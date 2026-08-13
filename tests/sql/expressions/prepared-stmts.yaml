@@ -1,13 +1,36 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
 metadata:
   version: "1.0"
   description: "Prepared statement / parameterized query tests"
 
 setup:
+  - sql: "DROP TABLE IF EXISTS ps_guard_left"
+  - sql: "DROP TABLE IF EXISTS ps_guard_right"
+  - sql: "DROP TABLE IF EXISTS ps_search_docs"
+  - sql: "DROP TABLE IF EXISTS ps_search_files"
   - sql: "DROP TABLE IF EXISTS ps_unique"
   - sql: "DROP TABLE IF EXISTS ps_test"
   - sql: "CREATE TABLE ps_test (id int, name text, score float)"
+  - sql: "CREATE TABLE ps_guard_left (id int primary key, rhs int)"
+  - sql: "CREATE TABLE ps_guard_right (id int primary key)"
+  - sql: "INSERT INTO ps_guard_left (id, rhs) VALUES (1, 1), (2, 1)"
+  - sql: "INSERT INTO ps_guard_right (id) VALUES (1)"
+  - sql: "CREATE TABLE ps_search_docs (id int primary key, file int, title text, sort_key int)"
+  - sql: "CREATE TABLE ps_search_files (id int primary key, filename text, search text)"
+  - sql: "INSERT INTO ps_search_docs (id, file, title, sort_key) VALUES (1, 10, NULL, 1), (2, 20, 'Ca direct', 2), (3, 30, NULL, 3)"
+  - sql: "INSERT INTO ps_search_files (id, filename, search) VALUES (10, 'Scan report.pdf', NULL), (20, 'other.pdf', NULL), (30, 'C-only report.pdf', NULL)"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ps_guard_left"
+  - sql: "DROP TABLE IF EXISTS ps_guard_right"
+  - sql: "DROP TABLE IF EXISTS ps_search_docs"
+  - sql: "DROP TABLE IF EXISTS ps_search_files"
   - sql: "DROP TABLE IF EXISTS ps_unique"
   - sql: "DROP TABLE IF EXISTS ps_test"
 
@@ -135,6 +158,50 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Complex LIKE UNION search normalizes only search literals"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "SELECT d.id FROM ps_guard_left d WHERE d.id = 7 OR d.rhs IN (SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE '%Ca%' UNION SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE '%Ca%')"
+        true)
+        '(normalized bindings)
+        (if (and
+          (equal? normalized "SELECT d.id FROM ps_guard_left d WHERE d.id = 7 OR d.rhs IN (SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ? UNION SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ?)")
+          (equal? bindings '("%Ca%" "%Ca%")))
+          "ok"
+          (error (concat "unexpected complex normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Ordered OR search uses one source key index after RecSet union"
+    sql: "EXPLAIN SELECT d.id FROM ps_search_docs d WHERE d.title COLLATE utf8mb4_unicode_ci LIKE '%C%' OR d.file IN (SELECT f.id FROM ps_search_files f WHERE f.filename COLLATE utf8mb4_unicode_ci LIKE '%C%' UNION SELECT f.id FROM ps_search_files f WHERE f.search COLLATE utf8mb4_unicode_ci LIKE '%C%') ORDER BY d.sort_key LIMIT 10"
+    expect:
+      rows: 1
+      result_contains:
+        - "recset_key_index"
+        - "recset_union"
+        - "scan_order"
+      result_not_contains:
+        - "recset_project_join"
+        - "touch_keytable"
+        - "scan_exists"
+
+  - name: "Broad ordered search keeps file membership in a source key index"
+    sql: "SELECT d.id FROM ps_search_docs d WHERE d.title COLLATE utf8mb4_unicode_ci LIKE '%C%' OR d.file IN (SELECT f.id FROM ps_search_files f WHERE f.filename COLLATE utf8mb4_unicode_ci LIKE '%C%' UNION SELECT f.id FROM ps_search_files f WHERE f.search COLLATE utf8mb4_unicode_ci LIKE '%C%') ORDER BY d.sort_key LIMIT 10"
+    expect:
+      rows: 3
+      data:
+        - {id: 1}
+        - {id: 2}
+        - {id: 3}
+
+  - name: "Second broad literal reuses the guarded shape without losing membership rows"
+    sql: "SELECT d.id FROM ps_search_docs d WHERE d.title COLLATE utf8mb4_unicode_ci LIKE '%Ca%' OR d.file IN (SELECT f.id FROM ps_search_files f WHERE f.filename COLLATE utf8mb4_unicode_ci LIKE '%Ca%' UNION SELECT f.id FROM ps_search_files f WHERE f.search COLLATE utf8mb4_unicode_ci LIKE '%Ca%') ORDER BY d.sort_key LIMIT 10"
+    expect:
+      rows: 2
+      data:
+        - {id: 1}
+        - {id: 2}
+
   - name: "Literal variants share one cached SELECT plan"
     scm: |
       (begin
@@ -153,6 +220,149 @@ test_cases:
           (equal? (sess "v3") 1))
           "ok"
           (error (concat "unexpected cache/bindings: " (count (cache)) " / " (sess "v1") "," (sess "v2") "," (sess "v3")))))
+    expect:
+      data: ["ok"]
+
+  - name: "Guarded plan cache lazily prepends broad LIKE variants"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (define compiles (newsession))
+        (define parser (lambda (_schema _query _policy) (begin
+          (define value (planner_literal_value (list (quote session) "v1")))
+          (define broad (planner_broad_like_expr?
+            (list (quote session) "v1")))
+          (compiles (string (count (compiles))) value)
+          (list (quote quote) (if broad "broad" "selective")))))
+        (sess "v1" "%C%")
+        (define first_formula (cached_parse cache parser "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define first_result (with_session sess (lambda () (eval first_formula))))
+        (sess "v1" "%Needle389%")
+        (define second_formula (cached_parse cache parser "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define second_result (with_session sess (lambda () (eval second_formula))))
+        (sess "v1" "%AnotherSelectiveValue%")
+        (define third_formula (cached_parse cache parser "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define third_result (with_session sess (lambda () (eval third_formula))))
+        (define entry (car (cache (car (cache)))))
+        (define latest_formula (entry "formula"))
+        (if (and
+          (equal? first_result "broad")
+          (equal? second_result "selective")
+          (equal? third_result "selective")
+          (equal? (count (compiles)) 2)
+          (equal? (count (entry "variants")) 2)
+          (equal? (car latest_formula) (quote if))
+          (with_session sess (lambda () (eval (nth latest_formula 1)))))
+          "ok"
+          (error (concat "unexpected guarded cache state: " first_result "/" second_result "/" third_result
+            " compiles=" (count (compiles)) " values=" (string (map (compiles) (lambda (key) (compiles key))))
+            " variants=" (count (entry "variants"))))))
+    expect:
+      data: ["ok"]
+
+  - name: "Variadic concat uses the same broad class at compile and runtime"
+    scm: |
+      (begin
+        (define planning (newsession))
+        (planning "v1" "Ca")
+        (planning "__memcp_queryplan_compile_bindings" planning)
+        (planning "__memcp_queryplan_guard_conditions" (newsession))
+        (planning "__memcp_queryplan_guard_bindings" (newsession))
+        (planning "__memcp_queryplan_guarded_session_keys" (newsession))
+        (planning "__memcp_queryplan_observed_session_keys" (newsession))
+        (define pattern (list (quote concat) "%" (list (quote session) "v1") "%"))
+        (define compile_broad (with_session planning (lambda () (planner_broad_like_expr? pattern))))
+        (define guard (sql_queryplan_guard_from_session planning))
+        (if (and compile_broad (with_session planning (lambda () (eval guard))))
+          "ok"
+          (error (concat "variadic concat broad guard disagreed: " (string guard)))))
+    expect:
+      data: ["ok"]
+
+  - name: "Uncovered compile bindings fall back to exact guards"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (define compiles (newsession))
+        (define parser (lambda (_schema _query _policy) (begin
+          (define value (planner_literal_value (list (quote session) "v1")))
+          (compiles (string value) true)
+          (list (quote quote) value))))
+        (sess "v1" "first")
+        (define first_formula (cached_parse cache parser "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define first_result (with_session sess (lambda () (eval first_formula))))
+        (sess "v1" "second")
+        (define second_formula (cached_parse cache parser "memcp-tests"
+          "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
+        (define second_result (with_session sess (lambda () (eval second_formula))))
+        (define entry (car (cache (car (cache)))))
+        (if (and
+          (equal? first_result "first")
+          (equal? second_result "second")
+          (equal? (count (compiles)) 2)
+          (equal? (count (entry "variants")) 2))
+          "ok"
+          (error (concat "exact fallback reused a specialized plan: " first_result "/" second_result))))
+    expect:
+      data: ["ok"]
+
+  - name: "Join reorder guard detects a cardinality crossover"
+    scm: |
+      (begin
+        (define planning (newsession))
+        (planning "left" 1000)
+        (planning "right" 10)
+        (planning "__memcp_queryplan_guard_conditions" (newsession))
+        (planning "__memcp_queryplan_guard_bindings" (newsession))
+        (planning "__memcp_queryplan_guarded_session_keys" (newsession))
+        (planning "__memcp_queryplan_observed_session_keys" (newsession))
+        (define result (with_session planning (lambda ()
+          (join_order_adaptive
+            (list
+              (list "left" (planning "left") (list (list (quote context) "session") "left"))
+              (list "right" (planning "right") (list (list (quote context) "session") "right")))
+            (list (list '("left" "right") 0.01 nil nil true nil 0.01))))))
+        (define guard (sql_queryplan_guard_from_session planning))
+        (define initially_valid (with_session planning (lambda () (eval guard))))
+        (planning "left" 10)
+        (planning "right" 1000)
+        (if (and
+          initially_valid
+          (not (with_session planning (lambda () (eval guard))))
+          (equal? (qassoc_get result (quote strategy) nil) (quote dphyp)))
+          "ok"
+          (error (concat "join guard did not track cardinality crossover: " (string guard)))))
+    expect:
+      data: ["ok"]
+
+  - name: "Cached SQL join recompiles after cardinality guard miss"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define resultrow (lambda (_row) nil))
+        (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
+        (define first_formula (cached_parse cache parse_sql "memcp-tests" query nil "root" sess true))
+        (with_session sess (lambda () (eval first_formula)))
+        (define entry (car (cache (car (cache)))))
+        (define variants_after_first (count (entry "variants")))
+        (insert (table "memcp-tests" "ps_guard_right") '("id")
+          (map (produceN 500) (lambda (i) (list (+ i 2)))))
+        (rebuild (table "memcp-tests" "ps_guard_right") true false)
+        (define second_formula (cached_parse cache parse_sql "memcp-tests" query nil "root" sess true))
+        (with_session sess (lambda () (eval second_formula)))
+        (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
+          "ok"
+          (error (concat "unexpected statistics variants: first=" variants_after_first
+            " final=" (count (entry "variants"))))))
     expect:
       data: ["ok"]
 

@@ -98,6 +98,56 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons k _) (and (not (equal? k key)) (not (equal? k removed_key)))
 			true))))))
 
+/* Cost-model decisions register the condition which keeps their chosen branch
+valid in a compile-local newsession. cached_parse installs the accumulator;
+direct planner users deliberately remain unaffected. Structural string keys
+deduplicate identical conditions without mutable Scheme lists. */
+(define planner_record_guard_condition (lambda (condition)
+	(begin
+		(define condition_accumulator (try
+			(lambda () ((context "session") "__memcp_queryplan_guard_conditions"))
+			(lambda (_e) nil)))
+		(if (nil? condition_accumulator)
+			condition
+			(begin
+				(condition_accumulator (string condition) condition)
+				(define covered_bindings (try
+					(lambda () ((context "session") "__memcp_queryplan_guarded_session_keys"))
+					(lambda (_e) nil)))
+				(if (nil? covered_bindings)
+					nil
+					(reduce (query_expr_session_reads condition) (lambda (_ expr)
+						(covered_bindings (string expr) true)) nil))
+				condition)))))
+
+(define planner_guarded_choice (lambda (chosen condition)
+	(begin
+		(planner_record_guard_condition
+			(if chosen condition (list (quote not) condition)))
+		chosen)))
+
+/* Runtime statistic expressions recur throughout dynamic-programming costs.
+Bind each unique expression once in the final guard instead of rereading the
+catalog for every comparison. The binding catalog is compile-local as well. */
+(define planner_guard_runtime_binding (lambda (expr)
+	(begin
+		(define bindings (try
+			(lambda () ((context "session") "__memcp_queryplan_guard_bindings"))
+			(lambda (_e) nil)))
+		(if (nil? bindings)
+			expr
+			(begin
+				(define key (string expr))
+				(define existing (bindings key))
+				(if (nil? existing)
+					(begin
+						(define binding (list
+							(symbol (concat "__queryplan_guard_value_" (fnv_hash key)))
+							expr))
+						(bindings key binding)
+						(car binding))
+					(car existing)))))))
+
 (define empty_list? (lambda (xs)
 	(or (nil? xs) (equal? xs '()))))
 
@@ -4398,13 +4448,35 @@ and barrier ownership come from the pre-normalization query block. */
 					(qassoc_get entry (quote predicate) true))))))
 		(max 1 (* base_rows local_selectivity)))))
 
+(define planner_quoted_value (lambda (value)
+	(list (quote quote) value)))
+
+(define join_optimizer_source_rows_expr (lambda (stages sources default_alias graph src)
+	(planner_guard_runtime_binding
+		(list (quote join_optimizer_source_rows)
+			(planner_quoted_value stages)
+			(planner_quoted_value sources)
+			default_alias
+			(planner_quoted_value graph)
+			(planner_quoted_value src)))))
+
+(define join_optimizer_selectivity_expr (lambda (sources default_alias predicate)
+	(planner_guard_runtime_binding
+		(list (quote join_optimizer_expr_selectivity)
+			(planner_quoted_value sources)
+			default_alias
+			(planner_quoted_value predicate)))))
+
 (define join_optimizer_alias_subset? (lambda (required available)
 	(reduce (coalesceNil required '()) (lambda (ok alias)
 		(and ok (contains? available alias))) true)))
 
 (define join_optimizer_metadata_nodes (lambda (stages sources default_alias graph)
 	(map sources (lambda (src)
-		(list (source_alias src) (join_optimizer_source_rows stages sources default_alias graph src))))))
+		(list
+			(source_alias src)
+			(join_optimizer_source_rows stages sources default_alias graph src)
+			(join_optimizer_source_rows_expr stages sources default_alias graph src))))))
 
 (define join_optimizer_metadata_predicates_from (lambda (sources default_alias entries aliases)
 	(map (filter entries (lambda (entry)
@@ -4418,14 +4490,17 @@ and barrier ownership come from the pre-normalization query block. */
 				(define barrier_owner (if (and (equal? origin (quote where))
 					(and (not (nil? local_source)) (source_outer? local_source)))
 					(source_alias local_source) nil))
+				(define predicate (qassoc_get entry (quote predicate) true))
 				(define metadata (list
 					predicate_aliases
 					(join_optimizer_expr_selectivity sources default_alias
-						(qassoc_get entry (quote predicate) true))
+						predicate)
 					origin
 					(qassoc_get entry (quote owner) nil)
-					(qassoc_get entry (quote predicate) true)))
-				(if (nil? barrier_owner) metadata (append metadata barrier_owner)))))))
+					predicate
+					barrier_owner
+					(join_optimizer_selectivity_expr sources default_alias predicate)))
+				metadata)))))
 
 (define join_optimizer_metadata_predicates (lambda (sources default_alias graph aliases)
 	(join_optimizer_metadata_predicates_from
@@ -4479,6 +4554,9 @@ logical trees consumed before physical scan lowering. */
 	(if (> (count predicate) 4) (nth predicate 4) true)))
 (define join_order_pred_barrier_owner (lambda (predicate)
 	(if (> (count predicate) 5) (nth predicate 5) nil)))
+(define join_order_pred_selectivity_expr (lambda (predicate)
+	(if (> (count predicate) 6) (nth predicate 6)
+		(join_order_pred_selectivity predicate))))
 
 (define join_order_predicate_crosses? (lambda (predicate left right)
 	(begin
@@ -4500,7 +4578,10 @@ logical trees consumed before physical scan lowering. */
 		(reduce predicates (lambda (connected predicate)
 			(or connected (join_order_predicate_crosses_in? predicate left right combined))) false))))
 
-/* plan = (tree aliases cardinality cost size atomic driver-cardinality left right) */
+/* The final three fields mirror the numeric cost values as cheap runtime ASTs.
+They let the compile-local condition accumulator retain the exact inequalities
+which selected a cached join plan without rerunning join enumeration. */
+/* plan = (tree aliases cardinality cost size atomic driver-cardinality left right cardinality-expr cost-expr driver-expr) */
 (define join_order_plan_tree (lambda (plan) (nth plan 0)))
 (define join_order_plan_aliases (lambda (plan) (nth plan 1)))
 (define join_order_plan_cardinality (lambda (plan) (nth plan 2)))
@@ -4510,17 +4591,37 @@ logical trees consumed before physical scan lowering. */
 (define join_order_driver_cardinality (lambda (plan) (nth plan 6)))
 (define join_order_plan_left (lambda (plan) (nth plan 7)))
 (define join_order_plan_right (lambda (plan) (nth plan 8)))
+(define join_order_plan_cardinality_expr (lambda (plan)
+	(if (> (count plan) 9) (nth plan 9) (join_order_plan_cardinality plan))))
+(define join_order_plan_cost_expr (lambda (plan)
+	(if (> (count plan) 10) (nth plan 10) (join_order_plan_cost plan))))
+(define join_order_plan_driver_expr (lambda (plan)
+	(if (> (count plan) 11) (nth plan 11) (join_order_driver_cardinality plan))))
 
 (define join_order_leaf_plan (lambda (node)
-	(list
-		(list (quote join-leaf) (car node) '())
-		(list (car node))
-		(max 1 (cadr node))
-		0
-		1
-		false
-		(max 1 (cadr node))
-		nil nil)))
+	(begin
+		(define row_expr (if (> (count node) 2) (nth node 2) (cadr node)))
+		(list
+			(list (quote join-leaf) (car node) '())
+			(list (car node))
+			(max 1 (cadr node))
+			0
+			1
+			false
+			(max 1 (cadr node))
+			nil nil
+			(list (quote max) 1 row_expr)
+			0
+			(list (quote max) 1 row_expr)))))
+
+(define join_order_product_expr (lambda (items)
+	(match items
+		(cons item '()) item
+		(cons _head _tail) (cons (quote *) items)
+		_ 1)))
+
+(define join_order_cap_cardinality (lambda (value)
+	(max 1 (min 1e300 value))))
 
 (define join_order_join_cardinality (lambda (predicates left right)
 	(begin
@@ -4531,14 +4632,29 @@ logical trees consumed before physical scan lowering. */
 				(join_order_plan_aliases left) (join_order_plan_aliases right) combined)
 				(* value (join_order_pred_selectivity predicate))
 				value)) 1))
-		(max 1 (min 1e300 (*
+		(join_order_cap_cardinality (*
 			(join_order_plan_cardinality left)
 			(join_order_plan_cardinality right)
-			selectivity))))))
+			selectivity)))))
+
+(define join_order_join_cardinality_expr (lambda (predicates left right)
+	(begin
+		(define combined (merge_unique (list
+			(join_order_plan_aliases left) (join_order_plan_aliases right))))
+		(define selectivities (map (filter predicates (lambda (predicate)
+			(join_order_predicate_crosses_in? predicate
+				(join_order_plan_aliases left) (join_order_plan_aliases right) combined)))
+			join_order_pred_selectivity_expr))
+		(list (quote join_order_cap_cardinality)
+			(list (quote *)
+				(join_order_plan_cardinality_expr left)
+				(join_order_plan_cardinality_expr right)
+				(join_order_product_expr selectivities))))))
 
 (define join_order_join_plan (lambda (universe predicates left right)
 	(begin
 		(define cardinality (join_order_join_cardinality predicates left right))
+		(define cardinality_expr (join_order_join_cardinality_expr predicates left right))
 		(define combined (join_order_set_union universe
 			(join_order_plan_aliases left) (join_order_plan_aliases right)))
 		(list
@@ -4549,16 +4665,39 @@ logical trees consumed before physical scan lowering. */
 			(+ (join_order_plan_size left) (join_order_plan_size right))
 			false
 			(join_order_driver_cardinality left)
-			left right))))
+			left right
+			cardinality_expr
+			(list (quote +)
+				(join_order_plan_cost_expr left)
+				(join_order_plan_cost_expr right)
+				cardinality_expr)
+			(join_order_plan_driver_expr left)))))
+
+(define join_order_candidate_better? (lambda (current candidate)
+	(or (< (join_order_plan_cost candidate) (join_order_plan_cost current))
+		(and (equal? (join_order_plan_cost candidate) (join_order_plan_cost current))
+			(< (join_order_driver_cardinality candidate) (join_order_driver_cardinality current))))))
+
+(define join_order_candidate_better_expr (lambda (current candidate)
+	(list (quote or)
+		(list (quote <)
+			(join_order_plan_cost_expr candidate)
+			(join_order_plan_cost_expr current))
+		(list (quote and)
+			(list (quote equal?)
+				(join_order_plan_cost_expr candidate)
+				(join_order_plan_cost_expr current))
+			(list (quote <)
+				(join_order_plan_driver_expr candidate)
+				(join_order_plan_driver_expr current))))))
 
 (define join_order_better_plan (lambda (current candidate)
 	(if (nil? current)
 		candidate
-		(if (< (join_order_plan_cost candidate) (join_order_plan_cost current))
-			candidate
-			(if (and (equal? (join_order_plan_cost candidate) (join_order_plan_cost current))
-				(< (join_order_driver_cardinality candidate) (join_order_driver_cardinality current)))
-				candidate current)))))
+		(if (planner_guarded_choice
+			(join_order_candidate_better? current candidate)
+			(join_order_candidate_better_expr current candidate))
+			candidate current))))
 
 (define join_order_best_orientation (lambda (universe predicates left right)
 	(join_order_better_plan
@@ -4912,7 +5051,10 @@ logical trees consumed before physical scan lowering. */
 		atomic
 		(join_order_driver_cardinality plan)
 		(join_order_plan_left plan)
-		(join_order_plan_right plan))))
+		(join_order_plan_right plan)
+		(join_order_plan_cardinality_expr plan)
+		(join_order_plan_cost_expr plan)
+		(join_order_plan_driver_expr plan))))
 
 (define join_order_expensive_subtree (lambda (plan parent_size limit)
 	(if (or (nil? plan) (join_order_plan_atomic? plan)
@@ -5025,6 +5167,19 @@ logical trees consumed before physical scan lowering. */
 				(quote linearized-dp)
 				(quote goo-linearized-dp))))))
 
+(define join_order_record_exact_cost_inputs (lambda (nodes predicates)
+	(begin
+		(reduce nodes (lambda (_ node)
+			(planner_record_guard_condition
+				(list (quote equal?)
+					(if (> (count node) 2) (nth node 2) (cadr node))
+					(cadr node)))) nil)
+		(reduce predicates (lambda (_ predicate)
+			(planner_record_guard_condition
+				(list (quote equal?)
+					(join_order_pred_selectivity_expr predicate)
+					(join_order_pred_selectivity predicate)))) nil))))
+
 /* Every subset containing one vertex and any selection of its regular-edge
 neighbors is connected. A degree d therefore proves at least 2^d connected
 subsets without materializing them. */
@@ -5065,6 +5220,7 @@ subsets without materializing them. */
 		(define strategy (join_order_choose_strategy
 			(count aliases) hypergraph (cadr connected_count)))
 		(define exact (equal? strategy (quote dphyp)))
+		(if exact nil (join_order_record_exact_cost_inputs nodes predicates))
 		(define result (if exact
 			(join_order_dphyp nodes aliases predicates)
 			(if (equal? strategy (quote linearized-dp))
@@ -5544,10 +5700,27 @@ source catalog. join_plan remains the single owner of physical join order. */
 (define planner_literal_value (lambda (expr)
 	(match expr
 		((symbol session) key) (try
-			(lambda () (session key))
+			(lambda () (begin
+				(define compile_bindings ((context "session") "__memcp_queryplan_compile_bindings"))
+				(define observed ((context "session") "__memcp_queryplan_observed_session_keys"))
+				(if (and (not (nil? compile_bindings)) (not (nil? observed)))
+					(observed key true)
+					nil)
+				(define direct ((context "session") key))
+				(if (not (nil? direct))
+					direct
+					(if (nil? compile_bindings) nil (compile_bindings key)))))
 			(lambda (_e) nil))
 		((quote session) key) (planner_literal_value (list (quote session) key))
 		_ expr)))
+
+(define planner_concat_expr_value (lambda (items)
+	(match items
+		(cons item rest) (begin
+			(define value (planner_string_expr_value item))
+			(define tail (planner_concat_expr_value rest))
+			(if (and (string? value) (string? tail)) (concat value tail) nil))
+		_ "")))
 
 (define planner_string_expr_value (lambda (expr)
 	(begin
@@ -5555,11 +5728,8 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(if (string? value)
 			value
 			(match expr
-				((symbol concat) a b) (begin
-					(define av (planner_string_expr_value a))
-					(define bv (planner_string_expr_value b))
-					(if (and (string? av) (string? bv)) (concat av bv) nil))
-				((quote concat) a b) (planner_string_expr_value (list (quote concat) a b))
+				(cons head args) (if (or (equal? head (symbol "concat")) (equal? head (quote concat)))
+					(planner_concat_expr_value args) nil)
 				_ nil)))))
 
 (define like_pattern_core (lambda (pattern)
@@ -5570,12 +5740,28 @@ source catalog. join_plan remains the single owner of physical join order. */
 		false
 		(begin
 			(define core (like_pattern_core pattern))
-			(<= (strlen core) 1)))))
+			(<= (strlen core) 2)))))
+
+(define planner_broad_like_expr? (lambda (pattern)
+	(begin
+		(define broad (broad_like_pattern? (planner_string_expr_value pattern)))
+		(if (expr_contains_session_dependency? pattern)
+			(planner_guarded_choice broad
+				(list (quote broad_like_pattern?) pattern))
+			broad))))
+
+(define planner_record_session_value_guards (lambda (node)
+	(reduce (query_expr_session_reads node) (lambda (_ expr)
+		(begin
+			(define value (planner_literal_value expr))
+			(planner_record_guard_condition
+				(list (quote equal?) expr
+					(if (list? value) (list (quote quote) value) value))))) nil)))
 
 (define expr_contains_broad_text_match? (lambda (expr)
 	(match expr
 		((symbol strlike) _value pattern _collation)
-		(broad_like_pattern? (planner_string_expr_value pattern))
+		(planner_broad_like_expr? pattern)
 		((quote strlike) _value pattern _collation)
 		(expr_contains_broad_text_match? (list (quote strlike) _value pattern _collation))
 		(cons head tail)
@@ -5795,6 +5981,19 @@ resulting tree in semantic order. */
 				nil)
 			nil))))
 
+(define membership_expr_has_driver_alternative? (lambda (expr)
+	(match expr
+		(cons head tail) (begin
+			(define is_or (or (equal? head (quote or)) (equal? head (symbol "or"))))
+			(define has_membership (and is_or (reduce tail (lambda (found item)
+				(or found (expr_contains_membership_truth? item))) false)))
+			(define has_driver (and is_or (reduce tail (lambda (found item)
+				(or found (not (expr_contains_membership_truth? item)))) false)))
+			(or (and has_membership has_driver)
+				(reduce tail (lambda (found item)
+					(or found (membership_expr_has_driver_alternative? item))) false)))
+		_ false)))
+
 (define candidate_reorder_telemetry (lambda (stage sources block)
 	(begin
 		(define driver (if (empty_list? sources) nil (car sources)))
@@ -5807,7 +6006,9 @@ resulting tree in semantic order. */
 		(define estimate_ratio_broad (and
 			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
 			(>= (* estimate_rows 4) estimate_input)))
-		(define class (if (or estimate_ratio_broad (and (nil? candidate_estimate) (candidate_stage_broad? stage))) (quote broad) (quote selective)))
+		(define driver_alternative (membership_expr_has_driver_alternative? (qb_where block)))
+		(define class (if (or estimate_ratio_broad
+			(if driver_alternative (candidate_stage_broad? stage) false)) (quote broad) (quote selective)))
 		(define ordered_driver (if (nil? driver) false
 			(or (source_order_limit_driver? driver (qb_order block) (qb_limit block))
 				(source_row_number_limit_driver? (qb_stages block) driver))))
@@ -5818,6 +6019,7 @@ resulting tree in semantic order. */
 			(list (quote membership_candidate_estimated_rows) estimate_rows)
 			(list (quote membership_candidate_estimate_capped) estimate_capped)
 			(list (quote membership_candidate_estimate_input) estimate_input)
+			(list (quote membership_driver_alternative) driver_alternative)
 			(list (quote membership_order_limit) (qb_limit block))
 			(list (quote membership_order_limit_driver) ordered_driver)))))
 
@@ -5865,14 +6067,21 @@ resulting tree in semantic order. */
 			(qassoc_get telemetry (quote membership_candidate_estimate_input) nil)
 			estimated_rows))
 		(define driver_rows (qassoc_get telemetry (quote membership_driver_rows) nil))
+		/* A broad membership below a driver-local OR is evaluated after the ordered
+		driver scan so local matches can short-circuit the nested lookup. */
+		(define broad_driver (and
+			(equal? (qassoc_get telemetry (quote membership_selectivity_class) nil) (quote broad))
+			(qassoc_get telemetry (quote membership_driver_alternative) false)))
 		/* UNION membership is already in a canonical semantic form here. Cost
 		the two supported implementations for every query shape: project the
 		candidate keys to a driver RecSet, or retain the driver scan and let its
 		per-row membership probes use autoindex. ORDER/LIMIT is an input to future
 		braking refinements, not permission for syntax to force either plan. */
-		(if (membership_projection_cost_preferred? candidate_rows driver_rows)
-			(quote candidate_keyset)
-			(quote driver_order_membership_probe)))))
+		(if broad_driver
+			(quote driver_order_membership_probe)
+			(if (membership_projection_cost_preferred? candidate_rows driver_rows)
+				(quote candidate_keyset)
+				(quote driver_order_membership_probe))))))
 
 (define query_block_with_reorder_facts (lambda (block facts)
 	(make_query_block
@@ -5957,31 +6166,45 @@ in the canonicalization functions above. */
 		must never select the physical representation. */
 		(< (+ 16 (* candidate_rows 4)) driver_rows))))
 
+(define membership_broad_driver_probe_preferred? (lambda (block stage)
+	(begin
+		(define base_sources (filter (qb_sources block) source_is_base_table?))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(and (source_is_base_table? (gs_input stage))
+			(and (single_source? base_sources)
+				(and (query_limit_active? (qb_offset block) (qb_limit block))
+					(and (order_items_belong_to_source? (car base_sources) (qb_order block))
+						(expr_contains_broad_text_match? condition))))))))
+
 (define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
 	(begin
 		(define input (gs_input stage))
 		/* Projection from the canonical group cache currently guarantees a
 		direct key map only for base-table membership stages. Derived inputs keep
 		the same primitive and use indexed existence probing until their cache-key
-		lineage is represented explicitly; do not add a shape-specific fallback. */
+		lineage is represented explicitly. A canonical simple UNION is also valid
+		for the driver probe because each branch lowers independently against the
+		current lookup key; this does not project or materialize the UNION. */
 		(define base_sources (filter (qb_sources block) source_is_base_table?))
-		(if (or (not (source_is_base_table? input)) (not (single_source? base_sources)))
-			false
-			(begin
-				(define candidate_estimate (planner_source_filter_estimate input
-					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
-					512))
-				(define candidate_rows (membership_estimated_work_rows candidate_estimate
-					(planner_source_row_count input)))
-				(define driver (reduce (qb_sources block) (lambda (found src)
-					(if (not (nil? found)) found (if (source_is_base_table? src) src nil))) nil))
-				(define driver_total_rows (if (nil? driver) nil (planner_source_row_count driver)))
-				(define driver_estimate (if (nil? driver)
-					nil
-					(planner_source_filter_estimate driver
-						(membership_driver_filter (qb_where block)) 512)))
-				(define driver_rows (membership_estimated_work_rows driver_estimate driver_total_rows))
-				(membership_projection_cost_preferred? candidate_rows driver_rows)))))))
+		(if (if _guarded_alternative (membership_broad_driver_probe_preferred? block stage) false)
+			true
+			(if (or (not (source_is_base_table? input)) (not (single_source? base_sources)))
+				false
+				(begin
+					(define candidate_estimate (planner_source_filter_estimate input
+						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+						512))
+					(define candidate_rows (membership_estimated_work_rows candidate_estimate
+						(planner_source_row_count input)))
+					(define driver (reduce (qb_sources block) (lambda (found src)
+						(if (not (nil? found)) found (if (source_is_base_table? src) src nil))) nil))
+					(define driver_total_rows (if (nil? driver) nil (planner_source_row_count driver)))
+					(define driver_estimate (if (nil? driver)
+						nil
+						(planner_source_filter_estimate driver
+							(membership_driver_filter (qb_where block)) 512)))
+					(define driver_rows (membership_estimated_work_rows driver_estimate driver_total_rows))
+					(membership_projection_cost_preferred? candidate_rows driver_rows)))))))
 
 (define choose_membership_truth_items (lambda (block items guarded_alternative)
 	(match items
@@ -5992,6 +6215,10 @@ in the canonicalization functions above. */
 				(cons (nth chosen 0) (nth tail 0))
 				(merge_unique (list (nth chosen 1) (nth tail 1)))))
 		_ (list '() '()))))
+
+(define membership_or_has_driver_alternative? (lambda (items)
+	(reduce (coalesceNil items '()) (lambda (found item)
+		(or found (not (expr_contains_membership_truth? item)))) false)))
 
 (define choose_membership_truth_expr_using (lambda (block expr guarded_alternative)
 	(begin
@@ -6008,8 +6235,10 @@ in the canonicalization functions above. */
 					(or (equal? (car expr) (quote and)) (equal? (car expr) (symbol "and")))
 					(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or")))))
 				(begin
+					(define is_or
+						(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or"))))
 					(define below_or (or guarded_alternative
-						(or (equal? (car expr) (quote or)) (equal? (car expr) (symbol "or")))))
+						(and is_or (membership_or_has_driver_alternative? (cdr expr)))))
 					(define chosen (choose_membership_truth_items block (cdr expr) below_or))
 					(list (cons (car expr) (nth chosen 0)) (nth chosen 1)))
 				(list expr '()))))))
@@ -6028,19 +6257,53 @@ in the canonicalization functions above. */
 		(begin
 			(define chosen (choose_membership_truth_expr block (qb_where block)))
 			(define removed_aliases (nth chosen 1))
+			(define chosen_where (nth chosen 0))
+			(define base_sources (filter (qb_sources block) source_is_base_table?))
+			(define ordered_memberships (if (single_source? base_sources)
+				(driver_memberships_for_source (car base_sources) chosen_where)
+				'()))
+			/* Capability checks deliberately inspect only logical source/key
+			signatures. Physical RecSet scan ASTs are emitted once, during lowering. */
+			(define keysets_supported (membership_keysets_supported? ordered_memberships))
+			(define ordered_driver_probe (and
+				(not (empty_list? removed_aliases))
+				(and keysets_supported
+					(and (membership_expr_has_driver_alternative? (qb_where block))
+						(and (query_limit_active? (qb_offset block) (qb_limit block))
+							(and (single_source? base_sources)
+								(order_items_belong_to_source? (car base_sources) (qb_order block))))))))
+			(define chosen_facts (if ordered_driver_probe
+				(merge (list
+					(list
+						(list (quote membership_plan_strategy) (quote driver_order_membership_probe))
+						(list (quote membership_driver_alternative) true)
+						(list (quote membership_order_limit_driver) true))
+					(qb_facts block)))
+				(qassoc_set (qb_facts block) (quote membership_plan_strategy)
+					(quote projected_membership_alternatives))))
+			(define removed_stage_ids (if ordered_driver_probe
+				(filter (map (filter (qb_sources block) (lambda (src)
+					(contains? removed_aliases (source_alias src))))
+					(lambda (src) (if (stage_output_relation? (source_relation src))
+						(stage_output_relation_id (source_relation src)) nil)))
+					(lambda (stage_id) (not (nil? stage_id))))
+				'()))
+			(define chosen_stages (if ordered_driver_probe
+				(filter (qb_stages block) (lambda (stage)
+					(not (contains? removed_stage_ids (gs_id stage)))))
+				(qb_stages block)))
 			(if (empty_list? removed_aliases)
 				(make_query_block
-					(qb_schema block) (qb_sources block) (qb_fields block) (nth chosen 0)
+					(qb_schema block) (qb_sources block) (qb_fields block) chosen_where
 					(qb_group block) (qb_having block) (qb_order block) (qb_limit block)
 					(qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block))
 				(make_query_block
 					(qb_schema block)
 					(filter (qb_sources block) (lambda (src) (not (contains? removed_aliases (source_alias src)))))
-					(qb_fields block) (nth chosen 0) (qb_group block) (qb_having block)
+					(qb_fields block) chosen_where (qb_group block) (qb_having block)
 					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
-					(qb_stages block)
-					(qassoc_set (qb_facts block) (quote membership_plan_strategy)
-						(quote projected_membership_alternatives))))))))
+					chosen_stages
+					chosen_facts))))))
 
 (define dml_preserve_driver_membership_probe (lambda (fallback_schema expr)
 	(match expr
@@ -6130,6 +6393,18 @@ in the canonicalization functions above. */
 				(or
 					broad_by_count
 					(equal? (qassoc_get facts (quote membership_selectivity_class) nil) (quote broad))))))))
+
+(define broad_nested_driver_membership_probe? (lambda (facts)
+	(and
+		(qassoc_get facts (quote membership_driver_alternative) false)
+		(broad_driver_order_membership_probe? facts))))
+
+(define ordered_driver_membership_keyset? (lambda (facts)
+	(and
+		(qassoc_get facts (quote membership_driver_alternative) false)
+		(and
+			(driver_order_membership_strategy? facts)
+			(qassoc_get facts (quote membership_order_limit_driver) false)))))
 
 (define stage_consumed_by_membership_source? (lambda (stage stages sources facts)
 	(if (not (membership_strategy? facts))
@@ -13234,6 +13509,107 @@ scan boundary only when the complete predicate implies it. */
 					binding
 					nil)))) nil)))
 
+(define membership_keyset_descriptor (lambda (membership)
+	(begin
+		(define stage (nth membership 0))
+		(define input (gs_input stage))
+		(define input_src (if (query_block? input)
+			(if (single_source? (qb_sources input)) (car (qb_sources input)) nil)
+			input))
+		(define keys (gs_keys stage))
+		(define condition (if (query_block? input)
+			(combine_where (qb_where input) (source_join_expr input_src))
+			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+		(define source_col (if (or (nil? input_src) (empty_list? keys))
+			nil
+			(direct_column_name_for_alias input_src (car keys))))
+		(if (or (nil? source_col) (not (source_is_base_table? input_src)))
+			nil
+			(list input_src source_col condition)))))
+
+(define membership_keysets_supported? (lambda (memberships)
+	(begin
+		(define descriptors (map memberships membership_keyset_descriptor))
+		(define supported (and (not (empty_list? descriptors))
+			(not (reduce descriptors (lambda (missing descriptor)
+				(or missing (nil? descriptor))) false))))
+		(if (not supported)
+			false
+			(begin
+				(define first_descriptor (car descriptors))
+				(reduce (cdr descriptors) (lambda (same descriptor)
+					(and same
+						(and (equal? (source_table_expr (nth descriptor 0))
+							(source_table_expr (nth first_descriptor 0)))
+							(equal? (nth descriptor 1) (nth first_descriptor 1))))) true))))))
+
+(define membership_keyset_parts (lambda (membership)
+	(begin
+		(define descriptor (membership_keyset_descriptor membership))
+		(if (nil? descriptor)
+			nil
+			(begin
+				(define input_src (nth descriptor 0))
+				(define source_col (nth descriptor 1))
+				(define condition (nth descriptor 2))
+				(define alias (source_alias input_src))
+				(define filtercols (extract_columns_for_alias input_src condition))
+				(list
+					(source_table_expr input_src)
+					source_col
+					(list (quote scan_recset)
+						'(session "__memcp_tx")
+						(source_table_expr input_src)
+						(cons (quote list) filtercols)
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat alias "." col))))
+							(list (quote optimize) (lower_column_expr_for_alias input_src condition))))))))))
+
+(define membership_keyset_bindings (lambda (memberships)
+	(begin
+		(define parts (map memberships membership_keyset_parts))
+		(define supported (and (not (empty_list? parts))
+			(not (reduce parts (lambda (missing item) (or missing (nil? item))) false))))
+		(define compatible (and supported
+			(reduce (cdr parts) (lambda (same item)
+				(and same
+					(and (equal? (nth item 0) (nth (car parts) 0))
+						(equal? (nth item 1) (nth (car parts) 1))))) true)))
+		(if (not compatible)
+			'()
+			(begin
+				(define keyset_var (symbol "__membership_keyset"))
+				(define candidate_recsets (map parts (lambda (item) (nth item 2))))
+				(define candidate_recset (if (single_source? candidate_recsets)
+					(car candidate_recsets)
+					(list (quote recset_union) (cons (quote list) candidate_recsets))))
+				(define keyset_expr (list (quote recset_key_index)
+					'(session "__memcp_tx")
+					candidate_recset
+					(quoted_runtime_list (list (nth (car parts) 1)))))
+				(map memberships (lambda (membership)
+					(list membership keyset_var keyset_expr))))))))
+
+(define wrap_membership_keyset_bindings (lambda (bindings body)
+	(if (empty_list? bindings)
+		body
+		(list
+			(list (quote lambda) (list (nth (car bindings) 1)) body)
+			(nth (car bindings) 2)))))
+
+(define replace_driver_membership_keyset_markers (lambda (expr bindings)
+	(begin
+		(define marker (driver_membership_probe_term expr))
+		(define binding (if (nil? marker) nil (membership_binding_for_marker bindings marker)))
+		(if (not (nil? binding))
+			(list (nth binding 1) (nth marker 1))
+			(if (not (nil? marker))
+				expr
+				(match expr
+					(cons head tail) (cons head (map tail (lambda (item)
+						(replace_driver_membership_keyset_markers item bindings))))
+					_ expr))))))
+
 (define membership_branch_candidate_recset (lambda (src source_table branch bindings)
 	(begin
 		(define markers (driver_memberships_for_source src branch))
@@ -13302,7 +13678,19 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				(define scan_order_supported (order_items_belong_to_source? src order_items))
 				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
 				(define memberships (driver_memberships_for_source src condition))
-				(define membership_bindings (membership_recset_bindings src memberships))
+				/* For a bounded ordered driver, union branch-local source candidates
+				before building one immutable key index. The driver stays a scan_order
+				and probes that index in its filter, so Top-K braking remains effective
+				without projecting every candidate into a target RecSet. */
+				(define keyset_membership_probe (ordered_driver_membership_keyset? (qb_facts block)))
+				(define membership_keysets (if keyset_membership_probe
+					(membership_keyset_bindings memberships)
+					'()))
+				(define use_membership_keysets (and keyset_membership_probe
+					(equal? (count membership_keysets) (count memberships))))
+				(define membership_bindings (if keyset_membership_probe
+					'()
+					(membership_recset_bindings src memberships)))
 				(define bound_memberships (map membership_bindings (lambda (binding) (nth binding 0))))
 				/* A membership predicate which is implied by the whole WHERE clause is
 				eligible to become the scan driver. A branch-local predicate below OR is
@@ -13311,8 +13699,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				single-IN path while allowing several guarded RecSets in one scan. */
 				(define direct_membership (driver_membership_for_source src condition))
 				(define prefer_membership_filter (and scan_order_supported
-					(and bounded
-						(broad_driver_order_membership_probe? (qb_facts block)))))
+					(and bounded (broad_driver_order_membership_probe? (qb_facts block)))))
 				(define membership_driver (and
 					(not (nil? direct_membership))
 					(and (not prefer_membership_filter)
@@ -13322,9 +13709,11 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				(define membership_filter (and
 					(not membership_driver)
 					(not (empty_list? membership_bindings))))
-				(define filter_condition (if membership_driver
-					(strip_driver_membership_for_source src condition direct_membership)
-					(replace_driver_membership_markers condition bound_memberships)))
+				(define filter_condition (if use_membership_keysets
+					(replace_driver_membership_keyset_markers condition membership_keysets)
+					(if membership_driver
+						(strip_driver_membership_for_source src condition direct_membership)
+						(replace_driver_membership_markers condition bound_memberships))))
 				(define filtercols (merge_unique (list
 					(if membership_filter (list "$recset_contains") '())
 					(extract_columns_for_alias src filter_condition))))
@@ -13378,9 +13767,11 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 								(source_outer? src)))
 							scan_expr)
 						(neumann_fail "build_queryplan" "single-source ORDER BY requires a storage carrier"))))
-				(if membership_filter
-					(wrap_membership_recset_bindings membership_bindings scan_plan)
-					scan_plan))))))
+				(if use_membership_keysets
+					(wrap_membership_keyset_bindings membership_keysets scan_plan)
+					(if membership_filter
+						(wrap_membership_recset_bindings membership_bindings scan_plan)
+						scan_plan)))))))
 
 (define order_exprs (lambda (order_items)
 	(map (coalesceNil order_items '()) (lambda (item)

@@ -467,6 +467,53 @@ test_cases:
           "ok"
           (error "recset_project_join output did not scan_order correctly")))
 
+  - name: "recset key index provides immutable scalar lookup"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define selected (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define lookup (recset_key_index nil selected '("id")))
+        (if (and
+              (lookup 1)
+              (lookup 2)
+              (lookup 5)
+              (not (lookup 3)))
+          "ok"
+          (error "recset key index returned wrong membership")))
+
+  - name: "recset key index accepts a union and composite keys"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define tenant1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl
+          '("active")
+          (lambda (value) (equal? value 1))))
+        (define lookup (recset_key_index nil
+          (recset_union (list tenant1 active))
+          '("tenant" "active")))
+        (if (and
+              (lookup 1 1)
+              (lookup 1 0)
+              (lookup 2 1)
+              (not (lookup 2 0)))
+          "ok"
+          (error "union composite key index returned wrong membership")))
+
+  - name: "recset key index rejects lookup arity mismatch"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define selected (scan_recset nil tbl '() (lambda () true)))
+        (define lookup (recset_key_index nil selected '("tenant" "active")))
+        (lookup 1))
+    expect:
+      error: true
+
   - name: "recset_union combines same-table recsets without duplicates"
     scm: |
       (begin
