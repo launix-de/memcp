@@ -3615,6 +3615,65 @@ membership_truth rather than adding another physical lowering path. */
 			(field_expr_by_title rest title ignorecase))
 		_ nil)))
 
+/* Derived relations expose their projection, not every column of the base
+sources that replace them during logical flattening. Keep that SQL scope
+available while nested queries are decorrelated. */
+(define logical_relation_fields (lambda (relation)
+	(begin
+		(define normalized (normalize_query_ast relation))
+		(if (query_block? normalized)
+			(qb_fields normalized)
+			(if (union_block? normalized)
+				(match (union_branches normalized)
+					(cons branch _rest) (logical_relation_fields branch)
+					_ '())
+				'())))))
+
+(define logical_source_has_column? (lambda (src col col_ignorecase)
+	(begin
+		(define relation (normalize_query_ast (source_relation src)))
+		(if (string? relation)
+			(source_has_column? src col col_ignorecase)
+			(not (nil? (field_expr_by_title (logical_relation_fields relation) col col_ignorecase)))))))
+
+(define logical_sources_for_unqualified_column (lambda (sources col col_ignorecase)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(logical_source_has_column? src col col_ignorecase)))))
+
+(define qualify_unqualified_column_from_matches (lambda (matches col col_ignorecase fallback)
+	(if (empty_list? matches)
+		fallback
+		(if (single_source? matches)
+			(list (quote get_column) (source_alias (car matches)) false col col_ignorecase)
+			(neumann_fail "untangle_query" (concat "ambiguous unqualified column: " col))))))
+
+(define qualify_unqualified_column_for_logical_scope (lambda (local_sources outer_sources expr)
+	(match expr
+		((symbol inner_select) _subquery) expr
+		((quote inner_select) _subquery) expr
+		((symbol inner_select_exists) _subquery) expr
+		((quote inner_select_exists) _subquery) expr
+		((symbol inner_select_in) probe subquery)
+		(list (quote inner_select_in) (qualify_unqualified_column_for_logical_scope local_sources outer_sources probe) subquery)
+		((quote inner_select_in) probe subquery)
+		(list (quote inner_select_in) (qualify_unqualified_column_for_logical_scope local_sources outer_sources probe) subquery)
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (not (nil? tblvar))
+			expr
+			(begin
+				(define local_matches (logical_sources_for_unqualified_column local_sources col col_ignorecase))
+				(if (empty_list? local_matches)
+					(qualify_unqualified_column_from_matches
+						(logical_sources_for_unqualified_column outer_sources col col_ignorecase)
+						col col_ignorecase expr)
+					(qualify_unqualified_column_from_matches local_matches col col_ignorecase expr))))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(qualify_unqualified_column_for_logical_scope local_sources outer_sources
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons (qualify_unqualified_column_for_logical_scope local_sources outer_sources head)
+			(map tail (lambda (item)
+				(qualify_unqualified_column_for_logical_scope local_sources outer_sources item))))
+		_ expr)))
+
 (define derived_star_ref? (lambda (alias expr)
 	(match expr
 		((symbol get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
@@ -4081,15 +4140,21 @@ membership_truth rather than adding another physical lowering path. */
 						(if (not (nil? embedded_union_rewrite))
 							(untangle_union_block embedded_union_rewrite child_ctx)
 							(begin
+								(define logical_sources (qb_sources block))
 								(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
 								(define sources (nth flattened_sources 0))
 								(define rewrites (nth flattened_sources 1))
 								(define source_where_terms (nth flattened_sources 2))
 								(define source_stages (nth flattened_sources 3))
 								(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
+								(define inherited_outer_resolution_sources (uctx_get child_ctx (quote outer-resolution-sources) '()))
+								(define nested_outer_resolution_sources (merge (list inherited_outer_resolution_sources logical_sources)))
+								(define qualify_logical_scope (lambda (expr)
+									(qualify_unqualified_column_for_logical_scope logical_sources inherited_outer_resolution_sources expr)))
 								(define expr_outer_sources (merge (list inherited_outer_sources sources)))
 								(define expr_ctx (make_uctx child_ctx (list
 									(list (quote outer-sources) expr_outer_sources)
+									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) sources))))
 								(define source_join_result (untangle_source_join_exprs_with_stages sources expr_outer_sources expr_ctx))
 								(define untangled_sources (nth source_join_result 0))
@@ -4097,6 +4162,7 @@ membership_truth rather than adding another physical lowering path. */
 								(define joined_expr_outer_sources (merge (list inherited_outer_sources untangled_sources source_join_stage_sources)))
 								(define joined_expr_ctx (make_uctx child_ctx (list
 									(list (quote outer-sources) joined_expr_outer_sources)
+									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources))))))
 								(define local_resolution_sources (merge_unique (list untangled_sources source_join_stage_sources)))
 								(define qualify_join_expr (lambda (expr)
@@ -4105,32 +4171,39 @@ membership_truth rather than adding another physical lowering path. */
 										(qualify_unqualified_column_for_sources local_resolution_sources expr))))
 								(define rewritten_where (qualify_unqualified_column_for_sources
 									local_resolution_sources
-									(combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qb_where block)))))
+									(combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qualify_logical_scope (qb_where block))))))
 								(if (expr_contains_window? rewritten_where)
 									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 									true)
 								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
-								(define rewritten_fields (rewrite_derived_fields_chain rewrites (qb_fields block)))
+								(define rewritten_fields (rewrite_derived_fields_chain rewrites
+									(map_assoc (qb_fields block) (lambda (_title expr) (qualify_logical_scope expr)))))
 								(define field_result (untangle_fields_with_stages
 									(qualify_join_expr rewritten_fields)
 									joined_expr_outer_sources joined_expr_ctx))
 								(define having_result (untangle_expr_with_stages
-									(qualify_join_expr (rewrite_derived_ref_chain rewrites (qb_having block)))
+									(qualify_join_expr (rewrite_derived_ref_chain rewrites (qualify_logical_scope (qb_having block))))
 									joined_expr_outer_sources joined_expr_ctx))
 								(define stage_sources (merge_unique (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
 								(define group_result (untangle_expr_list_with_stages
 									(qualify_unqualified_column_for_sources local_resolution_sources
-										(map (coalesceNil (qb_group block) '()) (lambda (item) (rewrite_derived_ref_chain rewrites item))))
+										(map (coalesceNil (qb_group block) '()) (lambda (item)
+											(rewrite_derived_ref_chain rewrites (qualify_logical_scope item)))))
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define order_result (untangle_order_with_stages
 									(qualify_join_expr (rewrite_order_output_aliases
 										rewritten_fields
-										(rewrite_derived_order_chain rewrites (qb_order block))))
+										(rewrite_derived_order_chain rewrites
+											(map (coalesceNil (qb_order block) '()) (lambda (item)
+												(match item
+													'(expr dir) (list (qualify_logical_scope expr) dir)
+													_ item))))))
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define hidden_result (untangle_fields_with_stages
-									(qualify_join_expr (rewrite_derived_fields_chain rewrites (qb_hidden block)))
+									(qualify_join_expr (rewrite_derived_fields_chain rewrites
+										(map_assoc (qb_hidden block) (lambda (_title expr) (qualify_logical_scope expr)))))
 									joined_expr_outer_sources joined_expr_ctx))
 								(define delayed_block (make_query_block
 									(qb_schema block)
@@ -4145,7 +4218,9 @@ membership_truth rather than adding another physical lowering path. */
 									(nth hidden_result 0)
 									(merge_unique (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
 									(qb_facts block)))
-								(btw2025_decorrelate_query_block delayed_block child_ctx))))))))))
+								(btw2025_decorrelate_query_block delayed_block
+									(make_uctx child_ctx (list
+										(list (quote outer-resolution-sources) nested_outer_resolution_sources)))))))))))))
 
 (define untangle_union_block (lambda (block ctx)
 	(make_union_block
