@@ -7475,7 +7475,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(concat (group_stage_cache_schema stage) "\n" (group_stage_cache_relation stage))
 		(concat "stage\n" (logical_stage_key stage)))))
 
-(define group_stage_with_initializer_owner (lambda (stage owner cache)
+(define group_stage_with_facts (lambda (stage facts)
 	(if (not (group_stage? stage))
 		stage
 		(make_group_stage
@@ -7489,9 +7489,13 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(gs_order stage)
 			(gs_limit stage)
 			(gs_offset stage)
-			(qassoc_set
-				(qassoc_set (gs_facts stage) (quote group_cache) cache)
-				(quote keytable_initializer_owner) owner)))))
+			facts))))
+
+(define group_stage_with_initializer_owner (lambda (stage owner cache)
+	(group_stage_with_facts stage
+		(qassoc_set
+			(qassoc_set (gs_facts stage) (quote group_cache) cache)
+			(quote keytable_initializer_owner) owner))))
 
 (define node_contains_nested_stage_input? (lambda (node)
 	(if (query_block? node)
@@ -11940,20 +11944,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(query_block_facts_with_stage_catalog block stages))))
 
 (define group_stage_with_semantic_signatures (lambda (stage signatures)
-	(if (not (group_stage? stage))
-		stage
-		(make_group_stage
-			(gs_id stage)
-			(gs_input stage)
-			(gs_domain stage)
-			(gs_keys stage)
-			(gs_aggregates stage)
-			(gs_having stage)
-			(gs_output stage)
-			(gs_order stage)
-			(gs_limit stage)
-			(gs_offset stage)
-			(qassoc_set (gs_facts stage) (quote stage_semantic_signatures) signatures)))))
+	(group_stage_with_facts stage
+		(qassoc_set (gs_facts stage) (quote stage_semantic_signatures) signatures))))
 
 (define query_block_with_stage_catalog (lambda (block stages)
 	(make_query_block
@@ -11977,23 +11969,37 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			/* Do not derive a carrier while merely cataloging logical alternatives.
 			The cost model may lower only a small subset to group keytables; their
 			canonical physical names are computed lazily by group_stage_cache. */
-			(define facts (gs_facts stage))
-			(make_group_stage
-				(gs_id stage)
-				(gs_input stage)
-				(gs_domain stage)
-				(gs_keys stage)
-				(gs_aggregates stage)
-				(gs_having stage)
-				(gs_output stage)
-				(gs_order stage)
-				(gs_limit stage)
-				(gs_offset stage)
+			(group_stage_with_facts stage
 				(qassoc_set
 					(if (lowering_catalog? catalog)
-						(qassoc_set_without facts (quote lowering_catalog) catalog (quote stage_catalog))
-						(qassoc_set facts (quote stage_catalog) catalog))
+						(qassoc_set_without (gs_facts stage) (quote lowering_catalog) catalog (quote stage_catalog))
+						(qassoc_set (gs_facts stage) (quote stage_catalog) catalog))
 					(quote stage_semantic_signatures) signatures))))))
+
+(define stages_with_canonical_group_caches_acc (lambda (stages signatures cache_index)
+	(match (coalesceNil stages '())
+		(cons stage rest) (begin
+			(define signature_stage (group_stage_with_semantic_signatures stage signatures))
+			(if (not (group_stage? signature_stage))
+				(begin
+					(define tail (stages_with_canonical_group_caches_acc rest signatures cache_index))
+					(list (cons signature_stage (nth tail 0)) (nth tail 1)))
+				(begin
+					(define signature (get_assoc signatures (gs_id signature_stage)))
+					(define cache (if (has_assoc? cache_index signature)
+						(cache_index signature)
+						(group_stage_default_cache signature_stage)))
+					(define next_index (if (has_assoc? cache_index signature)
+						cache_index
+						(set_assoc cache_index signature cache)))
+					(define cached_stage (group_stage_with_facts signature_stage
+						(qassoc_set (gs_facts signature_stage) (quote group_cache) cache)))
+					(define tail (stages_with_canonical_group_caches_acc rest signatures next_index))
+					(list (cons cached_stage (nth tail 0)) (nth tail 1)))))
+		_ (list '() cache_index))))
+
+(define stages_with_canonical_group_caches (lambda (stages signatures)
+	(nth (stages_with_canonical_group_caches_acc stages signatures '()) 0)))
 
 (define group_stage_lowering_catalog (lambda (stage)
 	(match (gs_facts stage)
@@ -12008,11 +12014,14 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define signatures (stage_semantic_signature_index stages))
 		/* Catalog lookups must return the same annotated immutable stage instances
 		that root lowering sees; otherwise nested probe copies derive old names. */
-		(define signature_stages (map stages (lambda (stage)
-			(group_stage_with_semantic_signatures stage signatures))))
+		(define signature_stages (stages_with_canonical_group_caches stages signatures))
 		(define catalog (make_lowering_catalog signature_stages))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
-			(group_stage_with_lowering_catalog stage catalog signatures))))
+			(begin
+				(define cached (if (group_stage? stage) (stage_by_id catalog (gs_id stage)) nil))
+				(group_stage_with_lowering_catalog
+					(if (nil? cached) stage cached)
+					catalog signatures)))))
 		(make_query_block
 			(qb_schema block)
 			(qb_sources block)

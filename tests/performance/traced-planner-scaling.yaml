@@ -58,7 +58,7 @@ setup:
 test_cases:
   - name: "Independent nested scalar aggregates compile within a linear budget"
     max_time: 1.0
-    max_planner_time_ms: 700
+    max_planner_time_ms: 300
     max_compile_phase_ms:
       recipe_emit_ns: 600
     max_compile_metrics:
