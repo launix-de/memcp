@@ -19,10 +19,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
+import tempfile
 import unittest
 
 from check_sql_time_limit import GuardFailure
 from check_sql_time_limit import check_added_planner_lines
+from check_sql_time_limit import check_runner
 from check_sql_time_limit import compare_suites
 from check_sql_time_limit import load_suite
 from check_sql_time_limit import validate_suite
@@ -38,6 +42,68 @@ def suite(case: dict | None = None, metadata: dict | None = None) -> dict:
 
 
 class CurrentTreeValidationTest(unittest.TestCase):
+    def runner_fixture(self) -> tuple[tempfile.TemporaryDirectory, Path]:
+        temporary = tempfile.TemporaryDirectory()
+        root = Path(temporary.name)
+        repository = Path(__file__).resolve().parents[1]
+        (root / "tools").mkdir()
+        (root / ".github" / "workflows").mkdir(parents=True)
+        for relative in (
+            "run_sql_tests.py",
+            "git-pre-commit",
+            ".github/workflows/test.yml",
+        ):
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(repository / relative, target)
+        return temporary, root
+
+    def test_current_runner_keeps_calibration_contract(self) -> None:
+        check_runner(Path(__file__).resolve().parents[1])
+
+    def test_runner_rejects_a_relaxed_machine_scale_cap(self) -> None:
+        temporary, root = self.runner_fixture()
+        with temporary:
+            runner = root / "run_sql_tests.py"
+            runner.write_text(
+                runner.read_text(encoding="utf-8").replace(
+                    "PERFORMANCE_SCALE_MAX = 16.0", "PERFORMANCE_SCALE_MAX = 160.0"
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(GuardFailure, "protected literal"):
+                check_runner(root)
+
+    def test_runner_rejects_calibration_work_that_can_be_tampered_with(self) -> None:
+        temporary, root = self.runner_fixture()
+        with temporary:
+            runner = root / "run_sql_tests.py"
+            runner.write_text(
+                runner.read_text(encoding="utf-8").replace(
+                    "hashlib.sha256(payload).digest()",
+                    "time.sleep(0.1)",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(GuardFailure, "implementation changed"):
+                check_runner(root)
+
+    def test_runner_rejects_scaling_any_gate_other_than_max_time(self) -> None:
+        temporary, root = self.runner_fixture()
+        with temporary:
+            runner = root / "run_sql_tests.py"
+            runner.write_text(
+                runner.read_text(encoding="utf-8").replace(
+                    "plan_size_limit = int(test_case[\"max_plan_size\"])",
+                    "plan_size_limit = scaled_wall_clock_limit_ms(1, self.performance_calibration)",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(GuardFailure, "exactly once"):
+                check_runner(root)
+
     def test_structured_yaml_rejects_quoted_time_bypass(self) -> None:
         value = load_suite(
             "metadata: {}\ntest_cases:\n  - name: bypass\n    max_time: '6e0'\n    sql: SELECT 1\n",

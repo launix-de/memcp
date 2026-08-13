@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import math
 import re
 import subprocess
@@ -34,7 +35,22 @@ import yaml
 
 EXPECTED_DEFAULT_MAX_TIME_SEC = 5.0
 EXPECTED_DEFAULT_MAX_PLAN_SIZE = 200_000
+EXPECTED_PERFORMANCE_REFERENCE_NS_PER_MIB = 450_000
+EXPECTED_PERFORMANCE_CALIBRATION_SAMPLES = 5
+EXPECTED_PERFORMANCE_SCALE_MIN = 1.0
+EXPECTED_PERFORMANCE_SCALE_MAX = 16.0
+EXPECTED_PERFORMANCE_CALIBRATION_ROUNDS = {
+    "x86_64": 32,
+    "aarch64": 16,
+    "armv7l": 8,
+    "other": 16,
+}
+EXPECTED_CALIBRATION_AST_SHA256 = "2e3ab9d30e772472d35c44d9dc11e330a2755e68e65fb848c652dd1af5d08dd2"
 MAPPING_BUDGETS = ("max_compile_phase_ms", "max_compile_metrics")
+PROTECTED_POLICY_PATHS = (
+    ".github/workflows/sql-regression-policy.yml",
+    "tools/check_sql_time_limit.py",
+)
 PROTECTED_EXPECTATIONS = (
     "rows",
     "data",
@@ -81,8 +97,31 @@ def assigned_numeric_constant(tree: ast.AST, name: str) -> float:
     return value
 
 
+def assigned_literal(tree: ast.AST, name: str) -> Any:
+    values: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == name:
+                values.append(node.value)
+    if len(values) != 1:
+        raise GuardFailure(f"run_sql_tests.py must define {name} exactly once")
+    try:
+        return ast.literal_eval(values[0])
+    except (ValueError, TypeError) as exc:
+        raise GuardFailure(f"{name} must be a literal") from exc
+
+
 def check_runner(root: Path) -> None:
     runner = root / "run_sql_tests.py"
+    required_paths = (
+        runner,
+        root / "git-pre-commit",
+        root / ".github/workflows/test.yml",
+    )
+    if any(path.is_symlink() for path in required_paths):
+        raise GuardFailure("runner, test hook, and required workflow must be regular files")
     source = runner.read_text(encoding="utf-8")
     for environment_override in ("MEMCP_MAX_TIME", "MEMCP_MAX_PLAN_SIZE"):
         if environment_override in source:
@@ -101,6 +140,120 @@ def check_runner(root: Path) -> None:
         raise GuardFailure(
             f"DEFAULT_MAX_PLAN_SIZE must remain the literal {EXPECTED_DEFAULT_MAX_PLAN_SIZE}"
         )
+    protected_constants = {
+        "PERFORMANCE_REFERENCE_NS_PER_MIB": EXPECTED_PERFORMANCE_REFERENCE_NS_PER_MIB,
+        "PERFORMANCE_CALIBRATION_SAMPLES": EXPECTED_PERFORMANCE_CALIBRATION_SAMPLES,
+        "PERFORMANCE_SCALE_MIN": EXPECTED_PERFORMANCE_SCALE_MIN,
+        "PERFORMANCE_SCALE_MAX": EXPECTED_PERFORMANCE_SCALE_MAX,
+    }
+    for name, expected in protected_constants.items():
+        actual = assigned_numeric_constant(tree, name)
+        if actual != expected:
+            raise GuardFailure(
+                f"{name} must remain the protected literal {expected}; "
+                "do not weaken regression budgets through calibration"
+            )
+    actual_rounds = assigned_literal(tree, "PERFORMANCE_CALIBRATION_ROUNDS")
+    if actual_rounds != EXPECTED_PERFORMANCE_CALIBRATION_ROUNDS:
+        raise GuardFailure(
+            "PERFORMANCE_CALIBRATION_ROUNDS must remain the protected architecture mapping"
+        )
+
+    calibration_names = {
+        "performance_architecture",
+        "performance_scale_from_samples",
+        "calibrate_performance_scale",
+        "load_performance_scale",
+        "publish_performance_scale",
+        "scaled_wall_clock_limit_ms",
+    }
+    calibration_nodes = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in calibration_names
+    ]
+    if {node.name for node in calibration_nodes} != calibration_names:
+        raise GuardFailure("run_sql_tests.py is missing protected calibration functions")
+    calibration_ast = "\n".join(
+        ast.dump(node, annotate_fields=True, include_attributes=False)
+        for node in calibration_nodes
+    )
+    calibration_digest = hashlib.sha256(calibration_ast.encode("utf-8")).hexdigest()
+    if calibration_digest != EXPECTED_CALIBRATION_AST_SHA256:
+        raise GuardFailure(
+            "performance calibration implementation changed; do not make a regression enlarge its own budget"
+        )
+
+    scale_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "scaled_wall_clock_limit_ms"
+    ]
+    scaled_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "hard_limit_ms"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "scaled_wall_clock_limit_ms"
+    ]
+    if len(scale_calls) != 1 or len(scaled_assignments) != 1:
+        raise GuardFailure(
+            "machine scaling must apply exactly once and only to the max_time wall-clock gate"
+        )
+    for unscaled_gate in (
+        "plan_size_limit",
+        "planner_time_limit_ms",
+        "compile_phase_limits_ms",
+        "compile_metric_limits",
+    ):
+        if re.search(rf"{unscaled_gate}[^\n]*performance_calibration", source):
+            raise GuardFailure(
+                f"{unscaled_gate} must remain independent of machine wall-clock calibration"
+            )
+
+    hook = (root / "git-pre-commit").read_text(encoding="utf-8")
+    export_line = 'export MEMCP_TEST_PERFORMANCE_SCALE="$performance_scale"'
+    if hook.count(export_line) != 1:
+        raise GuardFailure(
+            "git-pre-commit must publish exactly one pre-server performance calibration"
+        )
+    for variable in (
+        "MEMCP_TEST_PERFORMANCE_ARCH",
+        "MEMCP_TEST_PERFORMANCE_SCALE",
+        "MEMCP_TEST_PERFORMANCE_MEASURED_NS",
+        "MEMCP_TEST_PERFORMANCE_REFERENCE_NS",
+    ):
+        if hook.count(variable) != 1:
+            raise GuardFailure(
+                f"git-pre-commit must set {variable} exactly once from the protected calibration"
+            )
+    calibration_pos = hook.find("calibrate_performance_scale")
+    server_pos = hook.find("start_supervisor")
+    if calibration_pos < 0 or server_pos < 0 or calibration_pos > server_pos:
+        raise GuardFailure(
+            "git-pre-commit must calibrate before MemCP starts so regressions cannot enlarge their own allowance"
+        )
+
+    workflow_path = root / ".github/workflows/test.yml"
+    workflow = load_suite(workflow_path.read_text(encoding="utf-8"), str(workflow_path))
+    jobs = workflow.get("jobs", {})
+    test_job = jobs.get("test", {}) if isinstance(jobs, dict) else {}
+    steps = test_job.get("steps", []) if isinstance(test_job, dict) else []
+    hook_steps = [
+        step
+        for step in steps
+        if isinstance(step, dict) and step.get("run") == "bash git-pre-commit"
+    ]
+    if len(hook_steps) != 1 or hook_steps[0].get("continue-on-error") is True:
+        raise GuardFailure("the required test workflow must execute git-pre-commit")
 
 
 def load_suite(text: str, label: str) -> dict[str, Any]:
@@ -412,6 +565,28 @@ def check_base_regressions(
             )
         compare_suites(old_suite, head_suites[new_path], new_path)
     check_added_planner_lines(added_planner_lines(root, base_ref))
+
+    # The pull_request_target policy runs this checker from the trusted base
+    # revision.  Once bootstrapped, a PR cannot rewrite either that workflow or
+    # the checker that defines the policy it is being judged by.
+    policy_path = PROTECTED_POLICY_PATHS[0]
+    policy_exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{base_ref}:{policy_path}"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+    if policy_exists:
+        for path in PROTECTED_POLICY_PATHS:
+            if (root / path).is_symlink():
+                raise GuardFailure(f"{path} must be a regular protected policy file")
+            base_content = git(root, "show", f"{base_ref}:{path}").stdout
+            head_content = (root / path).read_text(encoding="utf-8")
+            if head_content != base_content:
+                raise GuardFailure(
+                    f"{path} is protected policy code; obtain explicit maintainer approval "
+                    "and use the administrative policy-update procedure"
+                )
 
 
 def parse_args() -> argparse.Namespace:
