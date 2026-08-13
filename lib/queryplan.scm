@@ -9306,7 +9306,10 @@ self-joins of the same base table still describe two distinct row roles. */
 			(stage_semantic_rewrite_expr alias_map '() (qb_where input))
 			(stage_semantic_rewrite_expr alias_map '() (qb_group input))
 			(stage_semantic_rewrite_expr alias_map '() (qb_having input))
-			(stage_semantic_rewrite_expr alias_map '() (qb_order input))
+			/* ORDER only changes the represented row domain when a bound consumes it. */
+			(if (and (nil? (qb_limit input)) (nil? (qb_offset input)))
+				'()
+				(stage_semantic_rewrite_expr alias_map '() (qb_order input)))
 			(qb_limit input)
 			(qb_offset input))
 		/* UNION projections define the rows exposed to the grouping input. Keep
