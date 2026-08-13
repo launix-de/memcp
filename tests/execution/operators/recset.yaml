@@ -12,6 +12,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS recset_items"
   - sql: "DROP TABLE IF EXISTS recset_other"
   - sql: "DROP TABLE IF EXISTS recset_link"
+  - sql: "DROP TABLE IF EXISTS recset_adaptive"
+  - sql: "DROP TABLE IF EXISTS recset_project_source"
+  - sql: "DROP TABLE IF EXISTS recset_project_target"
   - sql: |
       CREATE TABLE recset_items (
         id INT PRIMARY KEY,
@@ -29,6 +32,9 @@ setup:
         item_id INT,
         tenant INT
       )
+  - sql: "CREATE TABLE recset_adaptive (id INT PRIMARY KEY, value INT)"
+  - sql: "CREATE TABLE recset_project_source (id INT PRIMARY KEY, k1 INT, k2 INT, selected INT)"
+  - sql: "CREATE TABLE recset_project_target (id INT PRIMARY KEY, k1 INT, k2 INT)"
   - sql: |
       INSERT INTO recset_items VALUES
         (1, 1, 1),
@@ -47,8 +53,24 @@ setup:
         (3, 1, 1),
         (4, 3, 2),
         (5, NULL, 1)
+  - scm: |
+      (begin
+        (define rows (produceN 4096 (lambda (i) (list (+ i 1) (mod i 8)))))
+        (insert (table "memcp-tests" "recset_adaptive") '("id" "value") rows '() (lambda () true) false))
+  - scm: |
+      (begin
+        (define rows (produceN 20000 (lambda (i)
+          (list (+ i 1) (if (equal? (mod i 997) 0) nil (mod i 10000)) (mod i 17) (if (< i 5000) 1 0)))))
+        (insert (table "memcp-tests" "recset_project_source") '("id" "k1" "k2" "selected") rows '() (lambda () true) false))
+  - scm: |
+      (begin
+        (define rows (produceN 40000 (lambda (i) (list (+ i 1) (mod i 10000) (mod i 17)))))
+        (insert (table "memcp-tests" "recset_project_target") '("id" "k1" "k2") rows '() (lambda () true) false))
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS recset_project_target"
+  - sql: "DROP TABLE IF EXISTS recset_project_source"
+  - sql: "DROP TABLE IF EXISTS recset_adaptive"
   - sql: "DROP TABLE IF EXISTS recset_link"
   - sql: "DROP TABLE IF EXISTS recset_other"
   - sql: "DROP TABLE IF EXISTS recset_items"
@@ -469,6 +491,87 @@ test_cases:
               (equal? sum_ids 11))
           "ok"
           (error "recset_union returned wrong row set")))
+
+  - name: "adaptive recset algebra covers every representation pairing"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_adaptive"))
+        (define full (scan_recset nil tbl '() (lambda () true)))
+        (define empty (scan_recset nil tbl '() (lambda () false)))
+        (define positive (scan_recset nil tbl '("id") (lambda (id) (> id 4086))))
+        (define positive2 (scan_recset nil tbl '("id") (lambda (id) (and (>= id 4083) (<= id 4092)))))
+        (define negative (scan_recset nil tbl '("id") (lambda (id) (not (> (mod id 5000) 4086)))))
+        (define negative2 (scan_recset nil tbl '("id") (lambda (id)
+          (not (and (>= (mod id 5000) 6) (<= (mod id 5000) 15))))))
+        (define negative3 (scan_recset nil tbl '("id") (lambda (id) (not (> (mod id 5000) 4091)))))
+        (define even (scan_recset nil tbl '("id") (lambda (id) (equal? (mod id 2) 0))))
+        (define third (scan_recset nil tbl '("id") (lambda (id) (equal? (mod id 3) 0))))
+        (if (and
+              (equal? (recset_count full) 4096)
+              (equal? (recset_count empty) 0)
+              (equal? (recset_count positive) 10)
+              (equal? (recset_count negative) 4086)
+              (equal? (recset_count even) 2048)
+              (equal? (recset_count (recset_union (list positive positive2))) 14)
+              (equal? (recset_count (recset_intersect (list positive positive2))) 6)
+              (equal? (recset_count (recset_union (list negative negative2))) 4096)
+              (equal? (recset_count (recset_intersect (list negative negative2))) 4076)
+              (equal? (recset_count (recset_union (list negative negative3))) 4091)
+              (equal? (recset_count (recset_intersect (list negative negative3))) 4086)
+              (equal? (recset_count (recset_union (list positive2 negative))) 4092)
+              (equal? (recset_count (recset_intersect (list positive2 negative))) 4)
+              (equal? (recset_count (recset_union (list even third))) 2731)
+              (equal? (recset_count (recset_intersect (list even third))) 682)
+              (equal? (recset_count (recset_union (list positive even))) 2053)
+              (equal? (recset_count (recset_intersect (list positive even))) 5)
+              (equal? (recset_count (recset_union (list negative even))) 4091)
+              (equal? (recset_count (recset_intersect (list negative even))) 2043)
+              (equal? (recset_count (recset_union (list full positive))) 4096)
+              (equal? (recset_count (recset_intersect (list empty negative))) 0)
+              (equal? (recset_count (recset_union (list empty positive))) 10)
+              (equal? (recset_count (recset_intersect (list full negative))) 4086))
+          "ok"
+          (error "adaptive recset algebra returned wrong cardinality")))
+
+  - name: "recset_union rejects recsets from different tables"
+    scm: |
+      (begin
+        (define left (scan_recset nil (table "memcp-tests" "recset_items") '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" "recset_other") '() (lambda () true)))
+        (recset_union (list left right)))
+    expect:
+      error: true
+
+  - name: "recset_intersect rejects recsets from different tables"
+    scm: |
+      (begin
+        (define left (scan_recset nil (table "memcp-tests" "recset_items") '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" "recset_other") '() (lambda () true)))
+        (recset_intersect (list left right)))
+    expect:
+      error: true
+
+  - name: "large recset projection keeps one-column duplicates and nulls exact"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "recset_project_source"))
+        (define target (table "memcp-tests" "recset_project_target"))
+        (define selected (scan_recset nil source '("selected") (lambda (v) (equal? v 1))))
+        (define projected (recset_project_join nil selected '("k1") target '("k1")))
+        (if (equal? (recset_count projected) 19976)
+          "ok"
+          (error "large one-column recset projection returned wrong cardinality")))
+
+  - name: "large recset projection keeps composite keys exact"
+    scm: |
+      (begin
+        (define source (table "memcp-tests" "recset_project_source"))
+        (define target (table "memcp-tests" "recset_project_target"))
+        (define selected (scan_recset nil source '("selected") (lambda (v) (equal? v 1))))
+        (define projected (recset_project_join nil selected '("k1" "k2") target '("k1" "k2")))
+        (if (equal? (recset_count projected) 4994)
+          "ok"
+          (error "large composite recset projection returned wrong cardinality")))
 
   - name: "show forwards recset to base table metadata"
     scm: |

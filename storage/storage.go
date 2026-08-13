@@ -662,6 +662,25 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_intersect",
+		Desc: "intersects query-local recsets from the same table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			values := mustScmerSlice(a[0], "recsets")
+			recsets := make([]*recSet, 0, len(values))
+			for _, value := range values {
+				recsets = append(recsets, RecSetFromScmer(value))
+			}
+			return NewRecSetScmer(recSetIntersect(recsets))
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "list", ParamName: "recsets"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_exists",
 		Desc: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
