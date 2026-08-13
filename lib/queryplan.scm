@@ -1006,29 +1006,29 @@ instead of capturing whichever session populated the cache first. */
 					(nth outer_domain i))))
 			true))))
 
-(define make_positive_in_join_condition (lambda (stage_alias key_names lookup_keys probe match_ag)
+(define make_positive_in_join_condition (lambda (input stage_alias key_names lookup_keys probe match_ag)
 	(combine_where_terms
 		(list
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)
 			(list (quote not) (list (quote nil?) probe))
-			(list (quote >) (membership_count_expr stage_alias match_ag) 0))
+			(list (quote >) (membership_count_expr input stage_alias match_ag) 0))
 		true)))
 
 /* One aggregate encodes empty=0, nonempty=1, and contains-NULL=2. */
 (define in_rhs_state_descriptor (lambda (rhs_expr)
 	(list (list (quote if) (list (quote nil?) rhs_expr) 2 1) (quote max) 0)))
 
-(define membership_count_expr (lambda (stage_alias ag)
+(define membership_count_expr (lambda (input stage_alias ag)
 	(list (quote coalesceNil)
-		(list (quote get_column) stage_alias false (aggregate_col_name ag) false)
+		(list (quote get_column) stage_alias false (aggregate_col_name_using input ag) false)
 		0)))
 
 /* Canonical positive-WHERE membership primitive. Its stage-output source
 provides the lookup relation; UNKNOWN and FALSE are intentionally equivalent in
 this truth context. Reordering may later replace this semantic primitive with a
 physical membership probe. */
-(define in_membership_truth_expr (lambda (probe stage_alias match_ag)
-	(list (quote membership_truth) probe stage_alias (aggregate_col_name match_ag))))
+(define in_membership_truth_expr (lambda (input probe stage_alias match_ag)
+	(list (quote membership_truth) probe stage_alias (aggregate_col_name_using input match_ag))))
 
 (define expand_in_membership_truth_expr (lambda (probe stage_alias count_col)
 	(list (quote and)
@@ -1039,10 +1039,10 @@ physical membership probe. */
 				0)
 			0))))
 
-(define in_membership_expr (lambda (probe match_alias match_ag null_alias rhs_state_ag)
+(define in_membership_expr (lambda (match_input null_input probe match_alias match_ag null_alias rhs_state_ag)
 	(begin
-		(define match_count (membership_count_expr match_alias match_ag))
-		(define rhs_state (membership_count_expr null_alias rhs_state_ag))
+		(define match_count (membership_count_expr match_input match_alias match_ag))
+		(define rhs_state (membership_count_expr null_input null_alias rhs_state_ag))
 		(list (quote if)
 			(list (quote nil?) probe)
 			(list (quote if) (list (quote >) rhs_state 0) nil false)
@@ -1054,10 +1054,10 @@ physical membership probe. */
 					nil
 					false))))))
 
-(define not_in_membership_expr (lambda (probe match_alias match_ag null_alias rhs_state_ag)
+(define not_in_membership_expr (lambda (match_input null_input probe match_alias match_ag null_alias rhs_state_ag)
 	(begin
-		(define match_count (membership_count_expr match_alias match_ag))
-		(define rhs_state (membership_count_expr null_alias rhs_state_ag))
+		(define match_count (membership_count_expr match_input match_alias match_ag))
+		(define rhs_state (membership_count_expr null_input null_alias rhs_state_ag))
 		(list (quote if)
 			(list (quote nil?) probe)
 			(list (quote if) (list (quote >) rhs_state 0) nil true)
@@ -1227,9 +1227,9 @@ physical membership probe. */
 		'(((quote scalar_first_payload) _order_expr _value_expr) _reduce _neutral) true
 		_ false)))
 
-(define scalar_once_value_expr (lambda (stage_alias ag)
+(define scalar_once_value_expr (lambda (input stage_alias ag)
 	(begin
-		(define stored (list (quote get_column) stage_alias false (aggregate_col_name ag) false))
+		(define stored (list (quote get_column) stage_alias false (aggregate_col_name_using input ag) false))
 		(if (scalar_once_ordered_payload? ag)
 			(list (quote if)
 				(list (quote or)
@@ -1239,12 +1239,12 @@ physical membership probe. */
 				(list (quote cadr) stored))
 			stored))))
 
-(define scalar_single_value_expr (lambda (stage_alias value_ag count_ag)
+(define scalar_single_value_expr (lambda (input stage_alias value_ag count_ag)
 	(begin
 		(define count_expr (list (quote coalesceNil)
-			(list (quote get_column) stage_alias false (aggregate_col_name count_ag) false)
+			(list (quote get_column) stage_alias false (aggregate_col_name_using input count_ag) false)
 			0))
-		(define value_expr (list (quote get_column) stage_alias false (aggregate_col_name value_ag) false))
+		(define value_expr (list (quote get_column) stage_alias false (aggregate_col_name_using input value_ag) false))
 		(list (quote if)
 			(list (quote >) count_expr 1)
 			(list (quote error) "scalar subselect returned more than one row")
@@ -1579,7 +1579,7 @@ physical membership probe. */
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define having_expr (replace_group_expr
-			inner_default stage_alias keys key_names ags (coalesceNil (qb_having inner) true)))
+			(gs_input stage) inner_default stage_alias keys key_names ags (coalesceNil (qb_having inner) true)))
 		(define source (list
 			stage_alias
 			(group_stage_schema stage)
@@ -1918,7 +1918,7 @@ without separately proving two-valued semantics. */
 			(make_stage_output_relation stage_id)
 			(not semijoin_where)
 			(if semijoin_where
-				(make_positive_in_join_condition stage_alias key_names (list probe) probe aggregate_count_descriptor)
+				(make_positive_in_join_condition (gs_input stage) stage_alias key_names (list probe) probe aggregate_count_descriptor)
 				(make_exists_stage_join_condition stage_alias key_names (list probe)))))
 		(define null_source (list
 			null_stage_alias
@@ -1929,7 +1929,8 @@ without separately proving two-valued semantics. */
 		(if semijoin_where
 			(list true (list stage) (list source))
 			(list
-				(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
+				(in_membership_expr (gs_input stage) (gs_input null_stage)
+					probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
 				(list stage null_stage)
 				(list source null_source))))))
 
@@ -2041,7 +2042,7 @@ without separately proving two-valued semantics. */
 			(make_stage_output_relation stage_id)
 			(or truth_membership (not semijoin_where))
 			(if semijoin_where
-				(make_positive_in_join_condition stage_alias key_names lookup_keys probe aggregate_count_descriptor)
+				(make_positive_in_join_condition (gs_input stage) stage_alias key_names lookup_keys probe aggregate_count_descriptor)
 				(make_exists_stage_join_condition stage_alias key_names lookup_keys))))
 		(define null_source (list
 			null_stage_alias
@@ -2054,13 +2055,15 @@ without separately proving two-valued semantics. */
 			(list true (list stage) (list source))
 			(if truth_membership
 				(list
-					(in_membership_truth_expr probe stage_alias aggregate_count_descriptor)
+					(in_membership_truth_expr (gs_input stage) probe stage_alias aggregate_count_descriptor)
 					(list stage)
 					(list source))
 				(list
 					(if negate
-						(not_in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
-						(in_membership_expr probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
+						(not_in_membership_expr (gs_input stage) (gs_input null_stage)
+							probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
+						(in_membership_expr (gs_input stage) (gs_input null_stage)
+							probe stage_alias aggregate_count_descriptor null_stage_alias null_ag))
 					(list stage null_stage)
 					(list source null_source)))))))
 
@@ -2093,7 +2096,7 @@ without separately proving two-valued semantics. */
 		(define stage_alias (exists_stage_alias (gs_id stage)))
 		(define key_names (group_key_cols keys))
 		(define having_expr (replace_group_expr
-			input_alias stage_alias keys key_names ags (coalesceNil (gs_having stage) true)))
+			(gs_input stage) input_alias stage_alias keys key_names ags (coalesceNil (gs_having stage) true)))
 		(define join_condition (combine_where_terms
 			(list
 				(make_exists_stage_join_condition stage_alias (list (nth key_names key_idx)) (list probe))
@@ -2193,7 +2196,7 @@ without separately proving two-valued semantics. */
 				(btw2025_stage_facts inner outer_sources all_corr_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
-		(define post_condition (replace_group_expr inner_default stage_alias keys key_names ags local_having))
+		(define post_condition (replace_group_expr stage_input inner_default stage_alias keys key_names ags local_having))
 		(define source (list
 			stage_alias
 			(group_stage_schema stage)
@@ -2201,7 +2204,7 @@ without separately proving two-valued semantics. */
 			(or (stage_source_outer? outer_sources) (not (equal? local_having true)))
 			(make_stage_lookup_condition stage_alias key_names lookup_keys post_condition)))
 		(define presence_expr (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false))
-		(define scalar_value_expr (replace_group_expr inner_default stage_alias keys key_names ags value_expr))
+		(define scalar_value_expr (replace_group_expr stage_input inner_default stage_alias keys key_names ags value_expr))
 		(list
 			(if (equal? local_having true)
 				scalar_value_expr
@@ -2289,7 +2292,7 @@ without separately proving two-valued semantics. */
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(list
-			(scalar_once_value_expr stage_alias ag)
+			(scalar_once_value_expr stage_input stage_alias ag)
 			(list stage)
 			(list source)))))
 
@@ -2348,7 +2351,7 @@ without separately proving two-valued semantics. */
 			(begin
 				(define value_expr (canonical_column_expr_for_alias inner_default expr))
 				(define ag (list value_expr (scalar_once_reduce_first) nil))
-				(scalar_once_value_expr alias ag)))))
+				(scalar_once_value_expr stage_input alias ag)))))
 		(list
 			(list alias (group_stage_schema stage) (make_stage_output_relation stage_id) false nil)
 			projection
@@ -2367,7 +2370,7 @@ without separately proving two-valued semantics. */
 		(define key_names (group_key_cols keys))
 		(define ags (gs_aggregates stage))
 		(map_assoc (gs_output stage) (lambda (_title expr)
-			(replace_group_order_expr input_alias alias keys key_names ags expr))))))
+			(replace_group_order_expr (gs_input stage) input_alias alias keys key_names ags expr))))))
 
 (define make_grouped_derived_stage_source (lambda (src alias inner)
 	(begin
@@ -2382,7 +2385,7 @@ without separately proving two-valued semantics. */
 				(filter (cdr (qb_sources (gs_input stage))) (lambda (extra)
 					(source_needed_after_group_stage? input_alias stage extra)))
 				(lambda (extra)
-					(rewrite_source_for_group_domain input_alias alias keys key_names ags extra)))
+					(rewrite_source_for_group_domain (gs_input stage) input_alias alias keys key_names ags extra)))
 			'()))
 		(define source (list
 			alias
@@ -2421,8 +2424,10 @@ without separately proving two-valued semantics. */
 		(define sortdirs (window_order_dirs_for_orc order_items))
 		(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
 		(define filtercols (extract_columns_for_alias derived_src inner_where))
-		(define rn_col (concat "__derived_row_number_" (fnv_hash (serialize (list
-			alias sortcols sortdirs inner_where (qb_limit inner) (qb_offset inner))))))
+		/* LIMIT/OFFSET only bound readers of this complete row-number column. They
+		do not alter the stored window and therefore must not fragment its cache. */
+		(define rn_col (canonical_orc_column_name "derived_row_number" derived_src
+			(list sortcols sortdirs (canonical_helper_expr_using derived_src inner_where))))
 		(define rn_stage (make_window_stage
 			(concat "window-row-number:" rn_col)
 			derived_src
@@ -2512,12 +2517,20 @@ without separately proving two-valued semantics. */
 		(define aggregate_col_map (merge (map (coalesceNil stages '()) (lambda (stage)
 			(begin
 				(define old_alias (exists_stage_alias (gs_id stage)))
-				(map (gs_aggregates stage) (lambda (ag)
-					(list
-						old_alias
-						(aggregate_col_name ag)
-						(aggregate_col_name
-							(rewrite_stage_graph_expr base_alias_map id_map ag))))))))))
+				(merge (map (gs_aggregates stage) (lambda (ag)
+					(begin
+						(define rewritten_input (rewrite_stage_graph_expr base_alias_map id_map (gs_input stage)))
+						(define rewritten_ag (rewrite_stage_graph_expr base_alias_map id_map ag))
+						/* Logical probes from older rewrites may still carry raw descriptor
+						hashes. Accept both forms while every physical writer uses the
+						canonical source-aware name. */
+						(list
+							(list old_alias
+								(aggregate_col_name ag)
+								(aggregate_col_name rewritten_ag))
+							(list old_alias
+								(aggregate_col_name_using (gs_input stage) ag)
+								(aggregate_col_name_using rewritten_input rewritten_ag))))))))))))
 		(merge (list base_alias_map aggregate_col_map)))))
 
 /* Derived clones rebind their root ID. Stage merges keep the surviving root ID,
@@ -2637,7 +2650,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
 		(list
-			(scalar_single_value_expr stage_alias value_ag count_ag)
+			(scalar_single_value_expr stage_input stage_alias value_ag count_ag)
 			(list stage)
 			(list source)))))
 
@@ -2670,16 +2683,16 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			nil))
 		_ (neumann_fail "untangle_query" "window function needs ORC stage"))))
 
-(define window_aggregate_value_expr (lambda (fn args ags stage_alias)
+(define window_aggregate_value_expr (lambda (input fn args ags stage_alias)
 	(match fn
-		"COUNT" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
-		"SUM" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+		"COUNT" (list (quote get_column) stage_alias false (aggregate_col_name_using input (car ags)) false)
+		"SUM" (list (quote get_column) stage_alias false (aggregate_col_name_using input (car ags)) false)
 		"AVG" (list (quote sql_avg_divide)
-			(list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
-			(list (quote get_column) stage_alias false (aggregate_col_name (cadr ags)) false))
-		"MAX" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
-		"MIN" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
-		"GROUP_CONCAT" (list (quote get_column) stage_alias false (aggregate_col_name (car ags)) false)
+			(list (quote get_column) stage_alias false (aggregate_col_name_using input (car ags)) false)
+			(list (quote get_column) stage_alias false (aggregate_col_name_using input (cadr ags)) false))
+		"MAX" (list (quote get_column) stage_alias false (aggregate_col_name_using input (car ags)) false)
+		"MIN" (list (quote get_column) stage_alias false (aggregate_col_name_using input (car ags)) false)
+		"GROUP_CONCAT" (list (quote get_column) stage_alias false (aggregate_col_name_using input (car ags)) false)
 		_ (neumann_fail "untangle_query" "window function needs ORC stage"))))
 
 (define window_order_sort_dir (lambda (dir)
@@ -2788,7 +2801,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(map partition_exprs (lambda (_expr) false))
 							(if (equal? fn "LEAD") (invert_window_order_dirs order_dirs) order_dirs))))
 						(define sortcols (merge (list partition_cols order_cols)))
-						(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list relation alias value_col sortcols sortdirs offset (count partition_exprs))))))
+						(define col (canonical_orc_column_name (toLower fn) src
+							(list value_col sortcols sortdirs offset (count partition_exprs))))
 						(define stage (make_window_stage
 							(concat "window-" (toLower fn) ":" col)
 							src
@@ -2912,7 +2926,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
 							(window_order_dirs_for_orc order_items))))
-						(define col (concat "__orc_" (toLower fn) "_" (fnv_hash (string (list relation alias sortcols sortdirs (count partition_exprs))))))
+						(define col (canonical_orc_column_name (toLower fn) src
+							(list sortcols sortdirs (count partition_exprs))))
 						(define stage (make_window_stage
 							(concat "window-" (toLower fn) ":" col)
 							src
@@ -2958,7 +2973,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 						(define sortdirs (merge (list
 							(map partition_exprs (lambda (_expr) false))
 							(window_order_dirs_for_orc order_items))))
-						(define col (concat "__orc_row_number_" (fnv_hash (string (list relation alias sortcols sortdirs (count partition_exprs))))))
+						(define col (canonical_orc_column_name "row_number" src
+							(list sortcols sortdirs (count partition_exprs))))
 						(define stage (make_window_stage
 							(concat "window-row-number:" col)
 							src
@@ -3054,7 +3070,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			true
 			(make_exists_stage_join_condition stage_alias key_names outer_domain)))
 		(list
-			(window_aggregate_value_expr fn canonical_args ags stage_alias)
+			(window_aggregate_value_expr src fn canonical_args ags stage_alias)
 			(list stage)
 			(list source)))))
 
@@ -6503,7 +6519,7 @@ created. Canonicalize that unambiguous interface before physical lowering. */
 				nil))
 			(if (and (group_stage? stage) (equal? (count (gs_aggregates stage)) 1))
 				(list (source_alias src) (quote aggregate-column)
-					(aggregate_col_name (car (gs_aggregates stage))))
+					(aggregate_col_name_using (gs_input stage) (car (gs_aggregates stage))))
 				nil))))
 		(lambda (entry) (not (nil? entry))))))
 
@@ -6796,9 +6812,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(map (produceN (count source_ags)) (lambda (i)
 			(list
 				stage_alias
-				(aggregate_col_name (nth source_ags i))
+				(aggregate_col_name_using (gs_input stage) (nth source_ags i))
 				target_alias
-				(aggregate_col_name (nth aligned_ags i))))))))
+				(aggregate_col_name_using (gs_input target) (nth aligned_ags i))))))))
 
 (define stage_output_left_join_column_maps_for_entry (lambda (stages entry)
 	(begin
@@ -6943,8 +6959,11 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(define ag (scalar_first_probe_aggregate stage requested_col))
 		(if (nil? ag)
 			requested_col
-			(aggregate_col_name
-				(rewrite_stage_graph_expr alias_map id_map ag))))))
+			(begin
+				(define rewritten_stage (rewrite_stage_graph_stage alias_map id_map true stage))
+				(aggregate_col_name_using
+					(gs_input rewritten_stage)
+					(rewrite_stage_graph_expr alias_map id_map ag)))))))
 
 (define rewrite_stage_graph_expr (lambda (alias_map id_map expr)
 	(match expr
@@ -7086,7 +7105,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(concat (group_stage_cache_schema stage) "\n" (group_stage_cache_relation stage))
 		(concat "stage\n" (logical_stage_key stage)))))
 
-(define group_stage_with_initializer_owner (lambda (stage owner)
+(define group_stage_with_initializer_owner (lambda (stage owner cache)
 	(if (not (group_stage? stage))
 		stage
 		(make_group_stage
@@ -7100,7 +7119,9 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(gs_order stage)
 			(gs_limit stage)
 			(gs_offset stage)
-			(qassoc_set (gs_facts stage) (quote keytable_initializer_owner) owner)))))
+			(qassoc_set
+				(qassoc_set (gs_facts stage) (quote group_cache) cache)
+				(quote keytable_initializer_owner) owner)))))
 
 (define node_contains_nested_stage_input? (lambda (node)
 	(if (query_block? node)
@@ -7298,7 +7319,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 	(reduce (gs_aggregates stage) (lambda (found ag)
 		(if (not (nil? found))
 			found
-			(if (equal? (aggregate_col_name ag) requested_col) ag nil)))
+			(if (or
+				(equal? (aggregate_col_name ag) requested_col)
+				(equal? (aggregate_col_name_using (gs_input stage) ag) requested_col))
+				ag nil)))
 		nil)))
 
 (define scalar_first_probe_key_terms (lambda (sources default_alias src keys lookup_keys)
@@ -8401,9 +8425,9 @@ until lowering without creating a depth-proportional binary OR chain. */
 		(define schema (group_cache_schema cache))
 		(define grouptbl (group_cache_relation cache))
 		(define group_src (list grouptbl schema grouptbl false nil))
-		(define value_expr (replace_group_expr alias grouptbl keys key_names ags (first_projection_expr (gs_output stage))))
+		(define value_expr (replace_group_expr (gs_input stage) alias grouptbl keys key_names ags (first_projection_expr (gs_output stage))))
 		(define replaced_order (map (coalesceNil (gs_order stage) '()) (lambda (item)
-			(match item '(expr dir) (list (replace_group_order_expr alias grouptbl keys key_names ags expr) dir)))))
+			(match item '(expr dir) (list (replace_group_order_expr (gs_input stage) alias grouptbl keys key_names ags expr) dir)))))
 		(define session_filter (group_stage_session_filter_expr stage grouptbl keys key_names))
 		(define filtercols (extract_columns_for_alias group_src session_filter))
 		(define ordercols (order_cols_for_alias group_src replaced_order))
@@ -9101,6 +9125,47 @@ working on the original values. */
 (define aggregate_col_name (lambda (ag)
 	(concat "agg_" (fnv_hash (serialize ag)))))
 
+(define canonical_aggregate_probe_reference (lambda (stage requested_col)
+	(begin
+		(define ag (scalar_first_probe_aggregate stage requested_col))
+		(define input (gs_input stage))
+		(define stage_identity (if (source_is_base_table? input)
+			(list
+				(quote base-probe)
+				(source_schema input)
+				(source_relation input)
+				(canonical_helper_expr_using input (gs_keys stage))
+				(canonical_helper_expr_using input
+					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+			(group_stage_cache_relation stage)))
+		(list
+			stage_identity
+			(if (nil? ag) requested_col
+				(aggregate_col_name_using (gs_input stage) ag))))))
+
+/* Aggregate descriptors still carry aliases because they must execute against
+the current logical input. Persistent keytable columns must not. Resolve every
+column to (source role, schema, base relation, physical column) for the name;
+the enclosing carrier identity supplies the remaining query context. */
+(define aggregate_col_name_using (lambda (input ag)
+	/* The carrier already identifies the complete input graph, keys, and filter.
+	The column therefore identifies only the aggregate recipe. Normalize source
+	aliases by role so equivalent SQL aliases converge while self-join sides stay
+	distinct, and do not let eager physical preparation rename the recipe. */
+	(if (equal? ag aggregate_count_descriptor)
+		(aggregate_col_name ag)
+		(begin
+			(define local_aliases (source_aliases (canonical_helper_sources input)))
+			(define referenced_aliases (stage_semantic_expr_aliases ag))
+			(define outer_aliases (filter referenced_aliases (lambda (alias)
+				(not (contains? local_aliases alias)))))
+			(define alias_map (merge (list
+				(stage_semantic_alias_entries local_aliases "__aggregate_local_")
+				(stage_semantic_alias_entries outer_aliases "__aggregate_outer_"))))
+			(concat "agg_" (fnv_hash (serialize (list
+				"canonical-aggregate-v5"
+				(stage_semantic_rewrite_expr alias_map '() ag)))))))))
+
 (define dedupe_aggregates_by_col (lambda (ags)
 	(reduce (coalesceNil ags '()) (lambda (acc ag)
 		(begin
@@ -9112,16 +9177,149 @@ working on the original values. */
 				(merge acc (list ag)))))
 		'())))
 
-(define group_table_name (lambda (schema tbl alias keys condition)
-	(concat ".grp:" tbl ":" (fnv_hash (serialize (list "neumann-clean-groups-v4" schema tbl alias keys condition))))))
+(define group_table_name (lambda (schema label input_identity keys condition)
+	/* The readable label is not an identity. The hash covers the canonical input
+	graph, source-role-aware keys, and complete filter, so equivalent aliases
+	converge while self-join roles and different predicates remain separated. */
+	(concat ".grp:" label ":" (fnv_hash (serialize (list
+		"canonical-group-keytable-v5" schema input_identity keys condition))))))
 
-(define canonical_group_stage_alias "__grp")
+/* Persistent helper objects must be named by the physical data they represent,
+not by disposable SQL aliases. Source position remains part of the identity so
+self-joins of the same base table still describe two distinct row roles. */
+(define canonical_helper_sources (lambda (input)
+	(if (group_stage? input)
+		(canonical_helper_sources (gs_input input))
+		(if (query_block? input)
+			(qb_sources input)
+			(if (union_block? input)
+				(if (empty_list? (union_branches input)) '()
+					(qb_sources (car (union_branches input))))
+				(if (source_is_base_table? input) (list input) '()))))))
 
-(define canonicalize_group_stage_local_expr (lambda (alias expr)
-	(requalify_single_source_expr alias canonical_group_stage_alias expr)))
+(define canonical_helper_source_role_from (lambda (sources ref_alias ignorecase pos)
+	(match sources
+		(cons src rest)
+		(if (if ignorecase
+			(equal?? ref_alias (source_alias src))
+			(equal? ref_alias (source_alias src)))
+			(list pos src)
+			(canonical_helper_source_role_from rest ref_alias ignorecase (+ pos 1)))
+		_ nil)))
 
-(define canonicalize_group_stage_local_exprs (lambda (alias exprs)
-	(map (coalesceNil exprs '()) (lambda (expr) (canonicalize_group_stage_local_expr alias expr)))))
+(define canonical_helper_source_role (lambda (sources default_alias tblvar tbl_ignorecase)
+	/* Resolve role and source in one pass. Calling source_for_alias and then
+	searching its position performed two linear source walks per column node. */
+	(canonical_helper_source_role_from sources
+		(resolve_column_alias tblvar default_alias)
+		tbl_ignorecase
+		0)))
+
+(define canonical_helper_expr_using (lambda (input expr)
+	(begin
+		(define sources (canonical_helper_sources input))
+		(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
+		(define sole_source (if (single_source? sources) (car sources) nil))
+		/* Parser flags already define identifier semantics. Normalize insensitive
+		references directly instead of consulting table metadata for every repeated
+		aggregate reader; sensitive identifiers retain their exact physical name. */
+		(define canonical_col (lambda (col ignorecase)
+			(if (and (string? col) ignorecase) (toLower col) col)))
+		(define rewrite (lambda (node)
+			(if (group_stage? node)
+				(list (quote aggregate-stage) (group_stage_cache_relation node))
+				(match node
+					((symbol scalar_first_probe) stage requested_col)
+					(list (quote scalar_first_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((quote scalar_first_probe) stage requested_col)
+					(list (quote scalar_first_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((symbol scalar_first_probe) stage requested_col _stages)
+					(list (quote scalar_first_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((quote scalar_first_probe) stage requested_col _stages)
+					(list (quote scalar_first_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((symbol scalar_aggregate_probe) stage requested_col)
+					(list (quote scalar_aggregate_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((quote scalar_aggregate_probe) stage requested_col)
+					(list (quote scalar_aggregate_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((symbol scalar_cardinality_probe) stage requested_col)
+					(list (quote scalar_cardinality_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((quote scalar_cardinality_probe) stage requested_col)
+					(list (quote scalar_cardinality_probe) (canonical_aggregate_probe_reference stage requested_col))
+					((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+						/* Most helper expressions address one base source. Avoid rebuilding
+						a role lookup for that overwhelmingly common planner hot path. */
+						(define role (if (and (not (nil? sole_source))
+							(source_alias_matches? sole_source default_alias tblvar tbl_ignorecase))
+							(list 0 sole_source)
+							(canonical_helper_source_role sources default_alias tblvar tbl_ignorecase)))
+						(if (nil? role)
+							(list (quote outer-column) tblvar col)
+							(begin
+								(define src (nth role 1))
+								(list (quote base-column) (nth role 0)
+									(source_schema src) (source_relation src)
+									(canonical_col col col_ignorecase)))))
+					((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+					(rewrite (list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
+					(cons head tail) (cons (rewrite head) (map tail rewrite))
+					_ (if (symbol? node)
+						(match (string node)
+							(concat alias "." col) (begin
+								(define role (canonical_helper_source_role sources default_alias alias false))
+								(if (nil? role)
+									node
+									(begin
+										(define src (nth role 1))
+										(list (quote base-column) (nth role 0)
+											(source_schema src) (source_relation src) col))))
+							_ node)
+						node)))))
+		(rewrite expr))))
+
+(define canonical_group_stage_alias_map (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define local_aliases (source_aliases (stage_semantic_input_sources input)))
+		/* Carrier identity deliberately excludes aggregates, output, HAVING, and
+		ORDER. Adding another aggregate column to the same keys and condition must
+		reuse the existing keytable rather than create a second carrier. Neumann's
+		domain is the complete ordered interface of outer references, so it also
+		avoids rescanning the full keys and condition for aliases here. */
+		(define outer_aliases (filter
+			(merge_unique (map (gs_domain stage) stage_semantic_expr_aliases))
+			(lambda (alias)
+				(not (contains? local_aliases alias)))))
+		(merge (list
+			(stage_semantic_alias_entries local_aliases "__carrier_local_")
+			(stage_semantic_alias_entries outer_aliases "__carrier_outer_"))))))
+
+(define canonical_group_input_identity (lambda (alias_map input)
+	/* A carrier stores the input row domain, not its SELECT projection. Omitting
+	fields, hidden expressions, and the stage catalog prevents nested scalar
+	projection trees from being serialized again for every enclosing aggregate. */
+	(if (query_block? input)
+		(list
+			(quote query-domain)
+			(qb_schema input)
+			(map (qb_sources input) (lambda (src)
+				(stage_semantic_rewrite_source alias_map '() src)))
+			(stage_semantic_rewrite_expr alias_map '() (qb_where input))
+			(stage_semantic_rewrite_expr alias_map '() (qb_group input))
+			(stage_semantic_rewrite_expr alias_map '() (qb_having input))
+			(stage_semantic_rewrite_expr alias_map '() (qb_order input))
+			(qb_limit input)
+			(qb_offset input))
+		/* UNION projections define the rows exposed to the grouping input. Keep
+		the complete canonical union until it gets a dedicated domain form. */
+		(stage_semantic_canonical_node alias_map '() input))))
+
+(define canonical_orc_column_name (lambda (kind src payload)
+	/* ORCs live on one base table. Their identity is the table plus the complete
+	physical window recipe; SELECT aliases and read-time LIMIT/OFFSET are absent. */
+	(concat "__orc_" kind "_" (fnv_hash (serialize (list
+		"canonical-orc-v2"
+		(list (source_schema src) (source_relation src))
+		payload))))))
 
 (define make_group_keytable_cache (lambda (schema relation)
 	(list (quote group-keytable) schema relation)))
@@ -9165,21 +9363,26 @@ working on the original values. */
 (define group_stage_default_cache (lambda (stage)
 	(begin
 		(define schema (group_stage_schema stage))
-		(define tbl (group_stage_input_name stage))
-		(define alias (group_stage_input_alias stage))
+		(define input (gs_input stage))
+		(define label (if (source_is_base_table? input) (source_relation input)
+			(if (union_block? input) "union" "query")))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define alias_map (canonical_group_stage_alias_map stage))
 		(make_group_keytable_cache schema (group_table_name
 			schema
-			tbl
-			canonical_group_stage_alias
-			(canonicalize_group_stage_local_exprs alias keys)
-			(canonicalize_group_stage_local_expr alias condition))))))
+			label
+			(canonical_group_input_identity alias_map input)
+			(stage_semantic_rewrite_expr alias_map '() keys)
+			(stage_semantic_rewrite_expr alias_map '() condition))))))
 
 (define group_stage_cache (lambda (stage)
-	(coalesceNil
-		(qassoc_get (gs_facts stage) (quote group_cache) nil)
-		(group_stage_default_cache stage))))
+	(begin
+		(define cached (qassoc_get (gs_facts stage) (quote group_cache) nil))
+		/* Canonicalizing a nested input walks its complete logical tree. Keep the
+		fallback lazy: Scheme evaluates function arguments eagerly, so coalesceNil
+		would repeat that walk even after physical lowering stored the result. */
+		(if (nil? cached) (group_stage_default_cache stage) cached))))
 
 (define group_stage_cache_relation (lambda (stage)
 	(group_cache_relation (group_stage_cache stage))))
@@ -9391,26 +9594,26 @@ ever-larger subtrees. */
 (define non_scalar_order_aggregates (lambda (ags)
 	(filter ags (lambda (ag) (nil? (scalar_order_aggregate_parts ag))))))
 
-(define group_aggregate_read_expr (lambda (grouptbl ag)
+(define group_aggregate_read_expr (lambda (input grouptbl ag)
 	(begin
-		(define col (aggregate_col_name ag))
+		(define col (aggregate_col_name_using input ag))
 		(define read_expr (list (quote get_column) grouptbl false col false))
 		(if (aggregate_count_like? ag)
 			(list (quote coalesceNil) read_expr 0)
 			read_expr))))
 
-(define group_aggregate_order_read_expr (lambda (grouptbl ag)
-	(list (quote get_column) grouptbl false (aggregate_col_name ag) false)))
+(define group_aggregate_order_read_expr (lambda (input grouptbl ag)
+	(list (quote get_column) grouptbl false (aggregate_col_name_using input ag) false)))
 
-(define count_distinct_read_expr (lambda (grouptbl agg_expr)
+(define count_distinct_read_expr (lambda (input grouptbl agg_expr)
 	(begin
-		(define read_expr (list (quote get_column) grouptbl false (aggregate_col_name (count_distinct_descriptor agg_expr)) false))
+		(define read_expr (list (quote get_column) grouptbl false (aggregate_col_name_using input (count_distinct_descriptor agg_expr)) false))
 		(list (quote if)
 			(list (quote list?) read_expr)
 			(list (quote count) read_expr)
 			(list (quote coalesceNil) read_expr 0)))))
 
-(define replace_group_probe_stage_lookup_keys (lambda (alias grouptbl keys key_names ags key_index stage)
+(define replace_group_probe_stage_lookup_keys (lambda (input alias grouptbl keys key_names ags key_index stage)
 	(if (not (group_stage? stage))
 		stage
 		(begin
@@ -9431,22 +9634,22 @@ ever-larger subtrees. */
 					(map lookup_keys (lambda (expr)
 						(begin
 							(define resolved (canonical_column_expr_for_alias alias expr))
-							(replace_group_expr_indexed alias grouptbl keys key_names ags
+							(replace_group_expr_indexed input alias grouptbl keys key_names ags
 								(make_group_key_index keys (list resolved)) expr resolved))))))))))
 
-(define replace_group_probe_stages_lookup_keys (lambda (alias grouptbl keys key_names ags key_index stages)
+(define replace_group_probe_stages_lookup_keys (lambda (input alias grouptbl keys key_names ags key_index stages)
 	(map (coalesceNil stages '()) (lambda (stage)
-		(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)))))
+		(replace_group_probe_stage_lookup_keys input alias grouptbl keys key_names ags key_index stage)))))
 
-(define replace_group_expr_tail_indexed (lambda (alias grouptbl keys key_names ags key_index items resolved_items)
+(define replace_group_expr_tail_indexed (lambda (input alias grouptbl keys key_names ags key_index items resolved_items)
 	(match items
 		(cons item rest)
 		(cons
-			(replace_group_expr_indexed alias grouptbl keys key_names ags key_index item (car resolved_items))
-			(replace_group_expr_tail_indexed alias grouptbl keys key_names ags key_index rest (cdr resolved_items)))
+			(replace_group_expr_indexed input alias grouptbl keys key_names ags key_index item (car resolved_items))
+			(replace_group_expr_tail_indexed input alias grouptbl keys key_names ags key_index rest (cdr resolved_items)))
 		_ '())))
 
-(define replace_group_expr_indexed (lambda (alias grouptbl keys key_names ags key_index expr resolved)
+(define replace_group_expr_indexed (lambda (input alias grouptbl keys key_names ags key_index expr resolved)
 	(begin
 		(define key_idx (lookup_group_key_index key_index resolved))
 		(if (not (nil? key_idx))
@@ -9454,30 +9657,30 @@ ever-larger subtrees. */
 			(match expr
 				((symbol scalar_first_probe) stage requested_col stages)
 				(list (quote scalar_first_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
+					(replace_group_probe_stage_lookup_keys input alias grouptbl keys key_names ags key_index stage)
 					requested_col
-					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags key_index stages))
+					(replace_group_probe_stages_lookup_keys input alias grouptbl keys key_names ags key_index stages))
 				((quote scalar_first_probe) stage requested_col stages)
 				(list (quote scalar_first_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
+					(replace_group_probe_stage_lookup_keys input alias grouptbl keys key_names ags key_index stage)
 					requested_col
-					(replace_group_probe_stages_lookup_keys alias grouptbl keys key_names ags key_index stages))
+					(replace_group_probe_stages_lookup_keys input alias grouptbl keys key_names ags key_index stages))
 				((symbol scalar_aggregate_probe) stage requested_col)
 				(list (quote scalar_aggregate_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
+					(replace_group_probe_stage_lookup_keys input alias grouptbl keys key_names ags key_index stage)
 					requested_col)
 				((quote scalar_aggregate_probe) stage requested_col)
 				(list (quote scalar_aggregate_probe)
-					(replace_group_probe_stage_lookup_keys alias grouptbl keys key_names ags key_index stage)
+					(replace_group_probe_stage_lookup_keys input alias grouptbl keys key_names ags key_index stage)
 					requested_col)
 				((symbol count_distinct) agg_expr)
-				(count_distinct_read_expr grouptbl agg_expr)
+				(count_distinct_read_expr input grouptbl agg_expr)
 				((quote count_distinct) agg_expr)
-				(count_distinct_read_expr grouptbl agg_expr)
+				(count_distinct_read_expr input grouptbl agg_expr)
 				((symbol aggregate) agg_expr agg_reduce agg_neutral)
-				(group_aggregate_read_expr grouptbl (list agg_expr agg_reduce agg_neutral))
+				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
-				(group_aggregate_read_expr grouptbl (list agg_expr agg_reduce agg_neutral))
+				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				((symbol get_column) _tblvar _ _col _)
 				(if (equal?? (resolve_column_alias _tblvar alias) alias)
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
@@ -9487,55 +9690,55 @@ ever-larger subtrees. */
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
 					expr)
 				(cons head tail) (cons head
-					(replace_group_expr_tail_indexed alias grouptbl keys key_names ags key_index tail (cdr resolved)))
+					(replace_group_expr_tail_indexed input alias grouptbl keys key_names ags key_index tail (cdr resolved)))
 				_ expr)))))
 
-(define replace_group_expr (lambda (alias grouptbl keys key_names ags expr)
+(define replace_group_expr (lambda (input alias grouptbl keys key_names ags expr)
 	(begin
 		(define resolved (canonical_column_expr_for_alias alias expr))
 		(replace_group_expr_indexed
-			alias grouptbl keys key_names ags (make_group_key_index keys (list resolved))
+			input alias grouptbl keys key_names ags (make_group_key_index keys (list resolved))
 			expr resolved))))
 
-(define replace_group_fields_indexed (lambda (alias grouptbl keys key_names ags key_index fields resolved_fields)
+(define replace_group_fields_indexed (lambda (input alias grouptbl keys key_names ags key_index fields resolved_fields)
 	(match fields
 		(cons title (cons expr rest))
 		(cons title (cons
-			(replace_group_expr_indexed alias grouptbl keys key_names ags key_index expr (cadr resolved_fields))
-			(replace_group_fields_indexed alias grouptbl keys key_names ags key_index rest (cdr (cdr resolved_fields)))))
+			(replace_group_expr_indexed input alias grouptbl keys key_names ags key_index expr (cadr resolved_fields))
+			(replace_group_fields_indexed input alias grouptbl keys key_names ags key_index rest (cdr (cdr resolved_fields)))))
 		_ '())))
 
-(define replace_group_order_expr_tail_indexed (lambda (alias grouptbl keys key_names ags key_index items resolved_items)
+(define replace_group_order_expr_tail_indexed (lambda (input alias grouptbl keys key_names ags key_index items resolved_items)
 	(match items
 		(cons item rest)
 		(cons
-			(replace_group_order_expr_indexed alias grouptbl keys key_names ags key_index item (car resolved_items))
-			(replace_group_order_expr_tail_indexed alias grouptbl keys key_names ags key_index rest (cdr resolved_items)))
+			(replace_group_order_expr_indexed input alias grouptbl keys key_names ags key_index item (car resolved_items))
+			(replace_group_order_expr_tail_indexed input alias grouptbl keys key_names ags key_index rest (cdr resolved_items)))
 		_ '())))
 
-(define replace_group_order_expr_indexed (lambda (alias grouptbl keys key_names ags key_index expr resolved)
+(define replace_group_order_expr_indexed (lambda (input alias grouptbl keys key_names ags key_index expr resolved)
 	(begin
 		(define key_idx (lookup_group_key_index key_index resolved))
 		(if (not (nil? key_idx))
 			(list (quote get_column) grouptbl false (nth key_names key_idx) false)
 			(match expr
 				((symbol count_distinct) agg_expr)
-				(count_distinct_read_expr grouptbl agg_expr)
+				(count_distinct_read_expr input grouptbl agg_expr)
 				((quote count_distinct) agg_expr)
-				(count_distinct_read_expr grouptbl agg_expr)
+				(count_distinct_read_expr input grouptbl agg_expr)
 				((symbol aggregate) agg_expr agg_reduce agg_neutral)
-				(group_aggregate_order_read_expr grouptbl (list agg_expr agg_reduce agg_neutral))
+				(group_aggregate_order_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
-				(group_aggregate_order_read_expr grouptbl (list agg_expr agg_reduce agg_neutral))
+				(group_aggregate_order_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				(cons head tail) (cons head
-					(replace_group_order_expr_tail_indexed alias grouptbl keys key_names ags key_index tail (cdr resolved)))
+					(replace_group_order_expr_tail_indexed input alias grouptbl keys key_names ags key_index tail (cdr resolved)))
 				_ expr)))))
 
-(define replace_group_order_expr (lambda (alias grouptbl keys key_names ags expr)
+(define replace_group_order_expr (lambda (input alias grouptbl keys key_names ags expr)
 	(begin
 		(define resolved (canonical_column_expr_for_alias alias expr))
 		(replace_group_order_expr_indexed
-			alias grouptbl keys key_names ags (make_group_key_index keys (list resolved))
+			input alias grouptbl keys key_names ags (make_group_key_index keys (list resolved))
 			expr resolved))))
 
 (define direct_group_order_expr? (lambda (expr)
@@ -9630,7 +9833,7 @@ ever-larger subtrees. */
 (define build_group_ordered_scalar_column (lambda (schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
 	(begin
 		(define src (list alias schema tbl false nil))
-		(define agg_col (aggregate_col_name ag))
+		(define agg_col (aggregate_col_name_using src ag))
 		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 		(define condition_cols (extract_columns_for_alias src condition))
 		(define order_cols (map order_exprs (lambda (order_expr) (order_column_for_alias src order_expr))))
@@ -9678,7 +9881,7 @@ ever-larger subtrees. */
 		(define order_exprs (nth first_parts 1))
 		(define dirs (nth first_parts 2))
 		(define offset_value (nth first_parts 3))
-		(define agg_cols (map ags aggregate_col_name))
+		(define agg_cols (map ags (lambda (ag) (aggregate_col_name_using src ag))))
 		(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 		(define condition_cols (extract_columns_for_alias src condition))
 		(define order_cols (map order_exprs (lambda (order_expr) (order_column_for_alias src order_expr))))
@@ -9731,7 +9934,7 @@ ever-larger subtrees. */
 		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
 		'(agg_expr agg_reduce agg_neutral) (begin
 			(define src (list alias schema tbl false nil))
-			(define agg_col (aggregate_col_name ag))
+			(define agg_col (aggregate_col_name_using src ag))
 			(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
 			(define condition_cols (extract_columns_for_alias src condition))
 			(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols)))
@@ -9767,7 +9970,7 @@ ever-larger subtrees. */
 (define build_query_group_aggregate_column (lambda (input grouptbl keys key_names ag)
 	(match ag '(agg_expr agg_reduce agg_neutral) (begin
 		(define schema (qb_schema input))
-		(define agg_col (aggregate_col_name ag))
+		(define agg_col (aggregate_col_name_using input ag))
 		(define value_col "__agg")
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define row_identity (if (count_distinct_descriptor? ag)
@@ -9805,7 +10008,7 @@ ever-larger subtrees. */
 (define build_query_group_aggregate_insert_plan (lambda (input grouptbl keys key_names ag)
 	(match ag '(agg_expr agg_reduce agg_neutral) (begin
 		(define schema (qb_schema input))
-		(define agg_col (aggregate_col_name ag))
+		(define agg_col (aggregate_col_name_using input ag))
 		(define value_col "__agg")
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define row_fields (merge (list
@@ -10051,7 +10254,8 @@ ever-larger subtrees. */
 			(list (quote lambda) (list (quote grouped))
 				(list
 					(list (quote lambda) (list (quote grouped))
-						(group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name)))
+						(group_insert_finish_expr schema grouptbl key_names
+							(map ags (lambda (ag) (aggregate_col_name_using src ag)))))
 					grouped_expr))
 			grouped_scan))
 		(if (nil? membership_expr)
@@ -10229,7 +10433,10 @@ ever-larger subtrees. */
 		(group_cleanup_missing_keys_plan schema grouptbl key_names)
 		(group_insert_batches_expr schema grouptbl key_names value_cols (quote grouped)))))
 
-(define build_query_group_aggregates_insert_plan_using (lambda (input grouptbl keys key_names ags output_ags)
+/* Eager preparation may physicalize nested stage-output sources in input. Hash
+persistent aggregate names against naming_input, the original logical graph,
+so preparation order cannot rename a cache column. */
+(define build_query_group_aggregates_insert_plan_using (lambda (input naming_input grouptbl keys key_names ags output_ags)
 	(begin
 		(define schema (qb_schema input))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
@@ -10254,7 +10461,8 @@ ever-larger subtrees. */
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names (map output_ags aggregate_col_name)))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names
+			(map output_ags (lambda (ag) (aggregate_col_name_using naming_input ag)))))
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(list
 			(list (quote lambda) (list (quote grouped)) finish_expr)
@@ -10273,8 +10481,8 @@ ever-larger subtrees. */
 				(list (quote list))
 				combine_grouped)))))
 
-(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags)
-	(build_query_group_aggregates_insert_plan_using input grouptbl keys key_names ags ags)))
+(define build_query_group_aggregates_insert_plan (lambda (input naming_input grouptbl keys key_names ags)
+	(build_query_group_aggregates_insert_plan_using input naming_input grouptbl keys key_names ags ags)))
 
 (define union_branch_group_row_fields (lambda (candidate_alias branch keys key_names ags value_cols)
 	(begin
@@ -10305,7 +10513,7 @@ ever-larger subtrees. */
 					row_mapper reduce_expr neutral_expr shard_reduce_expr)))
 			neutral_expr))))
 
-(define build_union_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags)
+(define build_union_group_aggregates_insert_plan (lambda (input naming_input grouptbl keys key_names ags)
 	(begin
 		(define schema (qb_schema (car (union_branches input))))
 		(define row_key_names key_names)
@@ -10319,7 +10527,8 @@ ever-larger subtrees. */
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names (map ags aggregate_col_name)))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names
+			(map ags (lambda (ag) (aggregate_col_name_using naming_input ag)))))
 		(define row_mapper (list (quote lambda)
 			(merge (list key_symbols value_symbols))
 			(runtime_cons_list_expr (list key_expr payload_expr))))
@@ -10336,14 +10545,14 @@ ever-larger subtrees. */
 			(lower_union_block_as_dataset_reduce
 				input keys row_key_names ags value_cols row_mapper reduce_expr neutral_expr combine_grouped)))))
 
-(define build_scalar_single_query_stage_fill_plan (lambda (input grouptbl keys key_names value_ag count_ag)
+(define build_scalar_single_query_stage_fill_plan (lambda (input naming_input grouptbl keys key_names value_ag count_ag)
 	(match value_ag '(value_expr _value_reduce _value_neutral) (begin
 		(define prepared_input (if (and (query_block? input) (not (empty_list? (qb_stages input))))
 			(query_block_without_stages_after_eager_prepare_using (qb_stages input) input)
 			input))
 		(define schema (qb_schema prepared_input))
-		(define value_col (aggregate_col_name value_ag))
-		(define count_col (aggregate_col_name count_ag))
+		(define value_col (aggregate_col_name_using naming_input value_ag))
+		(define count_col (aggregate_col_name_using naming_input count_ag))
 		(define payload_col "__agg")
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define row_fields (merge (list
@@ -10419,26 +10628,26 @@ ever-larger subtrees. */
 			nil nil
 			(map (produceN (count order_items)) (lambda (i)
 				(match (nth order_items i) '(expr dir) (list
-					(replace_group_expr_indexed alias grouptbl keys key_names ags key_index expr
+					(replace_group_expr_indexed (gs_input stage) alias grouptbl keys key_names ags key_index expr
 						(nth resolved_order_exprs i))
 					dir))))
 			(gs_limit stage)
 			(gs_offset stage)
 			'() '() '()))))
 
-(define rewrite_source_for_group_domain (lambda (alias grouptbl keys key_names ags src)
+(define rewrite_source_for_group_domain (lambda (input alias grouptbl keys key_names ags src)
 	(begin
 		(define resolved (canonical_column_expr_for_alias alias (source_join_expr src)))
-		(rewrite_source_for_group_domain_indexed alias grouptbl keys key_names ags
+		(rewrite_source_for_group_domain_indexed input alias grouptbl keys key_names ags
 			(make_group_key_index keys (list resolved)) src resolved))))
 
-(define rewrite_source_for_group_domain_indexed (lambda (alias grouptbl keys key_names ags key_index src resolved_join)
+(define rewrite_source_for_group_domain_indexed (lambda (input alias grouptbl keys key_names ags key_index src resolved_join)
 	(list
 		(source_alias src)
 		(source_schema src)
 		(source_relation src)
 		(source_outer? src)
-		(replace_group_expr_indexed alias grouptbl keys key_names ags key_index
+		(replace_group_expr_indexed input alias grouptbl keys key_names ags key_index
 			(source_join_expr src)
 			resolved_join))))
 
@@ -11367,6 +11576,9 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 	(if (not (group_stage? stage))
 		stage
 		(begin
+			/* Do not derive a carrier while merely cataloging logical alternatives.
+			The cost model may lower only a small subset to group keytables; their
+			canonical physical names are computed lazily by group_stage_cache. */
 			(define facts (gs_facts stage))
 			(make_group_stage
 				(gs_id stage)
@@ -11694,10 +11906,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			resolved_order_exprs
 			resolved_extra_joins))))
 		(define output_fields (replace_group_fields_indexed
-			alias grouptbl keys key_names ags key_index original_output resolved_output))
-		(define replaced_having (replace_group_expr_indexed alias grouptbl keys key_names ags key_index
+			src alias grouptbl keys key_names ags key_index original_output resolved_output))
+		(define replaced_having (replace_group_expr_indexed src alias grouptbl keys key_names ags key_index
 			original_having resolved_having))
-		(define count_col_name (aggregate_col_name aggregate_count_descriptor))
+		(define count_col_name (aggregate_col_name_using src aggregate_count_descriptor))
 		(define count_check (list (quote >) (list (quote get_column) grouptbl false count_col_name false) 0))
 		(define needs_count_filter (and (not (equal? keys '(1))) (not (equal? condition true))))
 		(define aggregate_having_expr (if (not needs_count_filter)
@@ -11712,7 +11924,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(cons
 				(list grouptbl schema grouptbl false nil)
 				(map (produceN (count extras)) (lambda (i)
-					(rewrite_source_for_group_domain_indexed alias grouptbl keys key_names ags key_index
+					(rewrite_source_for_group_domain_indexed src alias grouptbl keys key_names ags key_index
 						(nth extras i) (nth resolved_extra_joins i)))))
 			output_fields
 			having_expr
@@ -11720,7 +11932,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(map (produceN (count order_items)) (lambda (i)
 				(match (nth order_items i) '(expr dir) (begin
 					(define replaced_order_expr (replace_group_order_expr_indexed
-						alias grouptbl keys key_names ags key_index expr
+						src alias grouptbl keys key_names ags key_index expr
 						(nth resolved_order_exprs i)))
 					(list (group_order_physical_expr grouptbl replaced_order_expr) dir)))))
 			(gs_limit stage)
@@ -11749,7 +11961,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(quote group)
 				(group_cache_schema cache)
 				(group_cache_relation cache)
-				(map (gs_aggregates stage) aggregate_col_name)
+				(map (gs_aggregates stage) (lambda (ag)
+					(aggregate_col_name_using (gs_input stage) ag)))
 				(map (gs_order stage) (lambda (item) (fnv_hash (serialize item))))
 				(if (source_is_base_table? (gs_input stage))
 					nil
@@ -11762,13 +11975,19 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 	(match (coalesceNil stages '())
 		(cons stage rest) (begin
 			(define shared_group_cache (and (group_stage? stage) (source_is_base_table? (gs_input stage))))
-			(define group_cache_key (if shared_group_cache (group_stage_cache_owner_key stage) nil))
+			/* This is a selected physical prepare, not a catalog alternative. Keep
+			the canonical carrier on its immutable stage copy so all lowering readers
+			share one derivation without introducing global planner state. */
+			(define cache (if (group_stage? stage) (group_stage_cache stage) nil))
+			(define group_cache_key (if shared_group_cache
+				(concat (group_cache_schema cache) "\n" (group_cache_relation cache))
+				nil))
 			(define initializer_owner (or (not shared_group_cache) (not (has_assoc? initialized_group_caches group_cache_key))))
-			(define prepared_stage (if shared_group_cache
-				(group_stage_with_initializer_owner stage initializer_owner)
+			(define prepared_stage (if (group_stage? stage)
+				(group_stage_with_initializer_owner stage initializer_owner cache)
 				stage))
 			(define plan (prepare prepared_stage))
-			(define identity (stage_prepare_identity stage))
+			(define identity (stage_prepare_identity prepared_stage))
 			(define next_group_caches (if (and shared_group_cache initializer_owner)
 				(set_assoc initialized_group_caches group_cache_key true)
 				initialized_group_caches))
@@ -11909,7 +12128,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(map ags (lambda (ag)
 				(list (quote createcolumn)
 					(list (quote table) schema grouptbl)
-					(aggregate_col_name ag)
+					(aggregate_col_name_using src ag)
 					"any"
 					(quoted_runtime_list '())
 					(quoted_runtime_list '()))))
@@ -11917,7 +12136,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define collect_plan (if (not query_input)
 			nil
 			(if (union_block? src)
-				(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names (list aggregate_count_descriptor))
+				(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names (list aggregate_count_descriptor))
 				(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
 		(define base_group_into_plan (if (or query_input scalar_order_base_stage)
 			nil
@@ -11930,8 +12149,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(if (empty_list? ags)
 				'()
 				(list (if (union_block? src)
-					(build_union_group_aggregates_insert_plan prepared_src grouptbl keys key_names ags)
-					(build_query_group_aggregates_insert_plan_using prepared_src grouptbl keys key_names lowering_ags ags))))
+					(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names ags)
+					(build_query_group_aggregates_insert_plan_using prepared_src src grouptbl keys key_names lowering_ags ags))))
 			(if scalar_order_base_stage
 				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
 				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
@@ -11949,7 +12168,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define computed_order_exprs (merge_unique (map (produceN (count prepare_order_items)) (lambda (i)
 			(match (nth prepare_order_items i) '(expr _dir) (begin
 				(define replaced_order_expr (replace_group_order_expr_indexed
-					alias grouptbl keys key_names ags key_index expr
+					src alias grouptbl keys key_names ags key_index expr
 					(nth prepare_resolved_order_exprs i)))
 				(if (direct_group_order_expr? replaced_order_expr) '() (list replaced_order_expr))))))))
 		(define computed_order_plans (map computed_order_exprs (lambda (expr)
@@ -11989,7 +12208,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				nested_prepare_expr
 				(if initializer_owner keytable_init nil)
 				ensure_agg_expr
-				(build_scalar_single_query_stage_fill_plan prepared_src grouptbl keys key_names (car lowering_ags) (cadr lowering_ags)))
+				(build_scalar_single_query_stage_fill_plan prepared_src src grouptbl keys key_names (car lowering_ags) (cadr lowering_ags)))
 			(if query_input
 				(cons (quote !begin)
 					(merge (list

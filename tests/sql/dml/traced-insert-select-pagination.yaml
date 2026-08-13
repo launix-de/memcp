@@ -148,6 +148,18 @@ test_cases:
       data:
         - id: 1
           label: "zeta"
+  - name: "Derived pagination bounds reuse one canonical window column"
+    scm: |
+      (begin
+        (define first_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT page.id FROM (SELECT source.id FROM trace_limit_parent source ORDER BY source.value_id LIMIT 2 OFFSET 1) page")))
+        (define later_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT renamed.id FROM (SELECT base.id FROM trace_limit_parent base ORDER BY base.value_id LIMIT 5 OFFSET 1) renamed")))
+        (define first_column (regexp_replace first_plan ".*(__orc_derived_row_number_[0-9a-f]+).*" "$1"))
+        (define later_column (regexp_replace later_plan ".*(__orc_derived_row_number_[0-9a-f]+).*" "$1"))
+        (if (equal? first_column later_column)
+          true
+          (error "pagination bounds fragmented the derived ORC column"))))
   - name: "Empty multi-source derived LIMIT returns no row"
     sql: |
       SELECT candidate.id, candidate.label

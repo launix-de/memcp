@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 metadata:
   version: "1.0"
   description: "Window functions: LEAD, LAG, aggregates with OVER, error cases"
@@ -165,6 +180,32 @@ test_cases:
         - {id: 5, prev: 15}
         - {id: 1, prev: null}
         - {id: 3, prev: 20}
+
+  - name: "Equivalent window queries share the canonical ORC column"
+    scm: |
+      (begin
+        (define plan_a (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT a.id, ROW_NUMBER() OVER (PARTITION BY a.parent ORDER BY a.time_val) AS rn FROM win_emp a ORDER BY a.amount")))
+        (define plan_b (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT renamed.id, ROW_NUMBER() OVER (PARTITION BY renamed.parent ORDER BY renamed.time_val) AS rn FROM win_emp renamed ORDER BY renamed.amount")))
+        (define column_a (regexp_replace plan_a ".*(__orc_row_number_[0-9a-f]+).*" "$1"))
+        (define column_b (regexp_replace plan_b ".*(__orc_row_number_[0-9a-f]+).*" "$1"))
+        (if (equal? column_a column_b)
+          true
+          (error "equivalent windows did not reuse the canonical ORC column"))))
+
+  - name: "Different window ordering uses a different ORC column"
+    scm: |
+      (begin
+        (define asc_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT a.id, ROW_NUMBER() OVER (ORDER BY a.time_val) AS rn FROM win_emp a ORDER BY a.amount")))
+        (define desc_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT a.id, ROW_NUMBER() OVER (ORDER BY a.time_val DESC) AS rn FROM win_emp a ORDER BY a.amount")))
+        (define asc_column (regexp_replace asc_plan ".*(__orc_row_number_[0-9a-f]+).*" "$1"))
+        (define desc_column (regexp_replace desc_plan ".*(__orc_row_number_[0-9a-f]+).*" "$1"))
+        (if (not (equal? asc_column desc_column))
+          true
+          (error "different windows shared one ORC column"))))
 
   # ==========================================================================
   # Case 4: OVER (PARTITION BY + ORDER BY) + LAG/LEAD — ERPL use case
