@@ -4902,14 +4902,24 @@ which selected a cached join plan without rerunning join enumeration. */
 				(if (nil? plan) plans (set_assoc plans (join_order_set_key aliases) plan))
 				(if (nil? plan) entries (+ entries 1)))))))
 
-(define join_order_dphyp (lambda (nodes aliases predicates)
+(define join_order_dphyp_connected (lambda (nodes aliases predicates connected)
 	(begin
-		(define connected (join_order_sort_sets (car (join_order_enumerate_connected aliases predicates 0))))
+		(define sorted_connected (join_order_sort_sets connected))
 		(define connected_by_first (reduce connected (lambda (dict subset)
 			(begin
 				(define first (car subset))
 				(set_assoc dict first (append (get_assoc dict first '()) subset)))) '()))
-		(join_order_dphyp_fill nodes aliases predicates connected_by_first connected '() 0))))
+		(join_order_dphyp_fill nodes aliases predicates connected_by_first sorted_connected '() 0))))
+
+(define join_order_dphyp_budgeted (lambda (nodes aliases predicates budget)
+	(begin
+		(define connected (join_order_enumerate_connected aliases predicates budget))
+		(if (cadr connected)
+			(list nil 0)
+			(join_order_dphyp_connected nodes aliases predicates (car connected))))))
+
+(define join_order_dphyp (lambda (nodes aliases predicates)
+	(join_order_dphyp_budgeted nodes aliases predicates (join_order_dp_state_budget))))
 
 (define join_order_alias_position (lambda (aliases alias)
 	(reduce (produceN (count aliases)) (lambda (found i)
@@ -5165,7 +5175,8 @@ which selected a cached join plan without rerunning join enumeration. */
 				(list plan used)
 				(begin
 					(define optimized (if hypergraph
-						(join_order_dphyp nodes (join_order_plan_aliases target) predicates)
+						(join_order_dphyp_budgeted nodes (join_order_plan_aliases target)
+							predicates (join_order_dp_state_budget))
 						(join_order_linearized_dp nodes (join_order_plan_aliases target) predicates)))
 					(define replacement (car optimized))
 					(define entries (cadr optimized))
@@ -5233,8 +5244,7 @@ which selected a cached join plan without rerunning join enumeration. */
 		(list (quote dp_entries) entries))))
 
 (define join_order_choose_strategy (lambda (alias_count hypergraph connected_over_budget)
-	(if (or (< alias_count 14)
-		(and (<= alias_count 100) (not connected_over_budget)))
+	(if (and (<= alias_count 100) (not connected_over_budget))
 		(quote dphyp)
 		(if hypergraph
 			(quote goo-dphyp)
@@ -5277,27 +5287,32 @@ subsets without materializing them. */
 		(or proven (join_order_degree_exceeds_budget?
 			(count (join_order_regular_neighbors edges alias)) budget))) false)))
 
+/* Connected subsets are the dominant retained state of DPHyp. Keeping this
+budget below the measured compile-time cliff makes the exact search predictable;
+the fallback still evaluates the same execution-cost function. */
+(define join_order_dp_state_budget (lambda ()
+	(begin
+		(define configured (settings "JoinReorderDPBudget"))
+		(if (> configured 0) configured 256))))
+
 (define join_order_adaptive (lambda (nodes raw_predicates)
 	(begin
 		(define aliases (map nodes car))
 		(define hypergraph (join_order_hypergraph? raw_predicates))
 		(define predicates (join_order_prepare_predicates aliases raw_predicates))
 		(define regular_edges (join_order_regular_edges aliases predicates))
-		(define regular_edge_count (count regular_edges))
-		(define complete_regular_graph (equal? regular_edge_count
-			(/ (* (count aliases) (- (count aliases) 1)) 2)))
-		(define connected_count (if (and (>= (count aliases) 14) (<= (count aliases) 100))
-			(if (or complete_regular_graph
-				(join_order_degree_proves_budget_overflow? aliases regular_edges 10000))
+		(define state_budget (join_order_dp_state_budget))
+		(define connected_count (if (<= (count aliases) 100)
+			(if (join_order_degree_proves_budget_overflow? aliases regular_edges state_budget)
 				(list '() true)
-				(join_order_enumerate_connected aliases predicates 10000))
+				(join_order_enumerate_connected aliases predicates state_budget))
 			(list '() true)))
 		(define strategy (join_order_choose_strategy
 			(count aliases) hypergraph (cadr connected_count)))
 		(define exact (equal? strategy (quote dphyp)))
 		(if exact nil (join_order_record_exact_cost_inputs nodes predicates))
 		(define result (if exact
-			(join_order_dphyp nodes aliases predicates)
+			(join_order_dphyp_connected nodes aliases predicates (car connected_count))
 			(if (equal? strategy (quote linearized-dp))
 				(join_order_linearized_dp nodes aliases predicates)
 				(join_order_goo_dp nodes aliases predicates hypergraph))))
@@ -5677,8 +5692,8 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(quote order) ordered_aliases)
 				(quote strategy) (quote order-prefix))))))
 
-(define join_optimizer_reorder_result (lambda (tree strategy dp_entries)
-	(list tree strategy dp_entries)))
+(define join_optimizer_reorder_result (lambda (tree strategy dp_entries cost cardinality)
+	(list tree strategy dp_entries cost cardinality)))
 
 (define join_optimizer_reorder_sources (lambda (stage_catalog block graph)
 	(begin
@@ -5701,7 +5716,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(join_optimizer_reorder_result
 				(join_optimizer_left_deep_tree sources)
 				(if preserve_order_driver (quote preserve-order-limit) (quote fixed))
-				0)
+				0 nil nil)
 			(begin
 				(define cost_planned (join_optimizer_plan_segment
 					stage_catalog sources segment default_alias graph))
@@ -5713,7 +5728,9 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(join_optimizer_append_sources_tree
 						(qassoc_get planned (quote tree) nil) remaining)
 					(qassoc_get planned (quote strategy) (quote fixed))
-					(qassoc_get planned (quote dp_entries) 0)))))))
+					(qassoc_get planned (quote dp_entries) 0)
+					(qassoc_get planned (quote cost) nil)
+					(qassoc_get planned (quote cardinality) nil)))))))
 
 (define join_optimizer_drop_sources (lambda (sources amount)
 	(if (or (<= amount 0) (empty_list? sources))
@@ -5726,6 +5743,9 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(list (quote join_plan) (nth reordered 0))
 		(list (quote join_driver) (car (join_optimizer_tree_aliases (nth reordered 0))))
 		(list (quote join_dp_entries) (nth reordered 2))
+		(list (quote join_estimated_cost) (nth reordered 3))
+		(list (quote join_estimated_rows) (nth reordered 4))
+		(list (quote join_dp_state_budget) (join_order_dp_state_budget))
 		(list (quote join_graph_nodes) (count (qassoc_get graph (quote nodes) '())))
 		(list (quote join_graph_edges) (count (qassoc_get graph (quote edges) '())))
 		(list (quote join_graph_hyperedges) (count (qassoc_get graph (quote hyperedges) '())))
