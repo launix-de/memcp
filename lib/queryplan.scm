@@ -4601,6 +4601,57 @@ and barrier ownership come from the pre-normalization query block. */
 /* Neumann/Radke join ordering lives in the SQL planner. None of these values
 are runtime relations: they are compile-time graph sets, cost records and
 logical trees consumed before physical scan lowering. */
+(define planner_cost (lambda (startup_ns row_ns probe_ns batch_startup_ns batch_row_ns
+	build_ns memory_bytes compile_ns expected_rows confidence)
+	(begin
+		(define execution_ns (+ startup_ns row_ns probe_ns batch_startup_ns batch_row_ns build_ns))
+		(define total_ns (+ execution_ns compile_ns))
+		(list
+			(list (quote startup_ns) startup_ns)
+			(list (quote row_ns) row_ns)
+			(list (quote probe_ns) probe_ns)
+			(list (quote batch_startup_ns) batch_startup_ns)
+			(list (quote batch_row_ns) batch_row_ns)
+			(list (quote build_ns) build_ns)
+			(list (quote memory_bytes) memory_bytes)
+			(list (quote compile_ns) compile_ns)
+			(list (quote expected_rows) expected_rows)
+			(list (quote confidence) confidence)
+			(list (quote execution_ns) execution_ns)
+			(list (quote total_ns) total_ns)))))
+
+(define planner_zero_cost (lambda (expected_rows confidence)
+	(planner_cost 0 0 0 0 0 0 0 0 expected_rows confidence)))
+
+(define planner_cost_add (lambda (left right expected_rows confidence)
+	(planner_cost
+		(+ (qassoc_get left (quote startup_ns) 0) (qassoc_get right (quote startup_ns) 0))
+		(+ (qassoc_get left (quote row_ns) 0) (qassoc_get right (quote row_ns) 0))
+		(+ (qassoc_get left (quote probe_ns) 0) (qassoc_get right (quote probe_ns) 0))
+		(+ (qassoc_get left (quote batch_startup_ns) 0) (qassoc_get right (quote batch_startup_ns) 0))
+		(+ (qassoc_get left (quote batch_row_ns) 0) (qassoc_get right (quote batch_row_ns) 0))
+		(+ (qassoc_get left (quote build_ns) 0) (qassoc_get right (quote build_ns) 0))
+		(+ (qassoc_get left (quote memory_bytes) 0) (qassoc_get right (quote memory_bytes) 0))
+		(+ (qassoc_get left (quote compile_ns) 0) (qassoc_get right (quote compile_ns) 0))
+		expected_rows confidence)))
+
+(define planner_cost_better? (lambda (candidate current)
+	(begin
+		(define candidate_total (qassoc_get candidate (quote total_ns) 0))
+		(define current_total (qassoc_get current (quote total_ns) 0))
+		(or (< candidate_total current_total)
+			(and (equal? candidate_total current_total)
+				(< (qassoc_get candidate (quote memory_bytes) 0)
+					(qassoc_get current (quote memory_bytes) 0)))))))
+
+/* Calibrated generic storage facts. They are deliberately free of SQL
+semantics; SCM combines them according to the candidate being evaluated. */
+(define planner_scan_cost (lambda (rows confidence)
+	(planner_cost 4000 (* rows 54) 0 0 0 0 0 0 rows confidence)))
+
+(define planner_join_work_cost (lambda (rows confidence)
+	(planner_cost 0 0 (* rows 1240) 0 0 0 0 0 rows confidence)))
+
 (define join_order_set_subset? (lambda (required available)
 	(reduce (coalesceNil required '()) (lambda (ok alias)
 		(and ok (contains? available alias))) true)))
@@ -4656,7 +4707,7 @@ logical trees consumed before physical scan lowering. */
 /* The final three fields mirror the numeric cost values as cheap runtime ASTs.
 They let the compile-local condition accumulator retain the exact inequalities
 which selected a cached join plan without rerunning join enumeration. */
-/* plan = (tree aliases cardinality cost size atomic driver-cardinality left right cardinality-expr cost-expr driver-expr) */
+/* plan = (tree aliases cardinality cost size atomic driver-cardinality left right cardinality-expr cost-expr driver-expr cost-domain) */
 (define join_order_plan_tree (lambda (plan) (nth plan 0)))
 (define join_order_plan_aliases (lambda (plan) (nth plan 1)))
 (define join_order_plan_cardinality (lambda (plan) (nth plan 2)))
@@ -4672,22 +4723,30 @@ which selected a cached join plan without rerunning join enumeration. */
 	(if (> (count plan) 10) (nth plan 10) (join_order_plan_cost plan))))
 (define join_order_plan_driver_expr (lambda (plan)
 	(if (> (count plan) 11) (nth plan 11) (join_order_driver_cardinality plan))))
+(define join_order_plan_cost_domain (lambda (plan)
+	(if (> (count plan) 12) (nth plan 12)
+		(planner_zero_cost (join_order_plan_cardinality plan) 0.5))))
+
+(define planner_scan_cost_expr (lambda (rows)
+	(list (quote +) 4000 (list (quote *) rows 54))))
 
 (define join_order_leaf_plan (lambda (node)
 	(begin
 		(define row_expr (if (> (count node) 2) (nth node 2) (cadr node)))
+		(define rows (max 1 (cadr node)))
 		(list
 			(list (quote join-leaf) (car node) '())
 			(list (car node))
-			(max 1 (cadr node))
-			0
+			rows
+			(qassoc_get (planner_scan_cost rows 0.5) (quote total_ns) 0)
 			1
 			false
-			(max 1 (cadr node))
+			rows
 			nil nil
 			(list (quote max) 1 row_expr)
-			0
-			(list (quote max) 1 row_expr)))))
+			(planner_scan_cost_expr (list (quote max) 1 row_expr))
+			(list (quote max) 1 row_expr)
+			(planner_scan_cost rows 0.5)))))
 
 (define join_order_product_expr (lambda (items)
 	(match items
@@ -4732,11 +4791,16 @@ which selected a cached join plan without rerunning join enumeration. */
 		(define cardinality_expr (join_order_join_cardinality_expr predicates left right))
 		(define combined (join_order_set_union universe
 			(join_order_plan_aliases left) (join_order_plan_aliases right)))
+		(define children_cost (planner_cost_add
+			(join_order_plan_cost_domain left) (join_order_plan_cost_domain right)
+			cardinality 0.5))
+		(define cost_domain (planner_cost_add children_cost
+			(planner_join_work_cost cardinality 0.5) cardinality 0.5))
 		(list
 			(list (quote join-node) (quote inner) (join_order_plan_tree left) (join_order_plan_tree right) '())
 			combined
 			cardinality
-			(+ (join_order_plan_cost left) (join_order_plan_cost right) cardinality)
+			(qassoc_get cost_domain (quote total_ns) 0)
 			(+ (join_order_plan_size left) (join_order_plan_size right))
 			false
 			(join_order_driver_cardinality left)
@@ -4745,8 +4809,9 @@ which selected a cached join plan without rerunning join enumeration. */
 			(list (quote +)
 				(join_order_plan_cost_expr left)
 				(join_order_plan_cost_expr right)
-				cardinality_expr)
-			(join_order_plan_driver_expr left)))))
+				(list (quote *) cardinality_expr 1240))
+			(join_order_plan_driver_expr left)
+			cost_domain))))
 
 (define join_order_candidate_better? (lambda (current candidate)
 	(or (< (join_order_plan_cost candidate) (join_order_plan_cost current))
@@ -5139,7 +5204,8 @@ which selected a cached join plan without rerunning join enumeration. */
 		(join_order_plan_right plan)
 		(join_order_plan_cardinality_expr plan)
 		(join_order_plan_cost_expr plan)
-		(join_order_plan_driver_expr plan))))
+		(join_order_plan_driver_expr plan)
+		(join_order_plan_cost_domain plan))))
 
 (define join_order_expensive_subtree (lambda (plan parent_size limit)
 	(if (or (nil? plan) (join_order_plan_atomic? plan)
@@ -5235,13 +5301,22 @@ which selected a cached join plan without rerunning join enumeration. */
 		_ (neumann_fail "join_reorder" "malformed optimized join tree"))))
 
 (define join_order_result (lambda (strategy plan entries predicates)
-	(list
-		(list (quote strategy) strategy)
-		(list (quote tree) (join_order_tree_with_predicates (join_order_plan_tree plan) predicates))
-		(list (quote order) (join_order_plan_aliases plan))
-		(list (quote cost) (join_order_plan_cost plan))
-		(list (quote cardinality) (join_order_plan_cardinality plan))
-		(list (quote dp_entries) entries))))
+	(begin
+		/* Compile work is reported separately from execution work but participates
+		in the displayed total. The state calibration is intentionally generic and
+		does not affect execution-plan comparison. */
+		(define cost_components (planner_cost_add
+			(join_order_plan_cost_domain plan)
+			(planner_cost 0 0 0 0 0 0 0 (* entries 50000) 0 0.5)
+			(join_order_plan_cardinality plan) 0.5))
+		(list
+			(list (quote strategy) strategy)
+			(list (quote tree) (join_order_tree_with_predicates (join_order_plan_tree plan) predicates))
+			(list (quote order) (join_order_plan_aliases plan))
+			(list (quote cost) (join_order_plan_cost plan))
+			(list (quote cardinality) (join_order_plan_cardinality plan))
+			(list (quote cost_components) cost_components)
+			(list (quote dp_entries) entries)))))
 
 (define join_order_choose_strategy (lambda (alias_count hypergraph connected_over_budget)
 	(if (and (<= alias_count 100) (not connected_over_budget))
@@ -5692,8 +5767,8 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(quote order) ordered_aliases)
 				(quote strategy) (quote order-prefix))))))
 
-(define join_optimizer_reorder_result (lambda (tree strategy dp_entries cost cardinality)
-	(list tree strategy dp_entries cost cardinality)))
+(define join_optimizer_reorder_result (lambda (tree strategy dp_entries cost cardinality cost_components)
+	(list tree strategy dp_entries cost cardinality cost_components)))
 
 (define join_optimizer_reorder_sources (lambda (stage_catalog block graph)
 	(begin
@@ -5716,7 +5791,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(join_optimizer_reorder_result
 				(join_optimizer_left_deep_tree sources)
 				(if preserve_order_driver (quote preserve-order-limit) (quote fixed))
-				0 nil nil)
+				0 nil nil nil)
 			(begin
 				(define cost_planned (join_optimizer_plan_segment
 					stage_catalog sources segment default_alias graph))
@@ -5730,7 +5805,8 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(qassoc_get planned (quote strategy) (quote fixed))
 					(qassoc_get planned (quote dp_entries) 0)
 					(qassoc_get planned (quote cost) nil)
-					(qassoc_get planned (quote cardinality) nil)))))))
+					(qassoc_get planned (quote cardinality) nil)
+					(qassoc_get planned (quote cost_components) nil)))))))
 
 (define join_optimizer_drop_sources (lambda (sources amount)
 	(if (or (<= amount 0) (empty_list? sources))
@@ -5745,6 +5821,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(list (quote join_dp_entries) (nth reordered 2))
 		(list (quote join_estimated_cost) (nth reordered 3))
 		(list (quote join_estimated_rows) (nth reordered 4))
+		(list (quote join_cost) (nth reordered 5))
 		(list (quote join_dp_state_budget) (join_order_dp_state_budget))
 		(list (quote join_graph_nodes) (count (qassoc_get graph (quote nodes) '())))
 		(list (quote join_graph_edges) (count (qassoc_get graph (quote edges) '())))
@@ -6255,11 +6332,33 @@ in the canonicalization functions above. */
 (define membership_projection_cost_preferred? (lambda (candidate_rows driver_rows)
 	(if (or (nil? candidate_rows) (nil? driver_rows))
 		false
-		/* Projection has fixed setup and per-key projection costs. Driver probing
-		uses the ordinary scan/autoindex path. These units are deliberately
-		simple and shared by every canonical membership shape; syntax recognition
-		must never select the physical representation. */
-		(< (+ 16 (* candidate_rows 4)) driver_rows))))
+		(planner_cost_better?
+			(membership_projection_cost candidate_rows)
+			(membership_driver_probe_cost driver_rows)))))
+
+(define membership_projection_cost (lambda (candidate_rows)
+	/* Preserve the measured crossover of the prior 16+4*n model while making
+	each component explicit in nanoseconds. */
+	(planner_cost 864 (* candidate_rows 54) 0 0 0 (* candidate_rows 162)
+		(* candidate_rows 8) 0 candidate_rows 0.5)))
+
+(define membership_driver_probe_cost (lambda (driver_rows)
+	(planner_cost 0 0 (* driver_rows 54) 0 0 0 0 0 driver_rows 0.5)))
+
+(define membership_cost_options (lambda (candidate_rows driver_rows)
+	(if (or (nil? candidate_rows) (nil? driver_rows))
+		'()
+		(list
+			(list (quote candidate_keyset) (membership_projection_cost candidate_rows))
+			(list (quote driver_order_membership_probe) (membership_driver_probe_cost driver_rows))))))
+
+(define membership_cost_options_for_telemetry (lambda (telemetry)
+	(begin
+		(define candidate_rows (if (qassoc_get telemetry (quote membership_candidate_estimate_capped) false)
+			(qassoc_get telemetry (quote membership_candidate_estimate_input) nil)
+			(qassoc_get telemetry (quote membership_candidate_estimated_rows) nil)))
+		(membership_cost_options candidate_rows
+			(qassoc_get telemetry (quote membership_driver_rows) nil)))))
 
 (define membership_broad_driver_probe_preferred? (lambda (block stage)
 	(begin
@@ -6720,7 +6819,10 @@ in the canonicalization functions above. */
 						(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
 						(define candidate_telemetry (candidate_reorder_telemetry stage sources block))
 						(define strategy (candidate_reorder_strategy candidate_telemetry))
-						(define costed_telemetry (qassoc_set candidate_telemetry
+						(define costed_telemetry (qassoc_set
+							(qassoc_set candidate_telemetry
+								(quote membership_cost_candidates)
+								(membership_cost_options_for_telemetry candidate_telemetry))
 							(quote membership_cost_reason)
 							(if (equal? strategy (quote candidate_keyset))
 								(quote projected_membership_cost)
