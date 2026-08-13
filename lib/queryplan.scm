@@ -9839,7 +9839,7 @@ self-joins of the same base table still describe two distinct row roles. */
 				(concat "query:" (fnv_hash (string input)))
 				(source_relation input))))))
 
-(define group_stage_default_cache (lambda (stage)
+(define group_stage_default_cache (lambda (stage signatures)
 	(begin
 		(define schema (group_stage_schema stage))
 		(define input (gs_input stage))
@@ -9848,11 +9848,6 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define alias_map (canonical_group_stage_alias_map stage))
-		/* Generated dependency IDs are not physical identities once lowering has
-		selected a stage DAG. Earlier analysis and cost-model probes deliberately
-		keep the cheap provisional identity instead of recursively cataloging stages. */
-		(define signatures
-			(qassoc_get (gs_facts stage) (quote stage_semantic_signatures) '()))
 		(make_group_keytable_cache schema (group_table_name
 			schema
 			label
@@ -9863,10 +9858,9 @@ self-joins of the same base table still describe two distinct row roles. */
 (define group_stage_cache (lambda (stage)
 	(begin
 		(define cached (qassoc_get (gs_facts stage) (quote group_cache) nil))
-		/* Canonicalizing a nested input walks its complete logical tree. Keep the
-		fallback lazy: Scheme evaluates function arguments eagerly, so coalesceNil
-		would repeat that walk even after physical lowering stored the result. */
-		(if (nil? cached) (group_stage_default_cache stage) cached))))
+		/* Analysis and cost probes have no semantic index yet and deliberately use
+		the cheap provisional identity. Physical preparation passes its shared index. */
+		(if (nil? cached) (group_stage_default_cache stage '()) cached))))
 
 (define group_stage_cache_relation (lambda (stage)
 	(group_cache_relation (group_stage_cache stage))))
@@ -12041,10 +12035,6 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			catalog)
 		(query_block_facts_with_stage_catalog block stages))))
 
-(define group_stage_with_semantic_signatures (lambda (stage signatures)
-	(group_stage_with_facts stage
-		(qassoc_set (gs_facts stage) (quote stage_semantic_signatures) signatures))))
-
 (define query_block_with_stage_catalog (lambda (block stages)
 	(make_query_block
 		(qb_schema block)
@@ -12075,24 +12065,20 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define stages_with_canonical_group_caches_acc (lambda (stages signatures cache_index)
 	(match (coalesceNil stages '())
 		(cons stage rest) (begin
-			(define signature_stage (group_stage_with_semantic_signatures stage signatures))
-			(if (not (group_stage? signature_stage))
+			(if (not (group_stage? stage))
 				(begin
 					(define tail (stages_with_canonical_group_caches_acc rest signatures cache_index))
-					(list (cons signature_stage (nth tail 0)) (nth tail 1)))
+					(list (cons stage (nth tail 0)) (nth tail 1)))
 				(begin
-					(define signature (get_assoc signatures (gs_id signature_stage)))
+					(define signature (get_assoc signatures (gs_id stage)))
 					(define cache (if (has_assoc? cache_index signature)
 						(cache_index signature)
-						(group_stage_default_cache signature_stage)))
+						(group_stage_default_cache stage signatures)))
 					(define next_index (if (has_assoc? cache_index signature)
 						cache_index
 						(set_assoc cache_index signature cache)))
-					/* The complete signature index is compile-local scratch data. Keeping it
-					on every immutable stage makes later rewrites copy an O(stages) fact. */
-					(define cached_stage (group_stage_with_facts signature_stage
-						(qassoc_set_without (gs_facts signature_stage)
-							(quote group_cache) cache (quote stage_semantic_signatures))))
+					(define cached_stage (group_stage_with_facts stage
+						(qassoc_set (gs_facts stage) (quote group_cache) cache)))
 					(define tail (stages_with_canonical_group_caches_acc rest signatures next_index))
 					(list (cons cached_stage (nth tail 0)) (nth tail 1)))))
 		_ (list '() cache_index))))
