@@ -148,6 +148,27 @@ test_cases:
         - "driver_membership_probe"
         - "touch_keytable"
 
+  - name: "EXPLAIN REORDER keeps EXISTS membership as a logical requirement"
+    sql: |
+      EXPLAIN REORDER SELECT ID, name FROM exists_customers c
+      WHERE EXISTS (
+        SELECT 1 FROM exists_orders o
+        WHERE o.customer_id = c.ID
+          AND o.total > 150
+      )
+      ORDER BY ID
+    expect:
+      contains:
+        - "exists_membership_requirement"
+        - "membership_requirement_probe"
+        - "left_join_requirements"
+      not_contains:
+        - "driver_membership_probe"
+        - "recset_project_join"
+        - "group_cache_read"
+        - "tempcol_materialize_reusable"
+        - "subscan_partition_limit"
+
   - name: "Optimizer rewrites generated EXISTS scan pattern to scan_exists"
     scm: |
       (begin

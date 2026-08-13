@@ -5595,23 +5595,39 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(neumann_fail "build_queryplan" "logical join plan does not cover the query-block sources exactly once"))
 				block)))))
 
+(define physicalize_membership_requirement_expr (lambda (expr)
+	(match expr
+		((symbol membership_requirement_probe) stage probe)
+		(list (quote driver_membership_probe) stage probe)
+		((quote membership_requirement_probe) stage probe)
+		(list (quote driver_membership_probe) stage probe)
+		(cons head tail) (cons
+			(physicalize_membership_requirement_expr head)
+			(map tail physicalize_membership_requirement_expr))
+		_ expr)))
+
+(define physicalize_membership_requirement_source (lambda (src)
+	(source_with_join_expr src
+		(physicalize_membership_requirement_expr (source_join_expr src)))))
+
 (define apply_join_optimizer_plan_node (lambda (node)
 	(if (query_block? node)
 		(begin
 			(define planned (apply_join_optimizer_plan node))
+			(define physical_planned (query_block_with_physical_requirement_choices planned))
 			(make_query_block
-				(qb_schema planned)
-				(qb_sources planned)
-				(qb_fields planned)
-				(qb_where planned)
-				(qb_group planned)
-				(qb_having planned)
-				(qb_order planned)
-				(qb_limit planned)
-				(qb_offset planned)
-				(qb_hidden planned)
-				(map (qb_stages planned) apply_join_optimizer_plan_stage)
-				(qb_facts planned)))
+				(qb_schema physical_planned)
+				(map (qb_sources physical_planned) physicalize_membership_requirement_source)
+				(physicalize_membership_requirement_expr (qb_fields physical_planned))
+				(physicalize_membership_requirement_expr (qb_where physical_planned))
+				(physicalize_membership_requirement_expr (qb_group physical_planned))
+				(physicalize_membership_requirement_expr (qb_having physical_planned))
+				(physicalize_membership_requirement_expr (qb_order physical_planned))
+				(qb_limit physical_planned)
+				(qb_offset physical_planned)
+				(physicalize_membership_requirement_expr (qb_hidden physical_planned))
+				(map (qb_stages physical_planned) apply_join_optimizer_plan_stage)
+				(physicalize_membership_requirement_expr (qb_facts physical_planned))))
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
@@ -5627,12 +5643,12 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(make_group_stage
 			(gs_id stage)
 			(apply_join_optimizer_plan_node (gs_input stage))
-			(gs_domain stage)
-			(gs_keys stage)
-			(gs_aggregates stage)
-			(gs_having stage)
-			(gs_output stage)
-			(gs_order stage)
+			(physicalize_membership_requirement_expr (gs_domain stage))
+			(physicalize_membership_requirement_expr (gs_keys stage))
+			(physicalize_membership_requirement_expr (gs_aggregates stage))
+			(physicalize_membership_requirement_expr (gs_having stage))
+			(physicalize_membership_requirement_expr (gs_output stage))
+			(physicalize_membership_requirement_expr (gs_order stage))
 			(gs_limit stage)
 			(gs_offset stage)
 			(gs_facts stage))
@@ -6076,27 +6092,23 @@ resulting tree in semantic order. */
 			'())
 		_ '())))
 
-(define left_join_strategy_options (lambda (src)
+(define left_join_requirement (lambda (src)
 	(if (not (source_outer? src))
 		nil
 		(begin
 			(define rows (planner_source_row_count src))
 			(list
 				(source_alias src)
-				(list (quote preferred) (if (and (not (nil? rows)) (< rows 1000))
-					(quote subscan)
-					(quote tempcol_materialize_reusable)))
-				(list (quote alternatives) (list
-					(quote subscan)
-					(quote group_cache_read)
-					(quote tempcol_materialize_reusable)))
-				(list (quote row_count) rows))))))
+				(list (quote access) (quote nullable_lookup))
+				(list (quote estimated_rows) rows)
+				(list (quote null_extension_barrier) true)
+				(list (quote reuse) 1))))))
 
 (define query_block_reorder_telemetry (lambda (block)
 	(list
 		(list (quote source_estimates) (map (qb_sources block) source_reorder_estimate))
-		(list (quote left_join_plan_options) (filter
-			(map (qb_sources block) left_join_strategy_options)
+		(list (quote left_join_requirements) (filter
+			(map (qb_sources block) left_join_requirement)
 			(lambda (item) (not (nil? item))))))))
 
 (define query_block_needs_reorder_facts? (lambda (block)
@@ -6195,28 +6207,14 @@ resulting tree in semantic order. */
 			(list (quote membership_order_limit) (qb_limit block))
 			(list (quote membership_order_limit_driver) ordered_driver)))))
 
-(define stage_reorder_strategy (lambda (stage)
-	(match (qassoc_get (gs_facts stage) (quote purpose) nil)
-		(symbol exists) (quote group_cache_read)
-		(symbol not_exists) (quote group_cache_read)
-		(symbol in_membership) (quote group_cache_read)
-		(symbol in_candidate) (quote candidate_keyset)
-		(symbol scalar_aggregate) (quote group_cache_read)
-		(symbol scalar_single) (if (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote first))
-			(quote subscan_partition_limit)
-			(quote group_cache_read))
-		_ (quote group_cache_read))))
-
 (define stage_reorder_telemetry (lambda (stage)
 	(list
-		(list (quote group_stage_strategy) (stage_reorder_strategy stage))
-		(list (quote group_input_rows) (planner_stage_input_rows (gs_input stage)))
-		(list (quote group_domain_count) (count (gs_domain stage)))
-		(list (quote group_key_count) (count (gs_keys stage)))
-		(list (quote group_plan_options) (list
-			(quote subscan)
-			(quote group_cache_read)
-			(quote tempcol_materialize_reusable))))))
+		(list (quote group_requirement) (list
+			(list (quote purpose) (qassoc_get (gs_facts stage) (quote purpose) nil))
+			(list (quote input_rows) (planner_stage_input_rows (gs_input stage)))
+			(list (quote domain_count) (count (gs_domain stage)))
+			(list (quote key_count) (count (gs_keys stage)))
+			(list (quote reuse) 1))))))
 
 (define group_stage_with_reorder_facts (lambda (stage)
 	(make_group_stage
@@ -6232,28 +6230,10 @@ resulting tree in semantic order. */
 		(gs_offset stage)
 		(merge (list (stage_reorder_telemetry stage) (gs_facts stage))))))
 
-(define candidate_reorder_strategy (lambda (telemetry)
-	(begin
-		(define estimated_rows (qassoc_get telemetry (quote membership_candidate_estimated_rows) nil))
-		(define candidate_rows (if (qassoc_get telemetry (quote membership_candidate_estimate_capped) false)
-			(qassoc_get telemetry (quote membership_candidate_estimate_input) nil)
-			estimated_rows))
-		(define driver_rows (qassoc_get telemetry (quote membership_driver_rows) nil))
-		/* A broad membership below a driver-local OR is evaluated after the ordered
-		driver scan so local matches can short-circuit the nested lookup. */
-		(define broad_driver (and
-			(equal? (qassoc_get telemetry (quote membership_selectivity_class) nil) (quote broad))
-			(qassoc_get telemetry (quote membership_driver_alternative) false)))
-		/* UNION membership is already in a canonical semantic form here. Cost
-		the two supported implementations for every query shape: project the
-		candidate keys to a driver RecSet, or retain the driver scan and let its
-		per-row membership probes use autoindex. ORDER/LIMIT is an input to future
-		braking refinements, not permission for syntax to force either plan. */
-		(if broad_driver
-			(quote driver_order_membership_probe)
-			(if (membership_projection_cost_preferred? candidate_rows driver_rows)
-				(quote candidate_keyset)
-				(quote driver_order_membership_probe))))))
+(define physical_candidate_membership_strategy (lambda (_telemetry)
+	/* Candidate stages have one consumer in the logical contract. Reusable
+	membership is represented by membership_truth and costed independently. */
+	(quote driver_order_membership_probe)))
 
 (define query_block_with_reorder_facts (lambda (block facts)
 	(make_query_block
@@ -6274,6 +6254,11 @@ resulting tree in semantic order. */
 	(list (quote and)
 		(list (quote not) (list (quote nil?) probe))
 		(list (quote driver_membership_probe) stage probe))))
+
+(define logical_membership_probe_expr (lambda (stage probe)
+	(list (quote and)
+		(list (quote not) (list (quote nil?) probe))
+		(list (quote membership_requirement_probe) stage probe))))
 
 (define membership_truth_parts (lambda (expr)
 	(match expr
@@ -6359,6 +6344,31 @@ in the canonicalization functions above. */
 			(qassoc_get telemetry (quote membership_candidate_estimated_rows) nil)))
 		(membership_cost_options candidate_rows
 			(qassoc_get telemetry (quote membership_driver_rows) nil)))))
+
+/* The reorder phase carries only an abstract membership requirement. Concrete
+keyset/probe names enter the IR here, at the physical preparation boundary. */
+(define query_block_with_physical_requirement_choices (lambda (block)
+	(begin
+		(define requirement (qassoc_get (qb_facts block) (quote membership_requirement) nil))
+		(if (nil? requirement)
+			block
+			(begin
+				(define strategy (physical_candidate_membership_strategy requirement))
+				(define physical_facts (merge (list
+					(list
+						(list (quote membership_plan_strategy) strategy)
+						(list (quote membership_cost_candidates)
+							(membership_cost_options_for_telemetry requirement))
+						(list (quote membership_cost_reason)
+							(if (equal? strategy (quote candidate_keyset))
+								(quote projected_membership_cost)
+								(quote indexed_driver_probe_cost))))
+					requirement
+					(qb_facts block))))
+				(make_query_block
+					(qb_schema block) (qb_sources block) (qb_fields block) (qb_where block)
+					(qb_group block) (qb_having block) (qb_order block) (qb_limit block)
+					(qb_offset block) (qb_hidden block) (qb_stages block) physical_facts))))))
 
 (define membership_broad_driver_probe_preferred? (lambda (block stage)
 	(begin
@@ -6550,7 +6560,9 @@ in the canonicalization functions above. */
 		nil)))
 
 (define driver_order_membership_strategy? (lambda (facts)
-	(equal? (qassoc_get facts (quote membership_plan_strategy) nil) (quote driver_order_membership_probe))))
+	(or
+		(equal? (qassoc_get facts (quote membership_plan_strategy) nil) (quote driver_order_membership_probe))
+		(not (nil? (qassoc_get facts (quote membership_requirement) nil))))))
 
 (define membership_strategy? (lambda (facts)
 	(or (driver_order_membership_strategy? facts)
@@ -6613,33 +6625,35 @@ in the canonicalization functions above. */
 							(equal? (stage_output_relation_id (source_relation candidate)) (gs_id stage))))))))))
 
 (define query_block_with_physical_membership_using (lambda (stages block)
-	(if (not (membership_strategy? (qb_facts block)))
-		block
-		(begin
-			(define sources (qb_sources block))
-			(define candidate (first_candidate_source stages sources))
-			(if (nil? candidate)
-				block
-				(begin
-					(define stage (stage_by_id stages (stage_output_relation_id (source_relation candidate))))
-					(if (not (candidate_stage_recset_supported? stage))
-						block
-						(begin
-							(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-							(make_query_block
-								(qb_schema block)
-								(without_source_alias sources (source_alias candidate))
-								(qb_fields block)
-								(combine_where (qb_where block) (driver_membership_probe_expr stage probe))
-								(qb_group block)
-								(qb_having block)
-								(qb_order block)
-								(qb_limit block)
-								(qb_offset block)
-								(qb_hidden block)
-								(candidate_stage_without_source (qb_stages block) (gs_id stage))
-								(join_optimizer_facts_without_aliases
-									(qb_facts block) (list (source_alias candidate))))))))))))
+	(begin
+		(define physical_block (query_block_with_physical_requirement_choices block))
+		(if (not (membership_strategy? (qb_facts physical_block)))
+			physical_block
+			(begin
+				(define sources (qb_sources physical_block))
+				(define candidate (first_candidate_source stages sources))
+				(if (nil? candidate)
+					physical_block
+					(begin
+						(define stage (stage_by_id stages (stage_output_relation_id (source_relation candidate))))
+						(if (not (candidate_stage_recset_supported? stage))
+							physical_block
+							(begin
+								(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+								(make_query_block
+									(qb_schema physical_block)
+									(without_source_alias sources (source_alias candidate))
+									(qb_fields physical_block)
+									(combine_where (qb_where physical_block) (driver_membership_probe_expr stage probe))
+									(qb_group physical_block)
+									(qb_having physical_block)
+									(qb_order physical_block)
+									(qb_limit physical_block)
+									(qb_offset physical_block)
+									(qb_hidden physical_block)
+									(candidate_stage_without_source (qb_stages physical_block) (gs_id stage))
+									(join_optimizer_facts_without_aliases
+										(qb_facts physical_block) (list (source_alias candidate)))))))))))))
 
 (define negated_term? (lambda (term)
 	(match term
@@ -6687,7 +6701,7 @@ in the canonicalization functions above. */
 
 (define rewrite_exists_recset_probe_refs (lambda (alias stage probe expr)
 	(if (exists_recset_probe_term? alias expr)
-		(driver_membership_probe_expr stage probe)
+		(logical_membership_probe_expr stage probe)
 		(match expr
 			(cons head tail) (cons head (map tail (lambda (item) (rewrite_exists_recset_probe_refs alias stage probe item))))
 			_ expr))))
@@ -6813,25 +6827,17 @@ in the canonicalization functions above. */
 										(candidate_stage_without_source (qb_stages block) stage_id)
 										(merge (list
 											(query_block_reorder_telemetry block)
-											(list (list (quote exists_reorder_strategy) (quote project_driver)))
+											(list (list (quote exists_membership_requirement) (list
+												(list (quote access) (quote membership))
+												(list (quote reuse) 1))))
 											(qb_facts block))))))))
 					(begin
 						(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
 						(define candidate_telemetry (candidate_reorder_telemetry stage sources block))
-						(define strategy (candidate_reorder_strategy candidate_telemetry))
-						(define costed_telemetry (qassoc_set
-							(qassoc_set candidate_telemetry
-								(quote membership_cost_candidates)
-								(membership_cost_options_for_telemetry candidate_telemetry))
-							(quote membership_cost_reason)
-							(if (equal? strategy (quote candidate_keyset))
-								(quote projected_membership_cost)
-								(quote indexed_driver_probe_cost))))
 						(define facts (merge (list
 							(query_block_reorder_telemetry block)
-							(cons
-								(list (quote membership_plan_strategy) strategy)
-								costed_telemetry))))
+							(list (list (quote membership_requirement)
+								(qassoc_set candidate_telemetry (quote reuse) 1))))))
 						(query_block_with_reorder_facts
 							(make_query_block
 								(qb_schema block)
@@ -6930,7 +6936,7 @@ in the canonicalization functions above. */
 					(gs_order stage)
 					(gs_limit stage)
 					(gs_offset stage)
-					(gs_facts stage))
+					(physicalize_membership_requirement_expr (gs_facts stage)))
 				nested_stages))
 		(list stage '()))))
 
@@ -13383,7 +13389,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 
 (define prepare_simple_query_block_physical_core (lambda (block)
 	(prepare_simple_query_block_physical_core_chosen
-		(query_block_with_physical_membership_choices block))))
+		(query_block_with_physical_membership_choices
+			(query_block_with_physical_membership_using
+				(query_block_stage_lookup block)
+				(query_block_with_physical_requirement_choices block))))))
 
 (define lower_simple_query_block_with_cataloged_stages (lambda (block)
 	(begin
