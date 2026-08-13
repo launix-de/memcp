@@ -57,11 +57,13 @@ setup:
 
 test_cases:
   - name: "Independent nested scalar aggregates compile within a linear budget"
-    noncritical: true
-    fail_comment: "independent nested scalar aggregates currently exceed the linear compile budget"
-    max_time: 5.0
-    max_planner_time_ms: 300
-    max_plan_size: 160000
+    max_time: 1.0
+    max_planner_time_ms: 700
+    max_compile_phase_ms:
+      recipe_emit_ns: 600
+    max_compile_metrics:
+      plan_nodes: 6500
+    max_plan_size: 100000
     sql: |
       SELECT
         (SELECT SUM(1) FROM tps_prop item_1 WHERE item_1.id = 1 AND COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM tps_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM tps_parent parent_1 WHERE parent_1.id = item_1.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_1,
