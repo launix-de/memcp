@@ -459,6 +459,61 @@ test_cases:
         - 'dphyp'
         - 'join_plan'
 
+  - name: "EXPLAIN REORDER honors the configured DPHyp state budget"
+    setup:
+      - scm: '(settings "JoinReorderDPBudget" 16)'
+    sql: |
+      EXPLAIN REORDER
+      SELECT a.id
+      FROM perf_tiny a, perf_tiny b, perf_tiny c,
+           perf_tiny d, perf_tiny e, perf_tiny f
+      WHERE a.id = b.id AND a.id = c.id AND a.id = d.id
+        AND a.id = e.id AND a.id = f.id
+    expect:
+      rows: 1
+      result_contains:
+        - 'join_reorder_strategy'
+        - 'linearized-dp'
+    cleanup:
+      - scm: '(settings "JoinReorderDPBudget" 256)'
+
+  - name: "EXPLAIN REORDER budgets a twelve-way star before DPHyp"
+    timeout: 2
+    max_time: 0.2
+    sql: |
+      EXPLAIN REORDER
+      SELECT a.id
+      FROM perf_tiny a, perf_tiny b, perf_tiny c, perf_tiny d,
+           perf_tiny e, perf_tiny f, perf_tiny g, perf_tiny h,
+           perf_tiny i, perf_tiny j, perf_tiny k, perf_tiny l
+      WHERE a.id = b.id AND a.id = c.id AND a.id = d.id AND a.id = e.id
+        AND a.id = f.id AND a.id = g.id AND a.id = h.id AND a.id = i.id
+        AND a.id = j.id AND a.id = k.id AND a.id = l.id
+    expect:
+      rows: 1
+      result_contains:
+        - 'join_reorder_strategy'
+        - 'linearized-dp'
+        - 'join_plan'
+        - 'join_estimated_cost'
+        - 'join_estimated_rows'
+        - 'join_dp_state_budget'
+
+  - name: "Budgeted twelve-way star preserves execution results"
+    timeout: 2
+    sql: |
+      SELECT a.id
+      FROM perf_tiny a, perf_tiny b, perf_tiny c, perf_tiny d,
+           perf_tiny e, perf_tiny f, perf_tiny g, perf_tiny h,
+           perf_tiny i, perf_tiny j, perf_tiny k, perf_tiny l
+      WHERE a.id = b.id AND a.id = c.id AND a.id = d.id AND a.id = e.id
+        AND a.id = f.id AND a.id = g.id AND a.id = h.id AND a.id = i.id
+        AND a.id = j.id AND a.id = k.id AND a.id = l.id
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
   - name: "EXPLAIN REORDER linearizes a star beyond the connected-subgraph budget"
     sql: |
       EXPLAIN REORDER
