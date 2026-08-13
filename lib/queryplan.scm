@@ -9663,7 +9663,7 @@ self-joins of the same base table still describe two distinct row roles. */
 			(stage_semantic_alias_entries local_aliases "__carrier_local_")
 			(stage_semantic_alias_entries outer_aliases "__carrier_outer_"))))))
 
-(define canonical_group_input_identity (lambda (alias_map input)
+(define canonical_group_input_identity (lambda (alias_map signatures input)
 	/* A carrier stores the input row domain, not its SELECT projection. Omitting
 	fields, hidden expressions, and the stage catalog prevents nested scalar
 	projection trees from being serialized again for every enclosing aggregate. */
@@ -9672,19 +9672,19 @@ self-joins of the same base table still describe two distinct row roles. */
 			(quote query-domain)
 			(qb_schema input)
 			(map (qb_sources input) (lambda (src)
-				(stage_semantic_rewrite_source alias_map '() src)))
-			(stage_semantic_rewrite_expr alias_map '() (qb_where input))
-			(stage_semantic_rewrite_expr alias_map '() (qb_group input))
-			(stage_semantic_rewrite_expr alias_map '() (qb_having input))
+				(stage_semantic_rewrite_source alias_map signatures src)))
+			(stage_semantic_rewrite_expr alias_map signatures (qb_where input))
+			(stage_semantic_rewrite_expr alias_map signatures (qb_group input))
+			(stage_semantic_rewrite_expr alias_map signatures (qb_having input))
 			/* ORDER only changes the represented row domain when a bound consumes it. */
 			(if (and (nil? (qb_limit input)) (nil? (qb_offset input)))
 				'()
-				(stage_semantic_rewrite_expr alias_map '() (qb_order input)))
+				(stage_semantic_rewrite_expr alias_map signatures (qb_order input)))
 			(qb_limit input)
 			(qb_offset input))
 		/* UNION projections define the rows exposed to the grouping input. Keep
 		the complete canonical union until it gets a dedicated domain form. */
-		(stage_semantic_canonical_node alias_map '() input))))
+		(stage_semantic_canonical_node alias_map signatures input))))
 
 (define canonical_orc_column_name (lambda (kind src payload)
 	/* ORCs live on one base table. Their identity is the table plus the complete
@@ -9742,12 +9742,21 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define alias_map (canonical_group_stage_alias_map stage))
+		/* Generated dependency IDs are not physical identities. Cataloged stages
+		share one signature index; immutable probe copies can reconstruct it from
+		their local catalog without relying on process- or session-global state. */
+		(define stored_signatures
+			(qassoc_get (gs_facts stage) (quote stage_semantic_signatures) nil))
+		/* Keep the fallback lazy: Scheme evaluates ordinary call arguments eagerly. */
+		(define signatures (if (nil? stored_signatures)
+			(stage_semantic_signature_index (nested_stage_catalog stage))
+			stored_signatures))
 		(make_group_keytable_cache schema (group_table_name
 			schema
 			label
-			(canonical_group_input_identity alias_map input)
-			(stage_semantic_rewrite_expr alias_map '() keys)
-			(stage_semantic_rewrite_expr alias_map '() condition))))))
+			(canonical_group_input_identity alias_map signatures input)
+			(stage_semantic_rewrite_expr alias_map signatures keys)
+			(stage_semantic_rewrite_expr alias_map signatures condition))))))
 
 (define group_stage_cache (lambda (stage)
 	(begin
@@ -11930,6 +11939,22 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			catalog)
 		(query_block_facts_with_stage_catalog block stages))))
 
+(define group_stage_with_semantic_signatures (lambda (stage signatures)
+	(if (not (group_stage? stage))
+		stage
+		(make_group_stage
+			(gs_id stage)
+			(gs_input stage)
+			(gs_domain stage)
+			(gs_keys stage)
+			(gs_aggregates stage)
+			(gs_having stage)
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			(qassoc_set (gs_facts stage) (quote stage_semantic_signatures) signatures)))))
+
 (define query_block_with_stage_catalog (lambda (block stages)
 	(make_query_block
 		(qb_schema block)
@@ -11945,7 +11970,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(qb_stages block)
 		(query_block_facts_with_stage_catalog block stages))))
 
-(define group_stage_with_lowering_catalog (lambda (stage catalog)
+(define group_stage_with_lowering_catalog (lambda (stage catalog signatures)
 	(if (not (group_stage? stage))
 		stage
 		(begin
@@ -11964,9 +11989,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(gs_order stage)
 				(gs_limit stage)
 				(gs_offset stage)
-				(if (lowering_catalog? catalog)
-					(qassoc_set_without facts (quote lowering_catalog) catalog (quote stage_catalog))
-					(qassoc_set facts (quote stage_catalog) catalog)))))))
+				(qassoc_set
+					(if (lowering_catalog? catalog)
+						(qassoc_set_without facts (quote lowering_catalog) catalog (quote stage_catalog))
+						(qassoc_set facts (quote stage_catalog) catalog))
+					(quote stage_semantic_signatures) signatures))))))
 
 (define group_stage_lowering_catalog (lambda (stage)
 	(match (gs_facts stage)
@@ -11976,12 +12003,16 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			_ nil)
 		_ nil)))
 
-(define query_block_with_full_stage_catalog (lambda (block)
+(define query_block_with_full_stage_catalog_using (lambda (block stages)
 	(begin
-		(define stages (stage_catalog_with_nested (query_block_stage_catalog block)))
-		(define catalog (make_lowering_catalog stages))
+		(define signatures (stage_semantic_signature_index stages))
+		/* Catalog lookups must return the same annotated immutable stage instances
+		that root lowering sees; otherwise nested probe copies derive old names. */
+		(define signature_stages (map stages (lambda (stage)
+			(group_stage_with_semantic_signatures stage signatures))))
+		(define catalog (make_lowering_catalog signature_stages))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
-			(group_stage_with_lowering_catalog stage catalog))))
+			(group_stage_with_lowering_catalog stage catalog signatures))))
 		(make_query_block
 			(qb_schema block)
 			(qb_sources block)
@@ -11994,7 +12025,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_offset block)
 			(qb_hidden block)
 			cataloged_stages
-			(query_block_facts_with_lowering_catalog block stages catalog)))))
+			(query_block_facts_with_lowering_catalog block signature_stages catalog)))))
+
+(define query_block_with_full_stage_catalog (lambda (block)
+	(query_block_with_full_stage_catalog_using block
+		(stage_catalog_with_nested (query_block_stage_catalog block)))))
 
 (define stage_ids (lambda (stages)
 	(map (coalesceNil stages '()) gs_id)))
@@ -12359,14 +12394,13 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(define prepared_stage (if (group_stage? stage)
 				(group_stage_with_initializer_owner stage initializer_owner cache)
 				stage))
-			(define plan (prepare prepared_stage))
 			(define identity (stage_prepare_identity prepared_stage))
 			(define next_group_caches (if (and shared_group_cache initializer_owner)
 				(set_assoc initialized_group_caches group_cache_key true)
 				initialized_group_caches))
 			(if (has_assoc? seen identity)
 				(lower_unique_stage_prepares_acc rest seen next_group_caches prepare)
-				(cons plan
+				(cons (prepare prepared_stage)
 					(lower_unique_stage_prepares_acc rest (set_assoc seen identity true) next_group_caches prepare))))
 		_ '())))
 
@@ -15632,10 +15666,13 @@ build_queryplan contract. */
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		(define planned_root (apply_join_optimizer_plan_node (ir_root ir)))
+		(define stages (if (query_block? planned_root)
+			(stage_catalog_with_nested (query_block_stage_catalog planned_root))
+			'()))
 		(make_ir
 			(ir_kind ir)
 			(if (query_block? planned_root)
-				(query_block_with_full_stage_catalog planned_root)
+				(query_block_with_full_stage_catalog_using planned_root stages)
 				planned_root)
 			(map (ir_stages ir) apply_join_optimizer_plan_stage)
 			(ir_context_of ir)

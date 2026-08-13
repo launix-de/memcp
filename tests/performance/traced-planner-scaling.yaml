@@ -362,7 +362,7 @@ test_cases:
         - "touch_keytable"
       result_occurrences:
         - text: "touch_keytable"
-          count: 4
+          count: 2
   - name: "Physical preparation keeps distinct nested filter formulas"
     sql: |
       EXPLAIN SELECT
