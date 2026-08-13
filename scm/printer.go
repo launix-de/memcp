@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -104,15 +105,104 @@ func String(v Scmer) string {
 		return fmt.Sprintf("<scmer %d>", v.GetTag())
 	}
 }
+
+// WriteStringValue streams the exact representation returned by String. It is
+// used by structural name hashing to avoid building complete AST strings.
+func WriteStringValue(w schemeTextWriter, v Scmer) {
+	switch v.GetTag() {
+	case tagNil:
+		w.WriteString("nil")
+	case tagBool, tagString, tagCString, tagBString, tagSymbol:
+		w.WriteString(v.String())
+	case tagInt:
+		var buffer [32]byte
+		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
+		_, _ = w.Write(value)
+	case tagFloat:
+		var buffer [64]byte
+		value := strconv.AppendFloat(buffer[:0], v.Float(), 'g', -1, 64)
+		_, _ = w.Write(value)
+	case tagSlice:
+		w.WriteByte('(')
+		for i, item := range v.Slice() {
+			if i > 0 {
+				w.WriteByte(' ')
+			}
+			WriteStringValue(w, item)
+		}
+		w.WriteByte(')')
+	case tagVector:
+		w.WriteString("#(")
+		for i, item := range v.Vector() {
+			if i > 0 {
+				w.WriteByte(' ')
+			}
+			fmt.Fprint(w, item)
+		}
+		w.WriteByte(')')
+	case tagPromise:
+		w.WriteString("[promise]")
+	case tagFunc:
+		w.WriteString("[native func]")
+	case tagProc:
+		serializeProcShallow(w, *v.Proc(), &Globalenv)
+	case tagJIT:
+		serializeProcShallow(w, v.JIT().Proc, &Globalenv)
+	case tagFastDict:
+		w.WriteByte('(')
+		if dictionary := v.FastDict(); dictionary != nil {
+			for i, item := range dictionary.Pairs {
+				if i > 0 {
+					w.WriteByte(' ')
+				}
+				WriteStringValue(w, item)
+			}
+		}
+		w.WriteByte(')')
+	case tagSourceInfo:
+		WriteStringValue(w, v.SourceInfo().value)
+	case tagAny:
+		if source, ok := v.Any().(SourceInfo); ok {
+			WriteStringValue(w, source.value)
+			return
+		}
+		if index, ok := v.Any().(NthLocalVar); ok {
+			fmt.Fprintf(w, "(var %d)", index)
+			return
+		}
+		if _, ok := v.Any().(func(...Scmer) Scmer); ok {
+			w.WriteString("[native func]")
+			return
+		}
+		if _, ok := v.Any().(func(*Env, ...Scmer) Scmer); ok {
+			w.WriteString("[native func]")
+			return
+		}
+		if reader, ok := v.Any().(io.Reader); ok {
+			_, _ = io.Copy(w, reader)
+			return
+		}
+		fmt.Fprint(w, v.Any())
+	default:
+		fmt.Fprintf(w, "<scmer %d>", v.GetTag())
+	}
+}
 func SerializeToString(v Scmer, glob *Env) string {
 	var b bytes.Buffer
 	SerializeEx(&b, v, glob, glob, nil)
 	return b.String()
 }
-func Serialize(b *bytes.Buffer, v Scmer, glob *Env) {
+
+type schemeTextWriter interface {
+	io.Writer
+	io.ByteWriter
+	io.StringWriter
+}
+
+func Serialize(b schemeTextWriter, v Scmer, glob *Env) {
 	SerializeEx(b, v, glob, glob, nil)
 }
-func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
+func SerializeEx(b schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 	if en != glob {
 		b.WriteString("(begin ")
 		for k, v := range en.Vars {
@@ -139,8 +229,14 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		} else {
 			b.WriteString("false")
 		}
-	case tagInt, tagFloat:
-		b.WriteString(v.String())
+	case tagInt:
+		var buffer [32]byte
+		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
+		_, _ = b.Write(value)
+	case tagFloat:
+		var buffer [64]byte
+		value := strconv.AppendFloat(buffer[:0], v.Float(), 'g', -1, 64)
+		_, _ = b.Write(value)
 	case tagString, tagCString, tagBString:
 		b.WriteByte('"')
 		b.WriteString(schemeStringEscaper.Replace(v.String()))
@@ -282,7 +378,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	}
 }
 
-func serializeProc(b *bytes.Buffer, v Proc, en *Env, glob *Env, parent *Proc) {
+func serializeProc(b schemeTextWriter, v Proc, en *Env, glob *Env, parent *Proc) {
 	b.WriteString("(lambda ")
 	if v.NumVars > 0 && v.Params.GetTag() == tagNil {
 		// TODO: deoptimize numbered lambdas when needed
@@ -300,7 +396,7 @@ func serializeProc(b *bytes.Buffer, v Proc, en *Env, glob *Env, parent *Proc) {
 // serializeProcShallow prints a procedure as a (lambda ...) form without
 // embedding environment bindings. This avoids recursive printing when the
 // closure captures itself or large environments.
-func serializeProcShallow(b *bytes.Buffer, v Proc, glob *Env) {
+func serializeProcShallow(b schemeTextWriter, v Proc, glob *Env) {
 	b.WriteString("(lambda ")
 	SerializeEx(b, v.Params, glob, glob, nil)
 	b.WriteByte(' ')
@@ -313,7 +409,7 @@ func serializeProcShallow(b *bytes.Buffer, v Proc, glob *Env) {
 	b.WriteByte(')')
 }
 
-func serializeNativeFunc(b *bytes.Buffer, fn any, en *Env) {
+func serializeNativeFunc(b schemeTextWriter, fn any, en *Env) {
 	switch f := fn.(type) {
 	case func(...Scmer) Scmer:
 		if col, rev, ok := LookupCollate(f); ok {

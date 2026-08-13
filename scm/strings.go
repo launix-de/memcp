@@ -18,22 +18,46 @@ package scm
 
 import "io"
 import "fmt"
+import "hash"
 import "html"
+import "sync"
 import "regexp"
-import "strings"
+import "unsafe"
 import "net/url"
+import "reflect"
+import "strings"
 import "hash/fnv"
+import crand "crypto/rand"
 import "crypto/sha1"
+import "encoding/hex"
 import "crypto/sha256"
 import "encoding/json"
 import "encoding/base64"
-import "encoding/hex"
-import crand "crypto/rand"
+import "github.com/google/uuid"
 import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
-import "sync"
-import "reflect"
-import "github.com/google/uuid"
+
+type hashTextWriter struct {
+	hash hash.Hash64
+	one  [1]byte
+}
+
+func (w *hashTextWriter) Write(value []byte) (int, error) {
+	return w.hash.Write(value)
+}
+
+func (w *hashTextWriter) WriteByte(value byte) error {
+	w.one[0] = value
+	_, err := w.hash.Write(w.one[:])
+	return err
+}
+
+func (w *hashTextWriter) WriteString(value string) (int, error) {
+	if value == "" {
+		return 0, nil
+	}
+	return w.hash.Write(unsafe.Slice(unsafe.StringData(value), len(value)))
+}
 
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
@@ -995,6 +1019,31 @@ func init_strings() {
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "stable_structural_hash",
+		Desc: "streams the string or serialized representation of a Scheme value into stable FNV-1a without constructing the complete representation",
+		Fn: func(a ...Scmer) Scmer {
+			if len(a) < 1 || len(a) > 2 {
+				panic("stable_structural_hash expects a value and optional serialize flag")
+			}
+			h := fnv.New64a()
+			writer := &hashTextWriter{hash: h}
+			if len(a) == 2 && a[1].Bool() {
+				Serialize(writer, a[0], &Globalenv)
+			} else {
+				WriteStringValue(writer, a[0])
+			}
+			return NewString(fmt.Sprintf("%016x", h.Sum64()))
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "value", ParamDesc: "value to hash"},
+				{Kind: "bool", ParamName: "serialize", ParamDesc: "use the Scheme serializer instead of string rendering", Optional: true},
+			},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 		},

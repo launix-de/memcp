@@ -1763,6 +1763,17 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "make_structural_catalog",
+		Desc: "Creates an atomic compile-local structural catalog. Insert with (catalog key value); freeze with (catalog) to obtain a parallel-safe read-only lookup.",
+		Fn:   NewStructuralCatalog,
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "bool", ParamName: "force_collision", ParamDesc: "test-only: place every key in one bucket", Optional: true},
+			},
+			Return: &TypeDescriptor{Kind: "func"},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "has_assoc?",
 		Desc: "checks if a dictionary has a key present",
 		Fn: func(a ...Scmer) Scmer {

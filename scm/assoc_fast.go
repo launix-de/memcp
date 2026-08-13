@@ -21,6 +21,8 @@ import (
 	"hash/maphash"
 	"math"
 	"reflect"
+	"strings"
+	"sync"
 	"unsafe"
 )
 
@@ -55,7 +57,7 @@ func (d *FastDict) Iterate(fn func(k, v Scmer) bool) {
 	}
 }
 
-// HashKey computes a stable hash for a Scheme value.
+// HashKey hashes the coercion classes used by Equal for dictionary keys.
 // It avoids allocating intermediate strings by inspecting types and
 // feeding bytes directly to a streaming hasher. Lists are hashed by
 // recursively hashing their elements with structural markers.
@@ -66,30 +68,54 @@ func HashKey(k Scmer) uint64 {
 	writeScmer = func(v Scmer) {
 		switch v.GetTag() {
 		case tagNil:
-			h.WriteByte(0)
-		case tagBool:
-			h.WriteByte(1)
-			if v.Bool() {
-				h.WriteByte(1)
-			} else {
-				h.WriteByte(0)
-			}
-		case tagInt:
 			h.WriteByte(2)
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], uint64(v.Int()))
+			h.Write(b[:])
+		case tagBool:
+			h.WriteByte(2)
+			var b [8]byte
+			if v.Bool() {
+				binary.LittleEndian.PutUint64(b[:], math.Float64bits(1))
+			}
+			h.Write(b[:])
+		case tagInt, tagDate:
+			h.WriteByte(2)
+			var b [8]byte
+			binary.LittleEndian.PutUint64(b[:], math.Float64bits(float64(v.Int())))
 			h.Write(b[:])
 		case tagFloat:
-			h.WriteByte(3)
+			h.WriteByte(2)
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
+			value := v.Float()
+			if value == 0 {
+				value = 0
+			}
+			binary.LittleEndian.PutUint64(b[:], math.Float64bits(value))
 			h.Write(b[:])
-		case tagString:
+		case tagString, tagSymbol, tagCString, tagBString:
+			value := v.String()
+			if value == "" || strings.EqualFold(value, "false") {
+				h.WriteByte(2)
+				var b [8]byte
+				h.Write(b[:])
+				return
+			}
+			if timestamp, ok := ParseDateString(value); ok {
+				h.WriteByte(2)
+				var b [8]byte
+				binary.LittleEndian.PutUint64(b[:], math.Float64bits(float64(timestamp)))
+				h.Write(b[:])
+				return
+			}
+			if numericPrefix(value) != "" {
+				h.WriteByte(2)
+				var b [8]byte
+				binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
+				h.Write(b[:])
+				return
+			}
 			h.WriteByte(4)
-			h.WriteString(v.String())
-		case tagSymbol:
-			h.WriteByte(5)
-			h.WriteString(v.String())
+			h.WriteString(value)
 		case tagSlice:
 			h.WriteByte(6)
 			// write length to reduce collisions for different list sizes
@@ -185,15 +211,175 @@ func hashStructuralKey(key Scmer, memo map[Scmer]uint64) uint64 {
 		return hash
 	case tagFastDict:
 		panic("make_structural_index requires immutable list expressions")
-	case tagInt, tagDate:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString:
 		// Equal accepts numerically equal int/float/date values across tags.
-		return HashKey(NewFloat(float64(key.Int())))
-	case tagString, tagSymbol:
-		// Symbols and strings with the same text compare equal.
-		return HashKey(NewString(key.String()))
+		// HashKey also normalizes string/symbol and false-like scalar keys.
+		return HashKey(key)
 	default:
 		return HashKey(key)
 	}
+}
+
+// hashStructuralReadonly is the allocation-free counterpart used after
+// publication for an equal expression that is not one of the original roots.
+func hashStructuralReadonly(key Scmer) uint64 {
+	switch key.GetTag() {
+	case tagSourceInfo:
+		return hashStructuralReadonly(key.SourceInfo().value)
+	case tagAny:
+		if source, ok := key.Any().(SourceInfo); ok {
+			return hashStructuralReadonly(source.value)
+		}
+		return HashKey(key)
+	case tagSlice:
+		items := key.Slice()
+		hash := combineStructuralHash(0x6a09e667f3bcc909, uint64(len(items)))
+		for _, item := range items {
+			hash = combineStructuralHash(hash, hashStructuralReadonly(item))
+		}
+		return hash
+	case tagFastDict:
+		panic("structural hashing rejects mutable FastDict expressions")
+	default:
+		return HashKey(key)
+	}
+}
+
+const structuralCatalogFastThreshold = 5
+
+// structuralCatalog is mutable only during compile-local collection. Freeze
+// copies its entries into an immutable lookup closure, so planner walkers need
+// neither locks nor lazy memo writes.
+type structuralCatalog struct {
+	mu             sync.Mutex
+	entries        []structuralIndexEntry
+	buckets        map[uint64][]int
+	forceCollision bool
+}
+
+func (catalog *structuralCatalog) hash(key Scmer, memo map[Scmer]uint64) uint64 {
+	if catalog.forceCollision {
+		return 0
+	}
+	return hashStructuralKey(key, memo)
+}
+
+func (catalog *structuralCatalog) set(key, value Scmer) {
+	if catalog.buckets == nil {
+		for i := range catalog.entries {
+			if Equal(catalog.entries[i].key, key) {
+				catalog.entries[i].value = value
+				return
+			}
+		}
+		catalog.entries = append(catalog.entries, structuralIndexEntry{key: key, value: value})
+		if len(catalog.entries) < structuralCatalogFastThreshold {
+			return
+		}
+		catalog.buckets = make(map[uint64][]int, len(catalog.entries))
+		memo := make(map[Scmer]uint64)
+		for i, entry := range catalog.entries {
+			entryHash := catalog.hash(entry.key, memo)
+			catalog.buckets[entryHash] = append(catalog.buckets[entryHash], i)
+		}
+		return
+	}
+	hash := uint64(0)
+	if !catalog.forceCollision {
+		hash = hashStructuralReadonly(key)
+	}
+	for _, i := range catalog.buckets[hash] {
+		if Equal(catalog.entries[i].key, key) {
+			catalog.entries[i].value = value
+			return
+		}
+	}
+	index := len(catalog.entries)
+	catalog.entries = append(catalog.entries, structuralIndexEntry{key: key, value: value})
+	catalog.buckets[hash] = append(catalog.buckets[hash], index)
+}
+
+func (catalog *structuralCatalog) insert(key, value Scmer) {
+	catalog.mu.Lock()
+	defer catalog.mu.Unlock()
+	catalog.set(key, value)
+}
+
+func (catalog *structuralCatalog) snapshot() []structuralIndexEntry {
+	catalog.mu.Lock()
+	defer catalog.mu.Unlock()
+	return append([]structuralIndexEntry(nil), catalog.entries...)
+}
+
+func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool) Scmer {
+	memo := make(map[Scmer]uint64)
+	var buckets map[uint64][]structuralIndexEntry
+	if len(entries) >= structuralCatalogFastThreshold {
+		buckets = make(map[uint64][]structuralIndexEntry, len(entries))
+		for _, entry := range entries {
+			hash := uint64(0)
+			if !forceCollision {
+				hash = hashStructuralKey(entry.key, memo)
+			}
+			buckets[hash] = append(buckets[hash], entry)
+		}
+	}
+	return NewFunc(func(args ...Scmer) Scmer {
+		if len(args) != 1 {
+			panic("frozen structural catalog lookup expects one key")
+		}
+		key := args[0]
+		if key.GetTag() == tagFastDict {
+			panic("frozen structural catalog rejects mutable FastDict keys")
+		}
+		if buckets == nil {
+			for _, entry := range entries {
+				if Equal(entry.key, key) {
+					return entry.value
+				}
+			}
+			return NewNil()
+		}
+		hash := uint64(0)
+		if !forceCollision {
+			if memoHash, ok := memo[key]; ok {
+				hash = memoHash
+			} else {
+				hash = hashStructuralReadonly(key)
+			}
+		}
+		for _, entry := range buckets[hash] {
+			if Equal(entry.key, key) {
+				return entry.value
+			}
+		}
+		return NewNil()
+	})
+}
+
+// NewStructuralCatalog returns an atomic compile-local collector. Calling it
+// with (key value) inserts or replaces an equal key; calling it with no
+// arguments publishes and returns a frozen read-only lookup closure. The
+// optional constructor flag forces one bucket for collision tests.
+func NewStructuralCatalog(a ...Scmer) Scmer {
+	if len(a) > 1 {
+		panic("make_structural_catalog expects an optional collision-test flag")
+	}
+	catalog := &structuralCatalog{forceCollision: len(a) == 1 && a[0].Bool()}
+	return NewFunc(func(args ...Scmer) Scmer {
+		switch len(args) {
+		case 0:
+			return frozenStructuralLookup(catalog.snapshot(), catalog.forceCollision)
+		case 2:
+			if args[0].GetTag() == tagFastDict {
+				panic("structural catalog rejects mutable FastDict keys")
+			}
+			catalog.insert(args[0], args[1])
+			return args[1]
+		default:
+			panic("structural catalog expects no arguments or key and value")
+		}
+	})
 }
 
 type structuralIndexEntry struct {
