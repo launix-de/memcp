@@ -13710,6 +13710,81 @@ ownership remain available until the physical scans are emitted. */
 		schema sources sources default_alias needed_exprs final_condition sink_expr
 		'() 0 -1 false nil stages)))
 
+/* A total order that cannot be factored along the logical join tree needs a
+storage-backed intermediate relation.  Materializing joined rows in a Scheme
+list would violate the relation-materialization invariant and scale with heap
+objects.  This last-resort intermediate relation stays in the storage engine, where
+scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
+(define join_order_intermediate_names (lambda (prefix amount)
+	(map (produceN amount) (lambda (idx) (concat prefix idx)))))
+
+(define join_order_intermediate_columns (lambda (names)
+	(cons (quote list) (map names (lambda (name)
+		(list (quote list) "column" name "any" (quoted_runtime_list '()) (quoted_runtime_list '())))))))
+
+(define join_order_intermediate_insert (lambda (table_expr names values)
+	(list (quote insert)
+		table_expr
+		(cons (quote list) names)
+		(list (quote list) (cons (quote list) values))
+		(quoted_runtime_list '())
+		(list (quote lambda) '() true)
+		true)))
+
+(define join_order_intermediate_result_fields (lambda (fields value_names)
+	(match fields
+		(cons title (cons _expr rest))
+		(cons title (cons (symbol (car value_names))
+			(join_order_intermediate_result_fields rest (cdr value_names))))
+		_ '())))
+
+(define join_order_intermediate_scan (lambda (table_expr fields value_names order_names order_items offset_value limit_value)
+	(list (quote scan_order)
+		'(session "__memcp_tx")
+		table_expr
+		(quoted_runtime_list '())
+		(list (quote lambda) '() true)
+		(cons (quote list) order_names)
+		(cons (quote list) (order_dirs order_items))
+		0
+		(coalesceNil offset_value 0)
+		(coalesceNil limit_value -1)
+		(cons (quote list) value_names)
+		(list (quote lambda) (map value_names symbol)
+			(list (quote resultrow)
+				(cons (quote list) (join_order_intermediate_result_fields fields value_names))))
+		nil nil false)))
+
+(define lower_join_order_through_intermediate (lambda (block fields scan_sources scan_plan default_alias needed_exprs final_condition order_items stage_catalog)
+	(begin
+		(define value_exprs (extract_assoc fields (lambda (_title expr) expr)))
+		(define order_values (order_exprs order_items))
+		(define value_names (join_order_intermediate_names "v" (count value_exprs)))
+		(define order_names (join_order_intermediate_names "o" (count order_values)))
+		(define column_names (merge (list value_names order_names)))
+		(define lowered_values (map (merge (list value_exprs order_values)) (lambda (expr)
+			(lower_column_expr_for_join scan_sources default_alias expr))))
+		(define table_key (concat "__join_order_intermediate:" (uuid)))
+		(define table_name (list (quote session) table_key))
+		(define table_expr (list (quote table) (qb_schema block) table_name))
+		(define fill_plan (build_join_scan_pipeline_using_recipe
+			(qb_schema block) scan_sources scan_plan default_alias needed_exprs final_condition
+			(join_order_intermediate_insert table_expr column_names lowered_values)
+			'() 0 -1 false nil stage_catalog))
+		(define scan_plan_expr (join_order_intermediate_scan table_expr fields value_names order_names order_items
+			(qb_offset block) (qb_limit block)))
+		(define drop_plan (list (quote droptable) (qb_schema block) table_name true))
+		(list (quote !begin)
+			(list (quote session) table_key (list (quote concat) ".join-order:" (list (quote uuid))))
+			(list (quote createtable) (qb_schema block) table_name
+				(join_order_intermediate_columns column_names)
+				(quoted_runtime_list '("engine" "memory")) true)
+			(list (quote try)
+				(list (quote lambda) '() (list (quote !begin) fill_plan scan_plan_expr))
+				(list (quote lambda) (list (quote __intermediate_error))
+					(list (quote !begin) drop_plan (list (quote error) (quote __intermediate_error)))))
+			drop_plan))))
+
 /* ------------------------------------------------------------------------- */
 /* Canonical physical prejoin relations                                      */
 
@@ -14229,7 +14304,9 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 							final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
 						(if (physical_prejoin_supported? block)
 							(lower_query_block_through_prejoin block)
-							(neumann_fail "build_queryplan" "ORDER BY requires a storage carrier")))
+							(lower_join_order_through_intermediate
+								block fields scan_sources scan_plan first_alias needed_exprs
+								final_condition order_items stage_catalog)))
 ))))))
 
 (define lower_zero_source_query_block (lambda (block)
