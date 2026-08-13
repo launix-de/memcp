@@ -142,6 +142,34 @@ test_cases:
       data_not_contains:
         - code: "scan_batch"
 
+  - name: "Optimizer telemetry exposes compile and AST growth costs"
+    scm: |
+      (begin
+        (define stats (optimize_stats (scheme "(+ 1 2)")))
+        (and
+          (> (stats "compile_ns") 0)
+          (> (stats "input_nodes") 0)
+          (> (stats "output_nodes") 0)
+          (>= (stats "rewrites") 0)
+          (>= (stats "rejected_rewrites") 0)
+          (>= (stats "budget_remaining") 0)
+          (>= (stats "callback_analyses") 0)
+          (>= (stats "callback_clones") 0)))
+    expect:
+      data: [true]
+
+  - name: "Recursive scan rewrites consume the shared rewrite budget once"
+    scm: |
+      (begin
+        (define code (scheme "(scan nil nil (list) (lambda () (if (> 2 1) true false)) (list) (lambda () nil) nil nil nil false)"))
+        (define stats (optimize_stats code))
+        (and
+          (> (stats "rewrites") 0)
+          (< (stats "budget_remaining") 64)
+          (< (stats "output_nodes") (+ (* (stats "input_nodes") 4) 1025))))
+    expect:
+      data: [true]
+
   - name: "Grouped LEFT JOIN carrier keeps outer key as dynamic lookup"
     sql: |
       SELECT c.cid, g.total
