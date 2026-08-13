@@ -13715,7 +13715,7 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 			(join_order_intermediate_result_fields rest (cdr value_names))))
 		_ '())))
 
-(define join_order_intermediate_scan (lambda (table_expr fields value_names order_names order_items offset_value limit_value)
+(define join_order_intermediate_reduce_scan (lambda (table_expr value_names order_names order_items offset_value limit_value map_expr reduce_expr neutral_expr)
 	(list (quote scan_order)
 		'(session "__memcp_tx")
 		table_expr
@@ -13727,14 +13727,11 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 		(coalesceNil offset_value 0)
 		(coalesceNil limit_value -1)
 		(cons (quote list) value_names)
-		(list (quote lambda) (map value_names symbol)
-			(list (quote resultrow)
-				(cons (quote list) (join_order_intermediate_result_fields fields value_names))))
-		nil nil false)))
+		map_expr
+		reduce_expr neutral_expr false)))
 
-(define lower_join_order_through_intermediate (lambda (block fields scan_sources scan_plan default_alias needed_exprs final_condition order_items stage_catalog)
+(define lower_join_order_to_intermediate (lambda (block value_exprs scan_sources scan_plan default_alias needed_exprs final_condition order_items stage_catalog scan_builder)
 	(begin
-		(define value_exprs (extract_assoc fields (lambda (_title expr) expr)))
 		(define order_values (order_exprs order_items))
 		(define value_names (join_order_intermediate_names "v" (count value_exprs)))
 		(define order_names (join_order_intermediate_names "o" (count order_values)))
@@ -13748,19 +13745,33 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 			(qb_schema block) scan_sources scan_plan default_alias needed_exprs final_condition
 			(join_order_intermediate_insert table_expr column_names lowered_values)
 			'() 0 -1 false nil stage_catalog))
-		(define scan_plan_expr (join_order_intermediate_scan table_expr fields value_names order_names order_items
-			(qb_offset block) (qb_limit block)))
+		(define scan_plan_expr (scan_builder table_expr value_names order_names))
 		(define drop_plan (list (quote droptable) (qb_schema block) table_name true))
 		(list (quote !begin)
 			(list (quote session) table_key (list (quote concat) ".join-order:" (list (quote uuid))))
 			(list (quote createtable) (qb_schema block) table_name
 				(join_order_intermediate_columns column_names)
 				(quoted_runtime_list '("engine" "memory")) true)
-			(list (quote try)
-				(list (quote lambda) '() (list (quote !begin) fill_plan scan_plan_expr))
-				(list (quote lambda) (list (quote __intermediate_error))
-					(list (quote !begin) drop_plan (list (quote error) (quote __intermediate_error)))))
-			drop_plan))))
+			(list
+				(list (quote lambda) (list (quote __intermediate_result))
+					(list (quote !begin) drop_plan (quote __intermediate_result)))
+				(list (quote try)
+					(list (quote lambda) '() (list (quote !begin) fill_plan scan_plan_expr))
+					(list (quote lambda) (list (quote __intermediate_error))
+						(list (quote !begin) drop_plan (list (quote error) (quote __intermediate_error))))))))))
+
+(define lower_join_order_through_intermediate (lambda (block fields scan_sources scan_plan default_alias needed_exprs final_condition order_items stage_catalog)
+	(begin
+		(define value_exprs (extract_assoc fields (lambda (_title expr) expr)))
+		(lower_join_order_to_intermediate
+			block value_exprs scan_sources scan_plan default_alias needed_exprs final_condition order_items stage_catalog
+			(lambda (table_expr value_names order_names)
+				(join_order_intermediate_reduce_scan
+					table_expr value_names order_names order_items (qb_offset block) (qb_limit block)
+					(list (quote lambda) (map value_names symbol)
+						(list (quote resultrow)
+							(cons (quote list) (join_order_intermediate_result_fields fields value_names))))
+					nil nil))))))
 
 /* ------------------------------------------------------------------------- */
 /* Canonical physical prejoin relations                                      */
@@ -14145,30 +14156,38 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define direct_order_safe (and direct_order
 			(not (ordered_join_limit_requires_complete_rows?
 				scan_sources first_alias final_condition (qb_offset block) (qb_limit block)))))
-		(if (not direct_order_safe)
-			(neumann_fail "build_queryplan" "dataset ORDER BY requires a storage carrier")
-			true)
 		(define field_exprs (extract_assoc fields (lambda (_title expr) expr)))
 		(define needed_exprs (merge (list
 			field_exprs
 			(list final_condition)
 			(order_exprs order_items)
 			(source_join_exprs scan_sources))))
-		(define row_expr (cons row_mapper (map field_exprs (lambda (expr)
-			(lower_column_expr_for_join scan_sources first_alias expr)))))
-		(build_join_scan_reduce_using_recipe
-			(qb_schema block)
-			scan_sources
-			scan_plan
-			first_alias
-			needed_exprs
-			final_condition
-			row_expr
-			order_items
-			(coalesceNil (qb_offset block) 0)
-			(coalesceNil (qb_limit block) -1)
-			true nil (query_block_stage_catalog block)
-			reduce_expr neutral_expr shard_reduce_expr))))
+		(if direct_order_safe
+			(begin
+				(define row_expr (cons row_mapper (map field_exprs (lambda (expr)
+					(lower_column_expr_for_join scan_sources first_alias expr)))))
+				(build_join_scan_reduce_using_recipe
+					(qb_schema block)
+					scan_sources
+					scan_plan
+					first_alias
+					needed_exprs
+					final_condition
+					row_expr
+					order_items
+					(coalesceNil (qb_offset block) 0)
+					(coalesceNil (qb_limit block) -1)
+					true nil (query_block_stage_catalog block)
+					reduce_expr neutral_expr shard_reduce_expr))
+			(lower_join_order_to_intermediate
+				block field_exprs scan_sources scan_plan first_alias needed_exprs final_condition order_items
+				(query_block_stage_catalog block)
+				(lambda (table_expr value_names order_names)
+					(join_order_intermediate_reduce_scan
+						table_expr value_names order_names order_items (qb_offset block) (qb_limit block)
+						(list (quote lambda) (map value_names symbol)
+							(cons row_mapper (map value_names symbol)))
+						reduce_expr neutral_expr)))))))
 
 (define scalar_order_lookup_input_keys (lambda (stage)
 	(begin

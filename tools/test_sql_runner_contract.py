@@ -19,6 +19,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 import sys
 import tempfile
 import threading
@@ -28,7 +29,91 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from run_sql_tests import SQLTestRunner, is_error_response, observe_atomic_json  # noqa: E402
+from run_sql_tests import (  # noqa: E402
+    PERFORMANCE_ARCH_ENV,
+    PERFORMANCE_CALIBRATION_ROUNDS,
+    PERFORMANCE_MEASURED_NS_ENV,
+    PERFORMANCE_REFERENCE_NS_ENV,
+    PERFORMANCE_REFERENCE_NS_PER_MIB,
+    PERFORMANCE_SCALE_ENV,
+    SQLTestRunner,
+    is_error_response,
+    load_performance_scale,
+    observe_atomic_json,
+    performance_architecture,
+    performance_scale_from_samples,
+    publish_performance_scale,
+    scaled_wall_clock_limit_ms,
+)
+
+
+class PerformanceScaleContractTest(unittest.TestCase):
+    def test_architecture_aliases_select_stable_profiles(self) -> None:
+        self.assertEqual(performance_architecture("AMD64"), "x86_64")
+        self.assertEqual(performance_architecture("arm64"), "aarch64")
+        self.assertEqual(performance_architecture("mips64"), "other")
+
+    def test_reference_machine_never_tightens_wall_clock_budget(self) -> None:
+        reference_ns = (
+            PERFORMANCE_REFERENCE_NS_PER_MIB
+            * PERFORMANCE_CALIBRATION_ROUNDS["x86_64"]
+        )
+        calibration = performance_scale_from_samples(
+            "x86_64", [reference_ns // 2, reference_ns // 2, reference_ns]
+        )
+        self.assertEqual(calibration["scale"], 1.0)
+        self.assertEqual(scaled_wall_clock_limit_ms(0.02, calibration), 20.0)
+
+    def test_slower_machine_scales_only_the_wall_clock_budget(self) -> None:
+        reference_ns = (
+            PERFORMANCE_REFERENCE_NS_PER_MIB
+            * PERFORMANCE_CALIBRATION_ROUNDS["aarch64"]
+        )
+        calibration = performance_scale_from_samples(
+            "aarch64", [reference_ns * 4] * 5
+        )
+        self.assertEqual(calibration["scale"], 4.0)
+        self.assertEqual(scaled_wall_clock_limit_ms(0.02, calibration), 80.0)
+
+    def test_unreasonably_slow_calibration_fails_instead_of_disabling_gates(self) -> None:
+        reference_ns = (
+            PERFORMANCE_REFERENCE_NS_PER_MIB
+            * PERFORMANCE_CALIBRATION_ROUNDS["armv7l"]
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds supported maximum"):
+            performance_scale_from_samples("armv7l", [reference_ns * 17])
+
+    def test_inherited_scale_must_match_protected_measurements(self) -> None:
+        profile = performance_architecture()
+        reference_ns = (
+            PERFORMANCE_REFERENCE_NS_PER_MIB
+            * PERFORMANCE_CALIBRATION_ROUNDS[profile]
+        )
+        environment = {
+            PERFORMANCE_ARCH_ENV: profile,
+            PERFORMANCE_SCALE_ENV: "8",
+            PERFORMANCE_MEASURED_NS_ENV: str(reference_ns),
+            PERFORMANCE_REFERENCE_NS_ENV: str(reference_ns),
+        }
+        with mock.patch.dict("os.environ", environment, clear=False):
+            with self.assertRaisesRegex(ValueError, "does not match its measurements"):
+                load_performance_scale()
+
+    def test_published_calibration_round_trips_without_recalibration(self) -> None:
+        profile = performance_architecture()
+        reference_ns = (
+            PERFORMANCE_REFERENCE_NS_PER_MIB
+            * PERFORMANCE_CALIBRATION_ROUNDS[profile]
+        )
+        calibration = {
+            "architecture": profile,
+            "scale": 2.0,
+            "measured_ns": reference_ns * 2,
+            "reference_ns": reference_ns,
+        }
+        with mock.patch.dict("os.environ", {}, clear=True):
+            publish_performance_scale(calibration)
+            self.assertEqual(load_performance_scale(), calibration)
 
 
 class ErrorResponseContractTest(unittest.TestCase):
