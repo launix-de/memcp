@@ -12558,6 +12558,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define initial_fill_expr (if (nil? base_group_into_plan)
 			nil
 			(list (quote initialize_cache_table)
+				'(session "__memcp_tx")
 				(list (quote table) schema grouptbl)
 				(list (quote list) (source_table_expr src))
 				(list (quote lambda) '()
@@ -14842,6 +14843,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(list (quote createtable) (qb_schema block) table_name
 				(prejoin_create_columns sources) (quoted_runtime_list '("engine" "cache")) true)
 			(list (quote initialize_cache_table)
+				'(session "__memcp_tx")
 				table_expr
 				(cons (quote list) (map sources source_table_expr))
 				(list (quote lambda) '() (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))

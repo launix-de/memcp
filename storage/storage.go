@@ -2229,9 +2229,16 @@ func Init(en scm.Env) {
 		Name: "initialize_cache_table",
 		Desc: "registers maintenance, locks source tables for a consistent snapshot, and runs a canonical planner-cache initializer exactly once",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			tbl := TableFromScmer(a[0])
-			initialized := tbl.initializeCache(func() {
-				sources := mustScmerSlice(a[1], "source tables")
+			currentTx := scmerToTxContext(a[0])
+			tbl := TableFromScmer(a[1])
+			// Cache preparation can execute inside a shard worker. Like every scan
+			// operator, it receives transaction and session ownership explicitly.
+			var ss *scm.SessionState
+			if currentTx != nil {
+				ss = currentTx.SessionState
+			}
+			initialized := tbl.initializeCache(ss, func() {
+				sources := mustScmerSlice(a[2], "source tables")
 				sourceTables := make([]*table, len(sources))
 				for i, source := range sources {
 					sourceTables[i] = TableFromScmer(source)
@@ -2242,10 +2249,6 @@ func Init(en scm.Env) {
 					return left < right
 				})
 
-				ss := scm.GetCurrentSessionState()
-				if ss == nil {
-					panic("cache initialization requires a query session")
-				}
 				unlocks := make([]func(), 0, len(sourceTables))
 				defer func() {
 					for i := len(unlocks) - 1; i >= 0; i-- {
@@ -2257,16 +2260,17 @@ func Init(en scm.Env) {
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
-				scm.Apply(a[2])
 				scm.Apply(a[3])
-				if len(a) > 4 {
-					scm.Apply(a[4])
+				scm.Apply(a[4])
+				if len(a) > 5 {
+					scm.Apply(a[5])
 				}
 			})
 			return scm.NewBool(initialized)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "transaction", ParamDesc: "explicit transaction context carrying query-session ownership"},
 				{Kind: "table", ParamName: "table"},
 				{Kind: "list", ParamName: "source_tables"},
 				{Kind: "func", ParamName: "register_maintenance", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
