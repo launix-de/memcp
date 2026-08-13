@@ -1749,16 +1749,19 @@ physical membership probe. */
 
 /* Canonicalization is the only layer that should know IN was written over a
 UNION. In positive WHERE truth context, each branch becomes one membership
-alternative and the result is a flat n-ary OR. This deliberately gives naive
-lowering the short-circuit behavior of OR(EXISTS ...), while preserving the
-optimization axiom
+alternative and the result is a flat n-ary OR. This gives naive lowering the
+short-circuit behavior of OR(EXISTS ...) while exposing one application of the
+general RecSet algebra documented in INVARIANTS.md:
 
-RecSet(IN(UNION branches)) == union(RecSet(branch) ...)
-== RecSet(OR(EXISTS branches)).
+T_R(p OR q) = T_R(p) union T_R(q).
 
-Thus a later lowerer may fuse the alternatives back into RecSets without
-depending on the original SQL spelling. NOT IN and scalar/CASE consumers stay
-on the 3VL path and must not use this positive-truth equivalence. */
+The useful invariant is the general algebra and its proof obligations, not an
+IN/UNION special-case identity. A later optimizer may associate, distribute,
+factor, project, or fuse RecSet formulas and cost the equivalent plans without
+recovering the original SQL spelling. This particular canonicalizer merely
+makes the membership branches visible to that common machinery. NOT IN and
+scalar/CASE consumers stay on the 3VL path and cannot use complement laws
+without separately proving two-valued semantics. */
 (define combine_in_union_results (lambda (results negate)
 	(begin
 		(define items (coalesceNil results '()))
@@ -12823,11 +12826,14 @@ scan boundary only when the complete predicate implies it. */
 						(list (quote recset_union)
 							(cons (quote list) (map branch_bindings (lambda (binding) (nth binding 1))))))))))))
 
-/* When every OR alternative has a target-table candidate RecSet, their union
-is a safe scan boundary. Membership alternatives contribute projected supersets
-and ordinary alternatives contribute filtered base RecSets; the unchanged full
-predicate still runs on that much smaller union and enforces branch-local
-guards. This is the physical form of the RecSet membership equivalence. */
+/* When every OR alternative has a target-table candidate RecSet, the general
+truth-set law T_R(p OR q) = T_R(p) union T_R(q) provides a safe scan boundary.
+Membership alternatives contribute projected supersets and ordinary
+alternatives contribute filtered base RecSets. Because some inputs may be
+candidate supersets rather than exact truth sets, the unchanged full predicate
+still runs on the union and enforces branch-local guards. Keep this code phrased
+in terms of boolean RecSet formulas: future optimizers can add intersection,
+factoring, or other proven set transformations without adding SQL-shape cases. */
 (define membership_or_candidate_recset (lambda (src source_table condition bindings)
 	(begin
 		(define or_expr (membership_guard_or_expr condition))
