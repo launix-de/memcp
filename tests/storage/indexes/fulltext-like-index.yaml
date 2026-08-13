@@ -27,6 +27,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS `ft_customers`"
   - sql: "DROP TABLE IF EXISTS `ft_large`"
+  - sql: "DROP TABLE IF EXISTS `ft_matchset`"
 
 test_cases:
   # --- Small table: correctness tests ---
@@ -442,10 +443,9 @@ test_cases:
         (SELECT COUNT(*) FROM ft_large) AS total
     expect: { rows: 1 }
 
-  # --- Interval merge stress: alternating matches (Animal/Person/Animal/...) ---
-  # A naive implementation would create one interval per match, producing a
-  # skip list larger than the data. The 3-block merge tolerance must collapse
-  # adjacent intervals to keep the list small.
+  # --- Adaptive representation stress: alternating matches ---
+  # Alternating membership exceeds the compact positive/negative-list capacity
+  # and must switch in place to a bitmap without changing the result.
   - name: "Create alternating table"
     sql: |
       CREATE TABLE IF NOT EXISTS `ft_alternating` (
@@ -502,7 +502,92 @@ test_cases:
         - like_cnt: 3333
           total: 10000
 
+  # --- Direct storage boundary regression ---
+  # Keep matching values below the lexical position of the LIKE pattern. A
+  # binary search on a non-sorted matcher used to start after these records,
+  # so only warm scans lost rows while SQL-level aggregate tests stayed green.
+  - name: "Create exact match-set table"
+    sql: |
+      CREATE TABLE `ft_matchset` (
+        id INT PRIMARY KEY,
+        name TEXT,
+        tag TEXT
+      )
+    expect: { rows: 0 }
+
+  - name: "Insert exact match-set data"
+    scm: |
+      (begin
+        (set rows (map (produceN 30000) (lambda (i)
+          (list i
+            (if (< i 100)
+              (concat "!Klaus-" i)
+              (if (< i 105) (concat "Klaus-" i) (concat "Person-" i)))
+            (concat "!zzzz-" i)))))
+        (insert (table "memcp-tests" "ft_matchset") (list "id" "name" "tag") rows)
+        (rebuild)
+        30000)
+
+  - name: "Exact match-set fixture is visible through SQL"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_matchset WHERE tag LIKE '%zzzz%'"
+    expect: { rows: 1, data: [{ cnt: 30000 }] }
+
+  - name: "LIKE match set remains exact through warmup"
+    scm: |
+      (begin
+        (set tbl (table "memcp-tests" "ft_matchset"))
+        (set condition (eval (list
+          'lambda (list 'search)
+          (list 'strlike 'search "%zzzz%" "utf8mb4_general_ci"))))
+        (set count-matches (lambda ()
+          (recset_count (scan_recset nil tbl (list "tag") condition))))
+        (set first (count-matches))
+        (set built (count-matches))
+        (set warm (count-matches))
+        (if (and (equal? first 30000) (equal? built 30000) (equal? warm 30000))
+          true
+          (error (concat "LIKE match-set counts: " first ", " built ", " warm))))
+
+  - name: "LIKE match sets keep collation semantics separate"
+    scm: |
+      (begin
+        (set tbl (table "memcp-tests" "ft_matchset"))
+        (set binary-condition (eval (list
+          'lambda (list 'name)
+          (list 'strlike 'name "%klaus%" "utf8mb4_bin"))))
+        (set ci-condition (eval (list
+          'lambda (list 'name)
+          (list 'strlike 'name "%klaus%" "utf8mb4_general_ci"))))
+        (set binary-count (recset_count (scan_recset nil tbl (list "name") binary-condition)))
+        (set ci-count (recset_count (scan_recset nil tbl (list "name") ci-condition)))
+        (if (and (equal? binary-count 0) (equal? ci-count 105))
+          true
+          (error (concat "LIKE collation counts: " binary-count ", " ci-count))))
+
+  - name: "Cached LIKE match sets still evaluate delta rows"
+    setup:
+      - sql: "INSERT INTO ft_matchset (id, name, tag) VALUES (30000, 'klaus-delta', 'delta')"
+    scm: |
+      (begin
+        (set tbl (table "memcp-tests" "ft_matchset"))
+        (set binary-condition (eval (list
+          'lambda (list 'name)
+          (list 'strlike 'name "%klaus%" "utf8mb4_bin"))))
+        (set ci-condition (eval (list
+          'lambda (list 'name)
+          (list 'strlike 'name "%klaus%" "utf8mb4_general_ci"))))
+        (set binary-count (recset_count (scan_recset nil tbl (list "name") binary-condition)))
+        (set ci-count (recset_count (scan_recset nil tbl (list "name") ci-condition)))
+        (if (and (equal? binary-count 1) (equal? ci-count 106))
+          true
+          (error (concat "LIKE delta counts: " binary-count ", " ci-count))))
+
+  - name: "Case-insensitive prefix LIKE does not use binary range semantics"
+    sql: "SELECT COUNT(*) AS cnt FROM ft_matchset WHERE name LIKE 'klaus%'"
+    expect: { rows: 1, data: [{ cnt: 6 }] }
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS `ft_customers`"
   - sql: "DROP TABLE IF EXISTS `ft_large`"
   - sql: "DROP TABLE IF EXISTS `ft_alternating`"
+  - sql: "DROP TABLE IF EXISTS `ft_matchset`"

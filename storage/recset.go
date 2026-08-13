@@ -339,6 +339,8 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	completeTraversal := len(boundaries) == 0 && recsetFilter == nil
+	singleExactLike := len(boundaries) == 1 && singleLikeBoundaryCoversCondition(conditionCols, condition, boundaries[0])
+	exactLikeMain := false
 	builder := newRecSetShardBuilder(t, visibleUpper, completeTraversal)
 	replayCandidates := 0
 	evaluate := func(idx uint32) bool {
@@ -354,6 +356,9 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 			}
 		} else if t.deletions.Get(uint(idx)) {
 			return false
+		}
+		if idx < t.main_count && exactLikeMain && singleExactLike {
+			return true
 		}
 		if idx < t.main_count {
 			for i, c := range cReaders {
@@ -382,7 +387,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	}
 	var buf [1024]uint32
 	processedCandidates := 0
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+	t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, &exactLikeMain, func(batch []uint32) bool {
 		for _, idx := range batch {
 			if idx >= visibleUpper {
 				continue
@@ -398,7 +403,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	})
 	if replayCandidates > 0 {
 		replayed := 0
-		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], false, func(batch []uint32) bool {
+		t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], false, &exactLikeMain, func(batch []uint32) bool {
 			for _, idx := range batch {
 				if idx < visibleUpper {
 					builder.addBitmap(idx, evaluate(idx))

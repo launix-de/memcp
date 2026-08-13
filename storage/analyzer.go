@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "github.com/carli2/hybridsort"
+import "math/bits"
 import "strings"
 import "github.com/launix-de/memcp/scm"
 
@@ -55,47 +56,93 @@ type BoundaryMatcher interface {
 	// For sorted matchers this is a no-op. The pattern is the search value
 	// (e.g. the LIKE pattern). The result is stored on the StorageIndex.
 	// colStorage is the column's ColumnStorage for reading values.
-	BuildSkipList(pattern string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList
+	BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage, candidate *SkipList) *SkipList
 }
 
-// SkipList holds precomputed interval data for block-level skipping.
-// Built once during index construction, stored on StorageIndex, used by iterate().
+// SkipList holds an exact adaptive set of matching index positions.
 type SkipList struct {
-	starts StorageInt // interval start positions (index order), bit-packed
-	lens   StorageInt // interval lengths, bit-packed
-	count  uint32     // number of intervals
+	matches recSetShard
 }
 
-// NextBlock returns the next block of potentially matching records at or after pos.
-// Returns (0, 0, false) when no more blocks exist.
-func (s *SkipList) NextBlock(pos uint32) (start uint32, length uint32, ok bool) {
-	if s == nil || s.count == 0 {
+type skipListCursor struct {
+	skip    *SkipList
+	listPos int
+}
+
+func (s *SkipList) cursor() skipListCursor {
+	return skipListCursor{skip: s}
+}
+
+func (c *skipListCursor) NextBlock(pos uint32) (uint32, uint32, bool) {
+	if c.skip == nil {
 		return 0, 0, false
 	}
-	lo, hi := uint32(0), s.count
-	for lo < hi {
-		mid := (lo + hi) / 2
-		st := uint32(int64(s.starts.GetValueUInt(mid)) + s.starts.offset)
-		ln := uint32(int64(s.lens.GetValueUInt(mid)) + s.lens.offset)
-		if st+ln <= pos {
-			lo = mid + 1
-		} else {
-			hi = mid
+	set := &c.skip.matches
+	if pos >= set.universe || set.kind == recSetEmpty {
+		return 0, 0, false
+	}
+	switch set.kind {
+	case recSetFull:
+		return pos, set.universe - pos, true
+	case recSetPositive:
+		values := set.listedValues()
+		for c.listPos < len(values) && values[c.listPos] < pos {
+			c.listPos++
 		}
-	}
-	if lo >= s.count {
+		if c.listPos == len(values) {
+			return 0, 0, false
+		}
+		start := values[c.listPos]
+		end := start + 1
+		c.listPos++
+		for c.listPos < len(values) && values[c.listPos] == end {
+			end++
+			c.listPos++
+		}
+		return start, end - start, true
+	case recSetNegative:
+		excluded := set.listedValues()
+		for c.listPos < len(excluded) && excluded[c.listPos] < pos {
+			c.listPos++
+		}
+		for c.listPos < len(excluded) && excluded[c.listPos] == pos {
+			pos++
+			c.listPos++
+		}
+		if pos >= set.universe {
+			return 0, 0, false
+		}
+		end := set.universe
+		if c.listPos < len(excluded) {
+			end = excluded[c.listPos]
+		}
+		return pos, end - pos, true
+	case recSetBitmap:
+		wordIndex := pos >> 5
+		word := set.data[wordIndex] & (^uint32(0) << (pos & 31))
+		for word == 0 {
+			wordIndex++
+			if int(wordIndex) >= len(set.data) {
+				return 0, 0, false
+			}
+			word = set.data[wordIndex]
+		}
+		start := (wordIndex << 5) + uint32(bits.TrailingZeros32(word))
+		end := start + 1
+		for end < set.universe && set.contains(end) {
+			end++
+		}
+		return start, end - start, true
+	default:
 		return 0, 0, false
 	}
-	st := uint32(int64(s.starts.GetValueUInt(lo)) + s.starts.offset)
-	ln := uint32(int64(s.lens.GetValueUInt(lo)) + s.lens.offset)
-	return st, ln, true
 }
 
 func (s *SkipList) ComputeSize() uint {
 	if s == nil {
 		return 0
 	}
-	return s.starts.ComputeSize() + s.lens.ComputeSize() + 16
+	return uint(len(s.matches.data))*4 + 32
 }
 
 // Built-in matcher singletons. Every columnboundaries.matcher points to one of these.
@@ -123,7 +170,7 @@ type equalMatcher struct{}
 func (m *equalMatcher) Kind() string      { return "equal" }
 func (m *equalMatcher) IsSorted() bool    { return true }
 func (m *equalMatcher) IsPointLike() bool { return true }
-func (m *equalMatcher) BuildSkipList(_ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
+func (m *equalMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage, _ *SkipList) *SkipList {
 	return nil // sorted: no skip list needed
 }
 
@@ -134,7 +181,7 @@ type rangeMatcher struct{}
 func (m *rangeMatcher) Kind() string      { return "range" }
 func (m *rangeMatcher) IsSorted() bool    { return true }
 func (m *rangeMatcher) IsPointLike() bool { return false }
-func (m *rangeMatcher) BuildSkipList(_ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
+func (m *rangeMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage, _ *SkipList) *SkipList {
 	return nil // sorted: no skip list needed
 }
 
@@ -145,73 +192,49 @@ type likeMatcher struct{}
 func (m *likeMatcher) Kind() string      { return "like" }
 func (m *likeMatcher) IsSorted() bool    { return false }
 func (m *likeMatcher) IsPointLike() bool { return true }
-func (m *likeMatcher) BuildSkipList(pattern string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList {
+func (m *likeMatcher) BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage, candidate *SkipList) *SkipList {
 	if count == 0 || colStorage == nil {
 		return nil
 	}
 
-	// Scan to find intervals with 3-miss tolerance
-	type interval struct{ start, len uint32 }
-	var intervals []interval
-	inInterval := false
-	var intervalStart uint32
-	var intervalLen uint32
-	missCount := 0
-	const maxMiss = 3
-
-	patternCI := strings.ToLower(pattern)
-	for pos := uint32(0); pos < count; pos++ {
+	builder := newRecSetShardBuilder(nil, count, candidate == nil)
+	replayUntil := uint32(0)
+	matches := func(pos uint32) bool {
 		recid := getRecid(pos)
 		v := colStorage.GetValue(recid)
-		hit := false
-		if v.IsString() {
-			value := v.String()
-			hit = scm.StrLike(value, pattern) || scm.StrLike(strings.ToLower(value), patternCI)
+		return v.IsString() && scm.StrLikeCollation(v.String(), pattern, collation)
+	}
+	add := func(pos uint32) bool {
+		wasBitmap := builder.bitmap
+		builder.add(pos, matches(pos))
+		if !wasBitmap && builder.bitmap {
+			replayUntil = pos + 1
 		}
-
-		if hit {
-			if !inInterval {
-				intervalStart = pos
-				intervalLen = 1
-				inInterval = true
-			} else {
-				intervalLen = pos - intervalStart + 1
-			}
-			missCount = 0
-		} else if inInterval {
-			missCount++
-			if missCount > maxMiss {
-				intervals = append(intervals, interval{intervalStart, intervalLen})
-				inInterval = false
-				missCount = 0
-			}
+		return true
+	}
+	if candidate != nil {
+		candidate.matches.forEachID(add)
+	} else {
+		for pos := uint32(0); pos < count; pos++ {
+			add(pos)
 		}
 	}
-	if inInterval {
-		intervals = append(intervals, interval{intervalStart, intervalLen})
+	if replayUntil > 0 {
+		if candidate != nil {
+			candidate.matches.forEachID(func(pos uint32) bool {
+				if pos >= replayUntil {
+					return false
+				}
+				builder.addBitmap(pos, matches(pos))
+				return true
+			})
+		} else {
+			for pos := uint32(0); pos < replayUntil; pos++ {
+				builder.addBitmap(pos, matches(pos))
+			}
+		}
 	}
-
-	if len(intervals) == 0 {
-		return nil
-	}
-
-	// Pack into two StorageInt (compact bit-packed representation)
-	n := uint32(len(intervals))
-	sl := &SkipList{count: n}
-	sl.starts.prepare()
-	sl.lens.prepare()
-	for i, iv := range intervals {
-		sl.starts.scan(uint32(i), scm.NewInt(int64(iv.start)))
-		sl.lens.scan(uint32(i), scm.NewInt(int64(iv.len)))
-	}
-	sl.starts.init(n)
-	sl.lens.init(n)
-	for i, iv := range intervals {
-		sl.starts.build(uint32(i), scm.NewInt(int64(iv.start)))
-		sl.lens.build(uint32(i), scm.NewInt(int64(iv.len)))
-	}
-	sl.starts.finish()
-	sl.lens.finish()
+	sl := &SkipList{matches: builder.finish()}
 	return sl
 }
 
@@ -222,7 +245,7 @@ type recSetMatcher struct{}
 func (m *recSetMatcher) Kind() string      { return "recset" }
 func (m *recSetMatcher) IsSorted() bool    { return false }
 func (m *recSetMatcher) IsPointLike() bool { return true }
-func (m *recSetMatcher) BuildSkipList(_ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
+func (m *recSetMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage, _ *SkipList) *SkipList {
 	return nil
 }
 
@@ -237,6 +260,7 @@ type columnboundaries struct {
 	lowerBatchSubidx int
 	upperBatch       bool
 	upperBatchSubidx int
+	collation        string // non-empty only for collation-sensitive matchers
 	// for computed index columns (col starts with ".")
 	mapCols []string  // source columns needed to compute the value
 	mapFn   scm.Scmer // function: mapFn(mapCols values...) → index value
@@ -692,9 +716,17 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 			// LIKE: (strlike col "pattern" collation)
 			if col, ok := resolveColVar(v[1]); ok {
 				if pat, ok := extractConstant(v[2]); ok && pat.IsString() {
+					collation := "utf8mb4_general_ci"
+					if len(v) >= 4 {
+						coll, constant := extractConstant(v[3])
+						if !constant || !coll.IsString() {
+							return nil
+						}
+						collation = strings.ToLower(coll.String())
+					}
 					pattern := pat.String()
 					idx := strings.IndexAny(pattern, "%_")
-					if idx > 0 {
+					if idx > 0 && !strings.Contains(collation, "_ci") {
 						// prefix-anchored LIKE "foo%" → range boundary
 						prefix := pattern[:idx]
 						upperBytes := []byte(prefix)
@@ -702,7 +734,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
 					}
 					// non-prefix LIKE "%foo%" → matcher boundary
-					return boundaries{columnboundaries{col: col, matcher: LikeMatcher, lower: pat, upper: pat}}
+					return boundaries{columnboundaries{col: col, matcher: LikeMatcher, lower: pat, upper: pat, collation: collation}}
 				}
 			}
 			return nil
@@ -790,6 +822,60 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 
 	return cols
+}
+
+// singleLikeBoundaryCoversCondition proves that the condition consists solely
+// of the LIKE call represented by bound. An exact main-row match set may bypass
+// residual evaluation only under this structural proof; deltas are never
+// covered because they are not part of the immutable set.
+func singleLikeBoundaryCoversCondition(conditionCols []string, condition scm.Scmer, bound columnboundaries) bool {
+	if bound.matcher != LikeMatcher {
+		return false
+	}
+	var p scm.Proc
+	if condition.IsProc() {
+		p = *condition.Proc()
+	} else if legacy, ok := condition.Any().(scm.Proc); ok {
+		p = legacy
+	} else {
+		return false
+	}
+	if !p.Params.IsSlice() {
+		return false
+	}
+	params := p.Params.Slice()
+	body := p.Body
+	for {
+		items, ok := scmerSlice(body)
+		if !ok || len(items) != 2 {
+			break
+		}
+		declaration := scm.DeclarationForValue(items[0])
+		if !items[0].SymbolEquals("optimize") && (declaration == nil || declaration.Name != "optimize") {
+			break
+		}
+		body = items[1]
+	}
+	items, ok := scmerSlice(body)
+	if !ok || len(items) < 3 {
+		return false
+	}
+	declaration := scm.DeclarationForValue(items[0])
+	if !items[0].SymbolEquals("strlike") && (declaration == nil || declaration.Name != "strlike") {
+		return false
+	}
+	if items[1].IsNthLocalVar() {
+		idx := int(items[1].NthLocalVar())
+		return idx < len(conditionCols) && conditionCols[idx] == bound.col
+	}
+	if items[1].IsSymbol() {
+		for i, param := range params {
+			if i < len(conditionCols) && param.IsSymbol() && param.String() == items[1].String() {
+				return conditionCols[i] == bound.col
+			}
+		}
+	}
+	return false
 }
 
 func splitRecSetBoundary(b boundaries, backingTable *table) (boundaries, *recSet) {
