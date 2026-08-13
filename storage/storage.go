@@ -3598,19 +3598,112 @@ func showEngineStr(t *table) string {
 	}
 }
 
-// showBuildMeta builds the meta assoc for a table: Name, Engine, Collation, Charset, Comment, Unique, Partitions.
+func showStringSlice(values []string) scm.Scmer {
+	items := make([]scm.Scmer, len(values))
+	for i, value := range values {
+		items[i] = scm.NewString(value)
+	}
+	return scm.NewSlice(items)
+}
+
+func plannerDistinctForColumns(t *table, columns []string) (float64, float64, string) {
+	rows := float64(t.CountEstimate())
+	if len(columns) == 0 {
+		return 0, 0, "unknown"
+	}
+	estimate := 1.0
+	confidence := 1.0
+	for _, columnName := range columns {
+		var descriptor *column
+		for _, candidate := range t.Columns {
+			if candidate.Name == columnName {
+				descriptor = candidate
+				break
+			}
+		}
+		if descriptor == nil || descriptor.PlannerStats.Load() == nil {
+			return 0, 0, "unknown"
+		}
+		distinct := float64(atomic.LoadUint64(&descriptor.DistinctEstimate))
+		if distinct <= 0 {
+			return 0, 0, "unknown"
+		}
+		estimate *= distinct
+		confidence *= descriptor.PlannerStats.Load().Confidence
+	}
+	if estimate > rows {
+		estimate = rows
+	}
+	return estimate, confidence, "rebuild_independence"
+}
+
+// showBuildMeta builds table metadata including key, relationship, and
+// multi-column planner statistics. All statistics are immutable snapshots.
 func showBuildMeta(db *database, t *table) scm.Scmer {
 	engine := showEngineStr(t)
 	uniques := make([]scm.Scmer, len(t.Unique))
 	for i, uk := range t.Unique {
-		cols := make([]scm.Scmer, len(uk.Cols))
-		for j, c := range uk.Cols {
-			cols[j] = scm.NewString(c)
-		}
 		uniques[i] = scm.NewSlice([]scm.Scmer{
 			scm.NewString("Id"), scm.NewString(uk.Id),
-			scm.NewString("Cols"), scm.NewSlice(cols),
+			scm.NewString("Cols"), showStringSlice(uk.Cols),
 		})
+	}
+	multiColumnDistinct := make([]scm.Scmer, 0, len(t.Unique))
+	for _, uk := range t.Unique {
+		if len(uk.Cols) < 2 {
+			continue
+		}
+		confidence := 0.8
+		source := "unique_constraint_upper_bound"
+		if uk.Id == "PRIMARY" {
+			confidence = 1
+			source = "primary_key"
+		}
+		multiColumnDistinct = append(multiColumnDistinct, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Columns"), showStringSlice(uk.Cols),
+			scm.NewString("Estimate"), scm.NewInt(int64(t.CountEstimate())),
+			scm.NewString("Confidence"), scm.NewFloat(confidence),
+			scm.NewString("Source"), scm.NewString(source),
+		}))
+	}
+	foreignKeys := make([]scm.Scmer, 0, len(t.Foreign))
+	fanouts := make([]scm.Scmer, 0, len(t.Foreign))
+	for _, fk := range t.Foreign {
+		role := "referenced"
+		localColumns := fk.Cols2
+		otherTable := fk.Tbl1
+		otherColumns := fk.Cols1
+		if fk.Tbl1 == t.Name {
+			role = "referencing"
+			localColumns = fk.Cols1
+			otherTable = fk.Tbl2
+			otherColumns = fk.Cols2
+		}
+		foreignKeys = append(foreignKeys, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Id"), scm.NewString(fk.Id),
+			scm.NewString("Role"), scm.NewString(role),
+			scm.NewString("LocalColumns"), showStringSlice(localColumns),
+			scm.NewString("OtherTable"), scm.NewString(otherTable),
+			scm.NewString("OtherColumns"), showStringSlice(otherColumns),
+		}))
+		fanoutEstimate := scm.NewNil()
+		confidenceValue := 0.0
+		sourceValue := "unknown"
+		if role == "referencing" {
+			distinct, confidence, source := plannerDistinctForColumns(t, localColumns)
+			if distinct > 0 {
+				fanoutEstimate = scm.NewFloat(float64(t.CountEstimate()) / distinct)
+				confidenceValue = confidence
+				sourceValue = source
+			}
+		}
+		fanouts = append(fanouts, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Id"), scm.NewString(fk.Id),
+			scm.NewString("Role"), scm.NewString(role),
+			scm.NewString("EstimatedFanout"), fanoutEstimate,
+			scm.NewString("Confidence"), scm.NewFloat(confidenceValue),
+			scm.NewString("Source"), scm.NewString(sourceValue),
+		}))
 	}
 	partitions := make([]scm.Scmer, 0)
 	if t.ShardMode == ShardModePartition {
@@ -3629,6 +3722,9 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		scm.NewString("Charset"), scm.NewString(t.Charset),
 		scm.NewString("Comment"), scm.NewString(t.Comment),
 		scm.NewString("Unique"), scm.NewSlice(uniques),
+		scm.NewString("ForeignKeys"), scm.NewSlice(foreignKeys),
+		scm.NewString("Fanout"), scm.NewSlice(fanouts),
+		scm.NewString("MultiColumnDistinct"), scm.NewSlice(multiColumnDistinct),
 		scm.NewString("Partitions"), scm.NewSlice(partitions),
 	})
 }

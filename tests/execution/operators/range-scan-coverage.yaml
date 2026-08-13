@@ -20,6 +20,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS perf_tiny"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
+  - sql: "DROP TABLE IF EXISTS stats_contract_child"
+  - sql: "DROP TABLE IF EXISTS stats_contract_parent"
 
 test_cases:
 
@@ -41,6 +43,29 @@ test_cases:
             (+ 1.0 (* i 0.5))))))
         (insert (table "memcp-tests" "rs_data") '("id" "val" "category" "price") rows)
         200)
+
+  - name: "Unrebuilt column statistics remain explicitly unknown"
+    scm: |
+      (begin
+        (define idcol (car (get_schema "memcp-tests" "rs_data")))
+        (and
+          (equal? (idcol "StatisticsKnown") false)
+          (equal? (idcol "StatisticsConfidence") 0)
+          (equal? (idcol "StatisticsSource") "unknown")
+          (equal? (idcol "DistinctEstimateSource") "fallback_row_count")
+          (nil? (idcol "NullFraction"))))
+    expect:
+      data: [true]
+
+  - name: "EXPLAIN keeps unknown selectivity separate from its planning fallback"
+    sql: "EXPLAIN REORDER SELECT a.id FROM rs_data a JOIN rs_data b ON b.id = a.id WHERE a.val > 10"
+    expect:
+      rows: 1
+      result_contains:
+        - "selectivity_estimates"
+        - "range_unknown"
+        - "(known false)"
+        - "planning_value"
 
   - name: "Clear range scan statistics"
     setup:
@@ -647,6 +672,64 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "Rebuild publishes confidence null fraction and min max"
+    scm: |
+      (begin
+        (define idcol (car (get_schema "memcp-tests" "rs_data")))
+        (and
+          (idcol "StatisticsKnown")
+          (equal? (idcol "StatisticsConfidence") 1)
+          (equal? (idcol "StatisticsSource") "rebuild")
+          (equal? (idcol "DistinctEstimateSource") "rebuild")
+          (equal? (idcol "NullFraction") 0)
+          (equal? (idcol "MinEstimate") 0)
+          (equal? (idcol "MaxEstimate") 199)))
+    expect:
+      data: [true]
+
+  - name: "Create planner statistics relationship tables"
+    sql: "CREATE TABLE stats_contract_parent (tenant_id INT, id INT, PRIMARY KEY(tenant_id, id))"
+
+  - name: "Create planner statistics child table"
+    sql: "CREATE TABLE stats_contract_child (id INT PRIMARY KEY, tenant_id INT, parent_id INT, nullable_value INT, FOREIGN KEY stats_contract_fk (tenant_id, parent_id) REFERENCES stats_contract_parent(tenant_id, id))"
+
+  - name: "Insert planner statistics parent rows"
+    sql: "INSERT INTO stats_contract_parent VALUES (1,10),(1,20),(2,10)"
+
+  - name: "Insert planner statistics child rows"
+    sql: "INSERT INTO stats_contract_child VALUES (1,1,10,NULL),(2,1,10,5),(3,1,20,9)"
+
+  - name: "Rebuild planner statistics relationship tables"
+    sql: "SHUTDOWN"
+
+  - name: "Planner statistics expose nullable distribution"
+    scm: |
+      (begin
+        (define nullablecol (nth (get_schema "memcp-tests" "stats_contract_child") 3))
+        (and
+          (nullablecol "StatisticsKnown")
+          (> (nullablecol "NullFraction") 0.33)
+          (< (nullablecol "NullFraction") 0.34)
+          (equal? (nullablecol "MinEstimate") 5)
+          (equal? (nullablecol "MaxEstimate") 9)))
+    expect:
+      data: [true]
+
+  - name: "Planner metadata exposes composite distinct and FK fanout contracts"
+    scm: |
+      (begin
+        (define parentmeta ((show "memcp-tests" "stats_contract_parent" true) "meta"))
+        (define childmeta ((show "memcp-tests" "stats_contract_child" true) "meta"))
+        (and
+          (equal? (count (parentmeta "MultiColumnDistinct")) 1)
+          (equal? ((car (parentmeta "MultiColumnDistinct")) "Estimate") 3)
+          (equal? (count (childmeta "ForeignKeys")) 1)
+          (equal? ((car (childmeta "ForeignKeys")) "Role") "referencing")
+          (equal? (count (childmeta "Fanout")) 1)
+          (> ((car (childmeta "Fanout")) "EstimatedFanout") 0)))
+    expect:
+      data: [true]
+
   # ========================================================================
   # 8. Multi-column range + index (exercises multi-column boundary code)
   # ========================================================================
@@ -812,3 +895,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS perf_tiny"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
+  - sql: "DROP TABLE IF EXISTS stats_contract_child"
+  - sql: "DROP TABLE IF EXISTS stats_contract_parent"

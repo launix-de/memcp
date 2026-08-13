@@ -4454,45 +4454,85 @@ and barrier ownership come from the pre-normalization query block. */
 			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
 		_ nil)))
 
-(define join_optimizer_column_selectivity (lambda (column_ref)
-	(if (nil? column_ref)
-		0.1
-		(begin
-			(define distinct (planner_column_distinct_estimate (car column_ref) (cadr column_ref)))
-			(if (or (nil? distinct) (<= distinct 0)) 0.1 (/ 1 (max 1 distinct)))))))
+(define planner_estimate (lambda (value confidence source known)
+	(list
+		(list (quote value) value)
+		(list (quote confidence) confidence)
+		(list (quote source) source)
+		(list (quote known) known))))
 
-(define join_optimizer_equality_selectivity (lambda (sources default_alias left right)
+(define planner_estimate_planning_value (lambda (estimate fallback)
+	(coalesceNil (qassoc_get estimate (quote value) nil) fallback)))
+
+(define planner_unknown_selectivity_estimate (lambda ()
+	(planner_estimate nil 0 (quote unknown) false)))
+
+(define join_optimizer_column_selectivity_estimate (lambda (column_ref)
+	(if (nil? column_ref)
+		(planner_unknown_selectivity_estimate)
+		(begin
+			(define stats (planner_column_statistics (car column_ref) (cadr column_ref)))
+			(define distinct (qassoc_get stats (quote distinct) nil))
+			(if (or (nil? distinct) (<= distinct 0))
+				(planner_unknown_selectivity_estimate)
+				(planner_estimate (/ 1 (max 1 distinct))
+					(qassoc_get stats (quote confidence) 0)
+					(qassoc_get stats (quote source) (quote unknown)) true))))))
+
+(define join_optimizer_column_selectivity (lambda (column_ref)
+	(planner_estimate_planning_value
+		(join_optimizer_column_selectivity_estimate column_ref) 0.1)))
+
+(define join_optimizer_equality_selectivity_estimate (lambda (sources default_alias left right)
 	(begin
 		(define left_ref (join_optimizer_column_ref sources default_alias left))
 		(define right_ref (join_optimizer_column_ref sources default_alias right))
 		(if (and (not (nil? left_ref)) (not (nil? right_ref)))
 			(begin
-				(define left_distinct (planner_column_distinct_estimate (car left_ref) (cadr left_ref)))
-				(define right_distinct (planner_column_distinct_estimate (car right_ref) (cadr right_ref)))
+				(define left_stats (planner_column_statistics (car left_ref) (cadr left_ref)))
+				(define right_stats (planner_column_statistics (car right_ref) (cadr right_ref)))
+				(define left_distinct (qassoc_get left_stats (quote distinct) nil))
+				(define right_distinct (qassoc_get right_stats (quote distinct) nil))
 				(if (or (nil? left_distinct) (nil? right_distinct))
-					0.1
-					(/ 1 (max 1 (max left_distinct right_distinct)))))
+					(planner_unknown_selectivity_estimate)
+					(planner_estimate (/ 1 (max 1 (max left_distinct right_distinct)))
+						(min (qassoc_get left_stats (quote confidence) 0)
+							(qassoc_get right_stats (quote confidence) 0))
+						(quote distinct_join) true)))
 			(if (not (nil? left_ref))
-				(join_optimizer_column_selectivity left_ref)
-				(if (not (nil? right_ref)) (join_optimizer_column_selectivity right_ref) 0.1))))))
+				(join_optimizer_column_selectivity_estimate left_ref)
+				(if (not (nil? right_ref))
+					(join_optimizer_column_selectivity_estimate right_ref)
+					(planner_unknown_selectivity_estimate)))))))
+
+(define join_optimizer_equality_selectivity (lambda (sources default_alias left right)
+	(planner_estimate_planning_value
+		(join_optimizer_equality_selectivity_estimate sources default_alias left right) 0.1)))
+
+(define join_optimizer_expr_selectivity_estimate (lambda (sources default_alias expr)
+	(match expr
+		((symbol equal?) left right) (join_optimizer_equality_selectivity_estimate sources default_alias left right)
+		((quote equal?) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "equal?") left right))
+		((symbol equal??) left right) (join_optimizer_equality_selectivity_estimate sources default_alias left right)
+		((quote equal??) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "equal??") left right))
+		((symbol =) left right) (join_optimizer_equality_selectivity_estimate sources default_alias left right)
+		((quote =) left right) (join_optimizer_expr_selectivity_estimate sources default_alias (list (symbol "=") left right))
+		((symbol <) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((quote <) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((symbol <=) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((quote <=) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((symbol >) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((quote >) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((symbol >=) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((quote >=) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		_ (planner_unknown_selectivity_estimate))))
 
 (define join_optimizer_expr_selectivity (lambda (sources default_alias expr)
-	(match expr
-		((symbol equal?) left right) (join_optimizer_equality_selectivity sources default_alias left right)
-		((quote equal?) left right) (join_optimizer_equality_selectivity sources default_alias left right)
-		((symbol equal??) left right) (join_optimizer_equality_selectivity sources default_alias left right)
-		((quote equal??) left right) (join_optimizer_equality_selectivity sources default_alias left right)
-		((symbol =) left right) (join_optimizer_equality_selectivity sources default_alias left right)
-		((quote =) left right) (join_optimizer_equality_selectivity sources default_alias left right)
-		((symbol <) _left _right) 0.3333333333333333
-		((quote <) _left _right) 0.3333333333333333
-		((symbol <=) _left _right) 0.3333333333333333
-		((quote <=) _left _right) 0.3333333333333333
-		((symbol >) _left _right) 0.3333333333333333
-		((quote >) _left _right) 0.3333333333333333
-		((symbol >=) _left _right) 0.3333333333333333
-		((quote >=) _left _right) 0.3333333333333333
-		_ 0.1)))
+	(begin
+		(define estimate (join_optimizer_expr_selectivity_estimate sources default_alias expr))
+		(planner_estimate_planning_value estimate
+			(if (equal? (qassoc_get estimate (quote source) nil) (quote range_unknown))
+				0.3333333333333333 0.1)))))
 
 (define join_optimizer_product (lambda (values)
 	(reduce (coalesceNil values '()) (lambda (product value) (* product value)) 1)))
@@ -4516,7 +4556,8 @@ and barrier ownership come from the pre-normalization query block. */
 
 (define join_optimizer_source_rows (lambda (stages sources default_alias graph src)
 	(begin
-		(define base_rows (coalesceNil (planner_source_row_count_using_stages stages src) 1000000))
+		(define base_rows (planner_estimate_planning_value
+			(planner_source_row_estimate_using_stages stages src) 1000000))
 		(define local_selectivity (join_optimizer_product
 			(map (join_optimizer_local_predicates graph (source_alias src)) (lambda (entry)
 				(join_optimizer_expr_selectivity sources default_alias
@@ -6029,17 +6070,52 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(planner_table_row_count (source_schema src) (source_relation src))
 		nil)))
 
-(define planner_column_distinct_estimate (lambda (src column)
+(define planner_source_row_estimate (lambda (src)
+	(begin
+		(define rows (planner_source_row_count src))
+		(if (nil? rows)
+			(planner_estimate nil 0 (quote unknown) false)
+			(planner_estimate rows 0.9 (quote live_or_rebuild_row_count) true)))))
+
+(define planner_source_row_estimate_using_stages (lambda (stages src)
+	(if (join_optimizer_guaranteed_singleton_stage_source? stages src)
+		(planner_estimate 1 1 (quote semantic_singleton) true)
+		(planner_source_row_estimate src))))
+
+(define planner_column_statistics (lambda (src column)
 	(if (or (not (source_is_base_table? src)) (nil? column))
-		nil
+		(list
+			(list (quote known) false)
+			(list (quote confidence) 0)
+			(list (quote source) (quote unknown))
+			(list (quote distinct) nil)
+			(list (quote null_fraction) nil)
+			(list (quote min) nil)
+			(list (quote max) nil))
 		(try
 			(lambda ()
 				(reduce (get_schema (source_schema src) (source_relation src)) (lambda (found row)
 					(if (not (nil? found))
 						found
-						(if (equal?? (row "Field") column) (row "DistinctEstimate") nil)))
+						(if (equal?? (row "Field") column)
+							(list
+								(list (quote known) (row "StatisticsKnown"))
+								(list (quote confidence) (row "StatisticsConfidence"))
+								(list (quote source) (symbol (row "StatisticsSource")))
+								(list (quote distinct) (if (row "StatisticsKnown") (row "DistinctEstimate") nil))
+								(list (quote null_fraction) (row "NullFraction"))
+								(list (quote min) (row "MinEstimate"))
+								(list (quote max) (row "MaxEstimate")))
+							nil)))
 					nil))
-			(lambda (_e) nil)))))
+			(lambda (_e) (list
+				(list (quote known) false)
+				(list (quote confidence) 0)
+				(list (quote source) (quote unknown))
+				(list (quote distinct) nil)))))))
+
+(define planner_column_distinct_estimate (lambda (src column)
+	(qassoc_get (planner_column_statistics src column) (quote distinct) nil)))
 
 (define planner_group_distinct_estimate (lambda (src keys row_count)
 	(reduce keys (lambda (estimate key)
@@ -6073,12 +6149,15 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(not (or (nil? join_expr) (equal? join_expr true))))))
 
 (define source_reorder_estimate (lambda (src)
-	(list
-		(source_alias src)
-		(list (quote relation) (source_relation src))
-		(list (quote row_count) (planner_source_row_count src))
-		(list (quote outer_join) (source_outer? src))
-		(list (quote join_filter) (source_join_present? src)))))
+	(begin
+		(define row_estimate (planner_source_row_estimate src))
+		(list
+			(source_alias src)
+			(list (quote relation) (source_relation src))
+			(list (quote row_count) (qassoc_get row_estimate (quote value) nil))
+			(list (quote row_estimate) row_estimate)
+			(list (quote outer_join) (source_outer? src))
+			(list (quote join_filter) (source_join_present? src))))))
 
 /* Identify the leading inner-join cloud that the logical optimizer may
 reorder. Outer and stage-backed sources remain barriers and are appended to the
@@ -6109,12 +6188,42 @@ resulting tree in semantic order. */
 				(list (quote null_extension_barrier) true)
 				(list (quote reuse) 1))))))
 
+(define query_block_selectivity_estimates (lambda (block)
+	(begin
+		(define sources (qb_sources block))
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+			(if (empty_list? sources) nil (source_alias (car sources)))))
+		(define predicates (merge (list
+			(split_and_terms (coalesceNil (qb_where block) true))
+			(merge (map sources (lambda (src)
+				(split_and_terms (coalesceNil (source_join_expr src) true))))))))
+		(map (filter predicates (lambda (predicate) (not (equal? predicate true))))
+			(lambda (predicate)
+				(begin
+					(define estimate (join_optimizer_expr_selectivity_estimate
+						sources default_alias predicate))
+					(list
+						(list (quote predicate) predicate)
+						(list (quote estimate) estimate)
+						(list (quote planning_value)
+							(planner_estimate_planning_value estimate
+								(if (equal? (qassoc_get estimate (quote source) nil) (quote range_unknown))
+									0.3333333333333333 0.1))))))))))
+
+(define explain_reorder_selectivities? (lambda ()
+	(try
+		(lambda () (coalesceNil ((context "session") "__memcp_explain_reorder_selectivities") false))
+		(lambda (_e) false))))
+
 (define query_block_reorder_telemetry (lambda (block)
-	(list
-		(list (quote source_estimates) (map (qb_sources block) source_reorder_estimate))
-		(list (quote left_join_requirements) (filter
+	(merge (list
+		(list (list (quote source_estimates) (map (qb_sources block) source_reorder_estimate)))
+		(if (explain_reorder_selectivities?)
+			(list (list (quote selectivity_estimates) (query_block_selectivity_estimates block)))
+			'())
+		(list (list (quote left_join_requirements) (filter
 			(map (qb_sources block) left_join_requirement)
-			(lambda (item) (not (nil? item))))))))
+			(lambda (item) (not (nil? item))))))))))
 
 (define query_block_needs_reorder_facts? (lambda (block)
 	(or (not (empty_list? (qb_stages block)))
@@ -15862,12 +15971,15 @@ build_queryplan contract. */
 					(explain_union_ir_metadata ir)))))))
 
 (define explain_queryplan_reorder (lambda (query)
-	(list (quote resultrow)
-		(list (quote list)
-			"reorder"
-			(pretty_print
-				(join_reorder (untangle_query_term query nil))
-				(settings "ExplainWidth"))))))
+	(begin
+		(define planning_session (context "session"))
+		(planning_session "__memcp_explain_reorder_selectivities" true)
+		(define reordered (join_reorder (untangle_query_term query nil)))
+		(planning_session "__memcp_explain_reorder_selectivities" nil)
+		(list (quote resultrow)
+			(list (quote list)
+				"reorder"
+				(pretty_print reordered (settings "ExplainWidth")))))))
 
 (define explain_queryplan_compile (lambda (query parse_started_ns sql_bytes)
 	(begin

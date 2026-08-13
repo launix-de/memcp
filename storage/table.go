@@ -53,6 +53,18 @@ func (t *table) String() string {
 }
 
 type dataset []scm.Scmer
+
+// columnPlannerStatistics is an immutable rebuild-generation snapshot. The
+// pointer is published atomically so query compilation never needs shard locks.
+type columnPlannerStatistics struct {
+	Confidence   float64
+	Source       string
+	NullCount    uint64
+	NullFraction float64
+	MinEstimate  scm.Scmer
+	MaxEstimate  scm.Scmer
+}
+
 type column struct {
 	Name              string
 	Typ               string
@@ -80,8 +92,9 @@ type column struct {
 	// Statistics — updated at rebuild time, O(1) access for query planning.
 	// DistinctEstimate is the sum of per-shard DistinctCount() (upper bound).
 	// RowEstimate is the table-wide CountEstimate() at last rebuild.
-	DistinctEstimate uint64 `json:"-"`
-	RowEstimate      uint64 `json:"-"`
+	DistinctEstimate uint64                                  `json:"-"`
+	RowEstimate      uint64                                  `json:"-"`
+	PlannerStats     atomic.Pointer[columnPlannerStatistics] `json:"-"`
 
 	// ORC fields — non-empty OrcSortCols signals this is an ordered-reduce computed column.
 	// The column value is produced by a scan_order pass rather than per-row computation.
@@ -494,6 +507,56 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 	}
 }
 
+// collectRebuiltColumnPlannerStatistics reads only freshly rebuilt, unpublished
+// shard generations while the caller owns the table rebuild critical section.
+// It must not be used for live shards because it intentionally takes no shard
+// locks. Cached readers keep this maintenance pass sequential and allocation
+// free per value.
+func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName string) *columnPlannerStatistics {
+	stats := &columnPlannerStatistics{
+		Confidence:  1,
+		Source:      "rebuild",
+		MinEstimate: scm.NewNil(),
+		MaxEstimate: scm.NewNil(),
+	}
+	var rowCount uint64
+	var hasValue bool
+	for _, shard := range shards {
+		if shard == nil {
+			continue
+		}
+		columnStorage := shard.columns[columnName]
+		if columnStorage == nil {
+			continue
+		}
+		reader := columnStorage.GetCachedReader()
+		for recid := uint32(0); recid < shard.main_count; recid++ {
+			rowCount++
+			value := reader.GetValue(recid)
+			if value.IsNil() {
+				stats.NullCount++
+				continue
+			}
+			if !hasValue {
+				stats.MinEstimate = value
+				stats.MaxEstimate = value
+				hasValue = true
+				continue
+			}
+			if scm.Less(value, stats.MinEstimate) {
+				stats.MinEstimate = value
+			}
+			if scm.Less(stats.MaxEstimate, value) {
+				stats.MaxEstimate = value
+			}
+		}
+	}
+	if rowCount > 0 {
+		stats.NullFraction = float64(stats.NullCount) / float64(rowCount)
+	}
+	return stats
+}
+
 func (t *table) statistics() tableStatisticsSnapshot {
 	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil {
 		if snapshot.statistics != nil {
@@ -893,6 +956,7 @@ type tableShowColumnsSnapshot struct {
 	value             scm.Scmer
 	rowEstimate       uint
 	distinctEstimates []uint64
+	plannerStatistics []*columnPlannerStatistics
 	columnNames       *tableColumnNamesSnapshot
 	statistics        *tableStatisticsSnapshot
 }
@@ -923,7 +987,7 @@ func foldIdentifier(name string) string {
 }
 
 func (t *table) showColumnsSnapshotMatches(snapshot *tableShowColumnsSnapshot, rowEstimate uint) bool {
-	if snapshot == nil || snapshot.rowEstimate != rowEstimate || len(snapshot.distinctEstimates) != len(t.Columns) {
+	if snapshot == nil || snapshot.rowEstimate != rowEstimate || len(snapshot.distinctEstimates) != len(t.Columns) || len(snapshot.plannerStatistics) != len(t.Columns) {
 		return false
 	}
 	for i, c := range t.Columns {
@@ -934,6 +998,9 @@ func (t *table) showColumnsSnapshotMatches(snapshot *tableShowColumnsSnapshot, r
 		if snapshot.distinctEstimates[i] != distinctEstimate {
 			return false
 		}
+		if snapshot.plannerStatistics[i] != c.PlannerStats.Load() {
+			return false
+		}
 	}
 	return true
 }
@@ -941,6 +1008,7 @@ func (t *table) showColumnsSnapshotMatches(snapshot *tableShowColumnsSnapshot, r
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnapshot {
 	result := make([]scm.Scmer, len(t.Columns))
 	distinctEstimates := make([]uint64, len(t.Columns))
+	plannerStatistics := make([]*columnPlannerStatistics, len(t.Columns))
 	columnNames := t.buildColumnNamesSnapshot()
 	for i, c := range t.Columns {
 		keyType := ""
@@ -960,12 +1028,14 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 			distinctEstimate = uint64(rowEstimate)
 		}
 		distinctEstimates[i] = distinctEstimate
-		result[i] = c.show(keyType, distinctEstimate, rowEstimate)
+		plannerStatistics[i] = c.PlannerStats.Load()
+		result[i] = c.show(keyType, distinctEstimate, rowEstimate, plannerStatistics[i])
 	}
 	snapshot := &tableShowColumnsSnapshot{
 		value:             scm.NewSlice(result),
 		rowEstimate:       rowEstimate,
 		distinctEstimates: distinctEstimates,
+		plannerStatistics: plannerStatistics,
 		columnNames:       columnNames,
 	}
 	if current := t.showColumnsSnapshot.Load(); current != nil {
@@ -1037,10 +1107,10 @@ func (t *table) ShowColumns() scm.Scmer {
 }
 
 func (c *column) Show(keyType string, t *table) scm.Scmer {
-	return c.show(keyType, uint64(c.distinctEstimateFor(t)), t.CountEstimate())
+	return c.show(keyType, uint64(c.distinctEstimateFor(t)), t.CountEstimate(), c.PlannerStats.Load())
 }
 
-func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint) scm.Scmer {
+func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint, plannerStats *columnPlannerStatistics) scm.Scmer {
 	dims := make([]scm.Scmer, len(c.Typdimensions))
 	for i, v := range c.Typdimensions {
 		dims[i] = scm.NewInt(int64(v))
@@ -1063,6 +1133,19 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint)
 	if c.AutoIncrement {
 		extra = "auto_increment"
 	}
+	statisticsKnown := plannerStats != nil
+	statisticsConfidence := 0.0
+	statisticsSource := "unknown"
+	nullFraction := scm.NewNil()
+	minEstimate := scm.NewNil()
+	maxEstimate := scm.NewNil()
+	if statisticsKnown {
+		statisticsConfidence = plannerStats.Confidence
+		statisticsSource = plannerStats.Source
+		nullFraction = scm.NewFloat(plannerStats.NullFraction)
+		minEstimate = plannerStats.MinEstimate
+		maxEstimate = plannerStats.MaxEstimate
+	}
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewString("Field"), scm.NewString(c.Name),
 		scm.NewString("Type"), scm.NewString(typ),
@@ -1077,6 +1160,18 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint)
 		scm.NewString("Comment"), scm.NewString(c.Comment),
 		scm.NewString("DistinctEstimate"), scm.NewInt(int64(distinctEstimate)),
 		scm.NewString("RowEstimate"), scm.NewInt(int64(rowEstimate)),
+		scm.NewString("StatisticsKnown"), scm.NewBool(statisticsKnown),
+		scm.NewString("StatisticsConfidence"), scm.NewFloat(statisticsConfidence),
+		scm.NewString("StatisticsSource"), scm.NewString(statisticsSource),
+		scm.NewString("DistinctEstimateSource"), scm.NewString(func() string {
+			if statisticsKnown {
+				return "rebuild"
+			}
+			return "fallback_row_count"
+		}()),
+		scm.NewString("NullFraction"), nullFraction,
+		scm.NewString("MinEstimate"), minEstimate,
+		scm.NewString("MaxEstimate"), maxEstimate,
 	})
 }
 
