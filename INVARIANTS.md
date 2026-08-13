@@ -111,12 +111,14 @@ p implies q  => T_R(p) is a subset of T_R(q)
 ```
 
 Ordinary set identities such as associativity, commutativity, distributivity,
-absorption, and factoring may therefore be used to generate equivalent
-candidate plans. For example,
+absorption, and factoring may therefore be used by planner developers to find
+and prove useful normalizations. For example,
 `(A intersect B) union (A intersect C) = A intersect (B union C)` can expose one
-shared selective scan instead of two. The optimizer should enumerate useful
-equivalent RecSet formulas, cost them, and lower the cheapest supported one.
-This is a general optimization method, not a rule tied to one SQL spelling.
+shared selective scan instead of two. Once such a transformation is proved, it
+belongs as a recognized pattern in a normalization pass over semantic
+primitives. The optimizer is not required to search arbitrary set formulas at
+query-compilation time. This is a general method for extending the optimizer,
+not a rule tied to one SQL spelling and not a mandate to execute a RecSet.
 
 A physical candidate RecSet need not always be exact. If `C_R(p)` is only a
 proven superset of `T_R(p)`, it is a safe scan boundary only while the original
@@ -157,9 +159,11 @@ T_R(x IN (Q_1 UNION ... UNION Q_n))
 ```
 
 That example is not the axiom itself. New syntactic corner cases should
-normalize to semantic primitives; RecSet algebra then supplies transformations
-and proof obligations, and the common lowerer chooses indexed probes, projected
-RecSets, driver order, and braking from statistics.
+normalize to semantic primitives. Developers may use RecSet algebra to derive
+and prove further normalization patterns; the common lowerer must still choose
+between ordinary scans with indexed probes, projected RecSets, driver order,
+and braking from statistics. A normalization justified using truth sets must
+never preselect RecSet execution.
 
 Complement and difference require extra care under SQL three-valued logic:
 `T_R(NOT p)` is not generally the complement of `T_R(p)` because `UNKNOWN` is

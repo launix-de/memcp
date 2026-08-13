@@ -1684,7 +1684,12 @@ physical membership probe. */
 		(define outer_sources (nth args 0))
 		(define lookup_keys (qassoc_get (gs_facts first_stage) (quote lookup-keys) '()))
 		(define outer_domain (gs_domain first_stage))
-		(define candidate_alias (concat "__exists_union_" (fnv_hash (serialize inner))))
+		/* The UNION subtree can contain many already-decorrelated stages. Hash its
+		serialization once and reuse the compact identity below; serializing that
+		large immutable tree twice made canonicalization scale with an avoidable
+		second full traversal. */
+		(define inner_hash (fnv_hash (serialize inner)))
+		(define candidate_alias (concat "__exists_union_" inner_hash))
 		(define union_input (make_union_block
 			(union_mode inner)
 			(map results (lambda (result)
@@ -1695,7 +1700,8 @@ physical membership probe. */
 				(list (quote alias) candidate_alias))))
 		(define keys (mapIndex (gs_keys first_stage) (lambda (i _key)
 			(list (quote get_column) candidate_alias false (concat "k" (string i)) false))))
-		(define stage_id (concat "exists-union:" (fnv_hash (serialize (list inner outer_domain lookup_keys)))))
+		(define stage_id (concat "exists-union:"
+			(fnv_hash (serialize (list inner_hash outer_domain lookup_keys)))))
 		(define stage (make_group_stage
 			stage_id
 			union_input
@@ -5797,10 +5803,7 @@ resulting tree in semantic order. */
 			(list (quote membership_candidate_estimate_capped) estimate_capped)
 			(list (quote membership_candidate_estimate_input) estimate_input)
 			(list (quote membership_order_limit) (qb_limit block))
-			(list (quote membership_order_limit_driver) ordered_driver)
-			(list (quote membership_cost_reason) (if (and (equal? class (quote broad)) ordered_driver)
-				(quote broad_membership_preserve_driver_order_limit)
-				(quote selective_membership_build_candidate_keyset)))))))
+			(list (quote membership_order_limit_driver) ordered_driver)))))
 
 (define stage_reorder_strategy (lambda (stage)
 	(match (qassoc_get (gs_facts stage) (quote purpose) nil)
@@ -5839,13 +5842,21 @@ resulting tree in semantic order. */
 		(gs_offset stage)
 		(merge (list (stage_reorder_telemetry stage) (gs_facts stage))))))
 
-(define candidate_reorder_strategy (lambda (telemetry single_source_driver)
-	(if (and
-		(or single_source_driver
-			(equal? (qassoc_get telemetry (quote membership_selectivity_class) nil) (quote broad)))
-		(qassoc_get telemetry (quote membership_order_limit_driver) false))
-		(quote driver_order_membership_probe)
-		(quote candidate_keyset))))
+(define candidate_reorder_strategy (lambda (telemetry)
+	(begin
+		(define estimated_rows (qassoc_get telemetry (quote membership_candidate_estimated_rows) nil))
+		(define candidate_rows (if (qassoc_get telemetry (quote membership_candidate_estimate_capped) false)
+			(qassoc_get telemetry (quote membership_candidate_estimate_input) nil)
+			estimated_rows))
+		(define driver_rows (qassoc_get telemetry (quote membership_driver_rows) nil))
+		/* UNION membership is already in a canonical semantic form here. Cost
+		the two supported implementations for every query shape: project the
+		candidate keys to a driver RecSet, or retain the driver scan and let its
+		per-row membership probes use autoindex. ORDER/LIMIT is an input to future
+		braking refinements, not permission for syntax to force either plan. */
+		(if (membership_projection_cost_preferred? candidate_rows driver_rows)
+			(quote candidate_keyset)
+			(quote driver_order_membership_probe)))))
 
 (define query_block_with_reorder_facts (lambda (block facts)
 	(make_query_block
@@ -5895,7 +5906,42 @@ in the canonicalization functions above. */
 				(or found (expr_contains_membership_truth? item))) false)
 			_ false))))
 
-(define membership_truth_projection_preferred? (lambda (block stage guarded_alternative)
+(define query_block_has_membership_truth_stage? (lambda (block)
+	(reduce (qb_stages block) (lambda (found stage)
+		(or found
+			(and (group_stage? stage)
+				(equal? (qassoc_get (gs_facts stage) (quote purpose) nil)
+					(quote in_membership)))))
+		false)))
+
+(define membership_estimated_work_rows (lambda (estimate fallback)
+	(if (nil? estimate)
+		fallback
+		(if (qassoc_get estimate (quote capped) false)
+			(coalesceNil (qassoc_get estimate (quote input) nil) fallback)
+			(coalesceNil (qassoc_get estimate (quote rows) nil) fallback)))))
+
+(define membership_driver_filter (lambda (condition)
+	/* Only top-level conjuncts which do not contain membership are guaranteed
+	to restrict every evaluation of the membership formula. Predicates inside
+	an OR branch cannot reduce the driver cost: a sibling may still admit the
+	row. Keeping this estimate conservative is preferable to choosing a RecSet
+	from an invalid branch-local selectivity assumption. */
+	(combine_where_terms
+		(filter (split_and_terms (coalesceNil condition true)) (lambda (term)
+			(not (expr_contains_membership_truth? term))))
+		true)))
+
+(define membership_projection_cost_preferred? (lambda (candidate_rows driver_rows)
+	(if (or (nil? candidate_rows) (nil? driver_rows))
+		false
+		/* Projection has fixed setup and per-key projection costs. Driver probing
+		uses the ordinary scan/autoindex path. These units are deliberately
+		simple and shared by every canonical membership shape; syntax recognition
+		must never select the physical representation. */
+		(< (+ 16 (* candidate_rows 4)) driver_rows))))
+
+(define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
 	(begin
 		(define input (gs_input stage))
 		/* Projection from the canonical group cache currently guarantees a
@@ -5906,36 +5952,20 @@ in the canonicalization functions above. */
 		(if (or (not (source_is_base_table? input)) (not (single_source? base_sources)))
 			false
 			(begin
-				/* A branch-local membership below OR cannot become a mandatory
-				stage join or driver boundary: another branch may accept the row.
-				Project it and keep recset_contains exactly inside its original
-				boolean branch. This is a semantic feasibility rule before cost. */
-				(if guarded_alternative
-					true
-					(begin
-						/* Statistics are needed only when both plans are semantically
-						possible. Avoid sampling for guarded alternatives: their boolean
-						position has already made the decision. */
-						(define estimate (if (source_is_base_table? input)
-							(planner_source_filter_estimate input
-								(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
-								512)
-							(planner_stage_filter_estimate input 512)))
-						(define estimated_rows (qassoc_get estimate (quote rows) nil))
-						(define input_rows (qassoc_get estimate (quote input) nil))
-						(define estimate_capped (qassoc_get estimate (quote capped) false))
-						(define candidate_rows (if estimate_capped input_rows estimated_rows))
-						(define driver (reduce (qb_sources block) (lambda (found src)
-							(if (not (nil? found)) found (if (source_is_base_table? src) src nil))) nil))
-						(define driver_rows (if (nil? driver) nil (planner_source_row_count driver)))
-						/* Projection pays once per RHS key; probing pays while walking the
-						driver. A capped sample represents at least the sampled rows, so use the
-						RHS input as the conservative projection cost. Unknown estimates prefer
-						the structurally safe projected plan; later adaptive costing can replace
-						this static comparison without changing the canonical primitive. */
-						(if (or (nil? candidate_rows) (nil? driver_rows))
-							true
-							(<= (* candidate_rows 4) driver_rows)))))))))
+				(define candidate_estimate (planner_source_filter_estimate input
+					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+					512))
+				(define candidate_rows (membership_estimated_work_rows candidate_estimate
+					(planner_source_row_count input)))
+				(define driver (reduce (qb_sources block) (lambda (found src)
+					(if (not (nil? found)) found (if (source_is_base_table? src) src nil))) nil))
+				(define driver_total_rows (if (nil? driver) nil (planner_source_row_count driver)))
+				(define driver_estimate (if (nil? driver)
+					nil
+					(planner_source_filter_estimate driver
+						(membership_driver_filter (qb_where block)) 512)))
+				(define driver_rows (membership_estimated_work_rows driver_estimate driver_total_rows))
+				(membership_projection_cost_preferred? candidate_rows driver_rows)))))))
 
 (define choose_membership_truth_items (lambda (block items guarded_alternative)
 	(match items
@@ -5972,10 +6002,12 @@ in the canonicalization functions above. */
 	(choose_membership_truth_expr_using block expr false)))
 
 (define query_block_with_physical_membership_choices (lambda (block)
-	(if (not (expr_contains_membership_truth? (qb_where block)))
+	(if (or (not (query_block_has_membership_truth_stage? block))
+		(not (expr_contains_membership_truth? (qb_where block))))
 		/* Keep unrelated query blocks byte-for-byte unchanged. Besides making
-		this phase boundary explicit, that prevents future membership planner
-		extensions from perturbing EXISTS/scalar stage preparation. */
+		this phase boundary explicit, the stage-purpose check avoids recursively
+		walking large EXISTS/scalar expressions which cannot contain the
+		canonical membership primitive. */
 		block
 		(begin
 			(define chosen (choose_membership_truth_expr block (qb_where block)))
@@ -6301,13 +6333,17 @@ in the canonicalization functions above. */
 					(begin
 						(define stage (stage_by_id (qb_stages block) (stage_output_relation_id (source_relation candidate))))
 						(define candidate_telemetry (candidate_reorder_telemetry stage sources block))
-						(define strategy (candidate_reorder_strategy candidate_telemetry
-							(single_source? (without_source_alias sources (source_alias candidate)))))
+						(define strategy (candidate_reorder_strategy candidate_telemetry))
+						(define costed_telemetry (qassoc_set candidate_telemetry
+							(quote membership_cost_reason)
+							(if (equal? strategy (quote candidate_keyset))
+								(quote projected_membership_cost)
+								(quote indexed_driver_probe_cost))))
 						(define facts (merge (list
 							(query_block_reorder_telemetry block)
 							(cons
 								(list (quote membership_plan_strategy) strategy)
-								candidate_telemetry))))
+								costed_telemetry))))
 						(query_block_with_reorder_facts
 							(make_query_block
 								(qb_schema block)
