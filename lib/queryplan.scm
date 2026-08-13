@@ -11571,12 +11571,31 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define query_block_without_stages_after_prepare (lambda (block)
 	(query_block_without_stages_after_prepare_using (qb_stages block) block)))
 
+(define group_stage_with_eager_prepared_metadata (lambda (stage)
+	(if (not (group_stage? stage))
+		stage
+		(make_group_stage
+			(gs_id stage)
+			(gs_input stage)
+			(gs_domain stage)
+			(gs_keys stage)
+			(gs_aggregates stage)
+			(gs_having stage)
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			(qassoc_set (gs_facts stage) (quote eager_prepared) true)))))
+
 (define query_block_without_stages_after_eager_prepare_using (lambda (stages block)
 	(begin
 		(define available_stages (if (lowering_catalog? stages)
 			(lowering_catalog_stages stages)
 			(unique_stages_by_id (merge (list stages (qb_stages block))))))
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
+		(define source_stages (unique_stages_by_id (merge (list
+			(available_stage_outputs_from_sources_using stage_lookup (qb_sources block))
+			(group_cache_stages_from_sources stage_lookup (qb_sources block))))))
 		(make_query_block
 			(qb_schema block)
 			(physicalize_stage_output_sources stage_lookup (qb_sources block))
@@ -11589,7 +11608,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_offset block)
 			(qb_hidden block)
 			'()
-			(query_block_facts_with_stage_catalog block '())))))
+			(query_block_facts_with_stage_catalog block
+				(map source_stages group_stage_with_eager_prepared_metadata))))))
 
 (define query_block_without_stages_after_eager_prepare_with_constant_scalars_first (lambda (stages block)
 	(begin
@@ -12713,7 +12733,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 	(begin
 		(define table_expr (source_table_expr src))
 		(define group_cache_stage (stage_for_group_cache_source stages src))
-		(if (nil? group_cache_stage)
+		/* Eager preparation removes executable stages but retains their metadata so
+		physical lowering can still prove group-key uniqueness and cardinality. */
+		(if (or (nil? group_cache_stage)
+			(qassoc_get (gs_facts group_cache_stage) (quote eager_prepared) false))
 			table_expr
 			(list (quote !begin)
 				(stage_prepare_call_expr group_cache_stage)
