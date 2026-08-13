@@ -50,7 +50,11 @@ except Exception as e:
     sys.exit(2)
 
 import json
+import hashlib
+import math
+import platform
 import socket
+import statistics
 import subprocess
 import time
 import multiprocessing
@@ -176,6 +180,24 @@ PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
+# Wall-clock budgets are expressed for a reference CPU.  A fixed SHA-256
+# workload, measured before MemCP starts in the full test hook, maps that budget
+# to the current machine.  The workload is deliberately independent of MemCP:
+# a query-engine regression must not make its own allowance larger.
+PERFORMANCE_REFERENCE_NS_PER_MIB = 450_000
+PERFORMANCE_CALIBRATION_SAMPLES = 5
+PERFORMANCE_SCALE_MIN = 1.0
+PERFORMANCE_SCALE_MAX = 16.0
+PERFORMANCE_CALIBRATION_ROUNDS = {
+    "x86_64": 32,
+    "aarch64": 16,
+    "armv7l": 8,
+    "other": 16,
+}
+PERFORMANCE_SCALE_ENV = "MEMCP_TEST_PERFORMANCE_SCALE"
+PERFORMANCE_ARCH_ENV = "MEMCP_TEST_PERFORMANCE_ARCH"
+PERFORMANCE_MEASURED_NS_ENV = "MEMCP_TEST_PERFORMANCE_MEASURED_NS"
+PERFORMANCE_REFERENCE_NS_ENV = "MEMCP_TEST_PERFORMANCE_REFERENCE_NS"
 # Hard wall-clock limit per query — a GENEROUS backstop, not a precise gate.
 # Wall-clock is hardware-dependent (a Raspberry Pi is ~10x slower), so this is
 # only meant to catch gross runaways. The default gives a fast query (<100ms
@@ -195,6 +217,93 @@ MEMCP_START_TIMEOUT = int(os.environ.get("MEMCP_START_TIMEOUT", "180"))
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
 FAILURE_MAP_KEY = "failures"
+
+
+def performance_architecture(machine: Optional[str] = None) -> str:
+    """Return the stable calibration profile for the execution architecture."""
+    value = (machine or platform.machine()).strip().lower()
+    aliases = {"amd64": "x86_64", "arm64": "aarch64", "armv6l": "armv7l"}
+    value = aliases.get(value, value)
+    return value if value in PERFORMANCE_CALIBRATION_ROUNDS else "other"
+
+
+def performance_scale_from_samples(architecture: str, samples_ns: List[int]) -> Dict[str, Any]:
+    """Build a bounded machine scale from fixed-work calibration samples."""
+    profile = performance_architecture(architecture)
+    if not samples_ns or any(sample <= 0 for sample in samples_ns):
+        raise ValueError("performance calibration requires positive samples")
+    measured_ns = int(statistics.median(samples_ns))
+    reference_ns = PERFORMANCE_REFERENCE_NS_PER_MIB * PERFORMANCE_CALIBRATION_ROUNDS[profile]
+    raw_scale = measured_ns / reference_ns
+    if raw_scale > PERFORMANCE_SCALE_MAX:
+        raise ValueError(
+            f"performance calibration {raw_scale:.2f}x exceeds supported maximum "
+            f"{PERFORMANCE_SCALE_MAX:.0f}x"
+        )
+    return {
+        "architecture": profile,
+        "scale": max(PERFORMANCE_SCALE_MIN, raw_scale),
+        "measured_ns": measured_ns,
+        "reference_ns": reference_ns,
+    }
+
+
+def calibrate_performance_scale(machine: Optional[str] = None) -> Dict[str, Any]:
+    """Measure fixed CPU work without executing any MemCP or test code."""
+    profile = performance_architecture(machine)
+    rounds = PERFORMANCE_CALIBRATION_ROUNDS[profile]
+    payload = bytes(range(256)) * 4096  # exactly one MiB
+
+    # Warm caches and crypto dispatch before collecting the robust median.
+    hashlib.sha256(payload).digest()
+    samples_ns = []
+    for _sample in range(PERFORMANCE_CALIBRATION_SAMPLES):
+        started_ns = time.perf_counter_ns()
+        for _round in range(rounds):
+            hashlib.sha256(payload).digest()
+        samples_ns.append(time.perf_counter_ns() - started_ns)
+    return performance_scale_from_samples(profile, samples_ns)
+
+
+def load_performance_scale() -> Dict[str, Any]:
+    """Load the hook's pre-server calibration or measure one for direct runs."""
+    serialized = os.environ.get(PERFORMANCE_SCALE_ENV)
+    if serialized is None:
+        return calibrate_performance_scale()
+
+    profile = performance_architecture(os.environ.get(PERFORMANCE_ARCH_ENV, ""))
+    if profile != performance_architecture():
+        raise ValueError("performance calibration architecture does not match this machine")
+    scale = float(serialized)
+    measured_ns = int(os.environ[PERFORMANCE_MEASURED_NS_ENV])
+    reference_ns = int(os.environ[PERFORMANCE_REFERENCE_NS_ENV])
+    expected_reference = PERFORMANCE_REFERENCE_NS_PER_MIB * PERFORMANCE_CALIBRATION_ROUNDS[profile]
+    if reference_ns != expected_reference:
+        raise ValueError("performance calibration reference does not match the protected constant")
+    expected_scale = max(PERFORMANCE_SCALE_MIN, measured_ns / reference_ns)
+    if not (PERFORMANCE_SCALE_MIN <= scale <= PERFORMANCE_SCALE_MAX):
+        raise ValueError("performance calibration scale is outside protected bounds")
+    if not math.isclose(scale, expected_scale, rel_tol=1e-9, abs_tol=1e-12):
+        raise ValueError("performance calibration scale does not match its measurements")
+    return {
+        "architecture": profile,
+        "scale": scale,
+        "measured_ns": measured_ns,
+        "reference_ns": reference_ns,
+    }
+
+
+def publish_performance_scale(calibration: Dict[str, Any]) -> None:
+    """Pass one pre-server calibration unchanged to suite subprocesses."""
+    os.environ[PERFORMANCE_ARCH_ENV] = calibration["architecture"]
+    os.environ[PERFORMANCE_SCALE_ENV] = format(calibration["scale"], ".17g")
+    os.environ[PERFORMANCE_MEASURED_NS_ENV] = str(calibration["measured_ns"])
+    os.environ[PERFORMANCE_REFERENCE_NS_ENV] = str(calibration["reference_ns"])
+
+
+def scaled_wall_clock_limit_ms(seconds: float, calibration: Dict[str, Any]) -> float:
+    """Translate a reference-machine wall-clock budget to this machine."""
+    return seconds * 1000.0 * calibration["scale"]
 
 
 def is_error_response(response: Optional[requests.Response]) -> bool:
@@ -316,7 +425,7 @@ def start_ram_monitor():
     return t
 
 class SQLTestRunner:
-    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False, fail_fast=False):
+    def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False, fail_fast=False, performance_calibration=None):
         self.base_url = base_url
         self.username = username
         self.password = password
@@ -342,6 +451,7 @@ class SQLTestRunner:
         self.fail_fast = fail_fast
         self.current_spec_file = None
         self._config_loaded = False
+        self.performance_calibration = performance_calibration or load_performance_scale()
 
     def set_restart_handler(self, fn):
         """Install a restart handler callable that restarts MemCP (returns True on success)."""
@@ -1161,7 +1271,12 @@ class SQLTestRunner:
         # DEFAULT_MAX_TIME_SEC; slower queries must declare a higher limit so the
         # time budget stays explicit and visible in the test spec.
         if not is_perf_test and response.status_code == 200:
-            hard_limit_ms = hard_limit_sec * 1000.0
+            # max_time is a reference-machine budget.  Only its wall-clock
+            # enforcement is machine-scaled; correctness, plan size, planner
+            # metrics, data volume, and test criticality remain unchanged.
+            hard_limit_ms = scaled_wall_clock_limit_ms(
+                hard_limit_sec, self.performance_calibration
+            )
             if elapsed_ms > hard_limit_ms:
                 diag = self._run_on_fail(test_case, database)
                 return self._record_fail(name, f"Too slow (hard limit): {elapsed_ms:.1f}ms > {hard_limit_ms:.0f}ms", query, response,
@@ -1376,6 +1491,13 @@ class SQLTestRunner:
 
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
         print(f"💾 Database: {database}")
+        calibration = self.performance_calibration
+        print(
+            "⚖️  Wall-clock scale: "
+            f"{calibration['scale']:.2f}x ({calibration['architecture']}, "
+            f"reference {calibration['measured_ns'] / 1_000_000:.1f}/"
+            f"{calibration['reference_ns'] / 1_000_000:.1f}ms)"
+        )
 
         self.ensure_database(database)
 
@@ -1823,6 +1945,11 @@ def main():
         print_usage()
         sys.exit(1)
 
+    # Calibrate before a candidate MemCP process exists.  Publishing the
+    # validated result makes all later suite workers use exactly this factor.
+    performance_calibration = load_performance_scale()
+    publish_performance_scale(performance_calibration)
+
     spec_files, port, connect_only, log_times, jobs, fail_fast = parse_cli_args(sys.argv[1:])
 
     if not spec_files:
@@ -1854,7 +1981,12 @@ def main():
                 print("❌ Failed to start MemCP")
                 sys.exit(1)
 
-    runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=fail_fast)
+    runner = SQLTestRunner(
+        base_url,
+        log_times=log_times,
+        fail_fast=fail_fast,
+        performance_calibration=performance_calibration,
+    )
     if not connect_only:
         def restart_handler() -> bool:
             nonlocal memcp_process

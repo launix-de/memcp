@@ -77,6 +77,32 @@ if ! go build $build_flags -o memcp; then
     exit 1
 fi
 
+# Calibrate fixed, engine-independent CPU work before MemCP starts.  Every
+# suite process inherits this one machine factor, so a MemCP regression cannot
+# slow the calibrator and thereby enlarge its own wall-clock allowance.
+read -r performance_arch performance_scale performance_measured_ns performance_reference_ns < <(
+  python3 - <<'PY'
+from run_sql_tests import calibrate_performance_scale
+
+calibration = calibrate_performance_scale()
+print(
+    calibration["architecture"],
+    format(calibration["scale"], ".17g"),
+    calibration["measured_ns"],
+    calibration["reference_ns"],
+)
+PY
+)
+if [ -z "$performance_scale" ]; then
+  echo "❌ Performance calibration failed, commit aborted"
+  exit 1
+fi
+export MEMCP_TEST_PERFORMANCE_ARCH="$performance_arch"
+export MEMCP_TEST_PERFORMANCE_SCALE="$performance_scale"
+export MEMCP_TEST_PERFORMANCE_MEASURED_NS="$performance_measured_ns"
+export MEMCP_TEST_PERFORMANCE_REFERENCE_NS="$performance_reference_ns"
+echo "⚖️  Wall-clock calibration: ${performance_scale}x (${performance_arch})"
+
 resolve_test_selection() {
   local selected=""
   local pattern resolved
