@@ -26,6 +26,11 @@ setup:
   - sql: "DROP TABLE IF EXISTS sq_large_emp"
   - sql: "DROP TABLE IF EXISTS sq_dept"
   - sql: "DROP TABLE IF EXISTS sq_emp"
+  - sql: "DROP TABLE IF EXISTS sq_order_product"
+  - sql: "DROP TABLE IF EXISTS sq_order_vendor"
+  - sql: "DROP TABLE IF EXISTS sq_order_offer"
+  - sql: "DROP TABLE IF EXISTS sq_order_country"
+  - sql: "DROP TABLE IF EXISTS sq_order_region"
   - sql: |
       CREATE TABLE sq_dept (did INT, dname VARCHAR(30))
   - sql: |
@@ -45,11 +50,96 @@ setup:
         (8, 'Henry', NULL, 50000)
   - sql: "CREATE TABLE sq_large_dept (did INT)"
   - sql: "CREATE TABLE sq_large_emp (did INT, salary INT)"
+  - sql: "CREATE TABLE sq_order_product (id INT PRIMARY KEY, size INT, kind TEXT)"
+  - sql: "CREATE TABLE sq_order_vendor (id INT PRIMARY KEY, country_id INT, name TEXT, balance INT)"
+  - sql: "CREATE TABLE sq_order_offer (product_id INT, vendor_id INT, cost INT)"
+  - sql: "CREATE TABLE sq_order_country (id INT PRIMARY KEY, region_id INT, name TEXT)"
+  - sql: "CREATE TABLE sq_order_region (id INT PRIMARY KEY, name TEXT)"
+  - sql: "INSERT INTO sq_order_product VALUES (1,15,'small alloy'),(2,15,'small alloy')"
+  - sql: "INSERT INTO sq_order_vendor VALUES (10,100,'vendor a',200),(20,100,'vendor b',200),(30,200,'vendor c',400)"
+  - sql: "INSERT INTO sq_order_offer VALUES (1,10,50),(1,20,40),(2,10,30),(2,30,20)"
+  - sql: "INSERT INTO sq_order_country VALUES (100,1000,'country a'),(200,2000,'country b')"
+  - sql: "INSERT INTO sq_order_region VALUES (1000,'north'),(2000,'south')"
   - scm: |
       (insert (table "memcp-tests" "sq_large_dept") '("did")
         (map (produceN 1001) (lambda (i) (list i))))
 
 test_cases:
+
+  - name: "Ordered multi-join with correlated aggregate filter"
+    sql: |
+      SELECT v.balance, c.name AS country_name, v.name AS vendor_name, p.id
+      FROM sq_order_product p, sq_order_vendor v, sq_order_offer o,
+           sq_order_country c, sq_order_region r
+      WHERE p.id = o.product_id
+        AND v.id = o.vendor_id
+        AND v.country_id = c.id
+        AND c.region_id = r.id
+        AND p.size = 15
+        AND p.kind LIKE '%alloy'
+        AND r.name = 'north'
+        AND o.cost = (
+          SELECT MIN(o2.cost)
+          FROM sq_order_offer o2, sq_order_vendor v2,
+               sq_order_country c2, sq_order_region r2
+          WHERE p.id = o2.product_id
+            AND v2.id = o2.vendor_id
+            AND v2.country_id = c2.id
+            AND c2.region_id = r2.id
+            AND r2.name = 'north'
+        )
+      ORDER BY v.balance DESC, c.name, v.name, p.id
+      LIMIT 100
+    expect:
+      rows: 2
+      data:
+        - balance: 200
+          country_name: "country a"
+          vendor_name: "vendor a"
+          id: 2
+        - balance: 200
+          country_name: "country a"
+          vendor_name: "vendor b"
+          id: 1
+
+  - name: "Ordered correlated join uses a storage-backed intermediate relation"
+    sql: |
+      EXPLAIN SELECT v.balance, c.name AS country_name, v.name AS vendor_name, p.id
+      FROM sq_order_product p, sq_order_vendor v, sq_order_offer o,
+           sq_order_country c, sq_order_region r
+      WHERE p.id = o.product_id
+        AND v.id = o.vendor_id
+        AND v.country_id = c.id
+        AND c.region_id = r.id
+        AND p.size = 15
+        AND p.kind LIKE '%alloy'
+        AND r.name = 'north'
+        AND o.cost = (
+          SELECT MIN(o2.cost)
+          FROM sq_order_offer o2, sq_order_vendor v2,
+               sq_order_country c2, sq_order_region r2
+          WHERE p.id = o2.product_id
+            AND v2.id = o2.vendor_id
+            AND v2.country_id = c2.id
+            AND c2.region_id = r2.id
+            AND r2.name = 'north'
+        )
+      ORDER BY v.balance DESC, c.name, v.name, p.id
+      LIMIT 100
+    expect:
+      rows: 1
+      result_contains:
+        - ".join-order:"
+        - "scan_order"
+        - "droptable"
+      result_not_contains:
+        - "(sort rows"
+
+  - name: "Ordered join intermediate relation is query-local"
+    sql: "SHOW TABLES"
+    expect:
+      result_not_contains:
+        - ".join-order:"
 
   # === Scalar subquery in SELECT ===
 
