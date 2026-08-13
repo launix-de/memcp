@@ -58,6 +58,23 @@ func LookupCollate(fn func(...Scmer) Scmer) (string, bool, bool) {
 
 /* SQL LIKE operator implementation on strings */
 func StrLike(str, pattern string) bool {
+	if !strings.ContainsAny(pattern, "%_") {
+		return str == pattern
+	}
+	if !strings.Contains(pattern, "_") {
+		wildcards := strings.Count(pattern, "%")
+		if wildcards == 1 {
+			if pattern[0] == '%' {
+				return strings.HasSuffix(str, pattern[1:])
+			}
+			if pattern[len(pattern)-1] == '%' {
+				return strings.HasPrefix(str, pattern[:len(pattern)-1])
+			}
+		}
+		if wildcards == 2 && pattern[0] == '%' && pattern[len(pattern)-1] == '%' {
+			return strings.Contains(str, pattern[1:len(pattern)-1])
+		}
+	}
 	for {
 		// boundary check
 		if len(pattern) == 0 {
@@ -96,6 +113,23 @@ func StrLike(str, pattern string) bool {
 			}
 		}
 	}
+}
+
+// StrLikeFold retains the established Unicode lower-case behavior. StrLike's
+// fast paths then dispatch exact, prefix, suffix and contains patterns to Go's
+// optimized string primitives.
+func StrLikeFold(str, pattern string) bool {
+	return StrLike(strings.ToLower(str), strings.ToLower(pattern))
+}
+
+// StrLikeCollation is the canonical LIKE implementation shared by the Scheme
+// builtin and storage match indexes. Keeping both paths here guarantees that an
+// exact cached match set has the same case semantics as residual evaluation.
+func StrLikeCollation(str, pattern, collation string) bool {
+	if strings.Contains(strings.ToLower(collation), "_ci") {
+		return StrLikeFold(str, pattern)
+	}
+	return StrLike(str, pattern)
 }
 
 func TransformFromJSON(a_ any) Scmer {
@@ -267,11 +301,7 @@ func init_strings() {
 			if len(a) > 2 {
 				collation = strings.ToLower(String(a[2]))
 			}
-			if strings.Contains(collation, "_ci") {
-				value = strings.ToLower(value)
-				pattern = strings.ToLower(pattern)
-			}
-			return NewBool(StrLike(value, pattern))
+			return NewBool(StrLikeCollation(value, pattern, collation))
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "pattern with % and _ in them"}, &TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "collation in which to compare them", Optional: true}},
