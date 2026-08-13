@@ -497,6 +497,13 @@ test_cases:
         - 'join_plan'
         - 'join_estimated_cost'
         - 'join_estimated_rows'
+        - 'join_cost'
+        - 'startup_ns'
+        - 'probe_ns'
+        - 'memory_bytes'
+        - 'confidence'
+        - 'execution_ns'
+        - 'total_ns'
         - 'join_dp_state_budget'
 
   - name: "Budgeted twelve-way star preserves execution results"
