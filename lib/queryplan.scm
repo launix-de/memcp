@@ -5507,30 +5507,35 @@ the fallback still evaluates the same execution-cost function. */
 				(lambda (term) (not (contains? owned_exprs term))))
 			true))))
 
-(define join_optimizer_tree_without_aliases (lambda (tree removed_aliases)
+(define join_optimizer_tree_without_aliases_with_aliases (lambda (tree removed_aliases)
 	(match tree
-		((symbol join-leaf) alias) (if (contains? removed_aliases alias) nil tree)
-		((quote join-leaf) alias) (if (contains? removed_aliases alias) nil tree)
-		((symbol join-leaf) alias _predicates) (if (contains? removed_aliases alias) nil tree)
-		((quote join-leaf) alias _predicates) (if (contains? removed_aliases alias) nil tree)
+		((symbol join-leaf) alias) (if (contains? removed_aliases alias) (list nil '()) (list tree (list alias)))
+		((quote join-leaf) alias) (if (contains? removed_aliases alias) (list nil '()) (list tree (list alias)))
+		((symbol join-leaf) alias _predicates) (if (contains? removed_aliases alias) (list nil '()) (list tree (list alias)))
+		((quote join-leaf) alias _predicates) (if (contains? removed_aliases alias) (list nil '()) (list tree (list alias)))
 		((symbol join-node) kind left right predicates)
 		(begin
-			(define kept_left (join_optimizer_tree_without_aliases left removed_aliases))
-			(define kept_right (join_optimizer_tree_without_aliases right removed_aliases))
-			(if (nil? kept_left) kept_right
-				(if (nil? kept_right) kept_left
+			(define left_result (join_optimizer_tree_without_aliases_with_aliases left removed_aliases))
+			(define right_result (join_optimizer_tree_without_aliases_with_aliases right removed_aliases))
+			(define kept_left (car left_result))
+			(define kept_right (car right_result))
+			(if (nil? kept_left) right_result
+				(if (nil? kept_right) left_result
 					(begin
-						(define kept_aliases (merge (list
-							(join_optimizer_tree_aliases kept_left)
-							(join_optimizer_tree_aliases kept_right))))
-						(make_join_optimizer_node kind kept_left kept_right
-							(filter predicates (lambda (predicate)
-								(join_optimizer_alias_subset?
-									(join_order_pred_aliases predicate) kept_aliases))))))))
+						(define kept_aliases (merge (list (cadr left_result) (cadr right_result))))
+						(list
+							(make_join_optimizer_node kind kept_left kept_right
+								(filter predicates (lambda (predicate)
+									(join_optimizer_alias_subset?
+										(join_order_pred_aliases predicate) kept_aliases))))
+							kept_aliases)))))
 		((quote join-node) kind left right predicates)
-		(join_optimizer_tree_without_aliases
+		(join_optimizer_tree_without_aliases_with_aliases
 			(make_join_optimizer_node kind left right predicates) removed_aliases)
 		_ (neumann_fail "build_queryplan" "malformed logical join plan while removing consumed sources"))))
+
+(define join_optimizer_tree_without_aliases (lambda (tree removed_aliases)
+	(car (join_optimizer_tree_without_aliases_with_aliases tree removed_aliases))))
 
 (define join_optimizer_facts_without_aliases (lambda (facts removed_aliases)
 	(begin
@@ -14115,7 +14120,10 @@ either bound a real row or supplied the synthetic NULL row. */
 		(define ordered_sources (join_optimizer_sources_for_order all_sources ordered_aliases))
 		(define src (car ordered_sources))
 		(define remaining_sources (cdr ordered_sources))
-		(define remaining_plan (physical_join_plan_for_sources remaining_sources))
+		/* The ordered driver is consumed here. Preserve the optimizer's remaining
+		subtree instead of rebuilding a left-deep tree from the source catalog. */
+		(define remaining_plan (join_optimizer_tree_without_aliases
+			plan (list (source_alias src))))
 		(define alias (source_alias src))
 		(define condition_parts (physical_partition_condition default_alias src remaining_sources final_condition))
 		(define local_condition (nth condition_parts 0))
