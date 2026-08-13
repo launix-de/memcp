@@ -20,13 +20,15 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS trace_limit_output"
+  - sql: "DROP TABLE IF EXISTS trace_limit_value"
   - sql: "DROP TABLE IF EXISTS trace_limit_file"
   - sql: "DROP TABLE IF EXISTS trace_limit_parent"
   - sql: "DROP TABLE IF EXISTS trace_limit_label"
   - sql: |
       CREATE TABLE trace_limit_parent (
         id INT PRIMARY KEY,
-        label_id INT
+        label_id INT,
+        value_id INT
       )
   - sql: |
       CREATE TABLE trace_limit_label (
@@ -39,12 +41,18 @@ setup:
         label VARCHAR(64)
       )
   - sql: |
+      CREATE TABLE trace_limit_value (
+        id INT PRIMARY KEY,
+        rank_value INT
+      )
+  - sql: |
       CREATE TABLE trace_limit_file (
         id INT PRIMARY KEY,
         uploaded_at INT
       )
-  - sql: "INSERT INTO trace_limit_parent (id, label_id) VALUES (1, 10), (2, 20)"
+  - sql: "INSERT INTO trace_limit_parent (id, label_id, value_id) VALUES (1, 10, 100), (2, 20, 200)"
   - sql: "INSERT INTO trace_limit_label (id, label) VALUES (10, 'zeta'), (20, 'alpha')"
+  - sql: "INSERT INTO trace_limit_value (id, rank_value) VALUES (100, 1), (200, 2)"
   - sql: "INSERT INTO trace_limit_file (id, uploaded_at) VALUES (100, 500), (200, 900)"
 
 test_cases:
@@ -75,6 +83,63 @@ test_cases:
       data:
         - id: 1
           label: "zeta"
+  - name: "INSERT SELECT streams a scalar ordered derived relation"
+    max_time: 1.0
+    max_plan_size: 30000
+    sql: |
+      INSERT INTO trace_limit_output (id, label)
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY (
+          SELECT ranked.rank_value
+          FROM trace_limit_value ranked
+          WHERE ranked.id = parent.value_id
+          LIMIT 1
+        ) DESC, label.label ASC, parent.id ASC
+        LIMIT 1
+      ) candidate
+      WHERE NOT EXISTS (
+        SELECT TRUE
+        FROM trace_limit_output present
+        WHERE present.id = candidate.id
+      )
+    expect:
+      affected_rows: 1
+  - name: "Scalar ordered derived INSERT stores the selected row"
+    sql: "SELECT id, label FROM trace_limit_output ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          label: "zeta"
+        - id: 2
+          label: "alpha"
+  - name: "Scalar ordered derived relation stays in ordered scan operators"
+    sql: |
+      EXPLAIN
+      SELECT candidate.id, candidate.label
+      FROM (
+        SELECT parent.id, label.label
+        FROM trace_limit_parent parent
+        LEFT JOIN trace_limit_label label ON label.id = parent.label_id
+        ORDER BY (
+          SELECT ranked.rank_value
+          FROM trace_limit_value ranked
+          WHERE ranked.id = parent.value_id
+          LIMIT 1
+        ) DESC, label.label ASC, parent.id ASC
+        LIMIT 1
+      ) candidate
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "(sort rows"
+        - "(slice sorted"
   - name: "INSERT SELECT reduces an ordered join with a scalar lookup key"
     max_time: 1.0
     max_plan_size: 20000
@@ -124,6 +189,18 @@ test_cases:
       data:
         - id: 1
           label: "zeta"
+  - name: "Derived pagination bounds reuse one canonical window column"
+    scm: |
+      (begin
+        (define first_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT page.id FROM (SELECT source.id FROM trace_limit_parent source ORDER BY source.value_id LIMIT 2 OFFSET 1) page")))
+        (define later_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT renamed.id FROM (SELECT base.id FROM trace_limit_parent base ORDER BY base.value_id LIMIT 5 OFFSET 1) renamed")))
+        (define first_column (regexp_replace first_plan ".*(__orc_derived_row_number_[0-9a-f]+).*" "$1"))
+        (define later_column (regexp_replace later_plan ".*(__orc_derived_row_number_[0-9a-f]+).*" "$1"))
+        (if (equal? first_column later_column)
+          true
+          (error "pagination bounds fragmented the derived ORC column"))))
   - name: "Empty multi-source derived LIMIT returns no row"
     sql: |
       SELECT candidate.id, candidate.label
@@ -160,6 +237,7 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_limit_output"
+  - sql: "DROP TABLE IF EXISTS trace_limit_value"
   - sql: "DROP TABLE IF EXISTS trace_limit_file"
   - sql: "DROP TABLE IF EXISTS trace_limit_parent"
   - sql: "DROP TABLE IF EXISTS trace_limit_label"

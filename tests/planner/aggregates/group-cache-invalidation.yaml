@@ -106,6 +106,40 @@ test_cases:
       result_contains:
         - "memory"
 
+  - name: "Equivalent GROUP queries share carrier and aggregate column names"
+    scm: |
+      (begin
+        (define plan_a (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT a.dept, SUM(a.salary) AS total FROM sc_base a WHERE a.active GROUP BY a.dept")))
+        (define plan_b (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT renamed.dept, SUM(renamed.salary) AS total FROM sc_base renamed WHERE renamed.active GROUP BY renamed.dept")))
+        (define carrier_a (regexp_replace plan_a ".*(\\.grp:sc_base:[0-9a-f]+).*" "$1"))
+        (define carrier_b (regexp_replace plan_b ".*(\\.grp:sc_base:[0-9a-f]+).*" "$1"))
+        (define aggregate_a (regexp_replace plan_a ".*(agg_[0-9a-f]+).*" "$1"))
+        (define aggregate_b (regexp_replace plan_b ".*(agg_[0-9a-f]+).*" "$1"))
+        (if (and
+          (equal? carrier_a carrier_b)
+          (strlike plan_a (concat "%" aggregate_b "%"))
+          (strlike plan_b (concat "%" aggregate_a "%")))
+          true
+          (error (concat "equivalent GROUP plans did not reuse canonical helper names: "
+            carrier_a "/" aggregate_a " != " carrier_b "/" aggregate_b)))))
+
+  - name: "Different aggregates use different canonical columns"
+    scm: |
+      (begin
+        (define sum_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT a.dept, SUM(a.salary) AS total FROM sc_base a GROUP BY a.dept")))
+        (define count_plan (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT a.dept, COUNT(a.salary) AS total FROM sc_base a GROUP BY a.dept")))
+        (define sum_carrier (regexp_replace sum_plan ".*(\\.grp:sc_base:[0-9a-f]+).*" "$1"))
+        (define count_carrier (regexp_replace count_plan ".*(\\.grp:sc_base:[0-9a-f]+).*" "$1"))
+        (define sum_column (regexp_replace sum_plan ".*(agg_[0-9a-f]+).*" "$1"))
+        (define count_column (regexp_replace count_plan ".*(agg_[0-9a-f]+).*" "$1"))
+        (if (and (equal? sum_carrier count_carrier) (not (equal? sum_column count_column)))
+          true
+          (error "aggregate selection changed the carrier or reused one helper column"))))
+
   # === INSERT new rows into base table ===
   - name: "Insert new Engineering employee"
     sql: "INSERT INTO sc_base (id, dept, salary, active) VALUES (6, 'Engineering', 300, true)"
@@ -441,6 +475,22 @@ test_cases:
   - name: "Insert employees"
     sql: "INSERT INTO sc_emp (id, dept_id, salary) VALUES (1, 1, 100), (2, 1, 200), (3, 2, 150)"
 
+  - name: "Equivalent joined GROUP queries share carrier and aggregate column names"
+    scm: |
+      (begin
+        (define plan_a (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT d.name, SUM(e.salary) FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name")))
+        (define plan_b (serialize (parse_sql "memcp-tests"
+          "EXPLAIN SELECT department.name, SUM(employee.salary) FROM sc_emp employee JOIN sc_dept department ON department.id = employee.dept_id GROUP BY department.name")))
+        (define carrier_a (regexp_replace plan_a ".*(\\.grp:\\.prejoin:[0-9a-f]+:[0-9a-f]+).*" "$1"))
+        (define carrier_b (regexp_replace plan_b ".*(\\.grp:\\.prejoin:[0-9a-f]+:[0-9a-f]+).*" "$1"))
+        (define aggregate_a (regexp_replace plan_a ".*(agg_[0-9a-f]+).*" "$1"))
+        (define aggregate_b (regexp_replace plan_b ".*(agg_[0-9a-f]+).*" "$1"))
+        (if (and (equal? carrier_a carrier_b) (equal? aggregate_a aggregate_b))
+          true
+          (error (concat "equivalent joined GROUP plans did not reuse canonical helper names: "
+            carrier_a "/" aggregate_a " != " carrier_b "/" aggregate_b)))))
+
   - name: "Prejoin GROUP BY baseline"
     sql: "SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"
     expect:
@@ -450,6 +500,25 @@ test_cases:
           s: 300
         - name: "Sales"
           s: 150
+
+  - name: "Self-join aggregate columns preserve distinct source roles"
+    sql: |
+      SELECT left_row.dept_id,
+        SUM(left_row.salary) AS left_total,
+        SUM(right_row.salary) AS right_total
+      FROM sc_emp left_row
+      JOIN sc_emp right_row ON right_row.id = 1
+      GROUP BY left_row.dept_id
+      ORDER BY left_row.dept_id
+    expect:
+      rows: 2
+      data:
+        - dept_id: 1
+          left_total: 300
+          right_total: 200
+        - dept_id: 2
+          left_total: 150
+          right_total: 100
 
   - name: "Joined GROUP BY uses an incrementally maintained physical prejoin"
     sql: "EXPLAIN SELECT d.name, SUM(e.salary) AS s FROM sc_emp e JOIN sc_dept d ON d.id = e.dept_id GROUP BY d.name ORDER BY d.name"

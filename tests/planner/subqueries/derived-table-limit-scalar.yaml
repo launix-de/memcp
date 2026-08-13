@@ -570,7 +570,7 @@ test_cases:
         (define y66_interface_ref (car (car (gs_aggregates
           (stage_by_id y66_interface_stages "interface-consumer")))))
         (if (equal? (nth y66_interface_ref 3)
-          (aggregate_col_name y66_interface_ag))
+          (aggregate_col_name_using (gs_input y66_interface_target) y66_interface_ag))
           "ok"
           (error "single aggregate stage output kept a stale column")))
 
