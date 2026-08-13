@@ -88,6 +88,89 @@ possible later, for example:
 - `preserve_empty_domain`
 - order/window/group facts
 
+Positive membership in a WHERE truth context may use the semantic
+`membership_truth` expression primitive. It references a logical group-stage
+output and is not a physical RecSet or scan. Canonicalization may flatten
+`IN (… UNION …)` to a n-ary OR of these primitives because SQL `UNKNOWN` and
+`FALSE` both reject the row in that context. This rewrite must not cross `NOT`,
+`CASE`, projection, or another value-producing context; those retain the full
+match/RHS-NULL representation required for three-valued logic.
+
+### RecSet algebra as an optimization proof system
+
+RecSets provide a general way to discover and justify physical formula
+rewrites. For a fixed base relation `R`, define `T_R(p)` as the exact set of
+record IDs for which predicate `p` is SQL `TRUE`. In a truth-filtering context:
+
+```
+T_R(false)   = empty
+T_R(true)    = all visible records of R
+T_R(p OR q)  = T_R(p) union T_R(q)
+T_R(p AND q) = T_R(p) intersect T_R(q)
+p implies q  => T_R(p) is a subset of T_R(q)
+```
+
+Ordinary set identities such as associativity, commutativity, distributivity,
+absorption, and factoring may therefore be used by planner developers to find
+and prove useful normalizations. For example,
+`(A intersect B) union (A intersect C) = A intersect (B union C)` can expose one
+shared selective scan instead of two. Once such a transformation is proved, it
+belongs as a recognized pattern in a normalization pass over semantic
+primitives. The optimizer is not required to search arbitrary set formulas at
+query-compilation time. This is a general method for extending the optimizer,
+not a rule tied to one SQL spelling and not a mandate to execute a RecSet.
+
+A physical candidate RecSet need not always be exact. If `C_R(p)` is only a
+proven superset of `T_R(p)`, it is a safe scan boundary only while the original
+predicate `p` remains as a residual filter. This permits cheap projections or
+partially extracted branches to reduce the search space without claiming a
+stronger equivalence than was proved. Union/intersection operands must refer to
+the same base relation and visibility snapshot.
+
+Containment proofs compose monotonically:
+
+```
+C_R(p) contains T_R(p), C_R(q) contains T_R(q)
+  => C_R(p) union C_R(q) contains T_R(p OR q)
+  => C_R(p) intersect C_R(q) contains T_R(p AND q)
+```
+
+Every RecSet rewrite must therefore record or establish whether its result is
+exact or merely a candidate, identify its base relation and snapshot, and keep
+the residual predicate unless exactness has been proved. Formula equality is
+not by itself permission to change result multiplicity, ordering, NULL
+extension, or LIMIT boundaries; RecSets prove which base records may be scanned,
+not how often or in which semantic order result rows are produced.
+
+Semijoins extend the same algebra across relations. If `S` is an exact or safe
+candidate RecSet on a source relation, projecting `S` through join keys to `R`
+produces the corresponding exact or candidate target RecSet. Duplicate source
+keys do not matter because RecSets contain record IDs, not result multiplicity.
+This is why membership, EXISTS, joins, and boolean filter clouds can share
+physical RecSet optimization even when their parser ASTs differ.
+
+As one instance of the general rules, for probe expression `x` and UNION
+branches `Q_i`, positive membership permits:
+
+```
+T_R(x IN (Q_1 UNION ... UNION Q_n))
+  = union(T_R(x IN Q_i) for each i)
+  = T_R(EXISTS(Q_1 matching x) OR ... OR EXISTS(Q_n matching x))
+```
+
+That example is not the axiom itself. New syntactic corner cases should
+normalize to semantic primitives. Developers may use RecSet algebra to derive
+and prove further normalization patterns; the common lowerer must still choose
+between ordinary scans with indexed probes, projected RecSets, driver order,
+and braking from statistics. A normalization justified using truth sets must
+never preselect RecSet execution.
+
+Complement and difference require extra care under SQL three-valued logic:
+`T_R(NOT p)` is not generally the complement of `T_R(p)` because `UNKNOWN` is
+in neither truth set. Such rewrites require a proven two-valued predicate or an
+explicit representation of FALSE and UNKNOWN. Consequently these identities
+do not apply unchanged to `NOT IN`, `NOT`, or value-producing SQL-3VL contexts.
+
 `build_queryplan` chooses the physical implementation after decorrelation and
 reordering. The same logical helper may lower to a group cache, direct scan,
 `scan_exists`, RecSet, ORC, `scan_order_multi`, or temp table depending on

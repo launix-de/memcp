@@ -24,6 +24,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_ref_b"
   - sql: "DROP TABLE IF EXISTS trace_ref_c"
   - sql: "DROP TABLE IF EXISTS trace_ref_d"
+  - sql: "DROP TABLE IF EXISTS trace_ref_dense"
   - sql: "DROP TABLE IF EXISTS trace_box"
   - sql: "DROP TABLE IF EXISTS trace_host"
   - sql: "DROP TABLE IF EXISTS trace_folder"
@@ -95,6 +96,12 @@ setup:
         asset_id INT,
         enabled BOOL
       )
+  - sql: |
+      CREATE TABLE trace_ref_dense (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
   - sql: "INSERT INTO trace_asset (id, filename, kind, payload) VALUES (1, 'asset-1.dat', 1, 'p1')"
   - sql: "INSERT INTO trace_asset SELECT id + 1, CONCAT('asset-', CAST(id + 1 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 1 AS VARCHAR)) FROM trace_asset"
   - sql: "INSERT INTO trace_asset SELECT id + 2, CONCAT('asset-', CAST(id + 2 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 2 AS VARCHAR)) FROM trace_asset"
@@ -111,6 +118,13 @@ setup:
   - sql: "INSERT INTO trace_ref_b SELECT id, id, TRUE FROM trace_asset WHERE id IN (1, 17, 257)"
   - sql: "INSERT INTO trace_ref_c SELECT id, id, FALSE FROM trace_asset WHERE id % 257 = 0"
   - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
+  - sql: "INSERT INTO trace_ref_dense (id, asset_id, enabled) VALUES (1, 1, TRUE)"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 1, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 2, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 4, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 8, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 16, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 32, asset_id, enabled FROM trace_ref_dense"
 
 test_cases:
   - name: "ordered UNION scalar probes use the multi-scan carrier"
@@ -234,12 +248,137 @@ test_cases:
           filename: "asset-2.dat"
           referenced: false
 
+  - name: "Selective UNION EXISTS keeps one logical union and bounded branch probes"
+    sql: |
+      EXPLAIN
+      SELECT
+        a.id,
+        EXISTS (
+          SELECT r.id FROM trace_ref_a r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_b r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_c r WHERE r.enabled AND r.asset_id = a.id
+          UNION ALL
+          SELECT r.id FROM trace_ref_d r WHERE r.enabled AND r.asset_id = a.id
+        ) AS referenced
+      FROM trace_asset a
+      WHERE a.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_exists"
+      result_occurrences:
+        - text: "scan_exists"
+          count: 4
+      result_not_contains:
+        - "touch_keytable"
+        - ".grp:"
+
+  - name: "Selective nested UNION EXISTS keeps bounded physical probes"
+    max_time: 1.0
+    max_planner_time_ms: 500
+    max_plan_size: 350000
+    max_compile_metrics:
+      group_stages: 49
+      union_blocks: 1
+      group_caches: 1
+    sql: |
+      SELECT
+        a.id,
+        EXISTS (
+          SELECT r01.id FROM trace_ref_a r01 WHERE r01.enabled AND r01.asset_id = a.id AND COALESCE((SELECT (b01.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s01 WHERE s01.box_id = b01.id AND s01.owner_id = 7 LIMIT 1)) FROM trace_box b01 WHERE b01.id = r01.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r02.id FROM trace_ref_b r02 WHERE r02.enabled AND r02.asset_id = a.id AND COALESCE((SELECT (b02.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s02 WHERE s02.box_id = b02.id AND s02.owner_id = 7 LIMIT 1)) FROM trace_box b02 WHERE b02.id = r02.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r03.id FROM trace_ref_c r03 WHERE r03.enabled AND r03.asset_id = a.id AND COALESCE((SELECT (b03.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s03 WHERE s03.box_id = b03.id AND s03.owner_id = 7 LIMIT 1)) FROM trace_box b03 WHERE b03.id = r03.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r04.id FROM trace_ref_d r04 WHERE r04.enabled AND r04.asset_id = a.id AND COALESCE((SELECT (b04.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s04 WHERE s04.box_id = b04.id AND s04.owner_id = 7 LIMIT 1)) FROM trace_box b04 WHERE b04.id = r04.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r05.id FROM trace_ref_a r05 WHERE r05.enabled AND r05.asset_id = a.id AND COALESCE((SELECT (b05.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s05 WHERE s05.box_id = b05.id AND s05.owner_id = 7 LIMIT 1)) FROM trace_box b05 WHERE b05.id = r05.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r06.id FROM trace_ref_b r06 WHERE r06.enabled AND r06.asset_id = a.id AND COALESCE((SELECT (b06.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s06 WHERE s06.box_id = b06.id AND s06.owner_id = 7 LIMIT 1)) FROM trace_box b06 WHERE b06.id = r06.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r07.id FROM trace_ref_c r07 WHERE r07.enabled AND r07.asset_id = a.id AND COALESCE((SELECT (b07.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s07 WHERE s07.box_id = b07.id AND s07.owner_id = 7 LIMIT 1)) FROM trace_box b07 WHERE b07.id = r07.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r08.id FROM trace_ref_d r08 WHERE r08.enabled AND r08.asset_id = a.id AND COALESCE((SELECT (b08.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s08 WHERE s08.box_id = b08.id AND s08.owner_id = 7 LIMIT 1)) FROM trace_box b08 WHERE b08.id = r08.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r09.id FROM trace_ref_a r09 WHERE r09.enabled AND r09.asset_id = a.id AND COALESCE((SELECT (b09.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s09 WHERE s09.box_id = b09.id AND s09.owner_id = 7 LIMIT 1)) FROM trace_box b09 WHERE b09.id = r09.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r10.id FROM trace_ref_b r10 WHERE r10.enabled AND r10.asset_id = a.id AND COALESCE((SELECT (b10.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s10 WHERE s10.box_id = b10.id AND s10.owner_id = 7 LIMIT 1)) FROM trace_box b10 WHERE b10.id = r10.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r11.id FROM trace_ref_c r11 WHERE r11.enabled AND r11.asset_id = a.id AND COALESCE((SELECT (b11.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s11 WHERE s11.box_id = b11.id AND s11.owner_id = 7 LIMIT 1)) FROM trace_box b11 WHERE b11.id = r11.asset_id * 100 LIMIT 1), FALSE)
+          UNION ALL
+          SELECT r12.id FROM trace_ref_d r12 WHERE r12.enabled AND r12.asset_id = a.id AND COALESCE((SELECT (b12.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_share s12 WHERE s12.box_id = b12.id AND s12.owner_id = 7 LIMIT 1)) FROM trace_box b12 WHERE b12.id = r12.asset_id * 100 LIMIT 1), FALSE)
+        ) AS referenced
+      FROM trace_asset a
+      WHERE a.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          referenced: true
+
+  - name: "Broad UNION EXISTS uses a RecSet semijoin without group caches"
+    sql: |
+      EXPLAIN
+      SELECT a.id
+      FROM trace_asset a
+      WHERE EXISTS (
+        SELECT r.id FROM trace_ref_a r WHERE r.enabled AND r.asset_id = a.id
+        UNION ALL
+        SELECT r.id FROM trace_ref_b r WHERE r.enabled AND r.asset_id = a.id
+        UNION ALL
+        SELECT r.id FROM trace_ref_c r WHERE r.enabled AND r.asset_id = a.id
+        UNION ALL
+        SELECT r.id FROM trace_ref_d r WHERE r.enabled AND r.asset_id = a.id
+      )
+      ORDER BY a.id
+    expect:
+      rows: 1
+      result_contains:
+        - "recset_union"
+        - "recset_project_join"
+      result_not_contains:
+        - "touch_keytable"
+        - ".grp:"
+
+  - name: "Repeated bounded probes retain the cheaper shared group cache"
+    sql: |
+      EXPLAIN
+      SELECT a.id
+      FROM trace_asset a
+      WHERE a.id = 1
+        AND EXISTS (
+          SELECT r.id
+          FROM trace_ref_dense r
+          WHERE r.enabled
+            AND r.asset_id = a.id
+            AND COALESCE((
+              SELECT (b.owner_id = 7 OR EXISTS (
+                SELECT TRUE
+                FROM trace_share s
+                WHERE s.box_id = b.id AND s.owner_id = 7
+                LIMIT 1
+              ))
+              FROM trace_box b
+              WHERE b.id = r.asset_id * 100
+              LIMIT 1
+            ), FALSE)
+          UNION ALL
+          SELECT r.id FROM trace_ref_b r WHERE r.enabled AND r.asset_id = a.id
+        )
+    expect:
+      contains:
+        - "touch_keytable"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_asset"
   - sql: "DROP TABLE IF EXISTS trace_ref_a"
   - sql: "DROP TABLE IF EXISTS trace_ref_b"
   - sql: "DROP TABLE IF EXISTS trace_ref_c"
   - sql: "DROP TABLE IF EXISTS trace_ref_d"
+  - sql: "DROP TABLE IF EXISTS trace_ref_dense"
   - sql: "DROP TABLE IF EXISTS trace_box"
   - sql: "DROP TABLE IF EXISTS trace_host"
   - sql: "DROP TABLE IF EXISTS trace_folder"
