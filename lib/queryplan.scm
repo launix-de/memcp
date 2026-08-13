@@ -9848,15 +9848,11 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define alias_map (canonical_group_stage_alias_map stage))
-		/* Generated dependency IDs are not physical identities. Cataloged stages
-		share one signature index; immutable probe copies can reconstruct it from
-		their local catalog without relying on process- or session-global state. */
-		(define stored_signatures
-			(qassoc_get (gs_facts stage) (quote stage_semantic_signatures) nil))
-		/* Keep the fallback lazy: Scheme evaluates ordinary call arguments eagerly. */
-		(define signatures (if (nil? stored_signatures)
-			(stage_semantic_signature_index (nested_stage_catalog stage))
-			stored_signatures))
+		/* Generated dependency IDs are not physical identities once lowering has
+		selected a stage DAG. Earlier analysis and cost-model probes deliberately
+		keep the cheap provisional identity instead of recursively cataloging stages. */
+		(define signatures
+			(qassoc_get (gs_facts stage) (quote stage_semantic_signatures) '()))
 		(make_group_keytable_cache schema (group_table_name
 			schema
 			label
@@ -12064,7 +12060,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(qb_stages block)
 		(query_block_facts_with_stage_catalog block stages))))
 
-(define group_stage_with_lowering_catalog (lambda (stage catalog signatures)
+(define group_stage_with_lowering_catalog (lambda (stage catalog)
 	(if (not (group_stage? stage))
 		stage
 		(begin
@@ -12072,11 +12068,9 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			The cost model may lower only a small subset to group keytables; their
 			canonical physical names are computed lazily by group_stage_cache. */
 			(group_stage_with_facts stage
-				(qassoc_set
-					(if (lowering_catalog? catalog)
-						(qassoc_set_without (gs_facts stage) (quote lowering_catalog) catalog (quote stage_catalog))
-						(qassoc_set (gs_facts stage) (quote stage_catalog) catalog))
-					(quote stage_semantic_signatures) signatures))))))
+				(if (lowering_catalog? catalog)
+					(qassoc_set_without (gs_facts stage) (quote lowering_catalog) catalog (quote stage_catalog))
+					(qassoc_set (gs_facts stage) (quote stage_catalog) catalog)))))))
 
 (define stages_with_canonical_group_caches_acc (lambda (stages signatures cache_index)
 	(match (coalesceNil stages '())
@@ -12094,8 +12088,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(define next_index (if (has_assoc? cache_index signature)
 						cache_index
 						(set_assoc cache_index signature cache)))
+					/* The complete signature index is compile-local scratch data. Keeping it
+					on every immutable stage makes later rewrites copy an O(stages) fact. */
 					(define cached_stage (group_stage_with_facts signature_stage
-						(qassoc_set (gs_facts signature_stage) (quote group_cache) cache)))
+						(qassoc_set_without (gs_facts signature_stage)
+							(quote group_cache) cache (quote stage_semantic_signatures))))
 					(define tail (stages_with_canonical_group_caches_acc rest signatures next_index))
 					(list (cons cached_stage (nth tail 0)) (nth tail 1)))))
 		_ (list '() cache_index))))
@@ -12123,7 +12120,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(define cached (if (group_stage? stage) (stage_by_id catalog (gs_id stage)) nil))
 				(group_stage_with_lowering_catalog
 					(if (nil? cached) stage cached)
-					catalog signatures)))))
+					catalog)))))
 		(make_query_block
 			(qb_schema block)
 			(qb_sources block)
