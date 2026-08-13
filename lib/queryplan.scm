@@ -7245,7 +7245,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(cons head tail) (merge_unique (map tail (lambda (item) (extract_columns_for_alias src item))))
 		_ '())))
 
-(define lower_column_expr_for_alias (lambda (src expr)
+(define lower_column_expr_for_alias_in_context (lambda (src expr probe_work_rows)
 	(match expr
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr (list src) (source_alias src) stage probe)
@@ -7256,13 +7256,13 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		((quote dml_driver_membership_probe) fallback_schema stage probe)
 		(lower_dml_driver_membership_probe_expr (list src) (source_alias src) fallback_schema stage probe)
 		((symbol scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage))
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage) probe_work_rows)
 		((symbol scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages probe_work_rows)
 		((quote scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage))
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage) probe_work_rows)
 		((quote scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages probe_work_rows)
 		((symbol scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
@@ -7273,8 +7273,12 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(lower_scalar_cardinality_probe_expr (list src) (source_alias src) stage requested_col)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
-		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_alias src item))))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(lower_column_expr_for_alias_in_context src item probe_work_rows))))
 		_ expr)))
+
+(define lower_column_expr_for_alias (lambda (src expr)
+	(lower_column_expr_for_alias_in_context src expr nil)))
 
 (define scalar_first_probe_parts (lambda (ag)
 	(match ag
@@ -7483,21 +7487,47 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 					(list (quote coalesceNil) raw_probe false)
 					raw_probe))))))
 
-(define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys)
+(define bounded_scalar_query_probe_inline_presence_stages (lambda (direct_stages probe_work_rows)
+	(if (not (equal? (count direct_stages) 1))
+		'()
+		(filter direct_stages (lambda (nested_stage)
+			(if (not (group_stage? nested_stage))
+				false
+				(begin
+					(define stage_rows (planner_stage_input_rows (gs_input nested_stage)))
+					(define cache_preferred (and (number? stage_rows)
+						(and (number? probe_work_rows)
+							(< (+ 16 stage_rows) (* probe_work_rows 4)))))
+					(and (not cache_preferred)
+						(and (equal? (qassoc_get (gs_facts nested_stage) (quote purpose) nil) (quote exists))
+							(and (equal? (qassoc_get (gs_facts nested_stage) (quote presence_only) false) true)
+								(and (source_is_base_table? (gs_input nested_stage))
+									(not (stage_has_residual_outer_refs? nested_stage)))))))))))))
+
+(define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys probe_work_rows)
 	(begin
 		(define direct_stages (scalar_first_query_probe_direct_nested_stages all_stages stage))
 		(define dependency_graph (stage_dependency_graph all_stages))
 		(define closure_index (stage_dependency_closure_index_using_graph dependency_graph direct_stages))
 		(define nested_stages
 			(scalar_first_query_probe_nested_stages_using_index direct_stages closure_index))
+		/* A bounded parent probe evaluates this subtree only for rows that survived
+		root braking. Compare those expected probe calls with the dependent stage's
+		input size; retain the group cache when repeated probes amortize its build. */
+		(define inline_presence_stages (if (number? probe_work_rows)
+			(bounded_scalar_query_probe_inline_presence_stages direct_stages probe_work_rows)
+			'()))
+		(define inline_ids (stage_id_set inline_presence_stages))
+		(define prepare_stages (filter nested_stages (lambda (nested_stage)
+			(not (has_assoc? inline_ids (gs_id nested_stage))))))
 		(lower_scalar_first_query_probe_expr_using
 			stage
 			value_expr
 			keys
 			lookup_keys
 			nested_stages
-			nested_stages
-			'()))))
+			prepare_stages
+			inline_presence_stages))))
 
 /* Query-input scalar probes can occur in many projected fields after their
 logical stages have merged. Emit the physical probe recipe once per block and
@@ -7743,9 +7773,10 @@ dependency preparation does not emit free outer-row symbols. */
 			(lower_unique_stage_prepares_using stages stages stages)
 			(lower_stage_materialize_all stages))))))
 
-(define lower_exists_union_probe_branch (lambda (sources default_alias branch probe all_stages)
+(define lower_exists_union_probe_branch (lambda (sources default_alias branch probe all_stages dependency_graph)
 	(begin
-		(define prepared (query_block_with_prepared_sources_using all_stages branch))
+		(define prepared
+			(query_block_with_prepared_sources_using_graph all_stages dependency_graph branch))
 		(if (not (and (query_block? prepared) (single_source? (qb_sources prepared))))
 			(neumann_fail "build_queryplan" "EXISTS UNION point probe requires one prepared branch source")
 			true)
@@ -7755,6 +7786,12 @@ dependency preparation does not emit free outer-row symbols. */
 			true)
 		(define key_expr (query_block_first_expr prepared))
 		(define condition (combine_where (qb_where prepared) (source_join_expr src)))
+		(define source_rows (planner_source_row_count src))
+		(define probe_term (list (quote equal??) key_expr probe))
+		(define probe_work_rows (if (number? source_rows)
+			(max 1 (* source_rows
+				(join_optimizer_expr_selectivity (list src) (source_alias src) probe_term)))
+			1))
 		(define filtercols (merge_unique (list
 			(extract_columns_for_alias src condition)
 			(extract_columns_for_alias src key_expr))))
@@ -7766,7 +7803,7 @@ dependency preparation does not emit free outer-row symbols. */
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
 				(list (quote optimize)
 					(list (quote and)
-						(lower_column_expr_for_alias src condition)
+						(lower_column_expr_for_alias_in_context src condition probe_work_rows)
 						(list (quote equal??)
 							(lower_column_expr_for_alias src key_expr)
 							(lower_column_expr_for_join sources default_alias probe)))))))))
@@ -7775,11 +7812,21 @@ dependency preparation does not emit free outer-row symbols. */
 one n-ary physical OR of bounded probes. This preserves the logical union tree
 until lowering without creating a depth-proportional binary OR chain. */
 (define lower_exists_union_probe_expr (lambda (sources default_alias branches probe all_stages)
-	(cons (quote or)
-		(map (coalesceNil branches '()) (lambda (branch)
-			(lower_exists_union_probe_branch sources default_alias branch probe all_stages))))))
+	(begin
+		/* All branches resolve against the same immutable decorrelation catalog.
+		Build its indexes once instead of rediscovering the complete stage set for
+		every arm of a wide UNION. */
+		(define branch_stages (merge (map (coalesceNil branches '()) (lambda (branch)
+			(if (query_block? branch) (qb_stages branch) '())))))
+		(define stage_lookup
+			(make_lowering_catalog (unique_stages_by_id (merge (list all_stages branch_stages)))))
+		(define dependency_graph (stage_dependency_graph stage_lookup))
+		(cons (quote or)
+			(map (coalesceNil branches '()) (lambda (branch)
+				(lower_exists_union_probe_branch
+					sources default_alias branch probe stage_lookup dependency_graph)))))))
 
-(define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages)
+(define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows)
 	(begin
 		(if (not (scalar_or_presence_probe_stage? stage))
 			(neumann_fail "build_queryplan" "stage probe requires scalar_single first or presence stage")
@@ -7813,7 +7860,8 @@ until lowering without creating a depth-proportional binary OR chain. */
 					stage
 					value_expr
 					keys
-					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key))))
+					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
+					probe_work_rows)
 				(begin
 					(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 					(define condition_cols (extract_columns_for_alias src condition))
@@ -8002,13 +8050,13 @@ until lowering without creating a depth-proportional binary OR chain. */
 		((quote dml_driver_membership_probe) fallback_schema stage probe)
 		(lower_dml_driver_membership_probe_expr sources default_alias fallback_schema stage probe)
 		((symbol scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage))
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) nil)
 		((symbol scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages nil)
 		((quote scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage))
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) nil)
 		((quote scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages nil)
 		((symbol scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
@@ -10705,7 +10753,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(if insensitive (quote insensitive) (quote exact))
 		(if (and insensitive (string? alias)) (toLower alias) alias))))
 
-(define probe_stage_alias_index (lambda (stages sources consumers)
+(define probe_stage_alias_index_using_graph (lambda (stages dependency_graph sources consumers)
 	(begin
 		(define entries (filter (map (coalesceNil sources '()) (lambda (src)
 			(begin
@@ -10719,8 +10767,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					nil))))
 			(lambda (entry) (not (nil? entry)))))
 		(define probe_stages (unique_stages_by_id (map entries (lambda (entry) (nth entry 1)))))
-		(define closures (stage_dependency_closure_index_using_graph
-			(stage_dependency_graph stages) probe_stages))
+		(define closures (stage_dependency_closure_index_using_graph dependency_graph probe_stages))
 		(reduce entries (lambda (index entry)
 			(begin
 				(define src (nth entry 0))
@@ -10738,6 +10785,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(if (has_assoc? with_exact insensitive_key)
 						with_exact
 						(set_assoc with_exact insensitive_key index_entry))))) '()))))
+
+(define probe_stage_alias_index (lambda (stages sources consumers)
+	(probe_stage_alias_index_using_graph
+		stages (stage_dependency_graph stages) sources consumers)))
 
 (define probe_stage_entry_for_alias_using_index (lambda (index default_alias tblvar tbl_ignorecase)
 	(get_assoc index
@@ -11389,14 +11440,17 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 	(stages_without_consumed_probes_using_graph
 		(stage_dependency_graph stages) stages stages)))
 
-(define stages_without_probe_sources (lambda (stages probe_sources)
+(define stages_without_probe_sources_using_graph (lambda (dependency_graph stage_lookup stages probe_sources)
 	(begin
-		(define graph (stage_dependency_graph stages))
-		(define consumed (stages_without_consumed_probes_using_graph graph stages
-			(stage_outputs_from_sources_using stages probe_sources)))
+		(define consumed (stages_without_consumed_probes_using_graph dependency_graph stages
+			(stage_outputs_from_sources_using stage_lookup probe_sources)))
 		(define direct_ids (stage_output_source_ids (filter probe_sources (lambda (src)
-			(not (nil? (direct_group_probe_stage_for_source stages src (list true))))))))
+			(not (nil? (direct_group_probe_stage_for_source stage_lookup src (list true))))))))
 		(stages_without_ids consumed direct_ids))))
+
+(define stages_without_probe_sources (lambda (stages probe_sources)
+	(stages_without_probe_sources_using_graph
+		(stage_dependency_graph stages) stages stages probe_sources)))
 
 (define query_block_probe_consumers (lambda (block)
 	(list
@@ -11407,7 +11461,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(qb_order block)
 		(qb_hidden block))))
 
-(define query_block_with_scalar_first_probes_using (lambda (stages block)
+(define query_block_with_scalar_first_probes_using_graph (lambda (stages dependency_graph block)
 	(begin
 		(define stage_list (lowering_catalog_stages stages))
 		(define sources (qb_sources block))
@@ -11434,7 +11488,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define probe_sources (if (nil? retained_order_alias)
 			probe_candidates
 			(merge_unique (list probe_candidates (list (nth order_lookup 0))))))
-		(define probe_index (probe_stage_alias_index stages probe_sources consumers))
+		(define probe_index
+			(probe_stage_alias_index_using_graph stages dependency_graph probe_sources consumers))
 		(define rewritten_sources (rewrite_scalar_first_probe_sources_using_index stages sources probe_index default_alias))
 		(make_query_block
 			(qb_schema block)
@@ -11447,10 +11502,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_limit block)
 			(qb_offset block)
 			(rewrite_scalar_first_probe_fields_using_index stages probe_index default_alias (qb_hidden block))
-			(stages_without_probe_sources (qb_stages block) probe_sources)
+			(stages_without_probe_sources_using_graph
+				dependency_graph stages (qb_stages block) probe_sources)
 			(join_optimizer_facts_without_aliases
 				(query_block_facts_with_stage_catalog block stage_list)
 				(map probe_sources source_alias))))))
+
+(define query_block_with_scalar_first_probes_using (lambda (stages block)
+	(query_block_with_scalar_first_probes_using_graph
+		stages (stage_dependency_graph stages) block)))
 
 (define query_block_with_presence_probe_sources_using (lambda (stages probe_sources block)
 	(begin
@@ -11551,13 +11611,14 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			'()
 			(qb_facts block)))))
 
-(define query_block_with_prepared_sources_using (lambda (stages block)
+(define query_block_with_prepared_sources_using_graph (lambda (stages dependency_graph block)
 	(begin
 		(define available_stages (if (lowering_catalog? stages)
 			(lowering_catalog_stages stages)
 			(unique_stages_by_id (merge (list stages (qb_stages block))))))
 		(define stage_lookup (if (lowering_catalog? stages) stages available_stages))
-		(define scalar_rewritten (query_block_with_scalar_first_probes_using stage_lookup block))
+		(define scalar_rewritten
+			(query_block_with_scalar_first_probes_using_graph stage_lookup dependency_graph block))
 		(define membership_rewritten (query_block_with_physical_membership_using stage_lookup scalar_rewritten))
 		(define sources (qb_sources membership_rewritten))
 		(define default_alias (qassoc_get (qb_facts membership_rewritten) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
@@ -11574,8 +11635,13 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_limit rewritten)
 			(qb_offset rewritten)
 			(qb_hidden rewritten)
-			(stages_without_probe_sources (qb_stages rewritten) presence_probe_sources)
+			(stages_without_probe_sources_using_graph
+				dependency_graph stage_lookup (qb_stages rewritten) presence_probe_sources)
 			(query_block_facts_with_stage_catalog rewritten available_stages)))))
+
+(define query_block_with_prepared_sources_using (lambda (stages block)
+	(query_block_with_prepared_sources_using_graph
+		stages (stage_dependency_graph stages) block)))
 
 (define query_block_with_prepared_sources (lambda (block)
 	(query_block_with_prepared_sources_using (qb_stages block) block)))

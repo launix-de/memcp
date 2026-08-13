@@ -24,6 +24,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_ref_b"
   - sql: "DROP TABLE IF EXISTS trace_ref_c"
   - sql: "DROP TABLE IF EXISTS trace_ref_d"
+  - sql: "DROP TABLE IF EXISTS trace_ref_dense"
   - sql: "DROP TABLE IF EXISTS trace_box"
   - sql: "DROP TABLE IF EXISTS trace_host"
   - sql: "DROP TABLE IF EXISTS trace_folder"
@@ -95,6 +96,12 @@ setup:
         asset_id INT,
         enabled BOOL
       )
+  - sql: |
+      CREATE TABLE trace_ref_dense (
+        id INT PRIMARY KEY,
+        asset_id INT,
+        enabled BOOL
+      )
   - sql: "INSERT INTO trace_asset (id, filename, kind, payload) VALUES (1, 'asset-1.dat', 1, 'p1')"
   - sql: "INSERT INTO trace_asset SELECT id + 1, CONCAT('asset-', CAST(id + 1 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 1 AS VARCHAR)) FROM trace_asset"
   - sql: "INSERT INTO trace_asset SELECT id + 2, CONCAT('asset-', CAST(id + 2 AS VARCHAR), '.dat'), CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, CONCAT('p', CAST(id + 2 AS VARCHAR)) FROM trace_asset"
@@ -111,6 +118,13 @@ setup:
   - sql: "INSERT INTO trace_ref_b SELECT id, id, TRUE FROM trace_asset WHERE id IN (1, 17, 257)"
   - sql: "INSERT INTO trace_ref_c SELECT id, id, FALSE FROM trace_asset WHERE id % 257 = 0"
   - sql: "INSERT INTO trace_ref_d SELECT id, id, TRUE FROM trace_asset WHERE id % 509 = 0"
+  - sql: "INSERT INTO trace_ref_dense (id, asset_id, enabled) VALUES (1, 1, TRUE)"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 1, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 2, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 4, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 8, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 16, asset_id, enabled FROM trace_ref_dense"
+  - sql: "INSERT INTO trace_ref_dense SELECT id + 32, asset_id, enabled FROM trace_ref_dense"
 
 test_cases:
   - name: "ordered UNION scalar probes use the multi-scan carrier"
@@ -268,7 +282,7 @@ test_cases:
     max_compile_metrics:
       group_stages: 49
       union_blocks: 1
-      group_caches: 24
+      group_caches: 1
     sql: |
       SELECT
         a.id,
@@ -329,12 +343,42 @@ test_cases:
         - "touch_keytable"
         - ".grp:"
 
+  - name: "Repeated bounded probes retain the cheaper shared group cache"
+    sql: |
+      EXPLAIN
+      SELECT a.id
+      FROM trace_asset a
+      WHERE a.id = 1
+        AND EXISTS (
+          SELECT r.id
+          FROM trace_ref_dense r
+          WHERE r.enabled
+            AND r.asset_id = a.id
+            AND COALESCE((
+              SELECT (b.owner_id = 7 OR EXISTS (
+                SELECT TRUE
+                FROM trace_share s
+                WHERE s.box_id = b.id AND s.owner_id = 7
+                LIMIT 1
+              ))
+              FROM trace_box b
+              WHERE b.id = r.asset_id * 100
+              LIMIT 1
+            ), FALSE)
+          UNION ALL
+          SELECT r.id FROM trace_ref_b r WHERE r.enabled AND r.asset_id = a.id
+        )
+    expect:
+      contains:
+        - "touch_keytable"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_asset"
   - sql: "DROP TABLE IF EXISTS trace_ref_a"
   - sql: "DROP TABLE IF EXISTS trace_ref_b"
   - sql: "DROP TABLE IF EXISTS trace_ref_c"
   - sql: "DROP TABLE IF EXISTS trace_ref_d"
+  - sql: "DROP TABLE IF EXISTS trace_ref_dense"
   - sql: "DROP TABLE IF EXISTS trace_box"
   - sql: "DROP TABLE IF EXISTS trace_host"
   - sql: "DROP TABLE IF EXISTS trace_folder"
