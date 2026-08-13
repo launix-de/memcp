@@ -738,7 +738,7 @@ test_cases:
             - "__union_distinct_rows"
             - "__union_distinct_seen"
 
-  - name: "IN UNION joined order limit costs keyset against driver probing"
+  - name: "IN UNION joined order limit uses guarded keyset fallback"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     setup:
       - sql: "DROP TABLE IF EXISTS in_dv_doc"
