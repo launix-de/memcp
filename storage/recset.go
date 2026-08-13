@@ -29,17 +29,30 @@ import "github.com/launix-de/memcp/scm"
 const TagRecSet = 102
 
 type recSetShard struct {
-	shard  *storageShard
-	recids []uint32
-	count  int64
+	shard    *storageShard
+	kind     recSetRepresentation
+	universe uint32
+	data     []uint32
+	used     uint32
+	count    int64
 }
 
 func (s *recSetShard) contains(recid uint32) bool {
-	if s == nil {
+	if s == nil || recid >= s.universe {
 		return false
 	}
-	pos := sort.Search(len(s.recids), func(i int) bool { return s.recids[i] >= recid })
-	return pos < len(s.recids) && s.recids[pos] == recid
+	switch s.kind {
+	case recSetFull:
+		return true
+	case recSetPositive:
+		return sortedUint32Contains(s.listedValues(), recid)
+	case recSetNegative:
+		return !sortedUint32Contains(s.listedValues(), recid)
+	case recSetBitmap:
+		return s.data[recid>>5]&(uint32(1)<<(recid&31)) != 0
+	default:
+		return false
+	}
 }
 
 // recSet is a query-local, non-persistent subset of one table represented by
@@ -103,7 +116,7 @@ func recSetUnion(items []*recSet) *recSet {
 		return result
 	}
 
-	byShard := make(map[*storageShard][]uint32)
+	byShard := make(map[*storageShard][]*recSetShard)
 	for _, rs := range items {
 		if rs == nil || rs.table == nil {
 			continue
@@ -113,28 +126,51 @@ func recSetUnion(items []*recSet) *recSet {
 			if part.count == 0 {
 				continue
 			}
-			byShard[part.shard] = append(byShard[part.shard], part.recids...)
+			byShard[part.shard] = append(byShard[part.shard], &rs.shards[i])
 		}
 	}
-	for shard, recids := range byShard {
-		sort.Slice(recids, func(i, j int) bool { return recids[i] < recids[j] })
-		write := 0
-		var last uint32
-		for i, recid := range recids {
-			if i > 0 && recid == last {
-				continue
-			}
-			recids[write] = recid
-			write++
-			last = recid
-		}
-		recids = recids[:write]
-		result.count += int64(len(recids))
-		result.shards = append(result.shards, recSetShard{shard: shard, recids: recids, count: int64(len(recids))})
+	for shard, parts := range byShard {
+		part := unionRecSetShards(shard, parts)
+		result.count += part.count
+		result.shards = append(result.shards, part)
 	}
 	sort.Slice(result.shards, func(i, j int) bool {
 		return result.shards[i].shard.uuid.String() < result.shards[j].shard.uuid.String()
 	})
+	return result
+}
+
+func recSetIntersect(items []*recSet) *recSet {
+	var base *table
+	var tx *TxContext
+	for _, rs := range items {
+		if rs == nil || rs.table == nil {
+			continue
+		}
+		if base == nil {
+			base = rs.table
+			tx = rs.tx
+		} else if base != rs.table {
+			panic("recset_intersect: all recsets must belong to the same table")
+		}
+	}
+	result := &recSet{tx: tx, table: base}
+	if base == nil || len(items) == 0 {
+		return result
+	}
+	for _, shard := range base.ActiveShards() {
+		parts := make([]*recSetShard, len(items))
+		for i, rs := range items {
+			if rs != nil {
+				parts[i] = rs.shardEntry(shard)
+			}
+		}
+		part := intersectRecSetShards(shard, parts)
+		if part.count > 0 {
+			result.count += part.count
+			result.shards = append(result.shards, part)
+		}
+	}
 	return result
 }
 
@@ -168,7 +204,8 @@ type recSetBuildResult struct {
 }
 
 type recSetKeyResult struct {
-	keys [][]scm.Scmer
+	part int
+	used int
 	err  scanError
 }
 
@@ -301,54 +338,80 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	maxInsertIndex := len(t.inserts)
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
-	recids := make([]uint32, 0, 64)
+	completeTraversal := len(boundaries) == 0 && recsetFilter == nil
+	builder := newRecSetShardBuilder(t, visibleUpper, completeTraversal)
+	replayCandidates := 0
+	evaluate := func(idx uint32) bool {
+		if recsetPart != nil && !recsetPart.contains(idx) {
+			return false
+		}
+		if idx >= visibleUpper {
+			return false
+		}
+		if acidMode {
+			if !currentTx.IsVisible(t, idx) {
+				return false
+			}
+		} else if t.deletions.Get(uint(idx)) {
+			return false
+		}
+		if idx < t.main_count {
+			for i, c := range cReaders {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else if cNeedsCachedReader[i] {
+					cdataset[i] = c.GetValue(idx)
+				} else {
+					cdataset[i] = ccols[i].GetValue(idx)
+				}
+			}
+		} else {
+			for i, col := range conditionCols {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else if cNeedsCachedReader[i] {
+					cdataset[i] = cReaders[i].GetValue(idx)
+				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+					cdataset[i] = ccols[i].GetValue(idx)
+				} else {
+					cdataset[i] = t.getDelta(int(idx-t.main_count), col)
+				}
+			}
+		}
+		return scm.ToBool(conditionFn(cdataset...))
+	}
 	var buf [1024]uint32
+	processedCandidates := 0
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
 		for _, idx := range batch {
-			if recsetPart != nil && !recsetPart.contains(idx) {
-				continue
-			}
 			if idx >= visibleUpper {
 				continue
 			}
-			if acidMode {
-				if !currentTx.IsVisible(t, idx) {
-					continue
-				}
-			} else if t.deletions.Get(uint(idx)) {
-				continue
-			}
-			if idx < t.main_count {
-				for i, c := range cReaders {
-					if getter := conditionGetters[i]; getter != nil {
-						cdataset[i] = getter(idx, 0)
-					} else if cNeedsCachedReader[i] {
-						cdataset[i] = c.GetValue(idx)
-					} else {
-						cdataset[i] = ccols[i].GetValue(idx)
-					}
-				}
-			} else {
-				for i, col := range conditionCols {
-					if getter := conditionGetters[i]; getter != nil {
-						cdataset[i] = getter(idx, 0)
-					} else if cNeedsCachedReader[i] {
-						cdataset[i] = cReaders[i].GetValue(idx)
-					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-						cdataset[i] = ccols[i].GetValue(idx)
-					} else {
-						cdataset[i] = t.getDelta(int(idx-t.main_count), col)
-					}
-				}
-			}
-			if scm.ToBool(conditionFn(cdataset...)) {
-				recids = append(recids, idx)
+			processedCandidates++
+			wasBitmap := builder.bitmap
+			builder.add(idx, evaluate(idx))
+			if !wasBitmap && builder.bitmap {
+				replayCandidates = processedCandidates
 			}
 		}
 		return true
 	})
-	sort.Slice(recids, func(i, j int) bool { return recids[i] < recids[j] })
-	return recSetShard{shard: t, recids: recids, count: int64(len(recids))}
+	if replayCandidates > 0 {
+		replayed := 0
+		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], false, func(batch []uint32) bool {
+			for _, idx := range batch {
+				if idx < visibleUpper {
+					builder.addBitmap(idx, evaluate(idx))
+					replayed++
+					if replayed >= replayCandidates {
+						return false
+					}
+				}
+			}
+			return true
+		})
+	}
+	return builder.finish()
 }
 
 func (r *recSet) projectJoin(currentTx *TxContext, sourceKeyCols []string, target *table, targetKeyCols []string) *recSet {
@@ -366,9 +429,91 @@ func (r *recSet) projectJoin(currentTx *TxContext, sourceKeyCols []string, targe
 	return target.projectJoinKeysToRecSet(currentTx, targetKeyCols, keys, ss)
 }
 
-func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState) [][]scm.Scmer {
+type recSetProjectKeys struct {
+	width  int
+	values []scm.Scmer
+}
+
+func (k *recSetProjectKeys) count() int {
+	if k.width == 0 {
+		return 0
+	}
+	return len(k.values) / k.width
+}
+
+func (k *recSetProjectKeys) tuple(index int) []scm.Scmer {
+	start := index * k.width
+	return k.values[start : start+k.width]
+}
+
+func (k *recSetProjectKeys) contains(key []scm.Scmer) bool {
+	position := sort.Search(k.count(), func(i int) bool {
+		return compareProjectKey(k.tuple(i), key) >= 0
+	})
+	return position < k.count() && compareProjectKey(k.tuple(position), key) == 0
+}
+
+func compareProjectKey(left, right []scm.Scmer) int {
+	for i := range left {
+		if scm.Equal(left[i], right[i]) {
+			continue
+		}
+		if scm.Less(left[i], right[i]) {
+			return -1
+		}
+		return 1
+	}
+	return 0
+}
+
+func (k *recSetProjectKeys) sortAndDeduplicate() {
+	count := k.count()
+	if count < 2 {
+		return
+	}
+	sort.Sort(makeProjectKeyIndices(k))
+	write := 1
+	for read := 1; read < count; read++ {
+		if compareProjectKey(k.tuple(write-1), k.tuple(read)) == 0 {
+			continue
+		}
+		if write != read {
+			copy(k.tuple(write), k.tuple(read))
+		}
+		write++
+	}
+	k.values = k.values[:write*k.width]
+}
+
+type projectKeyIndices struct {
+	keys *recSetProjectKeys
+}
+
+func makeProjectKeyIndices(keys *recSetProjectKeys) *projectKeyIndices {
+	return &projectKeyIndices{keys: keys}
+}
+
+func (p *projectKeyIndices) Len() int { return p.keys.count() }
+func (p *projectKeyIndices) Less(i, j int) bool {
+	return compareProjectKey(p.keys.tuple(i), p.keys.tuple(j)) < 0
+}
+func (p *projectKeyIndices) Swap(i, j int) {
+	left := p.keys.tuple(i)
+	right := p.keys.tuple(j)
+	for col := range left {
+		left[col], right[col] = right[col], left[col]
+	}
+}
+
+func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState) recSetProjectKeys {
 	querySeq := scm.CurrentQuerySeq()
 	values := make(chan recSetKeyResult, len(r.shards))
+	width := len(sourceKeyCols)
+	keys := recSetProjectKeys{width: width, values: make([]scm.Scmer, int(r.count)*width)}
+	offsets := make([]int, len(r.shards)+1)
+	for i := range r.shards {
+		offsets[i+1] = offsets[i] + int(r.shards[i].count)*width
+	}
 	closeAfter := 0
 	for i := range r.shards {
 		part := r.shards[i]
@@ -376,11 +521,11 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 			continue
 		}
 		closeAfter++
-		go func(part recSetShard) {
+		go func(partIndex int, part recSetShard) {
 			withTxSession(currentTx, func() scm.Scmer {
 				defer func() {
 					if rec := recover(); rec != nil {
-						values <- recSetKeyResult{err: scanError{rec, string(debug.Stack())}}
+						values <- recSetKeyResult{part: partIndex, err: scanError{rec, string(debug.Stack())}}
 					}
 				}()
 				// Cancellation contract: check only at the scheduling boundary, before entering
@@ -388,12 +533,14 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				values <- recSetKeyResult{keys: part.shard.collectProjectJoinKeys(part.recids, sourceKeyCols, currentTx, ss)}
+				dst := keys.values[offsets[partIndex]:offsets[partIndex+1]]
+				used := part.shard.collectProjectJoinKeys(&part, sourceKeyCols, currentTx, ss, dst)
+				values <- recSetKeyResult{part: partIndex, used: used}
 				return scm.NewNil()
 			})
-		}(part)
+		}(i, part)
 	}
-	keys := make([][]scm.Scmer, 0, r.count)
+	used := make([]int, len(r.shards))
 	var keyErr scanError
 	for i := 0; i < closeAfter; i++ {
 		msg := <-values
@@ -403,15 +550,26 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 			}
 			continue
 		}
-		keys = append(keys, msg.keys...)
+		used[msg.part] = msg.used
 	}
 	if keyErr.r != nil {
 		panic(keyErr)
 	}
+	write := 0
+	for i := range r.shards {
+		if used[i] == 0 {
+			continue
+		}
+		start := offsets[i]
+		copy(keys.values[write:], keys.values[start:start+used[i]])
+		write += used[i]
+	}
+	keys.values = keys.values[:write]
+	keys.sortAndDeduplicate()
 	return keys
 }
 
-func (t *storageShard) collectProjectJoinKeys(recids []uint32, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState) [][]scm.Scmer {
+func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer) int {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -448,55 +606,55 @@ func (t *storageShard) collectProjectJoinKeys(recids []uint32, sourceKeyCols []s
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
-	keys := make([][]scm.Scmer, 0, len(recids))
-	for _, idx := range recids {
+	write := 0
+	part.forEachID(func(idx uint32) bool {
 		if idx >= visibleUpper {
-			continue
+			return true
 		}
 		if acidMode {
 			if !currentTx.IsVisible(t, idx) {
-				continue
+				return true
 			}
 		} else if t.deletions.Get(uint(idx)) {
-			continue
+			return true
 		}
-		key := make([]scm.Scmer, len(sourceKeyCols))
 		skip := false
 		if idx < mainCount {
 			for i, col := range cols {
 				if needsTxReader[i] {
-					key[i] = readers[i].GetValue(idx)
+					dst[write+i] = readers[i].GetValue(idx)
 				} else {
-					key[i] = col.GetValue(idx)
+					dst[write+i] = col.GetValue(idx)
 				}
-				if key[i].IsNil() {
+				if dst[write+i].IsNil() {
 					skip = true
 				}
 			}
 		} else {
 			for i, col := range sourceKeyCols {
 				if needsTxReader[i] {
-					key[i] = readers[i].GetValue(idx)
+					dst[write+i] = readers[i].GetValue(idx)
 				} else if _, isProxy := cols[i].(*StorageComputeProxy); isProxy {
-					key[i] = cols[i].GetValue(idx)
+					dst[write+i] = cols[i].GetValue(idx)
 				} else {
-					key[i] = t.getDelta(int(idx-mainCount), col)
+					dst[write+i] = t.getDelta(int(idx-mainCount), col)
 				}
-				if key[i].IsNil() {
+				if dst[write+i].IsNil() {
 					skip = true
 				}
 			}
 		}
 		if !skip {
-			keys = append(keys, key)
+			write += len(sourceKeyCols)
 		}
-	}
-	return keys
+		return true
+	})
+	return write
 }
 
-func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []string, keys [][]scm.Scmer, ss *scm.SessionState) *recSet {
+func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState) *recSet {
 	result := &recSet{tx: currentTx, table: t}
-	if len(keys) == 0 {
+	if keys.count() == 0 {
 		return result
 	}
 	querySeq := scm.CurrentQuerySeq()
@@ -517,7 +675,8 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
-			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss)}
+			dense := uint(keys.count()*64) >= t.CountEstimate()
+			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss, dense)}
 			return scm.NewNil()
 		})
 	})
@@ -549,7 +708,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 	return result
 }
 
-func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys [][]scm.Scmer, ss *scm.SessionState) recSetShard {
+func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, dense bool) recSetShard {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -585,10 +744,56 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	maxInsertIndex := len(t.inserts)
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	if dense {
+		builder := newRecSetShardBuilder(t, visibleUpper, true)
+		actual := make([]scm.Scmer, len(targetKeyCols))
+		replayUntil := uint32(0)
+		evaluate := func(idx uint32) bool {
+			visible := true
+			if acidMode {
+				visible = currentTx.IsVisible(t, idx)
+			} else if t.deletions.Get(uint(idx)) {
+				visible = false
+			}
+			if !visible {
+				return false
+			}
+			for col := range targetKeyCols {
+				if idx < t.main_count {
+					if targetNeedsTxReader[col] {
+						actual[col] = targetReaders[col].GetValue(idx)
+					} else {
+						actual[col] = targetCols[col].GetValue(idx)
+					}
+				} else if targetNeedsTxReader[col] {
+					actual[col] = targetReaders[col].GetValue(idx)
+				} else if _, proxy := targetCols[col].(*StorageComputeProxy); proxy {
+					actual[col] = targetCols[col].GetValue(idx)
+				} else {
+					actual[col] = t.getDelta(int(idx-t.main_count), targetKeyCols[col])
+				}
+			}
+			return keys.contains(actual)
+		}
+		for idx := uint32(0); idx < visibleUpper; idx++ {
+			wasBitmap := builder.bitmap
+			builder.add(idx, evaluate(idx))
+			if !wasBitmap && builder.bitmap {
+				replayUntil = idx + 1
+			}
+		}
+		if replayUntil > 0 {
+			for idx := uint32(0); idx < replayUntil; idx++ {
+				builder.addBitmap(idx, evaluate(idx))
+			}
+		}
+		return builder.finish()
+	}
 	seen := make(map[uint32]struct{})
 	recids := make([]uint32, 0, 64)
 	var buf [1024]uint32
-	for _, key := range keys {
+	for keyIndex := 0; keyIndex < keys.count(); keyIndex++ {
+		key := keys.tuple(keyIndex)
 		bounds := make(boundaries, len(targetKeyCols))
 		for i, col := range targetKeyCols {
 			bounds[i] = columnboundaries{
@@ -627,7 +832,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		})
 	}
 	sort.Slice(recids, func(i, j int) bool { return recids[i] < recids[j] })
-	return recSetShard{shard: t, recids: recids, count: int64(len(recids))}
+	return newRecSetShardFromSortedIDs(t, visibleUpper, recids)
 }
 
 func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, targetKeyCols []string, targetCols []ColumnStorage, targetReaders []ColumnReader, targetNeedsTxReader []bool, currentTx *TxContext) bool {
@@ -685,7 +890,7 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				res, cnt := part.shard.scanRecSetPart(part.recids, conditionCols, condition, callbackCols, callback, aggregate, neutral, currentTx, ss)
+				res, cnt := part.shard.scanRecSetPart(&part, conditionCols, condition, callbackCols, callback, aggregate, neutral, currentTx, ss)
 				values <- scanResult{res: res, outCount: cnt, inputCount: part.count}
 				return scm.NewNil()
 			})
@@ -795,7 +1000,7 @@ func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condit
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				found := part.shard.recSetPartExists(part.recids, conditionCols, conditionFn, currentTx, ss, &stop)
+				found := part.shard.recSetPartExists(&part, conditionCols, conditionFn, currentTx, ss, &stop)
 				if found {
 					stop.Store(true)
 				}
@@ -824,7 +1029,7 @@ func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condit
 	return found
 }
 
-func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
+func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -867,19 +1072,20 @@ func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string,
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
-	for _, idx := range recids {
+	found := false
+	part.forEachID(func(idx uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
 		}
 		if idx >= visibleUpper {
-			continue
+			return true
 		}
 		if acidMode {
 			if !currentTx.IsVisible(t, idx) {
-				continue
+				return true
 			}
 		} else if t.deletions.Get(uint(idx)) {
-			continue
+			return true
 		}
 		if idx < mainCount {
 			for i, c := range cReaders {
@@ -901,13 +1107,15 @@ func (t *storageShard) recSetPartExists(recids []uint32, conditionCols []string,
 			}
 		}
 		if scm.ToBool(conditionFn(cdataset...)) {
-			return true
+			found = true
+			return false
 		}
-	}
-	return false
+		return true
+	})
+	return found
 }
 
-func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
+func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -957,16 +1165,16 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 	var outCount int64
 	var buf [1024]uint32
 	pending := buf[:0]
-	for _, idx := range recids {
+	part.forEachID(func(idx uint32) bool {
 		if idx >= visibleUpper {
-			continue
+			return true
 		}
 		if acidMode {
 			if !currentTx.IsVisible(t, idx) {
-				continue
+				return true
 			}
 		} else if t.deletions.Get(uint(idx)) {
-			continue
+			return true
 		}
 		if idx < mainCount {
 			for i, c := range cReaders {
@@ -988,7 +1196,7 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 			}
 		}
 		if !scm.ToBool(conditionFn(cdataset...)) {
-			continue
+			return true
 		}
 		pending = append(pending, idx)
 		outCount++
@@ -1004,7 +1212,8 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 				locked = true
 			}
 		}
-	}
+		return true
+	})
 	if len(pending) > 0 {
 		if locked {
 			t.mu.RUnlock()
@@ -1023,7 +1232,7 @@ func (t *storageShard) scanRecSetPart(recids []uint32, conditionCols []string, c
 	return akkumulator, outCount
 }
 
-func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) *shardqueue {
+func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) *shardqueue {
 	result := &shardqueue{shard: t}
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
@@ -1129,17 +1338,17 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
-	result.items = make([]uint32, 0, len(recids))
-	for _, idx := range recids {
+	result.items = make([]uint32, 0, part.count)
+	part.forEachID(func(idx uint32) bool {
 		if idx >= visibleUpper {
-			continue
+			return true
 		}
 		if acidMode {
 			if !currentTx.IsVisible(t, idx) {
-				continue
+				return true
 			}
 		} else if t.deletions.Get(uint(idx)) {
-			continue
+			return true
 		}
 		if idx < mainCount {
 			for i, c := range cReaders {
@@ -1163,7 +1372,8 @@ func (t *storageShard) scan_order_recids(recids []uint32, conditionCols []string
 		if scm.ToBool(conditionFn(cdataset...)) {
 			result.items = append(result.items, idx)
 		}
-	}
+		return true
+	})
 
 	itemPos := make(map[uint32]int, len(result.items))
 	for i, idx := range result.items {

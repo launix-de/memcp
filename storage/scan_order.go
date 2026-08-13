@@ -612,7 +612,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 										q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 									}
 								}()
-								res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+								res := part.shard.scan_order_recset_part(&part, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 								res.callbackCols = callbackCols
 								res.callback = callback
 								res.tableIdx = tableIdx
@@ -642,7 +642,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 							if ss != nil && ss.IsKilledSeq(querySeq) {
 								panic("query killed")
 							}
-							res := part.shard.scan_order_recids(part.recids, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+							res := part.shard.scan_order_recset_part(&part, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 							res.callbackCols = callbackCols
 							res.callback = callback
 							res.tableIdx = tableIdx
