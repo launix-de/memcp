@@ -1367,6 +1367,7 @@ type ShardMapReducer struct {
 	noopClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
 	breakClosureFn *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
 	args           []scm.Scmer                             // pre-allocated args buffer
+	reduceArgs     []scm.Scmer                             // pre-allocated binary reducer arguments
 	mapFn          func(...scm.Scmer) scm.Scmer
 	reduceFn       func(...scm.Scmer) scm.Scmer
 	mapScmer       scm.Scmer     // original Scmer for network serialization
@@ -1399,6 +1400,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		mainCols:         make([]ColumnStorage, len(cols)),
 		colNames:         cols,
 		args:             make([]scm.Scmer, len(cols)),
+		reduceArgs:       make([]scm.Scmer, 2),
 		mapFn:            scm.OptimizeProcToSerialFunction(mapFn),
 		reduceFn:         scm.OptimizeProcToSerialFunction(reduceFn),
 		mapScmer:         mapFn,
@@ -1689,6 +1691,14 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32, batchids []uint
 	return acc
 }
 
+func (m *ShardMapReducer) reduce(acc scm.Scmer, value scm.Scmer) scm.Scmer {
+	// A direct variadic call with two values allocates its temporary argument
+	// slice on every row because reduceFn may retain it.
+	m.reduceArgs[0] = acc
+	m.reduceArgs[1] = value
+	return m.reduceFn(m.reduceArgs...)
+}
+
 // processMainBlock is a tight loop over main-storage records – no branching
 // on main vs delta, direct ColumnStorage.GetValue calls. JIT candidate.
 func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.Scmer {
@@ -1733,7 +1743,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduceFn(acc, m.mapFn(m.args...))
+			acc = m.reduce(acc, m.mapFn(m.args...))
 		}()
 	}
 	return acc
@@ -1776,7 +1786,7 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduceFn(acc, m.mapFn(m.args...))
+			acc = m.reduce(acc, m.mapFn(m.args...))
 		}()
 	}
 	return acc
@@ -1820,7 +1830,7 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduceFn(acc, m.mapFn(m.args...))
+			acc = m.reduce(acc, m.mapFn(m.args...))
 		}()
 	}
 	return acc
@@ -1863,7 +1873,7 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduceFn(acc, m.mapFn(m.args...))
+			acc = m.reduce(acc, m.mapFn(m.args...))
 		}()
 	}
 	return acc
