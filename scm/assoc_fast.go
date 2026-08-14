@@ -57,7 +57,7 @@ func (d *FastDict) Iterate(fn func(k, v Scmer) bool) {
 	}
 }
 
-// HashKey hashes the coercion classes used by Equal for dictionary keys.
+// HashKey computes a stable hash for a Scheme value.
 // It avoids allocating intermediate strings by inspecting types and
 // feeding bytes directly to a streaming hasher. Lists are hashed by
 // recursively hashing their elements with structural markers.
@@ -68,54 +68,30 @@ func HashKey(k Scmer) uint64 {
 	writeScmer = func(v Scmer) {
 		switch v.GetTag() {
 		case tagNil:
-			h.WriteByte(2)
-			var b [8]byte
-			h.Write(b[:])
+			h.WriteByte(0)
 		case tagBool:
-			h.WriteByte(2)
-			var b [8]byte
+			h.WriteByte(1)
 			if v.Bool() {
-				binary.LittleEndian.PutUint64(b[:], math.Float64bits(1))
+				h.WriteByte(1)
+			} else {
+				h.WriteByte(0)
 			}
-			h.Write(b[:])
-		case tagInt, tagDate:
+		case tagInt:
 			h.WriteByte(2)
 			var b [8]byte
-			binary.LittleEndian.PutUint64(b[:], math.Float64bits(float64(v.Int())))
+			binary.LittleEndian.PutUint64(b[:], uint64(v.Int()))
 			h.Write(b[:])
 		case tagFloat:
-			h.WriteByte(2)
+			h.WriteByte(3)
 			var b [8]byte
-			value := v.Float()
-			if value == 0 {
-				value = 0
-			}
-			binary.LittleEndian.PutUint64(b[:], math.Float64bits(value))
+			binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
 			h.Write(b[:])
-		case tagString, tagSymbol, tagCString, tagBString:
-			value := v.String()
-			if value == "" || strings.EqualFold(value, "false") {
-				h.WriteByte(2)
-				var b [8]byte
-				h.Write(b[:])
-				return
-			}
-			if timestamp, ok := ParseDateString(value); ok {
-				h.WriteByte(2)
-				var b [8]byte
-				binary.LittleEndian.PutUint64(b[:], math.Float64bits(float64(timestamp)))
-				h.Write(b[:])
-				return
-			}
-			if numericPrefix(value) != "" {
-				h.WriteByte(2)
-				var b [8]byte
-				binary.LittleEndian.PutUint64(b[:], math.Float64bits(v.Float()))
-				h.Write(b[:])
-				return
-			}
+		case tagString:
 			h.WriteByte(4)
-			h.WriteString(value)
+			h.WriteString(v.String())
+		case tagSymbol:
+			h.WriteByte(5)
+			h.WriteString(v.String())
 		case tagSlice:
 			h.WriteByte(6)
 			// write length to reduce collisions for different list sizes
@@ -179,6 +155,46 @@ func HashKey(k Scmer) uint64 {
 	return h.Sum64()
 }
 
+// hashStructuralScalar normalizes the scalar coercions needed by planner
+// expression catalogs without charging every FastDict and optimizer
+// fingerprint for date and numeric-string parsing.
+func hashStructuralFloat(value float64) uint64 {
+	if value == 0 {
+		value = 0
+	}
+	return HashKey(NewFloat(value))
+}
+
+func hashStructuralScalar(value Scmer) uint64 {
+	switch value.GetTag() {
+	case tagNil:
+		return hashStructuralFloat(0)
+	case tagBool:
+		if value.Bool() {
+			return hashStructuralFloat(1)
+		}
+		return hashStructuralFloat(0)
+	case tagInt, tagDate:
+		return hashStructuralFloat(float64(value.Int()))
+	case tagFloat:
+		return hashStructuralFloat(value.Float())
+	case tagString, tagSymbol, tagCString, tagBString:
+		text := value.String()
+		if text == "" || strings.EqualFold(text, "false") {
+			return hashStructuralFloat(0)
+		}
+		if timestamp, ok := ParseDateString(text); ok {
+			return hashStructuralFloat(float64(timestamp))
+		}
+		if numericPrefix(text) != "" {
+			return hashStructuralFloat(value.Float())
+		}
+		return HashKey(NewString(text))
+	default:
+		return HashKey(value)
+	}
+}
+
 func combineStructuralHash(hash, value uint64) uint64 {
 	value += 0x9e3779b97f4a7c15
 	value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9
@@ -213,8 +229,7 @@ func hashStructuralKey(key Scmer, memo map[Scmer]uint64) uint64 {
 		panic("make_structural_index requires immutable list expressions")
 	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString:
 		// Equal accepts numerically equal int/float/date values across tags.
-		// HashKey also normalizes string/symbol and false-like scalar keys.
-		return HashKey(key)
+		return hashStructuralScalar(key)
 	default:
 		return HashKey(key)
 	}
@@ -240,6 +255,8 @@ func hashStructuralReadonly(key Scmer) uint64 {
 		return hash
 	case tagFastDict:
 		panic("structural hashing rejects mutable FastDict expressions")
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString:
+		return hashStructuralScalar(key)
 	default:
 		return HashKey(key)
 	}

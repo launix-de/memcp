@@ -1450,7 +1450,7 @@ physical membership probe. */
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
 			(not (contains? explicit_keys expr)))))))
-		(define stage_id (concat "scalar-group-top:" (stable_structural_hash (list subquery keys ags (qb_order inner)) true)))
+		(define stage_id (concat "scalar-group-top:" (fnv_hash (serialize (list subquery keys ags (qb_order inner))))))
 		(define stage (make_group_stage
 			stage_id
 			inner_src
@@ -1524,7 +1524,7 @@ physical membership probe. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "exists:" (stable_structural_hash (list subquery keys outer_domain condition) false)))
+		(define stage_id (concat "exists:" (fnv_hash (string (list subquery keys outer_domain condition)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -1603,8 +1603,8 @@ physical membership probe. */
 			'()
 			(qb_stages inner)
 			(qb_facts inner)))
-		(define stage_id (concat "exists-group:" (stable_structural_hash
-			(list subquery keys outer_domain condition (qb_having inner)) false)))
+		(define stage_id (concat "exists-group:" (fnv_hash
+			(string (list subquery keys outer_domain condition (qb_having inner))))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -1738,7 +1738,7 @@ physical membership probe. */
 		serialization once and reuse the compact identity below; serializing that
 		large immutable tree twice made canonicalization scale with an avoidable
 		second full traversal. */
-		(define inner_hash (stable_structural_hash inner true))
+		(define inner_hash (fnv_hash (serialize inner)))
 		(define candidate_alias (concat "__exists_union_" inner_hash))
 		(define union_input (make_union_block
 			(union_mode inner)
@@ -1751,7 +1751,7 @@ physical membership probe. */
 		(define keys (mapIndex (gs_keys first_stage) (lambda (i _key)
 			(list (quote get_column) candidate_alias false (concat "k" (string i)) false))))
 		(define stage_id (concat "exists-union:"
-			(stable_structural_hash (list inner_hash outer_domain lookup_keys) true)))
+			(fnv_hash (serialize (list inner_hash outer_domain lookup_keys)))))
 		(define stage (make_group_stage
 			stage_id
 			union_input
@@ -1908,7 +1908,7 @@ without separately proving two-valued semantics. */
 (define make_in_union_candidate_stage_rewrite (lambda (probe inner args)
 	(begin
 		(define semijoin_where (if (>= (count args) 4) (nth args 3) false))
-		(define candidate_alias (concat "__in_candidate_" (stable_structural_hash (list probe inner) false)))
+		(define candidate_alias (concat "__in_candidate_" (fnv_hash (string (list probe inner)))))
 		(define union_input (make_union_block
 			(union_mode inner)
 			(map (union_branches inner) make_in_union_candidate_branch)
@@ -1918,8 +1918,8 @@ without separately proving two-valued semantics. */
 				(list (quote alias) candidate_alias))))
 		(define candidate_key (list (quote get_column) candidate_alias false "v" false))
 		(define keys (list candidate_key))
-		(define stage_id (concat "in-candidate:" (stable_structural_hash (list probe inner) false)))
-		(define null_stage_id (concat "in-candidate-null:" (stable_structural_hash inner false)))
+		(define stage_id (concat "in-candidate:" (fnv_hash (string (list probe inner)))))
+		(define null_stage_id (concat "in-candidate-null:" (fnv_hash (string inner))))
 		(define null_ag (in_rhs_state_descriptor candidate_key))
 		(define stage (make_group_stage
 			stage_id
@@ -2039,9 +2039,9 @@ without separately proving two-valued semantics. */
 				(qb_stages membership_inner)
 				(qb_facts membership_inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "in:" (stable_structural_hash (list probe keys lookup_keys condition) false)))
+		(define stage_id (concat "in:" (fnv_hash (string (list probe keys lookup_keys condition)))))
 		(define null_ag (in_rhs_state_descriptor rhs_expr))
-		(define null_stage_id (concat "in-null:" (stable_structural_hash (list outer_domain condition rhs_expr) false)))
+		(define null_stage_id (concat "in-null:" (fnv_hash (string (list outer_domain condition rhs_expr)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2223,7 +2223,7 @@ without separately proving two-valued semantics. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-agg:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
+		(define stage_id (concat "scalar-agg:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2309,7 +2309,7 @@ without separately proving two-valued semantics. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-once:" (stable_structural_hash (list subquery keys outer_domain condition ag) false)))
+		(define stage_id (concat "scalar-once:" (fnv_hash (string (list subquery keys outer_domain condition ag)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2375,7 +2375,7 @@ without separately proving two-valued semantics. */
 			'()
 			(qb_stages inner)
 			(qb_facts inner)))
-		(define stage_id (concat "derived-once:" (stable_structural_hash (list original_relation alias ags) false)))
+		(define stage_id (concat "derived-once:" (fnv_hash (string (list original_relation alias ags)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2558,7 +2558,7 @@ without separately proving two-valued semantics. */
 
 (define derived_stage_rebind_id_map (lambda (alias stages)
 	(map (coalesceNil stages '()) (lambda (stage)
-		(list (gs_id stage) (concat (gs_id stage) ":derived:" (stable_structural_hash alias false)))))))
+		(list (gs_id stage) (concat (gs_id stage) ":derived:" (fnv_hash (string alias))))))))
 
 (define derived_stage_rebind_alias_map (lambda (id_map stages)
 	(begin
@@ -2667,7 +2667,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-single:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
+		(define stage_id (concat "scalar-single:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3092,7 +3092,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define outer_domain (if (empty_list? partition_exprs)
 			'()
 			partition_exprs))
-		(define stage_id (concat "window-agg:" (stable_structural_hash (list fn canonical_args keys) false)))
+		(define stage_id (concat "window-agg:" (fnv_hash (string (list fn canonical_args keys)))))
 		(define stage (make_group_stage
 			stage_id
 			src
@@ -3437,7 +3437,7 @@ membership_truth rather than adding another physical lowering path. */
 		(define parent (uctx_get ctx (quote btw2025-current-handle) nil))
 		(define parent_ancestors (uctx_get ctx (quote btw2025-ancestor-handles) '()))
 		(define current_ancestors (if (nil? parent) '() (cons parent parent_ancestors)))
-		(define current_handle (concat "djoin:" (stable_structural_hash (list kind subquery outer_sources) false)))
+		(define current_handle (concat "djoin:" (fnv_hash (string (list kind subquery outer_sources)))))
 		(define current_info (btw2025_pending_unnesting_info subquery outer_sources current_handle parent current_ancestors))
 		(define resolve_ctx (make_uctx ctx (list
 			(list (quote defer-subquery-rewrites) true)
@@ -3485,7 +3485,7 @@ membership_truth rather than adding another physical lowering path. */
 
 (define btw2025_dependent_marker_key (lambda (expr)
 	(if (dependent_subquery_marker? expr)
-		(concat "dependent:" (stable_structural_hash expr false))
+		(concat "dependent:" (fnv_hash (string expr)))
 		nil)))
 
 (define btw2025_decorrelate_exprs_using (lambda (exprs ctx resolved)
@@ -7303,7 +7303,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				(gs_limit stage)
 				(gs_offset stage)
 				(stage_semantic_facts alias_map signatures (gs_facts stage))))
-			(concat "stage-semantic:" (stable_structural_hash payload true))))))
+			(concat "stage-semantic:" (fnv_hash (serialize payload)))))))
 
 (define stage_semantic_signature_index (lambda (stages)
 	(reduce (coalesceNil stages '()) (lambda (index stage)
@@ -7345,10 +7345,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				(define stage_key (stage_output_left_join_stage_key signature_index stage))
 				(if (nil? stage_key)
 					nil
-					(concat "stage-output-left-join:" (stable_structural_hash (list
+					(concat "stage-output-left-join:" (fnv_hash (serialize (list
 						stage_key
 						(source_schema src)
-						(normalize_stage_output_left_join_expr (source_alias src) (source_join_expr src))) true))))))))
+						(normalize_stage_output_left_join_expr (source_alias src) (source_join_expr src))))))))))))
 
 (define stage_output_left_join_stage_with_aggregates (lambda (stage ags)
 	(make_group_stage
@@ -9719,7 +9719,7 @@ working on the original values. */
 	(concat "k" i)))
 
 (define aggregate_col_name (lambda (ag)
-	(concat "agg_" (stable_structural_hash ag true))))
+	(concat "agg_" (fnv_hash (serialize ag)))))
 
 (define canonical_aggregate_probe_reference (lambda (stage requested_col)
 	(begin
@@ -9758,9 +9758,9 @@ the enclosing carrier identity supplies the remaining query context. */
 			(define alias_map (merge (list
 				(stage_semantic_alias_entries local_aliases "__aggregate_local_")
 				(stage_semantic_alias_entries outer_aliases "__aggregate_outer_"))))
-			(concat "agg_" (stable_structural_hash (list
+			(concat "agg_" (fnv_hash (serialize (list
 				"canonical-aggregate-v5"
-				(stage_semantic_rewrite_expr alias_map '() ag)) true))))))
+				(stage_semantic_rewrite_expr alias_map '() ag)))))))))
 
 (define dedupe_aggregates_by_col (lambda (ags)
 	(reduce (coalesceNil ags '()) (lambda (acc ag)
@@ -9777,8 +9777,8 @@ the enclosing carrier identity supplies the remaining query context. */
 	/* The readable label is not an identity. The hash covers the canonical input
 	graph, source-role-aware keys, and complete filter, so equivalent aliases
 	converge while self-join roles and different predicates remain separated. */
-	(concat ".grp:" label ":" (stable_structural_hash (list
-		"canonical-group-keytable-v5" schema input_identity keys condition) true))))
+	(concat ".grp:" label ":" (fnv_hash (serialize (list
+		"canonical-group-keytable-v5" schema input_identity keys condition))))))
 
 /* Persistent helper objects must be named by the physical data they represent,
 not by disposable SQL aliases. Source position remains part of the identity so
@@ -9915,10 +9915,10 @@ self-joins of the same base table still describe two distinct row roles. */
 (define canonical_orc_column_name (lambda (kind src payload)
 	/* ORCs live on one base table. Their identity is the table plus the complete
 	physical window recipe; SELECT aliases and read-time LIMIT/OFFSET are absent. */
-	(concat "__orc_" kind "_" (stable_structural_hash (list
+	(concat "__orc_" kind "_" (fnv_hash (serialize (list
 		"canonical-orc-v2"
 		(list (source_schema src) (source_relation src))
-		payload) true))))
+		payload))))))
 
 (define make_group_keytable_cache (lambda (schema relation)
 	(list (quote group-keytable) schema relation)))
@@ -9954,9 +9954,9 @@ self-joins of the same base table still describe two distinct row roles. */
 	(begin
 		(define input (gs_input stage))
 		(if (union_block? input)
-			(concat "union:" (stable_structural_hash input false))
+			(concat "union:" (fnv_hash (string input)))
 			(if (query_block? input)
-				(concat "query:" (stable_structural_hash input false))
+				(concat "query:" (fnv_hash (string input)))
 				(source_relation input))))))
 
 (define group_stage_default_cache (lambda (stage signatures)
@@ -10078,7 +10078,7 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
 			(not (contains? explicit_keys expr)))))))
 		(make_group_stage
-			(concat "group:" (source_relation src) ":" (stable_structural_hash (list keys ags) false))
+			(concat "group:" (source_relation src) ":" (fnv_hash (string (list keys ags))))
 			src
 			session_keys
 			keys
@@ -10116,8 +10116,8 @@ self-joins of the same base table still describe two distinct row roles. */
 			(qb_stages block)
 			(qb_facts block)))
 		(make_group_stage
-			(concat "group:query:" (stable_structural_hash (list
-				(qb_sources block) (qb_where block) keys ags) true))
+			(concat "group:query:" (fnv_hash (serialize (list
+				(qb_sources block) (qb_where block) keys ags))))
 			input
 			session_keys
 			keys
@@ -10346,7 +10346,7 @@ ever-larger subtrees. */
 		_ false)))
 
 (define group_computed_order_col_name (lambda (expr)
-	(concat "ord_" (stable_structural_hash expr true))))
+	(concat "ord_" (fnv_hash (serialize expr)))))
 
 (define group_order_physical_expr (lambda (grouptbl expr)
 	(if (direct_group_order_expr? expr)
@@ -12585,7 +12585,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(group_cache_relation cache)
 				(map (gs_aggregates stage) (lambda (ag)
 					(aggregate_col_name_using (gs_input stage) ag)))
-				(map (gs_order stage) (lambda (item) (stable_structural_hash item true)))
+				(map (gs_order stage) (lambda (item) (fnv_hash (serialize item))))
 				(if (source_is_base_table? (gs_input stage))
 					nil
 					(list
@@ -14778,7 +14778,7 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 		(define pos (prejoin_source_position sources alias))
 		(if (nil? pos)
 			(neumann_fail "build_queryplan" (concat "prejoin source alias not found: " alias))
-			(concat "s" pos "_" (stable_structural_hash col false))))))
+			(concat "s" pos "_" (fnv_hash (string col)))))))
 
 (define prejoin_source_table_key (lambda (src)
 	(list (source_schema src) (source_relation src))))
@@ -14886,7 +14886,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			"physical-prejoin-v2"
 			(map sources prejoin_source_table_key)
 			(prejoin_rewrite_expr sources default_alias canonical_alias (prejoin_join_condition block))))
-		(concat ".prejoin:" (stable_structural_hash signature true)))))
+		(concat ".prejoin:" (fnv_hash (serialize signature))))))
 
 (define prejoin_primary_key_exprs (lambda (sources)
 	(merge (map sources (lambda (src)

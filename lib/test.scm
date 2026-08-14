@@ -1845,6 +1845,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(fnv_hash (serialize structural_hash_tree))) true "stable structural serialize hash preserves generated names")
 	(assert (equal? (stable_structural_hash (source "hash-test" 1 1 structural_hash_tree) true)
 		(fnv_hash (serialize structural_hash_tree))) true "stable structural serialize hash unwraps SourceInfo")
+	(define optimized_string_hash (serialize (optimize (list
+		(quote lambda) (list (quote value))
+		(list (quote fnv_hash) (list (quote string) (quote value)))))))
+	(assert (strlike optimized_string_hash "%stable_structural_hash%false%") true
+		"fnv_hash optimizer fuses the builtin string producer")
+	(define optimized_serialize_hash (serialize (optimize (list
+		(quote lambda) (list (quote value))
+		(list (quote fnv_hash) (list (quote serialize) (quote value)))))))
+	(assert (strlike optimized_serialize_hash "%stable_structural_hash%true%") true
+		"fnv_hash optimizer fuses the builtin serializer producer")
+	(define optimized_plain_hash (serialize (optimize (list
+		(quote lambda) (list (quote value))
+		(list (quote fnv_hash) (quote value))))))
+	(assert (strlike optimized_plain_hash "%fnv_hash%") true
+		"fnv_hash optimizer preserves non-producer calls")
+	(define optimized_hash_payload (serialize (optimize (list
+		(quote lambda) (list (quote left) (quote right))
+		(list (quote stable_structural_hash)
+			(list (quote list) (quote left) (quote right)) true)))))
+	(assert (strlike optimized_hash_payload "%!list%") true
+		"structural hash payload is stack-backed because it cannot escape")
 
 	/* Compile-local structural catalogs keep small collections linear, promote
 	at the fifth distinct key, resolve collisions with equal?, and freeze before
