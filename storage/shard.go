@@ -2574,9 +2574,56 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 	// its UUID references both the column files and any unreplayed WAL. Keep it
 	// byte-for-byte instead of loading it merely for a periodic rebuild or
 	// shutdown. A forced rebuild must materialize it before continuing.
+	var columnSnapshot map[string]ColumnStorage
+	var indexSnapshot []*StorageIndex
+	var deltaColumnsSnapshot map[string]int
+	var insertsSnapshot [][]scm.Scmer
+	var mainCount uint32
+	var maxInsertIndex int
+	var deletions NonLockingReadMap.NonBlockingBitMap
 	for {
 		t.mu.Lock()
 		if t.srState != COLD {
+			if next := t.loadNext(); next != nil {
+				t.mu.Unlock()
+				// lock+unlock the next shard so we don't return too early (sync hazards)
+				next.mu.Lock()
+				next.mu.Unlock()
+				return next // already rebuilding (happens on parallel inserts)
+			}
+
+			maxInsertIndex = len(t.inserts)
+			deletions = t.deletions.Copy()
+			if all || maxInsertIndex > 0 || deletions.Count() > 0 {
+				// A rebuild must not acquire the old shard after publishing t.next:
+				// mutations deliberately hold old.mu while forwarding to next.mu.
+				// Materialize cold columns before that publication, then retry so
+				// the final snapshot and t.next become visible atomically to writers.
+				var nilCols []string
+				for col, storage := range t.columns {
+					if storage == nil {
+						nilCols = append(nilCols, col)
+					}
+				}
+				if len(nilCols) > 0 {
+					t.mu.Unlock()
+					for _, col := range nilCols {
+						t.ensureColumnLoaded(col, false)
+					}
+					continue
+				}
+				columnSnapshot = make(map[string]ColumnStorage, len(t.columns))
+				for col, storage := range t.columns {
+					columnSnapshot[col] = storage
+				}
+				indexSnapshot = snapshotIndexesForRebuild(t.Indexes)
+				deltaColumnsSnapshot = make(map[string]int, len(t.deltaColumns))
+				for col, index := range t.deltaColumns {
+					deltaColumnsSnapshot[col] = index
+				}
+				insertsSnapshot = append([][]scm.Scmer(nil), t.inserts[:maxInsertIndex]...)
+				mainCount = t.main_count
+			}
 			break
 		}
 		if !all {
@@ -2595,21 +2642,14 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			t.mu.Unlock()
 		}
 	}()
-	if next := t.loadNext(); next != nil {
-		t.mu.Unlock()
-		locked = false
-		// lock+unlock the next shard so we don't return too early (sync hazards)
-		next.mu.Lock()
-		next.mu.Unlock()
-		return next // already rebuilding (happens on parallel inserts)
-		// possible problem: this call may return the t.next shard faster than the competing rebuild() call that actually rebuilds; maybe use a additional lock on t.next??
-	}
 	result := new(storageShard)
 	result.t = t.t
 	result.srState = WRITE // mark as live so ensureLoaded() won't reset columns
-	t.storeNext(result)
-	result.mu.Lock() // interlock so no one will rebuild the shard twice
+	result.mu.Lock()       // interlock so no one will rebuild the shard twice
 	result.enterWriteOwner()
+	// Publish only after result.mu is held. A mutator that observes next can
+	// therefore neither overtake initialization nor invert the lock order.
+	t.storeNext(result)
 	resultLocked := true
 	defer func() {
 		if resultLocked {
@@ -2648,10 +2688,6 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		}
 	}()
 
-	// now read out deletion list
-	maxInsertIndex := len(t.inserts)
-	// copy-freeze deletions so we don't have to lock anything
-	deletions := t.deletions.Copy()
 	// from now on, we can rebuild with no hurry; inserts and update/deletes on the previous shard will propagate to us, too
 
 	if all || maxInsertIndex > 0 || deletions.Count() > 0 {
@@ -2678,29 +2714,19 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		GlobalCache.Remove(t)
 		removedFromCache = true
 
-		// Ensure all columns are loaded from disk. shardCleanup sets column
-		// values to nil (while keeping the key) to free memory under pressure.
-		// rebuild must read all columns, so materialize any nil entries now
-		// while t.mu is not held (ensureColumnLoaded acquires it internally).
-		// Snapshot nil-column keys to load them.
-		// rebuild() operates on the ORIGINAL shard (t), building a NEW shard (result).
-		// No concurrent writes to t.columns happen during rebuild because:
-		// - ComputeColumn writes to a DIFFERENT shard's columns map, not t's
-		// - The caller (database.rebuild or ComputeColumn) serializes rebuilds
-		//   for the same shard via table lock or retry loop
-		// Therefore iterating t.columns without lock is safe here.
-		var nilCols []string
-		for col, c := range t.columns {
-			if c == nil {
-				nilCols = append(nilCols, col)
-			}
-		}
-		for _, col := range nilCols {
-			t.ensureColumnLoaded(col, false)
-		}
-
 		// transfer indexes early so we know which index is Native (physically sorted)
-		rebuildIndexes(t, result)
+		rebuildIndexes(indexSnapshot, result)
+
+		getDelta := func(idx int, col string) scm.Scmer {
+			item := insertsSnapshot[idx]
+			if colidx, ok := deltaColumnsSnapshot[col]; ok && colidx < len(item) {
+				return item[colidx]
+			}
+			if proxy, ok := columnSnapshot[col].(*StorageComputeProxy); ok {
+				return proxy.GetValue(mainCount + uint32(idx))
+			}
+			return scm.NewNil()
+		}
 
 		// compute sort permutation for the Native index (if any)
 		var sortPerm []uint32
@@ -2711,7 +2737,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			// check that all index columns exist in old shard
 			allFound := true
 			for _, col := range idx.Cols {
-				if _, ok := t.columns[col]; !ok {
+				if _, ok := columnSnapshot[col]; !ok {
 					allFound = false
 					break
 				}
@@ -2720,30 +2746,30 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				idx.Native = false
 				break
 			}
-			sortPerm = make([]uint32, 0, int(t.main_count)+maxInsertIndex)
-			for i := uint32(0); i < t.main_count; i++ {
+			sortPerm = make([]uint32, 0, int(mainCount)+maxInsertIndex)
+			for i := uint32(0); i < mainCount; i++ {
 				if !deletions.Get(uint(i)) {
 					sortPerm = append(sortPerm, i)
 				}
 			}
 			for i := 0; i < maxInsertIndex; i++ {
-				if !deletions.Get(uint(t.main_count) + uint(i)) {
-					sortPerm = append(sortPerm, t.main_count+uint32(i))
+				if !deletions.Get(uint(mainCount) + uint(i)) {
+					sortPerm = append(sortPerm, mainCount+uint32(i))
 				}
 			}
 			idxCols := idx.Cols
 			hybridsort.HybridSort(sortPerm, func(idA, idB uint32) bool {
 				for _, colName := range idxCols {
 					var va, vb scm.Scmer
-					if idA < t.main_count {
-						va = t.columns[colName].GetValue(idA)
+					if idA < mainCount {
+						va = columnSnapshot[colName].GetValue(idA)
 					} else {
-						va = t.getDelta(int(idA-t.main_count), colName)
+						va = getDelta(int(idA-mainCount), colName)
 					}
-					if idB < t.main_count {
-						vb = t.columns[colName].GetValue(idB)
+					if idB < mainCount {
+						vb = columnSnapshot[colName].GetValue(idB)
 					} else {
-						vb = t.getDelta(int(idB-t.main_count), colName)
+						vb = getDelta(int(idB-mainCount), colName)
 					}
 					if scm.Less(va, vb) {
 						return true
@@ -2757,16 +2783,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			break
 		}
 
-		// Snapshot column keys under lock to avoid concurrent map iteration + write.
-		// After unlock, new columns may be added but won't be seen by this rebuild.
-		t.mu.RLock()
-		columnSnapshot := make(map[string]ColumnStorage, len(t.columns))
-		for k, v := range t.columns {
-			columnSnapshot[k] = v
-		}
-		t.mu.RUnlock()
-
-		rowCap := int(t.main_count) + maxInsertIndex - int(deletions.Count())
+		rowCap := int(mainCount) + maxInsertIndex - int(deletions.Count())
 		if rowCap < 0 {
 			rowCap = 0
 		}
@@ -2774,13 +2791,13 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		if sortPerm != nil {
 			rebuiltRowIDs = append(rebuiltRowIDs, sortPerm...)
 		} else {
-			for idx := uint32(0); idx < t.main_count; idx++ {
+			for idx := uint32(0); idx < mainCount; idx++ {
 				if !deletions.Get(uint(idx)) {
 					rebuiltRowIDs = append(rebuiltRowIDs, idx)
 				}
 			}
 			for idx := 0; idx < maxInsertIndex; idx++ {
-				globalID := t.main_count + uint32(idx)
+				globalID := mainCount + uint32(idx)
 				if !deletions.Get(uint(globalID)) {
 					rebuiltRowIDs = append(rebuiltRowIDs, globalID)
 				}
@@ -2826,16 +2843,16 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				newcol.prepare()
 				if sortPerm != nil {
 					for _, globalID := range sortPerm {
-						if globalID < t.main_count {
+						if globalID < mainCount {
 							newcol.scan(i, reader.GetValue(globalID))
 						} else {
-							newcol.scan(i, t.getDelta(int(globalID-t.main_count), col))
+							newcol.scan(i, getDelta(int(globalID-mainCount), col))
 						}
 						i++
 					}
 				} else {
 					// scan main
-					for idx := uint32(0); idx < t.main_count; idx++ {
+					for idx := uint32(0); idx < mainCount; idx++ {
 						if deletions.Get(uint(idx)) {
 							continue
 						}
@@ -2844,10 +2861,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					}
 					// scan delta
 					for idx := 0; idx < maxInsertIndex; idx++ {
-						if deletions.Get(uint(t.main_count + uint32(idx))) {
+						if deletions.Get(uint(mainCount + uint32(idx))) {
 							continue
 						}
-						newcol.scan(i, t.getDelta(idx, col))
+						newcol.scan(i, getDelta(idx, col))
 						i++
 					}
 				}
@@ -2873,16 +2890,16 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
 			if sortPerm != nil {
 				for _, globalID := range sortPerm {
-					if globalID < t.main_count {
+					if globalID < mainCount {
 						newcol.build(i, reader.GetValue(globalID))
 					} else {
-						newcol.build(i, t.getDelta(int(globalID-t.main_count), col))
+						newcol.build(i, getDelta(int(globalID-mainCount), col))
 					}
 					i++
 				}
 			} else {
 				// build main
-				for idx := uint32(0); idx < t.main_count; idx++ {
+				for idx := uint32(0); idx < mainCount; idx++ {
 					if deletions.Get(uint(idx)) {
 						continue
 					}
@@ -2891,10 +2908,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 				// build delta
 				for idx := 0; idx < maxInsertIndex; idx++ {
-					if deletions.Get(uint(t.main_count + uint32(idx))) {
+					if deletions.Get(uint(mainCount + uint32(idx))) {
 						continue
 					}
-					newcol.build(i, t.getDelta(idx, col))
+					newcol.build(i, getDelta(idx, col))
 					i++
 				}
 			}
