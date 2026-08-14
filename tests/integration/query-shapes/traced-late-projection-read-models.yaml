@@ -19,6 +19,10 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trace_actor"
+  - sql: "DROP TABLE IF EXISTS trace_lookup_many"
+  - sql: "DROP TABLE IF EXISTS trace_lookup"
+  - sql: "DROP TABLE IF EXISTS trace_page"
   - sql: "DROP TABLE IF EXISTS trace_config"
   - sql: "DROP TABLE IF EXISTS trace_doc"
   - sql: "DROP TABLE IF EXISTS trace_revision"
@@ -28,6 +32,33 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_wide_prop"
   - sql: "DROP TABLE IF EXISTS trace_wide_parent"
   - sql: "DROP TABLE IF EXISTS trace_wide_assignment"
+  - sql: |
+      CREATE TABLE trace_page (
+        id INT PRIMARY KEY,
+        lookup_id INT,
+        archived BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_lookup (
+        id INT PRIMARY KEY,
+        label VARCHAR(40),
+        amount INT
+      )
+  - sql: |
+      CREATE TABLE trace_lookup_many (
+        id INT PRIMARY KEY,
+        lookup_id INT,
+        amount INT
+      )
+  - sql: |
+      CREATE TABLE trace_actor (
+        id INT,
+        enabled BOOL
+      )
+  - sql: "INSERT INTO trace_page (id, lookup_id, archived) VALUES (1, 10, FALSE), (2, 20, FALSE), (3, 10, TRUE)"
+  - sql: "INSERT INTO trace_lookup (id, label, amount) VALUES (10, 'first', 4), (20, 'second', 7)"
+  - sql: "INSERT INTO trace_lookup_many (id, lookup_id, amount) VALUES (1, 10, 3), (2, 10, 5), (3, 20, 11)"
+  - sql: "INSERT INTO trace_actor (id, enabled) VALUES (10, TRUE), (20, FALSE)"
   - sql: |
       CREATE TABLE trace_profile (
         id INT PRIMARY KEY
@@ -132,6 +163,238 @@ setup:
   - sql: "INSERT INTO trace_revision SELECT id, id, CASE WHEN id % 2 = 0 THEN 2 ELSE 1 END, id FROM trace_doc"
 
 test_cases:
+  - name: "Unused unique lookup is removed before decorrelation"
+    sql: |
+      EXPLAIN IR
+      SELECT page.id
+      FROM trace_page page
+      LEFT JOIN trace_lookup unused_lookup ON unused_lookup.id = page.lookup_id
+      WHERE page.archived = FALSE
+      LIMIT 1
+    expect:
+      rows: 1
+      result_not_contains:
+        - "unused_lookup"
+
+  - name: "Referenced unique lookup remains visible"
+    sql: |
+      SELECT page.id, used_lookup.label
+      FROM trace_page page
+      LEFT JOIN trace_lookup used_lookup ON used_lookup.id = page.lookup_id
+      WHERE page.archived = FALSE
+      ORDER BY page.id
+    expect:
+      rows: 2
+      data:
+        - {id: 1, label: "first"}
+        - {id: 2, label: "second"}
+
+  - name: "Unused nonunique lookup preserves row multiplicity"
+    sql: |
+      SELECT page.id
+      FROM trace_page page
+      LEFT JOIN trace_lookup_many repeated_lookup ON repeated_lookup.lookup_id = page.lookup_id
+      WHERE page.id = 1
+      ORDER BY repeated_lookup.id
+    expect:
+      rows: 2
+      data:
+        - {id: 1}
+        - {id: 1}
+
+  - name: "Unordered bounded lookup uses late projection braking"
+    sql: |
+      EXPLAIN
+      SELECT page.id, used_lookup.label
+      FROM trace_page page
+      LEFT JOIN trace_lookup used_lookup ON used_lookup.id = page.lookup_id
+      WHERE page.archived = FALSE
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "trace_lookup"
+      result_not_contains:
+        - "join-order:"
+        - "collect_rows"
+
+  - name: "Unordered bounded group lookup initializes lazily"
+    sql: |
+      SELECT page.id, grouped_count.item_count
+      FROM trace_page page
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) grouped_count ON grouped_count.lookup_id = page.lookup_id
+      WHERE page.archived = FALSE
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - {id: 1, item_count: 2}
+
+  - name: "One canonical carrier emits one combined initializer"
+    sql: |
+      EXPLAIN
+      SELECT page.id, grouped_count.item_count, grouped_sum.total_amount
+      FROM trace_page page
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) grouped_count ON grouped_count.lookup_id = page.lookup_id
+      LEFT JOIN (
+        SELECT lookup_id, SUM(amount) AS total_amount
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) grouped_sum ON grouped_sum.lookup_id = page.lookup_id
+      LIMIT 1
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "createtable"
+          count: 1
+        - text: "touch_keytable"
+          count: 1
+      result_contains:
+        - "item_count"
+        - "total_amount"
+
+  - name: "Nested scalar lookups share one canonical initializer"
+    sql: |
+      EXPLAIN
+      SELECT page.id,
+        COALESCE((
+          SELECT actor.id = 10
+          FROM trace_actor actor
+          WHERE actor.id = page.lookup_id
+          LIMIT 1
+        ), FALSE) AS direct_access,
+        COALESCE((
+          SELECT COALESCE((
+            SELECT nested_actor.id = 10
+            FROM trace_actor nested_actor
+            WHERE nested_actor.id = item.lookup_id
+            LIMIT 1
+          ), FALSE)
+          FROM trace_lookup_many item
+          WHERE item.id = page.id
+          LIMIT 1
+        ), FALSE) AS nested_access
+      FROM trace_page page
+      WHERE page.id = 1
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "createtable"
+          count: 1
+        - text: "touch_keytable"
+          count: 1
+      result_contains:
+        - "direct_access"
+        - "nested_access"
+
+  - name: "Collected nested scalar lookups preserve results"
+    sql: |
+      SELECT page.id,
+        COALESCE((
+          SELECT actor.id = 10
+          FROM trace_actor actor
+          WHERE actor.id = page.lookup_id
+          LIMIT 1
+        ), FALSE) AS direct_access,
+        COALESCE((
+          SELECT COALESCE((
+            SELECT nested_actor.id = 10
+            FROM trace_actor nested_actor
+            WHERE nested_actor.id = item.lookup_id
+            LIMIT 1
+          ), FALSE)
+          FROM trace_lookup_many item
+          WHERE item.id = page.id
+          LIMIT 1
+        ), FALSE) AS nested_access
+      FROM trace_page page
+      WHERE page.id = 1
+    expect:
+      rows: 1
+      data:
+        - {id: 1, direct_access: true, nested_access: true}
+
+  - name: "Equivalent grouped lookup stages are interned once"
+    sql: |
+      EXPLAIN IR
+      SELECT page.id,
+        first_count.item_count AS count_a,
+        second_count.item_count AS count_b,
+        third_count.item_count AS count_c
+      FROM trace_page page
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) first_count ON first_count.lookup_id = page.lookup_id
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) second_count ON second_count.lookup_id = page.lookup_id
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) third_count ON third_count.lookup_id = page.lookup_id
+      LIMIT 1
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "group-stage"
+          count: 2
+
+  - name: "Combined carrier columns preserve aggregate results"
+    sql: |
+      SELECT page.id, grouped_count.item_count, grouped_sum.total_amount
+      FROM trace_page page
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) grouped_count ON grouped_count.lookup_id = page.lookup_id
+      LEFT JOIN (
+        SELECT lookup_id, SUM(amount) AS total_amount
+        FROM trace_lookup_many
+        GROUP BY lookup_id
+      ) grouped_sum ON grouped_sum.lookup_id = page.lookup_id
+      WHERE page.id = 1
+    expect:
+      rows: 1
+      data:
+        - {id: 1, item_count: 2, total_amount: 8}
+
+  - name: "Different grouped filters keep separate stages"
+    sql: |
+      SELECT page.id, above_four.item_count, above_ten.total_amount
+      FROM trace_page page
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_lookup_many
+        WHERE amount > 4
+        GROUP BY lookup_id
+      ) above_four ON above_four.lookup_id = page.lookup_id
+      LEFT JOIN (
+        SELECT lookup_id, SUM(amount) AS total_amount
+        FROM trace_lookup_many
+        WHERE amount > 10
+        GROUP BY lookup_id
+      ) above_ten ON above_ten.lookup_id = page.lookup_id
+      WHERE page.id = 1
+    expect:
+      rows: 1
+      data:
+        - {id: 1, item_count: 1, total_amount: null}
+
   - name: "Derived doc list applies outer ID filter before expensive projection"
     max_time: 2.2
     max_plan_size: 60000
@@ -581,6 +844,10 @@ test_cases:
           can_view: false
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_actor"
+  - sql: "DROP TABLE IF EXISTS trace_lookup_many"
+  - sql: "DROP TABLE IF EXISTS trace_lookup"
+  - sql: "DROP TABLE IF EXISTS trace_page"
   - sql: "DROP TABLE IF EXISTS trace_config"
   - sql: "DROP TABLE IF EXISTS trace_doc"
   - sql: "DROP TABLE IF EXISTS trace_revision"
