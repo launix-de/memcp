@@ -1,5 +1,3 @@
-//go:build amd64
-
 /*
 Copyright (C) 2024-2026  Carl-Philip Hänsch
 
@@ -24,7 +22,10 @@ import (
 	"unsafe"
 )
 
-// TODO: create this file for other architectures, too
+// These emitter definitions are compiled on every architecture because the
+// generated Declaration.JITEmit callbacks reference their API. jitEnabled is
+// true only for amd64 builds with GOEXPERIMENT=jit, so non-amd64 builds retain
+// their interpreter fallback and never execute the x86 machine code.
 
 var jitCodeOverflowPanic = &struct{}{}
 
@@ -78,7 +79,7 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool
 		si := body.SourceInfo()
 		if buf.arena != nil && si.source != "" {
 			codeOffset := int32(uintptr(buf.ptr) - uintptr(buf.arena.base))
-			buf.arena.sourceMap = append(buf.arena.sourceMap, jitSourceEntry{
+			buf.arena.addSourceEntry(jitSourceEntry{
 				offset: codeOffset,
 				file:   si.source,
 				line:   int32(si.line),
@@ -560,7 +561,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		si := expr.SourceInfo()
 		if ctx.Arena != nil && si.source != "" {
 			codeOffset := int32(uintptr(ctx.Ptr) - uintptr(ctx.Arena.base))
-			ctx.Arena.sourceMap = append(ctx.Arena.sourceMap, jitSourceEntry{
+			ctx.Arena.addSourceEntry(jitSourceEntry{
 				offset: codeOffset,
 				file:   si.source,
 				line:   int32(si.line),
@@ -685,6 +686,13 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		}
 		name := string(list[0].Symbol())
 		switch name {
+		case "jit-enabled?":
+			if len(list) != 1 {
+				panic("jit: jit-enabled? does not accept arguments")
+			}
+			imm := NewBool(jitEnabled)
+			ctx.TrackImm(imm)
+			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
 		case "quote":
 			if len(list) < 2 {
 				imm := NewNil()

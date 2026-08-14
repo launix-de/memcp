@@ -24,7 +24,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
@@ -136,6 +138,22 @@ type JITEntryPoint struct {
 	Arena      *jitArena            // owning arena (for free on GC)
 	ConstRoots []unsafe.Pointer     // GC roots for constants embedded into machine code
 	Proc       Proc                 // original Proc for serialization
+}
+
+// Call keeps the entry point, embedded constant roots, and source arguments
+// reachable for the complete native invocation, including panic unwinding.
+// The basic JIT does not keep an otherwise unrooted pointer across a Go
+// callback; this is why its runtime/jit region does not require a separate
+// shadow stack yet.
+func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
+	if jep == nil || jep.Native == nil {
+		panic("JIT: nil entry point")
+	}
+	defer func() {
+		runtime.KeepAlive(args)
+		runtime.KeepAlive(jep)
+	}()
+	return callJIT(jep.Native, args...)
 }
 
 // JITValueDesc describes a value during JIT compilation: its type and
@@ -1386,14 +1404,48 @@ type jitSourceEntry struct {
 	line   int32  // 1-based line number
 }
 
+type jitSourceMap struct {
+	entries []jitSourceEntry
+}
+
 // jitArena is a large mmap'd buffer, optionally registered with
 // runtime/jit for unwinding (when built with GOEXPERIMENT=jit).
 type jitArena struct {
-	base      unsafe.Pointer   // start of mmap'd region
-	size      int              // total bytes
-	offset    int              // bump pointer (next free byte)
-	handle    interface{}      // opaque registration handle (nil = unregistered)
-	sourceMap []jitSourceEntry // sorted by offset, for Describe callback
+	base   unsafe.Pointer // start of mmap'd region
+	size   int            // total bytes
+	offset int            // bump pointer (next free byte), guarded by jitPool.mu
+	handle interface{}    // opaque registration handle (nil = unregistered)
+
+	sourceMu      sync.Mutex
+	sourceEntries []jitSourceEntry
+	sourceMap     atomic.Pointer[jitSourceMap]
+}
+
+// addSourceEntry publishes an immutable, offset-sorted source-map snapshot.
+// Runtime traceback callbacks read it without locks or allocations.
+func (a *jitArena) addSourceEntry(entry jitSourceEntry) {
+	if a == nil || entry.file == "" {
+		return
+	}
+	a.sourceMu.Lock()
+	a.sourceEntries = append(a.sourceEntries, entry)
+	entries := append([]jitSourceEntry(nil), a.sourceEntries...)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].offset < entries[j].offset
+	})
+	a.sourceMap.Store(&jitSourceMap{entries: entries})
+	a.sourceMu.Unlock()
+}
+
+func (a *jitArena) loadSourceEntries() []jitSourceEntry {
+	if a == nil {
+		return nil
+	}
+	snapshot := a.sourceMap.Load()
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot.entries
 }
 
 // jitPool manages global JIT arena allocation.

@@ -31,9 +31,15 @@ func registerJITArena(a *jitArena) interface{} {
 		Start:  start,
 		End:    start + uintptr(a.size),
 		Unwind: jit.UnwindDeclare,
+		// ScanStack is intentionally nil for the basic JIT. Native code may
+		// retain arguments and constants rooted by JITEntryPoint.Call. A pointer
+		// returned by the closure-builder callback is returned immediately; other
+		// pointer-producing and nested emitters fall back to the interpreter. Add
+		// a shadow-stack scanner before relaxing that rule.
+		ScanStack: nil,
 		Describe: func(pc uintptr) (name, file string, line int, ok bool) {
 			offset := int32(pc - uintptr(a.base))
-			entries := a.sourceMap
+			entries := a.loadSourceEntries()
 			// Binary search: find last entry with offset <= target
 			lo, hi := 0, len(entries)
 			for lo < hi {

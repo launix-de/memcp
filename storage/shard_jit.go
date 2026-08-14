@@ -33,6 +33,9 @@ import (
 // the final accumulator.
 type fusedMainFn func(acc scm.Scmer, ids []uint32) scm.Scmer
 
+// Fused storage loops remain disabled in the basic JIT. Unlike the currently
+// enabled finite expression emitters, they contain runtime backedges and need
+// cooperative safepoints plus a complete pointer-liveness contract first.
 const enableFusedMainJIT = false
 
 // extractColDataPtr extracts the concrete struct data pointer from a

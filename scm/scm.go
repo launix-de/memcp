@@ -521,13 +521,13 @@ restart:
 				for i := 0; i < n; i++ {
 					buf[i] = Eval(operands[i], en)
 				}
-				return jep.Native(buf[:n]...)
+				return jep.Call(buf[:n]...)
 			}
 			args := make([]Scmer, len(operands))
 			for i, x := range operands {
 				args[i] = Eval(x, en)
 			}
-			return jep.Native(args...)
+			return jep.Call(args...)
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
@@ -778,7 +778,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		}
 		return NewNil()
 	case tagJIT:
-		return procedure.JIT().Native(args...)
+		return procedure.JIT().Call(args...)
 	case tagPromise:
 		return ApplyPromise(procedure, args)
 	default:

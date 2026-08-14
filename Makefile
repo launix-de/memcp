@@ -1,4 +1,7 @@
-all: jitgen
+PREFIX      ?= /usr/local
+SYSTEMD_DIR ?= $(PREFIX)/lib/systemd/system
+
+all:
 	go build
 
 jitgen:
@@ -89,4 +92,4 @@ docker-release:
 	sudo docker push carli2/memcp:$(VERSION)
 	sudo docker push carli2/memcp:latest
 
-.PHONY: memcp.sif docs jitgen
+.PHONY: memcp.sif memcp.deb memcp.rpm docs docker-release jitgen

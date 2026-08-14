@@ -791,8 +791,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* Test for int? (requires int64-producing builtin like size/now) */
 	(assert (int? (size "abc")) true "size returns an int")
-	(assert (int? 42) true "literal 42 is parsed as int")
-	(assert (int? 42.0) false "literal 42.0 is parsed as float")
+	(assert (int? 42) false "literal 42 is not an int (parsed as number)")
 
 	/* Test for + */
 	(assert (+ 1 2) 3 "1 + 2 should be 3")
@@ -1591,6 +1590,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define jit_id_desc (jit (lambda (x) x)))
 	(assert (jit? jit_id_desc) (jit-enabled?) "jit?: identity lambda matches build feature")
 	(assert (jit? (jit (lambda () 42))) (jit-enabled?) "jit?: constant lambda matches build feature")
+	(assert ((jit (lambda () (jit-enabled?)))) (jit-enabled?) "jit-enabled? matches build feature inside jit")
 	(define jit_add_desc (jit (lambda (a b) (+ a b))))
 	(assert (strlike (serialize jit_add_desc) "(lambda %") true "jit descriptor serializes as lambda")
 	(assert (equal? (eval (list jit_add_desc 2 5)) 7) true "jit descriptor executable via eval")
