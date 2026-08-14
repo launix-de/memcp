@@ -12828,9 +12828,9 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				base_group_fill
 				(list (quote lambda) '() finalize_group_fill))))
 		(define create_options (if (nil? initial_fill_expr)
-			(quoted_runtime_list '("engine" "memory"))
+			(quoted_runtime_list '("engine" "cache"))
 			(list (quote list)
-				"engine" "memory"
+				"engine" "cache"
 				"oninit" (list (quote lambda) '() initial_fill_expr))))
 		(define group_cache_created (symbol "__group_cache_created"))
 		(define keytable_init (list

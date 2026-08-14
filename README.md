@@ -127,8 +127,8 @@ MemCP supports several storage engines, selectable per table via `CREATE TABLE .
 | `safe` | Persisted to disk (default) | Yes | All writes are immediately durable; data is evicted from RAM when memory is tight and reloaded on demand. |
 | `logged` | Persisted to disk | Yes | Like `safe` but uses a write-ahead log for faster writes with the same durability guarantee. |
 | `sloppy` | Persisted to disk | Yes | Data is written to disk asynchronously; faster writes but brief data loss on crash. |
-| `memory` | RAM only | No | Data lives entirely in RAM and is never written to disk. Not registered with the memory manager — data is never evicted. Lost on restart. |
-| `cache` | Schema only (RAM data) | Yes | Like `memory`, data lives in RAM and is never written to disk. Unlike `memory`, the data **is** registered with the memory manager and will be automatically cleared when MemCP approaches its memory limit. The table schema is always persisted; after eviction the table is accessible but empty. Useful for derived or precomputed data that can be regenerated on demand. |
+| `memory` | RAM only | No | Data lives entirely in RAM and is never written to disk. Its schema and optional `oninit` callback are persisted; the callback can rebuild the empty data generation after restart. Not registered with the memory manager, so data is never evicted. |
+| `cache` | Reconstructible RAM data | Yes | Data lives in RAM and can be cleared under memory pressure. Hidden query-helper table and temporary-column creation buffer their schema update instead of writing the full catalog immediately; the next schema publication or rebuild includes the definition and closed `oninit` callback. The callback rebuilds an empty generation after restart. |
 
 ### **🔧 Developer-Friendly**
 - **Comprehensive test suite** with 2470+ SQL tests across 100+ test suites

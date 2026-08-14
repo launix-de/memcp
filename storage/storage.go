@@ -1284,17 +1284,15 @@ func Init(en scm.Env) {
 			// result stays race-free under concurrent creators.
 			if ifnotexists {
 				if existing := db.tables.Get(tblName); existing != nil {
-					// A table is published before oninit so the initializer can access it.
-					// Do not let another creator return while that initializer is running.
-					if !existing.creationMu.TryLock() {
-						existing.creationMu.Lock()
+					if existing.OnInit != nil || existing.onInitComplete {
+						// This also reruns persisted oninit for data-empty MEMORY/CACHE
+						// tables after restart. The local barrier affects no other table.
+						existing.awaitCreationInitialization()
+						atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
+						return scm.NewBool(false)
 					}
-					existing.creationMu.Unlock()
-					if existing.creationPanic != nil {
-						panic(existing.creationPanic)
-					}
-					atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
-					return scm.NewBool(false)
+					// Legacy CACHE/MEMORY schemas did not persist oninit. Parse this
+					// invocation so its current closed callback can repair the table.
 				}
 			}
 
@@ -1341,6 +1339,10 @@ func Init(en scm.Env) {
 			newTable.Charset = charset
 			newTable.Comment = comment
 			newTable.Auto_increment = autoIncrement
+			if !oninit.IsNil() {
+				closedOnInit := scm.CloseProcedure(oninit)
+				newTable.OnInit = &closedOnInit
+			}
 
 			for _, coldef := range mustScmerSlice(a[2], "columns") {
 				def := mustScmerSlice(coldef, "column definition")
@@ -1398,16 +1400,16 @@ func Init(en scm.Env) {
 				// the table already exists, "created=false" is the only signal the
 				// caller needs to skip collect/materialization work.
 				atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
-				db.schemalock.Unlock()
+				if existing.OnInit == nil && !oninit.IsNil() {
+					closedOnInit := scm.CloseProcedure(oninit)
+					existing.OnInit = &closedOnInit
+					db.saveLockedAndUnlock(schemaSaveBuffered)
+				} else {
+					db.schemalock.Unlock()
+				}
 				// The competing creator may have published the table after our
-				// optimistic probe. It owns creationMu until all initializers finish.
-				if !existing.creationMu.TryLock() {
-					existing.creationMu.Lock()
-				}
-				existing.creationMu.Unlock()
-				if existing.creationPanic != nil {
-					panic(existing.creationPanic)
-				}
+				// optimistic probe. Its table-local barrier includes oninit.
+				existing.awaitCreationInitialization()
 				if !ifnotexists {
 					panic("Table " + tblName + " already exists")
 				}
@@ -1440,7 +1442,11 @@ func Init(en scm.Env) {
 					}
 				}
 			}
-			db.saveLockedWithDurabilityAndUnlock(newTable.PersistencyMode == Safe)
+			mode := newTable.schemaSaveMode()
+			if newTable.isEphemeralQueryTable() {
+				mode = schemaSaveBuffered
+			}
+			db.saveLockedAndUnlock(mode)
 			registerCreatedTable(newTable)
 			func() {
 				defer func() {
@@ -1451,6 +1457,7 @@ func Init(en scm.Env) {
 				if !oninit.IsNil() {
 					scm.Apply(oninit)
 				}
+				newTable.onInitComplete = true
 				executeRegisteredCreateTableTriggers(newTable)
 			}()
 			if newTable.creationPanic != nil {
@@ -1463,7 +1470,7 @@ func Init(en scm.Env) {
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the existing database that will contain the table"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to create"},
 				{Kind: "list", ParamName: "cols", ParamDesc: "column and constraint definitions: (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). dimensions is a list of integer type dimensions. typeparams is an alternating key/value list supporting primary (bool), unique (bool), auto_increment (bool), null (bool), default (any), update (expression), comment (string), collate (string), temp (bool), filtercols (string list), filter (function), sortcols (string list), sortdirs (bool list), partitioncount (integer), mapcols (string list), mapfn (function), reducefn (function), and reduceinit (any). Column lists are string lists; foreign-key modes are restrict, cascade, or set null"},
-				{Kind: "list", ParamName: "options", ParamDesc: "alternating key/value list; supported keys are engine (safe, logged, sloppy, or memory), collation (string), charset (string), comment (string), auto_increment (non-negative integer), and oninit (zero-argument function run exactly once and synchronously after first creation; concurrent if-not-exists callers wait for it and do not run it again)"},
+				{Kind: "list", ParamName: "options", ParamDesc: "alternating key/value list; supported keys are engine (safe, logged, sloppy, memory, or cache), collation (string), charset (string), comment (string), auto_increment (non-negative integer), and oninit (closed zero-argument function run synchronously once per data generation; concurrent if-not-exists callers wait for it, and memory/cache tables persist the callback so the first idempotent createtable after restart repopulates their empty data)"},
 				{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "when true, return false instead of failing if the table exists; if another caller is still creating it, wait for that caller's after-create-table initialization before returning false", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool", ParamDesc: "true when this call created and initialized the table, false when ifnotexists reused an initialized table"},
@@ -1596,7 +1603,7 @@ func Init(en scm.Env) {
 
 			t.Unique = append(t.Unique, uniqueKey{name, cols})
 			t.publishShowColumnsSnapshot()
-			t.schema.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+			t.schema.saveLockedAndUnlock(t.schemaSaveMode())
 
 			return scm.NewBool(true)
 		},
@@ -1636,7 +1643,7 @@ func Init(en scm.Env) {
 			// auto-generate system triggers for FK enforcement
 			installFKTriggers(db, t1, t2, k)
 
-			db.saveLockedWithDurabilityAndUnlock(t1.PersistencyMode == Safe || t2.PersistencyMode == Safe)
+			db.saveLockedAndUnlock(schemaSaveModeForDurability(t1.PersistencyMode == Safe || t2.PersistencyMode == Safe))
 
 			return scm.NewBool(true)
 		},
@@ -3046,7 +3053,7 @@ func Init(en scm.Env) {
 			// Idempotent: replace any existing trigger with the same name
 			t.RemoveTrigger(name)
 			t.AddTrigger(trigger)
-			db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+			db.saveLockedAndUnlock(t.schemaSaveMode())
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,

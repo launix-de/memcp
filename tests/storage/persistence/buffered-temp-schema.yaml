@@ -1,0 +1,198 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Buffered temporary schema changes remain live and join the next persisted schema snapshot"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS `.buffered_schema_cache`"
+  - sql: "DROP TABLE IF EXISTS buffered_schema_memory"
+  - sql: "DROP TABLE IF EXISTS buffered_schema_base"
+  - sql: "DROP TABLE IF EXISTS buffered_schema_flush"
+  - sql: "CREATE TABLE buffered_schema_base (id INT PRIMARY KEY) ENGINE=SAFE"
+  - sql: "INSERT INTO buffered_schema_base (id) VALUES (1), (2)"
+
+test_cases:
+  - name: "Temporary column is published immediately"
+    scm: &create_computed_column |
+      (createcolumn
+        (table "memcp-tests" "buffered_schema_base")
+        "cached_value" "int" '() '("temp" true)
+        '("id") (lambda (id) (* id 2)))
+
+  - name: "Published temporary column is queryable"
+    sql: "SELECT id, cached_value FROM buffered_schema_base"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          cached_value: 2
+        - id: 2
+          cached_value: 4
+
+  - name: "Temporary ordered column metadata is published immediately"
+    scm: &create_ordered_column |
+      (createcolumn
+        (table "memcp-tests" "buffered_schema_base")
+        "ordered_position" "int" '()
+        (list
+          "temp" true
+          "sortcols" '("id")
+          "sortdirs" (list false)
+          "partitioncount" 0
+          "mapcols" '()
+          "mapfn" (lambda ($set) (list $set))
+          "reducefn" (lambda (acc mapped)
+            (begin
+              ((car mapped) (+ acc 1))
+              (+ acc 1)))
+          "reduceinit" 0))
+
+  - name: "Published ordered column is queryable"
+    sql: "SELECT id, ordered_position FROM buffered_schema_base ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          ordered_position: 1
+        - id: 2
+          ordered_position: 2
+
+  - name: "Temporary table is published immediately"
+    scm: &create_temp_table |
+      ((lambda (seed)
+        (createtable
+          "memcp-tests"
+          ".buffered_schema_cache"
+          (list (list "column" "cache_key" "int" (list) (list)))
+          (list "engine" "cache" "oninit"
+            (lambda ()
+              (insert
+                (table "memcp-tests" ".buffered_schema_cache")
+                (list "cache_key")
+                (list (list seed))
+                (list)
+                (lambda () true)
+                false)))
+          true))
+        7)
+
+  - name: "Published temporary table is queryable"
+    sql: "SELECT COUNT(*) AS cnt FROM `.buffered_schema_cache`"
+    expect:
+      rows: 1
+      data:
+        - cnt: 1
+
+  - name: "Memory table stores a restart initializer"
+    scm: &create_memory_table |
+      ((lambda (seed)
+        (createtable
+          "memcp-tests"
+          "buffered_schema_memory"
+          (list (list "column" "value" "int" (list) (list)))
+          (list "engine" "memory" "oninit"
+            (lambda ()
+              (insert
+                (table "memcp-tests" "buffered_schema_memory")
+                (list "value")
+                (list (list seed))
+                (list)
+                (lambda () true)
+                false)))
+          true))
+        11)
+
+  - name: "Memory initializer populated the first process generation"
+    sql: "SELECT value FROM buffered_schema_memory"
+    expect:
+      rows: 1
+      data:
+        - value: 11
+
+  - name: "Durable DDL flushes the complete buffered schema"
+    sql: "CREATE TABLE buffered_schema_flush (id INT) ENGINE=SAFE"
+    expect:
+      rows: 0
+
+  - name: "Crash after the later durable schema publication"
+    scm: "(crash)"
+    expect:
+      interrupted_ok: true
+
+  - name: "Restart after buffered schema flush"
+    action: restart
+
+  - name: "Idempotent temp create reruns persisted initialization"
+    scm: *create_temp_table
+
+  - name: "Repeated temp guard does not rerun initialization in one generation"
+    scm: *create_temp_table
+
+  - name: "Reinitialized temp table is not left empty"
+    sql: "SELECT cache_key FROM `.buffered_schema_cache`"
+    expect:
+      rows: 1
+      data:
+        - cache_key: 7
+
+  - name: "Idempotent memory create reruns persisted initialization"
+    scm: *create_memory_table
+
+  - name: "Repeated memory guard does not rerun initialization in one generation"
+    scm: *create_memory_table
+
+  - name: "Reinitialized memory table is not left empty"
+    sql: "SELECT value FROM buffered_schema_memory"
+    expect:
+      rows: 1
+      data:
+        - value: 11
+
+  - name: "Temporary column joined the durable snapshot"
+    sql: "SHOW FULL COLUMNS FROM buffered_schema_base"
+    expect:
+      rows: 3
+
+  - name: "Canonical computed-column guard repairs the empty RAM generation"
+    scm: *create_computed_column
+
+  - name: "Canonical ordered-column guard repairs the empty RAM generation"
+    scm: *create_ordered_column
+
+  - name: "Reprepared temporary metadata remains executable after restart"
+    sql: "SELECT id, cached_value, ordered_position FROM buffered_schema_base ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          cached_value: 2
+          ordered_position: 1
+        - id: 2
+          cached_value: 4
+          ordered_position: 2
+
+  - name: "Temporary table joined the durable snapshot"
+    sql: "SHOW FULL COLUMNS FROM `.buffered_schema_cache`"
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS `.buffered_schema_cache`"
+  - sql: "DROP TABLE IF EXISTS buffered_schema_memory"
+  - sql: "DROP TABLE IF EXISTS buffered_schema_base"
+  - sql: "DROP TABLE IF EXISTS buffered_schema_flush"

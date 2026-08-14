@@ -398,7 +398,7 @@ func (db *database) dropTrigger(name string) bool {
 			continue
 		}
 		if t.RemoveTrigger(name) {
-			db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+			db.saveLockedAndUnlock(t.schemaSaveMode())
 			t.ddlMu.Unlock()
 			return true
 		}

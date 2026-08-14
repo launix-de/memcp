@@ -51,6 +51,7 @@ type database struct {
 	savePending     []byte        `json:"-"`
 	savePendingSync bool          `json:"-"`
 	savePanic       any           `json:"-"`
+	schemaDirty     atomic.Bool   `json:"-"`
 	blobRefs        *blobRefState `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
@@ -91,6 +92,21 @@ type schemaWriteOptions interface {
 	// This has the same atomic-generation contract as WriteSchema. durable also
 	// requires data and namespace metadata to be stable before returning.
 	WriteSchemaWithMode(schema []byte, durable bool)
+}
+
+type schemaSaveMode uint8
+
+const (
+	schemaSaveFsync schemaSaveMode = iota
+	schemaSaveNoFsync
+	schemaSaveBuffered
+)
+
+func schemaSaveModeForDurability(durable bool) schemaSaveMode {
+	if durable {
+		return schemaSaveFsync
+	}
+	return schemaSaveNoFsync
 }
 
 func normalizeTempLookupName(dbName string, name string) string {
@@ -394,26 +410,47 @@ func (db *database) save() {
 	}
 	db.schemalock.RLock()
 	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	// Buffered mutations after this snapshot must leave the catalog dirty.
+	// They need the exclusive schema lock and therefore cannot race this store.
+	db.schemaDirty.Store(false)
 	db.schemalock.RUnlock()
-	db.commitSchemaSnapshot(jsonbytes, true)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				db.schemaDirty.Store(true)
+				panic(r)
+			}
+		}()
+		db.commitSchemaSnapshot(jsonbytes, true)
+	}()
 	// shards are written while rebuild
 }
 
-// saveLockedAndUnlock snapshots the schema while schemalock is held, then
-// releases schemalock before performing the synchronous schema write.
-// Callers must already hold db.schemalock.Lock().
-func (db *database) saveLockedAndUnlock() {
-	db.saveLockedWithDurabilityAndUnlock(true)
-}
-
-func (db *database) saveLockedWithDurabilityAndUnlock(durable bool) {
+// saveLockedAndUnlock publishes according to mode and always releases
+// schemalock. Buffered temp metadata is immediately visible in memory; a later
+// synchronous schema save or rebuild includes it in its complete snapshot.
+func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 	if db.srState == COLD {
 		db.schemalock.Unlock()
 		return
 	}
+	if mode == schemaSaveBuffered {
+		db.schemaDirty.Store(true)
+		db.schemalock.Unlock()
+		return
+	}
 	jsonbytes, _ := json.MarshalIndent(db, "", "  ")
+	// Clear while the snapshot is protected. A later buffered mutation takes
+	// schemalock exclusively and sets dirty again after this generation.
+	db.schemaDirty.Store(false)
 	db.schemalock.Unlock()
-	db.commitSchemaSnapshot(jsonbytes, durable)
+	defer func() {
+		if r := recover(); r != nil {
+			db.schemaDirty.Store(true)
+			panic(r)
+		}
+	}()
+	db.commitSchemaSnapshot(jsonbytes, mode == schemaSaveFsync)
 }
 
 // ensureLoaded loads schema.json into the database struct exactly once.
@@ -1098,7 +1135,11 @@ func CreateTable(schema, name string, pm PersistencyMode, ifnotexists bool) (*ta
 		db.schemalock.Unlock()
 		return t, false
 	}
-	db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+	mode := t.schemaSaveMode()
+	if t.isEphemeralQueryTable() {
+		mode = schemaSaveBuffered
+	}
+	db.saveLockedAndUnlock(mode)
 	registerCreatedTable(t)
 	return t, true
 }
@@ -1170,7 +1211,7 @@ func DropTable(schema, name string, ifexists bool) {
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
 	}
-	db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+	db.saveLockedAndUnlock(t.schemaSaveMode())
 	// fire AfterDropTable triggers after releasing schemalock (avoids deadlock on cascading drops)
 	t.ExecuteTableLifecycleTriggers(AfterDropTable)
 
@@ -1215,7 +1256,7 @@ func RenameTable(schema, oldname, newname string) {
 	db.tables.Remove(oldname)
 	t.Name = newname
 	db.tables.Set(t)
-	db.saveLockedWithDurabilityAndUnlock(t.PersistencyMode == Safe)
+	db.saveLockedAndUnlock(t.schemaSaveMode())
 }
 
 // keytableCleanup is called by the CacheManager when evicting a temp keytable.
@@ -1243,7 +1284,7 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 			return false
 		}
 		db.tables.Remove(tbl.Name)
-		db.saveLockedWithDurabilityAndUnlock(tbl.PersistencyMode == Safe)
+		db.saveLockedAndUnlock(tbl.schemaSaveMode())
 	} else if !tbl.beginCacheEviction() {
 		return false
 	}

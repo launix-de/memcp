@@ -147,10 +147,19 @@ func (c *column) OrcFirstSortDesc() bool {
 //
 //	Memory:
 //	  Non-persistent. ALL data is held in RAM only and is LOST on any
-//	  shutdown or restart. This is intentional and by design.
+//	  shutdown or restart. The schema is persisted synchronously. A closed
+//	  oninit callback is part of that schema and repopulates the empty data on
+//	  the first idempotent createtable guard after restart.
 //	  ⚠️  ALTER TABLE … ENGINE=memory on a persisted table PERMANENTLY
 //	  DELETES all on-disk files with no possibility of recovery.
 //	  Never use for production data that must survive a restart.
+//
+//	Cache:
+//	  Reconstructible RAM-only data managed by the global cache manager. Hidden
+//	  query-helper tables use buffered schema creation: creation returns without
+//	  schema I/O, and the table definition plus its closed oninit callback joins
+//	  the next complete schema save or rebuild. On restart, the first idempotent
+//	  createtable guard runs that callback before exposing the empty generation.
 //
 // ENGINE TRANSITION DATA SAFETY:
 //   - persisted (Safe/Logged/Sloppy) → Memory:  IRREVERSIBLE disk deletion.
@@ -289,6 +298,7 @@ type table struct {
 	Foreign         []foreignKey         // foreign keys
 	Triggers        []TriggerDescription // triggers on this table
 	PersistencyMode PersistencyMode      /* 0 = safe (default), 1 = sloppy, 2 = memory */
+	OnInit          *scm.Scmer           `json:"oninit,omitempty"` // closed callback that repopulates data-empty engines after restart
 	cacheUsers      int64                // atomic; -1 while/after CacheManager eviction, otherwise active trigger users
 	// LOCK ORDER CONTRACT:
 	//   1. db.schemalock
@@ -352,8 +362,9 @@ type table struct {
 
 	// creationMu is held while a newly published table runs its synchronous
 	// oninit hook. Concurrent if-not-exists calls wait on the same barrier.
-	creationMu    sync.Mutex
-	creationPanic any
+	creationMu     sync.Mutex
+	creationPanic  any
+	onInitComplete bool // guarded by creationMu; deliberately resets after restart
 
 	// cacheInitMu guards the one-time initializer for canonical planner caches.
 	// The table object is removed on cache eviction, so initialization state has
@@ -402,6 +413,41 @@ type table struct {
 	repartitionPendingMu         sync.Mutex
 	repartitionPendingDels       []translatedRecid
 	repartitionPendingSourceDels []pendingSourceDelete
+}
+
+// awaitCreationInitialization is the idempotent createtable barrier for an
+// already-published table. Persisted MEMORY/CACHE schemas deliberately reload
+// without data, so their closed oninit callback runs again on the first
+// createtable guard after every restart.
+func (t *table) awaitCreationInitialization() {
+	if !t.creationMu.TryLock() {
+		t.creationMu.Lock()
+	}
+	defer t.creationMu.Unlock()
+	if t.creationPanic != nil {
+		panic(t.creationPanic)
+	}
+	if t.PersistencyMode != Memory && t.PersistencyMode != Cache {
+		t.onInitComplete = true
+		return
+	}
+	if t.onInitComplete {
+		return
+	}
+	if t.OnInit == nil {
+		t.onInitComplete = true
+		return
+	}
+	func() {
+		defer func() {
+			t.creationPanic = recover()
+		}()
+		scm.Apply(*t.OnInit)
+		t.onInitComplete = true
+	}()
+	if t.creationPanic != nil {
+		panic(t.creationPanic)
+	}
 }
 
 func (t *table) enterMutationOwner() {
@@ -756,15 +802,14 @@ func (t *table) isEphemeralQueryTable() bool {
 	return strings.HasPrefix(t.Name, ".") && t.PersistencyMode == Cache
 }
 
-// schemaWriteDurable reports whether schema.json must be flushed with Sync for
-// DDL on this table. Safe tables keep the full durability contract; other
-// engines still write schema.json synchronously, but without fsync.
-func (t *table) schemaWriteDurable() bool {
-	return t.PersistencyMode == Safe
+// schemaSaveMode selects the synchronous persistence guarantee for ordinary
+// DDL. Callers explicitly override it for reconstructible temp metadata.
+func (t *table) schemaSaveMode() schemaSaveMode {
+	return schemaSaveModeForDurability(t.PersistencyMode == Safe)
 }
 
-func (t *table) finishSchemaMutationLocked() {
-	t.schema.saveLockedWithDurabilityAndUnlock(t.schemaWriteDurable())
+func (t *table) finishSchemaMutationLocked(mode schemaSaveMode) {
+	t.schema.saveLockedAndUnlock(mode)
 }
 
 // isHiddenFromShowTables implements the SQL metadata contract for internal
@@ -1522,7 +1567,11 @@ func (t *table) createColumnDDLLocked(name string, typ string, typdimensions []i
 	} else {
 		t.publishShowColumnsSnapshot()
 	}
-	t.finishSchemaMutationLocked()
+	mode := t.schemaSaveMode()
+	if cp.IsTemp {
+		mode = schemaSaveBuffered
+	}
+	t.finishSchemaMutationLocked(mode)
 	if cp.IsTemp {
 		t.registerTempColumn(cp)
 	}
@@ -1561,7 +1610,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			} else {
 				t.publishShowColumnsSnapshot()
 			}
-			t.finishSchemaMutationLocked()
+			t.finishSchemaMutationLocked(t.schemaSaveMode())
 			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
 			// can invalidate without lock-ordering cycles.
 			t.ExecuteTableLifecycleTriggers(AfterDropColumn)
