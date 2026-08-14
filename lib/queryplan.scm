@@ -78,13 +78,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(lambda (_e) '()))))
 
 (define qassoc_get (lambda (xs key default)
-	(match (coalesceNil xs '())
-		(cons entry rest) (match entry
-			(cons k values) (if (equal? k key)
-				(if (equal? (count values) 1) (car values) values)
-				(qassoc_get rest key default))
-			_ (qassoc_get rest key default))
-		_ default)))
+	(get_assoc_pairlist (coalesceNil xs '()) key default)))
 
 (define qassoc_set (lambda (xs key value)
 	(cons (list key value)
@@ -11037,11 +11031,15 @@ ever-larger subtrees. */
 		(group_cleanup_missing_keys_plan schema grouptbl key_names)
 		(group_insert_batches_expr schema grouptbl key_names value_cols (quote grouped)))))
 
-/* Eager preparation may physicalize nested stage-output sources in input. Hash
-persistent aggregate names against naming_input, the original logical graph,
-so preparation order cannot rename a cache column. */
-(define build_query_group_aggregates_insert_plan_using (lambda (input naming_input grouptbl keys key_names ags output_ags)
+/* Eager preparation may rewrite nested stage-output sources and aggregate
+expressions. Persistent column identity was selected from the original logical
+stage before that rewrite; thread it through unchanged to keep create and fill
+on the same columns. */
+(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags aggregate_cols)
 	(begin
+		(if (not (equal? (count ags) (count aggregate_cols)))
+			(neumann_fail "build_queryplan" "query-input aggregate columns do not match aggregate descriptors")
+			true)
 		(define schema (qb_schema input))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define value_cols (map (produceN (count ags)) (lambda (i) (concat "__agg" i))))
@@ -11065,8 +11063,7 @@ so preparation order cannot rename a cache column. */
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names
-			(map output_ags (lambda (ag) (aggregate_col_name_using naming_input ag)))))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names aggregate_cols))
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(list
 			(list (quote lambda) (list (quote grouped)) finish_expr)
@@ -11084,9 +11081,6 @@ so preparation order cannot rename a cache column. */
 						merge_payload))
 				(list (quote list))
 				combine_grouped)))))
-
-(define build_query_group_aggregates_insert_plan (lambda (input naming_input grouptbl keys key_names ags)
-	(build_query_group_aggregates_insert_plan_using input naming_input grouptbl keys key_names ags ags)))
 
 (define union_branch_group_row_fields (lambda (candidate_alias branch keys key_names ags value_cols)
 	(begin
@@ -11149,14 +11143,12 @@ so preparation order cannot rename a cache column. */
 			(lower_union_block_as_dataset_reduce
 				input keys row_key_names ags value_cols row_mapper reduce_expr neutral_expr combine_grouped)))))
 
-(define build_scalar_single_query_stage_fill_plan (lambda (input naming_input grouptbl keys key_names value_ag count_ag)
+(define build_scalar_single_query_stage_fill_plan (lambda (input grouptbl keys key_names value_ag count_ag value_col count_col)
 	(match value_ag '(value_expr _value_reduce _value_neutral) (begin
 		(define prepared_input (if (and (query_block? input) (not (empty_list? (qb_stages input))))
 			(query_block_without_stages_after_eager_prepare_using (qb_stages input) input)
 			input))
 		(define schema (qb_schema prepared_input))
-		(define value_col (aggregate_col_name_using naming_input value_ag))
-		(define count_col (aggregate_col_name_using naming_input count_ag))
 		(define payload_col "__agg")
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define row_fields (merge (list
@@ -12702,6 +12694,12 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 						(equal? (cadr ags) aggregate_count_descriptor))))))
 		(define scalar_order_base_stage (and (not query_input)
 			(compatible_scalar_order_aggregates? ags)))
+		/* Aggregate column names belong to the immutable logical stage. Prepared
+		input and rewritten descriptors below affect execution only. Base aggregate
+		columns use their direct physical builder and need no canonical list here. */
+		(define aggregate_cols (if (or query_input scalar_order_base_stage)
+			(map ags (lambda (ag) (aggregate_col_name_using src ag)))
+			'()))
 		(define scalar_aggregate_stage (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate)))
 		(define prepared_src (if (query_block? rewritten_src)
 			(if scalar_aggregate_stage
@@ -12752,10 +12750,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(cons (cons (quote list) (cons "unique" (cons "group" (list (cons (quote list) key_names)))))
 				key_columns)))
 		(define ensure_agg_columns (if (or query_input scalar_order_base_stage)
-			(map ags (lambda (ag)
+			(map (produceN (count ags)) (lambda (i)
 				(list (quote createcolumn)
 					(list (quote table) schema grouptbl)
-					(aggregate_col_name_using src ag)
+					(nth aggregate_cols i)
 					"any"
 					(quoted_runtime_list '())
 					(quoted_runtime_list '()))))
@@ -12777,7 +12775,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				'()
 				(list (if (union_block? src)
 					(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names ags)
-					(build_query_group_aggregates_insert_plan_using prepared_src src grouptbl keys key_names lowering_ags ags))))
+					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols))))
 			(if scalar_order_base_stage
 				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
 				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
@@ -12836,7 +12834,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				nested_prepare_expr
 				(if initializer_owner keytable_init nil)
 				ensure_agg_expr
-				(build_scalar_single_query_stage_fill_plan prepared_src src grouptbl keys key_names (car lowering_ags) (cadr lowering_ags)))
+				(build_scalar_single_query_stage_fill_plan
+					prepared_src grouptbl keys key_names
+					(car lowering_ags) (cadr lowering_ags)
+					(car aggregate_cols) (cadr aggregate_cols)))
 			(if query_input
 				(cons (quote !begin)
 					(merge (list

@@ -1,0 +1,113 @@
+# Copyright (C) 2023-2026 The MemCP Authors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "Canonical aggregate columns for correlated query-input groups"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cqgc_items"
+  - sql: "DROP TABLE IF EXISTS cqgc_categories"
+  - sql: "DROP TABLE IF EXISTS cqgc_memberships"
+  - sql: "DROP TABLE IF EXISTS cqgc_accounts"
+  - sql: "CREATE TABLE cqgc_items (id INT PRIMARY KEY, account_id INT, category_id INT, enabled INT)"
+  - sql: "CREATE TABLE cqgc_categories (id INT PRIMARY KEY, access_group INT)"
+  - sql: "CREATE TABLE cqgc_memberships (id INT PRIMARY KEY, group_id INT, member_id INT)"
+  - sql: "CREATE TABLE cqgc_accounts (id INT PRIMARY KEY)"
+  - sql: "INSERT INTO cqgc_items VALUES (1, 1, 10, 1), (2, 1, 20, 1)"
+  - sql: "INSERT INTO cqgc_categories VALUES (10, NULL), (20, 7)"
+  - sql: "INSERT INTO cqgc_memberships VALUES (1, 7, 1)"
+  - sql: "INSERT INTO cqgc_accounts VALUES (1)"
+
+test_cases:
+  - name: "set correlated access input"
+    session_id: "cqgc_session"
+    sql: "SET @cqgc_actor = 1"
+
+  - name: "correlated query-input aggregates use their created columns"
+    session_id: "cqgc_session"
+    sql: |
+      SELECT item.id, item.enabled
+      FROM cqgc_items item
+      WHERE item.account_id = 1
+        AND (
+          SELECT category.id IN (SELECT allowed.id FROM cqgc_categories allowed WHERE TRUE)
+          FROM cqgc_categories category
+          WHERE category.id = item.category_id
+        )
+        AND (
+          SELECT CASE
+            WHEN category.access_group IS NULL THEN TRUE
+            ELSE EXISTS (
+              SELECT TRUE
+              FROM cqgc_memberships membership
+              WHERE membership.group_id = category.access_group
+                AND (
+                  SELECT account.id = @cqgc_actor
+                  FROM cqgc_accounts account
+                  WHERE account.id = membership.member_id
+                  LIMIT 1
+                )
+              LIMIT 1
+            )
+          END
+          FROM cqgc_categories category
+          WHERE category.id = item.category_id
+        )
+      ORDER BY item.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          enabled: 1
+        - id: 2
+          enabled: 1
+
+  - name: "equivalent aliases reuse canonical query-input aggregates"
+    session_id: "cqgc_session"
+    sql: |
+      SELECT outer_item.id, outer_item.enabled
+      FROM cqgc_items outer_item
+      WHERE outer_item.account_id = 1
+        AND (
+          SELECT kind.id IN (SELECT candidate.id FROM cqgc_categories candidate WHERE TRUE)
+          FROM cqgc_categories kind
+          WHERE kind.id = outer_item.category_id
+        )
+        AND (
+          SELECT CASE
+            WHEN kind.access_group IS NULL THEN TRUE
+            ELSE EXISTS (
+              SELECT TRUE
+              FROM cqgc_memberships link
+              WHERE link.group_id = kind.access_group
+                AND (
+                  SELECT principal.id = @cqgc_actor
+                  FROM cqgc_accounts principal
+                  WHERE principal.id = link.member_id
+                  LIMIT 1
+                )
+              LIMIT 1
+            )
+          END
+          FROM cqgc_categories kind
+          WHERE kind.id = outer_item.category_id
+        )
+      ORDER BY outer_item.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          enabled: 1
+        - id: 2
+          enabled: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cqgc_items"
+  - sql: "DROP TABLE IF EXISTS cqgc_categories"
+  - sql: "DROP TABLE IF EXISTS cqgc_memberships"
+  - sql: "DROP TABLE IF EXISTS cqgc_accounts"
