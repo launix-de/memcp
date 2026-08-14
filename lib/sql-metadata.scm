@@ -62,7 +62,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 )))
 
 /* emulate metadata tables */
-(define get_schema (lambda (schema tbl) (match '(schema tbl)
+(define sql_metadata_get_schema (lambda (schema tbl) (match '(schema tbl)
 	/* special tables */
 	'((ignorecase "information_schema") (ignorecase "schemata")) '(
 		'("Field" "catalog_name")
@@ -172,6 +172,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
 	(show schema tbl) /* otherwise: fetch from metadata */
 )))
+
+(define get_schema sql_metadata_get_schema)
 
 /* runtime row source for virtual INFORMATION_SCHEMA tables */
 (define information_schema_rows (lambda (schema tbl) (match '(schema tbl)

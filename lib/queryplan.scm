@@ -70,12 +70,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 /* Small assoc helpers                                                        */
 
 (define get_schema (lambda (schema tbl)
-	(try
-		(lambda ()
-			(begin
-				(define handle (table schema tbl))
-				(if handle (show handle) (show schema tbl))))
-		(lambda (_e) '()))))
+	(if (equal?? schema "information_schema")
+		/* Virtual metadata relations have no storage table handle. Keep their
+		column catalog in sql-metadata.scm, alongside their runtime row source. */
+		(sql_metadata_get_schema schema tbl)
+		(try
+			(lambda ()
+				(begin
+					(define handle (table schema tbl))
+					(if handle (show handle) (show schema tbl))))
+			(lambda (_e) '())))))
 
 (define qassoc_get (lambda (xs key default)
 	(get_assoc_pairlist (coalesceNil xs '()) key default)))
