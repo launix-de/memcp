@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Correlated scalar subqueries over grouped derived tables with an outer grouped
 # domain. This exercises Neumann-style domain extension across multiple group
 # stages without relying on app-specific table names.
@@ -8,11 +23,77 @@ metadata:
   isolated: true
 
 setup:
+
+  - sql: "DROP TABLE IF EXISTS cgd_assignment"
+  - sql: "DROP TABLE IF EXISTS cgd_document"
+  - sql: "DROP TABLE IF EXISTS cgd_location"
   - sql: "DROP TABLE IF EXISTS cgd_state"
   - sql: "CREATE TABLE cgd_state (ID INT PRIMARY KEY, parent INT, grp INT)"
   - sql: "INSERT INTO cgd_state VALUES (1, NULL, 10), (2, 1, 10), (3, NULL, 20), (4, 1, 20), (5, 3, 20)"
+  - sql: "CREATE TABLE cgd_document (ID INT PRIMARY KEY, location_id INT)"
+  - sql: "CREATE TABLE cgd_location (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE cgd_assignment (ID INT PRIMARY KEY, actor_id INT, location_id INT)"
+  - sql: "INSERT INTO cgd_location VALUES (1)"
+  - sql: "INSERT INTO cgd_document VALUES (5, 1), (6, 1), (7, 1)"
+  - sql: "INSERT INTO cgd_assignment VALUES (1, 42, 1)"
 
 test_cases:
+
+  - name: "set aggregate carrier session domain"
+    session_id: "cgd_carrier"
+    sql: "SET @actor_id = 42"
+    expect:
+      rows_affected: 0
+
+  - name: "sibling SUM producers survive correlated probe lowering"
+    session_id: "cgd_carrier"
+    sql: |
+      SELECT
+        SUM(CASE TRUE WHEN TRUE THEN 1 ELSE 0 END) AS all_documents,
+        SUM(CASE COALESCE((
+          SELECT EXISTS(
+            SELECT TRUE
+            FROM cgd_assignment a
+            WHERE a.actor_id = @actor_id
+              AND a.location_id = l.ID
+            LIMIT 1
+          )
+          FROM cgd_location l
+          WHERE l.ID = cgd_document.location_id
+          LIMIT 1
+        ), FALSE) WHEN TRUE THEN 1 ELSE 0 END) AS permitted_documents
+      FROM cgd_document
+      WHERE ID IN (5, 6, 7)
+    expect:
+      rows: 1
+      data:
+        - all_documents: 3
+          permitted_documents: 3
+
+  - name: "warm literal-specialized carrier keeps every aggregate producer"
+    session_id: "cgd_carrier"
+    sql: |
+      SELECT
+        SUM(CASE COALESCE((
+          SELECT EXISTS(
+            SELECT TRUE
+            FROM cgd_assignment a
+            WHERE a.actor_id = @actor_id
+              AND a.location_id = l.ID
+            LIMIT 1
+          )
+          FROM cgd_location l
+          WHERE l.ID = cgd_document.location_id
+          LIMIT 1
+        ), FALSE) WHEN TRUE THEN 1 ELSE 0 END) AS permitted_documents,
+        SUM(CASE TRUE WHEN TRUE THEN 1 ELSE 0 END) AS all_documents
+      FROM cgd_document
+      WHERE ID IN (5, 6)
+    expect:
+      rows: 1
+      data:
+        - permitted_documents: 2
+          all_documents: 2
 
   - name: "scalar subquery over grouped inner derived table"
     sql: |
@@ -91,4 +172,7 @@ test_cases:
         - "dependent-subquery"
         - "__mat:o:"
 cleanup:
+  - sql: "DROP TABLE IF EXISTS cgd_assignment"
+  - sql: "DROP TABLE IF EXISTS cgd_document"
+  - sql: "DROP TABLE IF EXISTS cgd_location"
   - sql: "DROP TABLE IF EXISTS cgd_state"

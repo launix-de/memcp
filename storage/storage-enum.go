@@ -458,6 +458,12 @@ func (s *StorageEnum) findChunk(idx int) int {
 //	version byte.  Format changes require a NEW magic byte in storages[]
 //	(storage.go); keep magic 40 as a legacy reader forever.
 
+func (s *StorageEnum) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+
+	/* TODO: Extract: extract t20 #0 */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+}
+
 func (s *StorageEnum) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(40)) // magic byte 40 = StorageEnum
 	binary.Write(f, binary.LittleEndian, uint8(s.k))

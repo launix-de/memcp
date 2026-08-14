@@ -22,6 +22,7 @@ import "bufio"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
+import "unsafe"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageSCMER struct {
@@ -67,6 +68,106 @@ func (s *StorageSCMER) String() string {
 //	no persisted files exist with magic 1.  Still, format changes require a
 //	NEW magic byte in storages[] (storage.go); keep magic 1 as a legacy
 //	reader forever.
+func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var idxInt scm.JITValueDesc
+			if idx.Loc == scm.LocImm {
+				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
+			} else if idx.Loc == scm.LocRegPair {
+				ctx.FreeReg(idx.Reg)
+				idxInt = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idx.Reg2}
+				ctx.BindReg(idx.Reg2, &idxInt)
+			} else {
+				idxInt = idx
+			}
+			if idxInt.Loc == scm.LocImm {
+				idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
+			} else {
+				ctx.EnsureDesc(&idxInt)
+				if idxInt.Loc != scm.LocReg { panic("jit: idxInt not in register") }
+				ctx.EmitShlRegImm8(idxInt.Reg, 32)
+				ctx.EmitShrRegImm8(idxInt.Reg, 32)
+				ctx.BindReg(idxInt.Reg, &idxInt)
+			}
+			var d0 scm.JITValueDesc
+			if thisptr.Loc == scm.LocImm {
+				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageSCMER)(nil).values)
+				r0 := ctx.AllocReg()
+				r1 := ctx.AllocReg()
+				ctx.EmitMovRegMem64(r0, fieldAddr)
+				ctx.EmitMovRegMem64(r1, fieldAddr+8)
+				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+				ctx.BindReg(r0, &d0)
+				ctx.BindReg(r1, &d0)
+			} else {
+				off := int32(unsafe.Offsetof((*StorageSCMER)(nil).values))
+				r2 := ctx.AllocReg()
+				r3 := ctx.AllocReg()
+				ctx.EmitMovRegMem(r2, thisptr.Reg, off)
+				ctx.EmitMovRegMem(r3, thisptr.Reg, off+8)
+				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r2, Reg2: r3}
+				ctx.BindReg(r2, &d0)
+				ctx.BindReg(r3, &d0)
+			}
+			ctx.EnsureDesc(&idxInt)
+			r4 := ctx.AllocReg()
+			ctx.EnsureDesc(&idxInt)
+			ctx.EnsureDesc(&d0)
+			if idxInt.Loc == scm.LocImm {
+				ctx.EmitMovRegImm64(r4, uint64(idxInt.Imm.Int()) * 16)
+			} else {
+				ctx.EmitMovRegReg(r4, idxInt.Reg)
+				ctx.EmitShlRegImm8(r4, 4)
+			}
+			if d0.Loc == scm.LocImm {
+				ctx.EmitMovRegImm64(scm.RegR11, uint64(d0.Imm.Int()))
+				ctx.EmitAddInt64(r4, scm.RegR11)
+			} else {
+				ctx.EmitAddInt64(r4, d0.Reg)
+			}
+			r5 := ctx.AllocRegExcept(r4)
+			r6 := ctx.AllocRegExcept(r4, r5)
+			ctx.EmitMovRegMem(r5, r4, 0)
+			ctx.EmitMovRegMem(r6, r4, 8)
+			ctx.FreeReg(r4)
+			d1 := scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r5, Reg2: r6}
+			ctx.BindReg(r5, &d1)
+			ctx.BindReg(r6, &d1)
+			ctx.FreeDesc(&idxInt)
+			if d1.Loc == scm.LocImm {
+				if result.Loc == scm.LocAny { return d1 }
+			}
+			if result.Loc == scm.LocAny {
+				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			ctx.EnsureDesc(&d1)
+			if d1.Loc == scm.LocRegPair {
+				ctx.EmitMovPairToResult(&d1, &result)
+				result.Type = d1.Type
+			} else {
+				switch d1.Type {
+				case scm.TagBool:
+					ctx.EmitMakeBool(result, d1)
+					result.Type = scm.TagBool
+				case scm.TagInt:
+					ctx.EmitMakeInt(result, d1)
+					result.Type = scm.TagInt
+				case scm.TagFloat:
+					ctx.EmitMakeFloat(result, d1)
+					result.Type = scm.TagFloat
+				case scm.TagNil:
+					ctx.EmitMakeNil(result)
+					result.Type = scm.TagNil
+				default:
+					panic("jit: single-block scalar return with unknown type")
+				}
+			}
+			return result
+			return result
+}
+
 func (s *StorageSCMER) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))

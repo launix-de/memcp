@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -51,6 +51,11 @@ func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 	}
 	prefix := s.prefixdictionary[idx]
 	return scm.NewString(prefix + inner.String())
+}
+func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+
+	/* TODO: RunDefers: rundefers */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StoragePrefix).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 
 func (s *StoragePrefix) prepare() {

@@ -1488,8 +1488,10 @@ physical membership probe. */
 		(define inner_src (car (qb_sources inner)))
 		(define inner_default (source_alias inner_src))
 		(define visible_ags (stage_aggregates_for_fields (qb_fields inner)))
-		(define order_ags (merge_unique (map (order_item_exprs (qb_order inner)) extract_aggregates)))
-		(define ags (dedupe_aggregates_by_col (merge_unique (list visible_ags order_ags (list aggregate_count_descriptor)))))
+		(define order_ags (dedupe_aggregates_by_col
+			(merge (map (order_item_exprs (qb_order inner)) extract_aggregates))))
+		(define ags (dedupe_aggregates_by_col
+			(merge (list visible_ags order_ags (list aggregate_count_descriptor)))))
 		(define session_keys (query_expr_session_reads inner))
 		(define explicit_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
@@ -1636,7 +1638,7 @@ physical membership probe. */
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
-		(define ags (dedupe_aggregates_by_col (merge_unique
+		(define ags (dedupe_aggregates_by_col (merge
 			(list (extract_aggregates (coalesceNil (qb_having inner) true))
 				(list aggregate_count_descriptor)))))
 		(define stage_input (make_query_block
@@ -9876,16 +9878,16 @@ the auto-index chooses the concrete access path on both tables. */
 		((symbol scalar_aggregate_probe) stage requested_col)
 		(if (qassoc_get (gs_facts stage) (quote direct_group_probe) false)
 			'()
-			(merge_unique (map (list stage requested_col) extract_aggregates)))
+			(dedupe_aggregates_by_col (merge (map (list stage requested_col) extract_aggregates))))
 		((quote scalar_aggregate_probe) stage requested_col)
 		(if (qassoc_get (gs_facts stage) (quote direct_group_probe) false)
 			'()
-			(merge_unique (map (list stage requested_col) extract_aggregates)))
+			(dedupe_aggregates_by_col (merge (map (list stage requested_col) extract_aggregates))))
 		((symbol count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
 		((quote count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
 		((symbol aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
 		((quote aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
-		(cons head tail) (merge_unique (map tail extract_aggregates))
+		(cons head tail) (dedupe_aggregates_by_col (merge (map tail extract_aggregates)))
 		_ '())))
 
 /* DECIMAL is currently represented as float64 at runtime. Keep calculations
@@ -10105,7 +10107,8 @@ working on the original values. */
 				normalized)))))
 
 (define stage_aggregates_for_fields (lambda (fields)
-	(merge_unique (extract_assoc fields (lambda (_title expr) (extract_aggregates expr))))))
+	(dedupe_aggregates_by_col
+		(merge (extract_assoc fields (lambda (_title expr) (extract_aggregates expr)))))))
 
 (define expr_has_aggregates? (lambda (expr)
 	(not (empty_list? (extract_aggregates expr)))))
@@ -10491,8 +10494,8 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
 		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
 		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
-			(merge_unique (list visible_ags having_ags))
-			(merge_unique (list visible_ags having_ags (list aggregate_count_descriptor))))))
+			(merge (list visible_ags having_ags))
+			(merge (list visible_ags having_ags (list aggregate_count_descriptor))))))
 		(define alias (source_alias src))
 		(define session_keys (query_expr_session_reads block))
 		(define explicit_keys (map (coalesceNil (qb_group block) '()) (lambda (expr)
@@ -10520,8 +10523,8 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
 		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
 		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
-			(merge_unique (list visible_ags having_ags))
-			(merge_unique (list visible_ags having_ags (list aggregate_count_descriptor))))))
+			(merge (list visible_ags having_ags))
+			(merge (list visible_ags having_ags (list aggregate_count_descriptor))))))
 		(define alias (source_alias (car (qb_sources block))))
 		(define group_keys (map (coalesceNil (qb_group block) '()) (lambda (expr) (canonical_column_expr_for_alias alias expr))))
 		(define field_passthrough_keys (field_passthrough_keys_for_alias alias (qb_fields block)))

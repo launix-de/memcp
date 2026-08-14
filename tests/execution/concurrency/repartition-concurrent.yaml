@@ -36,7 +36,7 @@ test_cases:
   # ---- Parallel group: rebuild + concurrent DML ----
   - name: "RC: rebuild (triggers repartition)"
     parallel: repart
-    scm: "(rebuild)"
+    scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
 
   - name: "RC: concurrent INSERT 200 rows"
     parallel: repart
@@ -134,7 +134,7 @@ test_cases:
 
   # ---- Second rebuild to verify stability ----
   - name: "RC: second rebuild"
-    scm: "(rebuild)"
+    scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
 
   - name: "RC: count after second rebuild"
     sql: "SELECT COUNT(*) AS cnt FROM rpc_data"
@@ -171,7 +171,7 @@ test_cases:
             61000)
       - name: "RC-del: rebuild"
         parallel: repart_del
-        scm: "(rebuild)"
+        scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
       - name: "RC-del: concurrent DELETE 50"
         parallel: repart_del
         sql: "DELETE FROM rpc_data WHERE id >= 60950 AND id < 61000"
@@ -213,7 +213,7 @@ test_cases:
             61000)
       - name: "RC-repeat: rebuild"
         parallel: repart_repeat
-        scm: "(rebuild)"
+        scm: '(rebuild (table "memcp-tests" "rpc_data") false true)'
       - name: "RC-repeat: concurrent UPDATE 50"
         parallel: repart_repeat
         sql: "UPDATE rpc_data SET val = -999, tag = 'updated' WHERE id >= 60900 AND id < 60950"

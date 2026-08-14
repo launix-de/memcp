@@ -421,6 +421,148 @@ func init_sync() {
 				{Kind: "func", ParamName: "fn", ParamDesc: "the function to execute", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			argPinned0 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned0 = append(argPinned0, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned0 = append(argPinned0, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned0 = append(argPinned0, ai.Reg2)
+					}
+				}
+			}
+			d1 := args[0]
+			d1.ID = 0
+			d2 := args[1]
+			d2.ID = 0
+			ctx.EnsureDesc(&d1)
+			ctx.EnsureDesc(&d1)
+			if d1.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d1.Imm.GetTag() == tagBool {
+					ctx.EmitMakeBool(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagInt {
+					ctx.EmitMakeInt(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagFloat {
+					ctx.EmitMakeFloat(tmpPair, d1)
+				} else if d1.Imm.GetTag() == tagNil {
+					ctx.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d1.Imm.RawWords()
+					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d1 = tmpPair
+			} else if d1.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+				switch d1.Type {
+				case tagBool:
+					ctx.EmitMakeBool(tmpPair, d1)
+				case tagInt:
+					ctx.EmitMakeInt(tmpPair, d1)
+				case tagFloat:
+					ctx.EmitMakeFloat(tmpPair, d1)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d1)
+				d1 = tmpPair
+			}
+			if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
+				panic("jit: generic call arg expects 2-word value (WithSession arg0)")
+			}
+			ctx.EnsureDesc(&d2)
+			ctx.EnsureDesc(&d2)
+			if d2.Loc == LocImm {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				if d2.Imm.GetTag() == tagBool {
+					ctx.EmitMakeBool(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagInt {
+					ctx.EmitMakeInt(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagFloat {
+					ctx.EmitMakeFloat(tmpPair, d2)
+				} else if d2.Imm.GetTag() == tagNil {
+					ctx.EmitMakeNil(tmpPair)
+				} else {
+					ptrWord, auxWord := d2.Imm.RawWords()
+					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+				}
+				d2 = tmpPair
+			} else if d2.Loc == LocReg {
+				tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocRegExcept(d2.Reg), Reg2: ctx.AllocRegExcept(d2.Reg)}
+				switch d2.Type {
+				case tagBool:
+					ctx.EmitMakeBool(tmpPair, d2)
+				case tagInt:
+					ctx.EmitMakeInt(tmpPair, d2)
+				case tagFloat:
+					ctx.EmitMakeFloat(tmpPair, d2)
+				default:
+					panic("jit: generic call arg scalar type unknown for 2-word value")
+				}
+				ctx.FreeDesc(&d2)
+				d2 = tmpPair
+			}
+			if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
+				panic("jit: generic call arg expects 2-word value (WithSession arg1)")
+			}
+			d3 := ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d1, d2}, 2)
+			ctx.BindReg(d3.Reg, &d3)
+			ctx.BindReg(d3.Reg2, &d3)
+			ctx.FreeDesc(&d1)
+			ctx.FreeDesc(&d2)
+			if d3.Loc == LocImm {
+				if result.Loc == LocAny { return d3 }
+			}
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			ctx.EnsureDesc(&d3)
+			if d3.Loc == LocRegPair {
+				ctx.EmitMovPairToResult(&d3, &result)
+				result.Type = d3.Type
+			} else {
+				switch d3.Type {
+				case tagBool:
+					ctx.EmitMakeBool(result, d3)
+					result.Type = tagBool
+				case tagInt:
+					ctx.EmitMakeInt(result, d3)
+					result.Type = tagInt
+				case tagFloat:
+					ctx.EmitMakeFloat(result, d3)
+					result.Type = tagFloat
+				case tagNil:
+					ctx.EmitMakeNil(result)
+					result.Type = tagNil
+				default:
+					panic("jit: single-block scalar return with unknown type")
+				}
+			}
+			return result
+			for _, r := range argPinned0 {
+				ctx.UnprotectReg(r)
+			}
+			return result
+		},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -451,6 +593,8 @@ func init_sync() {
 				{Kind: "number", ParamName: "duration", ParamDesc: "number of seconds to sleep"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -476,6 +620,8 @@ func init_sync() {
 				},
 				Return: &TypeDescriptor{Kind: "any"},
 			},
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -506,6 +652,8 @@ func init_sync() {
 				},
 				Return: &TypeDescriptor{Kind: "any"},
 			},
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -517,6 +665,54 @@ func init_sync() {
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			argPinned0 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned0 = append(argPinned0, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned0 = append(argPinned0, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned0 = append(argPinned0, ai.Reg2)
+					}
+				}
+			}
+			d1 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
+			ctx.BindReg(d1.Reg, &d1)
+			ctx.EnsureDesc(&d1)
+			ctx.EnsureDesc(&d1)
+			ctx.EnsureDesc(&d1)
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			if d1.Loc == LocImm {
+				ctx.EmitMakeInt(result, d1)
+			} else {
+				ctx.EmitMakeInt(result, d1)
+				ctx.FreeReg(d1.Reg)
+			}
+			result.Type = tagInt
+			return result
+			for _, r := range argPinned0 {
+				ctx.UnprotectReg(r)
+			}
+			return result
+		},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -535,6 +731,8 @@ func init_sync() {
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "dict"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 }

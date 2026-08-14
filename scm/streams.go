@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -28,109 +28,119 @@ func init_streams() {
 	// string functions
 	DeclareTitle("Streams")
 
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "streamString",
 		Desc: "creates a stream that contains a string",
 		Fn: func(a ...Scmer) Scmer {
-				reader, writer := io.Pipe()
-				go func() {
-					io.WriteString(writer, String(a[0]))
-					writer.Close()
-				}()
-				return NewAny(io.Reader(reader))
-			},
+			reader, writer := io.Pipe()
+			go func() {
+				io.WriteString(writer, String(a[0]))
+				writer.Close()
+			}()
+			return NewAny(io.Reader(reader))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "content", ParamDesc: "content to put into the stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
+
+			JITEmit: nil,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "gzip",
 		Desc: "compresses a stream with gzip. Create streams with (stream filename)",
 		Fn: func(a ...Scmer) Scmer {
-				stream, ok := a[0].Any().(io.Reader)
-				if !ok {
-					panic("gzip expects a stream")
-				}
-				reader, writer := io.Pipe()
-				bwriter := bufio.NewWriterSize(writer, 16*1024)
-				zip := gzip.NewWriter(bwriter)
-				go func() {
-					io.Copy(zip, stream)
-					zip.Close()
-					bwriter.Flush()
-					writer.Close()
-				}()
-				return NewAny(io.Reader(reader))
-			},
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("gzip expects a stream")
+			}
+			reader, writer := io.Pipe()
+			bwriter := bufio.NewWriterSize(writer, 16*1024)
+			zip := gzip.NewWriter(bwriter)
+			go func() {
+				io.Copy(zip, stream)
+				zip.Close()
+				bwriter.Flush()
+				writer.Close()
+			}()
+			return NewAny(io.Reader(reader))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
+
+			JITEmit: nil,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "xz",
 		Desc: "compresses a stream with xz. Create streams with (stream filename)",
 		Fn: func(a ...Scmer) Scmer {
-				stream, ok := a[0].Any().(io.Reader)
-				if !ok {
-					panic("xz expects a stream")
-				}
-				reader, writer := io.Pipe()
-				bwriter := bufio.NewWriterSize(writer, 16*1024)
-				zip, err := xz.NewWriter(bwriter)
-				go func() {
-					io.Copy(zip, stream)
-					zip.Close()
-					bwriter.Flush()
-					writer.Close()
-				}()
-				if err != nil {
-					panic(err)
-				}
-				return NewAny(io.Reader(reader))
-			},
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("xz expects a stream")
+			}
+			reader, writer := io.Pipe()
+			bwriter := bufio.NewWriterSize(writer, 16*1024)
+			zip, err := xz.NewWriter(bwriter)
+			go func() {
+				io.Copy(zip, stream)
+				zip.Close()
+				bwriter.Flush()
+				writer.Close()
+			}()
+			if err != nil {
+				panic(err)
+			}
+			return NewAny(io.Reader(reader))
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
+
+			JITEmit: nil,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "zcat",
 		Desc: "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
 		Fn: func(a ...Scmer) Scmer {
-				stream, ok := a[0].Any().(io.Reader)
-				if !ok {
-					panic("zcat expects a stream")
-				}
-				reader, err := gzip.NewReader(stream)
-				if err != nil {
-					panic(err)
-				}
-				return NewAny(reader)
-			},
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("zcat expects a stream")
+			}
+			reader, err := gzip.NewReader(stream)
+			if err != nil {
+				panic(err)
+			}
+			return NewAny(reader)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
+
+			JITEmit: nil,
 		},
 	})
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "xzcat",
 		Desc: "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
 		Fn: func(a ...Scmer) Scmer {
-				stream, ok := a[0].Any().(io.Reader)
-				if !ok {
-					panic("xzcat expects a stream")
-				}
-				reader, err := xz.NewReader(stream)
-				if err != nil {
-					panic(err)
-				}
-				return NewAny(reader)
-			},
+			stream, ok := a[0].Any().(io.Reader)
+			if !ok {
+				panic("xzcat expects a stream")
+			}
+			reader, err := xz.NewReader(stream)
+			if err != nil {
+				panic(err)
+			}
+			return NewAny(reader)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
+
+			JITEmit: nil,
 		},
 	})
 }
