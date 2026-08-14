@@ -67,6 +67,16 @@ test_cases:
         - "(known false)"
         - "planning_value"
 
+  - name: "EXPLAIN uses the explicit fallback distinct estimate before rebuild"
+    sql: "EXPLAIN REORDER SELECT a.id FROM rs_data a JOIN rs_data b ON b.id = a.id WHERE a.val = 3"
+    expect:
+      rows: 1
+      result_contains:
+        - "fallback_row_count"
+        - "(confidence 0)"
+        - "(known true)"
+        - "planning_value"
+
   - name: "Clear range scan statistics"
     setup:
       - scm: '(settings "ScanDebugging" false)'
