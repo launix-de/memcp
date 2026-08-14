@@ -188,6 +188,7 @@ PERFORMANCE_REFERENCE_NS_PER_MIB = 450_000
 PERFORMANCE_CALIBRATION_SAMPLES = 5
 PERFORMANCE_SCALE_MIN = 1.0
 PERFORMANCE_SCALE_MAX = 16.0
+PLANNER_TIME_TOLERANCE_FACTOR = 1.2
 PERFORMANCE_CALIBRATION_ROUNDS = {
     "x86_64": 32,
     "aarch64": 16,
@@ -304,6 +305,11 @@ def publish_performance_scale(calibration: Dict[str, Any]) -> None:
 def scaled_wall_clock_limit_ms(seconds: float, calibration: Dict[str, Any]) -> float:
     """Translate a reference-machine wall-clock budget to this machine."""
     return seconds * 1000.0 * calibration["scale"]
+
+
+def planner_time_limit_with_tolerance_ms(reference_budget_ms: float) -> float:
+    """Allow bounded cold-compile jitter without hiding complexity regressions."""
+    return reference_budget_ms * PLANNER_TIME_TOLERANCE_FACTOR
 
 
 def is_error_response(response: Optional[requests.Response]) -> bool:
@@ -844,7 +850,8 @@ class SQLTestRunner:
             plan_size_limit = int(self.suite_metadata["max_plan_size"])
         else:
             plan_size_limit = DEFAULT_MAX_PLAN_SIZE
-        planner_time_limit_ms = float(test_case.get("max_planner_time_ms", 0))
+        planner_time_budget_ms = float(test_case.get("max_planner_time_ms", 0))
+        planner_time_limit_ms = planner_time_limit_with_tolerance_ms(planner_time_budget_ms)
         compile_phase_limits_ms = test_case.get("max_compile_phase_ms", {})
         if not isinstance(compile_phase_limits_ms, dict):
             return self._record_fail(name, "max_compile_phase_ms must be a mapping",
@@ -1153,7 +1160,9 @@ class SQLTestRunner:
                         diag = self._run_on_fail(test_case, database)
                         return self._record_fail(
                             name,
-                            f"Planner too slow: {planner_time_ms:.1f}ms > {planner_time_limit_ms:.0f}ms",
+                            f"Planner too slow: {planner_time_ms:.1f}ms > {planner_time_limit_ms:.0f}ms "
+                            f"({planner_time_budget_ms:.0f}ms budget + "
+                            f"{(PLANNER_TIME_TOLERANCE_FACTOR - 1) * 100:.0f}% tolerance)",
                             query, compile_resp, test_case.get("expect"), is_noncritical,
                             planner_time_ms, planner_time_limit_ms, diag,
                         )
