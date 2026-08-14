@@ -131,7 +131,7 @@ func Repl(en *Env) {
 			var b bytes.Buffer
 			code := Read("user prompt", line)
 			Validate(code, "any")
-			code = Optimize(code, en)
+			code = Optimize(code, en, nil)
 			result := Eval(code, en)
 			fmt.Print(resultprompt)
 			if result.IsString() && strings.Contains(result.String(), "\n") {

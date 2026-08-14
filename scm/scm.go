@@ -1133,45 +1133,54 @@ func init() {
 		},
 		},
 	})
+	optimizerTelemetryType := &TypeDescriptor{Kind: "assoc", Keys: map[string]*TypeDescriptor{
+		"compile_ns":        {Kind: "int"},
+		"input_nodes":       {Kind: "int"},
+		"output_nodes":      {Kind: "int"},
+		"rewrites":          {Kind: "int"},
+		"rejected_rewrites": {Kind: "int"},
+		"budget_remaining":  {Kind: "int"},
+		"callback_analyses": {Kind: "int"},
+		"callback_clones":   {Kind: "int"},
+	}}
 	Declare(&Globalenv, &Declaration{
 		Name: "optimize",
-		Desc: "optimize the given scheme program",
+		Desc: "optimize the given scheme program and optionally report telemetry after completion",
 		Fn: func(a ...Scmer) Scmer {
-			return Optimize(a[0], &Globalenv)
+			var report func(Scmer)
+			if len(a) == 2 {
+				callback := a[1]
+				report = func(telemetry Scmer) {
+					Apply(callback, telemetry)
+				}
+			}
+			return Optimize(a[0], &Globalenv, report)
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
 				{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"},
+				{
+					Kind: "func", ParamName: "telemetry_callback", ParamDesc: "optional callback invoked once with optimizer telemetry", Optional: true, NoEscape: true,
+					Params: []*TypeDescriptor{optimizerTelemetryType}, Return: &TypeDescriptor{Kind: "any"},
+				},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
-
-			JITEmit: nil,
-		},
-	})
-	Declare(&Globalenv, &Declaration{
-		Name: "optimize_stats",
-		Desc: "optimize code and return bounded rewrite, AST growth, callback-analysis, and compile-time metrics",
-		Fn: func(a ...Scmer) Scmer {
-			result, stats := OptimizeWithStats(a[0], &Globalenv)
-			return NewSlice([]Scmer{
-				NewString("result"), result,
-				NewString("compile_ns"), NewInt(stats.CompileNS),
-				NewString("input_nodes"), NewInt(int64(stats.InputNodes)),
-				NewString("output_nodes"), NewInt(int64(stats.OutputNodes)),
-				NewString("rewrites"), NewInt(int64(stats.Rewrites)),
-				NewString("rejected_rewrites"), NewInt(int64(stats.RejectedRewrites)),
-				NewString("budget_remaining"), NewInt(int64(stats.BudgetRemaining)),
-				NewString("callback_analyses"), NewInt(int64(stats.CallbackAnalyses)),
-				NewString("callback_clones"), NewInt(int64(stats.CallbackClones)),
-			})
-		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"},
+			Optimize: func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+				if len(v) == 2 {
+					return oc.ApplyDefaultOptimization(v, useResult)
+				}
+				optimizedInput, inputType := oc.OptimizeSub(v[1], true)
+				v[1] = optimizedInput
+				oc.SetCallbackParamTypes([]*TypeDescriptor{optimizerTelemetryType})
+				v[2], _ = oc.OptimizeSub(v[2], true)
+				resultType := copyTypeDescriptor(inputType)
+				if resultType == nil {
+					resultType = &TypeDescriptor{Kind: "any"}
+				}
+				resultType.Const = false
+				return NewSlice(v), resultType
 			},
-			Return: &TypeDescriptor{Kind: "assoc"},
-			Const:  true,
 
 			JITEmit: nil,
 		},

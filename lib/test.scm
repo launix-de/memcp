@@ -1166,6 +1166,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 	/* Optimize should fold constants */
 	(assert (optimize '(+ 1 2)) 3 "optimize folds +")
+	(define optimize_telemetry_test (newsession))
+	(assert (optimize '(+ 1 2) (lambda (stats)
+		(begin
+			(optimize_telemetry_test "calls" (+ (coalesce (optimize_telemetry_test "calls") 0) 1))
+			(optimize_telemetry_test "stats" stats)))) 3 "optimize telemetry preserves result")
+	(assert (optimize_telemetry_test "calls") 1 "optimize telemetry callback runs exactly once")
+	(assert (> ((optimize_telemetry_test "stats") "compile_ns") 0) true "optimize telemetry reports compile time")
 	(assert (optimize '('concat "a" 2)) "a2" "optimize folds string concat")
 	(assert (optimize '('and true '(equal? 2 2))) true "optimize folds and/equal")
 	(assert (optimize '('begin '('define 'x 4) '(+ 'x 1))) 5 "optimize inlines define use-once")

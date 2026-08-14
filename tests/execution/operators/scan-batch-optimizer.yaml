@@ -145,8 +145,12 @@ test_cases:
   - name: "Optimizer telemetry exposes compile and AST growth costs"
     scm: |
       (begin
-        (define stats (optimize_stats (scheme "(+ 1 2)")))
+        (define telemetry (newsession))
+        (define result (optimize (scheme "(+ 1 2)")
+          (lambda (stats) (telemetry "stats" stats))))
+        (define stats (telemetry "stats"))
         (and
+          (equal? result 3)
           (> (stats "compile_ns") 0)
           (> (stats "input_nodes") 0)
           (> (stats "output_nodes") 0)
@@ -162,7 +166,9 @@ test_cases:
     scm: |
       (begin
         (define code (scheme "(scan nil nil (list) (lambda () (if (> 2 1) true false)) (list) (lambda () nil) nil nil nil false)"))
-        (define stats (optimize_stats code))
+        (define telemetry (newsession))
+        (optimize code (lambda (stats) (telemetry "stats" stats)))
+        (define stats (telemetry "stats"))
         (and
           (> (stats "rewrites") 0)
           (< (stats "budget_remaining") 64)

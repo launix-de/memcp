@@ -77,7 +77,7 @@ func TestOptimizeDoubleBangListAllocatesSlots(t *testing.T) {
 		NewSlice([]Scmer{}),
 		NewSlice([]Scmer{NewSymbol("!!list"), NewInt(4)}),
 	})
-	optimized := Optimize(lambdaExpr, &Globalenv)
+	optimized := Optimize(lambdaExpr, &Globalenv, nil)
 	items := optimized.Slice()
 	if len(items) != 4 {
 		t.Fatalf("expected optimized lambda with NumVars, got %v", optimized)
@@ -103,7 +103,7 @@ func TestOptimizeDoubleBangListAllocatesSlots(t *testing.T) {
 
 func TestOptimizeGeneratedConsChainToList(t *testing.T) {
 	expr := Read("generated cons chain", `(lambda (a b c) (cons a (cons b (cons c '()))))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if strings.Contains(serialized, "cons") {
 		t.Fatalf("generated cons chain was not flattened: %s", serialized)
@@ -118,7 +118,7 @@ func TestOptimizeGeneratedConsChainToList(t *testing.T) {
 
 func TestOptimizeGeneratedConsChainWithListTail(t *testing.T) {
 	expr := Read("generated cons chain with list tail", `(lambda (a b c) (cons a (cons b (list c 4))))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if strings.Contains(serialized, "cons") {
 		t.Fatalf("generated cons chain with list tail was not flattened: %s", serialized)
@@ -133,7 +133,7 @@ func TestOptimizeGeneratedConsChainWithListTail(t *testing.T) {
 
 func TestOptimizePreservesSetInNumberedLambda(t *testing.T) {
 	expr := Read("numbered set", `((lambda (counter) (!begin (set counter (+ counter 1)) counter) 1) 0)`)
-	got := Eval(Optimize(expr, &Globalenv), &Globalenv)
+	got := Eval(Optimize(expr, &Globalenv, nil), &Globalenv)
 	if ToInt(got) != 1 {
 		t.Fatalf("optimized numbered lambda returned %s, want 1", got.String())
 	}
@@ -141,7 +141,7 @@ func TestOptimizePreservesSetInNumberedLambda(t *testing.T) {
 
 func TestOptimizeImproperConsStaysCons(t *testing.T) {
 	expr := Read("improper cons", `(lambda (tail) (cons 1 tail))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	if serialized := serializeSliceAllocTestExpr(t, optimized); !strings.Contains(serialized, "cons") {
 		t.Fatalf("improper cons was rewritten as a proper list: %s", serialized)
 	}
@@ -152,7 +152,7 @@ func TestOptimizePreservesSetAndReadInNestedLambda(t *testing.T) {
 		((lambda () (!begin
 			(set counter (+ counter 1))
 			counter)))) 0)`)
-	got := Eval(Optimize(expr, &Globalenv), &Globalenv)
+	got := Eval(Optimize(expr, &Globalenv, nil), &Globalenv)
 	if ToInt(got) != 1 {
 		t.Fatalf("optimized nested set returned %s, want 1", got.String())
 	}
@@ -163,7 +163,7 @@ func TestOptimizeNumbersRepeatedLocalBinding(t *testing.T) {
 		(begin
 			(define doubled (+ value value))
 			(+ doubled doubled)))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if strings.Contains(serialized, "define doubled") {
 		t.Fatalf("repeated local binding stayed symbolic: %s", serialized)
@@ -182,9 +182,9 @@ func TestOptimizeNumbersLocalBindingsDeterministically(t *testing.T) {
 			(define first (+ value 1))
 			(define second (+ value 2))
 			(+ first first second second)))`
-	want := serializeSliceAllocTestExpr(t, Optimize(Read("numbered local reference", source), &Globalenv))
+	want := serializeSliceAllocTestExpr(t, Optimize(Read("numbered local reference", source), &Globalenv, nil))
 	for i := 0; i < 100; i++ {
-		got := serializeSliceAllocTestExpr(t, Optimize(Read("numbered local repeat", source), &Globalenv))
+		got := serializeSliceAllocTestExpr(t, Optimize(Read("numbered local repeat", source), &Globalenv, nil))
 		if got != want {
 			t.Fatalf("numbered local slots changed between runs:\nwant %s\n got %s", want, got)
 		}
@@ -197,7 +197,7 @@ func TestOptimizeExtendsExplicitNumVarsForLocalBinding(t *testing.T) {
 			(define doubled (+ value value))
 			(+ doubled doubled))
 		1)`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	items := optimized.Slice()
 	if len(items) != 4 || ToInt(items[3]) != 2 {
 		t.Fatalf("explicit frame was not extended for local binding: %s", serializeSliceAllocTestExpr(t, optimized))
@@ -212,7 +212,7 @@ func TestOptimizeKeepsEvalVisibleBindingNamed(t *testing.T) {
 		(begin
 			(define dynamic_value (+ value value))
 			(+ dynamic_value (eval 'dynamic_value))))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if !strings.Contains(serialized, "define dynamic_value") {
 		t.Fatalf("eval-visible local binding was numbered: %s", serialized)
@@ -228,7 +228,7 @@ func TestOptimizeKeepsParserVisibleBindingNamed(t *testing.T) {
 			(define parser_rule (parser (atom "FOO" true) "inner"))
 			(define parser_value (parser parser_rule "ok"))
 			(list parser_rule parser_value)))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if !strings.Contains(serialized, "define parser_rule") {
 		t.Fatalf("parser-visible local binding was numbered: %s", serialized)
@@ -245,7 +245,7 @@ func TestOptimizeKeepsForwardReferencedBindingNamed(t *testing.T) {
 			(define read_later (lambda () later))
 			(define later (+ value value))
 			(+ (read_later) later)))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if !strings.Contains(serialized, "define later") {
 		t.Fatalf("forward-referenced local binding was numbered: %s", serialized)
@@ -260,7 +260,7 @@ func TestOptimizeKeepsInitializerReferenceNamed(t *testing.T) {
 		(begin
 			(define current (+ current value))
 			current))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if !strings.Contains(serialized, "define current") {
 		t.Fatalf("initializer-referenced local binding was numbered: %s", serialized)
@@ -274,7 +274,7 @@ func TestOptimizeKeepsMultiplyDefinedBindingNamed(t *testing.T) {
 			(define before current)
 			(set current (+ value 2))
 			(+ before current)))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if !strings.Contains(serialized, "define current") || !strings.Contains(serialized, "set current") {
 		t.Fatalf("multiply defined local binding was numbered: %s", serialized)
@@ -290,7 +290,7 @@ func TestOptimizeNumberedLocalSurvivesClosureCapture(t *testing.T) {
 			(define doubled (+ value value))
 			(define read_doubled (lambda () doubled))
 			(+ doubled (read_doubled))))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if !strings.Contains(serialized, "setN") || !strings.Contains(serialized, "outer") {
 		t.Fatalf("captured local did not use a numbered outer slot: %s", serialized)
@@ -305,7 +305,7 @@ func TestOptimizeNumbersLocalInsideBeginMutReserve(t *testing.T) {
 		(begin_mut 1
 			(define doubled (+ value value))
 			(+ doubled doubled)))`)
-	optimized := Optimize(expr, &Globalenv)
+	optimized := Optimize(expr, &Globalenv, nil)
 	serialized := serializeSliceAllocTestExpr(t, optimized)
 	if !strings.Contains(serialized, "setN") {
 		t.Fatalf("begin_mut local binding was not numbered: %s", serialized)
@@ -327,7 +327,7 @@ func benchmarkRepeatedLocalBindings(b *testing.B, serial bool) {
 			(define v6 (+ value 7))
 			(define v7 (+ value 8))
 			(+ v0 v0 v1 v1 v2 v2 v3 v3 v4 v4 v5 v5 v6 v6 v7 v7)))`)
-	proc := Eval(Optimize(expr, &Globalenv), &Globalenv)
+	proc := Eval(Optimize(expr, &Globalenv, nil), &Globalenv)
 	value := NewInt(3)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -359,7 +359,7 @@ func benchmarkGeneratedConsChain(b *testing.B, width int) {
 		for i := width - 1; i >= 0; i-- {
 			tail = NewSlice([]Scmer{NewSymbol("cons"), NewInt(int64(i)), tail})
 		}
-		Optimize(tail, &Globalenv)
+		Optimize(tail, &Globalenv, nil)
 	}
 }
 
@@ -376,6 +376,6 @@ func BenchmarkOptimizeImproperCons(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		expr := NewSlice([]Scmer{NewSymbol("cons"), NewInt(1), NewSymbol("tail")})
-		Optimize(expr, &Globalenv)
+		Optimize(expr, &Globalenv, nil)
 	}
 }

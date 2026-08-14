@@ -265,23 +265,34 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	}
 }
 
-// do preprocessing and optimization (Optimize is allowed to edit the value in-place)
-func Optimize(val Scmer, env *Env) Scmer {
-	result, _ := OptimizeWithStats(val, env)
-	return result
-}
-
-// OptimizerStats exposes compile work without coupling callers to optimizer
-// internals. All counters cover one top-level optimization.
-type OptimizerStats struct {
-	CompileNS        int64
-	InputNodes       int
-	OutputNodes      int
-	Rewrites         int
-	RejectedRewrites int
-	BudgetRemaining  int
-	CallbackAnalyses int
-	CallbackClones   int
+// Optimize consumes val, preprocesses and optimizes it, and transfers ownership
+// to the returned value. It may therefore reuse val's storage. When
+// telemetryCallback is non-nil, it is called exactly once after the optimizer
+// has finished. The callback itself is excluded from compile_ns.
+func Optimize(val Scmer, env *Env, telemetryCallback func(Scmer)) Scmer {
+	var started time.Time
+	if telemetryCallback != nil {
+		started = time.Now()
+	}
+	ome := newOptimizerMetainfo()
+	// Recursive hook guards still need the original tree size. This walk goes
+	// away with OptimizeRewrite; it is not performed for telemetry alone.
+	ome.rewrite.inputNodes = optimizerNodeCount(val)
+	v, _ := OptimizeEx(val, env, &ome, true)
+	if telemetryCallback != nil {
+		compileNS := time.Since(started).Nanoseconds()
+		telemetryCallback(NewSlice([]Scmer{
+			NewString("compile_ns"), NewInt(compileNS),
+			NewString("input_nodes"), NewInt(int64(ome.rewrite.inputNodes)),
+			NewString("output_nodes"), NewInt(int64(optimizerNodeCount(v))),
+			NewString("rewrites"), NewInt(int64(ome.rewrite.rewrites)),
+			NewString("rejected_rewrites"), NewInt(int64(ome.rewrite.rejected)),
+			NewString("budget_remaining"), NewInt(int64(ome.rewrite.remainingBudget)),
+			NewString("callback_analyses"), NewInt(int64(ome.rewrite.callbackAnalyses)),
+			NewString("callback_clones"), NewInt(int64(ome.rewrite.callbackClones)),
+		}))
+	}
+	return v
 }
 
 type optimizerRewriteState struct {
@@ -296,24 +307,6 @@ type optimizerRewriteState struct {
 }
 
 const defaultOptimizerRewriteBudget = 64
-
-// OptimizeWithStats returns both optimized code and bounded-work telemetry.
-func OptimizeWithStats(val Scmer, env *Env) (Scmer, OptimizerStats) {
-	started := time.Now()
-	ome := newOptimizerMetainfo()
-	ome.rewrite.inputNodes = optimizerNodeCount(val)
-	v, _ := OptimizeEx(val, env, &ome, true)
-	return v, OptimizerStats{
-		CompileNS:        time.Since(started).Nanoseconds(),
-		InputNodes:       ome.rewrite.inputNodes,
-		OutputNodes:      optimizerNodeCount(v),
-		Rewrites:         ome.rewrite.rewrites,
-		RejectedRewrites: ome.rewrite.rejected,
-		BudgetRemaining:  ome.rewrite.remainingBudget,
-		CallbackAnalyses: ome.rewrite.callbackAnalyses,
-		CallbackClones:   ome.rewrite.callbackClones,
-	}
-}
 
 type optimizerMetainfo struct {
 	variableReplacement   map[Symbol]Scmer

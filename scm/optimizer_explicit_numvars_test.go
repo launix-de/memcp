@@ -19,7 +19,7 @@ package scm
 import "testing"
 
 func TestOptimizeProcToSerialFunctionUsesNumberedFixedParams(t *testing.T) {
-	lambda := Eval(Optimize(Read("test", "(lambda (value) (+ value value))"), &Globalenv), &Globalenv)
+	lambda := Eval(Optimize(Read("test", "(lambda (value) (+ value value))"), &Globalenv, nil), &Globalenv)
 	if !lambda.Proc().NumberedOnly {
 		t.Fatal("expected optimized lambda to use numbered bindings only")
 	}
