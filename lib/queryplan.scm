@@ -587,6 +587,70 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 	(reduce (coalesceNil aliases '()) (lambda (found alias)
 		(or found (expr_refs_alias? default_alias alias expr))) false)))
 
+/* Collect bound source aliases once. Join pruning must not rescan a wide
+projection for every source; that turns read-model queries into O(N^2) planner
+work before decorrelation has even started. */
+(define query_expr_alias_set (lambda (default_alias expr aliases)
+	(match expr
+		((symbol get_column) tblvar _ _ _)
+		(set_assoc aliases (resolve_column_alias tblvar default_alias) true)
+		((quote get_column) tblvar _ _ _)
+		(set_assoc aliases (resolve_column_alias tblvar default_alias) true)
+		(cons head tail) (reduce tail (lambda (found item)
+			(query_expr_alias_set default_alias item found))
+			(query_expr_alias_set default_alias head aliases))
+		_ aliases)))
+
+(define query_exprs_alias_set (lambda (default_alias exprs)
+	(reduce (coalesceNil exprs '()) (lambda (aliases expr)
+		(query_expr_alias_set default_alias expr aliases)) '())))
+
+(define source_primary_key_columns (lambda (src)
+	(if (not (source_is_base_table? src))
+		'()
+		(map (filter (get_schema (source_schema src) (source_relation src)) (lambda (col)
+			(equal?? (col "Key") "PRI"))) (lambda (col) (col "Field"))))))
+
+(define unique_left_join_key_term? (lambda (default_alias src key_col term)
+	(match term
+		'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
+			(or
+				(and (equal? (direct_column_name_for_alias src left) key_col)
+					(not (expr_refs_alias? default_alias (source_alias src) right)))
+				(and (equal? (direct_column_name_for_alias src right) key_col)
+					(not (expr_refs_alias? default_alias (source_alias src) left))))
+			false)
+		_ false)))
+
+(define unused_unique_left_join? (lambda (default_alias referenced_aliases src)
+	(begin
+		(define keys (source_primary_key_columns src))
+		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
+		(and (source_outer? src)
+			(and (source_is_base_table? src)
+				(and (not (has_assoc? referenced_aliases (source_alias src)))
+					(and (not (empty_list? keys))
+						(reduce keys (lambda (bound key)
+							(and bound (reduce terms (lambda (found term)
+								(or found (unique_left_join_key_term? default_alias src key term))) false)))
+							true))))))))
+
+(define prune_unused_unique_left_joins_reversed (lambda (reversed_sources default_alias referenced_aliases)
+	(match (coalesceNil reversed_sources '())
+		(cons src rest) (if (unused_unique_left_join? default_alias referenced_aliases src)
+			(prune_unused_unique_left_joins_reversed rest default_alias referenced_aliases)
+			(begin
+				(define tail (prune_unused_unique_left_joins_reversed rest default_alias
+					(query_expr_alias_set default_alias (source_join_expr src) referenced_aliases)))
+				(cons src tail)))
+		_ '())))
+
+(define prune_unused_unique_left_joins (lambda (sources default_alias consumers)
+	(reverse (prune_unused_unique_left_joins_reversed
+		(reverse (coalesceNil sources '()))
+		default_alias
+		(query_exprs_alias_set default_alias consumers)))))
+
 (define btw2025_expr_accessing_aliases (lambda (expr outer_aliases)
 	(merge_unique (map (coalesceNil outer_aliases '()) (lambda (alias)
 		(if (expr_refs_any_alias? nil (list alias) expr)
@@ -4465,10 +4529,25 @@ source alias is the stable identity consumed by all later planner phases. */
 							(untangle_union_block embedded_union_rewrite child_ctx)
 							(begin
 								(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
-								(define sources (nth flattened_sources 0))
+								(define flattened_source_list (nth flattened_sources 0))
 								(define rewrites (nth flattened_sources 1))
 								(define source_where_terms (nth flattened_sources 2))
 								(define source_stages (nth flattened_sources 3))
+								/* Derived references are already bound. Rewrite them once, then
+								prune unused row-preserving lookups before their join expressions
+								can create decorrelation stages. */
+								(define rewritten_where (combine_where_terms source_where_terms
+									(rewrite_derived_ref_chain rewrites (qb_where block))))
+								(define rewritten_fields (rewrite_derived_fields_chain rewrites (qb_fields block)))
+								(define rewritten_group (map (coalesceNil (qb_group block) '()) (lambda (item)
+									(rewrite_derived_ref_chain rewrites item))))
+								(define rewritten_having (rewrite_derived_ref_chain rewrites (qb_having block)))
+								(define rewritten_order (rewrite_derived_order_chain rewrites (qb_order block)))
+								(define rewritten_hidden (rewrite_derived_fields_chain rewrites (qb_hidden block)))
+								(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+									(if (empty_list? flattened_source_list) nil (source_alias (car flattened_source_list)))))
+								(define sources (prune_unused_unique_left_joins flattened_source_list default_alias
+									(list rewritten_fields rewritten_where rewritten_group rewritten_having rewritten_order rewritten_hidden)))
 								(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
 								(define inherited_outer_resolution_sources (uctx_get child_ctx (quote outer-resolution-sources) '()))
 								(define nested_outer_resolution_sources (merge (list inherited_outer_resolution_sources (qb_sources block))))
@@ -4487,32 +4566,27 @@ source alias is the stable identity consumed by all later planner phases. */
 									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources))))))
 								/* SQL name ownership ends in bind_query_names. Derived flattening
 								only rewrites references carrying an explicit bound alias. */
-								(define rewritten_where (combine_where_terms source_where_terms
-									(rewrite_derived_ref_chain rewrites (qb_where block))))
 								(if (expr_contains_window? rewritten_where)
 									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 									true)
 								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
-								(define rewritten_fields (rewrite_derived_fields_chain rewrites
-									(qb_fields block)))
 								(define field_result (untangle_fields_with_stages
 									rewritten_fields
 									joined_expr_outer_sources joined_expr_ctx))
 								(define having_result (untangle_expr_with_stages
-									(rewrite_derived_ref_chain rewrites (qb_having block))
+									rewritten_having
 									joined_expr_outer_sources joined_expr_ctx))
 								(define stage_sources (merge_unique (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
 								(define group_result (untangle_expr_list_with_stages
-									(map (coalesceNil (qb_group block) '()) (lambda (item)
-										(rewrite_derived_ref_chain rewrites item)))
+									rewritten_group
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define order_result (untangle_order_with_stages
-									(rewrite_derived_order_chain rewrites (qb_order block))
+									rewritten_order
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define hidden_result (untangle_fields_with_stages
-									(rewrite_derived_fields_chain rewrites (qb_hidden block))
+									rewritten_hidden
 									joined_expr_outer_sources joined_expr_ctx))
 								(define delayed_block (make_query_block
 									(qb_schema block)
@@ -7509,7 +7583,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(qb_sources input)
 		(if (source_is_base_table? input) (list input) '()))))
 
-(define stage_semantic_alias_map (lambda (stage)
+(define stage_semantic_outer_aliases (lambda (stage)
 	(begin
 		(define local_aliases (source_aliases (stage_semantic_input_sources (gs_input stage))))
 		(define referenced_aliases (merge_unique (list
@@ -7518,7 +7592,12 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(stage_semantic_expr_aliases (gs_keys stage))
 			(stage_semantic_expr_aliases (gs_aggregates stage))
 			(stage_semantic_expr_aliases (qassoc_get (gs_facts stage) (quote condition) true)))))
-		(define outer_aliases (filter referenced_aliases (lambda (alias) (not (contains? local_aliases alias)))))
+		(filter referenced_aliases (lambda (alias) (not (contains? local_aliases alias)))))))
+
+(define stage_semantic_alias_map (lambda (stage)
+	(begin
+		(define local_aliases (source_aliases (stage_semantic_input_sources (gs_input stage))))
+		(define outer_aliases (stage_semantic_outer_aliases stage))
 		(merge (list
 			(stage_semantic_alias_entries local_aliases "__stage_local_")
 			(stage_semantic_alias_entries outer_aliases "__stage_outer_"))))))
@@ -7603,6 +7682,23 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(quote on_overflow))
 		(lambda (key) (list key (stage_semantic_rewrite_expr alias_map signatures (qassoc_get facts key nil)))))))
 
+(define stage_semantic_backbone_signature (lambda (signatures stage)
+	(if (not (group_stage? stage))
+		(logical_stage_key stage)
+		(begin
+			(define alias_map (stage_semantic_alias_map stage))
+			(define payload (list
+				(stage_semantic_canonical_node alias_map signatures (gs_input stage))
+				(stage_semantic_rewrite_expr alias_map signatures (gs_domain stage))
+				(stage_semantic_rewrite_expr alias_map signatures (gs_keys stage))
+				(stage_semantic_rewrite_expr alias_map signatures (qassoc_get (gs_facts stage) (quote condition) true))
+				(stage_semantic_rewrite_expr alias_map signatures (gs_having stage))
+				(stage_semantic_rewrite_expr alias_map signatures (gs_order stage))
+				(gs_limit stage)
+				(gs_offset stage)
+				(stage_semantic_facts alias_map signatures (gs_facts stage))))
+			(concat "stage-backbone:" (fnv_hash (serialize payload)))))))
+
 (define stage_semantic_signature (lambda (signatures stage)
 	(if (not (group_stage? stage))
 		(logical_stage_key stage)
@@ -7628,11 +7724,18 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		'())))
 
 (define stage_output_left_join_stage_key (lambda (signature_index stage)
-	(if (not (and (group_stage? stage)
-		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
-			(equal? (count (gs_aggregates stage)) 1))))
+	(if (not (group_stage? stage))
 		nil
-		(get_assoc signature_index (gs_id stage)))))
+		(if (and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
+			(equal? (count (gs_aggregates stage)) 1))
+			(get_assoc signature_index (gs_id stage))
+			/* Alias-normalized interning is safe for base-table groups. Query-input
+			stages retain distinct correlation scopes until scope equivalence can
+			be proven independently of their canonical carrier name. */
+			(if (and (source_is_base_table? (gs_input stage))
+				(empty_list? (stage_semantic_outer_aliases stage)))
+				(stage_semantic_backbone_signature signature_index stage)
+				nil)))))
 
 (define normalize_stage_output_left_join_expr (lambda (alias expr)
 	(match expr
@@ -8416,7 +8519,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 					(cons (quote !begin)
 						(merge (list
 							(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
-							(lower_unique_stage_prepares_using nested_stages nested_stages nested_stages)
+							(map nested_stages (lambda (nested_stage)
+								(if (group_stage? nested_stage)
+									(stage_prepare_call_expr nested_stage)
+									(lower_stage_prepare_using nested_stages nested_stages nested_stage))))
 							(lower_stage_materialize_all nested_stages)
 							(list probe_expr))))
 					probe_expr))
@@ -8597,18 +8703,18 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 							(source_is_base_table? (gs_input nested_stage))
 							(not (stage_has_residual_outer_refs? nested_stage))))))
 				'()))
-			/* Bounded consumers execute presence checks after root braking. Broad
-			consumers and complex stage graphs retain the persistent group cache so
-			repeated keys are shared with the canonical preparation path. */
+			/* Bounded consumers execute selected presence checks after root braking.
+			Every other base-table group without residual outer references has a
+			closed initializer. Hoist those initializers to the shared recipe scope,
+			where canonical carrier collection can merge duplicate key fills and
+			aggregate-column extensions before code emission. */
 			(define inline_presence_stages (if bounded_consumer inline_candidates '()))
-			(define hoisted_stages (if (empty_list? inline_presence_stages)
-				(filter nested_stages (lambda (nested_stage)
-					(and (group_stage? nested_stage)
-						(equal? (qassoc_get (gs_facts nested_stage) (quote purpose) nil) (quote exists))
-						(equal? (qassoc_get (gs_facts nested_stage) (quote presence_only) false) true)
-						(source_is_base_table? (gs_input nested_stage))
-						(not (stage_has_residual_outer_refs? nested_stage)))))
-				'()))
+			(define inline_presence_ids (stage_id_set inline_presence_stages))
+			(define hoisted_stages (filter nested_stages (lambda (nested_stage)
+				(and (group_stage? nested_stage)
+					(and (source_is_base_table? (gs_input nested_stage))
+						(and (not (stage_has_residual_outer_refs? nested_stage))
+							(not (has_assoc? inline_presence_ids (gs_id nested_stage)))))))))
 			(define consumed_ids (stage_id_set (merge (list hoisted_stages inline_presence_stages))))
 			(define prepare_stages (filter nested_stages (lambda (nested_stage)
 				(not (has_assoc? consumed_ids (gs_id nested_stage))))))
@@ -8706,8 +8812,12 @@ dependency preparation does not emit free outer-row symbols. */
 (define scalar_query_probe_recipe_prepare_exprs (lambda (plans)
 	(begin
 		(define stages (scalar_query_probe_recipe_hoisted_stages plans))
+		(define shared_stages (filter stages stage_shared_prepare?))
+		(define direct_stages (filter stages (lambda (stage) (not (stage_shared_prepare? stage)))))
 		(merge (list
-			(lower_unique_stage_prepares_using stages stages stages)
+			(lazy_stage_prepare_bindings stages shared_stages)
+			(map shared_stages stage_prepare_call_expr)
+			(lower_unique_stage_prepares_using direct_stages direct_stages direct_stages)
 			(lower_stage_materialize_all stages))))))
 
 (define lower_exists_union_probe_branch (lambda (sources default_alias branch probe all_stages dependency_graph)
@@ -9114,15 +9224,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
 
 (define unique_lookup_join_term? (lambda (default_alias src key_col term)
-	(match term
-		'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
-			(or
-				(and (equal? (direct_column_name_for_alias src left) key_col)
-					(not (expr_refs_alias? default_alias (source_alias src) right)))
-				(and (equal? (direct_column_name_for_alias src right) key_col)
-					(not (expr_refs_alias? default_alias (source_alias src) left))))
-			false)
-		_ false)))
+	(unique_left_join_key_term? default_alias src key_col term)))
 
 (define unique_lookup_key_columns (lambda (src stages)
 	(begin
@@ -12524,6 +12626,26 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define stages_with_canonical_group_caches (lambda (stages signatures)
 	(nth (stages_with_canonical_group_caches_acc stages signatures '()) 0)))
 
+(define stage_shared_prepare? (lambda (stage)
+	(and (group_stage? stage)
+		(qassoc_get (gs_facts stage) (quote shared_prepare) false))))
+
+(define stages_with_shared_prepare_facts (lambda (stages)
+	(begin
+		(define dependency_graph (stage_dependency_graph stages))
+		(define counts (reduce stages (lambda (found stage)
+			(if (closed_group_prepare_stage? dependency_graph stage)
+				(begin
+					(define key (stage_prepare_backbone_signature stage))
+					(set_assoc found key (+ 1 (coalesceNil (get_assoc found key) 0))))
+				found)) '()))
+		(map stages (lambda (stage)
+			(if (and (closed_group_prepare_stage? dependency_graph stage)
+				(> (coalesceNil (get_assoc counts (stage_prepare_backbone_signature stage)) 0) 1))
+				(group_stage_with_facts stage
+					(qassoc_set (gs_facts stage) (quote shared_prepare) true))
+				stage))))))
+
 (define group_stage_lowering_catalog (lambda (stage)
 	(match (gs_facts stage)
 		(cons entry _rest) (match entry
@@ -12537,7 +12659,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define signatures (stage_semantic_signature_index stages))
 		/* Catalog lookups must return the same annotated immutable stage instances
 		that root lowering sees; otherwise nested probe copies derive old names. */
-		(define signature_stages (stages_with_canonical_group_caches stages signatures))
+		(define signature_stages (stages_with_shared_prepare_facts
+			(stages_with_canonical_group_caches stages signatures)))
 		(define catalog (make_lowering_catalog signature_stages))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
 			(begin
@@ -12893,6 +13016,74 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define group_stage_final_extra_sources (lambda (stage)
 	(group_stage_final_extra_sources_using (if (query_block? (gs_input stage)) (qb_stages (gs_input stage)) '()) stage)))
 
+/* A canonical carrier describes keys and input semantics, while aggregate
+columns are independent extensions of that carrier. Collect all compatible
+extensions before emitting DDL/fill code so one query has one creator and one
+key-fill recipe per carrier. */
+(define stage_prepare_backbone_signature (lambda (stage)
+	(if (not (group_stage? stage))
+		(logical_stage_key stage)
+		(begin
+			(define cache (group_stage_cache stage))
+			/* Canonical carrier naming already includes the complete key and
+			condition semantics. It is therefore the physical identity used to
+			collect all aggregate columns and emit exactly one initializer. */
+			(concat "stage-prepare:"
+				(fnv_hash (serialize (list
+					(group_cache_schema cache)
+					(group_cache_relation cache)))))))))
+
+(define group_prepare_stage_with_aggregates (lambda (stage aggregates)
+	(make_group_stage
+		(gs_id stage)
+		(gs_input stage)
+		(gs_domain stage)
+		(gs_keys stage)
+		(dedupe_aggregates_by_col aggregates)
+		(gs_having stage)
+		(gs_output stage)
+		(gs_order stage)
+		(gs_limit stage)
+		(gs_offset stage)
+		(gs_facts stage))))
+
+(define merge_group_prepare_stage (lambda (target stage)
+	(group_prepare_stage_with_aggregates target
+		(merge (list
+			(gs_aggregates target)
+			(stage_output_left_join_aligned_aggregates target stage))))))
+
+(define collect_stage_prepares (lambda (stages)
+	(begin
+		(define collected (reduce (coalesceNil stages '()) (lambda (state stage)
+			(begin
+				(define index (nth state 0))
+				(define keys (nth state 1))
+				(define key (if (group_stage? stage)
+					(stage_prepare_backbone_signature stage)
+					(concat "logical-prepare:" (logical_stage_key stage))))
+				(define previous (if (has_assoc? index key) (index key) nil))
+				(list
+					(set_assoc index key (if (nil? previous)
+						stage
+						(if (and (group_stage? previous) (group_stage? stage))
+							(merge_group_prepare_stage previous stage)
+							previous)))
+					(if (nil? previous) (cons key keys) keys))))
+			(list '() '())))
+		(define index (nth collected 0))
+		(map (reverse (nth collected 1)) (lambda (key) (index key))))))
+
+(define stage_prepare_backbone_set (lambda (stages)
+	(reduce (coalesceNil stages '()) (lambda (keys stage)
+		(set_assoc keys (stage_prepare_backbone_signature stage) true)) '())))
+
+(define stages_without_prepare_backbones (lambda (stages prepared)
+	(begin
+		(define prepared_backbones (stage_prepare_backbone_set prepared))
+		(filter (coalesceNil stages '()) (lambda (stage)
+			(not (has_assoc? prepared_backbones (stage_prepare_backbone_signature stage))))))))
+
 (define stage_prepare_identity (lambda (stage)
 	(if (group_stage? stage)
 		(begin
@@ -12937,7 +13128,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		_ '())))
 
 (define lower_unique_stage_prepares (lambda (stages prepare)
-	(lower_unique_stage_prepares_acc stages '() '() prepare)))
+	(lower_unique_stage_prepares_acc (collect_stage_prepares stages) '() '() prepare)))
 
 (define lower_unique_stage_prepares_using (lambda (all_stages lookup_stages stages)
 	(lower_unique_stage_prepares stages (lambda (stage)
@@ -13701,10 +13892,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(query_limit_active? (qb_offset block) (qb_limit block))
 			(not (nil? (scalar_order_lookup_source
 				(query_block_stage_lookup block) sources default_alias order_items)))))
+		(define unordered_limit_candidate (and
+			(empty_list? order_items)
+			(query_limit_active? (qb_offset block) (qb_limit block))))
 		(and (not (single_source? sources))
-			(and (not (empty_list? order_items))
-				(and (or membership_candidate scalar_lookup_candidate)
-					(late_projection_sources_preserve_rows? sources prelimit_sources)))))))
+			(and (or unordered_limit_candidate
+				(and (not (empty_list? order_items)) (or membership_candidate scalar_lookup_candidate)))
+				(late_projection_sources_preserve_rows?
+					(query_block_stage_lookup block) sources prelimit_sources default_alias
+					(coalesceNil (qb_where block) true)))))))
 
 (define stage_direct_prepare_source_visible? (lambda (block sources default_alias stage)
 	(if (single_source? sources)
@@ -13770,14 +13966,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 
 (define query_block_stages_to_prepare_using (lambda (all_stages block)
 	(begin
-		(define prelimit_stage_ids (if (late_projection_candidate_block? block)
+		(define late_projection (late_projection_candidate_block? block))
+		(define prelimit_stage_ids (if late_projection
 			(stage_ids_for_sources_with_closure all_stages (query_block_prelimit_sources block))
-			nil))
+			'()))
 		(include_shared_group_cache_stages
 			(qb_stages block)
 			(filter (query_block_stages_to_prepare_base_using all_stages block) (lambda (stage)
 				(or
-					(nil? prelimit_stage_ids)
+					(not late_projection)
 					(stage_id_in? stage prelimit_stage_ids))))))))
 
 (define query_block_stages_to_prepare (lambda (block)
@@ -13823,7 +14020,9 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					recipe_block))
 			(begin
 				(define stage_catalog (query_block_stage_catalog block))
-				(define eager_stages (query_block_stages_to_prepare_using stage_lookup block))
+				(define eager_stages (filter
+					(query_block_stages_to_prepare_using stage_lookup block)
+					(lambda (stage) (not (stage_shared_prepare? stage)))))
 				(define dependency_graph (stage_dependency_graph stage_lookup))
 				(define raw_prepared_block (if (single_source? (qb_sources block))
 					(query_block_without_stages_after_prepare_using stage_lookup block)
@@ -13841,7 +14040,10 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(scalar_query_probe_recipe_bindings probe_recipe_plans))
 				(define probe_recipe_prepares
 					(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
-				(define lazy_catalog (stages_without_ids stage_catalog (stage_ids eager_stages)))
+				/* Different logical stage IDs may resolve to one physical carrier.
+				Once that carrier is eager, no alias-equivalent stage may emit a
+				second lazy initializer for the same session key. */
+				(define lazy_catalog (stages_without_prepare_backbones stage_catalog eager_stages))
 				(define core_block (query_block_without_stages
 					(query_block_with_stage_catalog prepared_block stage_catalog)))
 				(define lazy_stages (group_cache_stages_from_sources lazy_catalog (qb_sources core_block)))
@@ -13937,7 +14139,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define lazy_stage_prepare_bindings (lambda (stages selected)
 	(begin
 		(define dependency_graph (stage_dependency_graph stages))
-		(map (coalesceNil selected '()) (lambda (stage)
+		(map (collect_stage_prepares selected) (lambda (stage)
 			(lazy_stage_prepare_binding dependency_graph stage stages))))))
 
 (define prepared_stage_binding (lambda (stage)
@@ -13947,7 +14149,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(list (quote once) (list (quote lambda) '() true)))))
 
 (define prepared_stage_bindings (lambda (stages)
-	(map (coalesceNil stages '()) prepared_stage_binding)))
+	(map (collect_stage_prepares stages) prepared_stage_binding)))
 
 (define lower_query_block_core_with_lazy_prepares (lambda (stage_catalog block)
 	(begin
@@ -14067,13 +14269,21 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(mark_outer_join_symbols sources current_alias item))))
 			_ expr))))
 
-(define late_projection_sources_preserve_rows? (lambda (sources prelimit_sources)
-	(reduce (coalesceNil sources '()) (lambda (ok src)
-		(and ok
-			(or
-				(source_alias_in_sources? (source_alias src) prelimit_sources)
-				(source_outer? src))))
-		true)))
+(define late_projection_sources_preserve_rows_acc (lambda (stages sources remaining prelimit_sources default_alias final_condition bound_sources)
+	(match (coalesceNil remaining '())
+		(cons src rest) (if (source_alias_in_sources? (source_alias src) prelimit_sources)
+			(late_projection_sources_preserve_rows_acc stages sources rest prelimit_sources default_alias final_condition
+				(cons src bound_sources))
+			(if (and (source_outer? src)
+				(source_is_unique_lookup_from_sources? sources default_alias bound_sources src stages final_condition))
+				(late_projection_sources_preserve_rows_acc stages sources rest prelimit_sources default_alias final_condition
+					(cons src bound_sources))
+				false))
+		_ true)))
+
+(define late_projection_sources_preserve_rows? (lambda (stages sources prelimit_sources default_alias final_condition)
+	(late_projection_sources_preserve_rows_acc
+		stages sources sources prelimit_sources default_alias final_condition '())))
 
 (define ordered_join_limit_requires_complete_rows? (lambda (sources default_alias final_condition offset_value limit_value)
 	(and
@@ -15090,8 +15300,7 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 /* Canonical physical prejoin relations                                      */
 
 (define prejoin_primary_key_columns (lambda (src)
-	(map (filter (get_schema (source_schema src) (source_relation src)) (lambda (col)
-		(equal?? (col "Key") "PRI"))) (lambda (col) (col "Field")))))
+	(source_primary_key_columns src)))
 
 (define prejoin_source_position (lambda (sources alias)
 	(reduce (produceN (count sources)) (lambda (found i)
@@ -16246,6 +16455,123 @@ build_queryplan contract. */
 		(neumann_fail "build_queryplan" "relational results must remain in storage scans")
 		plan)))
 
+(define prepare_binding_key (lambda (expr)
+	(match expr
+		'(((symbol context) "session") key ((symbol once) ((symbol lambda) _params true))) nil
+		'(((quote context) "session") key ((quote once) ((quote lambda) _params true))) nil
+		'(((symbol context) "session") key ((symbol once) _initializer)) key
+		'(((quote context) "session") key ((quote once) _initializer)) key
+		_ nil)))
+
+(define emitted_prepare_binding_keys (lambda (expr keys)
+	(begin
+		(define key (prepare_binding_key expr))
+		(if (not (nil? key))
+			(set_assoc keys key true)
+			(match expr
+				(cons head tail) (reduce tail (lambda (found item)
+					(emitted_prepare_binding_keys item found))
+					(emitted_prepare_binding_keys head keys))
+				_ keys)))))
+
+(define without_prepare_bindings (lambda (expr keys)
+	(begin
+		(define key (prepare_binding_key expr))
+		(if (and (not (nil? key)) (has_assoc? keys key))
+			true
+			(match expr
+				(cons head tail) (cons
+					(without_prepare_bindings head keys)
+					(map tail (lambda (item) (without_prepare_bindings item keys))))
+				_ expr)))))
+
+(define physical_string_set (lambda (expr strings)
+	(if (string? expr)
+		(set_assoc strings expr true)
+		(match expr
+			(cons head tail) (reduce tail (lambda (found item)
+				(physical_string_set item found))
+				(physical_string_set head strings))
+			_ strings))))
+
+(define stage_aggregate_referenced? (lambda (strings stage)
+	(reduce (gs_aggregates stage) (lambda (found aggregate)
+		(or found (has_assoc? strings (aggregate_col_name_using (gs_input stage) aggregate))))
+		false)))
+
+(define closed_group_prepare_stage? (lambda (dependency_graph stage)
+	(and (group_stage? stage)
+		(and (source_is_base_table? (gs_input stage))
+			(and (not (stage_has_residual_outer_refs? stage))
+				(reduce (stage_dependency_closure_using_graph dependency_graph stage)
+					(lambda (closed dependency)
+						(and closed
+							(and (group_stage? dependency)
+								(not (stage_has_residual_outer_refs? dependency)))))
+					true))))))
+
+(define shared_prepare_owner_key (lambda (stage)
+	(concat "__prepare_carrier_" (fnv_hash (stage_prepare_backbone_signature stage)))))
+
+(define shared_prepare_owner_binding (lambda (dependency_graph catalog stage)
+	(list
+		(list (quote context) "session")
+		(shared_prepare_owner_key stage)
+		(list (quote once)
+			(list (quote lambda) '()
+				(list (quote !begin)
+					(lower_stage_prepare_using
+						(stage_dependency_closure_using_graph dependency_graph stage)
+						catalog stage)
+					true))))))
+
+(define shared_prepare_alias_binding (lambda (stage)
+	(list
+		(list (quote context) "session")
+		(stage_prepare_key stage)
+		(list (quote once)
+			(list (quote lambda) '()
+				(list (quote apply)
+					(list (list (quote context) "session") (shared_prepare_owner_key stage))
+					(quoted_runtime_list '())))))))
+
+/* Recipe emission is a two-step physical pass: normal lowering records which
+lazy stage keys are actually reachable, then this collector emits one closed
+initializer owner per canonical carrier and replaces local copies with aliases.
+Both AST walks are linear; no pairwise recipe comparison is performed. */
+(define consolidate_closed_group_prepares (lambda (ir plan)
+	(if (not (query_block? (ir_root ir)))
+		plan
+		(begin
+			(define emitted_keys (emitted_prepare_binding_keys plan '()))
+			(define emitted_strings (physical_string_set plan '()))
+			(define catalog (query_block_stage_catalog (ir_root ir)))
+			(define dependency_graph (stage_dependency_graph catalog))
+			(define consumers (filter catalog (lambda (stage)
+				(and (closed_group_prepare_stage? dependency_graph stage)
+					(has_assoc? emitted_keys (stage_prepare_key stage))))))
+			(define selected_backbones (stage_prepare_backbone_set consumers))
+			/* A consumer can read an aggregate column without owning a prepare
+			binding. Once a carrier is reachable, collect every compatible column
+			requirement for it from the canonical catalog. */
+			(define selected (filter catalog (lambda (stage)
+				(and (closed_group_prepare_stage? dependency_graph stage)
+					(and (has_assoc? selected_backbones (stage_prepare_backbone_signature stage))
+						(or (has_assoc? emitted_keys (stage_prepare_key stage))
+							(stage_aggregate_referenced? emitted_strings stage)))))))
+			(if (empty_list? selected)
+				plan
+				(begin
+					(define carriers (collect_stage_prepares selected))
+					(define selected_keys (reduce selected (lambda (keys stage)
+						(set_assoc keys (stage_prepare_key stage) true)) '()))
+					(cons (quote !begin)
+						(merge (list
+							(map carriers (lambda (stage)
+								(shared_prepare_owner_binding dependency_graph catalog stage)))
+							(map selected shared_prepare_alias_binding)
+							(list (without_prepare_bindings plan selected_keys)))))))))))
+
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define plan (match (ir_return ir)
@@ -16258,7 +16584,7 @@ build_queryplan contract. */
 				(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
 				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))
-		(require_physical_scan_relations plan))))
+		(require_physical_scan_relations (consolidate_closed_group_prepares ir plan)))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir))))
