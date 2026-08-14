@@ -20,13 +20,40 @@ import (
 	"strings"
 )
 
+type sqlShapeBuilder struct {
+	text strings.Builder
+	hash uint64
+}
+
+func newSQLShapeBuilder(capacity int) *sqlShapeBuilder {
+	result := &sqlShapeBuilder{hash: fnv64Offset}
+	result.text.Grow(capacity)
+	return result
+}
+
+func (builder *sqlShapeBuilder) WriteByte(value byte) {
+	builder.text.WriteByte(value)
+	builder.hash = (builder.hash ^ uint64(value)) * fnv64Prime
+}
+
+func (builder *sqlShapeBuilder) WriteString(value string) {
+	builder.text.WriteString(value)
+	for i := 0; i < len(value); i++ {
+		builder.hash = (builder.hash ^ uint64(value[i])) * fnv64Prime
+	}
+}
+
+func (builder *sqlShapeBuilder) Result() (string, string) {
+	return builder.text.String(), formatStructuralHash(builder.hash)
+}
+
 func declareSQLLiteralParameterizer() {
 	Declare(&Globalenv, &Declaration{
 		Name: "parameterize_sql_select_literals",
-		Desc: "replaces safe literals in a top-level MySQL SELECT with positional runtime bindings",
+		Desc: "replaces safe literals in a top-level MySQL SELECT and returns normalized SQL, positional runtime bindings, and its stable shape hash",
 		Fn: func(a ...Scmer) Scmer {
-			normalized, bindings := parameterizeSQLSelectLiterals(String(a[0]))
-			return NewSlice([]Scmer{NewString(normalized), NewSlice(bindings)})
+			normalized, bindings, shapeHash := parameterizeSQLSelectLiterals(String(a[0]))
+			return NewSlice([]Scmer{NewString(normalized), NewSlice(bindings), NewString(shapeHash)})
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{{Kind: "string", ParamName: "query"}},
@@ -36,13 +63,12 @@ func declareSQLLiteralParameterizer() {
 	})
 }
 
-func parameterizeSQLSelectLiterals(query string) (string, []Scmer) {
+func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 	if !parameterizableSelectPrefix(query) {
-		return query, nil
+		return query, nil, fnvHashString(query)
 	}
 
-	var out strings.Builder
-	out.Grow(len(query))
+	out := newSQLShapeBuilder(len(query))
 	bindings := make([]Scmer, 0, 8)
 	depth := 0
 	typeDepth := -1
@@ -70,7 +96,7 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer) {
 		if query[i] == '/' && i+1 < len(query) && query[i+1] == '*' {
 			end := strings.Index(query[i+2:], "*/")
 			if end < 0 {
-				return query, nil
+				return query, nil, fnvHashString(query)
 			}
 			end += i + 4
 			out.WriteString(query[i:end])
@@ -80,7 +106,7 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer) {
 		if query[i] == '`' {
 			end, ok := scanQuotedSQL(query, i, '`')
 			if !ok {
-				return query, nil
+				return query, nil, fnvHashString(query)
 			}
 			out.WriteString(query[i:end])
 			i = end
@@ -91,7 +117,7 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer) {
 			end, ok := scanQuotedSQL(query, i, query[i])
 			if !ok || previousWord == "AS" || previousWord == "DATE" || !parameterizableLiteralClause(clause) {
 				if !ok {
-					return query, nil
+					return query, nil, fnvHashString(query)
 				}
 				out.WriteString(query[i:end])
 				i = end
@@ -105,7 +131,7 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer) {
 			continue
 		}
 		if query[i] == '?' {
-			return query, nil
+			return query, nil, fnvHashString(query)
 		}
 		if isSQLIdentifierStart(query[i]) {
 			end := i + 1
@@ -115,13 +141,13 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer) {
 			word := strings.ToUpper(query[i:end])
 			if word == "SELECT" {
 				if seenSelect {
-					return query, nil
+					return query, nil, fnvHashString(query)
 				}
 				seenSelect = true
 				clause = "SELECT"
 			}
 			if unsafeParameterizedSelectWord(word) {
-				return query, nil
+				return query, nil, fnvHashString(query)
 			}
 			if word == "BY" && previousWord == "ORDER" {
 				orderDepth = depth
@@ -194,9 +220,10 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer) {
 	}
 
 	if len(bindings) == 0 {
-		return query, nil
+		return query, nil, fnvHashString(query)
 	}
-	return out.String(), bindings
+	normalized, shapeHash := out.Result()
+	return normalized, bindings, shapeHash
 }
 
 func parameterizableSelectPrefix(query string) bool {

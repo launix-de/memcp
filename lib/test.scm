@@ -1878,6 +1878,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(structural_small (source "catalog-test" 2 3 '(wrapped key)) "source")
 	(structural_small (parse_date "2024-06-15") "date")
 	(structural_small "2024-06-15" "date replacement")
+	(assert (structural_small (list (quote nested) (list (quote shared) (quote leaf)))) "tree" "structural catalog supports collection-time lookup")
+	(assert (nil? (structural_small '(not present))) true "structural catalog collection-time lookup reports misses")
 	(define structural_small_frozen (structural_small))
 	(assert (structural_small_frozen 42) "numeric replacement" "structural catalog honors int/float equality")
 	(assert (structural_small_frozen "named") "symbol" "structural catalog honors string/symbol equality")

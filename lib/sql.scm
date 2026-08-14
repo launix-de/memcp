@@ -29,19 +29,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* Keep exact SQL variants out of the parser while sharing their compiled plan.
 Only parameterized results enter the small front cache; exact-only statements
-continue to occupy just their existing query-plan entry. */
+continue to occupy just their existing query-plan entry. The third result item
+is the normalized shape hash. Keeping it beside the bindings avoids traversing
+the same normalized query again on every warm literal-specialization hit. */
+(define sql_parameterized_shape_result (lambda (result)
+	(match result
+		'(normalized bindings shape_hash) result
+		'(normalized bindings) (list normalized bindings (fnv_hash normalized)))))
+
 (define sql_parameterize_select_literals_cached (lambda (cache query enabled)
 	(if (not enabled)
-		(list query '())
+		(list query '() (fnv_hash query))
 		(begin
 			(define cached (cache query))
 			(if cached
 				cached
-				(match (parameterize_sql_select_literals query) '(normalized bindings)
+				(match (parameterize_sql_select_literals query) '(normalized bindings shape_hash)
 					(begin
 						(define result (if (equal? bindings '())
-							(sql_parameterize_select_like_strings query enabled)
-							(list normalized bindings)))
+							(sql_parameterized_shape_result (sql_parameterize_select_like_strings query enabled))
+							(list normalized bindings shape_hash)))
 						(if (equal? (cadr result) '())
 							result
 							(cache query result)))))))))
@@ -271,10 +278,10 @@ On parse error the result is not cached. */
 			(regex "^\\s*EXPLAIN\\b" _) true
 			_ false))
 		(define parameterized (if explain_query
-			(list query '())
+			(list query '() (fnv_hash query))
 			(sql_parameterize_select_literals query parameterize_literals)))
-		(match parameterized '(parse_query bindings) (begin
-			(define cache_key (concat username ":" schema ":" (sql_view_query_generation parse_query) ":" (fnv_hash parse_query)))
+		(match parameterized '(parse_query bindings shape_hash) (begin
+			(define cache_key (concat username ":" schema ":" (sql_view_query_generation parse_query) ":" shape_hash))
 			(define select_query (match (toUpper parse_query)
 				(regex "^\\s*SELECT\\b" _) true
 				_ false))

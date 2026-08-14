@@ -322,6 +322,29 @@ func (catalog *structuralCatalog) insert(key, value Scmer) {
 	catalog.set(key, value)
 }
 
+func (catalog *structuralCatalog) get(key Scmer) Scmer {
+	catalog.mu.Lock()
+	defer catalog.mu.Unlock()
+	if catalog.buckets == nil {
+		for _, entry := range catalog.entries {
+			if Equal(entry.key, key) {
+				return entry.value
+			}
+		}
+		return NewNil()
+	}
+	hash := uint64(0)
+	if !catalog.forceCollision {
+		hash = hashStructuralReadonly(key)
+	}
+	for _, index := range catalog.buckets[hash] {
+		if Equal(catalog.entries[index].key, key) {
+			return catalog.entries[index].value
+		}
+	}
+	return NewNil()
+}
+
 func (catalog *structuralCatalog) snapshot() []structuralIndexEntry {
 	catalog.mu.Lock()
 	defer catalog.mu.Unlock()
@@ -375,9 +398,10 @@ func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool)
 }
 
 // NewStructuralCatalog returns an atomic compile-local collector. Calling it
-// with (key value) inserts or replaces an equal key; calling it with no
-// arguments publishes and returns a frozen read-only lookup closure. The
-// optional constructor flag forces one bucket for collision tests.
+// with (key value) inserts or replaces an equal key; (catalog key) performs an
+// atomic compile-local lookup; calling it with no arguments publishes and
+// returns a frozen read-only lookup closure. The optional constructor flag
+// forces one bucket for collision tests.
 func NewStructuralCatalog(a ...Scmer) Scmer {
 	if len(a) > 1 {
 		panic("make_structural_catalog expects an optional collision-test flag")
@@ -387,6 +411,11 @@ func NewStructuralCatalog(a ...Scmer) Scmer {
 		switch len(args) {
 		case 0:
 			return frozenStructuralLookup(catalog.snapshot(), catalog.forceCollision)
+		case 1:
+			if args[0].GetTag() == tagFastDict {
+				panic("structural catalog rejects mutable FastDict keys")
+			}
+			return catalog.get(args[0])
 		case 2:
 			if args[0].GetTag() == tagFastDict {
 				panic("structural catalog rejects mutable FastDict keys")
@@ -394,7 +423,7 @@ func NewStructuralCatalog(a ...Scmer) Scmer {
 			catalog.insert(args[0], args[1])
 			return args[1]
 		default:
-			panic("structural catalog expects no arguments or key and value")
+			panic("structural catalog expects no arguments, one lookup key, or key and value")
 		}
 	})
 }

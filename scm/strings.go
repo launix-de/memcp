@@ -24,7 +24,6 @@ import "regexp"
 import "net/url"
 import "reflect"
 import "strings"
-import "hash/fnv"
 import crand "crypto/rand"
 import "crypto/sha1"
 import "encoding/hex"
@@ -73,6 +72,14 @@ func formatStructuralHash(hash uint64) string {
 		hash >>= 4
 	}
 	return string(result[:])
+}
+
+func fnvHashString(value string) string {
+	hash := fnv64Offset
+	for i := 0; i < len(value); i++ {
+		hash = (hash ^ uint64(value[i])) * fnv64Prime
+	}
+	return formatStructuralHash(hash)
 }
 
 // (no additional globals needed)
@@ -1025,9 +1032,7 @@ func init_strings() {
 		Name: "fnv_hash",
 		Desc: "computes a fast non-cryptographic 64-bit FNV-1a hash of a string, returns a 16-character hex string",
 		Fn: func(a ...Scmer) Scmer {
-			h := fnv.New64a()
-			h.Write([]byte(String(a[0])))
-			return NewString(fmt.Sprintf("%016x", h.Sum64()))
+			return NewString(fnvHashString(String(a[0])))
 		},
 		Type: &TypeDescriptor{
 			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},

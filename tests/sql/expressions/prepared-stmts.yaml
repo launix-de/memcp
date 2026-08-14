@@ -149,10 +149,11 @@ test_cases:
       (match (sql_parameterize_select_literals
         "SELECT id FROM ps_test WHERE id >= 1 AND name = 'alice' ORDER BY id LIMIT 2 OFFSET 0"
         true)
-        '(normalized bindings)
+        '(normalized bindings shape_hash)
         (if (and
           (equal? normalized "SELECT id FROM ps_test WHERE id >= ? AND name = ? ORDER BY id LIMIT ? OFFSET ?")
-          (equal? bindings '(1 "alice" 2 0)))
+          (equal? bindings '(1 "alice" 2 0))
+          (equal? shape_hash (fnv_hash normalized)))
           "ok"
           (error (concat "unexpected normalization: " normalized " / " bindings))))
     expect:
@@ -163,10 +164,11 @@ test_cases:
       (match (sql_parameterize_select_literals
         "SELECT d.id FROM ps_guard_left d WHERE d.id = 7 OR d.rhs IN (SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE '%Ca%' UNION SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE '%Ca%')"
         true)
-        '(normalized bindings)
+        '(normalized bindings shape_hash)
         (if (and
           (equal? normalized "SELECT d.id FROM ps_guard_left d WHERE d.id = 7 OR d.rhs IN (SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ? UNION SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ?)")
-          (equal? bindings '("%Ca%" "%Ca%")))
+          (equal? bindings '("%Ca%" "%Ca%"))
+          (equal? shape_hash (fnv_hash normalized)))
           "ok"
           (error (concat "unexpected complex normalization: " normalized " / " bindings))))
     expect:
@@ -376,9 +378,12 @@ test_cases:
           "SELECT COUNT(*) FROM ps_test WHERE id = 1" true)
         (sql_parameterize_select_literals_cached cache
           "SELECT id FROM ps_test WHERE id = 1" true)
-        (sql_parameterize_select_literals_cached cache
-          "SELECT id FROM ps_test WHERE id = 1" true)
-        (if (equal? (count (cache)) 1)
+        (define cached_shape (sql_parameterize_select_literals_cached cache
+          "SELECT id FROM ps_test WHERE id = 1" true))
+        (if (and
+          (equal? (count (cache)) 1)
+          (equal? (count cached_shape) 3)
+          (equal? (nth cached_shape 2) (fnv_hash (car cached_shape))))
           "ok"
           (error (concat "unexpected literal front-cache size: " (count (cache))))))
     expect:
@@ -410,10 +415,11 @@ test_cases:
       (match (sql_parameterize_select_literals
         "UPDATE ps_test SET score = 5 WHERE id = 1"
         true)
-        '(normalized bindings)
+        '(normalized bindings shape_hash)
         (if (and
           (equal? normalized "UPDATE ps_test SET score = 5 WHERE id = 1")
-          (equal? bindings '()))
+          (equal? bindings '())
+          (equal? shape_hash (fnv_hash normalized)))
           "ok"
           (error (concat "unexpected normalization: " normalized " / " bindings))))
     expect:

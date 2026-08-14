@@ -59,9 +59,12 @@ func TestParameterizeSQLSelectLiterals(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			normalized, bindings := parameterizeSQLSelectLiterals(tt.query)
+			normalized, bindings, shapeHash := parameterizeSQLSelectLiterals(tt.query)
 			if normalized != tt.normalized {
 				t.Fatalf("normalized = %q, want %q", normalized, tt.normalized)
+			}
+			if shapeHash != fnvHashString(normalized) {
+				t.Fatalf("shape hash = %q, want hash of %q", shapeHash, normalized)
 			}
 			if !Equal(NewSlice(bindings), NewSlice(tt.bindings)) {
 				t.Fatalf("bindings = %v, want %v", NewSlice(bindings), NewSlice(tt.bindings))
@@ -84,9 +87,12 @@ func TestParameterizeSQLSelectLiteralsKeepsUnsafeShapesExact(t *testing.T) {
 		"EXPLAIN COMPILE SELECT id FROM items WHERE id = 1",
 	}
 	for _, query := range queries {
-		normalized, bindings := parameterizeSQLSelectLiterals(query)
+		normalized, bindings, shapeHash := parameterizeSQLSelectLiterals(query)
 		if normalized != query || len(bindings) != 0 {
 			t.Errorf("unsafe query changed: %q -> %q, %v", query, normalized, bindings)
+		}
+		if shapeHash != fnvHashString(query) {
+			t.Errorf("unsafe query hash = %q, want hash of exact query", shapeHash)
 		}
 	}
 }

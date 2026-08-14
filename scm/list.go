@@ -1764,7 +1764,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "make_structural_catalog",
-		Desc: "Creates an atomic compile-local structural catalog. Insert with (catalog key value); freeze with (catalog) to obtain a parallel-safe read-only lookup.",
+		Desc: "Creates an atomic compile-local structural catalog. Look up with (catalog key), insert with (catalog key value), or freeze with (catalog) for parallel-safe read-only lookup.",
 		Fn:   NewStructuralCatalog,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
