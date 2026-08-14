@@ -3680,16 +3680,99 @@ available while nested queries are decorrelated. */
 		((quote get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
 		_ false)))
 
-(define rewrite_derived_ref (lambda (alias projection expr)
+/* A derived-relation rewrite may cross a subquery boundary only after names
+local to that subquery have been bound. Otherwise an unqualified local column
+which happens to share an outer projection title is captured by the outer
+rewrite. Names not provided by the local sources deliberately remain
+unqualified so correlated references can still bind to the derived projection. */
+(define qualify_query_local_scope (lambda (query)
+	(begin
+		(define normalized (normalize_query_ast query))
+		(if (query_block? normalized)
+			(begin
+				(define local_sources (qb_sources normalized))
+				(define resolution_sources (map local_sources (lambda (src)
+					(list
+						(source_alias src)
+						(coalesceNil (source_schema src) (qb_schema normalized))
+						(source_relation src)
+						(source_outer? src)
+						(source_join_expr src)))))
+				(define qualify (lambda (expr)
+					(qualify_unqualified_column_for_logical_scope resolution_sources '() expr)))
+				(define qualify_source (lambda (src)
+					(begin
+						(define relation (normalize_query_ast (source_relation src)))
+						(list
+							(source_alias src)
+							(source_schema src)
+							(if (or (query_block? relation) (union_block? relation))
+								(qualify_query_local_scope relation)
+								relation)
+							(source_outer? src)
+							(qualify (source_join_expr src))))))
+				(make_query_block
+					(qb_schema normalized)
+					(map local_sources qualify_source)
+					(map_assoc (qb_fields normalized) (lambda (_title expr) (qualify expr)))
+					(qualify (qb_where normalized))
+					(map (coalesceNil (qb_group normalized) '()) qualify)
+					(qualify (qb_having normalized))
+					(map (coalesceNil (qb_order normalized) '()) (lambda (item)
+						(match item
+							'(expr dir) (list (qualify expr) dir)
+							_ item)))
+					(qb_limit normalized)
+					(qb_offset normalized)
+					(map_assoc (qb_hidden normalized) (lambda (_title expr) (qualify expr)))
+					(qb_stages normalized)
+					(qb_facts normalized)))
+			(if (union_block? normalized)
+				(make_union_block
+					(union_mode normalized)
+					(map (union_branches normalized) qualify_query_local_scope)
+					(union_order normalized)
+					(union_limit normalized)
+					(union_offset normalized)
+					(union_facts normalized))
+				normalized)))))
+
+(define rewrite_derived_ref_for_scope (lambda (alias projection expr rewrite_unqualified)
 	(match expr
-		((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias) (nil? tblvar))
+		((symbol inner_select) subquery)
+		(list (quote inner_select) (rewrite_derived_ref_for_scope alias projection
+			(qualify_query_local_scope subquery) true))
+		((quote inner_select) subquery)
+		(list (quote inner_select) (rewrite_derived_ref_for_scope alias projection
+			(qualify_query_local_scope subquery) true))
+		((symbol inner_select_exists) subquery)
+		(list (quote inner_select_exists) (rewrite_derived_ref_for_scope alias projection
+			(qualify_query_local_scope subquery) true))
+		((quote inner_select_exists) subquery)
+		(list (quote inner_select_exists) (rewrite_derived_ref_for_scope alias projection
+			(qualify_query_local_scope subquery) true))
+		((symbol inner_select_in) probe subquery)
+		(list (quote inner_select_in)
+			(rewrite_derived_ref_for_scope alias projection probe rewrite_unqualified)
+			(rewrite_derived_ref_for_scope alias projection (qualify_query_local_scope subquery) true))
+		((quote inner_select_in) probe subquery)
+		(list (quote inner_select_in)
+			(rewrite_derived_ref_for_scope alias projection probe rewrite_unqualified)
+			(rewrite_derived_ref_for_scope alias projection (qualify_query_local_scope subquery) true))
+		((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias)
+			(and rewrite_unqualified (nil? tblvar)))
 			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 			expr)
-		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias) (nil? tblvar))
+		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias)
+			(and rewrite_unqualified (nil? tblvar)))
 			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 			expr)
-		(cons head tail) (cons head (map tail (lambda (item) (rewrite_derived_ref alias projection item))))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(rewrite_derived_ref_for_scope alias projection item rewrite_unqualified))))
 		_ expr)))
+
+(define rewrite_derived_ref (lambda (alias projection expr)
+	(rewrite_derived_ref_for_scope alias projection expr true)))
 
 (define rewrite_derived_fields (lambda (alias projection fields)
 	(match (coalesceNil fields '())

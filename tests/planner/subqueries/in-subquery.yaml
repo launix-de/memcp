@@ -817,6 +817,100 @@ test_cases:
             - ID: 2
             - ID: 1
       - sql: |
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT ID FROM in_dv_file WHERE filename LIKE '%does-not-match%'
+            UNION
+            SELECT ID FROM in_dv_file WHERE search LIKE '%needle%'
+          )
+          ORDER BY d.ID
+        expect:
+          rows: 1
+          data:
+            - ID: 2
+      - sql: |
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT ID FROM in_dv_file WHERE filename LIKE '%invoice-hit%'
+            UNION
+            SELECT ID FROM in_dv_file WHERE search LIKE '%does-not-match%'
+          )
+          ORDER BY d.ID
+        expect:
+          rows: 2
+          data:
+            - ID: 1
+            - ID: 4
+      - sql: |
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT ID FROM in_dv_file WHERE filename LIKE '%does-not-match%'
+            UNION
+            SELECT ID FROM in_dv_file WHERE search LIKE '%needle%'
+          )
+          ORDER BY t.ID
+        expect:
+          rows: 1
+          data:
+            - ID: 2
+      - sql: |
+          EXPLAIN IR
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT ID FROM in_dv_file WHERE filename LIKE '%does-not-match%'
+            UNION
+            SELECT ID FROM in_dv_file WHERE search LIKE '%needle%'
+          )
+          ORDER BY t.ID
+        expect:
+          contains:
+            - "in_candidate_union"
+            - '(get_column "in_dv_file" false "ID" false)'
+      - sql: |
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE EXISTS (
+            SELECT 1
+            FROM in_dv_file f
+            WHERE f.ID = t.file_id AND ID = 20
+          )
+          ORDER BY t.ID
+        expect:
+          rows: 1
+          data:
+            - ID: 2
+      - sql: |
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE EXISTS (
+            SELECT 1
+            FROM in_dv_file f1
+            JOIN in_dv_file f2 ON f2.ID = f1.ID
+            WHERE ID = t.file_id
+          )
+        expect:
+          error: true
+      - sql: |
           SELECT t.ID
           FROM (
             SELECT d.ID, d.file_id, d.tenant, d.sort_key
