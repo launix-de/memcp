@@ -22,14 +22,17 @@ setup:
   - sql: "DROP TABLE IF EXISTS nr_other"
   - sql: "DROP TABLE IF EXISTS nr_inner"
   - sql: "DROP TABLE IF EXISTS nr_outer"
+  - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
   - sql: "CREATE TABLE nr_outer (ID INT PRIMARY KEY, outer_only INT, shared INT, file_id INT)"
   - sql: "CREATE TABLE nr_inner (ID INT PRIMARY KEY, inner_only INT, shared INT, label VARCHAR(20))"
   - sql: "CREATE TABLE nr_other (ID INT PRIMARY KEY, shared INT)"
   - sql: "CREATE TABLE nr_leaf (leaf_id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nr_alias_conflict (ID INT PRIMARY KEY, computed INT)"
   - sql: "INSERT INTO nr_outer VALUES (1, 101, 1001, 10), (2, 102, 1002, 20)"
   - sql: "INSERT INTO nr_inner VALUES (10, 201, 2001, 'ten'), (20, 202, 2002, 'twenty')"
   - sql: "INSERT INTO nr_other VALUES (30, 3001)"
   - sql: "INSERT INTO nr_leaf VALUES (1)"
+  - sql: "INSERT INTO nr_alias_conflict VALUES (1, 2), (2, 1)"
 
 test_cases:
   - name: "Column identifiers remain case-insensitive when quoted"
@@ -119,6 +122,19 @@ test_cases:
     sql: |
       SELECT o.ID
       FROM nr_outer o
+      WHERE EXISTS (SELECT 1 FROM nr_inner o WHERE o.ID = 10)
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "A user alias cannot collide with a generated lexical alias"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      JOIN nr_leaf `__binding:query/where:0/exists:0/source:0:o` ON TRUE
       WHERE EXISTS (SELECT 1 FROM nr_inner o WHERE o.ID = 10)
       ORDER BY o.ID
     expect:
@@ -244,6 +260,61 @@ test_cases:
         - {shared: -1002}
         - {shared: -1001}
 
+  - name: "ORDER BY resolves the review alias conflict to the output"
+    sql: |
+      SELECT ID AS computed
+      FROM nr_alias_conflict
+      ORDER BY computed
+    expect:
+      rows: 2
+      data:
+        - {computed: 1}
+        - {computed: 2}
+
+  - name: "UNION ORDER BY binds the union output alias"
+    sql: |
+      SELECT ID AS result_id FROM nr_outer
+      UNION ALL
+      SELECT ID AS result_id FROM nr_other
+      ORDER BY result_id
+    expect:
+      rows: 3
+      data:
+        - {result_id: 1}
+        - {result_id: 2}
+        - {result_id: 30}
+
+  - name: "UNION ORDER BY accepts an output position"
+    sql: |
+      SELECT ID AS result_id FROM nr_outer
+      UNION ALL
+      SELECT ID AS result_id FROM nr_other
+      ORDER BY 1 DESC
+    expect:
+      rows: 3
+      data:
+        - {result_id: 30}
+        - {result_id: 2}
+        - {result_id: 1}
+
+  - name: "UNION ORDER BY rejects a branch relation qualifier"
+    sql: |
+      SELECT o.ID AS result_id FROM nr_outer o
+      UNION ALL
+      SELECT x.ID AS result_id FROM nr_other x
+      ORDER BY o.ID
+    expect:
+      error: true
+
+  - name: "UNION ORDER BY rejects an unknown output name"
+    sql: |
+      SELECT ID AS result_id FROM nr_outer
+      UNION ALL
+      SELECT ID AS result_id FROM nr_other
+      ORDER BY missing
+    expect:
+      error: true
+
   - name: "WHERE cannot bind an output alias"
     sql: "SELECT ID + 10 AS computed FROM nr_outer WHERE computed = 11"
     expect:
@@ -282,6 +353,7 @@ test_cases:
       error: true
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
   - sql: "DROP TABLE IF EXISTS nr_leaf"
   - sql: "DROP TABLE IF EXISTS nr_other"
   - sql: "DROP TABLE IF EXISTS nr_inner"
