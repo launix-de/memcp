@@ -307,6 +307,15 @@ def scaled_wall_clock_limit_ms(seconds: float, calibration: Dict[str, Any]) -> f
     return seconds * 1000.0 * calibration["scale"]
 
 
+def resolve_timing_samples(test_case: Dict[str, Any], is_perf_test: bool) -> int:
+    """Return an odd sample count so the timed result has an unambiguous median."""
+    default = PERF_REPEAT if is_perf_test else 1
+    raw = test_case.get("timing_samples", default)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1 or raw % 2 == 0:
+        raise ValueError("timing_samples must be a positive odd integer")
+    return raw
+
+
 def planner_time_limit_with_tolerance_ms(reference_budget_ms: float) -> float:
     """Allow bounded cold-compile jitter without hiding complexity regressions."""
     return reference_budget_ms * PLANNER_TIME_TOLERANCE_FACTOR
@@ -1235,10 +1244,18 @@ class SQLTestRunner:
             memcp_pid = find_memcp_pid() if is_perf_test else None
             start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
 
-            # Execute query. For perf tests, repeat N times and report the
-            # median — a single run is dominated by GC jitter on short queries.
-            # For non-perf tests, one run is sufficient.
-            repeat = PERF_REPEAT if is_perf_test else 1
+            # Execute query. Performance tests and explicitly sampled short
+            # SELECTs report the median so one scheduler/GC pause cannot mask
+            # their steady-state behavior.
+            try:
+                repeat = resolve_timing_samples(test_case, is_perf_test)
+            except ValueError as exc:
+                return self._record_fail(name, str(exc), query, None, None, is_noncritical)
+            if "timing_samples" in test_case and not query.lstrip().upper().startswith("SELECT"):
+                return self._record_fail(
+                    name, "timing_samples is only supported for SELECT queries",
+                    query, None, None, is_noncritical,
+                )
             samples_ns: list = []
             response = None
             for _ in range(repeat):

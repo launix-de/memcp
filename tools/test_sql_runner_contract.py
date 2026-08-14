@@ -45,11 +45,23 @@ from run_sql_tests import (  # noqa: E402
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
+    resolve_timing_samples,
     scaled_wall_clock_limit_ms,
 )
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_timing_samples_default_and_explicit_median(self) -> None:
+        self.assertEqual(resolve_timing_samples({}, False), 1)
+        self.assertEqual(resolve_timing_samples({}, True), 5)
+        self.assertEqual(resolve_timing_samples({"timing_samples": 3}, False), 3)
+
+    def test_timing_samples_rejects_ambiguous_or_empty_samples(self) -> None:
+        for invalid in (True, 0, 2, 2.5, "3"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "positive odd integer"):
+                    resolve_timing_samples({"timing_samples": invalid}, False)
+
     def test_cold_planner_budget_allows_bounded_measurement_jitter(self) -> None:
         self.assertEqual(PLANNER_TIME_TOLERANCE_FACTOR, 1.2)
         self.assertEqual(planner_time_limit_with_tolerance_ms(500), 600)
