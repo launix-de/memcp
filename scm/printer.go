@@ -23,10 +23,60 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
 var schemeStringEscaper = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n")
+
+const (
+	fnv64Offset = uint64(14695981039346656037)
+	fnv64Prime  = uint64(1099511628211)
+)
+
+// schemeTextWriter keeps the hot recursive serializer monomorphic. It either
+// forwards to the caller's bytes.Buffer or consumes bytes directly into FNV-1a.
+// Avoiding io.Writer/hash.Hash dispatch matters for the many tiny AST tokens.
+type schemeTextWriter struct {
+	buffer *bytes.Buffer
+	hash   uint64
+}
+
+func bufferTextWriter(buffer *bytes.Buffer) *schemeTextWriter {
+	return &schemeTextWriter{buffer: buffer}
+}
+
+func hashTextWriter() *schemeTextWriter {
+	return &schemeTextWriter{hash: fnv64Offset}
+}
+
+func (w *schemeTextWriter) Write(value []byte) (int, error) {
+	if w.buffer != nil {
+		return w.buffer.Write(value)
+	}
+	for _, b := range value {
+		w.hash = (w.hash ^ uint64(b)) * fnv64Prime
+	}
+	return len(value), nil
+}
+
+func (w *schemeTextWriter) WriteByte(value byte) error {
+	if w.buffer != nil {
+		return w.buffer.WriteByte(value)
+	}
+	w.hash = (w.hash ^ uint64(value)) * fnv64Prime
+	return nil
+}
+
+func (w *schemeTextWriter) WriteString(value string) (int, error) {
+	if w.buffer != nil {
+		return w.buffer.WriteString(value)
+	}
+	for i := 0; i < len(value); i++ {
+		w.hash = (w.hash ^ uint64(value[i])) * fnv64Prime
+	}
+	return len(value), nil
+}
 
 func String(v Scmer) string {
 	switch v.GetTag() {
@@ -60,11 +110,11 @@ func String(v Scmer) string {
 		// Pretty-print procedures as (lambda ...) expressions without
 		// serializing the captured environment to avoid recursion.
 		var b bytes.Buffer
-		serializeProcShallow(&b, *v.Proc(), &Globalenv)
+		serializeProcShallow(bufferTextWriter(&b), *v.Proc(), &Globalenv)
 		return b.String()
 	case tagJIT:
 		var b bytes.Buffer
-		serializeProcShallow(&b, v.JIT().Proc, &Globalenv)
+		serializeProcShallow(bufferTextWriter(&b), v.JIT().Proc, &Globalenv)
 		return b.String()
 	case tagFastDict:
 		fd := v.FastDict()
@@ -104,15 +154,116 @@ func String(v Scmer) string {
 		return fmt.Sprintf("<scmer %d>", v.GetTag())
 	}
 }
+
+// WriteStringValue streams the exact representation returned by String. It is
+// used by structural name hashing to avoid building complete AST strings.
+func WriteStringValue(w *schemeTextWriter, v Scmer) {
+	switch v.GetTag() {
+	case tagNil:
+		w.WriteString("nil")
+	case tagBool, tagString, tagCString, tagBString, tagSymbol:
+		w.WriteString(v.String())
+	case tagInt:
+		var buffer [32]byte
+		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
+		_, _ = w.Write(value)
+	case tagFloat:
+		var buffer [64]byte
+		value := strconv.AppendFloat(buffer[:0], v.Float(), 'g', -1, 64)
+		_, _ = w.Write(value)
+	case tagSlice:
+		w.WriteByte('(')
+		for i, item := range v.Slice() {
+			if i > 0 {
+				w.WriteByte(' ')
+			}
+			WriteStringValue(w, item)
+		}
+		w.WriteByte(')')
+	case tagVector:
+		w.WriteString("#(")
+		for i, item := range v.Vector() {
+			if i > 0 {
+				w.WriteByte(' ')
+			}
+			w.WriteString(fmt.Sprint(item))
+		}
+		w.WriteByte(')')
+	case tagPromise:
+		w.WriteString("[promise]")
+	case tagFunc:
+		w.WriteString("[native func]")
+	case tagProc:
+		serializeProcShallow(w, *v.Proc(), &Globalenv)
+	case tagJIT:
+		serializeProcShallow(w, v.JIT().Proc, &Globalenv)
+	case tagFastDict:
+		w.WriteByte('(')
+		if dictionary := v.FastDict(); dictionary != nil {
+			for i, item := range dictionary.Pairs {
+				if i > 0 {
+					w.WriteByte(' ')
+				}
+				WriteStringValue(w, item)
+			}
+		}
+		w.WriteByte(')')
+	case tagSourceInfo:
+		WriteStringValue(w, v.SourceInfo().value)
+	case tagAny:
+		if source, ok := v.Any().(SourceInfo); ok {
+			WriteStringValue(w, source.value)
+			return
+		}
+		if index, ok := v.Any().(NthLocalVar); ok {
+			w.WriteString("(var ")
+			w.WriteString(strconv.FormatInt(int64(index), 10))
+			w.WriteByte(')')
+			return
+		}
+		if _, ok := v.Any().(func(...Scmer) Scmer); ok {
+			w.WriteString("[native func]")
+			return
+		}
+		if _, ok := v.Any().(func(*Env, ...Scmer) Scmer); ok {
+			w.WriteString("[native func]")
+			return
+		}
+		if reader, ok := v.Any().(io.Reader); ok {
+			var buffer [4096]byte
+			for {
+				read, err := reader.Read(buffer[:])
+				if read > 0 {
+					_, _ = w.Write(buffer[:read])
+				}
+				if err != nil {
+					break
+				}
+			}
+			return
+		}
+		w.WriteString(fmt.Sprint(v.Any()))
+	default:
+		w.WriteString("<scmer ")
+		w.WriteString(strconv.FormatInt(int64(v.GetTag()), 10))
+		w.WriteByte('>')
+	}
+}
 func SerializeToString(v Scmer, glob *Env) string {
 	var b bytes.Buffer
 	SerializeEx(&b, v, glob, glob, nil)
 	return b.String()
 }
+
 func Serialize(b *bytes.Buffer, v Scmer, glob *Env) {
-	SerializeEx(b, v, glob, glob, nil)
+	serializeEx(bufferTextWriter(b), v, glob, glob, nil)
 }
+
 func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
+	serializeEx(bufferTextWriter(b), v, en, glob, p)
+}
+
+func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 	if en != glob {
 		b.WriteString("(begin ")
 		for k, v := range en.Vars {
@@ -122,11 +273,11 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 				b.WriteString("(define ")
 				b.WriteString(string(k))
 				b.WriteString(" ")
-				SerializeEx(b, v, en.Outer, glob, p)
+				serializeEx(b, v, en.Outer, glob, p)
 				b.WriteString(") ")
 			}
 		}
-		SerializeEx(b, v, en.Outer, glob, p)
+		serializeEx(b, v, en.Outer, glob, p)
 		b.WriteString(")")
 		return
 	}
@@ -139,8 +290,14 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		} else {
 			b.WriteString("false")
 		}
-	case tagInt, tagFloat:
-		b.WriteString(v.String())
+	case tagInt:
+		var buffer [32]byte
+		value := strconv.AppendInt(buffer[:0], v.Int(), 10)
+		_, _ = b.Write(value)
+	case tagFloat:
+		var buffer [64]byte
+		value := strconv.AppendFloat(buffer[:0], v.Float(), 'g', -1, 64)
+		_, _ = b.Write(value)
 	case tagString, tagCString, tagBString:
 		b.WriteByte('"')
 		b.WriteString(schemeStringEscaper.Replace(v.String()))
@@ -158,7 +315,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		slice := v.Slice()
 		if len(slice) == 2 && slice[0].IsSymbol() && slice[0].String() == "outer" {
 			b.WriteString("(outer ")
-			SerializeEx(b, slice[1], en, glob, nil)
+			serializeEx(b, slice[1], en, glob, nil)
 			b.WriteByte(')')
 			return
 		}
@@ -171,7 +328,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 			if i != 0 {
 				b.WriteByte(' ')
 			}
-			SerializeEx(b, x, en, glob, p)
+			serializeEx(b, x, en, glob, p)
 		}
 		b.WriteByte(')')
 	case tagVector:
@@ -200,12 +357,12 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 				if i != 0 {
 					b.WriteByte(' ')
 				}
-				SerializeEx(b, x, en, glob, p)
+				serializeEx(b, x, en, glob, p)
 			}
 		}
 		b.WriteByte(')')
 	case tagSourceInfo:
-		SerializeEx(b, v.SourceInfo().value, en, glob, p)
+		serializeEx(b, v.SourceInfo().value, en, glob, p)
 	case tagRegex:
 		b.WriteString(v.Regex().String())
 	case tagNthLocalVar:
@@ -222,7 +379,7 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte(')')
 	case tagAny:
 		if si, ok := v.Any().(SourceInfo); ok {
-			SerializeEx(b, si.value, en, glob, p)
+			serializeEx(b, si.value, en, glob, p)
 			return
 		}
 		if idx, ok := v.Any().(NthLocalVar); ok {
@@ -240,9 +397,9 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 		if sp, ok := v.Any().(*ScmParser); ok {
 			b.WriteString("(parser ")
-			SerializeEx(b, sp.Syntax, glob, glob, p)
+			serializeEx(b, sp.Syntax, glob, glob, p)
 			b.WriteByte(' ')
-			SerializeEx(b, sp.Generator, en, glob, p)
+			serializeEx(b, sp.Generator, en, glob, p)
 			b.WriteByte(')')
 			return
 		}
@@ -270,9 +427,9 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	case tagParser:
 		sp := v.Parser()
 		b.WriteString("(parser ")
-		SerializeEx(b, sp.Syntax, glob, glob, p)
+		serializeEx(b, sp.Syntax, glob, glob, p)
 		b.WriteByte(' ')
-		SerializeEx(b, sp.Generator, en, glob, p)
+		serializeEx(b, sp.Generator, en, glob, p)
 		b.WriteByte(')')
 	case tagJIT:
 		jep := v.JIT()
@@ -282,14 +439,14 @@ func SerializeEx(b *bytes.Buffer, v Scmer, en *Env, glob *Env, p *Proc) {
 	}
 }
 
-func serializeProc(b *bytes.Buffer, v Proc, en *Env, glob *Env, parent *Proc) {
+func serializeProc(b *schemeTextWriter, v Proc, en *Env, glob *Env, parent *Proc) {
 	b.WriteString("(lambda ")
 	if v.NumVars > 0 && v.Params.GetTag() == tagNil {
 		// TODO: deoptimize numbered lambdas when needed
 	}
-	SerializeEx(b, v.Params, glob, glob, nil)
+	serializeEx(b, v.Params, glob, glob, nil)
 	b.WriteByte(' ')
-	SerializeEx(b, v.Body, v.En, glob, &v)
+	serializeEx(b, v.Body, v.En, glob, &v)
 	if v.NumVars > 0 {
 		b.WriteByte(' ')
 		b.WriteString(fmt.Sprint(v.NumVars))
@@ -300,12 +457,12 @@ func serializeProc(b *bytes.Buffer, v Proc, en *Env, glob *Env, parent *Proc) {
 // serializeProcShallow prints a procedure as a (lambda ...) form without
 // embedding environment bindings. This avoids recursive printing when the
 // closure captures itself or large environments.
-func serializeProcShallow(b *bytes.Buffer, v Proc, glob *Env) {
+func serializeProcShallow(b *schemeTextWriter, v Proc, glob *Env) {
 	b.WriteString("(lambda ")
-	SerializeEx(b, v.Params, glob, glob, nil)
+	serializeEx(b, v.Params, glob, glob, nil)
 	b.WriteByte(' ')
 	// Print body using global env to avoid emitting (begin ... (define ...))
-	SerializeEx(b, v.Body, glob, glob, &v)
+	serializeEx(b, v.Body, glob, glob, &v)
 	if v.NumVars > 0 {
 		b.WriteByte(' ')
 		b.WriteString(fmt.Sprint(v.NumVars))
@@ -313,7 +470,7 @@ func serializeProcShallow(b *bytes.Buffer, v Proc, glob *Env) {
 	b.WriteByte(')')
 }
 
-func serializeNativeFunc(b *bytes.Buffer, fn any, en *Env) {
+func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 	switch f := fn.(type) {
 	case func(...Scmer) Scmer:
 		if col, rev, ok := LookupCollate(f); ok {

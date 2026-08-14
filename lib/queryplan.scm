@@ -9770,15 +9770,18 @@ the enclosing carrier identity supplies the remaining query context. */
 				(stage_semantic_rewrite_expr alias_map '() ag)))))))))
 
 (define dedupe_aggregates_by_col (lambda (ags)
-	(reduce (coalesceNil ags '()) (lambda (acc ag)
-		(begin
-			(define col (aggregate_col_name ag))
-			(if (reduce acc (lambda (found existing)
-				(or found (equal? col (aggregate_col_name existing))))
-				false)
+	(begin
+		/* Aggregate descriptors are immutable planner ASTs. Keep the exact
+		structural identity here instead of repeatedly serializing every prior
+		descriptor into its canonical column hash. */
+		(define seen (make_structural_catalog))
+		(reduce (coalesceNil ags '()) (lambda (acc ag)
+			(if (seen ag)
 				acc
-				(merge acc (list ag)))))
-		'())))
+				(begin
+					(seen ag true)
+					(merge acc (list ag)))))
+			'()))))
 
 (define group_table_name (lambda (schema label input_identity keys condition)
 	/* The readable label is not an identity. The hash covers the canonical input

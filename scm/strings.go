@@ -19,25 +19,68 @@ package scm
 import "io"
 import "fmt"
 import "html"
+import "sync"
 import "regexp"
-import "strings"
 import "net/url"
-import "hash/fnv"
+import "reflect"
+import "strings"
+import crand "crypto/rand"
 import "crypto/sha1"
+import "encoding/hex"
 import "crypto/sha256"
 import "encoding/json"
 import "encoding/base64"
-import "encoding/hex"
-import crand "crypto/rand"
+import "github.com/google/uuid"
 import "golang.org/x/text/collate"
 import "golang.org/x/text/language"
-import "sync"
-import "reflect"
-import "github.com/google/uuid"
 
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
 var collateRegistry sync.Map // map[uintptr]struct{Collation string; Reverse bool}
+
+func optimizeFNVHash(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if len(v) == 2 {
+		if producer, ok := scmerSlice(v[1]); ok && len(producer) == 2 {
+			if declaration := DeclarationForValue(producer[0]); declaration != nil {
+				serialize := declaration.Name == "serialize"
+				if serialize || declaration.Name == "string" {
+					original := NewSlice(v)
+					rewritten := NewSlice([]Scmer{
+						NewSymbol("stable_structural_hash"),
+						producer[1],
+						NewBool(serialize),
+					})
+					if result, td, ok := oc.OptimizeRewrite(original, rewritten, useResult, OptimizerRewriteContract{
+						Name:             "fnv_hash_stream_fusion",
+						PreconditionsMet: true,
+						MaxGrowthNodes:   0,
+					}); ok {
+						return result, td
+					}
+				}
+			}
+		}
+	}
+	return oc.ApplyDefaultOptimization(v, useResult)
+}
+
+func formatStructuralHash(hash uint64) string {
+	const digits = "0123456789abcdef"
+	var result [16]byte
+	for i := len(result) - 1; i >= 0; i-- {
+		result[i] = digits[hash&15]
+		hash >>= 4
+	}
+	return string(result[:])
+}
+
+func fnvHashString(value string) string {
+	hash := fnv64Offset
+	for i := 0; i < len(value); i++ {
+		hash = (hash ^ uint64(value[i])) * fnv64Prime
+	}
+	return formatStructuralHash(hash)
+}
 
 // (no additional globals needed)
 
@@ -989,12 +1032,35 @@ func init_strings() {
 		Name: "fnv_hash",
 		Desc: "computes a fast non-cryptographic 64-bit FNV-1a hash of a string, returns a 16-character hex string",
 		Fn: func(a ...Scmer) Scmer {
-			h := fnv.New64a()
-			h.Write([]byte(String(a[0])))
-			return NewString(fmt.Sprintf("%016x", h.Sum64()))
+			return NewString(fnvHashString(String(a[0])))
 		},
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
+			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
+			Return:   &TypeDescriptor{Kind: "string"},
+			Const:    true,
+			Optimize: optimizeFNVHash,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "stable_structural_hash",
+		Desc: "streams the string or serialized representation of a Scheme value into stable FNV-1a without constructing the complete representation",
+		Fn: func(a ...Scmer) Scmer {
+			if len(a) < 1 || len(a) > 2 {
+				panic("stable_structural_hash expects a value and optional serialize flag")
+			}
+			writer := hashTextWriter()
+			if len(a) == 2 && a[1].Bool() {
+				serializeEx(writer, a[0], &Globalenv, &Globalenv, nil)
+			} else {
+				WriteStringValue(writer, a[0])
+			}
+			return NewString(formatStructuralHash(writer.hash))
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "value", ParamDesc: "value to hash", NoEscape: true},
+				{Kind: "bool", ParamName: "serialize", ParamDesc: "use the Scheme serializer instead of string rendering", Optional: true},
+			},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 		},
