@@ -307,8 +307,8 @@ func structuralEqual(a, b Scmer) bool {
 		}
 		return true
 	}
-	if structuralScalarTag(a.GetTag()) || structuralScalarTag(b.GetTag()) {
-		return structuralScalarTag(a.GetTag()) && structuralScalarTag(b.GetTag()) &&
+	if structuralScalarTag(uint16(a.GetTag())) || structuralScalarTag(uint16(b.GetTag())) {
+		return structuralScalarTag(uint16(a.GetTag())) && structuralScalarTag(uint16(b.GetTag())) &&
 			hashStructuralScalar(a) == hashStructuralScalar(b) && Equal(a, b)
 	}
 	return Equal(a, b)

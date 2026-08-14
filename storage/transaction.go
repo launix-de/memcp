@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "github.com/carli2/hybridsort"
+import "runtime"
 import "sync"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
@@ -109,6 +110,10 @@ type TxContext struct {
 	Session       scm.Scmer
 	SessionState  *scm.SessionState // cached to avoid GLS stack-walking
 	querySeq      atomic.Uint64     // autocommit statement generation for cancellation checks
+	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
+	// single relevant shard never reads or writes this cache line.
+	fanoutLimit atomic.Int32
+	fanoutInUse atomic.Int32
 
 	// Per-shard state, nil until first write (zero-alloc for read-only transactions).
 	shards map[*storageShard]*storageShardTransaction
@@ -128,10 +133,41 @@ func NewTxContext(mode TxMode) *TxContext {
 		State: TxActive,
 		Mode:  mode,
 	}
+	tx.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
 	if mode == TxACID {
 		tx.SnapshotEpoch = atomic.LoadUint64(&GlobalCommitEpoch)
 	}
 	return tx
+}
+
+// claimFanoutWorkers reserves at most half of the transaction's remaining
+// fanout capacity. It never blocks: callers run synchronously when fewer than
+// two workers can be claimed, preventing nested scans from waiting on their
+// parents' reservations.
+func (tx *TxContext) claimFanoutWorkers(maxWorkers int) int {
+	if tx == nil || maxWorkers < 2 {
+		return 0
+	}
+	for {
+		limit := tx.fanoutLimit.Load()
+		used := tx.fanoutInUse.Load()
+		claim := (limit - used) / 2
+		if claim > int32(maxWorkers) {
+			claim = int32(maxWorkers)
+		}
+		if claim < 2 {
+			return 0
+		}
+		if tx.fanoutInUse.CompareAndSwap(used, used+claim) {
+			return int(claim)
+		}
+	}
+}
+
+func (tx *TxContext) releaseFanoutWorkers(workers int) {
+	if workers > 0 {
+		tx.fanoutInUse.Add(-int32(workers))
+	}
 }
 
 func (tx *TxContext) SessionValue(key string) scm.Scmer {

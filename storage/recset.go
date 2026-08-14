@@ -209,19 +209,6 @@ type recSetKeyResult struct {
 	err  scanError
 }
 
-func (t *table) recSetShardResultBufferSize() int {
-	t.shardModeMu.RLock()
-	defer t.shardModeMu.RUnlock()
-	size := len(t.PShards)
-	if t.ShardMode == ShardModeFree {
-		size = len(t.Shards)
-	}
-	if size < 1 {
-		return 1
-	}
-	return size
-}
-
 func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer) *recSet {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
@@ -231,7 +218,7 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 	lower, upperLast := indexFromBoundaries(boundaries)
 	result := &recSet{tx: currentTx, table: t}
 
-	values := make(chan recSetBuildResult, t.recSetShardResultBufferSize())
+	values := make(chan recSetBuildResult, t.shardResultBufferSize())
 	done := t.iterateShardsParallel(currentTx, boundaries, func(shard *storageShard, solo bool) {
 		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
@@ -250,14 +237,10 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 			return scm.NewNil()
 		})
 	})
-	if done == nil {
-		close(values)
-	} else {
-		go func() {
-			<-done
-			close(values)
-		}()
+	if done != nil {
+		<-done
 	}
+	close(values)
 
 	var buildErr scanError
 	for msg := range values {
@@ -519,35 +502,38 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 	for i := range r.shards {
 		offsets[i+1] = offsets[i] + int(r.shards[i].count)*width
 	}
-	closeAfter := 0
+	activeParts := make([]int, 0, len(r.shards))
 	for i := range r.shards {
-		part := r.shards[i]
-		if part.count == 0 {
-			continue
+		if r.shards[i].count > 0 {
+			activeParts = append(activeParts, i)
 		}
-		closeAfter++
-		go func(partIndex int, part recSetShard) {
-			withTxSession(currentTx, func() scm.Scmer {
-				defer func() {
-					if rec := recover(); rec != nil {
-						values <- recSetKeyResult{part: partIndex, err: scanError{rec, string(debug.Stack())}}
-					}
-				}()
-				// Cancellation contract: check only at the scheduling boundary, before entering
-				// the shard. Once entered, a shard runs atomically without cancellation checks.
-				if ss != nil && ss.IsKilledSeq(querySeq) {
-					panic("query killed")
+	}
+	done := runFanoutTasks(currentTx, len(activeParts), func(taskIndex int, _ bool) {
+		partIndex := activeParts[taskIndex]
+		part := r.shards[partIndex]
+		withTxSession(currentTx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- recSetKeyResult{part: partIndex, err: scanError{rec, string(debug.Stack())}}
 				}
-				dst := keys.values[offsets[partIndex]:offsets[partIndex+1]]
-				used := part.shard.collectProjectJoinKeys(&part, sourceKeyCols, currentTx, ss, dst)
-				values <- recSetKeyResult{part: partIndex, used: used}
-				return scm.NewNil()
-			})
-		}(i, part)
+			}()
+			// Cancellation contract: check only at the scheduling boundary, before entering
+			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			if ss != nil && ss.IsKilledSeq(querySeq) {
+				panic("query killed")
+			}
+			dst := keys.values[offsets[partIndex]:offsets[partIndex+1]]
+			used := part.shard.collectProjectJoinKeys(&part, sourceKeyCols, currentTx, ss, dst)
+			values <- recSetKeyResult{part: partIndex, used: used}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
 	}
 	used := make([]int, len(r.shards))
 	var keyErr scanError
-	for i := 0; i < closeAfter; i++ {
+	for i := 0; i < len(activeParts); i++ {
 		msg := <-values
 		if msg.err.r != nil {
 			if keyErr.r == nil {
@@ -667,7 +653,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 		part recSetShard
 		err  scanError
 	}
-	values := make(chan targetPartResult, t.recSetShardResultBufferSize())
+	values := make(chan targetPartResult, t.shardResultBufferSize())
 	done := t.iterateShardsParallel(currentTx, nil, func(shard *storageShard, solo bool) {
 		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
@@ -685,14 +671,10 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 			return scm.NewNil()
 		})
 	})
-	if done == nil {
-		close(values)
-	} else {
-		go func() {
-			<-done
-			close(values)
-		}()
+	if done != nil {
+		<-done
 	}
+	close(values)
 	var joinErr scanError
 	for msg := range values {
 		if msg.err.r != nil {
@@ -878,35 +860,34 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	values := make(chan scanResult, len(r.shards))
+	activeParts := make([]int, 0, len(r.shards))
 	for i := range r.shards {
-		rsShard := r.shards[i]
-		if rsShard.count == 0 {
-			continue
+		if r.shards[i].count > 0 {
+			activeParts = append(activeParts, i)
 		}
-		go func(part recSetShard) {
-			withTxSession(currentTx, func() scm.Scmer {
-				defer func() {
-					if rec := recover(); rec != nil {
-						values <- scanResult{err: scanError{rec, string(debug.Stack())}}
-					}
-				}()
-				// Cancellation contract: check only at the scheduling boundary, before entering
-				// the shard. Once entered, a shard runs atomically without cancellation checks.
-				if ss != nil && ss.IsKilledSeq(querySeq) {
-					panic("query killed")
+	}
+	done := runFanoutTasks(currentTx, len(activeParts), func(taskIndex int, _ bool) {
+		part := r.shards[activeParts[taskIndex]]
+		withTxSession(currentTx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- scanResult{err: scanError{rec, string(debug.Stack())}}
 				}
-				res, cnt := part.shard.scanRecSetPart(&part, conditionCols, condition, callbackCols, callback, aggregate, neutral, currentTx, ss)
-				values <- scanResult{res: res, outCount: cnt, inputCount: part.count}
-				return scm.NewNil()
-			})
-		}(rsShard)
+			}()
+			// Cancellation contract: check only at the scheduling boundary, before entering
+			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			if ss != nil && ss.IsKilledSeq(querySeq) {
+				panic("query killed")
+			}
+			res, cnt := part.shard.scanRecSetPart(&part, conditionCols, condition, callbackCols, callback, aggregate, neutral, currentTx, ss)
+			values <- scanResult{res: res, outCount: cnt, inputCount: part.count}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
 	}
-	closeAfter := 0
-	for _, part := range r.shards {
-		if part.count > 0 {
-			closeAfter++
-		}
-	}
+	closeAfter := len(activeParts)
 	akkumulator := neutral
 	hadValue := false
 	var scanErr scanError
@@ -986,34 +967,37 @@ func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condit
 	}
 	values := make(chan existsResult, len(r.shards))
 	var stop atomic.Bool
-	closeAfter := 0
+	activeParts := make([]int, 0, len(r.shards))
 	for i := range r.shards {
-		part := &r.shards[i]
-		if part.count == 0 {
-			continue
+		if r.shards[i].count > 0 {
+			activeParts = append(activeParts, i)
 		}
-		closeAfter++
-		go func(part recSetShard) {
-			withTxSession(currentTx, func() scm.Scmer {
-				defer func() {
-					if rec := recover(); rec != nil {
-						values <- existsResult{err: scanError{rec, string(debug.Stack())}}
-					}
-				}()
-				// Cancellation contract: check only at the scheduling boundary, before entering
-				// the shard. Once entered, a shard runs atomically without cancellation checks.
-				if ss != nil && ss.IsKilledSeq(querySeq) {
-					panic("query killed")
-				}
-				found := part.shard.recSetPartExists(&part, conditionCols, conditionFn, currentTx, ss, &stop)
-				if found {
-					stop.Store(true)
-				}
-				values <- existsResult{found: found}
-				return scm.NewNil()
-			})
-		}(*part)
 	}
+	done := runFanoutTasks(currentTx, len(activeParts), func(taskIndex int, _ bool) {
+		part := r.shards[activeParts[taskIndex]]
+		withTxSession(currentTx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- existsResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			// Cancellation contract: check only at the scheduling boundary, before entering
+			// the shard. Once entered, a shard runs atomically without cancellation checks.
+			if ss != nil && ss.IsKilledSeq(querySeq) {
+				panic("query killed")
+			}
+			found := part.shard.recSetPartExists(&part, conditionCols, conditionFn, currentTx, ss, &stop)
+			if found {
+				stop.Store(true)
+			}
+			values <- existsResult{found: found}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
+	}
+	closeAfter := len(activeParts)
 	var existsErr scanError
 	found := false
 	for i := 0; i < closeAfter; i++ {

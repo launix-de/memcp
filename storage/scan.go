@@ -456,7 +456,7 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 		t.AddPartitioningScore([]string{b.col})
 	}
 
-	values := make(chan scanResult, 4)
+	values := make(chan scanResult, t.shardResultBufferSize())
 	var found atomic.Bool
 	done := t.iterateShardsParallel(currentTx, boundaries, func(s *storageShard, solo bool) {
 		if found.Load() {
@@ -480,14 +480,10 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 		}
 		values <- scanResult{}
 	})
-	if done == nil {
-		close(values)
-	} else {
-		go func() {
-			<-done
-			close(values)
-		}()
+	if done != nil {
+		<-done
 	}
+	close(values)
 
 	var scanErr scanError
 	for msg := range values {
@@ -559,7 +555,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	var outCount int64
 	var inputCount int64
 	var candidateCount int64
-	values := make(chan scanResult, 4)
+	values := make(chan scanResult, t.shardResultBufferSize())
 	done := t.iterateShardsParallel(currentTx, boundaries, func(s *storageShard, solo bool) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -574,14 +570,10 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
 		values <- scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount}
 	})
-	if done == nil {
-		close(values)
-	} else {
-		go func() {
-			<-done
-			close(values)
-		}()
+	if done != nil {
+		<-done
 	}
+	close(values)
 
 	akkumulator := neutral
 	hadValue := false
