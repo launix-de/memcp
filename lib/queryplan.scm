@@ -689,7 +689,13 @@ instead of capturing whichever session populated the cache first. */
 	(if (not (query_block? block))
 		'()
 		(begin
-			(define outer_aliases (source_aliases outer_sources))
+			/* SQL name resolution binds the innermost source first. A local
+			alias that repeats an outer alias therefore shadows it rather than
+			turning its qualified column references into correlations. */
+			(define local_aliases (source_aliases (qb_sources block)))
+			(define outer_aliases (filter (source_aliases outer_sources) (lambda (outer_alias)
+				(not (reduce local_aliases (lambda (shadowed local_alias)
+					(or shadowed (equal?? local_alias outer_alias))) false)))))
 			(merge_unique (list
 				(btw2025_sources_accessing_aliases (qb_sources block) outer_aliases)
 				(btw2025_fields_accessing_aliases (qb_fields block) outer_aliases)
