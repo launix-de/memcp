@@ -42,22 +42,25 @@ Each Declaration may provide a JITEmit callback:
 This callback emits machine code for the operation. The contract between
 caller and emitter is as follows.
 
-Emiter rules
+Emitter rules
 -------------
- - The emiter must be a recursive 1-pass compiler that continuously writes into the JIT buffer
+ - The emitter must be a recursive 1-pass compiler that continuously writes into the JIT buffer
+ - The emitter is intentionally not followed by a JIT optimizer or peephole pass. It must consume constants, known types, control-flow reachability, and requested result placement while walking the expression from front to back, and emit only instructions that remain necessary.
+ - A statically known type test emits its result directly (often no instruction at all through LocImm). A statically impossible operation aborts the current compilation immediately so the caller can fall back safely. Only genuinely dynamic types receive a runtime tag check and branch.
+ - Instruction selection is final at emission time: choose the shortest valid immediate/move form, fold constants, inline eligible operations, and omit unreachable branches instead of emitting general code for a later cleanup pass.
  - each emitter takes input args ([]JITValueDesc), result JITValueDesc with placement info for the result (e.g. store to stack, store into rax or "any" if we don't care) and returns a JITValueDesc with the actual result placement - some emitters, especially basic emitters can also deviate from this signature but the idea must stay the same
- - There following types of emitters exist:
+ - The following types of emitters exist:
   * basic emitters (defined in scm/jit_[ARCH].go) that produce actual machine code like arithmetic, move or jump instructions
   * hardcoded emiters for inlining Go-functions like IsString, String, NewString for extra speed and full semantics control
-  * generated emiters produced by tools/jitgen for inlining scm functions. Jitgen takes in a Go function via Go compiler, analyzes the SSA and produce go code that is patched into go files like scm/alu.go
+  * generated emitters produced by tools/jitgen for inlining scm functions. Jitgen takes in a Go function via Go compiler, analyzes the SSA and produces Go code that is patched into files like scm/alu.go
   * Scm JIT compiler which mimics the structure scm.Eval() function and produces a function call frame in order to turn a scm.Proc into func(...Scmer)Scmer
- - Emiters use the JITContext to request free registers or write bytes into the JIT buffer
- - All registers acquired by an emiter must be freed after leaving the emiter function
- - Complex emiters can have BBs (basic blocks -> jump-free blocks with a [conditional] jump at the end)
+ - Emitters use the JITContext to request free registers or write bytes into the JIT buffer
+ - All registers acquired by an emitter must be freed after leaving the emitter function
+ - Complex emitters can have BBs (basic blocks -> jump-free blocks with a [conditional] jump at the end)
  - Only reachable BBs must be rendered -> if an "if" instruction has a constant condition, only render one additional BB
- - Emiters are chainable (inline function calls): A complex emiter calls another emiter.
- - BBs are not allowed to print return (0xC3), only a jump to the last BB so emiters stay chainable
- - Each BB is declared as a BBDescriptor on the stack of the emiter function
+ - Emitters are chainable (inline function calls): A complex emitter calls another emitter.
+ - BBs are not allowed to print return (0xC3), only a jump to the last BB so emitters stay chainable
+ - Each BB is declared as a BBDescriptor on the stack of the emitter function
  - the BB chain is started by firstbb.render(). Each bb render function can tail-call other bb render functions in order to "enqueue" them -> jumps tail-call ONE sucessor BB, conditional jumps tail-call up to TWO successor BBs, so we have a DFS traversal of all reachable BBs
  - a BB can either be rendered as the general block (phi inputs are on stack) or a specialized block (phi inputs can be either on stack or overwritten with other JITValueDesc like immediate-values or type-annotated)
  - general BBs must be rendered at-most once, if the BB already exists, jump to it instead

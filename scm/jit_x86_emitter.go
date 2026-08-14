@@ -1149,13 +1149,12 @@ func JITEmitProcInline(ctx *JITContext, proc *Proc, args []JITValueDesc, sliceBa
 	return jitCompileExpr(ctx, body, sliceBase, result)
 }
 
-/* TODO: peephole optimizer:
-- remove argument checks (test rbx,rbx 48 85 db 76 xx)
-- shorten immediate values
-- constant-fold operations
-- inline functions
-- jump to other functions
-*/
+// There is deliberately no later peephole optimizer. This backend is the final
+// stage of an intelligent one-pass emitter: known types and constants eliminate
+// checks and branches before bytes are written, impossible specializations
+// abort to the interpreter fallback, and dynamic cases emit only their required
+// checks. Immediate width, moves, inlining, and control flow are selected here
+// instead of producing generic code for a second optimization pass.
 // AMD64 register constants for the Go register ABI.
 //
 // Go register ABI (amd64): args in RAX, RBX, RCX, RDX, RSI, RDI, R8-R15
