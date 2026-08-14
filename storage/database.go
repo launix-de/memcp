@@ -653,18 +653,8 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 			t.mu.Unlock()
 			tableLocked = false
 			newShardList := make([]*storageShard, len(origShardList))
-			// Track if any shard is still COLD to avoid triggering repartition logic
+			// These facts are derived from the completed shard generations below.
 			hasColdShard := false
-			// Count items using shard read locks to avoid races
-			getShardCount := func(s *storageShard) uint {
-				if s == nil {
-					return 0
-				}
-				s.mu.RLock()
-				c := uint(s.main_count) + uint(len(s.inserts)) - uint(s.deletions.Count())
-				s.mu.RUnlock()
-				return c
-			}
 			maincount := uint(0)
 			var sdone sync.WaitGroup
 			var shardErrMu sync.Mutex
@@ -681,10 +671,6 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 			}
 			if len(origShardList) <= workers {
 				for i, s := range origShardList {
-					if s != nil && s.GetState() == COLD {
-						hasColdShard = true
-					}
-					maincount += getShardCount(s)
 					go func(i int, s *storageShard) {
 						defer func() {
 							if r := recover(); r != nil {
@@ -726,10 +712,6 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 					}()
 				}
 				for i, s := range origShardList {
-					if s != nil && s.GetState() == COLD {
-						hasColdShard = true
-					}
-					maincount += getShardCount(s)
 					jobs <- job{i: i, s: s}
 				}
 				close(jobs)
@@ -745,6 +727,26 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 				t.maintenanceMu.Unlock()
 				rebuildClaimed = false
 				return
+			}
+			// Recompute both facts after the workers finish. A forced rebuild can
+			// turn an initially cold shard into an authoritative warm generation;
+			// conversely, an unchanged shard can become cold after the snapshot.
+			// Repartitioning must use only the completed generations, never the
+			// pre-rebuild zero counters of cold shards.
+			hasColdShard = false
+			maincount = 0
+			for _, shard := range newShardList {
+				if shard == nil {
+					continue
+				}
+				shard.mu.RLock()
+				cold := shard.srState == COLD
+				count := uint(shard.main_count) + uint(len(shard.inserts)) - uint(shard.deletions.Count())
+				shard.mu.RUnlock()
+				maincount += count
+				if cold {
+					hasColdShard = true
+				}
 			}
 
 			t.mu.Lock()
@@ -769,35 +771,37 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 				t.Shards = newShardList
 			}
 
-			// Update per-column statistics from rebuilt shards.
-			// The new shards have freshly compressed columns with accurate stats.
-			rowEst := uint64(t.CountEstimate())
-			for ci := range t.Columns {
-				var distinctSum uint64
-				colName := t.Columns[ci].Name
-				for _, shard := range newShardList {
-					if shard == nil {
-						continue
+			if !hasColdShard {
+				// Update per-column statistics only when every rebuilt shard has
+				// authoritative in-memory counters and column statistics.
+				rowEst := uint64(t.CountEstimate())
+				for ci := range t.Columns {
+					var distinctSum uint64
+					colName := t.Columns[ci].Name
+					for _, shard := range newShardList {
+						if shard == nil {
+							continue
+						}
+						// columns are populated during rebuild - access directly
+						if cs, ok := shard.columns[colName]; ok && cs != nil {
+							distinctSum += uint64(cs.DistinctCount())
+						}
 					}
-					// columns are populated during rebuild — access directly
-					if cs, ok := shard.columns[colName]; ok && cs != nil {
-						distinctSum += uint64(cs.DistinctCount())
+					atomic.StoreUint64(&t.Columns[ci].DistinctEstimate, distinctSum)
+					atomic.StoreUint64(&t.Columns[ci].RowEstimate, rowEst)
+					// Planner statistics are properties of persisted base columns. Reading
+					// hidden/cache or computed storages can initialize maintenance state and
+					// must never be part of a statistics-only rebuild pass.
+					if !strings.HasPrefix(t.Name, ".") && !t.Columns[ci].IsTemp && t.Columns[ci].Computor.IsNil() && len(t.Columns[ci].OrcSortCols) == 0 {
+						t.Columns[ci].PlannerStats.Store(
+							collectRebuiltColumnPlannerStatistics(newShardList, colName))
+					} else {
+						t.Columns[ci].PlannerStats.Store(nil)
 					}
 				}
-				atomic.StoreUint64(&t.Columns[ci].DistinctEstimate, distinctSum)
-				atomic.StoreUint64(&t.Columns[ci].RowEstimate, rowEst)
-				// Planner statistics are properties of persisted base columns. Reading
-				// hidden/cache or computed storages can initialize maintenance state and
-				// must never be part of a statistics-only rebuild pass.
-				if !strings.HasPrefix(t.Name, ".") && !t.Columns[ci].IsTemp && t.Columns[ci].Computor.IsNil() && len(t.Columns[ci].OrcSortCols) == 0 {
-					t.Columns[ci].PlannerStats.Store(
-						collectRebuiltColumnPlannerStatistics(newShardList, colName))
-				} else {
-					t.Columns[ci].PlannerStats.Store(nil)
-				}
+				t.collectStatisticsFromShards(newShardList)
 			}
 			t.publishShowColumnsSnapshot()
-			t.collectStatisticsFromShards(newShardList)
 
 			// Collect replaced shards for deferred cleanup (see comment above).
 			if len(replaced) > 0 {

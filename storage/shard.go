@@ -2570,9 +2570,24 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild(all bool) *storageShard {
+	// An unchanged cold shard already is a complete persistent generation:
+	// its UUID references both the column files and any unreplayed WAL. Keep it
+	// byte-for-byte instead of loading it merely for a periodic rebuild or
+	// shutdown. A forced rebuild must materialize it before continuing.
+	for {
+		t.mu.Lock()
+		if t.srState != COLD {
+			break
+		}
+		if !all {
+			t.mu.Unlock()
+			return t
+		}
+		t.mu.Unlock()
+		t.ensureLoaded()
+	}
 
 	// concurrency! when rebuild is run in background, inserts and deletions into and from old delta storage must be duplicated to the ongoing process
-	t.mu.Lock()
 	locked := true
 	removedFromCache := false
 	defer func() {
