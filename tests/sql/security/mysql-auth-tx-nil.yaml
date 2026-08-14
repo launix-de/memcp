@@ -38,5 +38,19 @@ test_cases:
         "ok"
         (error "mysql_auth should return nil for missing user"))
 
+  - name: "Dashboard user authentication rejects missing credentials without evaluating an empty row"
+    scm: |
+      (if
+        (nil? (dashboard_check_user (lambda (key) "")))
+        "ok"
+        (error "missing dashboard credentials should be rejected"))
+
+  - name: "Dashboard admin authentication rejects missing credentials without evaluating an empty row"
+    scm: |
+      (if
+        (not (dashboard_check_admin (lambda (key) "")))
+        "ok"
+        (error "missing dashboard admin credentials should be rejected"))
+
 cleanup:
   - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"
