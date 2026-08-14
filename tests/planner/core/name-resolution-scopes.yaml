@@ -1,0 +1,360 @@
+# Copyright (C) 2026  MemCP Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "SQL column name binding, nested scopes, and derived aliases"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nr_leaf"
+  - sql: "DROP TABLE IF EXISTS nr_other"
+  - sql: "DROP TABLE IF EXISTS nr_inner"
+  - sql: "DROP TABLE IF EXISTS nr_outer"
+  - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
+  - sql: "CREATE TABLE nr_outer (ID INT PRIMARY KEY, outer_only INT, shared INT, file_id INT)"
+  - sql: "CREATE TABLE nr_inner (ID INT PRIMARY KEY, inner_only INT, shared INT, label VARCHAR(20))"
+  - sql: "CREATE TABLE nr_other (ID INT PRIMARY KEY, shared INT)"
+  - sql: "CREATE TABLE nr_leaf (leaf_id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nr_alias_conflict (ID INT PRIMARY KEY, computed INT)"
+  - sql: "INSERT INTO nr_outer VALUES (1, 101, 1001, 10), (2, 102, 1002, 20)"
+  - sql: "INSERT INTO nr_inner VALUES (10, 201, 2001, 'ten'), (20, 202, 2002, 'twenty')"
+  - sql: "INSERT INTO nr_other VALUES (30, 3001)"
+  - sql: "INSERT INTO nr_leaf VALUES (1)"
+  - sql: "INSERT INTO nr_alias_conflict VALUES (1, 2), (2, 1)"
+
+test_cases:
+  - name: "Column identifiers remain case-insensitive when quoted"
+    sql: "SELECT `id` FROM nr_outer ORDER BY `Id`"
+    expect:
+      rows: 2
+      data:
+        - {id: 1}
+        - {id: 2}
+
+  - name: "Derived output column identifiers are case-insensitive"
+    sql: |
+      SELECT d.foo
+      FROM (SELECT ID AS `Foo` FROM nr_outer) d
+      ORDER BY d.fOO
+    expect:
+      rows: 2
+      data:
+        - {foo: 1}
+        - {foo: 2}
+
+  - name: "An unquoted relation qualifier is case-insensitive"
+    sql: "SELECT AliasName.ID FROM nr_outer aliasname ORDER BY AliasName.ID"
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "A quoted relation qualifier is case-sensitive"
+    sql: "SELECT `aliasname`.ID FROM nr_outer `AliasName`"
+    expect:
+      error: true
+
+  - name: "Quoted case-distinct relation aliases remain distinguishable"
+    sql: |
+      SELECT `a`.ID AS outer_id, `A`.ID AS inner_id
+      FROM nr_outer `a`
+      JOIN nr_inner `A` ON `A`.ID = `a`.file_id
+      ORDER BY `a`.ID
+    expect:
+      rows: 2
+      data:
+        - {outer_id: 1, inner_id: 10}
+        - {outer_id: 2, inner_id: 20}
+
+  - name: "An unquoted case-folded qualifier rejects case-distinct ambiguity"
+    sql: "SELECT a.ID FROM nr_outer `a` JOIN nr_inner `A` ON `A`.ID = `a`.file_id"
+    expect:
+      error: true
+
+  - name: "Derived column alias lists bind the exported names"
+    sql: |
+      SELECT d.renamed
+      FROM (SELECT ID FROM nr_outer) d(renamed)
+      ORDER BY d.renamed
+    expect:
+      rows: 2
+      data:
+        - {renamed: 1}
+        - {renamed: 2}
+
+  - name: "Unqualified subquery column prefers the local relation"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      WHERE EXISTS (SELECT 1 FROM nr_inner i WHERE ID = 10)
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "Unqualified subquery column falls back to the outer relation"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      WHERE EXISTS (SELECT 1 FROM nr_inner i WHERE outer_only = 101)
+      ORDER BY o.ID
+    expect:
+      rows: 1
+      data:
+        - {ID: 1}
+
+  - name: "A local alias shadows an equal outer alias"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      WHERE EXISTS (SELECT 1 FROM nr_inner o WHERE o.ID = 10)
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "A user alias cannot collide with a generated lexical alias"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      JOIN nr_leaf `__binding:query/where:0/exists:0/source:0:o` ON TRUE
+      WHERE EXISTS (SELECT 1 FROM nr_inner o WHERE o.ID = 10)
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "A deeply nested unqualified name prefers the nearest outer scope"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      WHERE EXISTS (
+        SELECT 1
+        FROM nr_inner i
+        WHERE i.ID = 10
+          AND EXISTS (SELECT 1 FROM nr_leaf l WHERE shared = 2001)
+      )
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "Derived flattening cannot capture an inner IN column"
+    sql: |
+      SELECT t.ID
+      FROM (SELECT ID, file_id FROM nr_outer) t
+      WHERE t.file_id IN (
+        SELECT ID FROM nr_inner WHERE label LIKE '%ten%'
+      )
+      ORDER BY t.ID
+    expect:
+      rows: 1
+      data:
+        - {ID: 1}
+
+  - name: "Explicit correlation through a derived alias survives flattening"
+    sql: |
+      SELECT t.ID
+      FROM (SELECT ID, file_id FROM nr_outer) t
+      WHERE EXISTS (
+        SELECT 1 FROM nr_inner i WHERE i.ID = t.file_id
+      )
+      ORDER BY t.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "Every UNION branch binds its own unqualified membership column"
+    sql: |
+      SELECT t.ID
+      FROM (SELECT ID, file_id FROM nr_outer) t
+      WHERE t.file_id IN (
+        SELECT ID FROM nr_inner WHERE label LIKE '%missing%'
+        UNION
+        SELECT ID FROM nr_inner WHERE label LIKE '%twenty%'
+      )
+      ORDER BY t.ID
+    expect:
+      rows: 1
+      data:
+        - {ID: 2}
+
+  - name: "GROUP BY and ORDER BY can bind an output alias"
+    sql: |
+      SELECT ID + 10 AS computed, COUNT(*) AS matches
+      FROM nr_outer
+      GROUP BY computed
+      ORDER BY computed
+    expect:
+      rows: 2
+      data:
+        - {computed: 11, matches: 1}
+        - {computed: 12, matches: 1}
+
+  - name: "HAVING can bind an output alias"
+    sql: |
+      SELECT ID + 10 AS computed
+      FROM nr_outer
+      GROUP BY ID
+      HAVING computed = 11
+    expect:
+      rows: 1
+      data:
+        - {computed: 11}
+
+  - name: "GROUP BY prefers an input column over a colliding output alias"
+    sql: |
+      SELECT COUNT(*) AS shared
+      FROM nr_inner
+      GROUP BY shared
+      ORDER BY shared
+    expect:
+      rows: 2
+      data:
+        - {shared: 1}
+        - {shared: 1}
+
+  - name: "HAVING prefers a colliding output alias over the input column"
+    sql: |
+      SELECT shared - 1000 AS shared
+      FROM nr_outer
+      GROUP BY ID, shared
+      HAVING shared < 2
+      ORDER BY shared
+    expect:
+      rows: 1
+      data:
+        - {shared: 1}
+
+  - name: "ORDER BY prefers a colliding output alias over the input column"
+    sql: |
+      SELECT -shared AS shared
+      FROM nr_outer
+      ORDER BY shared
+    expect:
+      rows: 2
+      data:
+        - {shared: -1002}
+        - {shared: -1001}
+
+  - name: "ORDER BY resolves the review alias conflict to the output"
+    sql: |
+      SELECT ID AS computed
+      FROM nr_alias_conflict
+      ORDER BY computed
+    expect:
+      rows: 2
+      data:
+        - {computed: 1}
+        - {computed: 2}
+
+  - name: "UNION ORDER BY binds the union output alias"
+    sql: |
+      SELECT ID AS result_id FROM nr_outer
+      UNION ALL
+      SELECT ID AS result_id FROM nr_other
+      ORDER BY result_id
+    expect:
+      rows: 3
+      data:
+        - {result_id: 1}
+        - {result_id: 2}
+        - {result_id: 30}
+
+  - name: "UNION ORDER BY accepts an output position"
+    sql: |
+      SELECT ID AS result_id FROM nr_outer
+      UNION ALL
+      SELECT ID AS result_id FROM nr_other
+      ORDER BY 1 DESC
+    expect:
+      rows: 3
+      data:
+        - {result_id: 30}
+        - {result_id: 2}
+        - {result_id: 1}
+
+  - name: "UNION ORDER BY rejects a branch relation qualifier"
+    sql: |
+      SELECT o.ID AS result_id FROM nr_outer o
+      UNION ALL
+      SELECT x.ID AS result_id FROM nr_other x
+      ORDER BY o.ID
+    expect:
+      error: true
+
+  - name: "UNION ORDER BY rejects an unknown output name"
+    sql: |
+      SELECT ID AS result_id FROM nr_outer
+      UNION ALL
+      SELECT ID AS result_id FROM nr_other
+      ORDER BY missing
+    expect:
+      error: true
+
+  - name: "WHERE cannot bind an output alias"
+    sql: "SELECT ID + 10 AS computed FROM nr_outer WHERE computed = 11"
+    expect:
+      error: true
+
+  - name: "A derived relation hides non-projected base columns"
+    sql: "SELECT d.outer_only FROM (SELECT ID FROM nr_outer) d"
+    expect:
+      error: true
+
+  - name: "An ambiguous local column fails instead of selecting a driver"
+    sql: "SELECT ID FROM nr_inner i JOIN nr_other x ON TRUE"
+    expect:
+      error: true
+
+  - name: "Duplicate aliases in one query block are rejected"
+    sql: "SELECT x.ID FROM nr_outer x JOIN nr_inner x ON TRUE"
+    expect:
+      error: true
+
+  - name: "A derived FROM relation cannot capture its sibling"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      JOIN (SELECT outer_only) d ON TRUE
+    expect:
+      error: true
+
+  - name: "JOIN ON cannot reference a later source"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      JOIN nr_inner i ON x.ID = i.ID
+      JOIN nr_other x ON TRUE
+    expect:
+      error: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
+  - sql: "DROP TABLE IF EXISTS nr_leaf"
+  - sql: "DROP TABLE IF EXISTS nr_other"
+  - sql: "DROP TABLE IF EXISTS nr_inner"
+  - sql: "DROP TABLE IF EXISTS nr_outer"

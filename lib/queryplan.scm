@@ -759,29 +759,6 @@ instead of capturing whichever session populated the cache first. */
 			false)
 		_ false)))
 
-(define qualify_unqualified_column_for_sources (lambda (sources expr)
-	(match expr
-		((symbol inner_select) _subquery) expr
-		((quote inner_select) _subquery) expr
-		((symbol inner_select_exists) _subquery) expr
-		((quote inner_select_exists) _subquery) expr
-		((symbol inner_select_in) probe subquery)
-		(list (quote inner_select_in) (qualify_unqualified_column_for_sources sources probe) subquery)
-		((quote inner_select_in) probe subquery)
-		(list (quote inner_select_in) (qualify_unqualified_column_for_sources sources probe) subquery)
-		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (nil? tblvar)
-			(begin
-				(define src (source_for_unqualified_column sources nil col col_ignorecase))
-				(if (nil? src)
-					expr
-					(list (quote get_column) (source_alias src) false col col_ignorecase)))
-			expr)
-		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
-		(qualify_unqualified_column_for_sources sources (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
-		(cons head tail) (cons (qualify_unqualified_column_for_sources sources head) (map tail (lambda (item)
-			(qualify_unqualified_column_for_sources sources item))))
-		_ expr)))
-
 (define session_dependency_expr? (lambda (expr)
 	(match expr
 		((symbol session) key) (not (equal? key "__memcp_tx"))
@@ -807,9 +784,9 @@ instead of capturing whichever session populated the cache first. */
 			(define a_outer (and (not a_inner) (expr_refs_sources? nil outer_sources a)))
 			(define b_outer (and (not b_inner) (expr_refs_sources? nil outer_sources b)))
 			(if (and a_inner b_outer)
-				(list a (qualify_unqualified_column_for_sources outer_sources b))
+				(list a b)
 				(if (and b_inner a_outer)
-					(list b (qualify_unqualified_column_for_sources outer_sources a))
+					(list b a)
 					nil)))
 		((quote equal??) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
 		((symbol equal?) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
@@ -828,9 +805,9 @@ instead of capturing whichever session populated the cache first. */
 				(expr_refs_sources? nil outer_sources b)
 				(session_dependency_expr? b))))
 			(if (and a_inner b_outer)
-				(list a (qualify_unqualified_column_for_sources outer_sources b))
+				(list a b)
 				(if (and b_inner a_outer)
-					(list b (qualify_unqualified_column_for_sources outer_sources a))
+					(list b a)
 					nil)))
 		((quote equal??) a b) (presence_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
 		((symbol equal?) a b) (presence_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
@@ -3629,50 +3606,407 @@ available while nested queries are decorrelated. */
 					_ '())
 				'())))))
 
-(define logical_source_has_column? (lambda (src col col_ignorecase)
+/* Bind SQL names while query-block scopes and derived projections are still
+logical relations. Later rewrites may flatten those relations, but must no
+longer decide which scope an unqualified name belongs to. Scope lists are
+ordered from the innermost query block to the outermost one.
+
+Each entry stores the SQL-visible alias, its alpha-renamed logical source, and
+a precomputed export catalog. The SQL alias is only a scoped spelling; the
+source alias is the stable identity consumed by all later planner phases. */
+(define binding_field_titles (lambda (fields)
+	(extract_assoc (coalesceNil fields '()) (lambda (title _expr) title))))
+
+(define binding_source_columns (lambda (src)
 	(begin
 		(define relation (normalize_query_ast (source_relation src)))
 		(if (string? relation)
-			(source_has_column? src col col_ignorecase)
-			(not (nil? (field_expr_by_title (logical_relation_fields relation) col col_ignorecase)))))))
+			(map (get_schema (source_schema src) relation) (lambda (column) (column "Field")))
+			(binding_field_titles (logical_relation_fields relation))))))
 
-(define logical_sources_for_unqualified_column (lambda (sources col col_ignorecase)
-	(filter (coalesceNil sources '()) (lambda (src)
-		(logical_source_has_column? src col col_ignorecase)))))
+(define binding_column_name (lambda (columns col col_ignorecase)
+	(reduce (coalesceNil columns '()) (lambda (found candidate)
+		(if (not (nil? found))
+			found
+			(if (if col_ignorecase (equal?? candidate col) (equal? candidate col)) candidate nil))) nil)))
 
-(define qualify_unqualified_column_from_matches (lambda (matches col col_ignorecase fallback)
-	(if (empty_list? matches)
-		fallback
-		(if (single_source? matches)
-			(list (quote get_column) (source_alias (car matches)) false col col_ignorecase)
-			(neumann_fail "untangle_query" (concat "ambiguous unqualified column: " col))))))
+(define binding_column_catalog (lambda (columns)
+	(reduce (coalesceNil columns '()) (lambda (catalog column)
+		(list
+			(if (has_assoc? (nth catalog 0) column)
+				(nth catalog 0)
+				(set_assoc (nth catalog 0) column column))
+			(begin
+				(define folded (toLower column))
+				(if (has_assoc? (nth catalog 1) folded)
+					(nth catalog 1)
+					(set_assoc (nth catalog 1) folded column)))))
+		(list '() '()))))
 
-(define qualify_unqualified_column_for_logical_scope (lambda (local_sources outer_sources expr)
+(define binding_catalog_column_name (lambda (catalog col col_ignorecase)
+	(if col_ignorecase
+		(get_assoc (nth catalog 1) (toLower col) nil)
+		(get_assoc (nth catalog 0) col nil))))
+
+(define binding_entry_name (lambda (entry) (nth entry 0)))
+(define binding_entry_source (lambda (entry) (nth entry 1)))
+(define binding_entry_columns (lambda (entry) (nth entry 2)))
+(define binding_entry_catalog_known? (lambda (entry) (nth entry 3)))
+
+(define binding_entries_for_alias (lambda (entries tblvar tbl_ignorecase)
+	(filter (coalesceNil entries '()) (lambda (entry)
+		(if tbl_ignorecase
+			(equal?? (binding_entry_name entry) tblvar)
+			(or
+				(equal? (binding_entry_name entry) tblvar)
+				/* Expanded output aliases already contain bound references. */
+				(equal? (source_alias (binding_entry_source entry)) tblvar)))))))
+
+(define binding_entries_for_column (lambda (entries col col_ignorecase)
+	(filter (coalesceNil entries '()) (lambda (entry)
+		(or
+			(not (binding_entry_catalog_known? entry))
+			(not (nil? (binding_catalog_column_name (binding_entry_columns entry) col col_ignorecase))))))))
+
+(define bind_qualified_column_in_scopes (lambda (scopes tblvar tbl_ignorecase col col_ignorecase)
+	(match (coalesceNil scopes '())
+		(cons entries outer_scopes) (begin
+			(define matches (binding_entries_for_alias entries tblvar tbl_ignorecase))
+			(if (empty_list? matches)
+				(bind_qualified_column_in_scopes outer_scopes tblvar tbl_ignorecase col col_ignorecase)
+				(if (single_source? matches)
+					(begin
+						(define entry (car matches))
+						(define src (binding_entry_source entry))
+						(if (equal? col "*")
+							(list (quote get_column) (source_alias src) false "*" false)
+							(begin
+								(define resolved_col (binding_catalog_column_name (binding_entry_columns entry) col col_ignorecase))
+								(if (nil? resolved_col)
+									(if (binding_entry_catalog_known? entry)
+										(neumann_fail "bind_query_names" (concat "Column does not exist: " (concat tblvar (concat "." col))))
+										(list (quote get_column) (source_alias src) false col col_ignorecase))
+									(list (quote get_column) (source_alias src) false resolved_col false)))))
+					(neumann_fail "bind_query_names" (concat "ambiguous relation alias: " tblvar)))))
+		_ (neumann_fail "bind_query_names" (concat "unknown relation alias: " tblvar)))))
+
+(define bind_unqualified_column_in_scopes (lambda (scopes col col_ignorecase)
+	(match (coalesceNil scopes '())
+		(cons entries outer_scopes) (begin
+			(define matches (binding_entries_for_column entries col col_ignorecase))
+			(if (empty_list? matches)
+				(bind_unqualified_column_in_scopes outer_scopes col col_ignorecase)
+				(if (single_source? matches)
+					(begin
+						(define entry (car matches))
+						(list (quote get_column)
+							(source_alias (binding_entry_source entry))
+							false
+							(coalesceNil (binding_catalog_column_name (binding_entry_columns entry) col col_ignorecase) col)
+							(if (binding_entry_catalog_known? entry) false col_ignorecase)))
+					(neumann_fail "bind_query_names" (concat "ambiguous unqualified column: " col)))))
+		_ (neumann_fail "bind_query_names" (concat "Column does not exist: " col)))))
+
+(define try_bind_unqualified_column_in_scopes (lambda (scopes col col_ignorecase)
+	(match (coalesceNil scopes '())
+		(cons entries outer_scopes) (begin
+			(define matches (binding_entries_for_column entries col col_ignorecase))
+			(if (empty_list? matches)
+				(try_bind_unqualified_column_in_scopes outer_scopes col col_ignorecase)
+				(if (single_source? matches)
+					(begin
+						(define entry (car matches))
+						(list (quote get_column)
+							(source_alias (binding_entry_source entry)) false
+							(coalesceNil (binding_catalog_column_name (binding_entry_columns entry) col col_ignorecase) col)
+							(if (binding_entry_catalog_known? entry) false col_ignorecase)))
+					(neumann_fail "bind_query_names" (concat "ambiguous unqualified column: " col)))))
+		_ nil)))
+
+(define binding_path (lambda (parent kind index)
+	(concat parent (concat "/" (concat kind (concat ":" (string index)))))))
+
+(define binding_fresh_alias (lambda (string_catalog candidate)
+	(if (has_assoc? string_catalog candidate)
+		(binding_fresh_alias string_catalog (concat candidate ":"))
+		candidate)))
+
+(define binding_collect_string_catalog (lambda (value catalog)
+	(if (string? value)
+		(set_assoc catalog value true)
+		(match value
+			(cons head tail) (reduce tail (lambda (current item)
+				(binding_collect_string_catalog item current))
+				(binding_collect_string_catalog head catalog))
+			_ catalog))))
+
+(define binding_fresh_query_alias (lambda (query candidate)
+	(binding_fresh_alias (binding_collect_string_catalog query '()) candidate)))
+
+(define bind_query_expr_tail (lambda (scopes items path all_strings index)
+	(match (coalesceNil items '())
+		(cons item rest) (cons
+			(bind_query_expr scopes item (binding_path path "expr" index) all_strings)
+			(bind_query_expr_tail scopes rest path all_strings (+ index 1)))
+		_ '())))
+
+(define bind_query_expr (lambda (scopes expr path all_strings)
+	(match expr
+		((symbol inner_select) subquery)
+		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
+		((quote inner_select) subquery)
+		(list (quote inner_select) (bind_query_names_at subquery scopes (binding_path path "subquery" 0) all_strings))
+		((symbol inner_select_exists) subquery)
+		(list (quote inner_select_exists) (bind_query_names_at subquery scopes (binding_path path "exists" 0) all_strings))
+		((quote inner_select_exists) subquery)
+		(list (quote inner_select_exists) (bind_query_names_at subquery scopes (binding_path path "exists" 0) all_strings))
+		((symbol inner_select_in) probe subquery)
+		(list (quote inner_select_in)
+			(bind_query_expr scopes probe (binding_path path "probe" 0) all_strings)
+			(bind_query_names_at subquery scopes (binding_path path "in" 0) all_strings))
+		((quote inner_select_in) probe subquery)
+		(list (quote inner_select_in)
+			(bind_query_expr scopes probe (binding_path path "probe" 0) all_strings)
+			(bind_query_names_at subquery scopes (binding_path path "in" 0) all_strings))
+		((symbol get_column) tblvar tbl_ignorecase "*" col_ignorecase)
+		(if (nil? tblvar)
+			expr
+			(bind_qualified_column_in_scopes scopes tblvar tbl_ignorecase "*" col_ignorecase))
+		((quote get_column) tblvar tbl_ignorecase "*" col_ignorecase)
+		(bind_query_expr scopes (list (quote get_column) tblvar tbl_ignorecase "*" col_ignorecase) path all_strings)
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(if (nil? tblvar)
+			(bind_unqualified_column_in_scopes scopes col col_ignorecase)
+			(bind_qualified_column_in_scopes scopes tblvar tbl_ignorecase col col_ignorecase))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(bind_query_expr scopes (list (quote get_column) tblvar tbl_ignorecase col col_ignorecase) path all_strings)
+		(cons head tail) (cons head (bind_query_expr_tail scopes tail path all_strings 0))
+		_ expr)))
+
+(define bind_group_expr_tail (lambda (scopes fields items path all_strings index)
+	(match (coalesceNil items '())
+		(cons item rest) (cons
+			(bind_group_expr scopes fields item (binding_path path "expr" index) all_strings)
+			(bind_group_expr_tail scopes fields rest path all_strings (+ index 1)))
+		_ '())))
+
+(define bind_group_expr (lambda (scopes fields expr path all_strings)
+	(match expr
+		((symbol inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
+		((quote inner_select) _subquery) (bind_query_expr scopes expr path all_strings)
+		((symbol inner_select_exists) _subquery) (bind_query_expr scopes expr path all_strings)
+		((quote inner_select_exists) _subquery) (bind_query_expr scopes expr path all_strings)
+		((symbol inner_select_in) _probe _subquery) (bind_query_expr scopes expr path all_strings)
+		((quote inner_select_in) _probe _subquery) (bind_query_expr scopes expr path all_strings)
+		((symbol get_column) nil _tbl_ignorecase "*" _col_ignorecase) expr
+		((quote get_column) nil _tbl_ignorecase "*" _col_ignorecase) expr
+		((symbol get_column) nil _tbl_ignorecase col col_ignorecase) (begin
+			(define input_ref (try_bind_unqualified_column_in_scopes scopes col col_ignorecase))
+			(if (nil? input_ref)
+				(begin
+					(define output_ref (field_expr_by_title fields col col_ignorecase))
+					(if (nil? output_ref)
+						(neumann_fail "bind_query_names" (concat "Column does not exist: " col))
+						output_ref))
+				input_ref))
+		((quote get_column) nil _tbl_ignorecase col col_ignorecase)
+		(bind_group_expr scopes fields (list (quote get_column) nil false col col_ignorecase) path all_strings)
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(bind_query_expr scopes expr path all_strings)
+		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(bind_query_expr scopes expr path all_strings)
+		(cons head tail) (cons head (bind_group_expr_tail scopes fields tail path all_strings 0))
+		_ expr)))
+
+(define bind_query_source_relations (lambda (sources path all_strings index)
+	(match (coalesceNil sources '())
+		(cons src rest) (begin
+			(define relation (normalize_query_ast (source_relation src)))
+			(cons
+				(source_with_relation src
+					(if (or (query_block? relation) (union_block? relation))
+						/* MariaDB FROM subqueries are non-lateral. */
+						(bind_query_names_at relation '() (binding_path path "derived" index) all_strings)
+						relation))
+				(bind_query_source_relations rest path all_strings (+ index 1))))
+		_ '())))
+
+(define bind_query_source_joins (lambda (entries outer_scopes visible_entries path all_strings index)
+	(match (coalesceNil entries '())
+		(cons entry rest) (begin
+			(define src (binding_entry_source entry))
+			(define visible (merge (list visible_entries (list entry))))
+			(cons
+				(source_with_join_expr src
+					(bind_query_expr (cons visible outer_scopes) (source_join_expr src)
+						(binding_path path "join" index) all_strings))
+				(bind_query_source_joins rest outer_scopes visible path all_strings (+ index 1))))
+		_ '())))
+
+(define binding_scope_has_alias? (lambda (entries alias)
+	(reduce (coalesceNil entries '()) (lambda (found entry)
+		(or found (equal? (binding_entry_name entry) alias))) false)))
+
+(define binding_scopes_have_alias? (lambda (scopes alias)
+	(reduce (coalesceNil scopes '()) (lambda (found entries)
+		(or found (binding_scope_has_alias? entries alias))) false)))
+
+(define binding_scope_entries (lambda (sources outer_scopes path all_strings index)
+	(match (coalesceNil sources '())
+		(cons src rest) (begin
+			(define sql_alias (source_alias src))
+			(define internal_alias (if (binding_scopes_have_alias? outer_scopes sql_alias)
+				(binding_fresh_query_alias all_strings
+					(concat "__binding:" (concat (binding_path path "source" index) (concat ":" sql_alias))))
+				sql_alias))
+			(define internal_source (list
+				internal_alias
+				(source_schema src)
+				(source_relation src)
+				(source_outer? src)
+				(source_join_expr src)))
+			(cons
+				(begin
+					(define columns (binding_source_columns internal_source))
+					(list sql_alias internal_source (binding_column_catalog columns) (or
+						(query_block? (normalize_query_ast (source_relation internal_source)))
+						(or
+							(union_block? (normalize_query_ast (source_relation internal_source)))
+							(not (empty_list? columns))))))
+				(binding_scope_entries rest outer_scopes path all_strings (+ index 1))))
+		_ '())))
+
+(define duplicate_source_alias (lambda (sources)
+	(match (coalesceNil sources '())
+		(cons src rest) (if (reduce rest (lambda (found candidate)
+			(or found (equal? (source_alias src) (source_alias candidate)))) false)
+			(source_alias src)
+			(duplicate_source_alias rest))
+		_ nil)))
+
+(define bind_output_alias_refs (lambda (fields expr)
 	(match expr
 		((symbol inner_select) _subquery) expr
 		((quote inner_select) _subquery) expr
 		((symbol inner_select_exists) _subquery) expr
 		((quote inner_select_exists) _subquery) expr
 		((symbol inner_select_in) probe subquery)
-		(list (quote inner_select_in) (qualify_unqualified_column_for_logical_scope local_sources outer_sources probe) subquery)
+		(list (quote inner_select_in) (bind_output_alias_refs fields probe) subquery)
 		((quote inner_select_in) probe subquery)
-		(list (quote inner_select_in) (qualify_unqualified_column_for_logical_scope local_sources outer_sources probe) subquery)
-		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (if (not (nil? tblvar))
-			expr
-			(begin
-				(define local_matches (logical_sources_for_unqualified_column local_sources col col_ignorecase))
-				(if (empty_list? local_matches)
-					(qualify_unqualified_column_from_matches
-						(logical_sources_for_unqualified_column outer_sources col col_ignorecase)
-						col col_ignorecase expr)
-					(qualify_unqualified_column_from_matches local_matches col col_ignorecase expr))))
-		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
-		(qualify_unqualified_column_for_logical_scope local_sources outer_sources
-			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
-		(cons head tail) (cons (qualify_unqualified_column_for_logical_scope local_sources outer_sources head)
-			(map tail (lambda (item)
-				(qualify_unqualified_column_for_logical_scope local_sources outer_sources item))))
+		(list (quote inner_select_in) (bind_output_alias_refs fields probe) subquery)
+		((symbol get_column) nil _tbl_ignorecase col col_ignorecase)
+		(coalesceNil (field_expr_by_title fields col col_ignorecase) expr)
+		((quote get_column) nil _tbl_ignorecase col col_ignorecase)
+		(coalesceNil (field_expr_by_title fields col col_ignorecase) expr)
+		(cons head tail) (cons head (map tail (lambda (item) (bind_output_alias_refs fields item))))
 		_ expr)))
+
+(define bind_query_fields (lambda (fields scopes path all_strings index)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest)) (cons title (cons
+			(bind_query_expr scopes expr (binding_path path "field" index) all_strings)
+			(bind_query_fields rest scopes path all_strings (+ index 1))))
+		_ '())))
+
+(define bind_query_order (lambda (items scopes fields alias_first path all_strings index)
+	(match (coalesceNil items '())
+		(cons item rest) (cons
+			(match item
+				'(expr dir) (begin
+					(define prepared (if alias_first (bind_output_alias_refs fields expr) expr))
+					(list (bind_query_expr scopes prepared (binding_path path "order" index) all_strings) dir))
+				_ item)
+			(bind_query_order rest scopes fields alias_first path all_strings (+ index 1)))
+		_ '())))
+
+(define bind_union_output_expr (lambda (fields carrier_alias expr)
+	(match expr
+		((symbol get_column) nil _tbl_ignorecase col col_ignorecase) (begin
+			(define title (binding_column_name (binding_field_titles fields) col col_ignorecase))
+			(if (nil? title)
+				(neumann_fail "bind_query_names" (concat "UNION ORDER BY column does not exist: " col))
+				(list (quote get_column) carrier_alias false title false)))
+		((quote get_column) nil _tbl_ignorecase col col_ignorecase)
+		(bind_union_output_expr fields carrier_alias (list (quote get_column) nil false col col_ignorecase))
+		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(neumann_fail "bind_query_names" (concat "UNION ORDER BY cannot reference relation alias: " tblvar))
+		((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(neumann_fail "bind_query_names" (concat "UNION ORDER BY cannot reference relation alias: " tblvar))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(bind_union_output_expr fields carrier_alias item))))
+		_ expr)))
+
+(define bind_union_order (lambda (items fields carrier_alias)
+	(map (coalesceNil items '()) (lambda (item)
+		(match item
+			'(expr dir) (begin
+				(if (and (number? expr) (or (<= expr 0) (> expr (/ (count fields) 2))))
+					(neumann_fail "bind_query_names" "UNION ORDER BY position is out of range")
+					true)
+				(list (bind_union_output_expr fields carrier_alias expr) dir))
+			_ (neumann_fail "bind_query_names" "malformed UNION ORDER BY item"))))))
+
+(define bind_query_block_names (lambda (block outer_scopes path all_strings)
+	(begin
+		(define relation_bound_sources (bind_query_source_relations (qb_sources block) path all_strings 0))
+		(define duplicate_alias (duplicate_source_alias relation_bound_sources))
+		(if (nil? duplicate_alias)
+			true
+			(neumann_fail "bind_query_names" (concat "duplicate relation alias: " duplicate_alias)))
+		(define entries (binding_scope_entries relation_bound_sources outer_scopes path all_strings 0))
+		(define sources (bind_query_source_joins entries outer_scopes '() path all_strings 0))
+		(define scopes (cons entries outer_scopes))
+		(define fields (bind_query_fields (qb_fields block) scopes path all_strings 0))
+		(define bind_alias_first_expr (lambda (expr)
+			(bind_query_expr scopes (bind_output_alias_refs fields expr)
+				(binding_path path "output" 0) all_strings)))
+		(make_query_block
+			(qb_schema block)
+			sources
+			fields
+			(bind_query_expr scopes (qb_where block) (binding_path path "where" 0) all_strings)
+			/* MariaDB resolves GROUP BY against input columns first, while
+			HAVING and ORDER BY prefer SELECT-list aliases. */
+			(map (coalesceNil (qb_group block) '()) (lambda (expr)
+				(bind_group_expr scopes fields expr (binding_path path "group" 0) all_strings)))
+			(bind_alias_first_expr (qb_having block))
+			(bind_query_order (qb_order block) scopes fields true path all_strings 0)
+			(qb_limit block)
+			(qb_offset block)
+			(bind_query_fields (qb_hidden block) scopes (binding_path path "hidden" 0) all_strings 0)
+			(qb_stages block)
+			(qb_facts block)))))
+
+(define bind_query_branches (lambda (branches outer_scopes path all_strings index)
+	(match (coalesceNil branches '())
+		(cons branch rest) (cons
+			(bind_query_names_at branch outer_scopes (binding_path path "branch" index) all_strings)
+			(bind_query_branches rest outer_scopes path all_strings (+ index 1)))
+		_ '())))
+
+(define bind_query_names_at (lambda (query outer_scopes path all_strings)
+	(begin
+		(define normalized (normalize_query_ast query))
+		(if (query_block? normalized)
+			(bind_query_block_names normalized outer_scopes path all_strings)
+			(if (union_block? normalized)
+				(begin
+					(define branches (bind_query_branches (union_branches normalized) outer_scopes path all_strings 0))
+					(define fields (match branches
+						(cons branch _rest) (logical_relation_fields branch)
+						_ '()))
+					(make_union_block
+						(union_mode normalized)
+						branches
+						(bind_union_order (union_order normalized) fields
+							(concat "__binding:" (concat path ":union-output")))
+						(union_limit normalized)
+						(union_offset normalized)
+						(union_facts normalized)))
+				normalized)))))
+
+(define bind_query_names (lambda (query outer_scopes)
+	(bind_query_names_at query outer_scopes "query" query)))
 
 (define derived_star_ref? (lambda (alias expr)
 	(match expr
@@ -3682,10 +4016,10 @@ available while nested queries are decorrelated. */
 
 (define rewrite_derived_ref (lambda (alias projection expr)
 	(match expr
-		((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias) (nil? tblvar))
+		((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
 			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 			expr)
-		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (equal? tblvar alias) (nil? tblvar))
+		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
 			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 			expr)
 		(cons head tail) (cons head (map tail (lambda (item) (rewrite_derived_ref alias projection item))))
@@ -3702,20 +4036,6 @@ available while nested queries are decorrelated. */
 	(map (coalesceNil order_items '()) (lambda (item)
 		(match item
 			'(expr dir) (list (rewrite_derived_ref alias projection expr) dir)
-			_ item)))))
-
-(define rewrite_order_output_alias (lambda (fields expr)
-	(match expr
-		((symbol get_column) nil _tbl_ignorecase col col_ignorecase)
-		(coalesceNil (field_expr_by_title fields col col_ignorecase) expr)
-		((quote get_column) nil _tbl_ignorecase col col_ignorecase)
-		(coalesceNil (field_expr_by_title fields col col_ignorecase) expr)
-		_ expr)))
-
-(define rewrite_order_output_aliases (lambda (fields order_items)
-	(map (coalesceNil order_items '()) (lambda (item)
-		(match item
-			'(expr dir) (list (rewrite_order_output_alias fields expr) dir)
 			_ item)))))
 
 (define rewrite_source_join_for_derived (lambda (alias projection src)
@@ -4140,7 +4460,6 @@ available while nested queries are decorrelated. */
 						(if (not (nil? embedded_union_rewrite))
 							(untangle_union_block embedded_union_rewrite child_ctx)
 							(begin
-								(define logical_sources (qb_sources block))
 								(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
 								(define sources (nth flattened_sources 0))
 								(define rewrites (nth flattened_sources 1))
@@ -4148,9 +4467,7 @@ available while nested queries are decorrelated. */
 								(define source_stages (nth flattened_sources 3))
 								(define inherited_outer_sources (uctx_get child_ctx (quote outer-sources) '()))
 								(define inherited_outer_resolution_sources (uctx_get child_ctx (quote outer-resolution-sources) '()))
-								(define nested_outer_resolution_sources (merge (list inherited_outer_resolution_sources logical_sources)))
-								(define qualify_logical_scope (lambda (expr)
-									(qualify_unqualified_column_for_logical_scope logical_sources inherited_outer_resolution_sources expr)))
+								(define nested_outer_resolution_sources (merge (list inherited_outer_resolution_sources (qb_sources block))))
 								(define expr_outer_sources (merge (list inherited_outer_sources sources)))
 								(define expr_ctx (make_uctx child_ctx (list
 									(list (quote outer-sources) expr_outer_sources)
@@ -4164,46 +4481,34 @@ available while nested queries are decorrelated. */
 									(list (quote outer-sources) joined_expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
 									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources))))))
-								(define local_resolution_sources (merge_unique (list untangled_sources source_join_stage_sources)))
-								(define qualify_join_expr (lambda (expr)
-									(if (single_source? local_resolution_sources)
-										expr
-										(qualify_unqualified_column_for_sources local_resolution_sources expr))))
-								(define rewritten_where (qualify_unqualified_column_for_sources
-									local_resolution_sources
-									(combine_where_terms source_where_terms (rewrite_derived_ref_chain rewrites (qualify_logical_scope (qb_where block))))))
+								/* SQL name ownership ends in bind_query_names. Derived flattening
+								only rewrites references carrying an explicit bound alias. */
+								(define rewritten_where (combine_where_terms source_where_terms
+									(rewrite_derived_ref_chain rewrites (qb_where block))))
 								(if (expr_contains_window? rewritten_where)
 									(neumann_fail "untangle_query" "window function is not allowed in WHERE")
 									true)
 								(define where_result (untangle_where_with_stages rewritten_where joined_expr_outer_sources joined_expr_ctx))
 								(define rewritten_fields (rewrite_derived_fields_chain rewrites
-									(map_assoc (qb_fields block) (lambda (_title expr) (qualify_logical_scope expr)))))
+									(qb_fields block)))
 								(define field_result (untangle_fields_with_stages
-									(qualify_join_expr rewritten_fields)
+									rewritten_fields
 									joined_expr_outer_sources joined_expr_ctx))
 								(define having_result (untangle_expr_with_stages
-									(qualify_join_expr (rewrite_derived_ref_chain rewrites (qualify_logical_scope (qb_having block))))
+									(rewrite_derived_ref_chain rewrites (qb_having block))
 									joined_expr_outer_sources joined_expr_ctx))
 								(define stage_sources (merge_unique (list (nth where_result 2) (nth field_result 2) (nth having_result 2))))
 								(define group_result (untangle_expr_list_with_stages
-									(qualify_unqualified_column_for_sources local_resolution_sources
-										(map (coalesceNil (qb_group block) '()) (lambda (item)
-											(rewrite_derived_ref_chain rewrites (qualify_logical_scope item)))))
+									(map (coalesceNil (qb_group block) '()) (lambda (item)
+										(rewrite_derived_ref_chain rewrites item)))
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define order_result (untangle_order_with_stages
-									(qualify_join_expr (rewrite_order_output_aliases
-										rewritten_fields
-										(rewrite_derived_order_chain rewrites
-											(map (coalesceNil (qb_order block) '()) (lambda (item)
-												(match item
-													'(expr dir) (list (qualify_logical_scope expr) dir)
-													_ item))))))
+									(rewrite_derived_order_chain rewrites (qb_order block))
 									joined_expr_outer_sources
 									joined_expr_ctx))
 								(define hidden_result (untangle_fields_with_stages
-									(qualify_join_expr (rewrite_derived_fields_chain rewrites
-										(map_assoc (qb_hidden block) (lambda (_title expr) (qualify_logical_scope expr)))))
+									(rewrite_derived_fields_chain rewrites (qb_hidden block))
 									joined_expr_outer_sources joined_expr_ctx))
 								(define delayed_block (make_query_block
 									(qb_schema block)
@@ -4251,7 +4556,8 @@ available while nested queries are decorrelated. */
 
 (define untangle_query_term (lambda (query ctx)
 	(begin
-		(define root (require_unnested_node "untangle_query" (untangle_query query ctx)))
+		(define bound_query (bind_query_names query '()))
+		(define root (require_unnested_node "untangle_query" (untangle_query bound_query ctx)))
 		(define ir (make_ir (if (union_block? root) (quote union) (quote select))
 			root
 			(if (query_block? root) (qb_stages root) '())
