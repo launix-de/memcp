@@ -139,6 +139,9 @@ test_cases:
         - ID: 9981
 
   - name: "Selective IN branches under OR meet the projected membership budget"
+    # The preceding identical result query warms this path. Use a median so one
+    # scheduler/GC pause does not weaken the unchanged 20ms steady-state gate.
+    timing_samples: 3
     max_time: 0.02
     sql: |
       SELECT ID
