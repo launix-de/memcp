@@ -146,7 +146,11 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			if metadataChanged {
 				t.schema.schemalock.Lock()
 				metadataLocked = true
-				t.finishSchemaMutationLocked()
+				mode := t.schemaSaveMode()
+				if c.IsTemp {
+					mode = schemaSaveBuffered
+				}
+				t.finishSchemaMutationLocked(mode)
 				metadataLocked = false
 			}
 			return
@@ -267,6 +271,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
 	found := false
 	paramsChanged := false
+	isTemp := false
 	t.schema.schemalock.Lock()
 	for i, c := range t.Columns {
 		if c.Name == name {
@@ -282,6 +287,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 			t.Columns[i].OrcMapFn = mapFn
 			t.Columns[i].OrcReduceFn = reduceFn
 			t.Columns[i].OrcReduceInit = reduceInit
+			isTemp = c.IsTemp
 			found = true
 			break
 		}
@@ -291,11 +297,15 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 		panic("ComputeOrderedColumn: column " + t.Name + "." + name + " does not exist")
 	}
 
-	// Register triggers while the table-local DDL contract is held and persist
-	// the new ORC metadata atomically into schema.json before any rebuild can
-	// publish a stale shard snapshot of this table.
+	// Register triggers while the table-local DDL contract is held. Durable
+	// columns publish synchronously; reconstructible temp metadata joins the next
+	// complete schema snapshot.
 	t.registerORCTriggers(name)
-	t.finishSchemaMutationLocked()
+	mode := t.schemaSaveMode()
+	if isTemp {
+		mode = schemaSaveBuffered
+	}
+	t.finishSchemaMutationLocked(mode)
 
 	// Ensure every shard has an ORC proxy (lazy: no eager recompute).
 	//

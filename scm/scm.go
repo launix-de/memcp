@@ -796,6 +796,96 @@ type Proc struct {
 	NumberedOnly bool
 }
 
+// CloseProcedure snapshots explicit captures of a procedure without retaining
+// its request-local environment. The optimizer represents a capture from the
+// procedure's creation frame as (outer expr). Resolve only those forms in the
+// current procedure body; nested lambdas keep their own outer references,
+// which bind to frames created when the closed procedure runs.
+func CloseProcedure(value Scmer) Scmer {
+	if value.GetTag() != tagProc {
+		return value
+	}
+	proc := *value.Proc()
+	if proc.En == nil || proc.En == &Globalenv {
+		return value
+	}
+	callFrame := &Env{Outer: proc.En}
+	bound := make(map[Symbol]struct{})
+	if proc.Params.IsSlice() {
+		for _, param := range proc.Params.Slice() {
+			if param.IsSymbol() {
+				bound[param.Symbol()] = struct{}{}
+			}
+		}
+	} else if proc.Params.IsSymbol() {
+		bound[proc.Params.Symbol()] = struct{}{}
+	}
+	collectProcedureBindings(proc.Body, bound)
+	proc.Body = closeProcedureCaptures(proc.Body, callFrame, bound)
+	proc.En = &Globalenv
+	return NewProcStruct(proc)
+}
+
+func collectProcedureBindings(expression Scmer, bound map[Symbol]struct{}) {
+	if expression.IsSourceInfo() {
+		collectProcedureBindings(expression.SourceInfo().value, bound)
+		return
+	}
+	if !expression.IsSlice() {
+		return
+	}
+	items := expression.Slice()
+	if len(items) > 0 && items[0].IsSymbol() {
+		switch items[0].String() {
+		case "lambda", "quote":
+			return
+		case "define", "set":
+			if len(items) > 1 && items[1].IsSymbol() {
+				bound[items[1].Symbol()] = struct{}{}
+			}
+		}
+	}
+	for _, item := range items {
+		collectProcedureBindings(item, bound)
+	}
+}
+
+func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]struct{}) Scmer {
+	if expression.IsSourceInfo() {
+		source := *expression.SourceInfo()
+		source.value = closeProcedureCaptures(source.value, callFrame, bound)
+		return NewSourceInfo(source)
+	}
+	if expression.IsSymbol() {
+		symbol := expression.Symbol()
+		if _, local := bound[symbol]; !local {
+			if binding := callFrame.Outer.FindRead(symbol); binding != nil && binding != &Globalenv {
+				if captured, ok := binding.Vars[symbol]; ok {
+					return captured
+				}
+			}
+		}
+		return expression
+	}
+	if !expression.IsSlice() {
+		return expression
+	}
+	items := expression.Slice()
+	if len(items) > 0 && items[0].IsSymbol() {
+		switch items[0].String() {
+		case "outer":
+			return Eval(expression, callFrame)
+		case "lambda", "quote":
+			return expression
+		}
+	}
+	closed := make([]Scmer, len(items))
+	for i, item := range items {
+		closed[i] = closeProcedureCaptures(item, callFrame, bound)
+	}
+	return NewSlice(closed)
+}
+
 // helper pseudo type to optimize parameter reading from indices
 type NthLocalVar uint8 // equals to (var i)
 

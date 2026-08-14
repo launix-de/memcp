@@ -902,7 +902,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// must atomically name the new PShards before any old shard file is released;
 	// a publication panic therefore leaves oldshards intact and recoverable.
 	t.schema.schemalock.Lock()
-	t.schema.saveLockedWithDurabilityAndUnlock(t.schemaWriteDurable())
+	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
 
 	// Nil out old shards after the schema is saved, so no FreeShard
 	// code path can reference them. At this point, ShardMode is Partition,

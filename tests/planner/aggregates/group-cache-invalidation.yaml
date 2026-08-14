@@ -104,7 +104,7 @@ test_cases:
       result_not_contains:
         - "(show"
       result_contains:
-        - "memory"
+        - "cache"
 
   - name: "Equivalent GROUP queries share carrier and aggregate column names"
     scm: |
