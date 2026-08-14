@@ -71,9 +71,9 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 (define get_schema (lambda (schema tbl)
 	(if (equal?? schema "information_schema")
-		/* Virtual metadata relations have no storage table handle. Keep their
-		column catalog in sql-metadata.scm, alongside their runtime row source. */
-		(sql_metadata_get_schema schema tbl)
+		/* sql-metadata.scm owns only the virtual catalog. This is the sole
+		public dispatcher, so module load order cannot replace its semantics. */
+		(information_schema_column_catalog schema tbl)
 		(try
 			(lambda ()
 				(begin

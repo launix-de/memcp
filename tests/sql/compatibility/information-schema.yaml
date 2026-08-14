@@ -130,9 +130,19 @@ test_cases:
         ON key_column_usage.constraint_schema = referential_constraints.constraint_schema
        AND key_column_usage.constraint_name = referential_constraints.constraint_name
       WHERE key_column_usage.referenced_table_name IS NOT NULL
-        AND key_column_usage.table_schema = 'memcp-tests'
+        AND table_schema = 'memcp-tests'
     expect:
       min_rows: 0
+
+  - name: "A genuinely ambiguous metadata column is rejected"
+    sql: >
+      SELECT constraint_name
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+      JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+        ON key_column_usage.constraint_schema = referential_constraints.constraint_schema
+       AND key_column_usage.constraint_name = referential_constraints.constraint_name
+    expect:
+      error: true
 
   - name: "JOIN tables with columns"
     sql: >
