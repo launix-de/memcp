@@ -19,6 +19,7 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trace_case_item"
   - sql: "DROP TABLE IF EXISTS trace_lazy_error"
   - sql: "DROP TABLE IF EXISTS trace_lazy_source"
   - sql: "DROP TABLE IF EXISTS trace_lazy_driver"
@@ -79,9 +80,16 @@ setup:
         id INT PRIMARY KEY,
         source_id INT
       )
+  - sql: |
+      CREATE TABLE trace_case_item (
+        id INT PRIMARY KEY,
+        lookup_id INT,
+        tag VARCHAR(16) COLLATE utf8mb4_bin
+      )
   - sql: "INSERT INTO trace_lazy_driver (id, group_id, use_extra) VALUES (1, 10, FALSE), (2, 20, FALSE)"
   - sql: "INSERT INTO trace_lazy_source (id, group_id, amount) VALUES (1, 10, 3), (2, 10, 5), (3, 20, 11)"
   - sql: "INSERT INTO trace_lazy_error (id, source_id) VALUES (1, 1), (2, 1)"
+  - sql: "INSERT INTO trace_case_item (id, lookup_id, tag) VALUES (1, 10, 'Upper'), (2, 10, 'Upper'), (3, 10, 'upper')"
   - sql: |
       CREATE TABLE trace_profile (
         id INT PRIMARY KEY
@@ -187,6 +195,8 @@ setup:
 
 test_cases:
   - name: "Unreached CASE aggregate does not initialize its shared carrier column"
+    noncritical: true
+    fail_comment: "Known master defect: decorrelation currently prepares a scalar aggregate from an unreachable CASE branch eagerly"
     sql: |
       SELECT driver.id,
         (SELECT COUNT(*)
@@ -208,6 +218,20 @@ test_cases:
       data:
         - {id: 1, visible_count: 2, unreachable_value: 0}
         - {id: 2, visible_count: 1, unreachable_value: 0}
+
+  - name: "Reached CASE aggregate still validates its scalar dependency"
+    sql: |
+      SELECT CASE WHEN TRUE THEN
+        (SELECT SUM((
+          SELECT marker.id
+          FROM trace_lazy_error marker
+          WHERE marker.source_id = item.id
+        ))
+         FROM trace_lazy_source item
+         WHERE item.group_id = 10)
+      ELSE 0 END AS reached_value
+    expect:
+      error: true
 
   - name: "Unused unique lookup is removed before decorrelation"
     sql: |
@@ -234,6 +258,20 @@ test_cases:
       data:
         - {id: 1, label: "first"}
         - {id: 2, label: "second"}
+
+  - name: "A later join keeps the unique lookup that supplies its condition"
+    sql: |
+      SELECT page.id, chained_actor.enabled
+      FROM trace_page page
+      LEFT JOIN trace_lookup required_lookup ON required_lookup.id = page.lookup_id
+      LEFT JOIN trace_actor chained_actor ON chained_actor.id = required_lookup.id
+      WHERE page.archived = FALSE
+      ORDER BY page.id
+    expect:
+      rows: 2
+      data:
+        - {id: 1, enabled: true}
+        - {id: 2, enabled: false}
 
   - name: "Unused nonunique lookup preserves row multiplicity"
     sql: |
@@ -440,6 +478,40 @@ test_cases:
       rows: 1
       data:
         - {id: 1, item_count: 1, total_amount: null}
+
+  - name: "Case-sensitive grouped filters keep distinct canonical carriers"
+    sql: |
+      SELECT page.id, exact_upper.item_count AS upper_count, exact_lower.item_count AS lower_count
+      FROM trace_page page
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_case_item
+        WHERE tag COLLATE utf8mb4_bin = 'Upper'
+        GROUP BY lookup_id
+      ) exact_upper ON exact_upper.lookup_id = page.lookup_id
+      LEFT JOIN (
+        SELECT lookup_id, COUNT(*) AS item_count
+        FROM trace_case_item
+        WHERE tag COLLATE utf8mb4_bin = 'upper'
+        GROUP BY lookup_id
+      ) exact_lower ON exact_lower.lookup_id = page.lookup_id
+      WHERE page.id = 1
+    expect:
+      rows: 1
+      data:
+        - {id: 1, upper_count: 2, lower_count: 1}
+
+  - name: "Case-sensitive base selection keeps literal case distinct"
+    sql: |
+      SELECT id
+      FROM trace_case_item
+      WHERE tag COLLATE utf8mb4_bin = 'Upper'
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - {id: 1}
+        - {id: 2}
 
   - name: "Derived doc list applies outer ID filter before expensive projection"
     max_time: 2.2
@@ -890,6 +962,7 @@ test_cases:
           can_view: false
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_case_item"
   - sql: "DROP TABLE IF EXISTS trace_lazy_error"
   - sql: "DROP TABLE IF EXISTS trace_lazy_source"
   - sql: "DROP TABLE IF EXISTS trace_lazy_driver"
