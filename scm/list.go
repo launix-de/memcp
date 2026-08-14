@@ -2242,7 +2242,11 @@ func init_list() {
 			}
 			slice, fd := asAssoc(a[0], "set_assoc_mut")
 			if fd == nil {
-				list := slice
+				// Small associations are slice-backed and may originate from a
+				// reducer neutral shared by parallel shards. Copy the bounded
+				// representation before changing or extending it; once promoted
+				// to a FastDict, ownership is exclusive and updates stay in place.
+				list := append([]Scmer(nil), slice...)
 				for i := 0; i < len(list); i += 2 {
 					if Equal(list[i], a[1]) {
 						if mergeFn != nil {

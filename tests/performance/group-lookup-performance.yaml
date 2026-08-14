@@ -342,6 +342,40 @@ test_cases:
           (error (concat "non-preserving reducer received owned accumulator: " plan)))
         true)
 
+  - name: "join reducer wrapper preserves owned accumulator"
+    scm: |
+      (begin
+        (define merge (list 'lambda (list 'acc 'grouped)
+          (list 'merge_assoc 'acc 'grouped)))
+        (define wrapped (list 'lambda (list 'acc 'value)
+          (list 'if
+            (list 'and (list 'symbol? 'value)
+              (list 'equal? 'value (list 'quote '__join_scan_reduce_skip)))
+            'acc
+            (list merge 'acc 'value))))
+        (define plan (serialize (optimize
+          (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
+            (list "id") (list 'lambda (list 'id) true)
+            (list "id") (list 'lambda (list 'id)
+              (list 'list (list 'list 'id) (list 'list 'id 1)))
+            wrapped (list 'list) wrapped false))))
+        (if (not (match plan (regex "merge_assoc_mut" _) true false))
+          (error (concat "join reducer wrapper lost accumulator ownership: " plan)))
+        (if (match plan (regex "\\(merge_assoc \\(var 0\\)" _) true false)
+          (error (concat "join reducer wrapper kept an immutable merge: " plan)))
+        true)
+
+  - name: "slice-backed mutable assoc preserves a shared reducer neutral"
+    scm: |
+      (begin
+        (define neutral (list "existing" 1))
+        (define result (set_assoc_mut neutral "added" 2))
+        (if (has_assoc? neutral "added")
+          (error "set_assoc_mut changed its shared slice-backed input"))
+        (if (not (equal? (get_assoc result "added") 2))
+          (error "set_assoc_mut lost the added value"))
+        true)
+
   - name: "constant folding does not execute invalid callback arity"
     scm: |
       (begin
