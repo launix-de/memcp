@@ -16380,8 +16380,21 @@ build_queryplan contract. */
 		(define prepared_ns (nanotime))
 		(define plan (emit_physical_queryplan prepared))
 		(define emitted_ns (nanotime))
+		/* Read every raw-plan metric before transferring plan ownership to optimize. */
 		(define plan_text (pretty_print plan (settings "ExplainWidth")))
+		(define raw_plan_nodes (tree_count plan))
+		(define raw_scans (plan_count plan (quote scan)))
+		(define raw_ordered_scans (+
+			(plan_count plan (quote scan_order))
+			(plan_count plan (quote scan_order_multi))))
+		(define raw_exists_scans (plan_count plan (quote scan_exists)))
+		(define raw_group_caches (plan_count plan (quote touch_keytable)))
 		(define serialized_ns (nanotime))
+		(define optimizer_telemetry (newsession))
+		(define optimized_plan (optimize plan (lambda (stats)
+			(optimizer_telemetry "stats" stats))))
+		(define optimized_ns (nanotime))
+		(define optimizer_stats (optimizer_telemetry "stats"))
 		(list (quote resultrow)
 			(list (quote list)
 				"parse_ns" (- started_ns parse_started_ns)
@@ -16390,23 +16403,30 @@ build_queryplan contract. */
 				"physical_prepare_ns" (- prepared_ns reordered_ns)
 				"recipe_emit_ns" (- emitted_ns prepared_ns)
 				"lower_ns" (- emitted_ns reordered_ns)
+				"optimizer_ns" (optimizer_stats "compile_ns")
+				"optimizer_wall_ns" (- optimized_ns serialized_ns)
 				"serialize_ns" (- serialized_ns emitted_ns)
 				"planner_total_ns" (- emitted_ns started_ns)
-				"compile_total_ns" (- emitted_ns parse_started_ns)
-				"measured_total_ns" (- serialized_ns parse_started_ns)
+				"compile_total_ns" (- optimized_ns parse_started_ns)
+				"measured_total_ns" (- optimized_ns parse_started_ns)
 				"sql_bytes" sql_bytes
 				"ast_nodes" (tree_count query)
 				"logical_nodes" (tree_count reordered)
-				"plan_nodes" (tree_count plan)
+				"plan_nodes" raw_plan_nodes
 				"plan_bytes" (strlen plan_text)
+				"optimizer_input_nodes" (optimizer_stats "input_nodes")
+				"optimizer_output_nodes" (tree_count optimized_plan)
+				"optimizer_rewrites" (optimizer_stats "rewrites")
+				"optimizer_rejected_rewrites" (optimizer_stats "rejected_rewrites")
+				"optimizer_budget_remaining" (optimizer_stats "budget_remaining")
+				"optimizer_callback_analyses" (optimizer_stats "callback_analyses")
+				"optimizer_callback_clones" (optimizer_stats "callback_clones")
 				"query_blocks" (logical_count (ir_root reordered) (quote query-block))
 				"group_stages" (logical_count (ir_root reordered) (quote group-stage))
 				"union_blocks" (logical_count (ir_root reordered) (quote union-block))
-				"scans" (plan_count plan (quote scan))
-				"ordered_scans" (+
-					(plan_count plan (quote scan_order))
-					(plan_count plan (quote scan_order_multi)))
-				"exists_scans" (plan_count plan (quote scan_exists))
-				"group_caches" (plan_count plan (quote touch_keytable))
+				"scans" raw_scans
+				"ordered_scans" raw_ordered_scans
+				"exists_scans" raw_exists_scans
+				"group_caches" raw_group_caches
 				/* Backward-compatible telemetry alias; use group_caches in new integrations. */
-				"group_carriers" (plan_count plan (quote touch_keytable)))))))
+				"group_carriers" raw_group_caches)))))

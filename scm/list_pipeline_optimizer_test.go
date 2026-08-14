@@ -24,7 +24,7 @@ import (
 func optimizeListPipeline(t testing.TB, source string) (Scmer, *Env) {
 	t.Helper()
 	env := newOptimizerTestEnv()
-	optimized := Optimize(Read("list pipeline optimizer test", source), env)
+	optimized := Optimize(Read("list pipeline optimizer test", source), env, nil)
 	return optimized, env
 }
 
