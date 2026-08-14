@@ -262,6 +262,58 @@ func hashStructuralReadonly(key Scmer) uint64 {
 	}
 }
 
+func structuralScalarTag(tag uint16) bool {
+	switch tag {
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString:
+		return true
+	default:
+		return false
+	}
+}
+
+// structuralEqual compares planner data as trees. Equal implements Scheme/SQL
+// coercions such as TRUE == any non-empty list; those coercions must never
+// collapse distinct AST nodes in a structural catalog.
+func structuralEqual(a, b Scmer) bool {
+	if a.IsSourceInfo() {
+		return structuralEqual(a.SourceInfo().value, b)
+	}
+	if b.IsSourceInfo() {
+		return structuralEqual(a, b.SourceInfo().value)
+	}
+	if a.GetTag() == tagAny {
+		if source, ok := a.Any().(SourceInfo); ok {
+			return structuralEqual(source.value, b)
+		}
+	}
+	if b.GetTag() == tagAny {
+		if source, ok := b.Any().(SourceInfo); ok {
+			return structuralEqual(a, source.value)
+		}
+	}
+	if a.GetTag() == tagSlice || b.GetTag() == tagSlice {
+		if a.GetTag() != tagSlice || b.GetTag() != tagSlice {
+			return false
+		}
+		left := a.Slice()
+		right := b.Slice()
+		if len(left) != len(right) {
+			return false
+		}
+		for i := range left {
+			if !structuralEqual(left[i], right[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	if structuralScalarTag(a.GetTag()) || structuralScalarTag(b.GetTag()) {
+		return structuralScalarTag(a.GetTag()) && structuralScalarTag(b.GetTag()) &&
+			hashStructuralScalar(a) == hashStructuralScalar(b) && Equal(a, b)
+	}
+	return Equal(a, b)
+}
+
 const structuralCatalogFastThreshold = 5
 
 // structuralCatalog is mutable only during compile-local collection. Freeze
@@ -284,7 +336,7 @@ func (catalog *structuralCatalog) hash(key Scmer, memo map[Scmer]uint64) uint64 
 func (catalog *structuralCatalog) set(key, value Scmer) {
 	if catalog.buckets == nil {
 		for i := range catalog.entries {
-			if Equal(catalog.entries[i].key, key) {
+			if structuralEqual(catalog.entries[i].key, key) {
 				catalog.entries[i].value = value
 				return
 			}
@@ -306,7 +358,7 @@ func (catalog *structuralCatalog) set(key, value Scmer) {
 		hash = hashStructuralReadonly(key)
 	}
 	for _, i := range catalog.buckets[hash] {
-		if Equal(catalog.entries[i].key, key) {
+		if structuralEqual(catalog.entries[i].key, key) {
 			catalog.entries[i].value = value
 			return
 		}
@@ -327,7 +379,7 @@ func (catalog *structuralCatalog) get(key Scmer) Scmer {
 	defer catalog.mu.Unlock()
 	if catalog.buckets == nil {
 		for _, entry := range catalog.entries {
-			if Equal(entry.key, key) {
+			if structuralEqual(entry.key, key) {
 				return entry.value
 			}
 		}
@@ -338,7 +390,7 @@ func (catalog *structuralCatalog) get(key Scmer) Scmer {
 		hash = hashStructuralReadonly(key)
 	}
 	for _, index := range catalog.buckets[hash] {
-		if Equal(catalog.entries[index].key, key) {
+		if structuralEqual(catalog.entries[index].key, key) {
 			return catalog.entries[index].value
 		}
 	}
@@ -374,7 +426,7 @@ func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool)
 		}
 		if buckets == nil {
 			for _, entry := range entries {
-				if Equal(entry.key, key) {
+				if structuralEqual(entry.key, key) {
 					return entry.value
 				}
 			}
@@ -389,7 +441,7 @@ func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool)
 			}
 		}
 		for _, entry := range buckets[hash] {
-			if Equal(entry.key, key) {
+			if structuralEqual(entry.key, key) {
 				return entry.value
 			}
 		}
@@ -471,7 +523,7 @@ func NewStructuralIndex(a ...Scmer) Scmer {
 			hash = hashStructuralKey(expr, memo)
 		}
 		for _, entry := range entries[hash] {
-			if Equal(entry.key, expr) {
+			if structuralEqual(entry.key, expr) {
 				return entry.value
 			}
 		}

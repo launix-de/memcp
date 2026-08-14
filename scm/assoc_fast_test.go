@@ -112,6 +112,20 @@ func TestFunctionalAssocBuilderUsesOwnedAccumulator(t *testing.T) {
 	}
 }
 
+func TestStructuralCatalogDoesNotUseSQLTruthinessForASTs(t *testing.T) {
+	catalog := &structuralCatalog{}
+	catalog.set(NewSlice([]Scmer{NewSymbol("if"), NewBool(true)}), NewString("literal"))
+	catalog.set(NewSlice([]Scmer{NewSymbol("if"), NewSlice([]Scmer{NewSymbol("probe")})}), NewString("probe"))
+
+	if len(catalog.entries) != 2 {
+		t.Fatalf("structural catalog collapsed truthy AST nodes: %#v", catalog.entries)
+	}
+	got := catalog.get(NewSlice([]Scmer{NewSymbol("if"), NewSlice([]Scmer{NewSymbol("probe")})}))
+	if got.String() != "probe" {
+		t.Fatalf("probe-shaped AST lookup returned %s", SerializeToString(got, &Globalenv))
+	}
+}
+
 func BenchmarkFunctionalAssocBuild(b *testing.B) {
 	env := newOptimizerTestEnv()
 	optimized := optimizeTestSource(b, env, `(lambda (items)
