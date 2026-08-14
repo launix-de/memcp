@@ -49,8 +49,8 @@ test_cases:
         AND (
           EXISTS (
             SELECT * FROM ux_order
-            WHERE ux_order.purchase = ux_purchase.ID
-              AND ux_purchase.customer = ux_customer.`ID`
+            JOIN ux_purchase ON ux_order.purchase = ux_purchase.ID
+            WHERE ux_purchase.customer = ux_customer.`ID`
           )
           OR EXISTS (SELECT * FROM ux_invoice WHERE ux_invoice.customer = ux_customer.`ID`)
         )
@@ -75,8 +75,8 @@ test_cases:
         AND (
           EXISTS (
             SELECT * FROM ux_order
-            WHERE ux_order.purchase = ux_purchase.ID
-              AND ux_purchase.customer = ux_customer.`ID`
+            JOIN ux_purchase ON ux_order.purchase = ux_purchase.ID
+            WHERE ux_purchase.customer = ux_customer.`ID`
           )
           OR EXISTS (SELECT * FROM ux_invoice WHERE ux_invoice.customer = ux_customer.`ID`)
         )

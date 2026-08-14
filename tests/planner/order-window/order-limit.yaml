@@ -519,7 +519,7 @@ test_cases:
       SELECT d.*
       FROM (
         SELECT i.id AS `ID`, i.created AS `Created`, i.parent_id,
-          p.id AS `parent:ID`, p.label AS `parent:label`
+          p.`parent:ID` AS `parent:ID`, p.`parent:label` AS `parent:label`
         FROM ord_derived_item i
         LEFT JOIN (
           SELECT id AS `parent:ID`, label AS `parent:label`
@@ -539,7 +539,7 @@ test_cases:
       EXPLAIN SELECT d.*
       FROM (
         SELECT i.id AS `ID`, i.created AS `Created`, i.parent_id,
-          p.id AS `parent:ID`, p.label AS `parent:label`
+          p.`parent:ID` AS `parent:ID`, p.`parent:label` AS `parent:label`
         FROM ord_derived_item i
         LEFT JOIN (
           SELECT id AS `parent:ID`, label AS `parent:label`
