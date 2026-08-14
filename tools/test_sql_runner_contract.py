@@ -36,18 +36,24 @@ from run_sql_tests import (  # noqa: E402
     PERFORMANCE_REFERENCE_NS_ENV,
     PERFORMANCE_REFERENCE_NS_PER_MIB,
     PERFORMANCE_SCALE_ENV,
+    PLANNER_TIME_TOLERANCE_FACTOR,
     SQLTestRunner,
     is_error_response,
     load_performance_scale,
     observe_atomic_json,
     performance_architecture,
     performance_scale_from_samples,
+    planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
     scaled_wall_clock_limit_ms,
 )
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_cold_planner_budget_allows_bounded_measurement_jitter(self) -> None:
+        self.assertEqual(PLANNER_TIME_TOLERANCE_FACTOR, 1.2)
+        self.assertEqual(planner_time_limit_with_tolerance_ms(500), 600)
+
     def test_architecture_aliases_select_stable_profiles(self) -> None:
         self.assertEqual(performance_architecture("AMD64"), "x86_64")
         self.assertEqual(performance_architecture("arm64"), "aarch64")
