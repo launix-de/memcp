@@ -2176,6 +2176,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define structural_collision_frozen (structural_collision))
 	(assert (structural_collision_frozen "collision6") 6 "structural catalog resolves deliberate collisions with equality")
 	(assert (nil? (structural_collision_frozen "collision99")) true "structural collision bucket cannot create false identity")
+	(define structural_literal_ast (list (quote if) true))
+	(define structural_probe_ast (list (quote if) (list (quote probe))))
+	(define structural_ast_catalog (make_structural_catalog))
+	(structural_ast_catalog structural_literal_ast "literal")
+	(structural_ast_catalog structural_probe_ast "probe")
+	(define structural_ast_frozen (structural_ast_catalog))
+	(assert (structural_ast_frozen structural_literal_ast) "literal"
+		"structural catalog keeps literal truth separate from a truthy AST")
+	(assert (structural_ast_frozen structural_probe_ast) "probe"
+		"structural catalog keeps a truthy AST separate from literal truth")
+	(define structural_ast_index (make_structural_index
+		(list structural_literal_ast structural_probe_ast)
+		(list structural_literal_ast structural_probe_ast)))
+	(assert (structural_ast_index structural_literal_ast) 0
+		"structural index preserves the literal AST slot")
+	(assert (structural_ast_index structural_probe_ast) 1
+		"structural index preserves the probe AST slot")
 	(define structural_concurrent (make_structural_catalog))
 	(parallelN 64 (lambda (i) (structural_concurrent (list (quote concurrent) i) i)))
 	(define structural_concurrent_frozen (structural_concurrent))
