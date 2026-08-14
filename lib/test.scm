@@ -1600,6 +1600,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (jit? jit_fallback_desc) false "jit fallback returns plain lambda")
 	(assert (number? (jit_fallback_desc)) true "jit fallback lambda remains executable")
 
+	/* Borrowed Go-slice headers stay in the native pipeline as ptr/len/cap. */
+	(define jit_list_nth (jit (lambda (xs i) (nth xs i))))
+	(define jit_list_car (jit (lambda (xs) (car xs))))
+	(define jit_list_cdr (jit (lambda (xs) (cdr xs))))
+	(define jit_list_cadr (jit (lambda (xs) (cadr xs))))
+	(define jit_list_predicate (jit (lambda (xs) (list? xs))))
+	(assert (jit? jit_list_nth) (jit-enabled?) "jit: nth has a native slice emitter")
+	(assert (jit? jit_list_car) (jit-enabled?) "jit: car has a native slice emitter")
+	(assert (jit? jit_list_cdr) (jit-enabled?) "jit: cdr has a native slice emitter")
+	(assert (jit? jit_list_cadr) (jit-enabled?) "jit: cadr has a native slice emitter")
+	(assert (jit? jit_list_predicate) (jit-enabled?) "jit: list? remains native")
+	(assert (jit_list_nth '(10 20 30) 1) 20 "jit: nth reads a Go-slice element")
+	(assert (jit_list_car '(10 20 30)) 10 "jit: car reads the first Go-slice element")
+	(assert (jit_list_cdr '(10 20 30)) '(20 30) "jit: cdr returns a borrowed Go-slice view")
+	(assert (jit_list_cdr '()) '() "jit: cdr handles an empty slice")
+	(assert (jit_list_cadr '(10 20 30)) 20 "jit: cadr reads the second Go-slice element")
+	(assert (jit_list_predicate '(10 20 30)) true "jit: list? accepts a list")
+	(assert (jit_list_predicate 10) false "jit: list? rejects a scalar")
+	(assert (try (lambda () (jit_list_car '())) (lambda (e) "caught")) "caught" "jit: car bounds panic is recoverable")
+	(assert (try (lambda () (jit_list_nth '(10) 2)) (lambda (e) "caught")) "caught" "jit: nth bounds panic is recoverable")
+
 	/* Basic arithmetic with single parameter */
 	(assert ((jit (lambda (x) (+ x 1))) 4) 5 "jit: x + 1")
 	(assert ((jit (lambda (x) (- x 3))) 10) 7 "jit: x - 3")

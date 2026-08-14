@@ -53,6 +53,18 @@ const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen
 const phiSlotBytes = 16
 const phiStoreChunkSize = 3
 
+// These emitters currently pass static SSA lowering but fail native execution
+// because their loop/return CFG is not yet rendered correctly. Keeping this
+// list explicit prevents a generator run from turning a known-bad emitter back
+// on while retaining the precise failure as part of the jitgen TODO census.
+var nativeValidationFailures = map[string]string{
+	"count":              "native CFG validation: wrong merged return value",
+	"has?":               "native CFG validation: loop match path returns false",
+	"contains?":          "native CFG validation: loop match path returns false",
+	"sql_in":             "native CFG validation: loop match path returns false",
+	"get_assoc_pairlist": "native CFG validation: nested loop return pending",
+}
+
 func main() {
 	var files []string
 	for _, arg := range os.Args[1:] {
@@ -181,6 +193,9 @@ func main() {
 
 		// Single-pass: try to generate, recover on failure
 		newText, genErr := generateClosure(op.name, ssaFn, nil)
+		if genErr == "" {
+			genErr = nativeValidationFailures[op.name]
+		}
 		if genErr == "" {
 			fmt.Printf("  %s: %s OK\n", op.path, op.name)
 		} else {
@@ -780,7 +795,7 @@ func (g *codeGen) emitProtectIncomingArgRegs() string {
 		return ""
 	}
 	pinned := g.allocTemp("argPinned")
-	g.emit("%s := make([]Reg, 0, len(args)*2)", pinned)
+	g.emit("%s := make([]Reg, 0, len(args)*3)", pinned)
 	g.emit("seenArgRegs := make(map[Reg]bool)")
 	g.emit("for _, ai := range args {")
 	g.emit("\tif ai.Loc == LocReg {")
@@ -800,18 +815,29 @@ func (g *codeGen) emitProtectIncomingArgRegs() string {
 	g.emit("\t\t\tseenArgRegs[ai.Reg2] = true")
 	g.emit("\t\t\t%s = append(%s, ai.Reg2)", pinned, pinned)
 	g.emit("\t\t}")
+	g.emit("\t} else if ai.Loc == LocRegTriple {")
+	g.emit("\t\tfor _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {")
+	g.emit("\t\t\tif !seenArgRegs[r] {")
+	g.emit("\t\t\t\tctx.ProtectReg(r)")
+	g.emit("\t\t\t\tseenArgRegs[r] = true")
+	g.emit("\t\t\t\t%s = append(%s, r)", pinned, pinned)
+	g.emit("\t\t\t}")
+	g.emit("\t\t}")
 	g.emit("\t}")
 	g.emit("}")
+	g.emit("defer func() {")
+	g.emit("\tfor _, r := range %s {", pinned)
+	g.emit("\t\tctx.UnprotectReg(r)")
+	g.emit("\t}")
+	g.emit("}()")
 	return pinned
 }
 
 func (g *codeGen) emitUnprotectIncomingArgRegs(pinned string) {
-	if pinned == "" {
-		return
-	}
-	g.emit("for _, r := range %s {", pinned)
-	g.emit("\tctx.UnprotectReg(r)")
-	g.emit("}")
+	// Incoming registers are released by the deferred emitter epilogue. Returns
+	// are emitted directly from SSA blocks, so an appended cleanup statement
+	// would be unreachable for single-block functions.
+	_ = pinned
 }
 
 func (g *codeGen) scopedBBID(bbIdx int) uint64 {
@@ -908,8 +934,7 @@ func goCallWordCount(t types.Type) int {
 	case *types.Interface:
 		return 2
 	case *types.Slice:
-		// Go slice is 3 words (ptr,len,cap), currently not representable by JITValueDesc.
-		return 0
+		return 3
 	case *types.Struct:
 		sz := types.SizesFor("gc", "amd64").Sizeof(t)
 		if sz == 8 {
@@ -949,15 +974,32 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	if params.Len() != len(args) {
 		return false
 	}
+	results := sig.Results()
+	retWords := 0
+	if results.Len() > 1 || (results.Len() == 1 && name == "") {
+		return false
+	}
+	if results.Len() == 1 {
+		retWords = goCallWordCount(results.At(0).Type())
+		// A generic fresh slice result would need an invocation-local GC root
+		// before another Go call. Borrowed slices are lowered by explicit cases
+		// such as asSlice/Scmer.Slice until that root contract exists.
+		if retWords < 1 || retWords > 2 {
+			return false
+		}
+	}
 	resolved := make([]genVal, len(args))
 	argVars := make([]string, len(args))
+	constantArgs := make([]bool, len(args))
 	for i, a := range args {
+		_, constantArgs[i] = a.(*ssa.Const)
 		resolved[i] = g.resolveValue(a)
 		argVars[i] = resolved[i].goVar
-		switch goCallWordCount(params.At(i).Type()) {
+		paramType := params.At(i).Type()
+		switch goCallWordCount(paramType) {
 		case 1:
-			// If the value is currently a pair, this call shape is not representable.
-			g.emit("if %s.Loc == LocRegPair || %s.Loc == LocStackPair {", resolved[i].goVar, resolved[i].goVar)
+			// If the value is currently an aggregate, this call shape is not representable.
+			g.emit("if %s.Loc == LocRegPair || %s.Loc == LocStackPair || %s.Loc == LocRegTriple || %s.Loc == LocStackTriple {", resolved[i].goVar, resolved[i].goVar, resolved[i].goVar, resolved[i].goVar)
 			g.emit("\tpanic(\"jit: generic call arg expects 1-word value\")")
 			g.emit("}")
 		case 2:
@@ -965,19 +1007,26 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 			g.emit("ctx.EnsureDesc(&%s)", resolved[i].goVar)
 			g.emit("if %s.Loc == LocImm {", resolved[i].goVar)
 			g.emit("\ttmpPair := JITValueDesc{Loc: LocRegPair, Type: %s.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}", resolved[i].goVar)
-			g.emit("\tif %s.Imm.GetTag() == tagBool {", resolved[i].goVar)
-			g.emit("\t\tctx.EmitMakeBool(tmpPair, %s)", resolved[i].goVar)
-			g.emit("\t} else if %s.Imm.GetTag() == tagInt {", resolved[i].goVar)
-			g.emit("\t\tctx.EmitMakeInt(tmpPair, %s)", resolved[i].goVar)
-			g.emit("\t} else if %s.Imm.GetTag() == tagFloat {", resolved[i].goVar)
-			g.emit("\t\tctx.EmitMakeFloat(tmpPair, %s)", resolved[i].goVar)
-			g.emit("\t} else if %s.Imm.GetTag() == tagNil {", resolved[i].goVar)
-			g.emit("\t\tctx.EmitMakeNil(tmpPair)")
-			g.emit("\t} else {")
-			g.emit("\t\tptrWord, auxWord := %s.Imm.RawWords()", resolved[i].goVar)
-			g.emit("\t\tctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))")
-			g.emit("\t\tctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)")
-			g.emit("\t}")
+			if basic, ok := paramType.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+				g.emit("\tctx.TrackImm(%s.Imm)", resolved[i].goVar)
+				g.emit("\tptrWord, _ := %s.Imm.RawWords()", resolved[i].goVar)
+				g.emit("\tctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))")
+				g.emit("\tctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(%s.Imm.String())))", resolved[i].goVar)
+			} else {
+				g.emit("\tif %s.Imm.GetTag() == tagBool {", resolved[i].goVar)
+				g.emit("\t\tctx.EmitMakeBool(tmpPair, %s)", resolved[i].goVar)
+				g.emit("\t} else if %s.Imm.GetTag() == tagInt {", resolved[i].goVar)
+				g.emit("\t\tctx.EmitMakeInt(tmpPair, %s)", resolved[i].goVar)
+				g.emit("\t} else if %s.Imm.GetTag() == tagFloat {", resolved[i].goVar)
+				g.emit("\t\tctx.EmitMakeFloat(tmpPair, %s)", resolved[i].goVar)
+				g.emit("\t} else if %s.Imm.GetTag() == tagNil {", resolved[i].goVar)
+				g.emit("\t\tctx.EmitMakeNil(tmpPair)")
+				g.emit("\t} else {")
+				g.emit("\t\tptrWord, auxWord := %s.Imm.RawWords()", resolved[i].goVar)
+				g.emit("\t\tctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))")
+				g.emit("\t\tctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)")
+				g.emit("\t}")
+			}
 			g.emit("\t%s = tmpPair", resolved[i].goVar)
 			g.emit("} else if %s.Loc == LocReg {", resolved[i].goVar)
 			g.emit("\ttmpPair := JITValueDesc{Loc: LocRegPair, Type: %s.Type, Reg: ctx.AllocRegExcept(%s.Reg), Reg2: ctx.AllocRegExcept(%s.Reg)}", resolved[i].goVar, resolved[i].goVar, resolved[i].goVar)
@@ -997,24 +1046,26 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 			g.emit("if %s.Loc != LocRegPair && %s.Loc != LocStackPair {", resolved[i].goVar, resolved[i].goVar)
 			g.emit("\tpanic(\"jit: generic call arg expects 2-word value (%s arg%d)\")", funcExpr, i)
 			g.emit("}")
+		case 3:
+			g.emit("ctx.EnsureDesc(&%s)", resolved[i].goVar)
+			g.emit("if %s.Loc != LocRegTriple && %s.Loc != LocStackTriple {", resolved[i].goVar, resolved[i].goVar)
+			g.emit("\tpanic(\"jit: generic call arg expects 3-word Go slice (%s arg%d)\")", funcExpr, i)
+			g.emit("}")
 		default:
 			return false
 		}
 	}
 	argList := strings.Join(argVars, ", ")
-	results := sig.Results()
 	if results.Len() == 0 {
 		g.emit("ctx.EmitGoCallVoid(GoFuncAddr(%s), []JITValueDesc{%s})", funcExpr, argList)
+		for i, isConstant := range constantArgs {
+			if isConstant {
+				g.emit("ctx.FreeDesc(&%s)", resolved[i].goVar)
+			}
+		}
 		return true
 	}
-	if results.Len() != 1 || name == "" {
-		return false
-	}
 	retType := results.At(0).Type()
-	retWords := goCallWordCount(retType)
-	if retWords != 1 && retWords != 2 {
-		return false
-	}
 	dv := g.allocDesc()
 	g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
 	// Bind and protect GoCall result registers. The nil-ownership from
@@ -1022,9 +1073,14 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	// We protect until freeDeadOperands releases this value.
 	if retWords == 1 {
 		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
-	} else {
+	} else if retWords == 2 {
 		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
 		g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
+	}
+	for i, isConstant := range constantArgs {
+		if isConstant {
+			g.emit("ctx.FreeDesc(&%s)", resolved[i].goVar)
+		}
 	}
 	marker := ""
 	if bt, ok := retType.Underlying().(*types.Basic); ok && bt.Kind() == types.String {
@@ -2411,8 +2467,8 @@ func addScmPrefix(code string) string {
 	scmIdents := map[string]bool{
 		"JITValueDesc": true, "JITTypeUnknown": true, "JITContext": true,
 		"BBDescriptor": true, "PhiState": true,
-		"LocNone": true, "LocReg": true, "LocRegPair": true,
-		"LocStack": true, "LocStackPair": true, "LocMem": true, "LocImm": true, "LocAny": true,
+		"LocNone": true, "LocReg": true, "LocRegPair": true, "LocRegTriple": true,
+		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocMem": true, "LocImm": true, "LocAny": true,
 		"NewInt": true, "NewFloat": true, "NewBool": true, "NewNil": true, "NewString": true,
 		"NewFastDict": true, "NewFastDictValue": true,
 		"Scmer": true, "GoFuncAddr": true, "JITBuildMergeClosure": true,
@@ -3283,12 +3339,15 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					// Load slice header: ptr (8 bytes), len (8 bytes), cap (8 bytes)
 					ptrReg := g.allocReg()
 					lenReg := g.allocReg()
+					capReg := g.allocReg()
 					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
 					g.emit("\t%s := ctx.AllocReg()", ptrReg)
-					g.emit("\t%s := ctx.AllocReg()", lenReg)
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", ptrReg)   // data ptr
-					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg) // length
-					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg, lenReg)
+					g.emit("\t%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
+					g.emit("\t%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr)", ptrReg)    // data ptr
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+8)", lenReg)  // length
+					g.emit("\tctx.EmitMovRegMem64(%s, fieldAddr+16)", capReg) // capacity
+					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
 				case "array":
 					ptrReg := g.allocReg()
 					g.emit("\tfieldAddr := uintptr(thisptr.Imm.Int()) + %s", src.offsetExpr)
@@ -3323,11 +3382,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				case "slice":
 					ptrReg2 := g.allocReg()
 					lenReg2 := g.allocReg()
+					capReg2 := g.allocReg()
 					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
-					g.emit("\t%s := ctx.AllocReg()", lenReg2)
-					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)   // data ptr
-					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2) // length
-					g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv, ptrReg2, lenReg2)
+					g.emit("\t%s := ctx.AllocRegExcept(%s)", lenReg2, ptrReg2)
+					g.emit("\t%s := ctx.AllocRegExcept(%s, %s)", capReg2, ptrReg2, lenReg2)
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off)", ptrReg2)    // data ptr
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+8)", lenReg2)  // length
+					g.emit("\tctx.EmitMovRegMem(%s, thisptr.Reg, off+16)", capReg2) // capacity
+					g.emit("\t%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg2, lenReg2, capReg2)
 				case "array":
 					ptrReg2 := g.allocReg()
 					g.emit("\t%s := ctx.AllocReg()", ptrReg2)
@@ -3622,7 +3684,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						}
 						g.emit("} else {")
 						g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
-						g.emit("\tif %s.Loc == LocRegPair {", src.goVar)
+						g.emit("\tif %s.Loc == LocRegPair || %s.Loc == LocRegTriple {", src.goVar, src.goVar)
 						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
 						g.emit("\t\tctx.BindReg(%s.Reg2, &%s)", src.goVar, dv)
 						g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
@@ -3712,6 +3774,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			break
 		}
 		switch callee.Name() {
+		case "asSlice":
+			arg := g.vals[v.Call.Args[0].Name()]
+			dv := g.allocDesc()
+			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{%s}, 3)", dv, arg.goVar)
+			g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
+			g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
+			g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
 		case "GetTag":
 			arg := g.vals[v.Call.Args[0].Name()]
 			if !arg.isDesc {
@@ -4086,23 +4156,29 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Slice":
-			// (Scmer).Slice() []Scmer — extract data ptr and length from Scmer
+			// (Scmer).Slice() []Scmer — materialize the complete Go slice ABI
+			// header. Scmer stores ptr+len; a reconstructed slice has cap == len.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			// ptr field = data pointer (Reg), aux stores (len<<8)|tag.
-			g.emit("var %s JITValueDesc", dv)
-			g.emit("if %s.Loc == LocImm {", arg.goVar)
-			g.emit("\tslice := %s.Imm.Slice()", arg.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagSlice, Imm: NewInt(int64(len(slice)))}", dv)
-			g.emit("} else {")
-			// Extract length payload from aux (auxVal = aux >> 8).
+			ptrReg := g.allocReg()
 			lenReg := g.allocReg()
-			g.emit("\t%s := ctx.AllocReg()", lenReg)
+			capReg := g.allocReg()
+			g.emit("%s := ctx.AllocReg()", ptrReg)
+			g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
+			g.emit("%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
+			g.emit("if %s.Loc == LocImm {", arg.goVar)
+			g.emit("\tctx.TrackImm(%s.Imm)", arg.goVar)
+			g.emit("\tptrWord, _ := %s.Imm.RawWords()", arg.goVar)
+			g.emit("\tctx.EmitMovRegImm64(%s, uint64(ptrWord))", ptrReg)
+			g.emit("\tctx.EmitMovRegImm64(%s, uint64(len(%s.Imm.Slice())))", lenReg, arg.goVar)
+			g.emit("} else {")
+			g.emit("\tctx.EnsureDesc(&%s)", arg.goVar)
+			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", ptrReg, arg.goVar)
 			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg2)", lenReg, arg.goVar)
 			g.emit("\tctx.EmitShrRegImm8(%s, 8)", lenReg)
-			g.emit("\tctx.FreeReg(%s.Reg2)", arg.goVar) // free aux
-			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Reg: %s.Reg, Reg2: %s}", dv, arg.goVar, lenReg)
 			g.emit("}")
+			g.emit("ctx.EmitMovRegReg(%s, %s)", capReg, lenReg)
+			g.emit("%s := JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
 		case "JITBuildMergeClosure":
 			// JITBuildMergeClosure(func(...Scmer) Scmer) func(Scmer, Scmer) Scmer
@@ -4302,6 +4378,22 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		goOp := goOpStr(v.Op)
 		if cc != "" {
 			dv := g.allocDesc()
+			if _, pointerCompare := v.X.Type().Underlying().(*types.Pointer); pointerCompare {
+				if c, ok := v.Y.(*ssa.Const); ok && c.Value == nil && (v.Op == token.EQL || v.Op == token.NEQ) {
+					g.emit("var %s JITValueDesc", dv)
+					g.emit("if %s.Loc == LocImm {", xVal.goVar)
+					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.IsNil() %s true)}", dv, xVal.goVar, goOp)
+					g.emit("} else {")
+					rv := g.allocReg()
+					g.emitAllocRegExcept(rv, "\t", xMultiUse, xVal)
+					g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", xVal.goVar)
+					g.emit("\tctx.EmitSetcc(%s, %s)", rv, cc)
+					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: %s}", dv, rv)
+					g.emit("}")
+					g.vals[name] = genVal{goVar: dv, isDesc: true}
+					break
+				}
+			}
 			if sbx, okx := v.X.Type().Underlying().(*types.Basic); okx && sbx.Kind() == types.String {
 				if sby, oky := v.Y.Type().Underlying().(*types.Basic); oky && sby.Kind() == types.String {
 					if c, ok := v.Y.(*ssa.Const); ok {
@@ -5433,9 +5525,36 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gostring"}
 			break
 		}
-		// Sub-slice: str[low:high] or slice[low:high]
-		// Result is a LocRegPair {dataPtr, length} representing a Go string/slice header.
+		// Sub-slice: strings use ptr+len, Go slices use the complete ptr+len+cap ABI header.
 		x := g.vals[v.X.Name()]
+		if x.marker == "_alloc" {
+			ptr, ok := v.X.Type().Underlying().(*types.Pointer)
+			if !ok {
+				panic(fmt.Sprintf("Slice on unsupported allocation: %s", v))
+			}
+			array, ok := ptr.Elem().Underlying().(*types.Array)
+			if !ok || array.Len() != 0 {
+				panic(fmt.Sprintf("Slice on non-empty local allocation needs rooted stack storage: %s", v))
+			}
+			ptrReg := g.allocReg()
+			lenReg := g.allocReg()
+			capReg := g.allocReg()
+			dv := g.allocDesc()
+			g.emit("%s := ctx.AllocReg()", ptrReg)
+			g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
+			g.emit("%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
+			g.emit("ctx.EmitMovRegImm64(%s, 0)", ptrReg)
+			g.emit("ctx.EmitMovRegImm64(%s, 0)", lenReg)
+			g.emit("ctx.EmitMovRegImm64(%s, 0)", capReg)
+			g.emit("%s := JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			break
+		}
+		sliceType, isGoSlice := v.X.Type().Underlying().(*types.Slice)
+		elemSize := int64(1)
+		if isGoSlice {
+			elemSize = types.SizesFor("gc", "amd64").Sizeof(sliceType.Elem())
+		}
 		var low genVal
 		if v.Low == nil {
 			lowDesc := g.allocDesc()
@@ -5451,7 +5570,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			highDesc := g.allocDesc()
 			g.emit("var %s JITValueDesc", highDesc)
 			g.emit("ctx.EnsureDesc(&%s)", x.goVar)
-			g.emit("if %s.Loc == LocRegPair {", x.goVar)
+			g.emit("if %s.Loc == LocRegPair || %s.Loc == LocRegTriple {", x.goVar, x.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", highDesc, x.goVar)
 			g.emit("} else {")
 			g.emit("\tpanic(\"Slice with omitted high requires descriptor with length in Reg2\")")
@@ -5491,13 +5610,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("\t}")
 		g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", lenDesc, lenReg)
 		g.emit("}")
-		// Compute new data pointer: x.ptr + low
+		// Compute new data pointer: x.ptr + low*element-size.
 		ptrDesc := g.allocDesc()
 		g.emit("var %s JITValueDesc", ptrDesc)
 		if x.isDesc {
 			// x is a string/slice descriptor: Reg=dataPtr (or LocImm for const fold)
 			g.emit("if %s.Loc == LocImm && %s.Loc == LocImm {", x.goVar, low.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() + %s.Imm.Int())}", ptrDesc, x.goVar, low.goVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() + %s.Imm.Int()*%d)}", ptrDesc, x.goVar, low.goVar, elemSize)
 			g.emit("} else {")
 			ptrReg := g.allocReg()
 			g.emit("\t%s := ctx.AllocReg()", ptrReg)
@@ -5507,17 +5626,30 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t\tctx.EmitMovRegReg(%s, %s.Reg)", ptrReg, x.goVar)
 			g.emit("\t}")
 			g.emit("\tif %s.Loc == LocImm {", low.goVar)
-			g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", low.goVar)
+			g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()*%d))", low.goVar, elemSize)
 			g.emit("\t\tctx.EmitAddInt64(%s, RegR11)", ptrReg)
 			g.emit("\t} else {")
-			g.emit("\t\tctx.EmitAddInt64(%s, %s.Reg)", ptrReg, low.goVar)
+			if elemSize == 1 {
+				g.emit("\t\tctx.EmitAddInt64(%s, %s.Reg)", ptrReg, low.goVar)
+			} else {
+				g.emit("\t\toffsetReg := ctx.AllocRegExcept(%s, %s.Reg)", ptrReg, low.goVar)
+				g.emit("\t\tctx.EmitMovRegReg(offsetReg, %s.Reg)", low.goVar)
+				if elemSize > 0 && elemSize&(elemSize-1) == 0 {
+					g.emit("\t\tctx.EmitShlRegImm8(offsetReg, %d)", uint8(math.Log2(float64(elemSize))))
+				} else {
+					g.emit("\t\tctx.EmitMovRegImm64(RegR11, %d)", elemSize)
+					g.emit("\t\tctx.EmitImulInt64(offsetReg, RegR11)")
+				}
+				g.emit("\t\tctx.EmitAddInt64(%s, offsetReg)", ptrReg)
+				g.emit("\t\tctx.FreeReg(offsetReg)")
+			}
 			g.emit("\t}")
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", ptrDesc, ptrReg)
 			g.emit("}")
 		} else {
 			panic(fmt.Sprintf("Slice on non-desc: %s", v))
 		}
-		// Combine into LocRegPair {ptr, len} — same layout as Go string header
+		// Combine into the ABI header expected by the value's Go type.
 		dv2 := g.allocDesc()
 		g.emit("var %s JITValueDesc", dv2)
 		// Always materialize string/slice headers as register pairs. A single
@@ -5538,9 +5670,30 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", finalLen, lenDesc)
 		g.emit("\tctx.FreeReg(%s.Reg)", lenDesc)
 		g.emit("}")
-		g.emit("%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv2, finalPtr, finalLen)
+		if isGoSlice {
+			finalCap := g.allocReg()
+			g.emit("%s := ctx.AllocRegExcept(%s, %s)", finalCap, finalPtr, finalLen)
+			g.emit("ctx.EmitMovRegReg(%s, %s.Reg3)", finalCap, x.goVar)
+			g.emit("if %s.Loc == LocImm {", low.goVar)
+			g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", low.goVar, low.goVar)
+			g.emit("\t\tctx.EmitSubRegImm32(%s, int32(%s.Imm.Int()))", finalCap, low.goVar)
+			g.emit("\t} else {")
+			g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()))", low.goVar)
+			g.emit("\t\tctx.EmitSubInt64(%s, RegR11)", finalCap)
+			g.emit("\t}")
+			g.emit("} else {")
+			g.emit("\tctx.EmitSubInt64(%s, %s.Reg)", finalCap, low.goVar)
+			g.emit("}")
+			g.emit("%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv2, finalPtr, finalLen, finalCap)
+		} else {
+			g.emit("%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv2, finalPtr, finalLen)
+		}
 		_ = dv
-		g.vals[name] = genVal{goVar: dv2, isDesc: true, marker: "_gostring"}
+		marker := "_gostring"
+		if isGoSlice {
+			marker = "_slice"
+		}
+		g.vals[name] = genVal{goVar: dv2, isDesc: true, marker: marker}
 
 	default:
 		panic(instrDesc(instr))
@@ -5863,9 +6016,10 @@ func (g *codeGen) lookup(v ssa.Value) genVal {
 }
 
 var (
-	locRegAssignRe     = regexp.MustCompile(`^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?JITValueDesc\{Loc:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?LocReg,\s*(?:Type:\s*[^,}]+,\s*)?Reg:\s*([^,}]+)`)
-	locRegPairAssignRe = regexp.MustCompile(`^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?JITValueDesc\{Loc:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?LocRegPair,\s*(?:Type:\s*[^,}]+,\s*)?Reg:\s*([^,}]+),\s*Reg2:\s*([^,}]+)`)
-	regExprRe          = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$`)
+	locRegAssignRe       = regexp.MustCompile(`^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?JITValueDesc\{Loc:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?LocReg,\s*(?:Type:\s*[^,}]+,\s*)?Reg:\s*([^,}]+)`)
+	locRegPairAssignRe   = regexp.MustCompile(`^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?JITValueDesc\{Loc:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?LocRegPair,\s*(?:Type:\s*[^,}]+,\s*)?Reg:\s*([^,}]+),\s*Reg2:\s*([^,}]+)`)
+	locRegTripleAssignRe = regexp.MustCompile(`^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*(?::=|=)\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?JITValueDesc\{Loc:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)?LocRegTriple,\s*(?:Type:\s*[^,}]+,\s*)?Reg:\s*([^,}]+),\s*Reg2:\s*([^,}]+),\s*Reg3:\s*([^,}]+)`)
+	regExprRe            = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$`)
 )
 
 func bindableRegExpr(expr string) bool {
@@ -5877,6 +6031,16 @@ func injectBindRegCalls(code string) string {
 	out := make([]string, 0, len(lines)+len(lines)/3)
 	for _, line := range lines {
 		out = append(out, line)
+		if m := locRegTripleAssignRe.FindStringSubmatch(line); m != nil {
+			indent, descVar := m[1], m[2]
+			for _, expr := range m[3:6] {
+				expr = strings.TrimSpace(expr)
+				if bindableRegExpr(expr) {
+					out = append(out, fmt.Sprintf("%sctx.BindReg(%s, &%s)", indent, expr, descVar))
+				}
+			}
+			continue
+		}
 		if m := locRegAssignRe.FindStringSubmatch(line); m != nil {
 			indent, descVar, regExpr := m[1], m[2], strings.TrimSpace(m[3])
 			if bindableRegExpr(regExpr) {

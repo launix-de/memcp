@@ -173,6 +173,7 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 //	LocImm:     ALWAYS fixed. Imm.GetTag() == Type. Constant-fold everything.
 //	LocReg:     ALWAYS fixed. Unboxed primitive in a register. Type says what.
 //	LocRegPair: Fixed if Type != JITTypeUnknown, flexible otherwise.
+//	LocRegTriple: Three raw Go ABI words, currently used for slice ptr/len/cap.
 //	LocAny:     Result placement hint only ("I don't care where you put it").
 type JITValueDesc struct {
 	ID       uint32
@@ -181,6 +182,7 @@ type JITValueDesc struct {
 	Reg      Reg
 	Reg2     Reg     // second register (for Scmer: ptr+aux)
 	StackOff int32   // stack offset (if Loc == LocStack)
+	Reg3     Reg     // third register (for Go slices: ptr+len+cap); occupies former padding to keep the descriptor ABI stable
 	MemPtr   uintptr // memory address (only if Loc == LocMem)
 	Imm      Scmer   // compile-time constant (if Loc == LocImm); Imm.GetTag() carries type info
 }
@@ -208,6 +210,10 @@ const (
 	LocMem                     // At a fixed memory address (MemPtr)
 	LocImm                     // Compile-time constant (Imm)
 	LocAny                     // "I don't care" — result may be constant, register, or memory
+	// Append new locations to preserve the numeric ABI used by generated
+	// emitters and already compiled JIT integration code.
+	LocRegTriple   // In three registers (Reg=ptr, Reg2=len, Reg3=cap) — for Go slices
+	LocStackTriple // Three-word value in the current invocation's frame (StackOff..StackOff+16)
 )
 
 // JITFixup records a forward reference that must be patched after all
@@ -494,6 +500,8 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 			valid = owner.Reg == rr
 		case LocRegPair:
 			valid = owner.Reg == rr || owner.Reg2 == rr
+		case LocRegTriple:
+			valid = owner.Reg == rr || owner.Reg2 == rr || owner.Reg3 == rr
 		}
 		if !valid {
 			ctx.RegOwners[rr] = nil
@@ -522,6 +530,8 @@ func (ctx *JITContext) AllocReg() Reg {
 			valid = owner.Reg == rr
 		case LocRegPair:
 			valid = owner.Reg == rr || owner.Reg2 == rr
+		case LocRegTriple:
+			valid = owner.Reg == rr || owner.Reg2 == rr || owner.Reg3 == rr
 		}
 		if !valid {
 			ctx.RegOwners[rr] = nil
@@ -547,7 +557,8 @@ func (ctx *JITContext) AllocReg() Reg {
 	spillable := ctx.AllRegs &^ ctx.FreeRegs &^ ctx.ProtectedRegs
 	var r Reg = 0xFF
 	pairSpill := false
-	var pairR1, pairR2 Reg
+	tripleSpill := false
+	var spillR1, spillR2, spillR3 Reg
 	for bit := int(RegR15); bit >= 0; bit-- {
 		rbit := Reg(bit)
 		if spillable&(1<<uint(rbit)) == 0 {
@@ -569,15 +580,29 @@ func (ctx *JITContext) AllocReg() Reg {
 				// Stale ownership metadata: do not reclaim implicitly.
 				continue
 			}
-			pairR1 = owner.Reg
-			pairR2 = owner.Reg2
+			spillR1 = owner.Reg
+			spillR2 = owner.Reg2
 			// Pair spill must evict both registers atomically; if either register
 			// is currently protected, try another candidate.
-			if (ctx.ProtectedRegs&(1<<uint(pairR1))) != 0 || (ctx.ProtectedRegs&(1<<uint(pairR2))) != 0 {
+			if (ctx.ProtectedRegs&(1<<uint(spillR1))) != 0 || (ctx.ProtectedRegs&(1<<uint(spillR2))) != 0 {
 				continue
 			}
 			r = rbit
 			pairSpill = true
+		case LocRegTriple:
+			if owner.Reg != rbit && owner.Reg2 != rbit && owner.Reg3 != rbit {
+				continue
+			}
+			spillR1 = owner.Reg
+			spillR2 = owner.Reg2
+			spillR3 = owner.Reg3
+			if (ctx.ProtectedRegs&(1<<uint(spillR1))) != 0 ||
+				(ctx.ProtectedRegs&(1<<uint(spillR2))) != 0 ||
+				(ctx.ProtectedRegs&(1<<uint(spillR3))) != 0 {
+				continue
+			}
+			r = rbit
+			tripleSpill = true
 		default:
 			// Unknown owner location: do not reclaim implicitly.
 			continue
@@ -591,7 +616,7 @@ func (ctx *JITContext) AllocReg() Reg {
 			if ctx.RegOwners[rr] != nil {
 				ownerMask |= 1 << uint(rr)
 				o := ctx.RegOwners[rr]
-				ownerDump += fmt.Sprintf(" r%d(loc=%d reg=%d reg2=%d)", rr, o.Loc, o.Reg, o.Reg2)
+				ownerDump += fmt.Sprintf(" r%d(loc=%d reg=%d reg2=%d reg3=%d)", rr, o.Loc, o.Reg, o.Reg2, o.Reg3)
 			}
 		}
 		panic(fmt.Sprintf("jit: register spill required (fallback) free=%#x all=%#x prot=%#x owners=%#x%s", ctx.FreeRegs, ctx.AllRegs, ctx.ProtectedRegs, ownerMask, ownerDump))
@@ -600,9 +625,8 @@ func (ctx *JITContext) AllocReg() Reg {
 	owner := ctx.RegOwners[r]
 	if pairSpill {
 		stackOff := ctx.AllocSpill(16)
-		ctx.EmitStoreRegMem(pairR1, RegRBP, stackOff)
-		ctx.EmitStoreRegMem(pairR2, RegRBP, stackOff+8)
-
+		ctx.EmitStoreRegMem(spillR1, RegRBP, stackOff)
+		ctx.EmitStoreRegMem(spillR2, RegRBP, stackOff+8)
 		owner.Loc = LocStackPair
 		owner.MemPtr = 0
 		owner.StackOff = stackOff
@@ -614,8 +638,30 @@ func (ctx *JITContext) AllocReg() Reg {
 			}
 			ctx.descSpills[owner.ID] = descSpillMeta{loc: LocStackPair, stackOff: stackOff}
 		}
-		ctx.RegOwners[pairR1] = nil
-		ctx.RegOwners[pairR2] = nil
+		ctx.RegOwners[spillR1] = nil
+		ctx.RegOwners[spillR2] = nil
+		return r
+	}
+	if tripleSpill {
+		stackOff := ctx.AllocSpill(24)
+		ctx.EmitStoreRegMem(spillR1, RegRBP, stackOff)
+		ctx.EmitStoreRegMem(spillR2, RegRBP, stackOff+8)
+		ctx.EmitStoreRegMem(spillR3, RegRBP, stackOff+16)
+		owner.Loc = LocStackTriple
+		owner.MemPtr = 0
+		owner.StackOff = stackOff
+		owner.Reg = 0
+		owner.Reg2 = 0
+		owner.Reg3 = 0
+		if owner.ID != 0 {
+			if ctx.descSpills == nil {
+				ctx.descSpills = make(map[uint32]descSpillMeta)
+			}
+			ctx.descSpills[owner.ID] = descSpillMeta{loc: LocStackTriple, stackOff: stackOff}
+		}
+		ctx.RegOwners[spillR1] = nil
+		ctx.RegOwners[spillR2] = nil
+		ctx.RegOwners[spillR3] = nil
 		return r
 	}
 
@@ -656,6 +702,16 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 			desc.Reg2 = 0
 		}
 	}
+	if desc.Loc == LocRegTriple && desc.ID != 0 && ctx.descSpills != nil {
+		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStackTriple {
+			desc.Loc = LocStackTriple
+			desc.MemPtr = 0
+			desc.StackOff = meta.stackOff
+			desc.Reg = 0
+			desc.Reg2 = 0
+			desc.Reg3 = 0
+		}
+	}
 	switch desc.Loc {
 	case LocStack:
 		ctx.EnsureReg(desc)
@@ -675,6 +731,26 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 		desc.StackOff = 0
 		ctx.BindReg(r1, desc)
 		ctx.BindReg(r2, desc)
+	case LocStackTriple:
+		r1 := ctx.AllocReg()
+		r2 := ctx.AllocRegExcept(r1)
+		r3 := ctx.AllocRegExcept(r1, r2)
+		base := RegRSP
+		if desc.StackOff < 0 {
+			base = RegRBP
+		}
+		ctx.EmitMovRegMem(r1, base, desc.StackOff)
+		ctx.EmitMovRegMem(r2, base, desc.StackOff+8)
+		ctx.EmitMovRegMem(r3, base, desc.StackOff+16)
+		desc.Loc = LocRegTriple
+		desc.Reg = r1
+		desc.Reg2 = r2
+		desc.Reg3 = r3
+		desc.MemPtr = 0
+		desc.StackOff = 0
+		ctx.BindReg(r1, desc)
+		ctx.BindReg(r2, desc)
+		ctx.BindReg(r3, desc)
 	}
 }
 
@@ -703,6 +779,18 @@ func (ctx *JITContext) FreeReg(r Reg) {
 				owner.Loc = LocNone
 				owner.Reg = 0
 				owner.Reg2 = 0
+			}
+		case LocRegTriple:
+			if owner.Reg == r || owner.Reg2 == r || owner.Reg3 == r {
+				for _, other := range [...]Reg{owner.Reg, owner.Reg2, owner.Reg3} {
+					if other != r && other <= RegR15 {
+						ctx.RegOwners[other] = nil
+					}
+				}
+				owner.Loc = LocNone
+				owner.Reg = 0
+				owner.Reg2 = 0
+				owner.Reg3 = 0
 			}
 		}
 	}
@@ -819,8 +907,19 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 				ctx.FreeReg(desc.Reg2)
 			}
 		}
+	case LocRegTriple:
+		for _, r := range [...]Reg{desc.Reg, desc.Reg2, desc.Reg3} {
+			if r > RegR15 {
+				continue
+			}
+			owner := ctx.RegOwners[r]
+			if owner == nil || owner == desc || (desc.ID != 0 && owner.ID == desc.ID) {
+				ctx.FreeReg(r)
+			}
+		}
 	case LocStack:
 	case LocStackPair:
+	case LocStackTriple:
 	}
 	desc.Loc = LocNone
 	desc.MemPtr = 0
@@ -1310,7 +1409,8 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 }
 
 // flattenArgs converts JITValueDesc arguments to ABI words.
-// LocRegPair → 2 words (Reg, Reg2), LocReg → 1 word, LocImm → deferred imm.
+// LocRegTriple → 3 words (Reg, Reg2, Reg3), LocRegPair → 2 words,
+// LocReg → 1 word, LocImm → deferred imm.
 // buf is a caller-provided [16]goCallArgWord scratch buffer; returns a slice into it.
 func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) []goCallArgWord {
 	n := 0
@@ -1320,6 +1420,13 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
 			n++
 			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg2}
+			n++
+		case LocRegTriple:
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
+			n++
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg2}
+			n++
+			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg3}
 			n++
 		case LocReg:
 			buf[n] = goCallArgWord{loc: LocReg, reg: a.Reg}
@@ -1331,6 +1438,13 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff}
 			n++
 			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff + 8}
+			n++
+		case LocStackTriple:
+			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff}
+			n++
+			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff + 8}
+			n++
+			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff + 16}
 			n++
 		case LocImm:
 			var immWord uint64
@@ -1376,6 +1490,9 @@ func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, nu
 	}
 	if numResultWords == 1 {
 		return JITValueDesc{Loc: LocReg, Reg: results[0]}
+	}
+	if numResultWords == 3 {
+		return JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1], Reg3: results[2]}
 	}
 	return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
 }
@@ -1625,64 +1742,64 @@ func init_jit() {
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-			argPinned0 := make([]Reg, 0, len(args)*2)
-			seenArgRegs := make(map[Reg]bool)
-			for _, ai := range args {
-				if ai.Loc == LocReg {
-					if !seenArgRegs[ai.Reg] {
-						ctx.ProtectReg(ai.Reg)
-						seenArgRegs[ai.Reg] = true
-						argPinned0 = append(argPinned0, ai.Reg)
-					}
-				} else if ai.Loc == LocRegPair {
-					if !seenArgRegs[ai.Reg] {
-						ctx.ProtectReg(ai.Reg)
-						seenArgRegs[ai.Reg] = true
-						argPinned0 = append(argPinned0, ai.Reg)
-					}
-					if !seenArgRegs[ai.Reg2] {
-						ctx.ProtectReg(ai.Reg2)
-						seenArgRegs[ai.Reg2] = true
-						argPinned0 = append(argPinned0, ai.Reg2)
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*2)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
 					}
 				}
-			}
-			d1 := args[0]
-			d1.ID = 0
-			d2 := ctx.EmitGetTagDesc(&d1, JITValueDesc{Loc: LocAny})
-			ctx.FreeDesc(&d1)
-			ctx.EnsureDesc(&d2)
-			var d3 JITValueDesc
-			if d2.Loc == LocImm {
-				d3 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d2.Imm.Int()) == uint64(11))}
-			} else {
-				r0 := ctx.AllocReg()
-				ctx.EmitCmpRegImm32(d2.Reg, 11)
-				ctx.EmitSetcc(r0, CcE)
-				d3 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
-				ctx.BindReg(r0, &d3)
-			}
-			ctx.FreeDesc(&d2)
-			ctx.EnsureDesc(&d3)
-			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				ctx.BindReg(result.Reg, &result)
-				ctx.BindReg(result.Reg2, &result)
-			}
-			if d3.Loc == LocImm {
-				ctx.EmitMakeBool(result, d3)
-			} else {
-				ctx.EmitMakeBool(result, d3)
-				ctx.FreeReg(d3.Reg)
-			}
-			result.Type = tagBool
-			return result
-			for _, r := range argPinned0 {
-				ctx.UnprotectReg(r)
-			}
-			return result
-		},
+				d1 := args[0]
+				d1.ID = 0
+				d2 := ctx.EmitGetTagDesc(&d1, JITValueDesc{Loc: LocAny})
+				ctx.FreeDesc(&d1)
+				ctx.EnsureDesc(&d2)
+				var d3 JITValueDesc
+				if d2.Loc == LocImm {
+					d3 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d2.Imm.Int()) == uint64(11))}
+				} else {
+					r0 := ctx.AllocReg()
+					ctx.EmitCmpRegImm32(d2.Reg, 11)
+					ctx.EmitSetcc(r0, CcE)
+					d3 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+					ctx.BindReg(r0, &d3)
+				}
+				ctx.FreeDesc(&d2)
+				ctx.EnsureDesc(&d3)
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				if d3.Loc == LocImm {
+					ctx.EmitMakeBool(result, d3)
+				} else {
+					ctx.EmitMakeBool(result, d3)
+					ctx.FreeReg(d3.Reg)
+				}
+				result.Type = tagBool
+				return result
+				for _, r := range argPinned0 {
+					ctx.UnprotectReg(r)
+				}
+				return result
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1696,48 +1813,48 @@ func init_jit() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-			argPinned0 := make([]Reg, 0, len(args)*2)
-			seenArgRegs := make(map[Reg]bool)
-			for _, ai := range args {
-				if ai.Loc == LocReg {
-					if !seenArgRegs[ai.Reg] {
-						ctx.ProtectReg(ai.Reg)
-						seenArgRegs[ai.Reg] = true
-						argPinned0 = append(argPinned0, ai.Reg)
-					}
-				} else if ai.Loc == LocRegPair {
-					if !seenArgRegs[ai.Reg] {
-						ctx.ProtectReg(ai.Reg)
-						seenArgRegs[ai.Reg] = true
-						argPinned0 = append(argPinned0, ai.Reg)
-					}
-					if !seenArgRegs[ai.Reg2] {
-						ctx.ProtectReg(ai.Reg2)
-						seenArgRegs[ai.Reg2] = true
-						argPinned0 = append(argPinned0, ai.Reg2)
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*2)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
 					}
 				}
-			}
-			d1 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
-			if result.Loc == LocAny {
-				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				ctx.BindReg(result.Reg, &result)
-				ctx.BindReg(result.Reg2, &result)
-			}
-			if d1.Loc == LocImm {
-				ctx.EmitMakeBool(result, d1)
-			} else {
-				ctx.EmitMakeBool(result, d1)
-				ctx.FreeReg(d1.Reg)
-			}
-			result.Type = tagBool
-			return result
-			for _, r := range argPinned0 {
-				ctx.UnprotectReg(r)
-			}
-			return result
-		},
+				d1 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				if d1.Loc == LocImm {
+					ctx.EmitMakeBool(result, d1)
+				} else {
+					ctx.EmitMakeBool(result, d1)
+					ctx.FreeReg(d1.Reg)
+				}
+				result.Type = tagBool
+				return result
+				for _, r := range argPinned0 {
+					ctx.UnprotectReg(r)
+				}
+				return result
+			},
 		},
 	})
 }
