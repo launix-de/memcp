@@ -1095,3 +1095,10 @@ func (s *StorageComputeProxy) DistinctCount() uint {
 	}
 	return s.main.DistinctCount()
 }
+
+// JITEmit preserves lazy compute semantics by calling the ordinary reader.
+func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+
+	/* TODO: ChangeType: changetype *Pointer[T] <- *Pointer[[]uint64] (x) */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+}

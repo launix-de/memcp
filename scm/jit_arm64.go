@@ -1,7 +1,7 @@
 //go:build arm64
 
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -50,6 +50,21 @@ func jitStackFrame(size uint8) []byte {
 // jitCompileProc is a stub for arm64 — native compilation not yet implemented.
 func jitCompileProc(proc *Proc) []byte {
 	return nil // arm64 not yet implemented
+}
+
+// jitCompileProcWithRoots is a stub for arm64 — native compilation not yet implemented.
+func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
+	return nil, nil
+}
+
+// jitCompileProcToExec is a stub for arm64 — native compilation not yet implemented.
+func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool) {
+	return 0, nil, false
+}
+
+// jitNextCallback is a stub for arm64 — unwinding not yet implemented.
+func jitNextCallback(pc, sp uintptr) (callerPC, callerSP, callerBP uintptr, ok bool) {
+	return 0, 0, 0, false
 }
 
 /* TODO: peephole optimizer:

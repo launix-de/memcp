@@ -938,3 +938,10 @@ func (s *StorageString) DistinctCount() uint {
 	}
 	return s.count // dict entry count = distinct values
 }
+
+// JITEmit currently preserves the complete string decoding path through GetValue.
+func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+
+	/* TODO: RunDefers: rundefers */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+}

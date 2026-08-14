@@ -39,10 +39,29 @@ func (source_info SourceInfo) String() string {
 }
 
 func Simplify(s string) Scmer {
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		return NewFloat(f)
+	if n, ok := parseNumberLiteral(s); ok {
+		return n
 	}
 	return NewString(s)
+}
+
+func parseNumberLiteral(s string) (Scmer, bool) {
+	if s == "-" || s == "" {
+		return Scmer{}, false
+	}
+	if strings.ContainsAny(s, ".eE") {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return NewFloat(f), true
+		}
+		return Scmer{}, false
+	}
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return NewInt(i), true
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return NewFloat(f), true
+	}
+	return Scmer{}, false
 }
 
 func Read(source, s string) (expression Scmer) {
@@ -201,8 +220,8 @@ func tokenize(source, s string) []Scmer {
 			// otherwise: state change!
 			if state == 1 {
 				// finish Number
-				if f, err := strconv.ParseFloat(s[startToken:i], 64); err == nil {
-					result = append(result, NewFloat(f))
+				if n, ok := parseNumberLiteral(s[startToken:i]); ok {
+					result = append(result, n)
 				} else if s[startToken:i] == "-" {
 					result = append(result, NewSymbol("-"))
 				} else {
@@ -243,8 +262,8 @@ func tokenize(source, s string) []Scmer {
 	// in the end: finish unfinished Symbols and Numbers
 	if state == 1 {
 		// finish Number
-		if f, err := strconv.ParseFloat(s[startToken:], 64); err == nil {
-			result = append(result, NewFloat(f))
+		if n, ok := parseNumberLiteral(s[startToken:]); ok {
+			result = append(result, n)
 		} else if s[startToken:] == "-" {
 			result = append(result, NewSymbol("-"))
 		} else {

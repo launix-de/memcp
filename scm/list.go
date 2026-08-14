@@ -687,6 +687,8 @@ func init_list() {
 			Return:   &TypeDescriptor{Kind: "int"},
 			Const:    true,
 			Optimize: optimizeCount,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -707,6 +709,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -730,6 +734,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -760,6 +766,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -781,6 +789,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeFixedLengthInput("reverse_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -799,6 +809,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeAppend,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -826,6 +838,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: FirstParameterMutable("append_unique_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -846,6 +860,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeCons,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -864,6 +880,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -884,6 +902,8 @@ func init_list() {
 			Return:   &TypeDescriptor{Kind: "list"},
 			Const:    true,
 			Optimize: optimizeCdr,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -902,6 +922,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -938,6 +960,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeZip,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -965,6 +989,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeMerge,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1003,6 +1029,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeMergeUnique,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1024,6 +1052,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1048,6 +1078,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeFilter,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1074,6 +1106,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1096,6 +1130,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeMap,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1157,6 +1193,8 @@ func init_list() {
 			},
 			Return:   FreshAlloc,
 			Optimize: optimizeFixedLengthInput("parallel_map_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1216,6 +1254,8 @@ func init_list() {
 				{Kind: "func", ParamName: "fn", ParamDesc: "function with side effects applied to each element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1238,6 +1278,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeFixedLengthInput("mapIndex_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1268,6 +1310,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -1293,6 +1337,8 @@ func init_list() {
 			},
 			Return: FreshAlloc,
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1325,6 +1371,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeProduceN,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1393,6 +1441,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeParallelN,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1429,6 +1479,8 @@ func init_list() {
 			Return:    &TypeDescriptor{Kind: "list"},
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1535,6 +1587,8 @@ func init_list() {
 			Return:    &TypeDescriptor{Kind: "list"},
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1552,6 +1606,245 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			var d0 JITValueDesc
+			_ = d0
+			var d1 JITValueDesc
+			_ = d1
+			var d2 JITValueDesc
+			_ = d2
+			var d3 JITValueDesc
+			_ = d3
+			var d13 JITValueDesc
+			_ = d13
+			var d14 JITValueDesc
+			_ = d14
+			/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+			var bbs [3]BBDescriptor
+			if result.Loc == LocAny {
+				result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.BindReg(result.Reg, &result)
+				ctx.BindReg(result.Reg2, &result)
+			}
+			lbl0 := ctx.ReserveLabel()
+			bbpos_0_0 := int32(-1)
+			_ = bbpos_0_0
+			lbl1 := ctx.ReserveLabel()
+			bbpos_0_1 := int32(-1)
+			_ = bbpos_0_1
+			lbl2 := ctx.ReserveLabel()
+			bbpos_0_2 := int32(-1)
+			_ = bbpos_0_2
+			lbl3 := ctx.ReserveLabel()
+			bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
+			if !ps.General {
+				if bbs[0].VisitCount >= 0 {
+					ps.General = true
+					return bbs[0].RenderPS(ps)
+				}
+			}
+			bbs[0].VisitCount++
+			if ps.General {
+				if bbs[0].Rendered {
+					ctx.EmitJmp(lbl1)
+					return result
+				}
+				bbs[0].Rendered = true
+				bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				bbpos_0_0 = bbs[0].Address
+				ctx.MarkLabel(lbl1)
+				ctx.ResolveFixups()
+			}
+			ctx.ReclaimUntrackedRegs()
+			d0 = args[0]
+			d0.ID = 0
+			d2 = d0
+			d2.ID = 0
+			d1 = ctx.EmitTagEqualsBorrowed(&d2, tagSlice, JITValueDesc{Loc: LocAny})
+			ctx.FreeDesc(&d0)
+			d3 = d1
+			ctx.EnsureDesc(&d3)
+			if d3.Loc != LocImm && d3.Loc != LocReg {
+				panic("jit: If condition is neither LocImm nor LocReg")
+			}
+			if d3.Loc == LocImm {
+				if d3.Imm.Bool() {
+			ps4 := PhiState{General: ps.General}
+			ps4.OverlayValues = make([]JITValueDesc, 4)
+			ps4.OverlayValues[0] = d0
+			ps4.OverlayValues[1] = d1
+			ps4.OverlayValues[2] = d2
+			ps4.OverlayValues[3] = d3
+					return bbs[1].RenderPS(ps4)
+				}
+			ps5 := PhiState{General: ps.General}
+			ps5.OverlayValues = make([]JITValueDesc, 4)
+			ps5.OverlayValues[0] = d0
+			ps5.OverlayValues[1] = d1
+			ps5.OverlayValues[2] = d2
+			ps5.OverlayValues[3] = d3
+				return bbs[2].RenderPS(ps5)
+			}
+			if !ps.General {
+				ps.General = true
+				return bbs[0].RenderPS(ps)
+			}
+			lbl4 := ctx.ReserveLabel()
+			lbl5 := ctx.ReserveLabel()
+			ctx.EmitCmpRegImm32(d3.Reg, 0)
+			ctx.EmitJcc(CcNE, lbl4)
+			ctx.EmitJmp(lbl5)
+			ctx.MarkLabel(lbl4)
+			ctx.EmitJmp(lbl2)
+			ctx.MarkLabel(lbl5)
+			ctx.EmitJmp(lbl3)
+			ps6 := PhiState{General: true}
+			ps6.OverlayValues = make([]JITValueDesc, 4)
+			ps6.OverlayValues[0] = d0
+			ps6.OverlayValues[1] = d1
+			ps6.OverlayValues[2] = d2
+			ps6.OverlayValues[3] = d3
+			ps7 := PhiState{General: true}
+			ps7.OverlayValues = make([]JITValueDesc, 4)
+			ps7.OverlayValues[0] = d0
+			ps7.OverlayValues[1] = d1
+			ps7.OverlayValues[2] = d2
+			ps7.OverlayValues[3] = d3
+			snap8 := d0
+			snap9 := d1
+			snap10 := d2
+			snap11 := d3
+			alloc12 := ctx.SnapshotAllocState()
+			if !bbs[2].Rendered {
+				bbs[2].RenderPS(ps7)
+			}
+			ctx.RestoreAllocState(alloc12)
+			d0 = snap8
+			d1 = snap9
+			d2 = snap10
+			d3 = snap11
+			if !bbs[1].Rendered {
+				return bbs[1].RenderPS(ps6)
+			}
+			return result
+			ctx.FreeDesc(&d1)
+			return result
+			}
+			bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
+			if !ps.General {
+				if bbs[1].VisitCount >= 0 {
+					ps.General = true
+					return bbs[1].RenderPS(ps)
+				}
+			}
+			bbs[1].VisitCount++
+			if ps.General {
+				if bbs[1].Rendered {
+					ctx.EmitJmp(lbl2)
+					return result
+				}
+				bbs[1].Rendered = true
+				bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				bbpos_0_1 = bbs[1].Address
+				ctx.MarkLabel(lbl2)
+				ctx.ResolveFixups()
+			}
+			if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
+				d0 = ps.OverlayValues[0]
+			}
+			if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
+				d1 = ps.OverlayValues[1]
+			}
+			if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
+				d2 = ps.OverlayValues[2]
+			}
+			if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
+				d3 = ps.OverlayValues[3]
+			}
+			ctx.ReclaimUntrackedRegs()
+			d13 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
+			ctx.EnsureDesc(&d13)
+			ctx.EmitMakeBool(result, d13)
+			if d13.Loc == LocReg { ctx.FreeReg(d13.Reg) }
+			result.Type = tagBool
+			ctx.EmitJmp(lbl0)
+			return result
+			}
+			bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
+			if !ps.General {
+				if bbs[2].VisitCount >= 0 {
+					ps.General = true
+					return bbs[2].RenderPS(ps)
+				}
+			}
+			bbs[2].VisitCount++
+			if ps.General {
+				if bbs[2].Rendered {
+					ctx.EmitJmp(lbl3)
+					return result
+				}
+				bbs[2].Rendered = true
+				bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				bbpos_0_2 = bbs[2].Address
+				ctx.MarkLabel(lbl3)
+				ctx.ResolveFixups()
+			}
+			if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
+				d0 = ps.OverlayValues[0]
+			}
+			if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
+				d1 = ps.OverlayValues[1]
+			}
+			if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
+				d2 = ps.OverlayValues[2]
+			}
+			if len(ps.OverlayValues) > 3 && ps.OverlayValues[3].Loc != LocNone {
+				d3 = ps.OverlayValues[3]
+			}
+			if len(ps.OverlayValues) > 13 && ps.OverlayValues[13].Loc != LocNone {
+				d13 = ps.OverlayValues[13]
+			}
+			ctx.ReclaimUntrackedRegs()
+			d14 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
+			ctx.EnsureDesc(&d14)
+			ctx.EmitMakeBool(result, d14)
+			if d14.Loc == LocReg { ctx.FreeReg(d14.Reg) }
+			result.Type = tagBool
+			ctx.EmitJmp(lbl0)
+			return result
+			}
+			argPinned15 := make([]Reg, 0, len(args)*2)
+			seenArgRegs := make(map[Reg]bool)
+			for _, ai := range args {
+				if ai.Loc == LocReg {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned15 = append(argPinned15, ai.Reg)
+					}
+				} else if ai.Loc == LocRegPair {
+					if !seenArgRegs[ai.Reg] {
+						ctx.ProtectReg(ai.Reg)
+						seenArgRegs[ai.Reg] = true
+						argPinned15 = append(argPinned15, ai.Reg)
+					}
+					if !seenArgRegs[ai.Reg2] {
+						ctx.ProtectReg(ai.Reg2)
+						seenArgRegs[ai.Reg2] = true
+						argPinned15 = append(argPinned15, ai.Reg2)
+					}
+				}
+			}
+			ps16 := PhiState{General: false}
+			_ = bbs[0].RenderPS(ps16)
+			ctx.MarkLabel(lbl0)
+			ctx.ResolveFixups()
+			for _, r := range argPinned15 {
+				ctx.UnprotectReg(r)
+			}
+			return result
+		},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1573,6 +1866,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1601,6 +1896,8 @@ func init_list() {
 			Params: []*TypeDescriptor{{Kind: "list", ParamName: "values", ParamDesc: "SQL IN-list values", NoEscape: true}, {Kind: "any", ParamName: "value", ParamDesc: "value to find"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -1637,6 +1934,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: FirstParameterMutable("filter_assoc_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1678,6 +1977,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1714,6 +2015,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeAssocFixedLengthInput("map_assoc_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1742,6 +2045,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1797,6 +2102,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1828,6 +2135,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1857,6 +2166,8 @@ func init_list() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1892,6 +2203,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: optimizeExtractAssoc,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1942,6 +2255,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: FirstParameterMutable("set_assoc_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1976,6 +2291,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: FirstParameterMutable("merge_assoc_mut"),
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2005,6 +2322,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2029,6 +2348,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 	// _mut variants: optimizer-only, forbidden from .scm code
@@ -2053,6 +2374,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2075,6 +2398,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2111,6 +2436,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2139,6 +2466,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2159,6 +2488,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2196,6 +2527,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2228,6 +2561,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2281,6 +2616,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2302,6 +2639,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2329,6 +2668,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2394,6 +2735,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2414,6 +2757,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 
@@ -2449,6 +2794,8 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2472,6 +2819,8 @@ func init_list() {
 			Return:   FreshAlloc,
 			Const:    true,
 			Optimize: FirstParameterMutable("sort_mut"),
+
+			JITEmit: nil,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2492,6 +2841,8 @@ func init_list() {
 				{Kind: "func", ParamName: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
+
+			JITEmit: nil,
 		},
 	})
 }
