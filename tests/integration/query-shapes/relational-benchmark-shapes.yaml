@@ -458,6 +458,25 @@ test_cases:
         - id: 1
           total_score: 14
 
+  - name: "TPC-H Q18 shape: inner source shadows the same outer alias"
+    sql: |
+      SELECT p.id, SUM(i.score) AS total_score
+      FROM rbq_parent p
+      JOIN rbq_item i ON i.parent_id = p.id
+      WHERE p.id IN (
+        SELECT i.parent_id
+        FROM rbq_item i
+        GROUP BY i.parent_id
+        HAVING SUM(i.score) > 10
+      )
+      GROUP BY p.id
+      ORDER BY p.id
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          total_score: 14
+
   - name: "TPC-H Q19 shape: disjoint OR branches contribute once"
     sql: |
       SELECT SUM(score) AS selected_score

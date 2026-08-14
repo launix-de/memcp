@@ -7,7 +7,9 @@ setup:
   - scm: (settings "ShardSize" 3)
   - sql: "DROP TABLE IF EXISTS safe_rollover"
   - sql: "DROP TABLE IF EXISTS safe_copy_rollover"
+  - sql: "DROP TABLE IF EXISTS safe_cold_rebuild"
   - sql: "CREATE TABLE safe_rollover (id INT PRIMARY KEY, note TEXT) ENGINE=SAFE"
+  - sql: "CREATE TABLE safe_cold_rebuild (id INT PRIMARY KEY, note TEXT) ENGINE=SAFE"
 
 test_cases:
   - name: "Insert enough rows to create multiple free shards"
@@ -22,6 +24,20 @@ test_cases:
       rows: 1
       data:
         - cnt: 8
+
+  - name: "Seed a multi-shard table that stays cold after restart"
+    scm: |
+      (insert (table "memcp-tests" "safe_cold_rebuild") '("id" "note")
+        (map (produceN 8) (lambda (i)
+          (list (+ i 1) (concat "cold-" i)))))
+
+  - name: "Cold-rebuild source is complete before restart"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM safe_cold_rebuild"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+          checksum: 36
 
   - name: "Import COPY stream across shard rollover"
     scm: |
@@ -79,9 +95,46 @@ test_cases:
       data:
         - note: "copy-7"
 
+  - name: "Incremental rebuild preserves cold persisted shards"
+    scm: '(rebuild (table "memcp-tests" "safe_cold_rebuild") false false)'
+
+  - name: "All cold-shard rows remain visible after rebuild"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM safe_cold_rebuild"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+          checksum: 36
+
+  - name: "Publish the generation rebuilt from cold shards"
+    sql: "SHUTDOWN"
+
+  - name: "Forced rebuild loads cold shards before repartition"
+    scm: '(rebuild (table "memcp-tests" "safe_cold_rebuild") true true)'
+
+  - name: "Forced cold-shard repartition preserves every row"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM safe_cold_rebuild"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+          checksum: 36
+
+  - name: "Publish the forced cold-shard repartition"
+    sql: "SHUTDOWN"
+
+  - name: "Forced cold-shard repartition survives restart"
+    sql: "SELECT COUNT(*) AS cnt, SUM(id) AS checksum FROM safe_cold_rebuild"
+    expect:
+      rows: 1
+      data:
+        - cnt: 8
+          checksum: 36
+
   - name: "Restore default shard size"
     scm: (settings "ShardSize" 60000)
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS safe_rollover"
   - sql: "DROP TABLE IF EXISTS safe_copy_rollover"
+  - sql: "DROP TABLE IF EXISTS safe_cold_rebuild"

@@ -1,0 +1,28 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+metadata:
+  version: "1.0"
+  description: "Planner fact pair-list lookup semantics"
+
+setup: []
+
+test_cases:
+  - name: "pair-list lookup preserves values, nil, and defaults"
+    scm: |
+      (begin
+        (define facts (list
+          (list 'purpose 'scalar_single)
+          (list 'bounds 2 5)
+          (list 'nullable nil)))
+        (and
+          (equal? (get_assoc_pairlist facts 'purpose 'missing) 'scalar_single)
+          (and
+            (equal? (get_assoc_pairlist facts 'bounds 'missing) '(2 5))
+            (and
+              (nil? (get_assoc_pairlist facts 'nullable 'missing))
+              (equal? (get_assoc_pairlist facts 'absent 'missing) 'missing)))))
+    expect:
+      data: [true]
+
+cleanup: []

@@ -1831,6 +1831,35 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "get_assoc_pairlist",
+		Desc: "gets a value from a list of key/value rows without flattening the rows",
+		Fn: func(a ...Scmer) Scmer {
+			for _, entry := range asSlice(a[0], "get_assoc_pairlist") {
+				if !entry.IsSlice() {
+					continue
+				}
+				row := entry.Slice()
+				if len(row) == 0 || !Equal(row[0], a[1]) {
+					continue
+				}
+				if len(row) == 2 {
+					return row[1]
+				}
+				return NewSlice(row[1:])
+			}
+			return a[2]
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "rows", ParamDesc: "list whose rows contain a key followed by one or more values", NoEscape: true},
+				{Kind: "any", ParamName: "key", ParamDesc: "key compared with the first item of each row"},
+				{Kind: "any", ParamName: "default", ParamDesc: "value returned when no row contains the key"},
+			},
+			Return: &TypeDescriptor{Kind: "any"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "extract_assoc",
 		Desc: "applies a function (key value) on the dictionary and returns the results as a flat list",
 		Fn: func(a ...Scmer) Scmer {
