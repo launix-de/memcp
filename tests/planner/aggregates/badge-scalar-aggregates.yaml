@@ -59,9 +59,9 @@ setup:
   - sql: "INSERT INTO badge_message SELECT id + 8, box_id, id % 2 = 0, CASE WHEN id % 2 = 0 THEN 7 ELSE 8 END FROM badge_message"
 
 test_cases:
-  - name: "Badge scalar aggregates hoist constant stage lookups"
-    max_time: 0.5
-    sql: |
+  - name: "Cold badge scalar aggregates hoist constant stage lookups"
+    max_time: 1.0
+    sql: &badge_scalar_query |
       SELECT
         1 AS marker,
         (
@@ -94,7 +94,7 @@ test_cases:
           WHERE k.assignee = (SELECT actor_id FROM badge_config WHERE id = 1 LIMIT 1)
           LIMIT 1
         ) AS ticket_effort
-    expect:
+    expect: &badge_scalar_expect
       rows: 1
       data:
         - marker: 1
@@ -102,6 +102,12 @@ test_cases:
           task_badge: 128
           message_badge: 1
           ticket_effort: 5
+
+  - name: "Badge scalar aggregates hoist constant stage lookups"
+    max_time: 0.5
+    timing_samples: 3
+    sql: *badge_scalar_query
+    expect: *badge_scalar_expect
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS badge_config"

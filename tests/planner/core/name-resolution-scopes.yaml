@@ -160,6 +160,22 @@ test_cases:
         - {ID: 1}
         - {ID: 2}
 
+  - name: "An unqualified local column is not ambiguous with an outer column"
+    sql: |
+      SELECT o.ID
+      FROM nr_outer o
+      WHERE EXISTS (
+        SELECT 1
+        FROM nr_inner i
+        WHERE shared = 2001
+      )
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
   - name: "Derived flattening cannot capture an inner IN column"
     sql: |
       SELECT t.ID

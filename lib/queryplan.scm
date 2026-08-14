@@ -70,12 +70,16 @@ PostgreSQL parsers should both lower to the same combined operators.
 /* Small assoc helpers                                                        */
 
 (define get_schema (lambda (schema tbl)
-	(try
-		(lambda ()
-			(begin
-				(define handle (table schema tbl))
-				(if handle (show handle) (show schema tbl))))
-		(lambda (_e) '()))))
+	(if (equal?? schema "information_schema")
+		/* sql-metadata.scm owns only the virtual catalog. This is the sole
+		public dispatcher, so module load order cannot replace its semantics. */
+		(information_schema_column_catalog schema tbl)
+		(try
+			(lambda ()
+				(begin
+					(define handle (table schema tbl))
+					(if handle (show handle) (show schema tbl))))
+			(lambda (_e) '())))))
 
 (define qassoc_get (lambda (xs key default)
 	(get_assoc_pairlist (coalesceNil xs '()) key default)))

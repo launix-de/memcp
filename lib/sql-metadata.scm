@@ -61,8 +61,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 )))
 
-/* emulate metadata tables */
-(define get_schema (lambda (schema tbl) (match '(schema tbl)
+/* Column catalog for virtual INFORMATION_SCHEMA relations. Storage-backed
+relations are deliberately resolved by the single public get_schema dispatcher. */
+(define information_schema_column_catalog (lambda (schema tbl) (match '(schema tbl)
 	/* special tables */
 	'((ignorecase "information_schema") (ignorecase "schemata")) '(
 		'("Field" "catalog_name")
@@ -170,7 +171,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* Unknown INFORMATION_SCHEMA table → clear SCM-side error */
 	'((ignorecase "information_schema") _)
 	(error (concat "INFORMATION_SCHEMA." tbl " is not supported yet"))
-	(show schema tbl) /* otherwise: fetch from metadata */
 )))
 
 /* runtime row source for virtual INFORMATION_SCHEMA tables */
