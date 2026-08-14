@@ -7697,7 +7697,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(concat (group_stage_cache_schema stage) "\n" (group_stage_cache_relation stage))
 		(concat "stage\n" (logical_stage_key stage)))))
 
-(define group_stage_with_initializer_owner (lambda (stage owner cache)
+(define group_stage_with_facts (lambda (stage facts)
 	(if (not (group_stage? stage))
 		stage
 		(make_group_stage
@@ -7711,9 +7711,13 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(gs_order stage)
 			(gs_limit stage)
 			(gs_offset stage)
-			(qassoc_set
-				(qassoc_set (gs_facts stage) (quote group_cache) cache)
-				(quote keytable_initializer_owner) owner)))))
+			facts))))
+
+(define group_stage_with_initializer_owner (lambda (stage owner cache)
+	(group_stage_with_facts stage
+		(qassoc_set
+			(qassoc_set (gs_facts stage) (quote group_cache) cache)
+			(quote keytable_initializer_owner) owner))))
 
 (define node_contains_nested_stage_input? (lambda (node)
 	(if (query_block? node)
@@ -9885,7 +9889,7 @@ self-joins of the same base table still describe two distinct row roles. */
 			(stage_semantic_alias_entries local_aliases "__carrier_local_")
 			(stage_semantic_alias_entries outer_aliases "__carrier_outer_"))))))
 
-(define canonical_group_input_identity (lambda (alias_map input)
+(define canonical_group_input_identity (lambda (alias_map signatures input)
 	/* A carrier stores the input row domain, not its SELECT projection. Omitting
 	fields, hidden expressions, and the stage catalog prevents nested scalar
 	projection trees from being serialized again for every enclosing aggregate. */
@@ -9894,19 +9898,19 @@ self-joins of the same base table still describe two distinct row roles. */
 			(quote query-domain)
 			(qb_schema input)
 			(map (qb_sources input) (lambda (src)
-				(stage_semantic_rewrite_source alias_map '() src)))
-			(stage_semantic_rewrite_expr alias_map '() (qb_where input))
-			(stage_semantic_rewrite_expr alias_map '() (qb_group input))
-			(stage_semantic_rewrite_expr alias_map '() (qb_having input))
+				(stage_semantic_rewrite_source alias_map signatures src)))
+			(stage_semantic_rewrite_expr alias_map signatures (qb_where input))
+			(stage_semantic_rewrite_expr alias_map signatures (qb_group input))
+			(stage_semantic_rewrite_expr alias_map signatures (qb_having input))
 			/* ORDER only changes the represented row domain when a bound consumes it. */
 			(if (and (nil? (qb_limit input)) (nil? (qb_offset input)))
 				'()
-				(stage_semantic_rewrite_expr alias_map '() (qb_order input)))
+				(stage_semantic_rewrite_expr alias_map signatures (qb_order input)))
 			(qb_limit input)
 			(qb_offset input))
 		/* UNION projections define the rows exposed to the grouping input. Keep
 		the complete canonical union until it gets a dedicated domain form. */
-		(stage_semantic_canonical_node alias_map '() input))))
+		(stage_semantic_canonical_node alias_map signatures input))))
 
 (define canonical_orc_column_name (lambda (kind src payload)
 	/* ORCs live on one base table. Their identity is the table plus the complete
@@ -9955,7 +9959,7 @@ self-joins of the same base table still describe two distinct row roles. */
 				(concat "query:" (fnv_hash (string input)))
 				(source_relation input))))))
 
-(define group_stage_default_cache (lambda (stage)
+(define group_stage_default_cache (lambda (stage signatures)
 	(begin
 		(define schema (group_stage_schema stage))
 		(define input (gs_input stage))
@@ -9967,17 +9971,16 @@ self-joins of the same base table still describe two distinct row roles. */
 		(make_group_keytable_cache schema (group_table_name
 			schema
 			label
-			(canonical_group_input_identity alias_map input)
-			(stage_semantic_rewrite_expr alias_map '() keys)
-			(stage_semantic_rewrite_expr alias_map '() condition))))))
+			(canonical_group_input_identity alias_map signatures input)
+			(stage_semantic_rewrite_expr alias_map signatures keys)
+			(stage_semantic_rewrite_expr alias_map signatures condition))))))
 
 (define group_stage_cache (lambda (stage)
 	(begin
 		(define cached (qassoc_get (gs_facts stage) (quote group_cache) nil))
-		/* Canonicalizing a nested input walks its complete logical tree. Keep the
-		fallback lazy: Scheme evaluates function arguments eagerly, so coalesceNil
-		would repeat that walk even after physical lowering stored the result. */
-		(if (nil? cached) (group_stage_default_cache stage) cached))))
+		/* Analysis and cost probes have no semantic index yet and deliberately use
+		the cheap provisional identity. Physical preparation passes its shared index. */
+		(if (nil? cached) (group_stage_default_cache stage '()) cached))))
 
 (define group_stage_cache_relation (lambda (stage)
 	(group_cache_relation (group_stage_cache stage))))
@@ -12174,21 +12177,34 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			/* Do not derive a carrier while merely cataloging logical alternatives.
 			The cost model may lower only a small subset to group keytables; their
 			canonical physical names are computed lazily by group_stage_cache. */
-			(define facts (gs_facts stage))
-			(make_group_stage
-				(gs_id stage)
-				(gs_input stage)
-				(gs_domain stage)
-				(gs_keys stage)
-				(gs_aggregates stage)
-				(gs_having stage)
-				(gs_output stage)
-				(gs_order stage)
-				(gs_limit stage)
-				(gs_offset stage)
+			(group_stage_with_facts stage
 				(if (lowering_catalog? catalog)
-					(qassoc_set_without facts (quote lowering_catalog) catalog (quote stage_catalog))
-					(qassoc_set facts (quote stage_catalog) catalog)))))))
+					(qassoc_set_without (gs_facts stage) (quote lowering_catalog) catalog (quote stage_catalog))
+					(qassoc_set (gs_facts stage) (quote stage_catalog) catalog)))))))
+
+(define stages_with_canonical_group_caches_acc (lambda (stages signatures cache_index)
+	(match (coalesceNil stages '())
+		(cons stage rest) (begin
+			(if (not (group_stage? stage))
+				(begin
+					(define tail (stages_with_canonical_group_caches_acc rest signatures cache_index))
+					(list (cons stage (nth tail 0)) (nth tail 1)))
+				(begin
+					(define signature (get_assoc signatures (gs_id stage)))
+					(define cache (if (has_assoc? cache_index signature)
+						(cache_index signature)
+						(group_stage_default_cache stage signatures)))
+					(define next_index (if (has_assoc? cache_index signature)
+						cache_index
+						(set_assoc cache_index signature cache)))
+					(define cached_stage (group_stage_with_facts stage
+						(qassoc_set (gs_facts stage) (quote group_cache) cache)))
+					(define tail (stages_with_canonical_group_caches_acc rest signatures next_index))
+					(list (cons cached_stage (nth tail 0)) (nth tail 1)))))
+		_ (list '() cache_index))))
+
+(define stages_with_canonical_group_caches (lambda (stages signatures)
+	(nth (stages_with_canonical_group_caches_acc stages signatures '()) 0)))
 
 (define group_stage_lowering_catalog (lambda (stage)
 	(match (gs_facts stage)
@@ -12198,12 +12214,19 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			_ nil)
 		_ nil)))
 
-(define query_block_with_full_stage_catalog (lambda (block)
+(define query_block_with_full_stage_catalog_using (lambda (block stages)
 	(begin
-		(define stages (stage_catalog_with_nested (query_block_stage_catalog block)))
-		(define catalog (make_lowering_catalog stages))
+		(define signatures (stage_semantic_signature_index stages))
+		/* Catalog lookups must return the same annotated immutable stage instances
+		that root lowering sees; otherwise nested probe copies derive old names. */
+		(define signature_stages (stages_with_canonical_group_caches stages signatures))
+		(define catalog (make_lowering_catalog signature_stages))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
-			(group_stage_with_lowering_catalog stage catalog))))
+			(begin
+				(define cached (if (group_stage? stage) (stage_by_id catalog (gs_id stage)) nil))
+				(group_stage_with_lowering_catalog
+					(if (nil? cached) stage cached)
+					catalog)))))
 		(make_query_block
 			(qb_schema block)
 			(qb_sources block)
@@ -12216,7 +12239,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(qb_offset block)
 			(qb_hidden block)
 			cataloged_stages
-			(query_block_facts_with_lowering_catalog block stages catalog)))))
+			(query_block_facts_with_lowering_catalog block signature_stages catalog)))))
+
+(define query_block_with_full_stage_catalog (lambda (block)
+	(query_block_with_full_stage_catalog_using block
+		(stage_catalog_with_nested (query_block_stage_catalog block)))))
 
 (define stage_ids (lambda (stages)
 	(map (coalesceNil stages '()) gs_id)))
@@ -12581,14 +12608,13 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(define prepared_stage (if (group_stage? stage)
 				(group_stage_with_initializer_owner stage initializer_owner cache)
 				stage))
-			(define plan (prepare prepared_stage))
 			(define identity (stage_prepare_identity prepared_stage))
 			(define next_group_caches (if (and shared_group_cache initializer_owner)
 				(set_assoc initialized_group_caches group_cache_key true)
 				initialized_group_caches))
 			(if (has_assoc? seen identity)
 				(lower_unique_stage_prepares_acc rest seen next_group_caches prepare)
-				(cons plan
+				(cons (prepare prepared_stage)
 					(lower_unique_stage_prepares_acc rest (set_assoc seen identity true) next_group_caches prepare))))
 		_ '())))
 
@@ -15862,10 +15888,13 @@ build_queryplan contract. */
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		(define planned_root (apply_join_optimizer_plan_node (ir_root ir)))
+		(define stages (if (query_block? planned_root)
+			(stage_catalog_with_nested (query_block_stage_catalog planned_root))
+			'()))
 		(make_ir
 			(ir_kind ir)
 			(if (query_block? planned_root)
-				(query_block_with_full_stage_catalog planned_root)
+				(query_block_with_full_stage_catalog_using planned_root stages)
 				planned_root)
 			(map (ir_stages ir) apply_join_optimizer_plan_stage)
 			(ir_context_of ir)
