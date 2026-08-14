@@ -78,13 +78,7 @@ PostgreSQL parsers should both lower to the same combined operators.
 		(lambda (_e) '()))))
 
 (define qassoc_get (lambda (xs key default)
-	(match (coalesceNil xs '())
-		(cons entry rest) (match entry
-			(cons k values) (if (equal? k key)
-				(if (equal? (count values) 1) (car values) values)
-				(qassoc_get rest key default))
-			_ (qassoc_get rest key default))
-		_ default)))
+	(get_assoc_pairlist (coalesceNil xs '()) key default)))
 
 (define qassoc_set (lambda (xs key value)
 	(cons (list key value)
@@ -12676,10 +12670,6 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
 		(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
 		(define ags (gs_aggregates stage))
-		/* Aggregate column names belong to the immutable logical stage. Prepared
-		input and rewritten descriptors below affect execution only. */
-		(define aggregate_cols (map ags (lambda (ag)
-			(aggregate_col_name_using src ag))))
 		(define lowering_ags (if (query_block? src)
 			(rewrite_scalar_first_probe_aggregates stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias ags)
 			ags))
@@ -12698,6 +12688,12 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 						(equal? (cadr ags) aggregate_count_descriptor))))))
 		(define scalar_order_base_stage (and (not query_input)
 			(compatible_scalar_order_aggregates? ags)))
+		/* Aggregate column names belong to the immutable logical stage. Prepared
+		input and rewritten descriptors below affect execution only. Base aggregate
+		columns use their direct physical builder and need no canonical list here. */
+		(define aggregate_cols (if (or query_input scalar_order_base_stage)
+			(map ags (lambda (ag) (aggregate_col_name_using src ag)))
+			'()))
 		(define scalar_aggregate_stage (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate)))
 		(define prepared_src (if (query_block? rewritten_src)
 			(if scalar_aggregate_stage

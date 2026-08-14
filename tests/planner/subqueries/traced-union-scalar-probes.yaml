@@ -277,7 +277,7 @@ test_cases:
 
   - name: "Selective nested UNION EXISTS keeps bounded physical probes"
     max_time: 1.0
-    max_planner_time_ms: 650
+    max_planner_time_ms: 500
     max_plan_size: 350000
     max_compile_metrics:
       group_stages: 49
