@@ -643,6 +643,36 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_key_index",
+		Desc: "builds an immutable lookup function for key columns of the rows contained in a query-local recset",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			source := RecSetFromScmer(a[1])
+			sourceKeyCols := scmerSliceToStrings(mustScmerSlice(a[2], "sourceKeyColumns"))
+			if len(sourceKeyCols) == 0 {
+				panic("recset_key_index requires at least one key column")
+			}
+			keys := source.collectProjectJoinKeys(currentTx, sourceKeyCols, SessionStateFromTx(currentTx))
+			return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				if len(values) != keys.width {
+					panic("recset key lookup received the wrong number of key values")
+				}
+				return scm.NewBool(keys.contains(values))
+			})
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context used while reading source keys"},
+				{Kind: "recset", ParamName: "source_recset"},
+				{Kind: "list", ParamName: "source_key_columns"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "key", Variadic: true},
+			}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_union",
 		Desc: "combines query-local recsets from the same table and removes duplicate record IDs",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -2199,9 +2229,16 @@ func Init(en scm.Env) {
 		Name: "initialize_cache_table",
 		Desc: "registers maintenance, locks source tables for a consistent snapshot, and runs a canonical planner-cache initializer exactly once",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			tbl := TableFromScmer(a[0])
-			initialized := tbl.initializeCache(func() {
-				sources := mustScmerSlice(a[1], "source tables")
+			currentTx := scmerToTxContext(a[0])
+			tbl := TableFromScmer(a[1])
+			// Cache preparation can execute inside a shard worker. Like every scan
+			// operator, it receives transaction and session ownership explicitly.
+			var ss *scm.SessionState
+			if currentTx != nil {
+				ss = currentTx.SessionState
+			}
+			initialized := tbl.initializeCache(ss, func() {
+				sources := mustScmerSlice(a[2], "source tables")
 				sourceTables := make([]*table, len(sources))
 				for i, source := range sources {
 					sourceTables[i] = TableFromScmer(source)
@@ -2212,10 +2249,6 @@ func Init(en scm.Env) {
 					return left < right
 				})
 
-				ss := scm.GetCurrentSessionState()
-				if ss == nil {
-					panic("cache initialization requires a query session")
-				}
 				unlocks := make([]func(), 0, len(sourceTables))
 				defer func() {
 					for i := len(unlocks) - 1; i >= 0; i-- {
@@ -2227,16 +2260,17 @@ func Init(en scm.Env) {
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
-				scm.Apply(a[2])
 				scm.Apply(a[3])
-				if len(a) > 4 {
-					scm.Apply(a[4])
+				scm.Apply(a[4])
+				if len(a) > 5 {
+					scm.Apply(a[5])
 				}
 			})
 			return scm.NewBool(initialized)
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "transaction", ParamDesc: "explicit transaction context carrying query-session ownership"},
 				{Kind: "table", ParamName: "table"},
 				{Kind: "list", ParamName: "source_tables"},
 				{Kind: "func", ParamName: "register_maintenance", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
@@ -3568,19 +3602,112 @@ func showEngineStr(t *table) string {
 	}
 }
 
-// showBuildMeta builds the meta assoc for a table: Name, Engine, Collation, Charset, Comment, Unique, Partitions.
+func showStringSlice(values []string) scm.Scmer {
+	items := make([]scm.Scmer, len(values))
+	for i, value := range values {
+		items[i] = scm.NewString(value)
+	}
+	return scm.NewSlice(items)
+}
+
+func plannerDistinctForColumns(t *table, columns []string) (float64, float64, string) {
+	rows := float64(t.CountEstimate())
+	if len(columns) == 0 {
+		return 0, 0, "unknown"
+	}
+	estimate := 1.0
+	confidence := 1.0
+	for _, columnName := range columns {
+		var descriptor *column
+		for _, candidate := range t.Columns {
+			if candidate.Name == columnName {
+				descriptor = candidate
+				break
+			}
+		}
+		if descriptor == nil || descriptor.PlannerStats.Load() == nil {
+			return 0, 0, "unknown"
+		}
+		distinct := float64(atomic.LoadUint64(&descriptor.DistinctEstimate))
+		if distinct <= 0 {
+			return 0, 0, "unknown"
+		}
+		estimate *= distinct
+		confidence *= descriptor.PlannerStats.Load().Confidence
+	}
+	if estimate > rows {
+		estimate = rows
+	}
+	return estimate, confidence, "rebuild_independence"
+}
+
+// showBuildMeta builds table metadata including key, relationship, and
+// multi-column planner statistics. All statistics are immutable snapshots.
 func showBuildMeta(db *database, t *table) scm.Scmer {
 	engine := showEngineStr(t)
 	uniques := make([]scm.Scmer, len(t.Unique))
 	for i, uk := range t.Unique {
-		cols := make([]scm.Scmer, len(uk.Cols))
-		for j, c := range uk.Cols {
-			cols[j] = scm.NewString(c)
-		}
 		uniques[i] = scm.NewSlice([]scm.Scmer{
 			scm.NewString("Id"), scm.NewString(uk.Id),
-			scm.NewString("Cols"), scm.NewSlice(cols),
+			scm.NewString("Cols"), showStringSlice(uk.Cols),
 		})
+	}
+	multiColumnDistinct := make([]scm.Scmer, 0, len(t.Unique))
+	for _, uk := range t.Unique {
+		if len(uk.Cols) < 2 {
+			continue
+		}
+		confidence := 0.8
+		source := "unique_constraint_upper_bound"
+		if uk.Id == "PRIMARY" {
+			confidence = 1
+			source = "primary_key"
+		}
+		multiColumnDistinct = append(multiColumnDistinct, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Columns"), showStringSlice(uk.Cols),
+			scm.NewString("Estimate"), scm.NewInt(int64(t.CountEstimate())),
+			scm.NewString("Confidence"), scm.NewFloat(confidence),
+			scm.NewString("Source"), scm.NewString(source),
+		}))
+	}
+	foreignKeys := make([]scm.Scmer, 0, len(t.Foreign))
+	fanouts := make([]scm.Scmer, 0, len(t.Foreign))
+	for _, fk := range t.Foreign {
+		role := "referenced"
+		localColumns := fk.Cols2
+		otherTable := fk.Tbl1
+		otherColumns := fk.Cols1
+		if fk.Tbl1 == t.Name {
+			role = "referencing"
+			localColumns = fk.Cols1
+			otherTable = fk.Tbl2
+			otherColumns = fk.Cols2
+		}
+		foreignKeys = append(foreignKeys, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Id"), scm.NewString(fk.Id),
+			scm.NewString("Role"), scm.NewString(role),
+			scm.NewString("LocalColumns"), showStringSlice(localColumns),
+			scm.NewString("OtherTable"), scm.NewString(otherTable),
+			scm.NewString("OtherColumns"), showStringSlice(otherColumns),
+		}))
+		fanoutEstimate := scm.NewNil()
+		confidenceValue := 0.0
+		sourceValue := "unknown"
+		if role == "referencing" {
+			distinct, confidence, source := plannerDistinctForColumns(t, localColumns)
+			if distinct > 0 {
+				fanoutEstimate = scm.NewFloat(float64(t.CountEstimate()) / distinct)
+				confidenceValue = confidence
+				sourceValue = source
+			}
+		}
+		fanouts = append(fanouts, scm.NewSlice([]scm.Scmer{
+			scm.NewString("Id"), scm.NewString(fk.Id),
+			scm.NewString("Role"), scm.NewString(role),
+			scm.NewString("EstimatedFanout"), fanoutEstimate,
+			scm.NewString("Confidence"), scm.NewFloat(confidenceValue),
+			scm.NewString("Source"), scm.NewString(sourceValue),
+		}))
 	}
 	partitions := make([]scm.Scmer, 0)
 	if t.ShardMode == ShardModePartition {
@@ -3599,6 +3726,9 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		scm.NewString("Charset"), scm.NewString(t.Charset),
 		scm.NewString("Comment"), scm.NewString(t.Comment),
 		scm.NewString("Unique"), scm.NewSlice(uniques),
+		scm.NewString("ForeignKeys"), scm.NewSlice(foreignKeys),
+		scm.NewString("Fanout"), scm.NewSlice(fanouts),
+		scm.NewString("MultiColumnDistinct"), scm.NewSlice(multiColumnDistinct),
 		scm.NewString("Partitions"), scm.NewSlice(partitions),
 	})
 }

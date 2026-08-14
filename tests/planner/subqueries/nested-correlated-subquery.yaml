@@ -1,3 +1,18 @@
+# Copyright (C) 2026  MemCP Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Doubly-nested correlated scalar subquery
 # Pattern: outer scan has doc.ID, scalar subquery A references doc.ID through
 # scalar subquery B. The correlated reference must propagate through two levels.
@@ -8,6 +23,9 @@ metadata:
   description: "Doubly-nested correlated scalar subquery returns NULL instead of value"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nc_scope_state"
+  - sql: "DROP TABLE IF EXISTS nc_scope_outer"
+  - sql: "DROP TABLE IF EXISTS nc_scope_lookup"
   - sql: "DROP TABLE IF EXISTS nc_alias_ref"
   - sql: "DROP TABLE IF EXISTS nc_alias_outer"
   - sql: "DROP TABLE IF EXISTS nc_folder_ref"
@@ -20,6 +38,12 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS nc_config"
 
 setup:
+  - sql: "CREATE TABLE nc_scope_lookup (ID INT PRIMARY KEY, value INT)"
+  - sql: "CREATE TABLE nc_scope_outer (ID INT PRIMARY KEY, nc_scope_lookup INT, state_id INT)"
+  - sql: "CREATE TABLE nc_scope_state (ID INT PRIMARY KEY, label VARCHAR(20), nc_scope_lookup INT)"
+  - sql: "INSERT INTO nc_scope_lookup VALUES (1, 11), (2, 22)"
+  - sql: "INSERT INTO nc_scope_outer VALUES (1, 1, 1), (2, 2, 1)"
+  - sql: "INSERT INTO nc_scope_state VALUES (1, 'active', 2)"
   - sql: "CREATE TABLE nc_alias_ref (ID INT PRIMARY KEY, active BOOL, valid_from INT, valid_to INT)"
   - sql: "CREATE TABLE nc_alias_outer (ID INT PRIMARY KEY, ref_alias INT)"
   - sql: "CREATE TABLE nc_folder_ref (ID INT PRIMARY KEY, mailbox INT)"
@@ -42,6 +66,22 @@ setup:
   - sql: "INSERT INTO nc_config VALUES (1, 99)"
 
 test_cases:
+  - name: "Derived join hides non-projected column from correlated scope"
+    sql: |
+      SELECT o.ID,
+        (SELECT l.value FROM nc_scope_lookup l
+          WHERE l.ID = nc_scope_lookup LIMIT 1) AS resolved_value,
+        s.label
+      FROM nc_scope_outer o
+      LEFT JOIN (SELECT ID AS state_key, label FROM nc_scope_state) s
+        ON s.state_key = o.state_id
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, resolved_value: 11, label: "active"}
+        - {ID: 2, resolved_value: 22, label: "active"}
+
   - name: "Single-level correlated subquery works"
     sql: "SELECT (SELECT r.file FROM nc_revision r WHERE r.doc = nc_doc.ID ORDER BY r.created DESC LIMIT 1) AS latest_file FROM nc_doc"
     expect:

@@ -47,6 +47,7 @@ type SettingsT struct {
 	LogJIT                 bool  // when true, log JIT compilation (serialized proc + hexdump)
 	ScanDebugging          bool  // when true, log every scan/scan_order: db+table+boundaries+index; also overrides AnalyzeMinItems for scan statistics
 	ExplainWidth           int   // max chars before EXPLAIN pretty-prints a sub-expression on multiple lines (0 = default 20)
+	JoinReorderDPBudget    int   // maximum connected subsets retained by exact DPHyp (0 = default 256)
 	ErrorQueryLog          bool  // when true, log failed queries to system_statistic.errors
 	MaxErrorQueryLog       int   // max rows in error log (0 = unlimited)
 	PrintLog               bool  // when true, log (print) output to system_statistic.logs
@@ -77,7 +78,7 @@ func (r CreateTableTriggerRegistration) triggerDescription() TriggerDescription 
 	}
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, false, 0, false, 0, nil}
+var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, 256, false, 0, false, 0, nil}
 var createTableTriggerMu sync.Mutex
 
 func registerCreateTableTrigger(reg CreateTableTriggerRegistration) {
@@ -148,6 +149,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("LogJIT"), scm.NewBool(Settings.LogJIT),
 			scm.NewString("ScanDebugging"), scm.NewBool(Settings.ScanDebugging),
 			scm.NewString("ExplainWidth"), scm.NewInt(int64(Settings.ExplainWidth)),
+			scm.NewString("JoinReorderDPBudget"), scm.NewInt(int64(Settings.JoinReorderDPBudget)),
 			scm.NewString("ErrorQueryLog"), scm.NewBool(Settings.ErrorQueryLog),
 			scm.NewString("MaxErrorQueryLog"), scm.NewInt(int64(Settings.MaxErrorQueryLog)),
 			scm.NewString("PrintLog"), scm.NewBool(Settings.PrintLog),
@@ -191,6 +193,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(Settings.ScanDebugging)
 		case "ExplainWidth":
 			return scm.NewInt(int64(Settings.ExplainWidth))
+		case "JoinReorderDPBudget":
+			return scm.NewInt(int64(Settings.JoinReorderDPBudget))
 		case "ErrorQueryLog":
 			return scm.NewBool(Settings.ErrorQueryLog)
 		case "MaxErrorQueryLog":
@@ -252,6 +256,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.ScanDebugging = scm.ToBool(a[1])
 		case "ExplainWidth":
 			Settings.ExplainWidth = scm.ToInt(a[1])
+		case "JoinReorderDPBudget":
+			Settings.JoinReorderDPBudget = scm.ToInt(a[1])
 		case "ErrorQueryLog":
 			Settings.ErrorQueryLog = scm.ToBool(a[1])
 		case "MaxErrorQueryLog":

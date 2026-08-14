@@ -961,6 +961,31 @@ func init() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "optimize_stats",
+		Desc: "optimize code and return bounded rewrite, AST growth, callback-analysis, and compile-time metrics",
+		Fn: func(a ...Scmer) Scmer {
+			result, stats := OptimizeWithStats(a[0], &Globalenv)
+			return NewSlice([]Scmer{
+				NewString("result"), result,
+				NewString("compile_ns"), NewInt(stats.CompileNS),
+				NewString("input_nodes"), NewInt(int64(stats.InputNodes)),
+				NewString("output_nodes"), NewInt(int64(stats.OutputNodes)),
+				NewString("rewrites"), NewInt(int64(stats.Rewrites)),
+				NewString("rejected_rewrites"), NewInt(int64(stats.RejectedRewrites)),
+				NewString("budget_remaining"), NewInt(int64(stats.BudgetRemaining)),
+				NewString("callback_analyses"), NewInt(int64(stats.CallbackAnalyses)),
+				NewString("callback_clones"), NewInt(int64(stats.CallbackClones)),
+			})
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"},
+			},
+			Return: &TypeDescriptor{Kind: "assoc"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "time",
 		Desc: "measures the time it takes to compute the first argument",
 		Fn:   nil,

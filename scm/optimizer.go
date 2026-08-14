@@ -24,6 +24,7 @@ package scm
 import "regexp"
 import "strconv"
 import "strings"
+import "time"
 
 var SettingsHaveGoodBacktraces bool
 
@@ -266,9 +267,52 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 
 // do preprocessing and optimization (Optimize is allowed to edit the value in-place)
 func Optimize(val Scmer, env *Env) Scmer {
+	result, _ := OptimizeWithStats(val, env)
+	return result
+}
+
+// OptimizerStats exposes compile work without coupling callers to optimizer
+// internals. All counters cover one top-level optimization.
+type OptimizerStats struct {
+	CompileNS        int64
+	InputNodes       int
+	OutputNodes      int
+	Rewrites         int
+	RejectedRewrites int
+	BudgetRemaining  int
+	CallbackAnalyses int
+	CallbackClones   int
+}
+
+type optimizerRewriteState struct {
+	remainingBudget  int
+	inputNodes       int
+	rewrites         int
+	rejected         int
+	callbackAnalyses int
+	callbackClones   int
+	active           map[string]bool
+	seen             map[uint64]bool
+}
+
+const defaultOptimizerRewriteBudget = 64
+
+// OptimizeWithStats returns both optimized code and bounded-work telemetry.
+func OptimizeWithStats(val Scmer, env *Env) (Scmer, OptimizerStats) {
+	started := time.Now()
 	ome := newOptimizerMetainfo()
+	ome.rewrite.inputNodes = optimizerNodeCount(val)
 	v, _ := OptimizeEx(val, env, &ome, true)
-	return v
+	return v, OptimizerStats{
+		CompileNS:        time.Since(started).Nanoseconds(),
+		InputNodes:       ome.rewrite.inputNodes,
+		OutputNodes:      optimizerNodeCount(v),
+		Rewrites:         ome.rewrite.rewrites,
+		RejectedRewrites: ome.rewrite.rejected,
+		BudgetRemaining:  ome.rewrite.remainingBudget,
+		CallbackAnalyses: ome.rewrite.callbackAnalyses,
+		CallbackClones:   ome.rewrite.callbackClones,
+	}
 }
 
 type optimizerMetainfo struct {
@@ -284,13 +328,34 @@ type optimizerMetainfo struct {
 	beginDepth            int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
 	inlineDepth           int
 	inlineStack           map[Symbol]bool
+	rewrite               *optimizerRewriteState
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
 	result.variableTypes = make(map[Symbol]*TypeDescriptor)
 	result.numberedTypes = make(map[NthLocalVar]*TypeDescriptor)
+	result.rewrite = &optimizerRewriteState{
+		remainingBudget: defaultOptimizerRewriteBudget,
+		active:          make(map[string]bool),
+		seen:            make(map[uint64]bool),
+	}
 	return
+}
+
+func optimizerNodeCount(expr Scmer) int {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	items, ok := scmerSlice(expr)
+	if !ok {
+		return 1
+	}
+	count := 1
+	for _, item := range items {
+		count += optimizerNodeCount(item)
+	}
+	return count
 }
 
 func rewriteNoEscapeListReturn(expr Scmer, flow *TypeDescriptor, nextSlot *int) Scmer {
@@ -641,6 +706,7 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.rewrite = ome.rewrite
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
 }
@@ -666,6 +732,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.rewrite = ome.rewrite
 	return
 }
 
@@ -1597,10 +1664,66 @@ func (oc *OptimizerContext) OptimizeSub(val Scmer, useResult bool) (Scmer, *Type
 	return result, ti.ToTypeDescriptor()
 }
 
+// OptimizerRewriteContract declares the safety proof and maximum AST growth
+// for one recursive hook rewrite.
+type OptimizerRewriteContract struct {
+	Name             string
+	PreconditionsMet bool
+	MaxGrowthNodes   int
+}
+
+// OptimizeRewrite is the only supported path for a hook to recursively
+// optimize rewritten code. It enforces reentrancy, fingerprint, work-budget,
+// and AST-growth guards. The boolean is false when the caller must continue
+// with its non-rewrite optimization path.
+func (oc *OptimizerContext) OptimizeRewrite(original, rewritten Scmer, useResult bool, contract OptimizerRewriteContract) (Scmer, *TypeDescriptor, bool) {
+	state := oc.Ome.rewrite
+	if state == nil {
+		state = newOptimizerMetainfo().rewrite
+		oc.Ome.rewrite = state
+	}
+	activeKey := contract.Name + ":" + strconv.FormatUint(HashKey(original), 16)
+	if contract.Name == "" || !contract.PreconditionsMet || state.remainingBudget <= 0 || state.active[activeKey] {
+		state.rejected++
+		return original, nil, false
+	}
+	originalNodes := optimizerNodeCount(original)
+	rewrittenNodes := optimizerNodeCount(rewritten)
+	if contract.MaxGrowthNodes >= 0 && rewrittenNodes-originalNodes > contract.MaxGrowthNodes {
+		state.rejected++
+		return original, nil, false
+	}
+	globalLimit := state.inputNodes*4 + 1024
+	if state.inputNodes > 0 && rewrittenNodes > globalLimit {
+		state.rejected++
+		return original, nil, false
+	}
+	fingerprint := HashKey(rewritten)
+	if state.seen[fingerprint] {
+		state.rejected++
+		return original, nil, false
+	}
+	state.seen[fingerprint] = true
+	state.remainingBudget--
+	state.rewrites++
+	state.active[activeKey] = true
+	defer func() {
+		delete(state.active, activeKey)
+		delete(state.seen, fingerprint)
+	}()
+	result, td := oc.OptimizeSub(rewritten, useResult)
+	return result, td, true
+}
+
 // AnalyzeCallback computes a callback result type without consuming pending
 // metadata or otherwise mutating the optimizer context used for emitted code.
 func (oc *OptimizerContext) AnalyzeCallback(callback Scmer, params []*TypeDescriptor) *TypeDescriptor {
+	if oc.Ome.rewrite != nil {
+		oc.Ome.rewrite.callbackAnalyses++
+		oc.Ome.rewrite.callbackClones++
+	}
 	analysisOme := newOptimizerMetainfo()
+	analysisOme.rewrite = oc.Ome.rewrite
 	analysisOme.loopDepth = oc.Ome.loopDepth
 	analysis := OptimizerContext{Env: oc.Env, Ome: &analysisOme}
 	analysis.SetCallbackParamTypes(params)
@@ -1622,7 +1745,7 @@ func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator 
 		return optimized, normalizeOptimizerType(result)
 	}
 	loopType := accumulator
-	for {
+	for iteration := 0; iteration < 16; iteration++ {
 		params[0] = loopType
 		result := normalizeOptimizerType(oc.AnalyzeCallback(callback, params))
 		next, changed := mergeOptimizerTypes(loopType, result)
@@ -1634,6 +1757,12 @@ func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator 
 		}
 		loopType = next
 	}
+	// The join is monotonic, but malformed custom descriptors must not make
+	// optimizer compilation unbounded.
+	params[0] = loopType
+	oc.SetCallbackParamTypes(params)
+	optimized, finalResult := oc.OptimizeSub(callback, true)
+	return optimized, normalizeOptimizerType(finalResult)
 }
 
 func normalizeOptimizerType(td *TypeDescriptor) *TypeDescriptor {

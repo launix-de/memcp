@@ -69,10 +69,14 @@ test_cases:
     expect:
       contains:
         - "source_estimates"
-        - "left_join_plan_options"
+        - "left_join_requirements"
+        - "nullable_lookup"
+        - "null_extension_barrier"
+        - "estimated_rows"
+      not_contains:
         - "tempcol_materialize_reusable"
         - "group_cache_read"
-        - "subscan"
+        - "subscan_partition_limit"
 
   # ==========================================================
   # Statistics logging paths — needs >50 rows

@@ -38,9 +38,13 @@ continue to occupy just their existing query-plan entry. */
 			(if cached
 				cached
 				(match (parameterize_sql_select_literals query) '(normalized bindings)
-					(if (equal? bindings '())
-						(list normalized bindings)
-						(cache query (list normalized bindings)))))))))
+					(begin
+						(define result (if (equal? bindings '())
+							(sql_parameterize_select_like_strings query enabled)
+							(list normalized bindings)))
+						(if (equal? (cadr result) '())
+							result
+							(cache query result)))))))))
 
 (define sql_parameterize_select_literals (lambda (query enabled)
 	(sql_parameterize_select_literals_cached sql_literal_shape_cache query enabled)))
@@ -73,9 +77,7 @@ inside MATCH...AGAINST(...) with ? placeholders and returns (normalized-query bi
 literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 (define sql_parameterize_select_like_strings (lambda (query enabled) (begin
 	(define starts_like_select (lambda (q)
-		(or
-			(match q (regex "^\\s*SELECT\\b" _) true false)
-			(match q (regex "^\\s*EXPLAIN\\s+(?:(?:IR|REORDER)\\s+)?SELECT\\b" _) true false))))
+		(match q (regex "^\\s*SELECT\\b" _) true false)))
 	(define parameterized_rhs_literal? (lambda (q pos) (begin
 		(define prefix (toUpper (strrtrim (substr q 0 pos))))
 		(or
@@ -97,6 +99,9 @@ literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 	(if (or
 		(not enabled)
 		(not (starts_like_select query))
+		(match (toUpper query)
+			(regex "(?:\\b(?:COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT)\\s*\\(|\\bGROUP\\s+BY\\b|\\bHAVING\\b)" _)
+			true false)
 		(not (or
 			(match (toUpper query) (regex "\\bLIKE\\b" _) true false)
 			(match (toUpper query) (regex "\\bAGAINST\\b" _) true false)))
@@ -119,40 +124,189 @@ literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 					(list query '())
 					(list normalized bindings))))))))
 
-/* cached_parse: wraps a parser with cachemap-based caching.
+/* Copy request bindings and catalog context into an isolated planning session.
+The request transaction is deliberately excluded: cached plans must obtain
+__memcp_tx from the executing session, never retain the transaction which
+happened to compile a shared variant. The condition accumulator belongs to
+exactly one compile and substitutes for threading guard state through every
+functional planner return value. */
+(define sql_queryplan_compile_session (lambda (source_session)
+	(begin
+		(define planning_session (newsession))
+		(define compile_bindings (newsession))
+		(reduce (source_session) (lambda (_ key)
+			(if (match key (regex "^v[0-9]+$" _) true false)
+				(begin
+					(compile_bindings key (source_session key))
+					(planning_session key (source_session key)))
+				(if (equal? key "__memcp_tx")
+					nil
+					(planning_session key (source_session key))))) nil)
+		(planning_session "__memcp_queryplan_compile_bindings" compile_bindings)
+		(planning_session "__memcp_queryplan_guard_conditions" (newsession))
+		(planning_session "__memcp_queryplan_guard_bindings" (newsession))
+		(planning_session "__memcp_queryplan_guarded_session_keys" (newsession))
+		(planning_session "__memcp_queryplan_observed_session_keys" (newsession))
+		planning_session)))
+
+(define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
+	(begin
+		(define covered (planning_session "__memcp_queryplan_guarded_session_keys"))
+		(define observed (planning_session "__memcp_queryplan_observed_session_keys"))
+		(define compile_bindings (planning_session "__memcp_queryplan_compile_bindings"))
+		(map (filter (observed) (lambda (key)
+			(not (covered (string (list (quote session) key))))))
+			(lambda (key)
+				(begin
+					(define value (compile_bindings key))
+					(list (quote equal?)
+						(list (quote session) key)
+						(if (list? value) (list (quote quote) value) value))))))))
+
+/* Guards execute outside the optimized query lambda. Rewrite the query AST's
+session pseudo-call to an explicit context lookup so raw eval observes the
+current request bindings. Quoted planner/catalog payloads remain data. */
+(define sql_queryplan_runtime_guard_expr (lambda (expr)
+	(match expr
+		((symbol quote) _value) expr
+		((symbol session) key) (list (list (quote context) "session") key)
+		((quote session) key) (list (list (quote context) "session") key)
+		(cons head tail) (cons
+			(sql_queryplan_runtime_guard_expr head)
+			(map tail sql_queryplan_runtime_guard_expr))
+		_ expr)))
+
+(define sql_queryplan_guard_from_session (lambda (planning_session)
+	(begin
+		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
+		(define conditions (merge (list
+			(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
+			(sql_queryplan_uncovered_binding_conditions planning_session))))
+		(define raw_guard (match conditions
+			(cons condition '()) condition
+			(cons _head _tail) (cons (quote and) conditions)
+			_ true))
+		(define binding_session (planning_session "__memcp_queryplan_guard_bindings"))
+		(define bindings (map (binding_session) (lambda (key) (binding_session key))))
+		(sql_queryplan_runtime_guard_expr (if (empty_list? bindings)
+			raw_guard
+			(cons
+				(list (quote lambda) (map bindings car) raw_guard)
+				(map bindings cadr)))))))
+
+(define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session)
+	(begin
+		(define planning_session (sql_queryplan_compile_session source_session))
+		(define compile_policy (sql_compile_table_policy policy))
+		(define plan (optimize (with_session planning_session (lambda ()
+			(parse_fn schema parse_query compile_policy)))))
+		(list (sql_queryplan_guard_from_session planning_session) plan))))
+
+(define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
+	(list (quote eval)
+		(list (quote sql_queryplan_variant_miss)
+			queryplan_cache cache_key entry parse_fn schema parse_query policy))))
+
+(define sql_queryplan_formula (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
+	(match variants
+		(cons variant '()) (if (equal? (car variant) true)
+			(cadr variant)
+			(cons (quote if) (list
+				(car variant) (cadr variant)
+				(sql_queryplan_miss_expr queryplan_cache cache_key entry parse_fn schema parse_query policy))))
+		_ (cons (quote if)
+			(merge (list
+				(merge (map variants (lambda (variant)
+					(list (car variant) (cadr variant)))))
+				(list (sql_queryplan_miss_expr queryplan_cache cache_key entry parse_fn schema parse_query policy))))))))
+
+(define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
+	(begin
+		(entry "variants" variants)
+		(entry "formula" (sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy variants))
+		(entry "formula"))))
+
+(define sql_queryplan_new_entry (lambda (queryplan_cache cache_key parse_fn schema parse_query policy source_session)
+	(begin
+		(define entry (newsession))
+		(entry "compile_lock" (mutex))
+		(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
+			(list (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session))))
+		(list entry formula))))
+
+(define sql_queryplan_matching_variant (lambda (variants)
+	(match variants
+		(cons variant rest)
+		(if (eval (car variant)) variant (sql_queryplan_matching_variant rest))
+		_ nil)))
+
+/* Called only by the final else branch of a cached plan. Recheck after taking
+the entry lock because another request may already have installed a matching
+variant. New variants are prepended so the most recent statistics regime wins
+the common guard-dispatch path. */
+(define sql_queryplan_variant_miss (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
+	((entry "compile_lock") (lambda ()
+		(begin
+			(define current_variants (entry "variants"))
+			(define matching (sql_queryplan_matching_variant current_variants))
+			(if (not (nil? matching))
+				(cadr matching)
+				(begin
+					(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy (context "session")))
+					(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
+						(cons variant current_variants)))
+					(queryplan_cache cache_key (list entry formula))
+					(cadr variant))))))))
+
+/* cached_parse: wraps SELECT planning with a lazy polymorphic Scheme plan
+cache. DDL, DML and transaction-control formulas retain the original exact
+cache path because their AST may intentionally operate on (context "session").
 cache_key = username:schema:view-generation:hash(query-shape), retaining policy
-isolation while sharing safe SELECT plans across literal variants. Runtime
-bindings are installed only after a shape miss has compiled in a value-neutral
-session. On parse error the result is not cached. */
+isolation while sharing safe SELECT plans across literal variants. Each entry
+is a variadic if chain of guarded specialized plans plus one compile miss arm.
+On parse error the result is not cached. */
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals)
 	(begin
-		(match (sql_parameterize_select_literals query parameterize_literals) '(parse_query bindings) (begin
+		(define explain_query (match (toUpper query)
+			(regex "^\\s*EXPLAIN\\b" _) true
+			_ false))
+		(define parameterized (if explain_query
+			(list query '())
+			(sql_parameterize_select_literals query parameterize_literals)))
+		(match parameterized '(parse_query bindings) (begin
 			(define cache_key (concat username ":" schema ":" (sql_view_query_generation parse_query) ":" (fnv_hash parse_query)))
+			(define select_query (match (toUpper parse_query)
+				(regex "^\\s*SELECT\\b" _) true
+				_ false))
+			/* Polymorphic entries exist only where the planner can actually make a
+			parameter/statistics-dependent physical choice. Ordinary point and
+			ordered scans retain the smaller exact cache path. */
+			(define guarded_select (and select_query
+				(match (toUpper parse_query)
+					(regex "\\b(?:LIKE|MATCH|JOIN)\\b" _) true
+					_ false)))
 			(define compile_diagnostic (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
 				_ false))
-			(define planning_session (if (equal? bindings '()) session (newsession)))
-			(if (not (equal? bindings '()))
-				(begin
-					(planning_session "username" username)
-					(planning_session "schema" schema)
-					(planning_session "__memcp_tx" (session "__memcp_tx")))
-				nil)
-			(define compile_formula (lambda ()
-				(begin
-					(define compile_policy (sql_compile_table_policy policy))
-					(optimize (with_session planning_session (lambda ()
-						(parse_fn schema parse_query compile_policy)))))))
-			/* Compile diagnostics measure true misses and must not turn their own
-			previous result into a cache hit. The inspected query is never run. */
-			(define formula (if compile_diagnostic
-				(compile_formula)
-				(queryplan_cache "get_or_compute" cache_key
-					compile_formula)))
 			(if (not (equal? bindings '()))
 				(reduce (produceN (count bindings)) (lambda (_ idx)
 					(session (concat "v" (string (+ idx 1))) (nth bindings idx))) nil)
 				nil)
+			/* Compile diagnostics measure true misses and must not turn their own
+			previous result into a cache hit. The inspected query is never run. */
+			(define exact_compile (lambda ()
+				(begin
+					(define compile_policy (sql_compile_table_policy policy))
+					(optimize (with_session session (lambda ()
+						(parse_fn schema parse_query compile_policy)))))))
+			(define formula (if (or compile_diagnostic (not guarded_select))
+				(if compile_diagnostic
+					(exact_compile)
+					(queryplan_cache "get_or_compute" cache_key exact_compile))
+				(begin
+					(define cached_entry (queryplan_cache "get_or_compute" cache_key
+						(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query policy session))))
+					(cadr cached_entry))))
 			formula)))))
 
 /* helper: build a policy function for table-level access checks

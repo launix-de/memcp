@@ -855,22 +855,25 @@ test_cases:
           contains:
             - "in_candidate"
             - "candidate"
-            - "membership_plan_strategy"
-            - "driver_order_membership_probe"
+            - "membership_requirement"
             - "membership_selectivity_class"
             - "selective"
             - "membership_driver_rows"
             - "membership_candidate_input_rows"
-            - "membership_cost_reason"
-            - "indexed_driver_probe_cost"
+            - "reuse"
             - "source_estimates"
-            - "group_stage_strategy"
-            - "group_plan_options"
+            - "group_requirement"
             - "lookup-keys"
           not_contains:
             - "inner_select"
             - "dependent-subquery"
             - "in_membership"
+            - "membership_plan_strategy"
+            - "driver_order_membership_probe"
+            - "candidate_keyset"
+            - "group_cache_read"
+            - "tempcol_materialize_reusable"
+            - "subscan_partition_limit"
             - ".grp:"
             - "touch_keytable"
       - sql: |
@@ -998,17 +1001,17 @@ test_cases:
           LIMIT 10
         expect:
           contains:
-            - "membership_plan_strategy"
-            - "driver_order_membership_probe"
+            - "membership_requirement"
             - "membership_selectivity_class"
             - "broad"
             - "membership_candidate_estimated_rows"
             - "membership_candidate_estimate_input"
-            - "membership_cost_reason"
-            - "indexed_driver_probe_cost"
           not_contains:
             - "inner_select"
             - "dependent-subquery"
+            - "membership_plan_strategy"
+            - "driver_order_membership_probe"
+            - "candidate_keyset"
             - "projected_membership_cost"
       - sql: |
           EXPLAIN REORDER
@@ -1027,22 +1030,24 @@ test_cases:
           LIMIT 10
         expect:
           contains:
-            - "membership_plan_strategy"
-            - "driver_order_membership_probe"
+            - "membership_requirement"
             - "membership_selectivity_class"
             - "broad"
             - "membership_driver_rows"
             - "membership_candidate_input_rows"
-            - "membership_cost_reason"
-            - "indexed_driver_probe_cost"
             - "source_estimates"
-            - "group_stage_strategy"
-            - "group_plan_options"
+            - "group_requirement"
           not_contains:
             - "inner_select"
             - "dependent-subquery"
+            - "membership_plan_strategy"
+            - "driver_order_membership_probe"
+            - "candidate_keyset"
             - "projected_membership_cost"
             - "driver_membership_probe"
+            - "group_cache_read"
+            - "tempcol_materialize_reusable"
+            - "subscan_partition_limit"
             - ".grp:"
             - "touch_keytable"
       - sql: |
@@ -1963,6 +1968,55 @@ test_cases:
         - "createtable"
       not_contains:
         - "unknown stage"
+
+  - name: "Nested ACL caches initialize inside a parallel physical lookup"
+    fail_comment: "lazy cache preparation in a shard worker must retain the owning query session"
+    setup:
+      - sql: "DROP TABLE IF EXISTS worker_acl"
+      - sql: "DROP TABLE IF EXISTS worker_item"
+      - sql: "DROP TABLE IF EXISTS worker_location"
+      - sql: "DROP TABLE IF EXISTS worker_file"
+      - sql: "CREATE TABLE worker_acl (ID INT PRIMARY KEY, actor INT, tenant_id INT, location_id INT)"
+      - sql: "CREATE TABLE worker_item (ID INT PRIMARY KEY, file_id INT, tenant_id INT, location_id INT)"
+      - sql: "CREATE TABLE worker_location (ID INT PRIMARY KEY, tenant_id INT)"
+      - sql: "CREATE TABLE worker_file (ID INT PRIMARY KEY, filename VARCHAR(64), search VARCHAR(64))"
+      - sql: "INSERT INTO worker_acl VALUES (1, 42, NULL, NULL), (2, 42, 7, 70)"
+      - sql: "INSERT INTO worker_location VALUES (70, 7), (80, 8)"
+      - sql: "INSERT INTO worker_file VALUES (10, 'x-one', ''), (20, '', 'x-two')"
+      - sql: "INSERT INTO worker_item VALUES (100, 10, 7, 70), (200, 20, 8, 80)"
+      - scm: |
+          (partitiontable (table "memcp-tests" "worker_item")
+            (list "ID" (list 150)))
+    sql: |
+      SELECT i.ID
+      FROM worker_item i
+      WHERE COALESCE((
+        SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM worker_acl global_acl
+          WHERE global_acl.actor = 42 AND global_acl.tenant_id IS NULL
+          LIMIT 1
+        ) THEN TRUE ELSE EXISTS (
+          SELECT TRUE FROM worker_acl location_acl
+          WHERE location_acl.actor = 42
+            AND COALESCE(location_acl.location_id, current_location.ID) = current_location.ID
+          LIMIT 1
+        ) END
+        FROM worker_location current_location
+        WHERE current_location.ID = i.location_id
+        LIMIT 1
+      ), FALSE)
+      AND i.file_id IN (
+        SELECT f.ID FROM worker_file f WHERE f.filename LIKE '%x%'
+        UNION
+        SELECT f.ID FROM worker_file f WHERE f.search LIKE '%x%'
+      )
+      ORDER BY i.ID
+      LIMIT 10
+    expect:
+      rows: 2
+      data:
+        - ID: 100
+        - ID: 200
 
   - name: "Derived LEFT JOIN keeps projected values beside nested permission probes"
     fail_comment: "compiled plans must execute derived LEFT JOIN matches, not only resolve their stages"

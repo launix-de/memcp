@@ -204,6 +204,45 @@ direct subscan, group keytable, computed-column-filtered slice of a source
 keytable, RecSet, ORC column, or another storage-engine scan source. Operator choice
 must not change the logical join tree's leaf order.
 
+## Guarded Query-Plan Specialization
+
+The Scheme query-plan cache may hold several lazily compiled physical plans for
+one normalized SELECT shape. DDL, DML, and transaction control retain exact
+cache entries because their formulas may intentionally operate on the request
+session. This is a polymorphic cache entry, not a second planner and not a
+storage-engine query cache.
+
+Only SELECT shapes which reach a parameter- or statistics-dependent planner
+decision use polymorphic entries. Shapes without a tipping decision retain the
+smaller exact cache path.
+
+Every parameter- or statistics-dependent cost-model tipping decision must
+record the executable condition under which its chosen alternative remains
+valid. During one compilation these conditions are accumulated in a dedicated
+`newsession`; this compile-local state substitutes for threading a writer monad
+through the functional planner. It must not escape as logical or physical IR.
+The compile session must not capture request-local execution state such as
+`__memcp_tx`; cached scans resolve that state from the executing session.
+
+The conjunction of the recorded conditions guards the specialized plan. A
+guard miss compiles exactly one plan for the current bindings and statistics,
+then prepends its condition/plan pair to the variadic Scheme `if` cache entry.
+New variants go first because the newest statistics regime is normally the
+most likely one. Existing immutable plan tails remain valid for in-flight
+queries.
+
+Guards repeat cost decisions, not query planning. They must be side-effect-free
+and must not scan relations, build indexes or group caches, acquire schema
+write locks, or materialize data. Repeated catalog inputs must be bound once
+per guard evaluation. If a useful generalized inequality is unavailable, an
+exact parameter/statistics-input guard is the conservative fallback; an old
+specialized plan must never be selected after an unguarded cost input changes.
+
+The cache value must keep the complete Scheme guard/plan formula visible to the
+existing cachemap size accounting and eviction mechanism. A `newsession` may
+hold the entry's compile lock and metadata, but it must not hide the plan tree
+as the cachemap's sole value.
+
 ## Relational Results Stay In The Storage Engine
 
 A **scan source** is a storage-engine representation that `scan`, `scan_order`,

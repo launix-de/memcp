@@ -29,6 +29,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS ord_member_label"
   - sql: "DROP TABLE IF EXISTS ord_derived_item"
   - sql: "DROP TABLE IF EXISTS ord_derived_parent"
+  - sql: "DROP TABLE IF EXISTS ord_tree_a"
+  - sql: "DROP TABLE IF EXISTS ord_tree_b"
+  - sql: "DROP TABLE IF EXISTS ord_tree_c"
+  - sql: "DROP TABLE IF EXISTS ord_tree_d"
   - sql: "CREATE TABLE ord_t (a INT, b INT)"
   - sql: "CREATE TABLE ord_join_left (id INT PRIMARY KEY, ref_id INT)"
   - sql: "CREATE TABLE ord_join_right (id INT PRIMARY KEY, rank_value INT)"
@@ -37,6 +41,10 @@ setup:
   - sql: "CREATE TABLE ord_member_label (id INT PRIMARY KEY, name TEXT, visible INT)"
   - sql: "CREATE TABLE ord_derived_parent (id INT PRIMARY KEY, label TEXT)"
   - sql: "CREATE TABLE ord_derived_item (id INT PRIMARY KEY, parent_id INT, created INT)"
+  - sql: "CREATE TABLE ord_tree_a (id INT PRIMARY KEY, pair_key INT)"
+  - sql: "CREATE TABLE ord_tree_b (id INT PRIMARY KEY, pair_key INT)"
+  - sql: "CREATE TABLE ord_tree_c (id INT PRIMARY KEY, pair_key INT)"
+  - sql: "CREATE TABLE ord_tree_d (id INT PRIMARY KEY, pair_key INT)"
   - sql: |
       INSERT INTO ord_t (a,b) VALUES
       (1,2),(1,1),(2,2),(2,0),(3,1)
@@ -47,6 +55,10 @@ setup:
   - sql: "INSERT INTO ord_member_label VALUES (10,'alpha',1),(20,'beta',0)"
   - sql: "INSERT INTO ord_derived_parent VALUES (1,'one'),(2,'two')"
   - sql: "INSERT INTO ord_derived_item VALUES (10,1,100),(20,2,200)"
+  - sql: "INSERT INTO ord_tree_a VALUES (1,10),(2,20),(3,30)"
+  - sql: "INSERT INTO ord_tree_b VALUES (10,10),(20,20),(30,30)"
+  - sql: "INSERT INTO ord_tree_c VALUES (1,100),(2,200),(3,300)"
+  - sql: "INSERT INTO ord_tree_d VALUES (100,100),(200,200)"
 
 test_cases:
   - name: "Top-1 by a DESC"
@@ -219,6 +231,115 @@ test_cases:
         - "initialize_cache_table"
         - "(sort rows"
         - "(slice sorted"
+
+  - name: "Ordered four-way join retains a bushy logical tree"
+    sql: |
+      EXPLAIN REORDER SELECT a.id
+      FROM ord_tree_a a
+      JOIN ord_tree_b b ON b.pair_key = a.pair_key
+      JOIN ord_tree_c c ON c.id = a.id
+      JOIN ord_tree_d d ON d.pair_key = c.pair_key
+      ORDER BY a.id, b.id, c.id, d.id
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "join_reorder_strategy"
+        - "dphyp"
+        - "ord_tree_a"
+        - "ord_tree_b"
+        - "ord_tree_c"
+        - "ord_tree_d"
+      result_occurrences:
+        - { text: "join-node", count: 3 }
+
+  - name: "Ordered driver removal retains a bushy independent subtree"
+    scm: |
+      (begin
+        (define tree (make_join_optimizer_node 'inner
+          (make_join_optimizer_node 'inner
+            (make_join_optimizer_leaf "a")
+            (make_join_optimizer_leaf "b") '())
+          (make_join_optimizer_node 'inner
+            (make_join_optimizer_leaf "c")
+            (make_join_optimizer_leaf "d") '()) '()))
+        (equal?
+          (join_optimizer_tree_without_aliases tree '("a"))
+          (make_join_optimizer_node 'inner
+            (make_join_optimizer_leaf "b")
+            (make_join_optimizer_node 'inner
+              (make_join_optimizer_leaf "c")
+              (make_join_optimizer_leaf "d") '()) '())))
+    expect:
+      data: [true]
+
+  - name: "Ordered driver removal retains an outer-join barrier"
+    scm: |
+      (begin
+        (define tree (make_join_optimizer_node 'left-outer
+          (make_join_optimizer_node 'inner
+            (make_join_optimizer_leaf "a")
+            (make_join_optimizer_leaf "b") '())
+          (make_join_optimizer_leaf "d") '()))
+        (equal?
+          (join_optimizer_tree_without_aliases tree '("a"))
+          (make_join_optimizer_node 'left-outer
+            (make_join_optimizer_leaf "b")
+            (make_join_optimizer_leaf "d") '())))
+    expect:
+      data: [true]
+
+  - name: "Bushy ordered join lowers without rebuilding its independent subtree"
+    sql: |
+      EXPLAIN SELECT a.id
+      FROM ord_tree_a a
+      JOIN ord_tree_b b ON b.pair_key = a.pair_key
+      JOIN ord_tree_c c ON c.id = a.id
+      JOIN ord_tree_d d ON d.pair_key = c.pair_key
+      ORDER BY a.id, b.id, c.id, d.id
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "ord_tree_a"
+        - "ord_tree_b"
+        - "ord_tree_c"
+        - "ord_tree_d"
+      result_not_contains:
+        - "(sort rows"
+        - "(slice sorted"
+
+  - name: "Bushy ordered join preserves results across independent subtrees"
+    sql: |
+      SELECT a.id
+      FROM ord_tree_a a
+      JOIN ord_tree_b b ON b.pair_key = a.pair_key
+      JOIN ord_tree_c c ON c.id = a.id
+      JOIN ord_tree_d d ON d.pair_key = c.pair_key
+      ORDER BY a.id, b.id, c.id, d.id
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 2
+
+  - name: "Ordered lowering preserves the nullable outer-join barrier"
+    sql: |
+      SELECT a.id, d.id AS nullable_id
+      FROM ord_tree_a a
+      JOIN ord_tree_b b ON b.pair_key = a.pair_key
+      JOIN ord_tree_c c ON c.id = a.id
+      LEFT JOIN ord_tree_d d ON d.pair_key = c.pair_key
+      ORDER BY a.id, b.id, c.id, d.id
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - { id: 1, nullable_id: 100 }
+        - { id: 2, nullable_id: 200 }
+        - { id: 3, nullable_id: null }
 
   - name: "RecSet membership with lookup order never materializes Scheme rows"
     sql: |
@@ -545,3 +666,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ord_member_label"
   - sql: "DROP TABLE IF EXISTS ord_derived_item"
   - sql: "DROP TABLE IF EXISTS ord_derived_parent"
+  - sql: "DROP TABLE IF EXISTS ord_tree_a"
+  - sql: "DROP TABLE IF EXISTS ord_tree_b"
+  - sql: "DROP TABLE IF EXISTS ord_tree_c"
+  - sql: "DROP TABLE IF EXISTS ord_tree_d"
