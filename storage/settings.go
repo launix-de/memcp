@@ -122,7 +122,7 @@ func InitSettings() {
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 	scm.SetTrace(Settings.Trace)
 	scm.TracePrint = Settings.TracePrint
-	scm.LogJIT = Settings.LogJIT
+	scm.JITLog = Settings.LogJIT
 	onexit.Register(func() { scm.SetTrace(false) }) // close trace file on exit
 	InitCacheManager()
 }
@@ -251,7 +251,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			Settings.ShutdownDrainSeconds = scm.ToInt(a[1])
 		case "LogJIT":
 			Settings.LogJIT = scm.ToBool(a[1])
-			scm.LogJIT = Settings.LogJIT
+			scm.JITLog = Settings.LogJIT
 		case "ScanDebugging":
 			Settings.ScanDebugging = scm.ToBool(a[1])
 		case "ExplainWidth":

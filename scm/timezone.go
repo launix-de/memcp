@@ -167,155 +167,155 @@ func init_timezone() {
 
 	// UNIX_TIMESTAMP(): returns current unix timestamp as integer
 	// UNIX_TIMESTAMP(dt): converts datetime string to unix timestamp integer
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "unix_timestamp",
 		Desc: "returns a unix timestamp (integer seconds since epoch)",
 		Fn: func(a ...Scmer) Scmer {
-				if len(a) == 0 {
-					return NewInt(time.Now().Unix())
-				}
-				if a[0].IsNil() {
-					return NewNil()
-				}
-				t, ok := toTime(a[0])
-				if !ok {
-					return NewNil()
-				}
-				return NewInt(t.Unix())
-			},
+			if len(a) == 0 {
+				return NewInt(time.Now().Unix())
+			}
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			t, ok := toTime(a[0])
+			if !ok {
+				return NewNil()
+			}
+			return NewInt(t.Unix())
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "dt", ParamDesc: "optional datetime value to convert", Optional: true}},
 			Return: &TypeDescriptor{Kind: "int"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
 	// system_time_zone: returns the OS-level timezone name
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "system_time_zone",
 		Desc: "returns the operating system's local timezone name",
 		Fn: func(a ...Scmer) Scmer {
-				return NewString(time.Local.String())
-			},
+			return NewString(time.Local.String())
+		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "string"},
 		},
 	})
 
 	// CONVERT_TZ(dt, from_tz, to_tz)
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "convert_tz",
 		Desc: "converts a datetime from one timezone to another",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() || a[1].IsNil() || a[2].IsNil() {
+			if a[0].IsNil() || a[1].IsNil() || a[2].IsNil() {
+				return NewNil()
+			}
+			fromLoc, err := ResolveLocation(a[1].String())
+			if err != nil {
+				return NewNil()
+			}
+			toLoc, err := ResolveLocation(a[2].String())
+			if err != nil {
+				return NewNil()
+			}
+			// parse the input as a wall-clock time in fromLoc
+			var t time.Time
+			switch a[0].GetTag() {
+			case tagDate:
+				// tagDate stores a naive UTC unix (wall-clock as UTC); reinterpret as local in fromLoc
+				wall := time.Unix(a[0].Int(), 0).UTC()
+				t = time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, fromLoc)
+			default:
+				unix, ok := parseDateStringInLoc(a[0].String(), fromLoc)
+				if !ok {
 					return NewNil()
 				}
-				fromLoc, err := ResolveLocation(a[1].String())
-				if err != nil {
-					return NewNil()
-				}
-				toLoc, err := ResolveLocation(a[2].String())
-				if err != nil {
-					return NewNil()
-				}
-				// parse the input as a wall-clock time in fromLoc
-				var t time.Time
-				switch a[0].GetTag() {
-				case tagDate:
-					// tagDate stores a naive UTC unix (wall-clock as UTC); reinterpret as local in fromLoc
-					wall := time.Unix(a[0].Int(), 0).UTC()
-					t = time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, fromLoc)
-				default:
-					unix, ok := parseDateStringInLoc(a[0].String(), fromLoc)
-					if !ok {
-						return NewNil()
-					}
-					t = time.Unix(unix, 0)
-				}
-				// convert to target zone; encode result as naive UTC (wall-clock in toLoc stored as UTC)
-				tInTo := t.In(toLoc)
-				naive := time.Date(tInTo.Year(), tInTo.Month(), tInTo.Day(), tInTo.Hour(), tInTo.Minute(), tInTo.Second(), 0, time.UTC)
-				return NewDate(naive.Unix())
-			},
+				t = time.Unix(unix, 0)
+			}
+			// convert to target zone; encode result as naive UTC (wall-clock in toLoc stored as UTC)
+			tInTo := t.In(toLoc)
+			naive := time.Date(tInTo.Year(), tInTo.Month(), tInTo.Day(), tInTo.Hour(), tInTo.Minute(), tInTo.Second(), 0, time.UTC)
+			return NewDate(naive.Unix())
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "dt", ParamDesc: "datetime value"}, &TypeDescriptor{Kind: "string", ParamName: "from_tz", ParamDesc: "source timezone"}, &TypeDescriptor{Kind: "string", ParamName: "to_tz", ParamDesc: "target timezone"}},
 			Return: &TypeDescriptor{Kind: "date"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
 	// FROM_UNIXTIME(unix_ts [, format])
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "from_unixtime",
 		Desc: "converts a unix timestamp to a datetime in the session timezone",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() {
-					return NewNil()
-				}
-				unix := a[0].Int()
-				if len(a) == 2 && !a[1].IsNil() {
-					// with format string: return string
-					loc := GetCurrentSessionLocation()
-					t := time.Unix(unix, 0).In(loc)
-					return NewString(formatDateMySQL(t, a[1].String()))
-				}
-				return NewDate(unix)
-			},
+			if a[0].IsNil() {
+				return NewNil()
+			}
+			unix := a[0].Int()
+			if len(a) == 2 && !a[1].IsNil() {
+				// with format string: return string
+				loc := GetCurrentSessionLocation()
+				t := time.Unix(unix, 0).In(loc)
+				return NewString(formatDateMySQL(t, a[1].String()))
+			}
+			return NewDate(unix)
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "unix_ts", ParamDesc: "unix timestamp (seconds since epoch)"}, &TypeDescriptor{Kind: "string", ParamName: "format", ParamDesc: "optional MySQL format string", Optional: true}},
 			Return: &TypeDescriptor{Kind: "date"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
 	// UTC_TIMESTAMP()
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "utc_timestamp",
 		Desc: "returns the current UTC datetime",
 		Fn: func(a ...Scmer) Scmer {
-				return NewDate(time.Now().UTC().Unix())
-			},
+			return NewDate(time.Now().UTC().Unix())
+		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "date"},
 		},
 	})
 
 	// UTC_DATE()
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "utc_date",
 		Desc: "returns the current UTC date (midnight)",
 		Fn: func(a ...Scmer) Scmer {
-				now := time.Now().UTC()
-				midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-				return NewDate(midnight.Unix())
-			},
+			now := time.Now().UTC()
+			midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+			return NewDate(midnight.Unix())
+		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "date"},
 		},
 	})
 
 	// UTC_TIME()
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "utc_time",
 		Desc: "returns the current UTC time (as a datetime at epoch date)",
 		Fn: func(a ...Scmer) Scmer {
-				now := time.Now().UTC()
-				// Return as seconds since midnight
-				seconds := int64(now.Hour()*3600 + now.Minute()*60 + now.Second())
-				return NewDate(seconds)
-			},
+			now := time.Now().UTC()
+			// Return as seconds since midnight
+			seconds := int64(now.Hour()*3600 + now.Minute()*60 + now.Second())
+			return NewDate(seconds)
+		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "date"},
 		},
 	})
 
 	// SYSDATE() — re-evaluated on every call (unlike NOW() which is constant per query)
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "sysdate",
 		Desc: "returns the current datetime (re-evaluated per call, unlike now())",
 		Fn: func(a ...Scmer) Scmer {
-				return NewDate(time.Now().Unix())
-			},
+			return NewDate(time.Now().Unix())
+		},
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "date"},
 		},
@@ -324,87 +324,87 @@ func init_timezone() {
 	// AT_TIME_ZONE(dt, zone): PostgreSQL AT TIME ZONE operator implementation.
 	// If dt has zone_id=0 (TIMESTAMP without TZ): interpret as local time in zone → return UTC.
 	// If dt has zone_id!=0 (TIMESTAMPTZ): convert UTC moment to local time in zone → return as-is.
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "at_time_zone",
 		Desc: "PostgreSQL AT TIME ZONE operator: converts between timezones",
 		Fn: func(a ...Scmer) Scmer {
-				if a[0].IsNil() || a[1].IsNil() {
-					return NewNil()
-				}
-				toLoc, err := ResolveLocation(a[1].String())
-				if err != nil {
-					return NewNil()
-				}
-				var unix int64
-				zoneID := 0
-				if a[0].GetTag() == tagDate {
-					unix = TagDateDecodeUnix(auxVal(a[0].aux))
-					zoneID = TagDateDecodeZone(auxVal(a[0].aux))
-				} else {
-					unix = a[0].Int()
-				}
-				if zoneID == 0 {
-					// TIMESTAMP without TZ: the stored unix is a wall-clock time (UTC-interpreted).
-					// Reinterpret it as local time in toLoc and return UTC.
-					wall := time.Unix(unix, 0).UTC()
-					local := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, toLoc)
-					return NewDate(local.UTC().Unix())
-				}
-				// TIMESTAMPTZ: convert the absolute UTC moment to the target zone's wall clock.
-				utcTime := time.Unix(unix, 0).In(toLoc)
-				// Return the local wall-clock reading as a "naive" UTC timestamp (zone_id=0)
-				naive := time.Date(utcTime.Year(), utcTime.Month(), utcTime.Day(), utcTime.Hour(), utcTime.Minute(), utcTime.Second(), 0, time.UTC)
-				return NewDate(naive.Unix())
-			},
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
+			toLoc, err := ResolveLocation(a[1].String())
+			if err != nil {
+				return NewNil()
+			}
+			var unix int64
+			zoneID := 0
+			if a[0].GetTag() == tagDate {
+				unix = TagDateDecodeUnix(auxVal(a[0].aux))
+				zoneID = TagDateDecodeZone(auxVal(a[0].aux))
+			} else {
+				unix = a[0].Int()
+			}
+			if zoneID == 0 {
+				// TIMESTAMP without TZ: the stored unix is a wall-clock time (UTC-interpreted).
+				// Reinterpret it as local time in toLoc and return UTC.
+				wall := time.Unix(unix, 0).UTC()
+				local := time.Date(wall.Year(), wall.Month(), wall.Day(), wall.Hour(), wall.Minute(), wall.Second(), 0, toLoc)
+				return NewDate(local.UTC().Unix())
+			}
+			// TIMESTAMPTZ: convert the absolute UTC moment to the target zone's wall clock.
+			utcTime := time.Unix(unix, 0).In(toLoc)
+			// Return the local wall-clock reading as a "naive" UTC timestamp (zone_id=0)
+			naive := time.Date(utcTime.Year(), utcTime.Month(), utcTime.Day(), utcTime.Hour(), utcTime.Minute(), utcTime.Second(), 0, time.UTC)
+			return NewDate(naive.Unix())
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "dt", ParamDesc: "datetime value"}, &TypeDescriptor{Kind: "string", ParamName: "zone", ParamDesc: "target timezone"}},
 			Return: &TypeDescriptor{Kind: "date"},
-			Const: true,
+			Const:  true,
 		},
 	})
 
 	// TIMESTAMPDIFF(unit, dt1, dt2)
-		Declare(&Globalenv, &Declaration{
+	Declare(&Globalenv, &Declaration{
 		Name: "timestampdiff",
 		Desc: "returns the difference between two datetimes in the given unit",
 		Fn: func(a ...Scmer) Scmer {
-				if a[1].IsNil() || a[2].IsNil() {
-					return NewNil()
-				}
-				t1, ok1 := toTime(a[1])
-				t2, ok2 := toTime(a[2])
-				if !ok1 || !ok2 {
-					return NewNil()
-				}
-				unit := strings.ToUpper(String(a[0]))
-				diff := t2.Sub(t1)
-				switch unit {
-				case "SECOND":
-					return NewInt(int64(diff.Seconds()))
-				case "MINUTE":
-					return NewInt(int64(diff.Minutes()))
-				case "HOUR":
-					return NewInt(int64(diff.Hours()))
-				case "DAY":
-					return NewInt(int64(diff.Hours() / 24))
-				case "WEEK":
-					return NewInt(int64(diff.Hours() / (24 * 7)))
-				case "MONTH":
-					y1, m1, _ := t1.Date()
-					y2, m2, _ := t2.Date()
-					return NewInt(int64((y2-y1)*12 + int(m2-m1)))
-				case "YEAR":
-					y1, _, _ := t1.Date()
-					y2, _, _ := t2.Date()
-					return NewInt(int64(y2 - y1))
-				default:
-					return NewNil() // unknown unit → NULL (MySQL compatible)
-				}
-			},
+			if a[1].IsNil() || a[2].IsNil() {
+				return NewNil()
+			}
+			t1, ok1 := toTime(a[1])
+			t2, ok2 := toTime(a[2])
+			if !ok1 || !ok2 {
+				return NewNil()
+			}
+			unit := strings.ToUpper(String(a[0]))
+			diff := t2.Sub(t1)
+			switch unit {
+			case "SECOND":
+				return NewInt(int64(diff.Seconds()))
+			case "MINUTE":
+				return NewInt(int64(diff.Minutes()))
+			case "HOUR":
+				return NewInt(int64(diff.Hours()))
+			case "DAY":
+				return NewInt(int64(diff.Hours() / 24))
+			case "WEEK":
+				return NewInt(int64(diff.Hours() / (24 * 7)))
+			case "MONTH":
+				y1, m1, _ := t1.Date()
+				y2, m2, _ := t2.Date()
+				return NewInt(int64((y2-y1)*12 + int(m2-m1)))
+			case "YEAR":
+				y1, _, _ := t1.Date()
+				y2, _, _ := t2.Date()
+				return NewInt(int64(y2 - y1))
+			default:
+				return NewNil() // unknown unit → NULL (MySQL compatible)
+			}
+		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "unit", ParamDesc: "SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR"}, &TypeDescriptor{Kind: "any", ParamName: "dt1", ParamDesc: "first datetime"}, &TypeDescriptor{Kind: "any", ParamName: "dt2", ParamDesc: "second datetime"}},
 			Return: &TypeDescriptor{Kind: "int"},
-			Const: true,
+			Const:  true,
 		},
 	})
 }

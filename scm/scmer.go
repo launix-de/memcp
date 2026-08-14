@@ -67,6 +67,7 @@ const (
 	tagFunc
 	tagFuncEnv
 	tagProc
+	tagJIT
 	tagParser
 	tagNthLocalVar
 	tagSourceInfo
@@ -83,11 +84,17 @@ const (
 
 // Exported tag constants for type checking in other packages
 const (
-	TagString  = tagString
-	TagSymbol  = tagSymbol
-	TagDate    = tagDate
-	TagCString = tagCString
-	TagBString = tagBString
+	TagNil      = tagNil
+	TagString   = tagString
+	TagSymbol   = tagSymbol
+	TagFloat    = tagFloat
+	TagInt      = tagInt
+	TagBool     = tagBool
+	TagSlice    = tagSlice
+	TagFastDict = tagFastDict
+	TagDate     = tagDate
+	TagCString  = tagCString
+	TagBString  = tagBString
 )
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
@@ -122,10 +129,10 @@ var scmerIntSentinel byte
 var scmerFloatSentinel byte
 
 // Helpers
-func makeAux(tag uint16, val uint64) uint64 {
+func makeAux(tag uint8, val uint64) uint64 {
 	return (val << 8) | uint64(tag&0xFF)
 }
-func auxTag(aux uint64) uint16 { return uint16(aux & 0xFF) }
+func auxTag(aux uint64) uint8  { return uint8(aux & 0xFF) }
 func auxVal(aux uint64) uint64 { return aux >> 8 }
 func makeSliceAux(length, capacity int) uint64 {
 	if length < 0 || capacity < 0 || length > capacity {
@@ -142,7 +149,7 @@ func decodeSliceAux(aux uint64) (int, int) {
 	length := int((val >> sliceCapBits) & sliceLenMask)
 	return length, capacity
 }
-func (s Scmer) GetTag() uint16 {
+func (s Scmer) GetTag() uint8 {
 	if s.ptr == &scmerIntSentinel {
 		return tagInt
 	}
@@ -150,6 +157,12 @@ func (s Scmer) GetTag() uint16 {
 		return tagFloat
 	}
 	return auxTag(s.aux)
+}
+
+// RawWords exposes the underlying 2-word representation for JIT emission.
+// word0 is the pointer payload, word1 is the aux payload.
+func (s Scmer) RawWords() (word0 uintptr, word1 uint64) {
+	return uintptr(unsafe.Pointer(s.ptr)), s.aux
 }
 
 //
@@ -302,6 +315,15 @@ func NewProc(p *Proc) Scmer {
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagProc, 0)}
 }
 
+// NewJIT wraps a JITEntryPoint as a Scmer value.
+func NewJIT(jep *JITEntryPoint) Scmer {
+	var ptr *byte
+	if jep != nil {
+		ptr = (*byte)(unsafe.Pointer(jep))
+	}
+	return Scmer{ptr, makeAux(tagJIT, 0)}
+}
+
 func NewNthLocalVar(idx NthLocalVar) Scmer {
 	return Scmer{nil, makeAux(tagNthLocalVar, uint64(idx))}
 }
@@ -402,14 +424,14 @@ func FromAny(v any) Scmer {
 // Custom pointer-like values
 //
 
-func NewCustom(tag uint16, ptr unsafe.Pointer) Scmer {
+func NewCustom(tag uint8, ptr unsafe.Pointer) Scmer {
 	if tag < 100 {
 		panic("custom tags should be >= 100 to avoid conflicts")
 	}
 	return Scmer{(*byte)(ptr), makeAux(tag, 0)}
 }
 
-func (s Scmer) IsCustom(tag uint16) bool {
+func (s Scmer) IsCustom(tag uint8) bool {
 	if s.ptr == &scmerIntSentinel {
 		return tag == tagInt
 	}
@@ -419,7 +441,7 @@ func (s Scmer) IsCustom(tag uint16) bool {
 	return auxTag(s.aux) == tag
 }
 
-func (s Scmer) Custom(tag uint16) unsafe.Pointer {
+func (s Scmer) Custom(tag uint8) unsafe.Pointer {
 	if s.GetTag() != tag {
 		panic(fmt.Sprintf("wrong custom tag: expected %d, got %d (value: %s)", tag, s.GetTag(), s.String()))
 	}
@@ -880,6 +902,22 @@ func (s Scmer) Proc() *Proc {
 	return (*Proc)(unsafe.Pointer(s.ptr))
 }
 
+// IsJIT reports whether the value is a JIT-compiled function.
+func (s Scmer) IsJIT() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagJIT
+}
+
+// JIT returns the JITEntryPoint for a JIT-compiled value.
+func (s Scmer) JIT() *JITEntryPoint {
+	if s.GetTag() != tagJIT {
+		panic("not jit")
+	}
+	return (*JITEntryPoint)(unsafe.Pointer(s.ptr))
+}
+
 func (s Scmer) IsNthLocalVar() bool {
 	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
 		return false
@@ -957,6 +995,8 @@ func (s Scmer) Any() any {
 		return s.FuncEnv()
 	case tagProc:
 		return s.Proc()
+	case tagJIT:
+		return s.JIT()
 	case tagNthLocalVar:
 		return s.NthLocalVar()
 	case tagSourceInfo:

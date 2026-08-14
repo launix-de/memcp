@@ -61,6 +61,12 @@ const overlayBlobVersion = 0
 //	0 (current): layout as above; the version byte was previously the first byte
 //	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
 //	             Legacy: version byte '1'=49 → treat as v0 (inline blobs still possible).
+func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
+
+	/* TODO: dynamic call: invoke t1.GetValue(i) */
+	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*OverlayBlob).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+}
+
 func (s *OverlayBlob) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(31))                 // 31 = OverlayBlob
 	binary.Write(f, binary.LittleEndian, uint8(overlayBlobVersion)) // version byte (was '1' in legacy)
