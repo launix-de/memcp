@@ -98,13 +98,25 @@ func normalizeScanType(td *scm.TypeDescriptor) *scm.TypeDescriptor {
 
 func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
 	if rewritten := tryScanInvariantFilterRewrite(v); !rewritten.IsNil() {
-		return oc.OptimizeSub(rewritten, useResult)
+		if result, td, accepted := oc.OptimizeRewrite(scm.NewSlice(v), rewritten, useResult, scm.OptimizerRewriteContract{
+			Name: "scan-invariant-filter", PreconditionsMet: true, MaxGrowthNodes: 64,
+		}); accepted {
+			return result, td
+		}
 	}
 	if rewritten := tryScanExistsRewrite(v); !rewritten.IsNil() {
-		return oc.OptimizeSub(rewritten, useResult)
+		if result, td, accepted := oc.OptimizeRewrite(scm.NewSlice(v), rewritten, useResult, scm.OptimizerRewriteContract{
+			Name: "scan-exists", PreconditionsMet: true, MaxGrowthNodes: 64,
+		}); accepted {
+			return result, td
+		}
 	}
 	if rewritten := tryScanBatchRewrite(v); !rewritten.IsNil() {
-		return oc.OptimizeSub(rewritten, useResult)
+		if result, td, accepted := oc.OptimizeRewrite(scm.NewSlice(v), rewritten, useResult, scm.OptimizerRewriteContract{
+			Name: "scan-batch", PreconditionsMet: true, MaxGrowthNodes: 256,
+		}); accepted {
+			return result, td
+		}
 	}
 	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
 }
@@ -378,7 +390,11 @@ func scanExprMayHaveSideEffects(v scm.Scmer) bool {
 
 func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
 	if rewritten := tryScanInvariantFilterRewrite(v); !rewritten.IsNil() {
-		return oc.OptimizeSub(rewritten, useResult)
+		if result, td, accepted := oc.OptimizeRewrite(scm.NewSlice(v), rewritten, useResult, scm.OptimizerRewriteContract{
+			Name: "scan-batch-invariant-filter", PreconditionsMet: true, MaxGrowthNodes: 64,
+		}); accepted {
+			return result, td
+		}
 	}
 	return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
 }
