@@ -786,6 +786,15 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 				}
 				atomic.StoreUint64(&t.Columns[ci].DistinctEstimate, distinctSum)
 				atomic.StoreUint64(&t.Columns[ci].RowEstimate, rowEst)
+				// Planner statistics are properties of persisted base columns. Reading
+				// hidden/cache or computed storages can initialize maintenance state and
+				// must never be part of a statistics-only rebuild pass.
+				if !strings.HasPrefix(t.Name, ".") && !t.Columns[ci].IsTemp && t.Columns[ci].Computor.IsNil() && len(t.Columns[ci].OrcSortCols) == 0 {
+					t.Columns[ci].PlannerStats.Store(
+						collectRebuiltColumnPlannerStatistics(newShardList, colName))
+				} else {
+					t.Columns[ci].PlannerStats.Store(nil)
+				}
 			}
 			t.publishShowColumnsSnapshot()
 			t.collectStatisticsFromShards(newShardList)
