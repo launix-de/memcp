@@ -262,7 +262,7 @@ func hashStructuralReadonly(key Scmer) uint64 {
 	}
 }
 
-func structuralScalarTag(tag uint16) bool {
+func structuralScalarTag(tag uint8) bool {
 	switch tag {
 	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString:
 		return true
