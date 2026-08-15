@@ -30,6 +30,15 @@ type sqlSelectScope struct {
 	clause     string
 	orderDepth int
 	unsafe     bool
+	derived    bool
+}
+
+type sqlLiteralCandidate struct {
+	start int
+	end   int
+	value Scmer
+	scope *sqlSelectScope
+	force bool
 }
 
 func newSQLShapeBuilder(capacity int) *sqlShapeBuilder {
@@ -82,7 +91,8 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 	previousWord := ""
 	previousToken := ""
 	structuralQuery := false
-	selectScopes := make([]sqlSelectScope, 0, 4)
+	selectScopes := make([]*sqlSelectScope, 0, 4)
+	candidates := make([]sqlLiteralCandidate, 0, 8)
 
 	for i := 0; i < len(query); {
 		if isSQLSpace(query[i]) {
@@ -122,13 +132,13 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 		if query[i] == '\'' || query[i] == '"' {
 			end, ok := scanQuotedSQL(query, i, query[i])
 			clause := ""
-			scopeDepth := -1
+			var scope *sqlSelectScope
 			if len(selectScopes) > 0 {
-				clause = selectScopes[len(selectScopes)-1].clause
-				scopeDepth = selectScopes[len(selectScopes)-1].depth
+				scope = selectScopes[len(selectScopes)-1]
+				clause = scope.clause
 			}
-			parameterizable := parameterizableLiteralAtScope(clause, scopeDepth) ||
-				(scopeDepth > 0 && (previousWord == "LIKE" || previousWord == "AGAINST"))
+			forcedPattern := scope != nil && scope.depth > 0 && (previousWord == "LIKE" || previousWord == "AGAINST")
+			parameterizable := parameterizableLiteralAtScope(clause, scope) || forcedPattern
 			if !ok || previousWord == "AS" || previousWord == "DATE" || !parameterizable {
 				if !ok {
 					return query, nil, fnvHashString(query)
@@ -139,7 +149,9 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 				continue
 			}
 			out.WriteByte('?')
-			bindings = append(bindings, NewString(unescapeSQLLiteral(query[i+1:end-1])))
+			value := NewString(unescapeSQLLiteral(query[i+1 : end-1]))
+			bindings = append(bindings, value)
+			candidates = append(candidates, sqlLiteralCandidate{i, end, value, selectScopes[len(selectScopes)-1], forcedPattern})
 			i = end
 			previousToken = "literal"
 			continue
@@ -161,21 +173,20 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 					selectScopes[len(selectScopes)-1].clause = "SELECT"
 					selectScopes[len(selectScopes)-1].orderDepth = -1
 				} else {
-					selectScopes = append(selectScopes, sqlSelectScope{
+					selectScopes = append(selectScopes, &sqlSelectScope{
 						depth:      depth,
 						clause:     "SELECT",
 						orderDepth: -1,
+						derived:    depth == 0 || previousWord == "FROM" || previousWord == "JOIN",
 					})
 				}
 			}
 			if len(selectScopes) > 0 && depth == selectScopes[len(selectScopes)-1].depth {
-				scope := &selectScopes[len(selectScopes)-1]
-				if scope.depth == 0 {
-					switch word {
-					case "GROUP", "HAVING", "UNION", "DISTINCT", "OVER",
-						"COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT":
-						scope.unsafe = true
-					}
+				scope := selectScopes[len(selectScopes)-1]
+				switch word {
+				case "GROUP", "HAVING", "UNION", "DISTINCT", "OVER",
+					"COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT":
+					scope.unsafe = true
 				}
 				if word == "BY" && previousWord == "ORDER" {
 					scope.orderDepth = depth
@@ -222,17 +233,19 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 		}
 		clause := ""
 		orderDepth := -1
-		scopeDepth := -1
+		var scope *sqlSelectScope
 		if len(selectScopes) > 0 {
-			clause = selectScopes[len(selectScopes)-1].clause
-			orderDepth = selectScopes[len(selectScopes)-1].orderDepth
-			scopeDepth = selectScopes[len(selectScopes)-1].depth
+			scope = selectScopes[len(selectScopes)-1]
+			clause = scope.clause
+			orderDepth = scope.orderDepth
 		}
-		if query[i] == '-' && i+1 < len(query) && query[i+1] >= '0' && query[i+1] <= '9' && unarySQLSign(previousToken) && parameterizableLiteralAtScope(clause, scopeDepth) {
+		if query[i] == '-' && i+1 < len(query) && query[i+1] >= '0' && query[i+1] <= '9' && unarySQLSign(previousToken) && parameterizableLiteralAtScope(clause, scope) {
 			end := scanSQLNumber(query, i+1)
 			if !isSQLIdentifierPartAt(query, end) {
 				out.WriteByte('?')
-				bindings = append(bindings, Simplify(query[i:end]))
+				value := Simplify(query[i:end])
+				bindings = append(bindings, value)
+				candidates = append(candidates, sqlLiteralCandidate{i, end, value, selectScopes[len(selectScopes)-1], false})
 				i = end
 				previousToken = "literal"
 				continue
@@ -242,11 +255,13 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 			end := scanSQLNumber(query, i)
 			if end > i && !isSQLIdentifierPartAt(query, end) {
 				isOrderOrdinal := orderDepth == depth && (previousWord == "BY" || previousToken == ",")
-				if typeDepth >= 0 || isOrderOrdinal || !parameterizableLiteralAtScope(clause, scopeDepth) {
+				if typeDepth >= 0 || isOrderOrdinal || !parameterizableLiteralAtScope(clause, scope) {
 					out.WriteString(query[i:end])
 				} else {
 					out.WriteByte('?')
-					bindings = append(bindings, Simplify(query[i:end]))
+					value := Simplify(query[i:end])
+					bindings = append(bindings, value)
+					candidates = append(candidates, sqlLiteralCandidate{i, end, value, selectScopes[len(selectScopes)-1], false})
 				}
 				i = end
 				previousToken = "literal"
@@ -259,11 +274,32 @@ func parameterizeSQLSelectLiterals(query string) (string, []Scmer, string) {
 		i++
 	}
 
-	if len(bindings) == 0 {
+	if len(candidates) == 0 {
 		return query, nil, fnvHashString(query)
 	}
 	if structuralQuery || len(selectScopes) == 0 || selectScopes[0].unsafe {
 		return query, nil, fnvHashString(query)
+	}
+	accepted := make([]sqlLiteralCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.force || !candidate.scope.unsafe {
+			accepted = append(accepted, candidate)
+		}
+	}
+	if len(accepted) == 0 {
+		return query, nil, fnvHashString(query)
+	}
+	if len(accepted) != len(candidates) {
+		out = newSQLShapeBuilder(len(query))
+		bindings = make([]Scmer, 0, len(accepted))
+		position := 0
+		for _, candidate := range accepted {
+			out.WriteString(query[position:candidate.start])
+			out.WriteByte('?')
+			bindings = append(bindings, candidate.value)
+			position = candidate.end
+		}
+		out.WriteString(query[position:])
 	}
 	normalized, shapeHash := out.Result()
 	return normalized, bindings, shapeHash
@@ -392,12 +428,12 @@ func unarySQLSign(previousToken string) bool {
 	}
 }
 
-func parameterizableLiteralAtScope(clause string, scopeDepth int) bool {
-	if scopeDepth != 0 {
+func parameterizableLiteralAtScope(clause string, scope *sqlSelectScope) bool {
+	if scope == nil || (scope.depth > 0 && !scope.derived) {
 		return false
 	}
 	if clause == "LIMIT" || clause == "OFFSET" {
-		return true
+		return scope.depth == 0
 	}
 	return clause == "WHERE" || clause == "HAVING"
 }
