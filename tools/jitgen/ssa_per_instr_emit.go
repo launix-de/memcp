@@ -64,6 +64,8 @@ func (e perSSAInstrEmitter) Emit(instr ssa.Instruction) {
 		e.EmitPanic(v)
 	case *ssa.Slice:
 		e.EmitSlice(v)
+	case *ssa.MakeSlice:
+		e.EmitMakeSlice(v)
 	default:
 		panic(instrDesc(instr))
 	}
@@ -85,3 +87,4 @@ func (e perSSAInstrEmitter) EmitMakeClosure(v *ssa.MakeClosure)     { e.g.emitIn
 func (e perSSAInstrEmitter) EmitMakeInterface(v *ssa.MakeInterface) { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitPanic(v *ssa.Panic)                 { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitSlice(v *ssa.Slice)                 { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitMakeSlice(v *ssa.MakeSlice)         { e.g.emitInstrLegacy(v) }

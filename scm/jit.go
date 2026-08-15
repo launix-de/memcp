@@ -140,6 +140,7 @@ type JITEntryPoint struct {
 	// argument array as an owned list. Call must make that array fresh because
 	// apply may otherwise pass caller-owned list backing directly.
 	TransferInputArgs bool
+	HiddenArgs        []JITHiddenArg
 	CodePtr           unsafe.Pointer   // start of code in arena
 	CodeLen           int              // bytes used
 	Arena             *jitArena        // owning arena (for free on GC)
@@ -159,11 +160,37 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if jep.TransferInputArgs {
 		args = append([]Scmer(nil), args...)
 	}
+	for _, spec := range jep.HiddenArgs {
+		if spec.SourceInput < 0 || spec.SourceInput >= len(args) {
+			panic("JIT: invalid hidden argument input")
+		}
+		switch spec.Kind {
+		case jitHiddenPreallocatedSlice:
+			length := len(asSlice(args[spec.SourceInput], "jit preallocation"))
+			args = append(args, NewSlice(make([]Scmer, length)))
+		case jitHiddenOptimizedCallback:
+			args = append(args, NewFunc(OptimizeProcToSerialFunction(args[spec.SourceInput])))
+		default:
+			panic("JIT: invalid hidden argument kind")
+		}
+	}
 	defer func() {
 		runtime.KeepAlive(args)
 		runtime.KeepAlive(jep)
 	}()
 	return callJIT(jep.Native, args...)
+}
+
+type jitHiddenArgKind uint8
+
+const (
+	jitHiddenPreallocatedSlice jitHiddenArgKind = iota
+	jitHiddenOptimizedCallback
+)
+
+type JITHiddenArg struct {
+	Kind        jitHiddenArgKind
+	SourceInput int
 }
 
 // JITValueDesc describes a value during JIT compilation: its type and
@@ -198,10 +225,24 @@ type JITValueDesc struct {
 	KnownSliceLen  int32
 	KnownSliceCap  int32
 	SliceSizeKnown bool
+	// NoHeapPointer proves that the Scmer ptr word is nil or points at immutable
+	// runtime storage rather than the Go heap. It is intentionally independent
+	// of Type so unions such as int|float|nil retain the fact without claiming an
+	// exact tag.
+	NoHeapPointer bool
 	// Virtual holds compiler-only aggregate elements. LocVirtualSlice never
 	// reaches generated machine code; consumers either operate on its elements
 	// directly or materialize it through a Go allocation trampoline.
 	Virtual []JITValueDesc
+	// Lambda carries compiler-only code shape for a known lambda. Runtime
+	// captures remain descriptors in Outer and are never materialized merely to
+	// cross a generated emitter boundary.
+	Lambda *JITLambdaTemplate
+}
+
+type JITLambdaTemplate struct {
+	Proc  Proc
+	Outer *JITEnv
 }
 
 // ---- merged from scm/jit_types.go ----
@@ -233,6 +274,7 @@ const (
 	LocStackTriple // Three-word value in the current invocation's frame (StackOff..StackOff+16)
 	LocVirtualSlice
 	LocInputPair // Compiler-only reference to one Scmer in the native call's original variadic slice
+	LocLambdaTemplate
 )
 
 // JITFixup records a forward reference that must be patched after all
@@ -311,6 +353,7 @@ type JITContext struct {
 	// TransferInputArgs is set when emission proves that the native result is
 	// exactly the complete variadic input array re-tagged as an owned list.
 	TransferInputArgs bool
+	HiddenArgs        []JITHiddenArg
 	RegOwners         [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 
 	// Stack frame: emitter locals use [RSP + offset], while register spills use
@@ -333,6 +376,18 @@ type JITContext struct {
 	ConstRoots []unsafe.Pointer
 	rootSet    map[unsafe.Pointer]struct{}
 	Arena      *jitArena // owning arena for source map entries
+}
+
+func (ctx *JITContext) RequestPreallocatedSlice(lengthInput int) JITValueDesc {
+	hiddenIndex := ctx.InputArgCount + len(ctx.HiddenArgs)
+	ctx.HiddenArgs = append(ctx.HiddenArgs, JITHiddenArg{Kind: jitHiddenPreallocatedSlice, SourceInput: lengthInput})
+	return JITValueDesc{Loc: LocInputPair, Type: tagSlice, StackOff: int32(hiddenIndex)}
+}
+
+func (ctx *JITContext) RequestOptimizedCallback(sourceInput int) JITValueDesc {
+	hiddenIndex := ctx.InputArgCount + len(ctx.HiddenArgs)
+	ctx.HiddenArgs = append(ctx.HiddenArgs, JITHiddenArg{Kind: jitHiddenOptimizedCallback, SourceInput: sourceInput})
+	return JITValueDesc{Loc: LocInputPair, Type: tagFunc, StackOff: int32(hiddenIndex)}
 }
 
 // jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
@@ -540,6 +595,45 @@ func (ctx *JITContext) ReclaimUntrackedRegs() {
 	}
 }
 
+type jitNestedPreservation struct {
+	alloc jitAllocStateSnapshot
+	regs  []Reg
+	offs  []int32
+}
+
+// PreserveOuterRegs makes nested emission independent of registers whose
+// identities have already been embedded in outer control flow. The values are
+// saved in invocation-local spill slots, all allocator registers become
+// available to the nested emitter, and RestoreOuterRegs reloads the exact same
+// registers before outer code resumes.
+func (ctx *JITContext) PreserveOuterRegs() jitNestedPreservation {
+	p := jitNestedPreservation{alloc: ctx.SnapshotAllocState()}
+	ctx.ReclaimUntrackedRegs()
+	for r := Reg(0); r <= RegR15; r++ {
+		owner := ctx.RegOwners[r]
+		if owner == nil || (ctx.AllRegs&(1<<uint(r))) == 0 || (ctx.FreeRegs&(1<<uint(r))) != 0 {
+			continue
+		}
+		off := ctx.AllocSpill(8)
+		ctx.EmitStoreRegMem(r, RegRBP, off)
+		p.regs = append(p.regs, r)
+		p.offs = append(p.offs, off)
+		ctx.RegOwners[r] = nil
+		ctx.FreeRegs |= 1 << uint(r)
+	}
+	ctx.ProtectedRegs = 0
+	ctx.ProtectedRegCounts = [16]int{}
+	return p
+}
+
+func (ctx *JITContext) RestoreOuterRegs(p jitNestedPreservation) {
+	ctx.ReclaimUntrackedRegs()
+	for i, r := range p.regs {
+		ctx.EmitMovRegMem(r, RegRBP, p.offs[i])
+	}
+	ctx.RestoreAllocState(p.alloc)
+}
+
 // AllocReg picks a free register from the bitmap and marks it used.
 // If no registers are free, spills the highest-numbered in-use register
 // to a pre-allocated buffer and returns it.
@@ -743,6 +837,16 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 		}
 	}
 	switch desc.Loc {
+	case LocInputPair:
+		r1 := ctx.AllocReg()
+		r2 := ctx.AllocRegExcept(r1)
+		ctx.EmitMovRegMem(r1, ctx.SliceBase, desc.StackOff*16)
+		ctx.EmitMovRegMem(r2, ctx.SliceBase, desc.StackOff*16+8)
+		desc.Loc = LocRegPair
+		desc.Reg = r1
+		desc.Reg2 = r2
+		ctx.BindReg(r1, desc)
+		ctx.BindReg(r2, desc)
 	case LocStack:
 		ctx.EnsureReg(desc)
 	case LocStackPair:
@@ -1999,7 +2103,7 @@ func jitCompile(a ...Scmer) Scmer {
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
 			ptr, arena := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena}
-			codeLen, roots, overflow, transferInputArgs := jitCompileProcToExec(proc, buf)
+			codeLen, roots, overflow, transferInputArgs, hiddenArgs := jitCompileProcToExec(proc, buf)
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
@@ -2011,6 +2115,7 @@ func jitCompile(a ...Scmer) Scmer {
 				jep := &JITEntryPoint{
 					Native:            nativeFn,
 					TransferInputArgs: transferInputArgs,
+					HiddenArgs:        hiddenArgs,
 					CodePtr:           ptr,
 					CodeLen:           codeLen,
 					Arena:             arena,

@@ -62,7 +62,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
 	ptr, _ := globalJITPool.Alloc(defaultCodeBufSize)
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize}
-	codeLen, roots, _, _ := jitCompileProcToExec(proc, buf)
+	codeLen, roots, _, _, _ := jitCompileProcToExec(proc, buf)
 	if codeLen == 0 {
 		return nil, nil
 	}
@@ -74,7 +74,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 // jitCompileProcToExec compiles a Proc body directly into writable executable memory.
 // Returns code length, GC roots, an overflow flag, and whether the call boundary
 // must provide a fresh variadic array that becomes the owned list result.
-func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool, bool) {
+func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		si := body.SourceInfo()
@@ -93,7 +93,7 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
 // executable buffer using Declaration.JITEmit callbacks.
-func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool) {
+func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r == jitCodeOverflowPanic {
@@ -105,6 +105,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 			codeLen = 0
 			roots = nil
 			transferInputArgs = false
+			hiddenArgs = nil
 		}
 	}()
 
@@ -218,7 +219,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		case tagNil:
 			ctx.EmitMakeNil(result)
 		default:
-			return 0, nil, false, false
+			return 0, nil, false, false, nil
 		}
 		// fall through to epilog
 	} else {
@@ -241,10 +242,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 			case tagFloat:
 				ctx.EmitMakeFloat(ret, desc)
 			default:
-				return 0, nil, false, false
+				return 0, nil, false, false, nil
 			}
 		default:
-			return 0, nil, false, false
+			return 0, nil, false, false, nil
 		}
 	}
 	// Unified epilog: patch SUB RSP with max frame size, then leave; ret.
@@ -256,7 +257,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs
+	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs
 }
 
 func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
@@ -270,6 +271,10 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 	if target.Loc != LocRegPair {
 		panic("jit: jitPlaceIntoPair requires LocRegPair target")
 	}
+	// Placement changes representation, not the proven Scheme type. Keeping the
+	// fact lets downstream generated SSA eliminate checks and write barriers.
+	target.Type = src.Type
+	target.NoHeapPointer = src.NoHeapPointer
 	// Keep descriptor location in sync with spill metadata before we read Reg/Reg2.
 	if src.Loc != LocImm {
 		ctx.EnsureDesc(src)
@@ -332,6 +337,149 @@ func jitList5(a, b, c, d, e Scmer) Scmer          { return List(a, b, c, d, e) }
 func jitList6(a, b, c, d, e, f Scmer) Scmer       { return List(a, b, c, d, e, f) }
 func jitList7(a, b, c, d, e, f, g Scmer) Scmer    { return List(a, b, c, d, e, f, g) }
 func jitList8(a, b, c, d, e, f, g, h Scmer) Scmer { return List(a, b, c, d, e, f, g, h) }
+
+func jitMakeScmerSlice(length, capacity int) []Scmer {
+	return make([]Scmer, length, capacity)
+}
+
+func jitStoreScmerAt(address *Scmer, value Scmer) {
+	*address = value
+}
+
+func jitInvokeCallback1(callback, arg0 Scmer) Scmer {
+	return callback.Func()(arg0)
+}
+
+func jitInvokeCallback2(callback, arg0, arg1 Scmer) Scmer {
+	return callback.Func()(arg0, arg1)
+}
+
+func jitInvokeCallback3(callback, arg0, arg1, arg2 Scmer) Scmer {
+	return callback.Func()(arg0, arg1, arg2)
+}
+
+// EmitSliceElementAddress lowers the address part shared by SSA slice loads and
+// stores.
+func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, elementSize int32) JITValueDesc {
+	ctx.EnsureDesc(slice)
+	if slice.Loc != LocRegTriple {
+		panic("jit: slice element address requires a Go slice header")
+	}
+	ctx.ProtectReg(slice.Reg)
+	ctx.ProtectReg(slice.Reg2)
+	ctx.ProtectReg(slice.Reg3)
+	ctx.EnsureDesc(index)
+	excluded := []Reg{slice.Reg, slice.Reg2, slice.Reg3}
+	if index.Loc == LocReg {
+		excluded = append(excluded, index.Reg)
+	}
+	address := ctx.AllocRegExcept(excluded...)
+	if index.Loc == LocImm {
+		ctx.EmitMovRegImm64(address, uint64(index.Imm.Int())*uint64(elementSize))
+	} else if index.Loc == LocReg {
+		ctx.EmitMovRegReg(address, index.Reg)
+		switch elementSize {
+		case 8:
+			ctx.EmitShlRegImm8(address, 3)
+		case 16:
+			ctx.EmitShlRegImm8(address, 4)
+		default:
+			factor := ctx.AllocRegExcept(append(excluded, address)...)
+			ctx.EmitMovRegImm64(factor, uint64(elementSize))
+			ctx.EmitImulInt64(address, factor)
+			ctx.FreeReg(factor)
+		}
+	} else {
+		panic("jit: slice element index requires an integer descriptor")
+	}
+	ctx.EmitAddInt64(address, slice.Reg)
+	ctx.UnprotectReg(slice.Reg)
+	ctx.UnprotectReg(slice.Reg2)
+	ctx.UnprotectReg(slice.Reg3)
+	result := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: address}
+	ctx.BindReg(address, &result)
+	return result
+}
+
+// EmitStoreScmerAt stores a Scmer through an address produced by
+// EmitSliceElementAddress. Values whose descriptor proves that their ptr word
+// is nil or a static runtime sentinel need no GC write barrier and are emitted
+// as two plain stores. All other values retain Go's authoritative write barrier
+// through the generic trampoline.
+func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
+	ctx.EnsureDesc(address)
+	if address.Loc != LocReg {
+		panic("jit: Scmer store requires an address register")
+	}
+
+	switch value.Type {
+	case tagNil, tagFloat, tagInt, tagBool, tagDate, tagNthLocalVar:
+		value.NoHeapPointer = true
+	}
+	if value.NoHeapPointer {
+		ctx.ProtectReg(address.Reg)
+		ctx.EnsureDesc(value)
+		ctx.UnprotectReg(address.Reg)
+		if value.Loc == LocImm {
+			ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(value.Imm.ptr))))
+			ctx.EmitStoreRegMem(RegR11, address.Reg, 0)
+			ctx.EmitMovRegImm64(RegR11, value.Imm.aux)
+			ctx.EmitStoreRegMem(RegR11, address.Reg, 8)
+			return
+		}
+		if value.Loc == LocRegPair {
+			ctx.EmitStoreRegMem(value.Reg, address.Reg, 0)
+			ctx.EmitStoreRegMem(value.Reg2, address.Reg, 8)
+			return
+		}
+	}
+
+	ctx.EnsureDesc(value)
+	ctx.EmitGoCallVoid(GoFuncAddr(jitStoreScmerAt), []JITValueDesc{*address, *value})
+}
+
+func jitReturnHasNoHeapPointer(td *TypeDescriptor) bool {
+	if td == nil {
+		return false
+	}
+	switch td.Kind {
+	case "bool", "date", "int", "int|nil", "nil", "number", "number|nil":
+		return true
+	default:
+		return false
+	}
+}
+
+// EmitNewSliceFromGoSlice retags a Go []Scmer header as a Scheme list without
+// allocating or copying its backing storage. Ownership of the data pointer is
+// transferred from slice to the returned descriptor.
+func (ctx *JITContext) EmitNewSliceFromGoSlice(slice *JITValueDesc) JITValueDesc {
+	ctx.EnsureDesc(slice)
+	if slice.Loc != LocRegTriple {
+		panic("jit: NewSlice requires a Go slice header")
+	}
+	ptrReg, lenReg, capReg := slice.Reg, slice.Reg2, slice.Reg3
+	auxReg := ctx.AllocRegExcept(ptrReg, lenReg, capReg)
+	ctx.EmitMovRegReg(auxReg, lenReg)
+	ctx.EmitShlRegImm8(auxReg, sliceCapBits)
+	ctx.EmitOrInt64(auxReg, capReg)
+	ctx.EmitShlRegImm8(auxReg, 8)
+	ctx.EmitOrRegImm32(auxReg, int32(tagSlice))
+	oldID := slice.ID
+	for _, r := range [...]Reg{ptrReg, lenReg, capReg} {
+		if owner := ctx.RegOwners[r]; owner != nil && (oldID == 0 || owner.ID == oldID) {
+			ctx.RegOwners[r] = nil
+		}
+	}
+	ctx.FreeRegs |= 1 << uint(lenReg)
+	ctx.FreeRegs |= 1 << uint(capReg)
+	ctx.FreeRegs &^= 1 << uint(ptrReg)
+	slice.Loc = LocNone
+	result := JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: ptrReg, Reg2: auxReg}
+	ctx.BindReg(ptrReg, &result)
+	ctx.BindReg(auxReg, &result)
+	return result
+}
 
 // jitMaterializeVirtualSlice lowers the virtual variadic array produced from
 // List's Go SSA. A normal list always gets fresh backing storage, preserving
@@ -478,10 +626,14 @@ func jitKnownSliceHeader(ctx *JITContext, value *JITValueDesc) JITValueDesc {
 		ctx.EmitShrRegImm8(capReg, 8)
 		ctx.EmitAndRegImm32(capReg, int32(sliceCapMask))
 	}
-	return JITValueDesc{
+	result := JITValueDesc{
 		Loc: LocRegTriple, Type: tagSlice, Reg: ptrReg, Reg2: lenReg, Reg3: capReg,
 		KnownSliceLen: value.KnownSliceLen, KnownSliceCap: value.KnownSliceCap, SliceSizeKnown: value.SliceSizeKnown,
 	}
+	ctx.BindReg(ptrReg, &result)
+	ctx.BindReg(lenReg, &result)
+	ctx.BindReg(capReg, &result)
+	return result
 }
 
 // jitCondToBoolBorrowed evaluates truthiness without consuming cond.
@@ -819,6 +971,12 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			case LocImm:
 				ctx.TrackImm(src.Imm)
 				return src // constants are always safe to alias
+			case LocInputPair, LocStack, LocStackPair, LocStackTriple:
+				// Preserve lazy locations across an inlined Proc boundary. The
+				// consumer decides whether it needs registers; eagerly loading here
+				// both loses the callback argument's real stack location and creates
+				// avoidable register pressure in nested expressions.
+				return src
 			case LocReg:
 				// Allocate a fresh register so each use is independently freeable.
 				r := ctx.AllocRegExcept(src.Reg)
@@ -873,6 +1031,14 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			imm := NewBool(jitEnabled)
 			ctx.TrackImm(imm)
 			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
+		case "outer":
+			if len(list) != 2 || ctx.Env == nil || ctx.Env.Outer == nil {
+				panic("jit: invalid outer reference")
+			}
+			current := ctx.Env
+			ctx.Env = current.Outer
+			defer func() { ctx.Env = current }()
+			return jitCompileExpr(ctx, list[1], sliceBase, result)
 		case "quote":
 			if len(list) < 2 {
 				imm := NewNil()
@@ -1251,26 +1417,36 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 						args[i-1] = jitCompileExpr(ctx, argExpr, sliceBase, JITValueDesc{Loc: LocAny})
 					}
 				}
-				return decl.Type.JITEmit(ctx, list[1:], args, result)
+				out := decl.Type.JITEmit(ctx, list[1:], args, result)
+				out.NoHeapPointer = jitReturnHasNoHeapPointer(decl.Type.Return)
+				return out
 			}
-			// Descriptor ownership across nested generated emitters is not yet a
-			// stable part of the experimental contract. Compile leaf operations;
-			// let the interpreter handle composed calls until that ownership model
-			// can be proven instead of accepting silent register aliasing.
-			for _, argExpr := range list[1:] {
+			// Generated declaration emitters still require a general nested-result
+			// preservation contract. Special forms such as (outer ...) have their
+			// own lowering and do not create another generated emitter.
+			for argIndex, argExpr := range list[1:] {
 				for argExpr.GetTag() == tagSourceInfo {
 					argExpr = argExpr.SourceInfo().value
 				}
 				if argExpr.GetTag() == tagSlice {
 					nested := argExpr.Slice()
 					isQuote := len(nested) > 0 && nested[0].IsSymbol() && nested[0].Symbol() == Symbol("quote")
+					param := jitDeclarationParam(decl, argIndex)
+					isLambdaTemplate := param != nil && param.Kind == "func" && len(nested) > 0 && nested[0].IsSymbol() && nested[0].SymbolEquals("lambda")
 					// !list's backing storage is the current JIT frame. Until the
 					// generated-emitter contract can express result aliasing, only
 					// nth may consume it: nth returns one Scmer value, never a view
 					// into the list backing array.
 					isStackListForNth := name == "nth" && len(nested) > 0 && nested[0].IsSymbol() && nested[0].Symbol() == Symbol("!list")
-					if !isQuote && !isStackListForNth {
-						panic("jit: nested generated emitters are not supported")
+					var nestedType *TypeDescriptor
+					if len(nested) > 0 && nested[0].IsSymbol() {
+						if nestedDecl, exists := declarations[string(nested[0].Symbol())]; exists {
+							nestedType = nestedDecl.Type
+						}
+					}
+					isSpecialForm := nestedType == nil
+					if !isQuote && !isStackListForNth && !isLambdaTemplate && !isSpecialForm {
+						panic("jit: nested generated emitter has pointer-bearing or unknown result: " + SerializeToString(argExpr, &Globalenv))
 					}
 				}
 			}
@@ -1287,7 +1463,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			protectedRegs := make([]Reg, 0, len(list)*2)
 			for i := 1; i < len(list); i++ {
-				args[i-1] = jitCompileExpr(ctx, list[i], sliceBase, JITValueDesc{Loc: LocAny})
+				args[i-1] = jitCompileCallArgument(ctx, decl, i-1, list[i], sliceBase)
 				// Keep argument descriptors tracked while compiling later args and
 				// inside the callee JITEmit body. Without rebinding to args[] slots,
 				// register spills/reuse can leave stale copies in args and break
@@ -1312,6 +1488,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					ctx.UnprotectReg(r)
 				}
 			}()
+			// Argument compilation may have rendered mutually exclusive type paths.
+			// Their path-local temporaries are intentionally unowned after merging;
+			// reclaim them before entering another generated emitter while retaining
+			// the explicitly bound and protected argument descriptors above.
+			ctx.ReclaimUntrackedRegs()
 			labelsBefore := ctx.LabelNext
 			out := decl.Type.JITEmit(ctx, list[1:], args, result)
 			// A generated emitter may render several runtime control-flow paths.
@@ -1321,6 +1502,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			if ctx.LabelNext != labelsBefore && out.Loc == LocRegPair {
 				out.Type = JITTypeUnknown
 			}
+			out.NoHeapPointer = jitReturnHasNoHeapPointer(decl.Type.Return)
 			if out.Loc == LocImm {
 				ctx.TrackImm(out.Imm)
 			}
@@ -1344,9 +1526,13 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 // NthLocalVar loads (in practice not reached when all params are in args).
 // Panics on any un-emittable sub-expression — callers should recover and fall back.
 func JITEmitProcInline(ctx *JITContext, proc *Proc, args []JITValueDesc, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	return JITEmitProcInlineWithOuter(ctx, proc, ctx.Env, args, sliceBase, result)
+}
+
+func JITEmitProcInlineWithOuter(ctx *JITContext, proc *Proc, outer *JITEnv, args []JITValueDesc, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	innerEnv := &JITEnv{
 		Numbered: args,
-		Outer:    ctx.Env,
+		Outer:    outer,
 	}
 	oldEnv := ctx.Env
 	ctx.Env = innerEnv
@@ -1356,7 +1542,78 @@ func JITEmitProcInline(ctx *JITContext, proc *Proc, args []JITValueDesc, sliceBa
 	if body.GetTag() == tagSourceInfo {
 		body = body.SourceInfo().value
 	}
-	return jitCompileExpr(ctx, body, sliceBase, result)
+	out := jitCompileExpr(ctx, body, sliceBase, result)
+	if result.Loc == LocRegPair && (out.Loc != LocRegPair || out.Reg != result.Reg || out.Reg2 != result.Reg2) {
+		return jitPlaceIntoPair(ctx, &out, result)
+	}
+	return out
+}
+
+func jitLambdaTemplate(expr Scmer, outer *JITEnv) (*JITLambdaTemplate, bool) {
+	for expr.GetTag() == tagSourceInfo {
+		expr = expr.SourceInfo().value
+	}
+	if expr.GetTag() != tagSlice {
+		return nil, false
+	}
+	parts := expr.Slice()
+	if len(parts) < 3 || !parts[0].IsSymbol() || !parts[0].SymbolEquals("lambda") {
+		return nil, false
+	}
+	params := parts[1]
+	for params.GetTag() == tagSourceInfo {
+		params = params.SourceInfo().value
+	}
+	numVars := 0
+	if len(parts) > 3 {
+		numVars = int(ToInt(parts[3]))
+	}
+	return &JITLambdaTemplate{Proc: Proc{Params: params, Body: parts[2], NumVars: numVars, NumberedOnly: procCanUseNumberedOnly(params, parts[2], numVars)}, Outer: outer}, true
+}
+
+func jitDeclarationParam(decl *Declaration, index int) *TypeDescriptor {
+	if decl == nil || decl.Type == nil || len(decl.Type.Params) == 0 {
+		return nil
+	}
+	if index < len(decl.Type.Params) {
+		return decl.Type.Params[index]
+	}
+	last := decl.Type.Params[len(decl.Type.Params)-1]
+	if last.Variadic {
+		return last
+	}
+	return nil
+}
+
+func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer, sliceBase Reg) JITValueDesc {
+	param := jitDeclarationParam(decl, index)
+	if param != nil && param.Kind == "func" {
+		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
+			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+		}
+	}
+	hasCallback := false
+	for _, candidate := range decl.Type.Params {
+		if candidate.Kind == "func" {
+			hasCallback = true
+			break
+		}
+	}
+	if hasCallback {
+		for expr.GetTag() == tagSourceInfo {
+			expr = expr.SourceInfo().value
+		}
+		if expr.IsNthLocalVar() {
+			idx := int(expr.NthLocalVar())
+			if ctx.Env != nil && idx < len(ctx.Env.Numbered) {
+				return ctx.Env.Numbered[idx]
+			}
+			if idx < ctx.InputArgCount {
+				return JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(idx)}
+			}
+		}
+	}
+	return jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
 }
 
 // There is deliberately no later peephole optimizer. This backend is the final
