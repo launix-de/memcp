@@ -521,6 +521,61 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 	return result, setOptimizedCallLength(td, minLen)
 }
 
+// optimizedMergeSegments returns the list-of-lists input of an optimized merge
+// call without materializing its flattened result. Variadic merge calls need a
+// small segment catalog; unary calls already carry that catalog as their sole
+// argument.
+func optimizedMergeSegments(v Scmer) (Scmer, bool) {
+	rv, ok := scmerSlice(v)
+	if !ok || len(rv) < 2 || !scmerIsSymbol(rv[0], "merge") {
+		return NewNil(), false
+	}
+	if len(rv) == 2 {
+		return rv[1], true
+	}
+	segments := make([]Scmer, 1, len(rv))
+	segments[0] = NewSymbol("list")
+	segments = append(segments, rv[1:]...)
+	return NewSlice(segments), true
+}
+
+// mergeValidationSafeArgument reports whether evaluating an argument before
+// merge's list validation is unobservable. Fused calls evaluate their ordinary
+// arguments before reduce_segments validates the segment catalog, whereas the
+// unfused spelling validates during evaluation of reduce's first argument.
+func mergeValidationSafeArgument(v Scmer, allowLambda bool) bool {
+	if stripped, ok := scmerStripSourceInfo(v); ok {
+		v = stripped
+	}
+	inner, ok := scmerSlice(v)
+	if !ok {
+		return v.IsNil() || v.IsBool() || v.IsInt() || v.IsFloat() || v.IsString()
+	}
+	if len(inner) == 0 {
+		return true
+	}
+	return scmerIsSymbol(inner[0], "quote") || (allowLambda && scmerIsSymbol(inner[0], "lambda"))
+}
+
+// optimizeReduce keeps merge as a segmented producer when its flattened value
+// is consumed exactly once by reduce. reduce_segments validates all segments
+// before invoking the callback, matching merge's existing error order.
+func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) < 3 || len(rv) > 4 || !scmerIsSymbol(rv[0], "reduce") {
+		return result, td
+	}
+	segments, ok := optimizedMergeSegments(rv[1])
+	if !ok || !mergeValidationSafeArgument(rv[2], true) || (len(rv) == 4 && !mergeValidationSafeArgument(rv[3], false)) {
+		return result, td
+	}
+	fused := make([]Scmer, 0, len(rv))
+	fused = append(fused, NewSymbol("reduce_segments"), segments)
+	fused = append(fused, rv[2:]...)
+	return NewSlice(fused), td
+}
+
 // optimizeMap is the optimizer hook for `map`. It applies default optimization
 // (including FirstParameterMutable swap to map_mut), then fuses
 // (map (produceN N) fn) → (produceN N fn) to eliminate the intermediate list.
@@ -3943,8 +3998,9 @@ func init_list() {
 				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "any"},
-			Const:  true,
+			Return:   &TypeDescriptor{Kind: "any"},
+			Const:    true,
+			Optimize: optimizeReduce,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d3 JITValueDesc
@@ -6811,6 +6867,45 @@ func init_list() {
 	})
 
 	// Fused physical operators: optimizer-only, forbidden from .scm code.
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_segments",
+		Desc: "reduces ordered list segments without flattening them (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			segments := asSlice(a[0], "reduce_segments")
+			for _, segment := range segments {
+				asSlice(segment, "reduce_segments item")
+			}
+			fn := OptimizeProcToSerialFunction(a[1])
+			result := NewNil()
+			hasResult := len(a) > 2
+			if hasResult {
+				result = a[2]
+			}
+			for _, segment := range segments {
+				for _, item := range asSlice(segment, "reduce_segments item") {
+					if !hasResult {
+						result = item
+						hasResult = true
+						continue
+					}
+					result = fn(result, item)
+				}
+			}
+			return result
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "segments", NoEscape: true},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", ParamName: "neutral", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
 	Declare(&Globalenv, &Declaration{
 		Name: "filter_map",
 		Desc: "fused serial map and filter (optimizer-only)",
