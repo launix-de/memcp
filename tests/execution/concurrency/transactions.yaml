@@ -295,6 +295,138 @@ test_cases:
     expect:
       rows: 1
 
+  # Rebuild may finish before an explicit transaction resolves. Its successor
+  # must retain the same commit/rollback visibility as the source shard.
+  - name: "Cursor transaction across rebuild - setup"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (900, 9000, 'rebuild-old')"
+
+  - name: "Cursor transaction across rebuild - begin"
+    session_id: "tx_cursor_rebuild"
+    sql: "START TRANSACTION"
+
+  - name: "Cursor transaction across rebuild - insert"
+    session_id: "tx_cursor_rebuild"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (901, 9010, 'rebuild-new')"
+
+  - name: "Cursor transaction across rebuild - update"
+    session_id: "tx_cursor_rebuild"
+    sql: "UPDATE tx_test SET val = 9090 WHERE id = 900"
+
+  - name: "Cursor transaction across rebuild - delete"
+    session_id: "tx_cursor_rebuild"
+    sql: "DELETE FROM tx_test WHERE id = 1"
+
+  - name: "Cursor transaction across rebuild - rebuild"
+    scm: "(rebuild)"
+
+  - name: "Cursor transaction across rebuild - successor rebuild"
+    scm: "(rebuild)"
+
+  - name: "Cursor transaction across rebuild - rollback"
+    session_id: "tx_cursor_rebuild"
+    sql: "ROLLBACK"
+
+  - name: "Cursor transaction across rebuild - inserted row stays absent"
+    sql: "SELECT id FROM tx_test WHERE id = 901"
+    expect:
+      rows: 0
+
+  - name: "Cursor transaction across rebuild - updated row is restored"
+    sql: "SELECT val FROM tx_test WHERE id = 900"
+    expect:
+      rows: 1
+      data:
+        - val: 9000
+
+  - name: "Cursor transaction across rebuild - deleted row is restored"
+    sql: "SELECT id FROM tx_test WHERE id = 1"
+    expect:
+      rows: 1
+
+  - name: "ACID transaction across rebuild - setup"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (910, 9100, 'acid-rebuild-old')"
+
+  - name: "ACID transaction across rebuild - begin"
+    session_id: "tx_acid_rebuild"
+    sql: "START ACID TRANSACTION"
+
+  - name: "ACID transaction across rebuild - insert"
+    session_id: "tx_acid_rebuild"
+    sql: "INSERT INTO tx_test (id, val, name) VALUES (911, 9110, 'acid-rebuild-new')"
+
+  - name: "ACID transaction across rebuild - update"
+    session_id: "tx_acid_rebuild"
+    sql: "UPDATE tx_test SET val = 9190 WHERE id = 910"
+
+  - name: "ACID transaction across rebuild - delete"
+    session_id: "tx_acid_rebuild"
+    sql: "DELETE FROM tx_test WHERE id = 1"
+
+  - name: "ACID transaction across rebuild - rebuild"
+    scm: "(rebuild)"
+
+  - name: "ACID transaction across rebuild - successor rebuild"
+    scm: "(rebuild)"
+
+  - name: "ACID transaction across rebuild - staged insert remains private"
+    sql: "SELECT id FROM tx_test WHERE id = 911"
+    expect:
+      rows: 0
+
+  - name: "ACID transaction across rebuild - old update remains visible"
+    sql: "SELECT val FROM tx_test WHERE id = 910"
+    expect:
+      rows: 1
+      data:
+        - val: 9100
+
+  - name: "ACID transaction across rebuild - commit"
+    session_id: "tx_acid_rebuild"
+    sql: "COMMIT"
+
+  - name: "ACID transaction across rebuild - inserted row becomes visible"
+    sql: "SELECT id FROM tx_test WHERE id = 911"
+    expect:
+      rows: 1
+
+  - name: "ACID transaction across rebuild - update becomes visible"
+    sql: "SELECT val FROM tx_test WHERE id = 910"
+    expect:
+      rows: 1
+      data:
+        - val: 9190
+
+  - name: "ACID transaction across rebuild - delete becomes visible"
+    sql: "SELECT id FROM tx_test WHERE id = 1"
+    expect:
+      rows: 0
+
+  - name: "Rebuild transaction visibility - restart"
+    sql: "SHUTDOWN"
+
+  - name: "Rebuild transaction visibility - cursor rollback persists"
+    sql: "SELECT id, val FROM tx_test WHERE id IN (900, 901) ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - id: 900
+          val: 9000
+
+  - name: "Rebuild transaction visibility - ACID commit persists"
+    sql: "SELECT id, val FROM tx_test WHERE id IN (910, 911) ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 910
+          val: 9190
+        - id: 911
+          val: 9110
+
+  - name: "Rebuild transaction visibility - committed delete persists"
+    sql: "SELECT id FROM tx_test WHERE id = 1"
+    expect:
+      rows: 0
+
   # Empty transactions
   - name: "Empty transaction BEGIN + COMMIT is no-op"
 

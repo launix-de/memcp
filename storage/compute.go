@@ -165,8 +165,26 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
 }
 
+// hasUnprotectedDelta reports whether compaction can make progress. Tombstones
+// retained solely for an active transaction are already part of main storage;
+// rebuilding them again cannot remove them until that transaction resolves.
+func (s *storageShard) hasUnprotectedDelta() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.inserts) > 0 {
+		return true
+	}
+	hasUnprotectedDeletion := false
+	s.deletions.Iterate(func(recid uint) {
+		if !s.rollbackProtected.Get(recid) {
+			hasUnprotectedDeletion = true
+		}
+	})
+	return hasUnprotectedDeletion
+}
+
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool, tx *TxContext) bool {
-	if s.deletions.Count() > 0 || len(s.inserts) > 0 {
+	if s.hasUnprotectedDelta() {
 		return false // can't compute in shards with delta storage
 	}
 	// Ensure shard is loaded from disk before we mark it WRITE (ensureLoaded

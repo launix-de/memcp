@@ -394,11 +394,22 @@ func (tx *TxContext) CreateSavepoint() Savepoint {
 	return sp
 }
 
+// trackedShardSetLocked returns the rebuild generations whose transaction
+// masks are applied independently. Caller must hold tx.mu.
+func (tx *TxContext) trackedShardSetLocked() map[*storageShard]struct{} {
+	tracked := make(map[*storageShard]struct{}, len(tx.shards))
+	for shard := range tx.shards {
+		tracked[shard] = struct{}{}
+	}
+	return tracked
+}
+
 // RollbackToSavepoint undoes all changes made since the savepoint was created.
 func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	tx.Depth = sp.Depth
+	trackedShards := tx.trackedShardSetLocked()
 	for shard, st := range tx.shards {
 		lens := sp.shardLens[shard] // zero value (all zeros) if shard is new since savepoint
 		st.mu.Lock()
@@ -413,6 +424,7 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 				if shard.logfile != nil {
 					shard.logfile.Write(LogEntryDelete{recid})
 				}
+				shard.syncNextVisibilityLocked(recid, trackedShards)
 				shard.mu.Unlock()
 			}
 			st.InsertRecids = st.InsertRecids[:lens.InsertLen]
@@ -437,6 +449,8 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 						shard.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{vals}})
 					}
 				}
+				shard.rollbackProtected.Set(uint(recid), false)
+				shard.syncNextVisibilityLocked(recid, trackedShards)
 				shard.mu.Unlock()
 			}
 			st.DeletedRecids = st.DeletedRecids[:lens.DeletedLen]
@@ -451,7 +465,16 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 			for i := len(st.UndeleteRecids) - 1; i >= lens.UndeleteLen; i-- {
 				recid := st.UndeleteRecids[i]
 				st.UndeleteMask.Set(uint(recid), false)
+				ownsShardWrite := tx.writeHeld[shard] > 0
+				if !ownsShardWrite {
+					shard.mu.Lock()
+				}
 				shard.deletions.Set(uint(recid), true)
+				shard.rollbackProtected.Set(uint(recid), false)
+				shard.syncNextVisibilityLocked(recid, trackedShards)
+				if !ownsShardWrite {
+					shard.mu.Unlock()
+				}
 			}
 			st.UndeleteRecids = st.UndeleteRecids[:lens.UndeleteLen]
 		}
@@ -468,6 +491,17 @@ func (tx *TxContext) Commit() error {
 	switch tx.Mode {
 	case TxCursorStability:
 		tx.mu.Lock()
+		trackedShards := tx.trackedShardSetLocked()
+		for shard, st := range tx.shards {
+			st.mu.Lock()
+			shard.mu.Lock()
+			for _, recid := range st.DeletedRecids {
+				shard.rollbackProtected.Set(uint(recid), false)
+				shard.syncNextVisibilityLocked(recid, trackedShards)
+			}
+			shard.mu.Unlock()
+			st.mu.Unlock()
+		}
 		tx.State = TxCommitted
 		tx.shards = nil
 		tx.mu.Unlock()
@@ -485,8 +519,10 @@ func (tx *TxContext) Commit() error {
 func (tx *TxContext) commitACID() error {
 	tx.mu.Lock()
 	shards := make([]*storageShard, 0, len(tx.shards))
+	trackedShards := make(map[*storageShard]struct{}, len(tx.shards))
 	for s := range tx.shards {
 		shards = append(shards, s)
+		trackedShards[s] = struct{}{}
 	}
 	tx.mu.Unlock()
 
@@ -529,6 +565,7 @@ func (tx *TxContext) commitACID() error {
 			if shard.logfile != nil {
 				shard.logfile.Write(LogEntryDelete{recid})
 			}
+			shard.syncNextVisibilityLocked(recid, trackedShards)
 		}
 	}
 	// Apply UndeleteMask → clear global deletions (make staged rows visible)
@@ -539,6 +576,8 @@ func (tx *TxContext) commitACID() error {
 				continue // un-staged (row overwritten/deleted in same tx)
 			}
 			shard.deletions.Set(uint(recid), false)
+			shard.rollbackProtected.Set(uint(recid), false)
+			shard.syncNextVisibilityLocked(recid, trackedShards)
 		}
 	}
 
@@ -575,6 +614,7 @@ func (tx *TxContext) Rollback() {
 func (tx *TxContext) rollbackCursorStability() {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
+	trackedShards := tx.trackedShardSetLocked()
 	for shard, st := range tx.shards {
 		st.mu.Lock()
 		// Undo inserts (reverse order): mark as globally deleted
@@ -585,6 +625,7 @@ func (tx *TxContext) rollbackCursorStability() {
 			if shard.logfile != nil {
 				shard.logfile.Write(LogEntryDelete{recid})
 			}
+			shard.syncNextVisibilityLocked(recid, trackedShards)
 			shard.mu.Unlock()
 		}
 		// Undo deletes (reverse order): restore global visibility
@@ -607,6 +648,8 @@ func (tx *TxContext) rollbackCursorStability() {
 					shard.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{vals}})
 				}
 			}
+			shard.rollbackProtected.Set(uint(recid), false)
+			shard.syncNextVisibilityLocked(recid, trackedShards)
 			shard.mu.Unlock()
 		}
 		st.mu.Unlock()
@@ -620,6 +663,17 @@ func (tx *TxContext) rollbackCursorStability() {
 // remain as garbage (collected by the next GC/compaction pass).
 func (tx *TxContext) rollbackACID() {
 	tx.mu.Lock()
+	trackedShards := tx.trackedShardSetLocked()
+	for shard, st := range tx.shards {
+		st.mu.Lock()
+		shard.mu.Lock()
+		for _, recid := range st.UndeleteRecids {
+			shard.rollbackProtected.Set(uint(recid), false)
+			shard.syncNextVisibilityLocked(recid, trackedShards)
+		}
+		shard.mu.Unlock()
+		st.mu.Unlock()
+	}
 	tx.State = TxAborted
 	tx.shards = nil
 	tx.mu.Unlock()

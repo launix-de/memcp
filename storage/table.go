@@ -1984,7 +1984,7 @@ func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uin
 			return
 		}
 		rel := lastShard.GetExclusive()
-		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false)
+		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false, nil)
 		rel()
 		for i := lastI; i < end; i++ {
 			t.recordRepartitionTranslation(oldShard, firstOldRecid+uint32(i), translatedRecid{
