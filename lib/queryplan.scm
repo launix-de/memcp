@@ -956,6 +956,29 @@ instead of capturing whichever session populated the cache first. */
 (define correlation_domain (lambda (pairs)
 	(merge_unique (list (correlation_lookup_keys pairs)))))
 
+/* Equality decorrelation makes each outer lookup expression equivalent to its
+inner key. Rewrite later scalar expressions to that local representative before
+they enter a group-stage, so physical lowering never receives a free outer
+binding. The structural index hashes the complete root once; each AST node is
+then matched without repeated deep comparisons. */
+(define decorrelate_expr_with_pairs (lambda (inner_default pairs expr)
+	(begin
+		(define pair_list (coalesceNil pairs '()))
+		(if (empty_list? pair_list)
+			expr
+			(begin
+				(define replacements (correlation_inner_keys inner_default pair_list))
+				(define index (make_structural_index (correlation_lookup_keys pair_list) (list expr)))
+				(define rewrite (lambda (node)
+					(begin
+						(define idx (index node))
+						(if (nil? idx)
+							(match node
+								(cons head tail) (cons head (map tail rewrite))
+								_ node)
+							(nth replacements idx)))))
+				(rewrite expr))))))
+
 (define btw2025_cclasses_for_pairs (lambda (pairs)
 	(map (coalesceNil pairs '()) (lambda (pair)
 		(list (nth pair 0) (nth pair 1))))))
@@ -2229,10 +2252,6 @@ without separately proving two-valued semantics. */
 			(neumann_fail "untangle_query" "scalar aggregate group-stage(D) currently supports one plain inner query-block")
 			true)
 		(define value_expr (query_block_first_expr inner))
-		(define ags (dedupe_aggregates_by_col (merge (list (extract_aggregates value_expr) (list aggregate_count_descriptor)))))
-		(if (empty_list? ags)
-			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs cardinality_mode single_or_error lowering")
-			true)
 		(define inner_src (car (qb_sources inner)))
 		(define inner_sources (qb_sources inner))
 		(define inner_default (source_alias inner_src))
@@ -2251,13 +2270,19 @@ without separately proving two-valued semantics. */
 		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
 		(define all_corr_pairs (domain_correlation_pairs (merge (list
 			corr_pairs having_corr_pairs source_corr_pairs (session_domain_pairs inner)))))
+		(define local_value_expr (decorrelate_expr_with_pairs inner_default all_corr_pairs value_expr))
+		(define ags (dedupe_aggregates_by_col (merge (list (extract_aggregates local_value_expr) (list aggregate_count_descriptor)))))
+		(if (empty_list? ags)
+			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs cardinality_mode single_or_error lowering")
+			true)
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (group_keys_for_correlations inner_default all_corr_pairs explicit_group_keys))
 		(define outer_domain (correlation_domain all_corr_pairs))
 		(define lookup_keys (correlation_lookup_keys all_corr_pairs))
 		(define condition (combine_where_terms local_terms true))
-		(define local_having (combine_where_terms local_having_terms true))
+		(define local_having (decorrelate_expr_with_pairs inner_default all_corr_pairs
+			(combine_where_terms local_having_terms true)))
 		(define stage_input (if (and (single_source? (qb_sources inner)) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
@@ -2301,7 +2326,7 @@ without separately proving two-valued semantics. */
 			(or (stage_source_outer? outer_sources) (not (equal? local_having true)))
 			(make_stage_lookup_condition stage_alias key_names lookup_keys post_condition)))
 		(define presence_expr (list (quote get_column) stage_alias false (aggregate_col_name aggregate_count_descriptor) false))
-		(define scalar_value_expr (replace_group_expr stage_input inner_default stage_alias keys key_names ags value_expr))
+		(define scalar_value_expr (replace_group_expr stage_input inner_default stage_alias keys key_names ags local_value_expr))
 		(list
 			(if (equal? local_having true)
 				scalar_value_expr
@@ -2339,9 +2364,11 @@ without separately proving two-valued semantics. */
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
-		(define value_for_inner (canonical_column_expr_for_alias inner_default value_expr))
+		(define value_for_inner (canonical_column_expr_for_alias inner_default
+			(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))
 		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
-			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default expr) dir)))))
+			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default
+				(decorrelate_expr_with_pairs inner_default lookup_pairs expr)) dir)))))
 		(define ag (scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner)))
 		(define ags (list ag))
 		(define stage_input (if (empty_list? (qb_stages inner))
@@ -2698,7 +2725,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
-		(define value_for_inner (canonical_column_expr_for_alias inner_default value_expr))
+		(define value_for_inner (canonical_column_expr_for_alias inner_default
+			(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))
 		(define ags (scalar_single_aggregates value_for_inner))
 		(define value_ag (car ags))
 		(define count_ag (cadr ags))

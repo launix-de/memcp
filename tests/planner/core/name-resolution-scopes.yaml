@@ -359,6 +359,119 @@ test_cases:
     expect:
       error: true
 
+  - name: "Parallel sibling scalar scopes keep their repeated local alias"
+    parallel: cold_scope_binding
+    sql: |
+      SELECT wrapped.*
+      FROM (
+        SELECT o.ID,
+          COALESCE((
+            SELECT probe.ID = o.file_id
+            FROM nr_inner probe
+            WHERE probe.ID = o.file_id
+            LIMIT 1
+          ), FALSE) AS first_match,
+          COALESCE((
+            SELECT probe.ID = o.file_id
+            FROM nr_inner probe
+            WHERE probe.ID = o.file_id
+            LIMIT 1
+          ), FALSE) AS second_match
+        FROM nr_outer o
+      ) wrapped
+      ORDER BY wrapped.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, first_match: true, second_match: true}
+        - {ID: 2, first_match: true, second_match: true}
+
+  - name: "Correlated scalar values bind equality representatives locally"
+    parallel: cold_scope_binding
+    sql: |
+      SELECT o.ID,
+        (
+          SELECT probe.ID = o.file_id
+          FROM nr_inner probe
+          WHERE probe.ID = o.file_id
+        ) AS exact_match,
+        (
+          SELECT SUM(CASE WHEN probe.ID = o.file_id THEN 1 ELSE 0 END)
+          FROM nr_inner probe
+          WHERE probe.ID = o.file_id
+        ) AS matching_rows
+      FROM nr_outer o
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, exact_match: true, matching_rows: 1}
+        - {ID: 2, exact_match: true, matching_rows: 1}
+
+  - name: "Parallel quoted numeric alias remains local in a lazy branch"
+    parallel: cold_scope_binding
+    sql: |
+      SELECT wrapped.*
+      FROM (
+        SELECT o.ID,
+          CASE WHEN TRUE THEN TRUE ELSE NOT ((
+            SELECT `26local`.ID = o.file_id
+            FROM nr_inner `26local`
+            WHERE `26local`.ID = o.file_id
+            LIMIT 1
+          )) END AS allowed
+        FROM nr_outer o
+      ) wrapped
+      ORDER BY wrapped.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, allowed: true}
+        - {ID: 2, allowed: true}
+
+  - name: "Parallel unqualified ID remains a column beside nested probes"
+    parallel: cold_scope_binding
+    sql: |
+      SELECT CONCAT('row-', o.ID) AS description,
+        COALESCE((
+          SELECT probe.label
+          FROM nr_inner probe
+          WHERE probe.ID = o.file_id
+          LIMIT 1
+        ), '') AS label
+      FROM nr_outer o
+      WHERE ID = 1
+    expect:
+      rows: 1
+      data:
+        - {description: "row-1", label: "ten"}
+
+  - name: "Parallel nested EXISTS keeps table names separate from aliases"
+    parallel: cold_scope_binding
+    sql: |
+      SELECT wrapped.*
+      FROM (
+        SELECT o.ID, EXISTS (
+          SELECT TRUE
+          FROM nr_inner member_row
+          WHERE member_row.ID = o.file_id
+            AND EXISTS (
+              SELECT TRUE
+              FROM nr_leaf marker
+              WHERE marker.leaf_id = o.ID
+              LIMIT 1
+            )
+          LIMIT 1
+        ) AS visible
+        FROM nr_outer o
+      ) wrapped
+      ORDER BY wrapped.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, visible: true}
+        - {ID: 2, visible: false}
+
   - name: "JOIN ON cannot reference a later source"
     sql: |
       SELECT o.ID
