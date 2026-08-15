@@ -14918,6 +14918,37 @@ either bound a real row or supplied the synthetic NULL row. */
 			recset_contains_callback_symbol
 			expr))))
 
+(define acceptance_expr_source_aliases (lambda (sources default_alias expr)
+	(map
+		(filter (coalesceNil sources '()) (lambda (src)
+			(expr_refs_alias? default_alias (source_alias src) expr)))
+		source_alias)))
+
+(define acceptance_required_aliases_expand (lambda (sources default_alias required)
+	(merge_unique (list required
+		(merge (map (filter (coalesceNil sources '()) (lambda (src)
+			(contains? required (source_alias src)))) (lambda (src)
+				(acceptance_expr_source_aliases sources default_alias
+					(coalesceNil (source_join_expr src) true)))))))))
+
+(define acceptance_required_aliases_closure (lambda (sources default_alias required)
+	(begin
+		(define expanded (acceptance_required_aliases_expand sources default_alias required))
+		(if (equal? (count expanded) (count required))
+			expanded
+			(acceptance_required_aliases_closure sources default_alias expanded)))))
+
+(define acceptance_required_sources (lambda (sources default_alias condition)
+	(begin
+		(define seeds (map (filter (coalesceNil sources '()) (lambda (src)
+			(or
+				(not (source_outer? src))
+				(expr_refs_alias? default_alias (source_alias src) condition))))
+			source_alias))
+		(define required (acceptance_required_aliases_closure sources default_alias seeds))
+		(filter (coalesceNil sources '()) (lambda (src)
+			(contains? required (source_alias src)))))))
+
 /* A bounded ordered join may use the logical driver directly only when every
 remaining source is a proven unique lookup. The ordinary filter stays driver-local
 and indexable. The nested lookup acceptance runs in scan_order's globally ordered
@@ -14948,17 +14979,29 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			(recset_project_join_expr_for_membership src membership)))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		/* Acceptance runs before OFFSET/LIMIT and therefore contains only joins
+		which can reject a driver row. Projection-only nullable lookups belong to
+		the map callback after the native window and must not be probed twice. */
+		(define acceptance_sources (acceptance_required_sources
+			remaining_sources default_alias remaining_condition))
+		(define acceptance_aliases (map acceptance_sources source_alias))
+		(define removed_acceptance_aliases (filter (map remaining_sources source_alias)
+			(lambda (candidate) (not (contains? acceptance_aliases candidate)))))
+		(define acceptance_plan (join_optimizer_tree_without_aliases
+			remaining_plan removed_acceptance_aliases))
 		(define acceptance_needed_exprs (merge (list
-			needed_exprs
 			(list remaining_condition)
-			(source_join_exprs remaining_sources))))
-		(define acceptance_probe (build_join_scan_reduce_using_recipe
-			schema all_sources remaining_plan default_alias acceptance_needed_exprs remaining_condition true
-			'() 0 1 true nil stages
-			(list (quote lambda) (list (quote _accepted) (quote _row)) true)
-			false
-			(list (quote lambda) (list (quote accepted) (quote shard_accepted))
-				(list (quote or) (quote accepted) (quote shard_accepted)))))
+			(source_join_exprs acceptance_sources))))
+		(define acceptance_probe (if (empty_list? acceptance_sources)
+			(list (quote optimize)
+				(lower_column_expr_for_join all_sources default_alias remaining_condition))
+			(build_join_scan_reduce_using_recipe
+				schema all_sources acceptance_plan default_alias acceptance_needed_exprs remaining_condition true
+				'() 0 1 true nil stages
+				(list (quote lambda) (list (quote _accepted) (quote _row)) true)
+				false
+				(list (quote lambda) (list (quote accepted) (quote shard_accepted))
+					(list (quote or) (quote accepted) (quote shard_accepted))))))
 		(define filtercols (join_cols_for_alias all_sources default_alias alias (list effective_condition)))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
