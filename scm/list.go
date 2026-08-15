@@ -27,6 +27,7 @@ package scm
 
 import "fmt"
 import "runtime"
+import "strconv"
 import "sync"
 import "sync/atomic"
 import "github.com/carli2/hybridsort"
@@ -43,6 +44,46 @@ func descriptorWithLength(td *TypeDescriptor, length int) *TypeDescriptor {
 		out.Length = UnknownLength
 	}
 	return &out
+}
+
+// setOptimizedCallLength annotates the fresh top-level descriptor returned for
+// the current operator call. Unlike child descriptors projected from TypeInfo,
+// this descriptor is exclusively owned by the caller hook.
+func setOptimizedCallLength(td *TypeDescriptor, length int) *TypeDescriptor {
+	if td == nil {
+		td = &TypeDescriptor{}
+	}
+	if length > 0 {
+		td.Length = length
+	} else {
+		td.Length = UnknownLength
+	}
+	return td
+}
+
+func setOptimizedCallElement(td *TypeDescriptor, element TypeInfo) *TypeDescriptor {
+	// Structured callback metadata already belongs to the recursively optimized
+	// child. The top-level call descriptor is fresh, so only the immutable child
+	// subtree is shared. Atomic element facts remain in compact TypeInfo until
+	// TypeInfo itself has an inline structured representation.
+	if td == nil || element.Extra == nil {
+		return td
+	}
+	td.Element = element.Extra
+	return td
+}
+
+func callbackResultType(expr Scmer, callback TypeInfo) TypeInfo {
+	if callback.Kind() == KindFunc && callback.Extra != nil && callback.Extra.Return != nil {
+		return TypeInfoFromTD(callback.Extra.Return)
+	}
+	if callback.Kind() != KindAny || callback.Extra != nil {
+		return callback
+	}
+	if decl := DeclarationForValue(expr); decl != nil && decl.Type != nil && decl.Type.Return != nil {
+		return TypeInfoFromTD(decl.Type.Return)
+	}
+	return callback
 }
 
 func materializeCodeLiteral(expr Scmer) (Scmer, bool) {
@@ -258,74 +299,55 @@ func exactAssocLengthFromExpr(expr Scmer) int {
 	return UnknownLength
 }
 
-func optimizedExactListLength(expr Scmer, oc *OptimizerContext) int {
-	optimized, ti := OptimizeEx(expr, oc.Env, oc.Ome, true)
-	if length := ti.Length(); length > 0 {
-		return length
-	}
-	if length := exactListLengthFromExpr(optimized); length >= 0 {
-		return length
-	}
-	if materialized, changed := materializeCodeLiteral(expr); changed {
-		materializedOptimized, _ := OptimizeEx(materialized, oc.Env, oc.Ome, true)
-		if length := exactListLengthFromExpr(materializedOptimized); length >= 0 {
-			return length
-		}
-		return exactListLengthFromExpr(materialized)
-	}
-	return exactListLengthFromExpr(expr)
-}
-
-func optimizedExactAssocLength(expr Scmer, oc *OptimizerContext) int {
-	optimized, ti := OptimizeEx(expr, oc.Env, oc.Ome, true)
-	if length := ti.Length(); length > 0 {
-		return length
-	}
-	if length := exactAssocLengthFromExpr(optimized); length >= 0 {
+// exactOptimizedListArgumentLength consumes the code and TypeInfo returned by
+// the argument's existing recursive optimizer call. It must not invoke the
+// optimizer again merely to recover metadata.
+func exactOptimizedListArgumentLength(expr Scmer, ti TypeInfo) int {
+	if length := exactListLengthFromExpr(expr); length >= 0 {
 		return length
 	}
 	if materialized, changed := materializeCodeLiteral(expr); changed {
-		materializedOptimized, _ := OptimizeEx(materialized, oc.Env, oc.Ome, true)
-		if length := exactAssocLengthFromExpr(materializedOptimized); length >= 0 {
+		if length := exactListLengthFromExpr(materialized); length >= 0 {
 			return length
 		}
-		return exactAssocLengthFromExpr(materialized)
 	}
-	return exactAssocLengthFromExpr(expr)
-}
-
-func lambdaBodyResultExpr(expr Scmer) (Scmer, bool) {
-	if stripped, ok := scmerStripSourceInfo(expr); ok {
-		expr = stripped
+	if ti.length >= 0 {
+		return ti.length
 	}
-	inner, ok := scmerSlice(expr)
-	if !ok || len(inner) < 3 || !scmerIsSymbol(inner[0], "lambda") {
-		return NewNil(), false
-	}
-	body := inner[2]
-	if stripped, ok := scmerStripSourceInfo(body); ok {
-		body = stripped
-	}
-	if bodySlice, ok := scmerSlice(body); ok && len(bodySlice) > 0 && (scmerIsSymbol(bodySlice[0], "begin") || scmerIsSymbol(bodySlice[0], "!begin")) {
-		if len(bodySlice) == 1 {
-			return NewNil(), true
-		}
-		return bodySlice[len(bodySlice)-1], true
-	}
-	return body, true
-}
-
-func exactCallbackListLength(expr Scmer, oc *OptimizerContext) int {
-	if body, ok := lambdaBodyResultExpr(expr); ok {
-		return optimizedExactListLength(body, oc)
-	}
-	if decl := DeclarationForValue(expr); decl != nil && decl.Type != nil && decl.Type.Return != nil && decl.Type.Return.Length > 0 {
-		return decl.Type.Return.Length
+	if ti.Extra != nil && ti.Extra.Length >= 0 {
+		return ti.Extra.Length
 	}
 	return UnknownLength
 }
 
-func exactFlattenedMergeLength(expr Scmer, oc *OptimizerContext) int {
+// exactOptimizedAssocArgumentLength is the assoc counterpart of
+// exactOptimizedListArgumentLength and has the same single-visit contract.
+func exactOptimizedAssocArgumentLength(expr Scmer, ti TypeInfo) int {
+	if length := exactAssocLengthFromExpr(expr); length >= 0 {
+		return length
+	}
+	if materialized, changed := materializeCodeLiteral(expr); changed {
+		if length := exactAssocLengthFromExpr(materialized); length >= 0 {
+			return length
+		}
+	}
+	if ti.length >= 0 {
+		return ti.length
+	}
+	if ti.Extra != nil && ti.Extra.Length >= 0 {
+		return ti.Extra.Length
+	}
+	return UnknownLength
+}
+
+func optimizedArgumentType(types []TypeInfo, index int) TypeInfo {
+	if index < 0 || index >= len(types) {
+		return tiZero
+	}
+	return types[index]
+}
+
+func exactFlattenedMergeArgumentLength(expr Scmer, ti TypeInfo) int {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
 	}
@@ -337,50 +359,28 @@ func exactFlattenedMergeLength(expr Scmer, oc *OptimizerContext) int {
 		switch sym {
 		case "quote":
 			if len(inner) == 2 {
-				return exactFlattenedMergeLength(inner[1], oc)
+				return exactFlattenedMergeArgumentLength(inner[1], ti)
 			}
 			return UnknownLength
 		case "list":
 			total := 0
-			for _, item := range inner[1:] {
-				itemLen := optimizedExactListLength(item, oc)
+			for i, item := range inner[1:] {
+				itemType := tiZero
+				if ti.Extra != nil && ti.Extra.Keys != nil {
+					itemType = TypeInfoFromTD(ti.Extra.Keys[strconv.Itoa(i)])
+				}
+				itemLen := exactOptimizedListArgumentLength(item, itemType)
 				if itemLen < 0 {
 					return UnknownLength
 				}
 				total += itemLen
 			}
 			return total
-		case "map", "map_mut", "parallel_map", "parallel_map_mut", "mapIndex", "mapIndex_mut":
-			if len(inner) >= 3 {
-				inputLen := optimizedExactListLength(inner[1], oc)
-				itemLen := exactCallbackListLength(inner[2], oc)
-				if inputLen >= 0 && itemLen >= 0 {
-					return inputLen * itemLen
-				}
-			}
-			return UnknownLength
-		case "extract_assoc", "extract_assoc_mut":
-			if len(inner) >= 3 {
-				inputLen := optimizedExactAssocLength(inner[1], oc)
-				itemLen := exactCallbackListLength(inner[2], oc)
-				if inputLen >= 0 && itemLen >= 0 {
-					return inputLen * itemLen
-				}
-			}
-			return UnknownLength
-		case "produceN", "produceN_mut", "parallelN", "parallelN_mut":
-			if len(inner) >= 3 {
-				if count := int(ToInt(inner[1])); count >= 0 {
-					itemLen := exactCallbackListLength(inner[2], oc)
-					if itemLen >= 0 {
-						return count * itemLen
-					}
-				}
-			}
-			return UnknownLength
-		case "merge":
-			return optimizedExactListLength(expr, oc)
 		}
+	}
+	outerLength := exactOptimizedListArgumentLength(expr, ti)
+	if outerLength >= 0 && ti.Extra != nil && ti.Extra.Element != nil && ti.Extra.Element.Length >= 0 {
+		return outerLength * ti.Extra.Element.Length
 	}
 	return UnknownLength
 }
@@ -414,14 +414,18 @@ func optimizeListCall(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *
 }
 
 func optimizeCount(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	if len(v) == 2 && !exprMayHaveSideEffects(v[1]) {
-		if length := optimizedExactListLength(v[1], oc); length >= 0 {
+	if len(v) == 2 {
+		optimized, argumentType := OptimizeEx(v[1], oc.Env, oc.Ome, true)
+		v[1] = optimized
+		if length := exactOptimizedListArgumentLength(optimized, argumentType); length >= 0 && !exprMayHaveSideEffects(optimized) {
 			return NewInt(int64(length)), &TypeDescriptor{Kind: "int", Transfer: true, Const: true, Length: UnknownLength}
 		}
+		return NewSlice(v), &TypeDescriptor{Kind: "int", Length: UnknownLength}
 	}
-	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 	if rv, ok := scmerSlice(result); ok && len(rv) == 2 {
-		if length := optimizedExactListLength(rv[1], oc); length >= 0 && !exprMayHaveSideEffects(rv[1]) {
+		if length := exactOptimizedListArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)); length >= 0 && !exprMayHaveSideEffects(rv[1]) {
 			return NewInt(int64(length)), &TypeDescriptor{Kind: "int", Transfer: true, Const: true, Length: UnknownLength}
 		}
 	}
@@ -430,9 +434,10 @@ func optimizeCount(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 
 func optimizeFixedLengthInput(mutName string) func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	return func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-		result, td := oc.applyDefaultOptimization(v, useResult, mutName)
+		call := oc.applyDefaultOptimizationWithTypes(v, useResult, mutName)
+		result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 		if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-			return result, descriptorWithLength(td, optimizedExactListLength(rv[1], oc))
+			return result, setOptimizedCallLength(td, exactOptimizedListArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)))
 		}
 		return result, td
 	}
@@ -440,34 +445,38 @@ func optimizeFixedLengthInput(mutName string) func(v []Scmer, oc *OptimizerConte
 
 func optimizeAssocFixedLengthInput(mutName string) func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	return func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-		result, td := oc.applyDefaultOptimization(v, useResult, mutName)
+		call := oc.applyDefaultOptimizationWithTypes(v, useResult, mutName)
+		result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 		if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-			return result, descriptorWithLength(td, optimizedExactAssocLength(rv[1], oc))
+			return result, setOptimizedCallLength(td, exactOptimizedAssocArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)))
 		}
 		return result, td
 	}
 }
 
 func optimizeExtractAssoc(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	result, td := oc.applyDefaultOptimization(v, useResult, "extract_assoc_mut")
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "extract_assoc_mut")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 	if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-		return result, descriptorWithLength(td, optimizedExactAssocLength(rv[1], oc))
+		return result, setOptimizedCallLength(td, exactOptimizedAssocArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)))
 	}
 	return result, td
 }
 
 func optimizeCdr(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 	if rv, ok := scmerSlice(result); ok && len(rv) == 2 {
-		if length := optimizedExactListLength(rv[1], oc); length >= 0 {
-			return result, descriptorWithLength(td, length-1)
+		if length := exactOptimizedListArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)); length >= 0 {
+			return result, setOptimizedCallLength(td, length-1)
 		}
 	}
 	return result, td
 }
 
 func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 	rv, ok := scmerSlice(result)
 	if !ok || len(rv) < 2 {
 		return result, td
@@ -476,8 +485,12 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		argExpr := rv[1]
 		if argList, ok := scmerSlice(argExpr); ok && len(argList) > 0 {
 			expected := UnknownLength
-			for _, item := range argList[1:] {
-				itemLen := optimizedExactListLength(item, oc)
+			for i, item := range argList[1:] {
+				itemType := tiZero
+				if outerType := optimizedArgumentType(argumentTypes, 1); outerType.Extra != nil && outerType.Extra.Keys != nil {
+					itemType = TypeInfoFromTD(outerType.Extra.Keys[strconv.Itoa(i)])
+				}
+				itemLen := exactOptimizedListArgumentLength(item, itemType)
 				if itemLen < 0 {
 					return result, td
 				}
@@ -490,14 +503,14 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 				}
 			}
 			if expected > 0 {
-				return result, descriptorWithLength(td, expected)
+				return result, setOptimizedCallLength(td, expected)
 			}
 		}
 		return result, td
 	}
 	minLen := UnknownLength
-	for _, arg := range rv[1:] {
-		length := optimizedExactListLength(arg, oc)
+	for i, arg := range rv[1:] {
+		length := exactOptimizedListArgumentLength(arg, optimizedArgumentType(argumentTypes, i+1))
 		if length < 0 {
 			return result, td
 		}
@@ -505,7 +518,7 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 			minLen = length
 		}
 	}
-	return result, descriptorWithLength(td, minLen)
+	return result, setOptimizedCallLength(td, minLen)
 }
 
 // optimizeMap is the optimizer hook for `map`. It applies default optimization
@@ -513,7 +526,12 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 // (map (produceN N) fn) → (produceN N fn) to eliminate the intermediate list.
 func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	// Run default optimization first (handles map → map_mut swap etc.)
-	result, td := oc.applyDefaultOptimization(v, useResult, "map_mut")
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "map_mut")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
+	elementType := tiZero
+	if len(v) >= 3 {
+		elementType = callbackResultType(v[2], optimizedArgumentType(argumentTypes, 2))
+	}
 	// Check if the optimized result is still a call to map/map_mut
 	if result.IsSlice() {
 		rv := result.Slice()
@@ -526,9 +544,9 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 						if isym, ok := scmerSymbol(inner[0]); ok && isym == "produceN" {
 							// Fuse: (map (produceN N) fn) → (produceN N fn)
 							if count := int(ToInt(inner[1])); count > 0 {
-								return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), descriptorWithLength(td, count)
+								return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), setOptimizedCallElement(setOptimizedCallLength(td, count), elementType)
 							}
-							return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), td
+							return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), setOptimizedCallElement(td, elementType)
 						}
 					}
 				}
@@ -536,7 +554,7 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		}
 	}
 	if rv, ok := scmerSlice(result); ok && len(rv) == 3 {
-		return result, descriptorWithLength(td, optimizedExactListLength(rv[1], oc))
+		return result, setOptimizedCallElement(setOptimizedCallLength(td, exactOptimizedListArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1))), elementType)
 	}
 	return result, td
 }
@@ -8007,14 +8025,15 @@ func init_list() {
 }
 
 func optimizeAppend(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	result, td := oc.applyDefaultOptimization(v, useResult, "append_mut")
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "append_mut")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 	rv, ok := scmerSlice(result)
 	if !ok || len(rv) < 2 {
 		return result, td
 	}
-	baseLength := optimizedExactListLength(rv[1], oc)
+	baseLength := exactOptimizedListArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1))
 	if baseLength >= 0 {
-		td = descriptorWithLength(td, baseLength+len(rv)-2)
+		td = setOptimizedCallLength(td, baseLength+len(rv)-2)
 	}
 	if len(rv) > 2 {
 		if base, ok := scmerSlice(rv[1]); ok && len(base) > 0 && scmerIsSymbol(base[0], "list") {
@@ -8032,7 +8051,8 @@ func optimizeAppend(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 // positive list lengths to annotate the flattened result and collapse direct
 // list-of-items merges into a single list constructor.
 func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 	rv, ok := scmerSlice(result)
 	if !ok || len(rv) < 2 {
 		return result, td
@@ -8042,13 +8062,16 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 			if exprMayHaveSideEffects(producer[2]) {
 				return result, td
 			}
-			itemLength := exactCallbackListLength(producer[2], oc)
+			producerType := optimizedArgumentType(argumentTypes, 1)
+			itemLength := UnknownLength
+			if producerType.Extra != nil && producerType.Extra.Element != nil {
+				itemLength = producerType.Extra.Element.Length
+			}
 			if itemLength >= 0 {
 				switch {
 				case scmerIsSymbol(producer[0], "map"), scmerIsSymbol(producer[0], "map_mut"):
-					inputLength := optimizedExactListLength(producer[1], oc)
 					resultLength := UnknownLength
-					if inputLength >= 0 {
+					if inputLength := exactOptimizedListArgumentLength(rv[1], producerType); inputLength >= 0 {
 						resultLength = inputLength * itemLength
 					}
 					fused := NewSlice([]Scmer{NewSymbol("flat_map"), producer[1], producer[2], NewInt(int64(itemLength))})
@@ -8072,16 +8095,16 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 				return NewSlice(merged), descriptorWithLength(FreshAlloc, len(merged)-1)
 			}
 		}
-		if totalLength := exactFlattenedMergeLength(rv[1], oc); totalLength > 0 {
-			return result, descriptorWithLength(td, totalLength)
+		if totalLength := exactFlattenedMergeArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)); totalLength > 0 {
+			return result, setOptimizedCallLength(td, totalLength)
 		}
 		return result, td
 	}
 	totalLength := 0
 	allExact := len(rv) > 2
 	allDirectListArgs := len(rv) > 2
-	for _, arg := range rv[1:] {
-		length := optimizedExactListLength(arg, oc)
+	for i, arg := range rv[1:] {
+		length := exactOptimizedListArgumentLength(arg, optimizedArgumentType(argumentTypes, i+1))
 		if length >= 0 {
 			totalLength += length
 		} else {
@@ -8101,7 +8124,7 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 		return NewSlice(merged), descriptorWithLength(FreshAlloc, len(merged)-1)
 	}
 	if allExact {
-		return result, descriptorWithLength(td, totalLength)
+		return result, setOptimizedCallLength(td, totalLength)
 	}
 	return result, td
 }
@@ -8217,7 +8240,8 @@ func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Type
 	if flattened, ok := flattenConsList(v); ok {
 		return oc.ApplyDefaultOptimization(flattened, useResult)
 	}
-	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
 	if rSlice, ok := scmerSlice(result); ok && len(rSlice) == 3 {
 		tail := rSlice[2]
 		if inner, ok2 := scmerSlice(tail); ok2 && len(inner) >= 1 {
@@ -8230,8 +8254,8 @@ func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Type
 				return NewSlice(merged), descriptorWithLength(FreshAlloc, len(merged)-1)
 			}
 		}
-		if tailLength := optimizedExactListLength(tail, oc); tailLength >= 0 {
-			return result, descriptorWithLength(td, tailLength+1)
+		if tailLength := exactOptimizedListArgumentLength(tail, optimizedArgumentType(argumentTypes, 2)); tailLength >= 0 {
+			return result, setOptimizedCallLength(td, tailLength+1)
 		}
 	}
 	return result, td

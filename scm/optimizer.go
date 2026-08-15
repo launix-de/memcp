@@ -322,6 +322,8 @@ type optimizerMetainfo struct {
 	inlineDepth           int
 	inlineStack           map[Symbol]bool
 	rewrite               *optimizerRewriteState
+	captureArgumentTypes  bool
+	argumentTypes         []TypeInfo
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -1914,6 +1916,9 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			allConstArgs = false
 		}
 	}
+	if ome.captureArgumentTypes {
+		ome.argumentTypes = argTypes
+	}
 	if !allConstArgs {
 		if inlined, ti, ok := tryInlineLeafProc(v, env, ome, useResult); ok {
 			return inlined, ti.ToTypeDescriptor()
@@ -2089,6 +2094,26 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 	}
 	return NewSlice(v), td
+}
+
+type optimizedCall struct {
+	code          Scmer
+	typeInfo      *TypeDescriptor
+	argumentTypes []TypeInfo
+}
+
+// applyDefaultOptimizationWithTypes returns the code and TypeInfo from the
+// recursive call optimization together with the TypeInfo returned by each
+// argument. It never revisits an argument to derive metadata.
+func (oc *OptimizerContext) applyDefaultOptimizationWithTypes(v []Scmer, useResult bool, mutName string) optimizedCall {
+	previousCapture := oc.Ome.captureArgumentTypes
+	previousTypes := oc.Ome.argumentTypes
+	oc.Ome.captureArgumentTypes = true
+	code, typeInfo := oc.applyDefaultOptimization(v, useResult, mutName)
+	argumentTypes := oc.Ome.argumentTypes
+	oc.Ome.captureArgumentTypes = previousCapture
+	oc.Ome.argumentTypes = previousTypes
+	return optimizedCall{code: code, typeInfo: typeInfo, argumentTypes: argumentTypes}
 }
 
 // wrapConstListForCode wraps a constant-folded Scmer value so it can safely
