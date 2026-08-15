@@ -117,6 +117,20 @@ func materializeCodeLiteral(expr Scmer) (Scmer, bool) {
 	return expr, false
 }
 
+// listExpressionCallName recognizes both source symbols and native procedure
+// heads produced by recursive optimization. Length analysis runs after child
+// optimization, so treating a native `list` head as list data adds the call
+// head itself to the inferred length.
+func listExpressionCallName(head Scmer) (string, bool) {
+	if sym, ok := scmerSymbol(head); ok {
+		return string(sym), true
+	}
+	if decl := DeclarationForValue(head); decl != nil {
+		return decl.Name, true
+	}
+	return "", false
+}
+
 func exactListLengthFromExpr(expr Scmer) int {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
@@ -125,8 +139,8 @@ func exactListLengthFromExpr(expr Scmer) int {
 		if len(inner) == 0 {
 			return UnknownLength
 		}
-		if sym, ok := scmerSymbol(inner[0]); ok {
-			switch sym {
+		if callName, ok := listExpressionCallName(inner[0]); ok {
+			switch callName {
 			case "quote":
 				if len(inner) == 2 {
 					return exactListLengthFromExpr(inner[1])
@@ -181,7 +195,11 @@ func exactListLengthFromExpr(expr Scmer) int {
 			case "merge":
 				if len(inner) == 2 {
 					arg := inner[1]
-					if outer, ok := scmerSlice(arg); ok && len(outer) > 0 && scmerIsSymbol(outer[0], "list") {
+					if outer, ok := scmerSlice(arg); ok && len(outer) > 0 {
+						outerCall, isCall := listExpressionCallName(outer[0])
+						if !isCall || outerCall != "list" {
+							return UnknownLength
+						}
 						total := 0
 						for _, item := range outer[1:] {
 							itemLen := exactListLengthFromExpr(item)
@@ -211,7 +229,11 @@ func exactListLengthFromExpr(expr Scmer) int {
 			case "zip":
 				if len(inner) == 2 {
 					arg := inner[1]
-					if outer, ok := scmerSlice(arg); ok && len(outer) > 0 && scmerIsSymbol(outer[0], "list") {
+					if outer, ok := scmerSlice(arg); ok && len(outer) > 0 {
+						outerCall, isCall := listExpressionCallName(outer[0])
+						if !isCall || outerCall != "list" {
+							return UnknownLength
+						}
 						expected := UnknownLength
 						for _, item := range outer[1:] {
 							itemLen := exactListLengthFromExpr(item)
@@ -260,8 +282,8 @@ func exactAssocLengthFromExpr(expr Scmer) int {
 		if len(inner) == 0 {
 			return UnknownLength
 		}
-		if sym, ok := scmerSymbol(inner[0]); ok {
-			switch sym {
+		if callName, ok := listExpressionCallName(inner[0]); ok {
+			switch callName {
 			case "quote":
 				if len(inner) == 2 {
 					return exactAssocLengthFromExpr(inner[1])
@@ -355,8 +377,8 @@ func exactFlattenedMergeArgumentLength(expr Scmer, ti TypeInfo) int {
 	if !ok || len(inner) == 0 {
 		return UnknownLength
 	}
-	if sym, ok := scmerSymbol(inner[0]); ok {
-		switch sym {
+	if callName, ok := listExpressionCallName(inner[0]); ok {
+		switch callName {
 		case "quote":
 			if len(inner) == 2 {
 				return exactFlattenedMergeArgumentLength(inner[1], ti)

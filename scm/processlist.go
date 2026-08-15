@@ -46,6 +46,7 @@ type SessionState struct {
 	activeCount  atomic.Int64  // number of concurrently running requests/queries
 
 	cancelFns map[uint64]context.CancelFunc
+	queryCtxs map[uint64]context.Context
 	active    map[uint64]bool
 	killed    map[uint64]bool
 	cancelMu  sync.Mutex // protects active query bookkeeping
@@ -159,11 +160,36 @@ func (s *SessionState) SetCancel(seq uint64, fn context.CancelFunc) {
 	s.cancelMu.Unlock()
 }
 
+// SetQueryContext records the query-generation-specific cancellation signal.
+// Persistent HTTP sessions may execute overlapping generations, so table-lock
+// waiters must never infer this context from the session's latest query.
+func (s *SessionState) SetQueryContext(seq uint64, ctx context.Context) {
+	s.cancelMu.Lock()
+	if s.queryCtxs == nil {
+		s.queryCtxs = make(map[uint64]context.Context)
+	}
+	s.queryCtxs[seq] = ctx
+	s.cancelMu.Unlock()
+}
+
+// QueryContext returns the cancellation context owned by one query generation.
+func (s *SessionState) QueryContext(seq uint64) context.Context {
+	if seq == 0 {
+		return nil
+	}
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	return s.queryCtxs[seq]
+}
+
 // ClearCancel removes the cancel function if it still belongs to seq.
 func (s *SessionState) ClearCancel(seq uint64) {
 	s.cancelMu.Lock()
 	if s.cancelFns != nil {
 		delete(s.cancelFns, seq)
+	}
+	if s.queryCtxs != nil {
+		delete(s.queryCtxs, seq)
 	}
 	if s.active != nil {
 		delete(s.active, seq)

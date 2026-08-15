@@ -303,6 +303,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	querySeq := ss.BeginQuery("Query", req.Method+" "+req.URL.Path)
 	ctx, cancel := context.WithCancel(req.Context())
 	ss.SetCancel(querySeq, cancel)
+	ss.SetQueryContext(querySeq, ctx)
 	defer cancel()
 	defer ss.EndQuery(querySeq, "Sleep", "")
 	// Watch for HTTP client disconnect and propagate to session kill

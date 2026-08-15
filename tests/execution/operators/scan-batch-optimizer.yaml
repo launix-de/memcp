@@ -176,6 +176,15 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "Optimizer preserves count of variable list constructors"
+    scm: |
+      (begin
+        (define count_three ((eval (optimize '('lambda '('x) '(count '(list 'x 2 3))))) 42))
+        (define count_two ((eval (optimize '('lambda '('a 'b) '(count '(list 'a 'b))))) 10 20))
+        (if (and (equal? count_three 3) (equal? count_two 2))
+          true
+          (error "optimizer changed the length of a variable list")))
+
   - name: "Grouped LEFT JOIN carrier keeps outer key as dynamic lookup"
     sql: |
       SELECT c.cid, g.total

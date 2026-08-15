@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "context"
 import "fmt"
 import "math"
 import "sync"
@@ -867,6 +868,22 @@ func (t *table) getTableLockCond() *sync.Cond {
 	return t.tableLockCond
 }
 
+// tableLockQueryContext resolves the exact statement generation rather than
+// the session's latest query. Autocommit workers carry that generation in the
+// transaction, which keeps overlapping persistent HTTP requests independent.
+func tableLockQueryContext(ss *scm.SessionState) context.Context {
+	if ss == nil {
+		return nil
+	}
+	querySeq := scm.CurrentQuerySeq()
+	if tx := CurrentTx(); tx != nil {
+		if txSeq := querySeqFromTx(tx); txSeq != 0 {
+			querySeq = txSeq
+		}
+	}
+	return ss.QueryContext(querySeq)
+}
+
 // waitTableLock blocks until the table lock is compatible with the caller's intent.
 // isWrite=true means the caller wants to write (blocked by ANY lock from another session).
 // isWrite=false means the caller wants to read (blocked only by WRITE lock from another session).
@@ -877,6 +894,15 @@ func (t *table) getTableLockCond() *sync.Cond {
 // Panics if the owning session tries to write while holding a READ lock (MySQL semantics).
 func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	cond := t.getTableLockCond()
+	ctx := tableLockQueryContext(ss)
+	if ctx != nil {
+		stopWake := context.AfterFunc(ctx, func() {
+			t.tableLockMu.Lock()
+			cond.Broadcast()
+			t.tableLockMu.Unlock()
+		})
+		defer stopWake()
+	}
 	if ss != nil {
 		ss.BeginLockWait()
 		defer ss.EndLockWait()
@@ -885,6 +911,10 @@ func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	var errMsg string
 	t.tableLockMu.Lock()
 	for {
+		if ctx != nil && ctx.Err() != nil {
+			errMsg = "query killed"
+			break
+		}
 		owner := t.tableLockOwner.Load()
 		state := t.tableLockState.Load()
 		if !isWrite {
