@@ -2425,7 +2425,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
 	var buf [8]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], true, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
@@ -2519,7 +2519,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	var buf [256]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], false, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 0, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			if recsetPart != nil && !recsetPart.contains(idx) {
 				continue
@@ -2914,9 +2914,8 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					sortPerm = append(sortPerm, mainCount+uint32(i))
 				}
 			}
-			idxCols := idx.Cols
 			hybridsort.HybridSort(sortPerm, func(idA, idB uint32) bool {
-				for _, colName := range idxCols {
+				for colIdx, colName := range idx.Cols {
 					var va, vb scm.Scmer
 					if idA < mainCount {
 						va = columnSnapshot[colName].GetValue(idA)
@@ -2928,10 +2927,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					} else {
 						vb = getDelta(int(idB-mainCount), colName)
 					}
-					if scm.Less(va, vb) {
+					if idx.lessAt(colIdx, va, vb) {
 						return true
 					}
-					if scm.Less(vb, va) {
+					if idx.lessAt(colIdx, vb, va) {
 						return false
 					}
 				}

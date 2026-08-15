@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Tests for index prefix deduplication:
 # 1. iterateIndex() reuses existing longer indexes instead of creating shorter ones
 # 2. rebuildIndexes() transfers indexes across rebuild with savings decay
@@ -323,7 +326,198 @@ test_cases:
     expect:
       rows: 1
 
+  # ==============================================================
+  # Phase 5: Ordered auto indexes retain the complete sort relation
+  # ==============================================================
+
+  - name: "Setup ordered relation index table"
+    setup:
+      - sql: "DROP TABLE IF EXISTS idx_order_relation"
+      - scm: "(rebuild)"
+    sql: |
+      CREATE TABLE idx_order_relation (
+        id INT,
+        tenant INT,
+        label VARCHAR(40) COLLATE utf8mb4_unicode_ci
+      )
+
+  - name: "Insert deliberately unordered collated rows"
+    setup:
+      - sql: |
+          INSERT INTO idx_order_relation VALUES
+            (1, 1, 'Zulu'),
+            (2, 1, NULL),
+            (3, 1, 'apple'),
+            (4, 1, 'Banana'),
+            (5, 1, 'apricot'),
+            (6, 1, 'cherry'),
+            (7, 2, 'aardvark'),
+            (8, 2, NULL)
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_order_relation"
+    expect:
+      data:
+        - cnt: 8
+
+  - name: "Cold collated ASC index preserves NULL order before LIMIT"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 2
+          label: null
+        - id: 3
+          label: "apple"
+        - id: 5
+          label: "apricot"
+
+  - name: "Warm collated ASC index preserves NULL order before LIMIT"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 2
+          label: null
+        - id: 3
+          label: "apple"
+        - id: 5
+          label: "apricot"
+
+  - name: "Collated DESC uses its own relation and puts NULL last"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          label: "Zulu"
+        - id: 6
+          label: "cherry"
+        - id: 4
+          label: "Banana"
+
+  - name: "Warm collated DESC relation remains stable"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label DESC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          label: "Zulu"
+        - id: 6
+          label: "cherry"
+        - id: 4
+          label: "Banana"
+
+  - name: "Delta rows merge through the stored DESC relation"
+    setup:
+      - sql: |
+          INSERT INTO idx_order_relation VALUES
+            (10, 1, 'apple'),
+            (11, 1, NULL)
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label DESC LIMIT 3"
+    expect:
+      data:
+        - id: 1
+          label: "Zulu"
+        - id: 6
+          label: "cherry"
+        - id: 4
+          label: "Banana"
+
+  - name: "Cold mixed ASC DESC order keeps NULL ties deterministic"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label ASC, id DESC LIMIT 4"
+    expect:
+      data:
+        - id: 11
+          label: null
+        - id: 2
+          label: null
+        - id: 10
+          label: "apple"
+        - id: 3
+          label: "apple"
+
+  - name: "Warm mixed ASC DESC index keeps NULL ties deterministic"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label ASC, id DESC LIMIT 4"
+    expect:
+      data:
+        - id: 11
+          label: null
+        - id: 2
+          label: null
+        - id: 10
+          label: "apple"
+        - id: 3
+          label: "apple"
+
+  - name: "Unfiltered DESC uses NULL-last semantics"
+    sql: "SELECT id, label FROM idx_order_relation ORDER BY label DESC LIMIT 3"
+    expect:
+      data:
+        - id: 7
+          label: "aardvark"
+        - id: 1
+          label: "Zulu"
+        - id: 6
+          label: "cherry"
+
+  - name: "ASC and DESC auto indexes retain distinct order metadata"
+    scm: |
+      (begin
+        (define indexes ((show "memcp-tests" "idx_order_relation" 0 true) "indexes"))
+        (define asc_count (reduce indexes (lambda (n index)
+          (begin
+            (define orders (get_assoc index "orders"))
+            (if (and (>= (count orders) 2)
+                (equal? (nth orders 0) "utf8mb4:asc")
+                (equal? (nth orders 1) "utf8mb4_unicode_ci:asc")) (+ n 1) n))) 0))
+        (define desc_count (reduce indexes (lambda (n index)
+          (begin
+            (define orders (get_assoc index "orders"))
+            (if (and (>= (count orders) 2)
+                (equal? (nth orders 0) "utf8mb4:asc")
+                (equal? (nth orders 1) "utf8mb4_unicode_ci:desc")) (+ n 1) n))) 0))
+        (if (and (> asc_count 0) (> desc_count 0))
+          "ok"
+          (error (concat "expected separate ASC/DESC relation indexes, got " (serialize indexes)))))
+
+  - name: "Rebuild preserves ordered relation identity"
+    setup:
+      - sql: "INSERT INTO idx_order_relation VALUES (9, 1, 'blueberry')"
+      - scm: "(rebuild)"
+    scm: |
+      (begin
+        (define indexes ((show "memcp-tests" "idx_order_relation" 0 true) "indexes"))
+        (define asc_count (reduce indexes (lambda (n index)
+          (begin
+            (define orders (get_assoc index "orders"))
+            (if (and (>= (count orders) 2)
+                (equal? (nth orders 0) "utf8mb4:asc")
+                (equal? (nth orders 1) "utf8mb4_unicode_ci:asc")) (+ n 1) n))) 0))
+        (define desc_count (reduce indexes (lambda (n index)
+          (begin
+            (define orders (get_assoc index "orders"))
+            (if (and (>= (count orders) 2)
+                (equal? (nth orders 0) "utf8mb4:asc")
+                (equal? (nth orders 1) "utf8mb4_unicode_ci:desc")) (+ n 1) n))) 0))
+        (if (and (> asc_count 0) (> desc_count 0))
+          "ok"
+          (error (concat "ordered relation metadata lost on rebuild: " (serialize indexes)))))
+
+  - name: "Rebuilt mixed relation remains executable"
+    sql: "SELECT id, label FROM idx_order_relation WHERE tenant = 1 ORDER BY label ASC, id DESC LIMIT 4"
+    expect:
+      data:
+        - id: 11
+          label: null
+        - id: 2
+          label: null
+        - id: 10
+          label: "apple"
+        - id: 3
+          label: "apple"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS idx_nopfx"
   - sql: "DROP TABLE IF EXISTS idx_nonoverlap"
+  - sql: "DROP TABLE IF EXISTS idx_order_relation"
   - sql: "DROP TABLE IF EXISTS idx_rev"
