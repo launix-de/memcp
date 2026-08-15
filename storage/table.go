@@ -1712,6 +1712,108 @@ func (t *table) DropColumnIfExists(name string) bool {
 	return false
 }
 
+func (t *table) appendFreeShardDurably(topology *tableShardTopology, source *storageShard, incoming uint) (*tableShardTopology, *storageShard) {
+	t.maintenanceMu.Lock()
+	sourceCount := uint(source.Count())
+	t.mu.Lock()
+	active := t.activeTopology()
+	if active != topology || active.mode != ShardModeFree || len(active.shards) == 0 || active.shards[len(active.shards)-1] != source {
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		return active, nil
+	}
+	if sourceCount+incoming <= Settings.ShardSize {
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		return active, source
+	}
+
+	newShard := NewShard(t)
+	t.maintenanceKind = 1
+	t.Shards = append(t.Shards, newShard)
+	newIndex := len(t.Shards) - 1
+	sourceIndex := newIndex - 1
+	t.mu.Unlock()
+
+	var savePanic any
+	func() {
+		defer func() { savePanic = recover() }()
+		t.schema.save()
+	}()
+	if savePanic != nil {
+		t.mu.Lock()
+		if newIndex < len(t.Shards) && t.Shards[newIndex] == newShard {
+			t.Shards = t.Shards[:newIndex]
+		}
+		t.maintenanceKind = 0
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		discardUnpublishedShard(newShard)
+		panic(savePanic)
+	}
+
+	t.mu.Lock()
+	published := t.publishTopologyLocked()
+	t.mu.Unlock()
+	if t.PersistencyMode == Cache && !strings.HasPrefix(t.Name, ".") {
+		GlobalCache.AddItem(newShard, 0, TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+	}
+	fmt.Println("started new shard for table", t.Name)
+	t.overflowRebuilds.Add(1)
+	go t.finishOverflowRebuild(sourceIndex, source)
+	return published, newShard
+}
+
+// finishOverflowRebuild owns maintenanceMu, which appendFreeShardDurably
+// acquired before publishing the appended shard. The replacement UUID becomes
+// authoritative only after schema.json durably names it.
+func (t *table) finishOverflowRebuild(index int, source *storageShard) {
+	defer func() {
+		t.mu.Lock()
+		if t.maintenanceKind == 1 {
+			t.maintenanceKind = 0
+		}
+		t.mu.Unlock()
+		t.maintenanceMu.Unlock()
+		t.overflowRebuilds.Add(-1)
+		if r := recover(); r != nil {
+			fmt.Println("error: shard rebuild failed for", t.schema.Name+".", t.Name, "shard", index, ":", r)
+		}
+	}()
+
+	rebuilt := source.rebuild(false)
+	source.mu.Lock()
+	t.mu.Lock()
+	if t.ShardMode != ShardModeFree || index >= len(t.Shards) || t.Shards[index] != source {
+		t.mu.Unlock()
+		source.mu.Unlock()
+		return
+	}
+	t.Shards[index] = rebuilt
+	t.mu.Unlock()
+
+	var savePanic any
+	func() {
+		defer func() { savePanic = recover() }()
+		t.schema.save()
+	}()
+	if savePanic != nil {
+		t.mu.Lock()
+		if index < len(t.Shards) && t.Shards[index] == rebuilt {
+			t.Shards[index] = source
+		}
+		t.mu.Unlock()
+		source.mu.Unlock()
+		panic(savePanic)
+	}
+
+	t.mu.Lock()
+	t.publishTopologyLocked()
+	t.mu.Unlock()
+	source.mu.Unlock()
+	t.collectStatistics()
+}
+
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
 	result := 0
 	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE
@@ -1746,61 +1848,36 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	if topology.mode == ShardModeFree { // unpartitioned sharding
 		// Helper to get or create a shard with capacity for n rows
 		getShardWithCapacity := func(n uint) *storageShard {
-			t.mu.Lock()
-			if t.Shards == nil {
-				// Repartition completed while we waited for the lock.
+			for {
+				t.mu.Lock()
+				active := t.activeTopology()
+				if active != topology {
+					topology = active
+					t.mu.Unlock()
+					if topology.mode != ShardModeFree {
+						return nil
+					}
+					continue
+				}
+				if len(topology.shards) == 0 {
+					t.mu.Unlock()
+					return nil
+				}
+				shard := topology.shards[len(topology.shards)-1]
+				if uint(shard.Count())+n <= Settings.ShardSize || t.maintenanceKind != 0 {
+					t.mu.Unlock()
+					return shard
+				}
+
 				t.mu.Unlock()
-				return nil
-			}
-			shard := t.Shards[len(t.Shards)-1]
-			if uint(shard.Count())+n > Settings.ShardSize {
-				// Current shard would overflow, create new one
-				t.overflowRebuilds.Add(1)
-				go func(i int, s *storageShard) {
-					t.maintenanceMu.Lock()
-					claimed := false
-					defer func() {
-						if claimed {
-							t.mu.Lock()
-							if t.maintenanceKind == 1 {
-								t.maintenanceKind = 0
-							}
-							t.mu.Unlock()
-						}
-						t.maintenanceMu.Unlock()
-						t.overflowRebuilds.Add(-1)
-						if r := recover(); r != nil {
-							fmt.Println("error: shard rebuild failed for", t.schema.Name+".", t.Name, "shard", i, ":", r)
-						}
-					}()
-					t.mu.Lock()
-					if t.ShardMode != ShardModeFree || i >= len(t.Shards) || t.Shards[i] != s {
-						t.mu.Unlock()
-						return
-					}
-					t.maintenanceKind = 1
-					claimed = true
-					t.mu.Unlock()
-					rebuilt := s.rebuild(false)
-					t.mu.Lock()
-					if t.ShardMode == ShardModeFree && i < len(t.Shards) && t.Shards[i] == s {
-						t.Shards[i] = rebuilt
-						t.publishTopologyLocked()
-					}
-					t.mu.Unlock()
-					t.collectStatistics()
-					t.schema.save()
-				}(len(t.Shards)-1, shard)
-				shard = NewShard(t)
-				fmt.Println("started new shard for table", t.Name)
-				t.Shards = append(t.Shards, shard)
-				t.publishTopologyLocked()
-				if t.PersistencyMode == Cache && !strings.HasPrefix(t.Name, ".") {
-					GlobalCache.AddItem(shard, 0, TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+				published, appended := t.appendFreeShardDurably(topology, shard, n)
+				if published != nil {
+					topology = published
+				}
+				if appended != nil {
+					return appended
 				}
 			}
-			t.mu.Unlock()
-			return shard
 		}
 
 		// For bulk inserts larger than ShardSize, split into chunks
@@ -1946,13 +2023,6 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	}
 
 insertDone:
-	// Before the topology flip, storageShard.Insert forwards old→new and records
-	// recid translations. After the flip, new writes are mirrored new→old only
-	// until old scans drain. Replica insertion prevents recursive forwarding.
-	if topology.mode == ShardModePartition && t.repartitionDualWriteActive.Load() {
-		t.dualWriteInsertToOld(columns, values)
-	}
-
 	return result
 }
 
@@ -1998,19 +2068,6 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 	return values
 }
 
-// dualWriteInsertToOld keeps pre-flip readers current while the old generation
-// drains. It is called only for statements that started on partition topology.
-func (t *table) dualWriteInsertToOld(columns []string, values [][]scm.Scmer) {
-	sources := t.repartitionSources.Load()
-	if sources == nil || len(sources.shards) == 0 {
-		return
-	}
-	shard := sources.shards[len(sources.shards)-1]
-	release := shard.GetExclusive()
-	defer release()
-	shard.insertReplica(columns, values, false, nil)
-}
-
 func (t *table) isRepartitionSource(shard *storageShard) bool {
 	sources := t.repartitionSources.Load()
 	if sources == nil {
@@ -2020,7 +2077,7 @@ func (t *table) isRepartitionSource(shard *storageShard) bool {
 	return ok
 }
 
-func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uint32, columns []string, values [][]scm.Scmer) {
+func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uint32, columns []string, values [][]scm.Scmer, currentTx *TxContext) {
 	if t.PShards == nil || len(values) == 0 {
 		return
 	}
@@ -2045,7 +2102,7 @@ func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uin
 			return
 		}
 		rel := lastShard.GetExclusive()
-		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false, nil)
+		firstNewRecid := lastShard.insertReplica(columns, values[lastI:end], false, currentTx)
 		rel()
 		for i := lastI; i < end; i++ {
 			t.recordRepartitionTranslation(oldShard, firstOldRecid+uint32(i), translatedRecid{
@@ -2080,7 +2137,11 @@ func (t *table) dualWriteInsertFromOld(oldShard *storageShard, firstOldRecid uin
 // For rows in the Phase B snapshot (present in repartitionTranslation),
 // it uses the translation map to find the exact PShard recid. Post-snapshot
 // dual-written rows extend the same translation map as they are inserted.
-func (t *table) dualWriteDelete(oldShard *storageShard, oldRecid uint32) {
+func (t *table) dualWriteDelete(oldShard *storageShard, oldRecid uint32, currentTx *TxContext) {
+	if currentTx != nil {
+		currentTx.addRepartitionDelete(t, oldShard, oldRecid)
+		return
+	}
 	if tr, ok := t.lookupRepartitionTranslation(oldShard, oldRecid); ok {
 		t.appendPendingRepartitionDelete(tr)
 		return

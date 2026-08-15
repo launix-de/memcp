@@ -19,13 +19,129 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+type failColumnWritePersistence struct {
+	PersistenceEngine
+	failNext atomic.Bool
+}
+
+func (p *failColumnWritePersistence) WriteColumn(shard string, column string) io.WriteCloser {
+	if p.failNext.CompareAndSwap(true, false) {
+		panic("injected repartition column write failure")
+	}
+	return p.PersistenceEngine.WriteColumn(shard, column)
+}
+
+type failSchemaWritePersistence struct {
+	PersistenceEngine
+	calls  atomic.Int32
+	failAt int32
+}
+
+func (p *failSchemaWritePersistence) WriteSchema(schema []byte) {
+	if p.calls.Add(1) == p.failAt {
+		panic("injected schema publication failure")
+	}
+	p.PersistenceEngine.WriteSchema(schema)
+}
+
+type blockingSchemaWritePersistence struct {
+	PersistenceEngine
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingSchemaWritePersistence) WriteSchema(schema []byte) {
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
+	p.PersistenceEngine.WriteSchema(schema)
+}
+
+type blockingColumnWritePersistence struct {
+	PersistenceEngine
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingColumnWritePersistence) WriteColumn(shard string, column string) io.WriteCloser {
+	p.once.Do(func() {
+		close(p.entered)
+		<-p.release
+	})
+	return p.PersistenceEngine.WriteColumn(shard, column)
+}
+
+func reloadTableFromPersistence(t *testing.T, name string, persistence PersistenceEngine) *table {
+	t.Helper()
+	db := newDatabase()
+	db.Name = name
+	db.persistence = persistence
+	db.srState = COLD
+	db.ensureLoaded()
+	tbl := db.GetTable("items")
+	if tbl == nil {
+		t.Fatalf("reloaded database %s has no items table", name)
+	}
+	for _, shard := range tbl.ActiveShards() {
+		release := shard.GetRead()
+		release()
+	}
+	return tbl
+}
+
+func waitForRepartitionDualWrite(t *testing.T, tbl *table) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !tbl.repartitionDualWriteActive.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("repartition never enabled dual-write")
+		}
+		runtime.Gosched()
+	}
+}
+
+func createDurabilityTestTable(t *testing.T, databaseName string, rows int) (*table, PersistenceEngine) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "memcp-durability-regression-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBasepath := Basepath
+	Basepath = dir
+	t.Cleanup(func() {
+		databases.Remove(databaseName)
+		Basepath = oldBasepath
+		os.RemoveAll(dir)
+	})
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	CreateDatabase(databaseName, false)
+	tbl, _ := CreateTable(databaseName, "items", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("payload", "TEXT", nil, nil)
+	values := make([][]scm.Scmer, rows)
+	for i := range values {
+		values[i] = []scm.Scmer{scm.NewInt(int64(i + 1)), scm.NewString(fmt.Sprintf("row-%08d", i+1))}
+	}
+	tbl.Insert([]string{"id", "payload"}, values, nil, scm.NewNil(), false, nil)
+	return tbl, tbl.schema.persistence
+}
 
 func callBuiltin(t *testing.T, name string, args ...scm.Scmer) scm.Scmer {
 	t.Helper()
@@ -1370,5 +1486,267 @@ func TestInvalidateORCHitsShadowRebuildShards(t *testing.T) {
 	}
 	if shadowProxy.validMask.Get(0) || shadowProxy.validMask.Get(1) {
 		t.Fatal("shadow rebuild shard ORC proxy stayed valid after invalidateORC")
+	}
+}
+
+func TestRepartitionBuildFailureDoesNotPublishPartialGeneration(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "trepartitionbuildfailure", 128)
+	failing := &failColumnWritePersistence{PersistenceEngine: persistence}
+	failing.failNext.Store(true)
+	tbl.schema.persistence = failing
+
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	var repartitionPanic any
+	func() {
+		defer func() { repartitionPanic = recover() }()
+		tbl.repartition([]shardDimension{tbl.NewShardDimension("id", 2)})
+	}()
+	if !strings.Contains(fmt.Sprint(repartitionPanic), "injected repartition column write failure") {
+		t.Fatalf("repartition panic %q does not report the build failure", repartitionPanic)
+	}
+
+	if topology := tbl.activeTopology(); topology.mode != ShardModeFree {
+		t.Fatalf("failed repartition published mode %v with %d shards; old free generation must remain authoritative", topology.mode, len(topology.shards))
+	}
+}
+
+func TestRepartitionConcurrentDeleteSurvivesReload(t *testing.T) {
+	const rows = 256
+	tbl, persistence := createDurabilityTestTable(t, "trepartitiondeletereload", rows)
+	blocking := &blockingColumnWritePersistence{
+		PersistenceEngine: persistence,
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	tbl.schema.persistence = blocking
+
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	done := make(chan struct{})
+	go func() {
+		tbl.repartition([]shardDimension{tbl.NewShardDimension("id", 2)})
+		close(done)
+	}()
+	<-blocking.entered
+	waitForRepartitionDualWrite(t, tbl)
+
+	oldShard := tbl.repartitionSources.Load().shards[0]
+	if !scm.ToBool(oldShard.UpdateFunction(0, false, false, nil)()) {
+		t.Fatal("concurrent delete did not change the source row")
+	}
+	close(blocking.release)
+	<-done
+
+	if got := tbl.Count(); got != rows-1 {
+		t.Fatalf("live repartition count after delete = %d, want %d", got, rows-1)
+	}
+	reloaded := reloadTableFromPersistence(t, "trepartitiondeletereload", persistence)
+	if got := reloaded.Count(); got != rows-1 {
+		t.Fatalf("reloaded repartition count after delete = %d, want %d; forwarded delete was not durable", got, rows-1)
+	}
+}
+
+func TestRepartitionPublishedSchemaReloadsNewGeneration(t *testing.T) {
+	const rows = 32
+	tbl, persistence := createDurabilityTestTable(t, "trepartitionreload", rows)
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	tbl.repartition([]shardDimension{tbl.NewShardDimension("id", 2)})
+	if got := tbl.Count(); got != rows {
+		t.Fatalf("live repartition count = %d, want %d", got, rows)
+	}
+
+	reloaded := reloadTableFromPersistence(t, "trepartitionreload", persistence)
+	if got := reloaded.Count(); got != rows {
+		t.Fatalf("reloaded repartition count = %d, want %d; schema references the retired generation", got, rows)
+	}
+}
+
+func TestRepartitionRolledBackACIDDeleteKeepsRow(t *testing.T) {
+	const rows = 256
+	tbl, persistence := createDurabilityTestTable(t, "trepartitionacidrollback", rows)
+	blocking := &blockingColumnWritePersistence{
+		PersistenceEngine: persistence,
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	tbl.schema.persistence = blocking
+
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	done := make(chan struct{})
+	go func() {
+		tbl.repartition([]shardDimension{tbl.NewShardDimension("id", 2)})
+		close(done)
+	}()
+	<-blocking.entered
+	waitForRepartitionDualWrite(t, tbl)
+
+	oldShard := tbl.repartitionSources.Load().shards[0]
+	tx := NewTxContext(TxACID)
+	if !scm.ToBool(oldShard.UpdateFunction(0, false, false, tx)()) {
+		t.Fatal("transactional delete was not staged")
+	}
+	tx.Rollback()
+	close(blocking.release)
+	<-done
+
+	if got := tbl.Count(); got != rows {
+		t.Fatalf("repartition count after rolled-back ACID delete = %d, want %d", got, rows)
+	}
+}
+
+func TestRepartitionPostFlipUpdateDoesNotDuplicateRow(t *testing.T) {
+	const rows = 256
+	tbl, persistence := createDurabilityTestTable(t, "trepartitionpostflipupdate", rows)
+	blocking := &blockingSchemaWritePersistence{
+		PersistenceEngine: persistence,
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	tbl.schema.persistence = blocking
+
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	done := make(chan struct{})
+	go func() {
+		tbl.repartition([]shardDimension{tbl.NewShardDimension("id", 2)})
+		close(done)
+	}()
+	defer func() {
+		select {
+		case <-blocking.release:
+		default:
+			close(blocking.release)
+		}
+	}()
+	<-blocking.entered
+
+	var target *storageShard
+	for _, shard := range tbl.ActiveShards() {
+		if shard.Count() > 0 {
+			target = shard
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("published partition topology has no rows")
+	}
+	updateDone := make(chan bool, 1)
+	go func() {
+		changes := scm.NewSlice([]scm.Scmer{scm.NewString("payload"), scm.NewString("updated-after-flip")})
+		updateDone <- scm.ToBool(target.UpdateFunction(0, false, false, nil)(changes))
+	}()
+	select {
+	case <-updateDone:
+		t.Fatal("update reached a generation before schema publication committed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(blocking.release)
+	<-done
+	if !<-updateDone {
+		t.Fatal("post-publication update did not change the row")
+	}
+
+	if got := tbl.Count(); got != rows {
+		t.Fatalf("repartition count after post-flip update = %d, want %d", got, rows)
+	}
+}
+
+func TestFailedRebuildSchemaPublicationKeepsLaterWritesRecoverable(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "trebuildsavefailure", 1)
+	tbl.schema.ensureBlobTable()
+	failing := &failSchemaWritePersistence{PersistenceEngine: persistence, failAt: 1}
+	tbl.schema.persistence = failing
+
+	result := RebuildTable(tbl, true, false)
+	if !strings.Contains(result, "schema publication failure") {
+		t.Fatalf("rebuild result %q does not report injected schema failure", result)
+	}
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("after-failed-save")}}, nil, scm.NewNil(), false, nil)
+	if got := tbl.Count(); got != 2 {
+		t.Fatalf("live count after failed schema save = %d, want 2", got)
+	}
+
+	reloaded := reloadTableFromPersistence(t, "trebuildsavefailure", persistence)
+	if got := reloaded.Count(); got != 2 {
+		t.Fatalf("reloaded count after failed rebuild schema save = %d, want 2; write reached only the unpublished generation", got)
+	}
+}
+
+func TestOverflowRebuildSchemaFailureKeepsWritesRecoverable(t *testing.T) {
+	oldShardSize := Settings.ShardSize
+	Settings.ShardSize = 2
+	t.Cleanup(func() { Settings.ShardSize = oldShardSize })
+	tbl, persistence := createDurabilityTestTable(t, "toverflowsavefailure", 2)
+	failing := &failSchemaWritePersistence{PersistenceEngine: persistence, failAt: 2}
+	tbl.schema.persistence = failing
+
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(3), scm.NewString("starts-overflow-rebuild")}}, nil, scm.NewNil(), false, nil)
+	deadline := time.Now().Add(5 * time.Second)
+	for tbl.overflowRebuilds.Load() > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("overflow rebuild did not finish")
+		}
+		runtime.Gosched()
+	}
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(4), scm.NewString("after-failed-save")}}, nil, scm.NewNil(), false, nil)
+	if got := tbl.Count(); got != 4 {
+		t.Fatalf("live count after failed overflow schema save = %d, want 4", got)
+	}
+
+	reloaded := reloadTableFromPersistence(t, "toverflowsavefailure", persistence)
+	if got := reloaded.Count(); got != 4 {
+		t.Fatalf("reloaded count after failed overflow schema save = %d, want 4; writes reached only unpublished shards", got)
+	}
+}
+
+func TestACIDRolledBackInsertDoesNotReplayAfterRestart(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "tacidrollbackreload", 0)
+	session := scm.NewSession()
+	tx := NewTxContext(TxACID)
+	tx.Session = session
+	scm.Apply(session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
+	scm.SetValues(map[string]any{"session": session}, func() {
+		tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("rolled-back")}}, nil, scm.NewNil(), false, nil)
+	})
+	tx.Rollback()
+	if got := tbl.Count(); got != 0 {
+		t.Fatalf("live count after ACID rollback = %d, want 0", got)
+	}
+
+	reloaded := reloadTableFromPersistence(t, "tacidrollbackreload", persistence)
+	if got := reloaded.Count(); got != 0 {
+		t.Fatalf("reloaded count after ACID rollback = %d, want 0; uncommitted insert was replayed", got)
+	}
+}
+
+func TestCursorRollbackOfMainDeleteSurvivesRestart(t *testing.T) {
+	tbl, persistence := createDurabilityTestTable(t, "tcursorrollbackreload", 1)
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatalf("preparing main storage failed: %s", result)
+	}
+	shard := tbl.ActiveShards()[0]
+	if shard.main_count != 1 {
+		t.Fatalf("rebuilt main count = %d, want 1", shard.main_count)
+	}
+	tx := NewTxContext(TxCursorStability)
+	if !scm.ToBool(shard.UpdateFunction(0, false, false, tx)()) {
+		t.Fatal("cursor-stability delete did not change the row")
+	}
+	tx.Rollback()
+	if got := tbl.Count(); got != 1 {
+		t.Fatalf("live count after cursor rollback = %d, want 1", got)
+	}
+
+	reloaded := reloadTableFromPersistence(t, "tcursorrollbackreload", persistence)
+	if got := reloaded.Count(); got != 1 {
+		t.Fatalf("reloaded count after cursor rollback = %d, want 1; rollback was not represented in WAL", got)
 	}
 }

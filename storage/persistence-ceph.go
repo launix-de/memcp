@@ -506,8 +506,14 @@ func encodeLogEntry(e interface{}) []byte {
 	case LogEntryDelete:
 		tmp, _ := json.Marshal(encDelete{T: "delete", Idx: l.idx})
 		payload = tmp
+	case LogEntryUndelete:
+		tmp, _ := json.Marshal(encDelete{T: "undelete", Idx: l.idx})
+		payload = tmp
 	case LogEntryInsert:
 		tmp, _ := json.Marshal(encInsert{T: "insert", Cols: l.cols, Values: l.values})
+		payload = tmp
+	case LogEntryInsertHidden:
+		tmp, _ := json.Marshal(encInsert{T: "insert_hidden", Cols: l.cols, Values: l.values})
 		payload = tmp
 	default:
 		// ignore unknown
@@ -547,7 +553,12 @@ func decodeLogStream(data []byte, out chan interface{}) {
 			if json.Unmarshal(payload, &d) == nil {
 				out <- LogEntryDelete{idx: uint32(d.Idx)}
 			}
-		case "insert":
+		case "undelete":
+			var d encDelete
+			if json.Unmarshal(payload, &d) == nil {
+				out <- LogEntryUndelete{idx: uint32(d.Idx)}
+			}
+		case "insert", "insert_hidden":
 			var ins encInsert
 			if json.Unmarshal(payload, &ins) == nil {
 				// Transform values from JSON (same as FileStorage)
@@ -556,7 +567,11 @@ func decodeLogStream(data []byte, out chan interface{}) {
 						ins.Values[r][c] = scm.TransformFromJSON(ins.Values[r][c])
 					}
 				}
-				out <- LogEntryInsert{cols: ins.Cols, values: ins.Values}
+				if head.T == "insert_hidden" {
+					out <- LogEntryInsertHidden{cols: ins.Cols, values: ins.Values}
+				} else {
+					out <- LogEntryInsert{cols: ins.Cols, values: ins.Values}
+				}
 			}
 		}
 	}

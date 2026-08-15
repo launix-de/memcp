@@ -97,7 +97,14 @@ func finishColumnWrite(w io.WriteCloser, durable bool) {
 type LogEntryDelete struct {
 	idx uint32
 }
+type LogEntryUndelete struct {
+	idx uint32
+}
 type LogEntryInsert struct {
+	cols   []string
+	values [][]scm.Scmer
+}
+type LogEntryInsertHidden struct {
 	cols   []string
 	values [][]scm.Scmer
 }

@@ -541,7 +541,14 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	fmt.Println("repartitioning", t.Name, "by", shardCandidates, "into", totalShards, "shards")
 	start := time.Now()
 
-	oldshards := t.ActiveShards()
+	t.mu.Lock()
+	oldTopology := t.activeTopology()
+	oldshards := append([]*storageShard(nil), oldTopology.shards...)
+	oldShardMode := t.ShardMode
+	oldFreeShards := append([]*storageShard(nil), t.Shards...)
+	oldPartitionShards := append([]*storageShard(nil), t.PShards...)
+	oldPartitionDimensions := append([]shardDimension(nil), t.PDimensions...)
+	t.mu.Unlock()
 
 	// Eagerly load all shard data before taking any locks for partitioning.
 	for _, s := range oldshards {
@@ -573,6 +580,26 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		newshards[i].srState = WRITE // live shard, not cold
 		if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
 			newshards[i].logfile = t.schema.persistence.OpenLog(newshards[i].uuid.String())
+		}
+	}
+	abortRepartition := func() {
+		t.mu.Lock()
+		t.ShardMode = oldShardMode
+		t.Shards = oldFreeShards
+		t.PShards = oldPartitionShards
+		t.PDimensions = oldPartitionDimensions
+		t.maintenanceKind = 0
+		t.repartitionDualWriteActive.Store(false)
+		t.repartitionSources.Store(nil)
+		t.mu.Unlock()
+		t.clearRepartitionTranslation()
+		t.repartitionPendingMu.Lock()
+		t.repartitionPendingDels = nil
+		t.repartitionPendingSourceDels = nil
+		t.repartitionPendingMu.Unlock()
+		t.maintenanceMu.Unlock()
+		for _, shard := range newshards {
+			discardUnpublishedShard(shard)
 		}
 	}
 	// maintenanceKind was already set to 2 by the caller (db.rebuild or
@@ -657,6 +684,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 
 	fmt.Println("moving data from", t.Name, len(oldshards), "into", totalShards, "shards")
 	var done sync.WaitGroup
+	var buildErrMu sync.Mutex
+	var buildErrors []any
 	done.Add(totalShards)
 	workers := runtime.NumCPU() / 2
 	if workers < 1 {
@@ -670,6 +699,9 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 					defer func() {
 						if r := recover(); r != nil {
 							fmt.Println("error: repartition shard build failed for", t.schema.Name+".", t.Name, "shard", si, ":", r)
+							buildErrMu.Lock()
+							buildErrors = append(buildErrors, r)
+							buildErrMu.Unlock()
 						}
 						done.Done()
 					}()
@@ -793,6 +825,11 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	}
 	close(progress) // signal workers to exit after processing all items
 	done.Wait()
+	if len(buildErrors) > 0 {
+		err := buildErrors[0]
+		abortRepartition()
+		panic(err)
+	}
 
 	// ── Phase D: Install main storage + Delta shift ──
 	// Under the shard lock, install the built columns and main_count, then
@@ -851,11 +888,58 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 				}
 			}
 		}
+		// Staging inserts were assigned recids while main_count was still zero.
+		// Rebuild their unpublished WAL after the main prefix is installed so a
+		// restart observes the same shifted recids as the live shard.
+		if t.PersistencyMode == Safe || t.PersistencyMode == Logged {
+			if s.logfile != nil {
+				s.logfile.Close()
+			}
+			t.schema.persistence.RemoveLog(s.uuid.String())
+			s.logfile = t.schema.persistence.OpenLog(s.uuid.String())
+			if len(s.inserts) > 0 {
+				columns, values := s.materializedInsertedRowsLocked(0)
+				s.logfile.Write(LogEntryInsert{columns, values})
+				for i := range s.inserts {
+					recid := s.main_count + uint32(i)
+					if s.deletions.Get(uint(recid)) {
+						s.logfile.Write(LogEntryDelete{recid})
+					}
+				}
+			}
+			if t.PersistencyMode == Safe {
+				s.logfile.Sync()
+			}
+		}
 		s.mu.Unlock()
 	}
 	mainCounts := make([]uint32, len(newshards))
 	for i, built := range builtData {
 		mainCounts[i] = built.mainCount
+	}
+	applyPendingDeletes := func() int {
+		t.repartitionPendingMu.Lock()
+		pending := t.repartitionPendingDels
+		t.repartitionPendingDels = nil
+		t.repartitionPendingMu.Unlock()
+		for _, tr := range pending {
+			ps := newshards[tr.pshardIdx]
+			recid := tr.newRecid
+			if tr.inDelta {
+				recid += mainCounts[tr.pshardIdx]
+			}
+			ps.mu.Lock()
+			wasDeleted := ps.deletions.Get(uint(recid))
+			ps.deletions.Set(uint(recid), true)
+			if !wasDeleted {
+				ps.logVisibilityChangeLocked(recid, true)
+			}
+			ps.mu.Unlock()
+			if !wasDeleted && t.PersistencyMode == Safe && ps.logfile != nil {
+				ps.logfile.Sync()
+			}
+		}
+		return len(pending)
 	}
 	t.shiftDeltaRepartitionTranslations(mainCounts)
 	t.resolvePendingRepartitionSourceDeletes()
@@ -871,31 +955,89 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			break
 		}
 		totalPending += len(pending)
-		for _, tr := range pending {
-			ps := newshards[tr.pshardIdx]
-			recid := tr.newRecid
-			if tr.inDelta {
-				recid += mainCounts[tr.pshardIdx]
-			}
-			ps.mu.Lock()
-			ps.deletions.Set(uint(recid), true)
-			ps.mu.Unlock()
-		}
+		t.repartitionPendingMu.Lock()
+		t.repartitionPendingDels = append(t.repartitionPendingDels, pending...)
+		t.repartitionPendingMu.Unlock()
+		applyPendingDeletes()
 	}
 	if totalPending > 0 {
 		fmt.Println("repartition: applied", totalPending, "pending deletions after Phase D")
 	}
 
-	// ── Phase F: Flip ShardMode + Drain ──
-	// Publish the complete immutable topology as one generation. Readers that
-	// registered against the old generation either finish there or notice the
-	// pointer change and retry before touching its shards.
+	// ── Phase F: Durable publication + topology flip + drain ──
+	// Keep the old immutable topology authoritative while schema.json is being
+	// committed. Source writes remain synchronous old→new forwards. Locking the
+	// old shards only for this short commit boundary prevents a writer from
+	// completing between the final catch-up and durable metadata publication.
+	for {
+		for {
+			active := false
+			for _, shard := range oldshards {
+				if shard.activeTransactions.Load() > 0 {
+					active = true
+					break
+				}
+			}
+			if !active {
+				break
+			}
+			runtime.Gosched()
+		}
+		for _, shard := range oldshards {
+			shard.mu.Lock()
+		}
+		active := false
+		for _, shard := range oldshards {
+			if shard.activeTransactions.Load() > 0 {
+				active = true
+				break
+			}
+		}
+		if !active {
+			break
+		}
+		for i := len(oldshards) - 1; i >= 0; i-- {
+			oldshards[i].mu.Unlock()
+		}
+	}
+	// With source writers stopped, every completed pre-publication delete must
+	// now have a translation and be durable in the new generation.
+	t.resolvePendingRepartitionSourceDeletes()
+	t.repartitionPendingMu.Lock()
+	unresolvedBeforePublication := len(t.repartitionPendingSourceDels)
+	t.repartitionPendingMu.Unlock()
+	if unresolvedBeforePublication != 0 {
+		for i := len(oldshards) - 1; i >= 0; i-- {
+			oldshards[i].mu.Unlock()
+		}
+		abortRepartition()
+		panic(fmt.Sprintf("repartition cannot publish %s: %d source deletes have no target translation", t.Name, unresolvedBeforePublication))
+	}
+	applyPendingDeletes()
 	t.mu.Lock()
 	t.PShards = newshards
 	t.PDimensions = shardCandidates
 	t.ShardMode = ShardModePartition
+	t.Shards = nil
+	t.mu.Unlock()
+	var savePanic any
+	func() {
+		defer func() { savePanic = recover() }()
+		t.schema.save()
+	}()
+	if savePanic != nil {
+		for i := len(oldshards) - 1; i >= 0; i-- {
+			oldshards[i].mu.Unlock()
+		}
+		abortRepartition()
+		panic(savePanic)
+	}
+	t.mu.Lock()
 	t.publishTopologyLocked()
 	t.mu.Unlock()
+	for i := len(oldshards) - 1; i >= 0; i-- {
+		oldshards[i].mu.Unlock()
+	}
 	// Wait for all in-flight scans on old shards to complete.
 	// During this drain, maintenanceKind == 2 is still true, so dual-write
 	// continues forwarding writes from old shards to PShards.
@@ -919,22 +1061,14 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// Any remaining pending entries are now final.
 	t.resolvePendingRepartitionSourceDeletes()
 	t.repartitionPendingMu.Lock()
-	finalPending := t.repartitionPendingDels
-	t.repartitionPendingDels = nil
-	t.repartitionPendingSourceDels = nil
+	unresolvedFinal := len(t.repartitionPendingSourceDels)
 	t.repartitionPendingMu.Unlock()
-	for _, tr := range finalPending {
-		ps := newshards[tr.pshardIdx]
-		recid := tr.newRecid
-		if tr.inDelta {
-			recid += mainCounts[tr.pshardIdx]
-		}
-		ps.mu.Lock()
-		ps.deletions.Set(uint(recid), true)
-		ps.mu.Unlock()
+	if unresolvedFinal != 0 {
+		panic(fmt.Sprintf("repartition published %s with %d unresolved source deletes; old generation retained", t.Name, unresolvedFinal))
 	}
-	if len(finalPending) > 0 {
-		fmt.Println("repartition: applied", len(finalPending), "final pending deletions after Phase F drain")
+	finalPending := applyPendingDeletes()
+	if finalPending > 0 {
+		fmt.Println("repartition: applied", finalPending, "final pending deletions after Phase F drain")
 	}
 
 	// Verify transformation result
@@ -950,19 +1084,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	}
 	fmt.Println("activated new partitioning schema for", t.Name, "after", time.Since(start))
 
-	// ── Phase G: Commit and cleanup ──
-	// New shard files are complete before this publication barrier. schema.json
-	// must atomically name the new PShards before any old shard file is released;
-	// a publication panic therefore leaves oldshards intact and recoverable.
-	t.schema.schemalock.Lock()
-	t.schema.saveLockedAndUnlock(t.schemaSaveMode())
-
-	// Nil out old shards after the schema is saved, so no FreeShard
-	// code path can reference them. At this point, ShardMode is Partition,
-	// so new inserts use PShards exclusively.
+	// ── Phase G: Retire the old generation ──
 	t.mu.Lock()
-	t.Shards = nil
-	t.publishTopologyLocked()
 	t.maintenanceKind = 0
 	t.repartitionDualWriteActive.Store(false)
 	t.repartitionSources.Store(nil)

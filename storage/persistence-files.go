@@ -247,37 +247,16 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 					var idx uint32
 					json.Unmarshal(b[7:], &idx)
 					replay <- LogEntryDelete{idx}
+				} else if len(b) >= 9 && string(b[0:9]) == "undelete " {
+					var idx uint32
+					json.Unmarshal(b[9:], &idx)
+					replay <- LogEntryUndelete{idx}
+				} else if len(b) >= 14 && string(b[0:14]) == "insert-hidden " {
+					cols, values := decodeFileInsertLog(b[14:])
+					replay <- LogEntryInsertHidden{cols, values}
 				} else if len(b) >= 7 && string(b[0:7]) == "insert " {
-					body := string(b[7:])
-					if pos := strings.Index(body, "]["); pos >= 0 {
-						// new format: columns ][ values
-						var cols []string
-						var values [][]scm.Scmer
-						json.Unmarshal([]byte(body[:pos+1]), &cols)
-						json.Unmarshal([]byte(body[pos+1:]), &values)
-						for i := 0; i < len(values); i++ {
-							for j := 0; j < len(values[i]); j++ {
-								values[i][j] = scm.TransformFromJSON(values[i][j])
-							}
-						}
-						replay <- LogEntryInsert{cols, values}
-					} else {
-						// fallback/old format: flat array of alternating key/value pairs -> single row
-						var flat []interface{}
-						if err := json.Unmarshal([]byte(body), &flat); err != nil {
-							panic("unknown log sequence: " + string(b))
-						}
-						if len(flat)%2 != 0 {
-							panic("corrupt insert log (odd items): " + string(b))
-						}
-						cols := make([]string, 0, len(flat)/2)
-						row := make([]scm.Scmer, 0, len(flat)/2)
-						for i := 0; i < len(flat); i += 2 {
-							cols = append(cols, flat[i].(string))
-							row = append(row, scm.TransformFromJSON(flat[i+1]))
-						}
-						replay <- LogEntryInsert{cols, [][]scm.Scmer{row}}
-					}
+					cols, values := decodeFileInsertLog(b[7:])
+					replay <- LogEntryInsert{cols, values}
 				} else {
 					panic("unknown log sequence: " + string(b))
 				}
@@ -293,6 +272,39 @@ func (s *FileStorage) ReplayLog(shard string) (chan interface{}, PersistenceLogf
 		close(replay)
 	}
 	return replay, FileLogfile{f}
+}
+
+func decodeFileInsertLog(b []byte) ([]string, [][]scm.Scmer) {
+	body := string(b)
+	if pos := strings.Index(body, "]["); pos >= 0 {
+		// new format: columns ][ values
+		var cols []string
+		var values [][]scm.Scmer
+		json.Unmarshal([]byte(body[:pos+1]), &cols)
+		json.Unmarshal([]byte(body[pos+1:]), &values)
+		for i := 0; i < len(values); i++ {
+			for j := 0; j < len(values[i]); j++ {
+				values[i][j] = scm.TransformFromJSON(values[i][j])
+			}
+		}
+		return cols, values
+	} else {
+		// fallback/old format: flat array of alternating key/value pairs -> single row
+		var flat []interface{}
+		if err := json.Unmarshal([]byte(body), &flat); err != nil {
+			panic("unknown log sequence: " + string(b))
+		}
+		if len(flat)%2 != 0 {
+			panic("corrupt insert log (odd items): " + string(b))
+		}
+		cols := make([]string, 0, len(flat)/2)
+		row := make([]scm.Scmer, 0, len(flat)/2)
+		for i := 0; i < len(flat); i += 2 {
+			cols = append(cols, flat[i].(string))
+			row = append(row, scm.TransformFromJSON(flat[i+1]))
+		}
+		return cols, [][]scm.Scmer{row}
+	}
 }
 
 func (s *FileStorage) RemoveLog(shard string) {
@@ -312,16 +324,29 @@ func (w FileLogfile) Write(logentry interface{}) {
 		b.Write(tmp)
 		b.WriteString("\n")
 		w.w.Write(b.Bytes())
-	case LogEntryInsert:
+	case LogEntryUndelete:
 		var b bytes.Buffer
-		b.WriteString("insert ")
-		tmp, _ := json.Marshal(l.cols)
-		b.Write(tmp)
-		tmp, _ = json.Marshal(l.values)
+		b.WriteString("undelete ")
+		tmp, _ := json.Marshal(l.idx)
 		b.Write(tmp)
 		b.WriteString("\n")
 		w.w.Write(b.Bytes())
+	case LogEntryInsert:
+		w.writeInsert("insert ", l.cols, l.values)
+	case LogEntryInsertHidden:
+		w.writeInsert("insert-hidden ", l.cols, l.values)
 	}
+}
+
+func (w FileLogfile) writeInsert(prefix string, cols []string, values [][]scm.Scmer) {
+	var b bytes.Buffer
+	b.WriteString(prefix)
+	tmp, _ := json.Marshal(cols)
+	b.Write(tmp)
+	tmp, _ = json.Marshal(values)
+	b.Write(tmp)
+	b.WriteString("\n")
+	w.w.Write(b.Bytes())
 }
 func (w FileLogfile) Sync() {
 	w.w.Sync()

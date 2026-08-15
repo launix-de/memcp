@@ -545,8 +545,14 @@ func encodeS3LogEntry(e interface{}) []byte {
 	case LogEntryDelete:
 		tmp, _ := json.Marshal(s3EncDelete{T: "delete", Idx: l.idx})
 		payload = tmp
+	case LogEntryUndelete:
+		tmp, _ := json.Marshal(s3EncDelete{T: "undelete", Idx: l.idx})
+		payload = tmp
 	case LogEntryInsert:
 		tmp, _ := json.Marshal(s3EncInsert{T: "insert", Cols: l.cols, Values: l.values})
+		payload = tmp
+	case LogEntryInsertHidden:
+		tmp, _ := json.Marshal(s3EncInsert{T: "insert_hidden", Cols: l.cols, Values: l.values})
 		payload = tmp
 	default:
 		return nil
@@ -584,7 +590,12 @@ func decodeS3LogStream(data []byte, out chan interface{}) {
 			if json.Unmarshal(payload, &d) == nil {
 				out <- LogEntryDelete{idx: uint32(d.Idx)}
 			}
-		case "insert":
+		case "undelete":
+			var d s3EncDelete
+			if json.Unmarshal(payload, &d) == nil {
+				out <- LogEntryUndelete{idx: uint32(d.Idx)}
+			}
+		case "insert", "insert_hidden":
 			var ins s3EncInsert
 			if json.Unmarshal(payload, &ins) == nil {
 				for r := 0; r < len(ins.Values); r++ {
@@ -592,7 +603,11 @@ func decodeS3LogStream(data []byte, out chan interface{}) {
 						ins.Values[r][c] = scm.TransformFromJSON(ins.Values[r][c])
 					}
 				}
-				out <- LogEntryInsert{cols: ins.Cols, values: ins.Values}
+				if head.T == "insert_hidden" {
+					out <- LogEntryInsertHidden{cols: ins.Cols, values: ins.Values}
+				} else {
+					out <- LogEntryInsert{cols: ins.Cols, values: ins.Values}
+				}
 			}
 		}
 	}
