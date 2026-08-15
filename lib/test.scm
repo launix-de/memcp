@@ -1343,6 +1343,52 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(list 'list 'b 'c))))))
 	(assert (match opt_merge_unique_ser (regex "merge_unique_mut" _) true false) true "_mut merge_unique on fresh first arg")
 
+	/* merge consumers keep the segment catalog and avoid a flattened temporary. */
+	(print "testing optimizer merge consumer fusion ...")
+	(define opt_reduce_segments (optimize
+		(list 'lambda (list 'parts)
+			(list 'reduce (list 'merge 'parts)
+				(list 'lambda (list 'acc 'item) (list '+ 'acc 'item)) 0))))
+	(assert
+		(match (serialize opt_reduce_segments) (regex "reduce_segments" _) true false)
+		true
+		"optimizer: reduce consumes merge segments directly")
+	(define reduce_segments_fn (eval opt_reduce_segments))
+	(assert (reduce_segments_fn (list (list 1 2) (list) (list 3 4))) 10 "reduce_segments preserves order and empty segments")
+
+	(define opt_reduce_segments_without_neutral (optimize
+		(list 'lambda (list 'parts)
+			(list 'reduce (list 'merge 'parts)
+				(list 'lambda (list 'acc 'item) (list '+ 'acc 'item))))))
+	(define reduce_segments_without_neutral_fn (eval opt_reduce_segments_without_neutral))
+	(assert (reduce_segments_without_neutral_fn (list (list) (list 1 2) (list 3))) 6 "reduce_segments preserves implicit first accumulator")
+	(assert (reduce_segments_without_neutral_fn (list (list) (list))) nil "reduce_segments preserves empty reduction result")
+	(define opt_segment_validation_order (optimize
+		(list 'lambda (list 'parts)
+			(list 'reduce (list 'merge 'parts)
+				(list 'lambda (list 'acc 'item) (list 'panic "callback ran")) 0))))
+	(define segment_validation_order_fn (eval opt_segment_validation_order))
+	(define segment_validation_error (try
+		(lambda () (segment_validation_order_fn (list (list 1) 2)))
+		(lambda (e) e)))
+	(assert (strlike segment_validation_error "%reduce_segments item%") true "reduce_segments validates every segment before invoking reducer")
+	(define opt_dynamic_segment_reducer (optimize
+		(list 'lambda (list 'parts 'reducer)
+			(list 'reduce (list 'merge 'parts) 'reducer 0))))
+	(assert
+		(match (serialize opt_dynamic_segment_reducer) (regex "reduce_segments" _) true false)
+		false
+		"optimizer: dynamic reducer keeps merge validation before reducer lookup")
+	(define opt_computed_segment_neutral (optimize
+		(list 'lambda (list 'parts 'neutral)
+			(list 'reduce (list 'merge 'parts)
+				(list 'lambda (list 'acc 'item) (list '+ 'acc 'item))
+				(list '+ 'neutral 1)))))
+	(assert
+		(match (serialize opt_computed_segment_neutral) (regex "reduce_segments" _) true false)
+		false
+		"optimizer: computed neutral keeps merge validation order")
+
 	/* match / match_mut correctness */
 	(print "testing match/match_mut correctness ...")
 	/* match: literal patterns */
