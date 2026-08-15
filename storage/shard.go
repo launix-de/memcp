@@ -2168,7 +2168,17 @@ func (t *storageShard) insertReplica(columns []string, values [][]scm.Scmer, alr
 	if !alreadyLocked {
 		t.mu.Lock()
 	}
+	firstNewInsertIdx := len(t.inserts)
 	firstNewRecid := t.insertPreparedLocked(columns, values, nil, false, false, currentTx)
+	if next := t.nextForMaintenanceLocked(nil); next != nil {
+		// A writer may still hold an older immutable table-topology snapshot
+		// after more than one rebuild generation has been published. Replica
+		// inserts therefore continue through completed successor generations,
+		// without re-running triggers, unique checks, or repartition routing.
+		payloadCols, payloadVals := t.materializedInsertedRowsLocked(firstNewInsertIdx)
+		firstNextRecid := next.insertReplica(payloadCols, payloadVals, false, currentTx)
+		t.recordNextInsertRange(firstNewRecid, firstNextRecid, len(payloadVals))
+	}
 	if !alreadyLocked {
 		t.mu.Unlock()
 	}
@@ -2231,7 +2241,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			firstNextRecid := next.insertReplica(payloadCols, payloadVals, false, currentTx)
 			t.recordNextInsertRange(firstNewRecid, firstNextRecid, len(payloadVals))
 		}
-		if t.t.repartitionDualWriteActive.Load() {
+		if t.t.repartitionDualWriteActive.Load() && t.t.isRepartitionSource(t) {
 			t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals)
 		}
 	}

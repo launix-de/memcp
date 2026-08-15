@@ -1363,6 +1363,7 @@ func Init(en scm.Env) {
 			newTable.lastAccessed = uint64(time.Now().UnixNano())
 			newTable.Shards = make([]*storageShard, 1)
 			newTable.Shards[0] = NewShard(newTable)
+			newTable.publishTopologyLocked()
 			newTable.Auto_increment = 1
 			newTable.Collation = collation
 			newTable.Charset = charset

@@ -125,12 +125,7 @@ func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <
 // snapshots only shard topology and does not touch the transaction fanout
 // budget; callers reach it after boundary analysis has selected a table scan.
 func (t *table) shardResultBufferSize() int {
-	t.shardModeMu.RLock()
-	defer t.shardModeMu.RUnlock()
-	size := len(t.PShards)
-	if t.ShardMode == ShardModeFree {
-		size = len(t.Shards)
-	}
+	size := len(t.activeTopology().shards)
 	if size < 1 {
 		return 1
 	}
@@ -155,25 +150,37 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 	runWorkers := func(shards []*storageShard, onDone func(*storageShard)) <-chan struct{} {
 		return runFanoutTasks(currentTx, len(shards), func(i int, synchronous bool) {
 			s := shards[i]
+			if onDone != nil {
+				defer onDone(s)
+			}
 			release := s.GetRead()
 			defer release()
 			callback(s, synchronous)
-			if onDone != nil {
-				onDone(s)
-			}
 		})
 	}
 
-	// Hold shardModeMu.RLock while reading ShardMode and capturing shard list.
-	// Phase F's drain uses shardModeMu.Lock() to synchronize, ensuring all
-	// iterateShards calls that read FreeShard have incremented activeScanners
-	// before the drain check begins.
-	t.shardModeMu.RLock()
-	mode := t.ShardMode
-	if mode == ShardModeFree {
-		shards := t.Shards
-		// Increment activeScanners while holding shardModeMu.RLock so Phase F
-		// sees all in-flight scans after its shardModeMu.Lock()/Unlock().
+	for {
+		topology := t.activeTopology()
+		if topology.mode != ShardModeFree {
+			relevant := collectRelevantShards(topology.dimensions, boundaries, topology.shards)
+			if len(relevant) == 0 {
+				return nil
+			}
+			if len(relevant) == 1 {
+				s := relevant[0]
+				release := s.GetRead()
+				defer release()
+				callback(s, true)
+				return nil
+			}
+			return runWorkers(relevant, nil)
+		}
+
+		// Register against the loaded generation, then verify it is still
+		// authoritative. A concurrent publisher can drain the old generation
+		// without a reader lock: late registrations notice the changed pointer
+		// before touching a shard and retry on the new topology.
+		shards := topology.shards
 		relevant := make([]*storageShard, 0, len(shards))
 		for _, s := range shards {
 			if s != nil {
@@ -181,36 +188,27 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 				relevant = append(relevant, s)
 			}
 		}
-		t.shardModeMu.RUnlock()
+		if t.topology.Load() != topology {
+			for _, s := range relevant {
+				s.activeScanners.Add(-1)
+			}
+			continue
+		}
 
 		if len(relevant) == 0 {
 			return nil
 		}
 		if len(relevant) == 1 {
 			s := relevant[0]
+			defer s.activeScanners.Add(-1)
 			release := s.GetRead()
+			defer release()
 			callback(s, true)
-			release()
-			s.activeScanners.Add(-1)
 			return nil
 		}
 		return runWorkers(relevant, func(s *storageShard) {
 			s.activeScanners.Add(-1)
 		})
-	} else {
-		t.shardModeMu.RUnlock()
-		relevant := collectRelevantShards(t.PDimensions, boundaries, t.PShards)
-		if len(relevant) == 0 {
-			return nil
-		}
-		if len(relevant) == 1 {
-			s := relevant[0]
-			release := s.GetRead()
-			callback(s, true)
-			release()
-			return nil
-		}
-		return runWorkers(relevant, nil)
 	}
 }
 
@@ -577,8 +575,6 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			newshards[i].logfile = t.schema.persistence.OpenLog(newshards[i].uuid.String())
 		}
 	}
-	t.PShards = newshards
-	t.PDimensions = shardCandidates
 	// maintenanceKind was already set to 2 by the caller (db.rebuild or
 	// beginManualRepartition) under maintenanceMu.
 	// From this point, all concurrent inserts/updates go to BOTH shard sets.
@@ -591,9 +587,19 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	datasetids := make([][][]uint32, totalShards) // newshard -> oldshard -> []rowIdx
 	total_count := uint64(0)
 	t.mu.Lock()
+	t.PShards = newshards
+	t.PDimensions = shardCandidates
 	for si, s := range oldshards {
 		snapshots[si] = s.snapshotPartitionState(shardCandidates)
 	}
+	sourceSet := &repartitionSourceSet{
+		shards: append([]*storageShard(nil), oldshards...),
+		set:    make(map[*storageShard]struct{}, len(oldshards)),
+	}
+	for _, shard := range oldshards {
+		sourceSet.set[shard] = struct{}{}
+	}
+	t.repartitionSources.Store(sourceSet)
 	t.setRepartitionTranslationMap(make(map[*storageShard]map[uint32]translatedRecid))
 	t.repartitionDualWriteActive.Store(true)
 	t.mu.Unlock()
@@ -881,17 +887,16 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	}
 
 	// ── Phase F: Flip ShardMode + Drain ──
-	// Step 1: Flip ShardMode so new scans/inserts use PShards.
+	// Publish the complete immutable topology as one generation. Readers that
+	// registered against the old generation either finish there or notice the
+	// pointer change and retry before touching its shards.
+	t.mu.Lock()
 	t.PShards = newshards
 	t.PDimensions = shardCandidates
 	t.ShardMode = ShardModePartition
-	// Step 2: Acquire/release shardModeMu to synchronize with iterateShards.
-	// After this, all iterateShards calls that captured FreeShard mode have
-	// incremented activeScanners on old shards. New iterateShards calls see
-	// ShardModePartition and use PShards.
-	t.shardModeMu.Lock()
-	t.shardModeMu.Unlock()
-	// Step 3: Wait for all in-flight scans on old shards to complete.
+	t.publishTopologyLocked()
+	t.mu.Unlock()
+	// Wait for all in-flight scans on old shards to complete.
 	// During this drain, maintenanceKind == 2 is still true, so dual-write
 	// continues forwarding writes from old shards to PShards.
 	for _, s := range oldshards {
@@ -957,8 +962,10 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// so new inserts use PShards exclusively.
 	t.mu.Lock()
 	t.Shards = nil
+	t.publishTopologyLocked()
 	t.maintenanceKind = 0
 	t.repartitionDualWriteActive.Store(false)
+	t.repartitionSources.Store(nil)
 	t.mu.Unlock()
 	t.clearRepartitionTranslation()
 	t.maintenanceMu.Unlock()
