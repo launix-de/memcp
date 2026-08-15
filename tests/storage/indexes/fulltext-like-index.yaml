@@ -99,6 +99,31 @@ test_cases:
         - vorname: "Nikolaus"
           nachname: "Meyer"
 
+  - name: "Exact point probes keep LIKE as a residual filter"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "ft_customers"))
+        (define probe (lambda (id)
+          (begin
+            (define condition (eval (list
+              'lambda (list 'row_id 'name)
+              (list 'and
+                (list 'equal?? 'row_id id)
+                (list 'strlike 'name "%laus%" "utf8mb4_general_ci")))))
+            (scan_exists nil tbl (list "id" "vorname") condition))))
+        (reduce (produceN 8) (lambda (ok i)
+          (begin (probe (+ 1 i)) ok)) true)
+        (define indexes ((show "memcp-tests" "ft_customers" 0 true) "indexes"))
+        (define bad (reduce indexes (lambda (found index)
+          (begin
+            (define cols (get_assoc index "cols"))
+            (or found (and
+              (strlike cols "%id(equal)%" "utf8mb4_bin")
+              (strlike cols "%vorname(like)%" "utf8mb4_bin"))))) false))
+        (if bad
+          (error "point lookup built a full-table LIKE matcher index")
+          true))
+
   # --- Incremental search pattern ---
   - name: "Incremental search step 1"
     sql: "SELECT COUNT(*) AS cnt FROM ft_customers WHERE vorname LIKE '%K%'"

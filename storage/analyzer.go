@@ -916,9 +916,10 @@ func materializeBatchBoundaries(template boundaries, stride int, batchdata []scm
 	return result
 }
 
-// reorderByFrequency re-sorts equality columns by query frequency (most-used first)
-// so that the most-queried columns appear first in the index key, maximizing prefix
-// overlap across queries. Also bumps the frequency counters for each boundary column.
+// reorderByFrequency keeps exact sorted points ahead of matcher-backed points.
+// A PK equality must be allowed to narrow a nested probe before an expensive LIKE
+// matcher is considered. Frequency only reorders boundaries with the same access
+// characteristics, preserving prefix reuse without overriding that cost property.
 func reorderByFrequency(bounds boundaries, t *table) {
 	for _, b := range bounds {
 		t.bumpColFreq(b.col)
@@ -928,6 +929,11 @@ func reorderByFrequency(bounds boundaries, t *table) {
 		jEq := boundaryIsPoint(bounds[j])
 		if iEq != jEq {
 			return iEq // equality first
+		}
+		iSortedPoint := iEq && bounds[i].matcher.IsSorted()
+		jSortedPoint := jEq && bounds[j].matcher.IsSorted()
+		if iSortedPoint != jSortedPoint {
+			return iSortedPoint
 		}
 		if iEq && jEq {
 			fi, fj := t.getColFreq(bounds[i].col), t.getColFreq(bounds[j].col)
@@ -1215,6 +1221,21 @@ func scmerStructEqual(a, b scm.Scmer) bool {
 
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
+		// A non-sorted matcher after an exact sorted prefix is cheaper as a
+		// residual predicate: the prefix has already reduced the candidate set,
+		// while building a matcher skip list would scan the complete shard. Keep
+		// matcher-backed access for scans which have no exact sorted prefix.
+		hasExactPrefix := false
+		for i, col := range cols {
+			if col.matcher.IsSorted() && col.matcher.IsPointLike() {
+				hasExactPrefix = true
+				continue
+			}
+			if hasExactPrefix && !col.matcher.IsSorted() {
+				cols = cols[:i]
+				break
+			}
+		}
 		//fmt.Println("conditions:", cols)
 		// build up lower and upper bounds of index
 		for {
