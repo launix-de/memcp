@@ -1976,6 +1976,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define jit_panic_result (try (lambda () (jit_will_panic 42)) (lambda (e) "caught")))
 	(assert jit_panic_result "caught" "panic through JIT frame must be recoverable")
 
+	/* JIT list callbacks: constant code shape with runtime values/captures */
+	(define _jit_map_constant_callback (jit (lambda (values)
+		(map values (lambda (_) 7)))))
+	(assert (jit? _jit_map_constant_callback) (jit-enabled?) "jit: map constant callback compiles natively when enabled")
+	(assert (equal? (_jit_map_constant_callback '(1 2 3)) '(7 7 7)) true "jit: map constant callback result")
+
+	(define _jit_map_captured_callback (jit (lambda (values offset)
+		(map values (lambda (value) (+ value offset))))))
+	(assert (jit? _jit_map_captured_callback) (jit-enabled?) "jit: map callback with runtime capture compiles natively when enabled")
+	(assert (equal? (_jit_map_captured_callback '(1 2 3) 10) '(11 12 13)) true "jit: map callback reads runtime capture")
+
+	(define _jit_map_mut_callback (jit (lambda (values)
+		(map_mut values (lambda (value) (+ value 1))))))
+	(assert (jit? _jit_map_mut_callback) (jit-enabled?) "jit: map_mut callback compiles natively when enabled")
+	(assert (equal? (_jit_map_mut_callback (list 3 4 5)) '(4 5 6)) true "jit: map_mut callback result")
+
+	(define _jit_reduce_callback (jit (lambda (values neutral offset)
+		(reduce values (lambda (acc value) (+ acc (+ value offset))) neutral))))
+	(assert (jit? _jit_reduce_callback) (jit-enabled?) "jit: reduce callback with runtime capture compiles natively when enabled")
+	(assert (_jit_reduce_callback '(1 2 3) 0 10) 36 "jit: reduce callback reads accumulator and runtime capture")
+
+	(define _jit_map_dynamic_callback (jit (lambda (values callback)
+		(map values callback))))
+	(assert (jit? _jit_map_dynamic_callback) (jit-enabled?) "jit: map with runtime callback compiles natively when enabled")
+	(assert (equal? (_jit_map_dynamic_callback '(2 3 4) (lambda (value) (* value 3))) '(6 9 12)) true "jit: map runtime callback trampoline")
+
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
 	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")
