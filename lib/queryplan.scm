@@ -612,13 +612,36 @@ work before decorrelation has even started. */
 		(map (filter (get_schema (source_schema src) (source_relation src)) (lambda (col)
 			(equal?? (col "Key") "PRI"))) (lambda (col) (col "Field"))))))
 
+(define source_unique_key_sets (lambda (src)
+	(if (not (source_is_base_table? src))
+		'()
+		(try
+			(lambda ()
+				(begin
+					(define info (show (source_schema src) (source_relation src) true))
+					(map ((info "meta") "Unique") (lambda (unique_key)
+						(unique_key "Cols")))))
+			(lambda (_e) '())))))
+
+(define unique_lookup_column_name (lambda (src expr)
+	(match expr
+		((symbol if) ((symbol nil?) probe) fallback value)
+		(if (and (nil? fallback) (equal? probe value))
+			(direct_column_name_for_alias src probe)
+			nil)
+		((quote if) ((quote nil?) probe) fallback value)
+		(if (and (nil? fallback) (equal? probe value))
+			(direct_column_name_for_alias src probe)
+			nil)
+		_ (direct_column_name_for_alias src expr))))
+
 (define unique_left_join_key_term? (lambda (default_alias src key_col term)
 	(match term
 		'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
 			(or
-				(and (equal? (direct_column_name_for_alias src left) key_col)
+				(and (equal? (unique_lookup_column_name src left) key_col)
 					(not (expr_refs_alias? default_alias (source_alias src) right)))
-				(and (equal? (direct_column_name_for_alias src right) key_col)
+				(and (equal? (unique_lookup_column_name src right) key_col)
 					(not (expr_refs_alias? default_alias (source_alias src) left))))
 			false)
 		_ false)))
@@ -6120,12 +6143,6 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(join_optimizer_metadata_costed_predicates
 					all_sources default_alias graph aliases))))))
 
-(define join_optimizer_primary_key_columns (lambda (src)
-	(if (source_is_base_table? src)
-		(map (filter (get_schema (source_schema src) (source_relation src)) (lambda (col)
-			(equal?? (col "Key") "PRI"))) (lambda (col) (col "Field")))
-		'())))
-
 (define join_optimizer_ref_matches? (lambda (ref src col)
 	(and (not (nil? ref))
 		(and (equal? (source_alias (car ref)) (source_alias src))
@@ -6155,12 +6172,15 @@ source catalog. join_plan remains the single owner of physical join order. */
 
 (define join_optimizer_unique_lookup_from_driver? (lambda (sources default_alias graph driver lookup)
 	(begin
-		(define key_cols (join_optimizer_primary_key_columns lookup))
-		(and (not (empty_list? key_cols))
-			(reduce key_cols (lambda (unique key_col)
-				(and unique (join_optimizer_key_bound_to_driver?
-					sources default_alias graph driver lookup key_col)))
-				true)))))
+		(define key_sets (source_unique_key_sets lookup))
+		(reduce key_sets (lambda (unique key_cols)
+			(or unique
+				(and (not (empty_list? key_cols))
+					(reduce key_cols (lambda (complete key_col)
+						(and complete (join_optimizer_key_bound_to_driver?
+							sources default_alias graph driver lookup key_col)))
+						true))))
+			false))))
 
 (define join_optimizer_order_expr_available_from_driver? (lambda (sources default_alias graph driver expr)
 	(begin
@@ -9250,17 +9270,17 @@ until lowering without creating a depth-proportional binary OR chain. */
 (define unique_lookup_join_term? (lambda (default_alias src key_col term)
 	(unique_left_join_key_term? default_alias src key_col term)))
 
-(define unique_lookup_key_columns (lambda (src stages)
+(define unique_lookup_key_sets (lambda (src stages)
 	(begin
 		(define group_cache_stage (stage_for_group_cache_source stages src))
 		(if (group_stage? group_cache_stage)
-			(group_key_cols (gs_keys group_cache_stage))
+			(list (group_key_cols (gs_keys group_cache_stage)))
 			(if (source_is_base_table? src)
-				(prejoin_primary_key_columns src)
+				(source_unique_key_sets src)
 				(if (stage_output_relation? (source_relation src))
 					(begin
 						(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
-						(if (group_stage? stage) (group_key_cols (gs_keys stage)) '()))
+						(if (group_stage? stage) (list (group_key_cols (gs_keys stage))) '()))
 					'()))))))
 
 (define lookup_probe_term_from_sources? (lambda (sources default_alias bound_sources lookup term)
@@ -9286,17 +9306,20 @@ until lowering without creating a depth-proportional binary OR chain. */
 		(define stage (coalesceNil
 			(source_stage_output_stage stages src)
 			(stage_for_group_cache_source stages src)))
-		(define key_cols (unique_lookup_key_columns src stages))
+		(define key_sets (unique_lookup_key_sets src stages))
 		(define lookup_condition (lookup_probe_condition_from_sources
 			sources default_alias bound_sources src condition))
 		(or
 			(and (scalar_aggregate_probe_stage? stage)
 				(empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-			(and (not (empty_list? key_cols))
-				(reduce key_cols (lambda (unique key_col)
-					(and unique (reduce (split_and_terms lookup_condition)
-						(lambda (found term) (or found (unique_lookup_join_term? default_alias src key_col term))) false)))
-					true))))))
+			(reduce key_sets (lambda (unique key_cols)
+				(or unique
+					(and (not (empty_list? key_cols))
+						(reduce key_cols (lambda (complete key_col)
+							(and complete (reduce (split_and_terms lookup_condition)
+								(lambda (found term) (or found (unique_lookup_join_term? default_alias src key_col term))) false)))
+							true))))
+				false)))))
 
 (define source_is_unique_lookup? (lambda (sources default_alias driver src stages condition)
 	(source_is_unique_lookup_from_sources?
@@ -12268,18 +12291,12 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define source_unique_point_condition? (lambda (src condition)
 	(if (not (source_is_base_table? src))
 		false
-		(try
-			(lambda ()
-				(begin
-					(define info (show (source_schema src) (source_relation src) true))
-					(define uniques ((info "meta") "Unique"))
-					(reduce uniques (lambda (found unique_key)
-						(or found
-							(reduce (unique_key "Cols") (lambda (complete col)
-								(and complete (source_column_bound_by_equality? src col condition)))
-								true)))
-						false)))
-			(lambda (_e) false)))))
+		(reduce (source_unique_key_sets src) (lambda (found key_cols)
+			(or found
+				(reduce key_cols (lambda (complete col)
+					(and complete (source_column_bound_by_equality? src col condition)))
+					true)))
+			false))))
 
 (define probe_context_unique_point? (lambda (sources default_alias condition)
 	(if (not (single_source? sources))

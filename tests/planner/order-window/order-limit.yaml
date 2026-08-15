@@ -27,6 +27,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS ord_member_doc"
   - sql: "DROP TABLE IF EXISTS ord_member_file"
   - sql: "DROP TABLE IF EXISTS ord_member_label"
+  - sql: "DROP TABLE IF EXISTS ord_member_permission"
   - sql: "DROP TABLE IF EXISTS ord_derived_item"
   - sql: "DROP TABLE IF EXISTS ord_derived_parent"
   - sql: "DROP TABLE IF EXISTS ord_tree_a"
@@ -39,6 +40,7 @@ setup:
   - sql: "CREATE TABLE ord_member_doc (id INT PRIMARY KEY, file_id INT, label_id INT, rank_value INT)"
   - sql: "CREATE TABLE ord_member_file (id INT PRIMARY KEY, filename TEXT)"
   - sql: "CREATE TABLE ord_member_label (id INT PRIMARY KEY, name TEXT, visible INT)"
+  - sql: "CREATE TABLE ord_member_permission (id INT PRIMARY KEY, principal_id INT, label_id INT)"
   - sql: "CREATE TABLE ord_derived_parent (id INT PRIMARY KEY, label TEXT)"
   - sql: "CREATE TABLE ord_derived_item (id INT PRIMARY KEY, parent_id INT, created INT)"
   - sql: "CREATE TABLE ord_tree_a (id INT PRIMARY KEY, pair_key INT)"
@@ -53,6 +55,7 @@ setup:
   - sql: "INSERT INTO ord_member_doc VALUES (1,1,10,40),(2,2,20,30),(3,3,10,20),(4,4,30,10)"
   - sql: "INSERT INTO ord_member_file VALUES (1,'other'),(2,'needle one'),(3,'needle two'),(4,'other')"
   - sql: "INSERT INTO ord_member_label VALUES (10,'alpha',1),(20,'beta',0)"
+  - sql: "INSERT INTO ord_member_permission VALUES (1,7,10)"
   - sql: "INSERT INTO ord_derived_parent VALUES (1,'one'),(2,'two')"
   - sql: "INSERT INTO ord_derived_item VALUES (10,1,100),(20,2,200)"
   - sql: "INSERT INTO ord_tree_a VALUES (1,10),(2,20),(3,30)"
@@ -588,6 +591,184 @@ test_cases:
         - "(sort (var 0)"
         - "(slice (var 0)"
 
+  - name: "Bounded derived read model preserves nested permission semantics"
+    sql: |
+      SELECT d.id, d.file_id, d.label_name
+      FROM (
+        SELECT m.id, m.file_id, m.label_id, m.rank_value,
+          projected_label.name AS label_name
+        FROM ord_member_doc m
+        LEFT JOIN (
+          SELECT l.id, l.name
+          FROM ord_member_label l
+        ) projected_label ON projected_label.id = m.label_id
+        WHERE COALESCE((
+          SELECT EXISTS (
+            SELECT TRUE FROM ord_member_permission permission_entry
+            WHERE permission_entry.principal_id = 7
+              AND permission_entry.label_id = permission_label.id
+            LIMIT 1
+          )
+          FROM ord_member_label permission_label
+          WHERE permission_label.id = m.label_id
+          LIMIT 1
+        ), FALSE)
+      ) d
+      WHERE d.file_id IN (
+        SELECT id FROM ord_member_file WHERE filename LIKE '%needle%'
+        UNION
+        SELECT id FROM ord_member_file WHERE filename LIKE '%two%'
+      )
+      ORDER BY d.rank_value DESC, d.label_id ASC
+      LIMIT 2
+    expect:
+      rows: 1
+      data:
+        - {id: 3, file_id: 3, label_name: "alpha"}
+
+  - name: "Set up scalable bounded derived read model"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_read_doc"
+      - sql: "DROP TABLE IF EXISTS ord_read_file"
+      - sql: "DROP TABLE IF EXISTS ord_read_label"
+      - sql: "DROP TABLE IF EXISTS ord_read_permission"
+      - sql: "CREATE TABLE ord_read_doc (id INT PRIMARY KEY, file_id INT, label_id INT, rank_value INT)"
+      - sql: "CREATE TABLE ord_read_file (id INT PRIMARY KEY, filename TEXT)"
+      - sql: "CREATE TABLE ord_read_label (id INT UNIQUE, name TEXT)"
+      - sql: "CREATE TABLE ord_read_permission (id INT PRIMARY KEY, principal_id INT, label_id INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "ord_read_doc") (list "id" "file_id" "label_id" "rank_value")
+              (map (produceN 20000) (lambda (i)
+                (list (+ i 1) (+ i 1) (+ (mod i 100) 1) (- 20000 i)))))
+            (insert (table "memcp-tests" "ord_read_file") (list "id" "filename")
+              (map (produceN 20000) (lambda (i)
+                (list (+ i 1) (if (equal? (mod i 3) 0) "needle" "other")))))
+            (insert (table "memcp-tests" "ord_read_label") (list "id" "name")
+              (map (produceN 100) (lambda (i) (list (+ i 1) (concat "label_" (+ i 1))))))
+            (insert (table "memcp-tests" "ord_read_permission") (list "id" "principal_id" "label_id")
+              (map (produceN 50) (lambda (i) (list (+ i 1) 7 (+ i 1))))))
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM ord_read_doc"
+    expect:
+      rows: 1
+      data:
+        - cnt: 20000
+
+  - name: "Scalable bounded derived read model applies nested permission before native limit"
+    max_time: 3
+    sql: |
+      SELECT d.*
+      FROM (
+        SELECT m.id, m.file_id, m.label_id, m.rank_value,
+          projected_label.name AS label_name,
+          projected_label.allowed AS label_allowed
+        FROM ord_read_doc m
+        LEFT JOIN (
+          SELECT l.id, l.name,
+            l.name IS NOT NULL AS allowed
+          FROM ord_read_label l
+        ) projected_label ON projected_label.id = m.label_id
+        WHERE COALESCE((
+          SELECT EXISTS (
+            SELECT TRUE FROM ord_read_permission permission_entry
+            WHERE permission_entry.principal_id = 7
+              AND permission_entry.label_id = permission_label.id
+            LIMIT 1
+          )
+          FROM ord_read_label permission_label
+          WHERE permission_label.id = m.label_id
+          LIMIT 1
+        ), FALSE)
+      ) d
+      LEFT JOIN ord_read_label unused_sorter
+        ON unused_sorter.id = d.label_id
+      WHERE d.file_id IN (
+        SELECT id FROM ord_read_file WHERE filename LIKE '%needle%'
+        UNION
+        SELECT id FROM ord_read_file WHERE filename LIKE '%alternate%'
+      )
+      ORDER BY d.rank_value DESC, d.label_id ASC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - {id: 1, file_id: 1, label_id: 1, rank_value: 20000, label_name: "label_1", label_allowed: true}
+        - {id: 4, file_id: 4, label_id: 4, rank_value: 19997, label_name: "label_4", label_allowed: true}
+
+  - name: "Bounded nested permission and membership stay on the ordered base driver"
+    sql: |
+      EXPLAIN SELECT d.*
+      FROM (
+        SELECT m.id, m.file_id, m.label_id, m.rank_value,
+          projected_label.name AS label_name,
+          projected_label.allowed AS label_allowed
+        FROM ord_read_doc m
+        LEFT JOIN (
+          SELECT l.id, l.name,
+            l.name IS NOT NULL AS allowed
+          FROM ord_read_label l
+        ) projected_label ON projected_label.id = m.label_id
+        WHERE COALESCE((
+          SELECT EXISTS (
+            SELECT TRUE FROM ord_read_permission permission_entry
+            WHERE permission_entry.principal_id = 7
+              AND permission_entry.label_id = permission_label.id
+            LIMIT 1
+          )
+          FROM ord_read_label permission_label
+          WHERE permission_label.id = m.label_id
+          LIMIT 1
+        ), FALSE)
+      ) d
+      LEFT JOIN ord_read_label unused_sorter
+        ON unused_sorter.id = d.label_id
+      WHERE d.file_id IN (
+        SELECT id FROM ord_read_file WHERE filename LIKE '%needle%'
+        UNION
+        SELECT id FROM ord_read_file WHERE filename LIKE '%alternate%'
+      )
+      ORDER BY d.rank_value DESC, d.label_id ASC
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "recset"
+      result_not_contains:
+        - "__join_order_intermediate"
+        - '"$recset_contains"'
+        - "(lambda (rows)"
+        - "(sort (var 0)"
+        - "(slice (var 0)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_read_doc"
+      - sql: "DROP TABLE IF EXISTS ord_read_file"
+      - sql: "DROP TABLE IF EXISTS ord_read_label"
+      - sql: "DROP TABLE IF EXISTS ord_read_permission"
+
+  - name: "Partial composite unique lookup retains its storage carrier"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_composite_lookup"
+      - sql: "CREATE TABLE ord_composite_lookup (lookup_id INT, variant INT, name TEXT, UNIQUE KEY lookup_variant (lookup_id, variant))"
+      - sql: "INSERT INTO ord_composite_lookup VALUES (10,1,'first'),(10,2,'second'),(20,1,'third')"
+    sql: |
+      EXPLAIN SELECT d.id
+      FROM ord_member_doc d
+      JOIN ord_composite_lookup c ON c.lookup_id = d.label_id
+      ORDER BY d.rank_value DESC
+      LIMIT 2
+    expect:
+      rows: 1
+      result_contains:
+        - "__join_order_intermediate"
+      result_not_contains:
+        - "(lambda (rows)"
+        - "(sort (var 0)"
+        - "(slice (var 0)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_composite_lookup"
+
   - name: "ORDER BY DESC OFFSET beyond rows returns empty"
     sql: "SELECT a FROM ord_t ORDER BY a DESC LIMIT 2 OFFSET 10"
     expect:
@@ -695,6 +876,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ord_member_doc"
   - sql: "DROP TABLE IF EXISTS ord_member_file"
   - sql: "DROP TABLE IF EXISTS ord_member_label"
+  - sql: "DROP TABLE IF EXISTS ord_member_permission"
   - sql: "DROP TABLE IF EXISTS ord_derived_item"
   - sql: "DROP TABLE IF EXISTS ord_derived_parent"
   - sql: "DROP TABLE IF EXISTS ord_tree_a"
