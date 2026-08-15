@@ -21,6 +21,9 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS exists_point_acl"
+  - sql: "DROP TABLE IF EXISTS exists_point_child"
+  - sql: "DROP TABLE IF EXISTS exists_point_parent"
   - sql: "DROP TABLE IF EXISTS exists_shipments"
   - sql: "DROP TABLE IF EXISTS exists_doc_shares"
   - sql: "DROP TABLE IF EXISTS exists_docs"
@@ -77,6 +80,90 @@ setup:
       (5, 3, 1, TRUE)
 
 test_cases:
+  - name: "Set up large point-probe EXISTS relations"
+    setup:
+      - sql: "CREATE TABLE exists_point_parent (ID INT PRIMARY KEY, payload INT)"
+      - sql: "CREATE TABLE exists_point_child (ID INT PRIMARY KEY, parent_id INT)"
+      - sql: "CREATE TABLE exists_point_acl (ID INT PRIMARY KEY, child_id INT, principal_id INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "exists_point_parent") (list "ID" "payload")
+              (map (produceN 2000) (lambda (i) (list (+ i 1) i))))
+            (insert (table "memcp-tests" "exists_point_child") (list "ID" "parent_id")
+              (map (produceN 2000) (lambda (i) (list (+ i 1) (+ i 1)))))
+            (insert (table "memcp-tests" "exists_point_acl") (list "ID" "child_id" "principal_id")
+              (map (produceN 2000) (lambda (i) (list (+ i 1) (+ i 1) 7)))))
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM exists_point_parent"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2000
+
+  - name: "Point-selected parent evaluates correlated EXISTS directly"
+    sql: |
+      SELECT p.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM exists_point_child c
+          WHERE c.parent_id = p.ID
+            AND EXISTS (
+              SELECT TRUE
+              FROM exists_point_acl acl
+              WHERE acl.child_id = c.ID
+                AND acl.principal_id = 7
+              LIMIT 1
+            )
+          LIMIT 1
+        ) AS has_child,
+        EXISTS (
+          SELECT TRUE
+          FROM exists_point_child alternate
+          WHERE alternate.parent_id = p.ID
+            AND alternate.ID > 0
+          LIMIT 1
+        ) AS has_alternate
+      FROM exists_point_parent p
+      WHERE p.ID = 1500
+    expect:
+      rows: 1
+      data:
+        - {ID: 1500, has_child: true, has_alternate: true}
+
+  - name: "Point-selected parent avoids full correlated EXISTS keytable"
+    sql: |
+      EXPLAIN SELECT p.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM exists_point_child c
+          WHERE c.parent_id = p.ID
+            AND EXISTS (
+              SELECT TRUE
+              FROM exists_point_acl acl
+              WHERE acl.child_id = c.ID
+                AND acl.principal_id = 7
+              LIMIT 1
+            )
+          LIMIT 1
+        ) AS has_child,
+        EXISTS (
+          SELECT TRUE
+          FROM exists_point_child alternate
+          WHERE alternate.parent_id = p.ID
+            AND alternate.ID > 0
+          LIMIT 1
+        ) AS has_alternate
+      FROM exists_point_parent p
+      WHERE p.ID = 1500
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "touch_keytable"
+        - ".grp:query:"
+        - ".grp:exists_point_acl:"
+
   - name: "EXISTS with correlated subquery - customers with orders"
     sql: |
       SELECT ID, name FROM exists_customers c
@@ -654,6 +741,9 @@ test_cases:
           count: 2
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS exists_point_acl"
+  - sql: "DROP TABLE IF EXISTS exists_point_child"
+  - sql: "DROP TABLE IF EXISTS exists_point_parent"
   - sql: "DROP TABLE IF EXISTS exists_shipments"
   - sql: "DROP TABLE IF EXISTS exists_doc_shares"
   - sql: "DROP TABLE IF EXISTS exists_docs"
