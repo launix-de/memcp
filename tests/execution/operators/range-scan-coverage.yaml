@@ -128,8 +128,22 @@ test_cases:
       - scm: '(settings "ScanDebugging" false)'
 
   - name: "Ordered scan logs relation, candidate, and output counts"
+    sql: "SELECT id FROM rs_data ORDER BY price LIMIT 5"
+    expect:
+      rows: 5
+      data:
+        - id: 0
+        - id: 1
+        - id: 2
+        - id: 3
+        - id: 4
+
+  - name: "Performance exception: latest ordered scan statistic lookup"
+    threshold_ms: 7000
+    timing_samples: 1
+    warmup: false
     setup:
-      - scm: '(settings "ScanDebugging" false)'
+      - scm: '(settings "ScanDebugging" true)'
       - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` = 'rs_data'"
       - sql: "SELECT id FROM rs_data ORDER BY price LIMIT 5"
       - scm: '(sleep 0.1)'
@@ -140,6 +154,8 @@ test_cases:
         - inputCount: 200
           candidateCount: 200
           outputCount: 5
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
 
   # ========================================================================
   # 2. Range scans with various operators (exercises index boundary code)

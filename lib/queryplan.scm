@@ -10927,7 +10927,7 @@ ever-larger subtrees. */
 		(define combine_grouped (grouped_state_merge_expr keep_old))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_batches_expr schema grouptbl key_names '() (quote grouped)))
+				(group_insert_batches_expr schema grouptbl key_names '() false (quote grouped)))
 			(lower_query_block_as_dataset_reduce
 				input
 				key_fields
@@ -11005,7 +11005,7 @@ ever-larger subtrees. */
 		(define keep_first (list (quote lambda) (list (quote old) (quote new)) (quote old)))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names agg_cols))
+				(group_insert_finish_expr schema grouptbl key_names agg_cols false))
 			(list (quote scan_order)
 				'(session "__memcp_tx")
 				(list (quote table) schema tbl)
@@ -11134,7 +11134,7 @@ ever-larger subtrees. */
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names (list agg_col)))
+				(group_insert_finish_expr schema grouptbl key_names (list agg_col) false))
 			(lower_query_block_as_dataset_reduce
 				input
 				row_fields
@@ -11364,7 +11364,7 @@ ever-larger subtrees. */
 				(list
 					(list (quote lambda) (list (quote grouped))
 						(group_insert_finish_expr schema grouptbl key_names
-							(map ags (lambda (ag) (aggregate_col_name_using src ag)))))
+							(map ags (lambda (ag) (aggregate_col_name_using src ag))) true))
 					grouped_expr))
 			grouped_scan))
 		(if (nil? membership_expr)
@@ -11469,25 +11469,37 @@ ever-larger subtrees. */
 				(aggregate_payload_merge_expr ags (+ idx 1)))
 			_ (neumann_fail "build_queryplan" "aggregate payload merge expects aggregate descriptor")))))
 
-(define group_upsert_collision_cols (lambda (value_cols)
+(define group_upsert_collision_cols (lambda (value_cols computed_values)
 	(if (empty_list? value_cols)
 		'(list "$update")
 		(cons (quote list) (merge (list
-			(map value_cols (lambda (col) (concat "$set:" col)))
+			(if computed_values
+				(map value_cols (lambda (col) (concat "$set:" col)))
+				(list "$update"))
 			(map value_cols (lambda (col) (concat "NEW." col)))))))))
 
-(define group_upsert_collision_lambda (lambda (value_cols)
+(define group_upsert_collision_lambda (lambda (value_cols computed_values)
 	(if (empty_list? value_cols)
 		(list (quote lambda)
 			(list (quote $update))
 			(list (quote $update) (cons (quote list) '())))
 		(begin
-			(define setter_params (map (produceN (count value_cols)) (lambda (i) (symbol (concat "__set_group_value_" i)))))
 			(define new_params (map (produceN (count value_cols)) (lambda (i) (symbol (concat "__new_group_value_" i)))))
-			(list (quote lambda)
-				(merge (list setter_params new_params))
-				(cons (quote begin) (map (produceN (count value_cols)) (lambda (i)
-					(list (nth setter_params i) (nth new_params i))))))))))
+			(if computed_values
+				(begin
+					(define setter_params (map (produceN (count value_cols)) (lambda (i) (symbol (concat "__set_group_value_" i)))))
+					(list (quote lambda)
+						(merge (list setter_params new_params))
+						(cons (quote begin) (map (produceN (count value_cols)) (lambda (i)
+							(list (nth setter_params i) (nth new_params i)))))))
+				/* Ordinary aggregate columns are one row payload. A single $update
+				keeps every value on the same replacement row and avoids reusing the
+				stale recid after the first column update. */
+				(list (quote lambda)
+					(cons (quote $update) new_params)
+					(list (quote $update) (runtime_cons_list_expr
+						(merge (map (produceN (count value_cols)) (lambda (i)
+							(list (nth value_cols i) (nth new_params i)))))))))))))
 
 (define group_cleanup_missing_keys_plan (lambda (schema grouptbl key_names)
 	(begin
@@ -11529,18 +11541,18 @@ ever-larger subtrees. */
 						(list (+ count 1) rows))))
 			(list 0 (list))))))
 
-(define group_insert_batches_expr (lambda (schema grouptbl key_names value_cols grouped_expr)
+(define group_insert_batches_expr (lambda (schema grouptbl key_names value_cols computed_values grouped_expr)
 	(list (quote group_insert_batches)
 		(list (quote table) schema grouptbl)
 		(cons (quote list) (merge (list key_names value_cols)))
-		(group_upsert_collision_cols value_cols)
-		(group_upsert_collision_lambda value_cols)
+		(group_upsert_collision_cols value_cols computed_values)
+		(group_upsert_collision_lambda value_cols computed_values)
 		grouped_expr)))
 
-(define group_insert_finish_expr (lambda (schema grouptbl key_names value_cols)
+(define group_insert_finish_expr (lambda (schema grouptbl key_names value_cols computed_values)
 	(list (quote !begin)
 		(group_cleanup_missing_keys_plan schema grouptbl key_names)
-		(group_insert_batches_expr schema grouptbl key_names value_cols (quote grouped)))))
+		(group_insert_batches_expr schema grouptbl key_names value_cols computed_values (quote grouped)))))
 
 /* Eager preparation may rewrite nested stage-output sources and aggregate
 expressions. Persistent column identity was selected from the original logical
@@ -11574,7 +11586,7 @@ on the same columns. */
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names aggregate_cols))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names aggregate_cols false))
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(list
 			(list (quote lambda) (list (quote grouped)) finish_expr)
@@ -11637,7 +11649,7 @@ on the same columns. */
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
 		(define finish_expr (group_insert_finish_expr schema grouptbl key_names
-			(map ags (lambda (ag) (aggregate_col_name_using naming_input ag)))))
+			(map ags (lambda (ag) (aggregate_col_name_using naming_input ag))) false))
 		(define row_mapper (list (quote lambda)
 			(merge (list key_symbols value_symbols))
 			(runtime_cons_list_expr (list key_expr payload_expr))))
@@ -11681,7 +11693,7 @@ on the same columns. */
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(define scan_plan (list
 			(list (quote lambda) (list (quote grouped))
-				(group_insert_finish_expr schema grouptbl key_names (list value_col count_col)))
+				(group_insert_finish_expr schema grouptbl key_names (list value_col count_col) false))
 			(lower_query_block_as_dataset_reduce
 				prepared_input
 				row_fields

@@ -949,6 +949,91 @@ test_cases:
         - name: "Sales"
           s: 270
 
+  # =============================================================
+  # Empty global cache: all aggregate columns must update together
+  # =============================================================
+
+  - name: "Drop empty-cache detail source"
+    sql: "DROP TABLE IF EXISTS empty_cache_detail"
+
+  - name: "Drop empty-cache base source"
+    sql: "DROP TABLE IF EXISTS empty_cache_base"
+
+  - name: "Create empty-cache base source"
+    sql: "CREATE TABLE empty_cache_base (id INT PRIMARY KEY, active BOOL)"
+
+  - name: "Create empty-cache detail source"
+    sql: "CREATE TABLE empty_cache_detail (id INT PRIMARY KEY, parent_id INT, start_value INT, end_value INT)"
+
+  - name: "Materialize empty COUNT and SUM cache"
+    sql: |
+      SELECT COUNT(*) AS item_count, SUM(t.total_value) AS total_value
+      FROM (
+        SELECT id, COALESCE((
+          SELECT SUM(end_value - start_value)
+          FROM empty_cache_detail
+          WHERE parent_id = empty_cache_base.id
+          LIMIT 1
+        ), 0) AS total_value
+        FROM empty_cache_base
+        WHERE active
+      ) t
+    expect:
+      rows: 1
+      data:
+        - item_count: 0
+          total_value: null
+
+  - name: "Insert rows after empty aggregate cache exists"
+    sql: "INSERT INTO empty_cache_base (id, active) VALUES (1, true), (2, true), (3, true)"
+
+  - name: "All cached aggregate columns update after INSERT"
+    sql: |
+      SELECT COUNT(*) AS item_count, SUM(t.total_value) AS total_value
+      FROM (
+        SELECT id, COALESCE((
+          SELECT SUM(end_value - start_value)
+          FROM empty_cache_detail
+          WHERE parent_id = empty_cache_base.id
+          LIMIT 1
+        ), 0) AS total_value
+        FROM empty_cache_base
+        WHERE active
+      ) t
+    expect:
+      rows: 1
+      data:
+        - item_count: 3
+          total_value: 0
+
+  - name: "Insert detail after zero-valued aggregate cache exists"
+    sql: "INSERT INTO empty_cache_detail (id, parent_id, start_value, end_value) VALUES (1, 1, 2, 7)"
+
+  - name: "Nested aggregate invalidation updates the outer SUM"
+    sql: |
+      SELECT COUNT(*) AS item_count, SUM(t.total_value) AS total_value
+      FROM (
+        SELECT id, COALESCE((
+          SELECT SUM(end_value - start_value)
+          FROM empty_cache_detail
+          WHERE parent_id = empty_cache_base.id
+          LIMIT 1
+        ), 0) AS total_value
+        FROM empty_cache_base
+        WHERE active
+      ) t
+    expect:
+      rows: 1
+      data:
+        - item_count: 3
+          total_value: 5
+
+  - name: "Cleanup empty-cache detail source"
+    sql: "DROP TABLE IF EXISTS empty_cache_detail"
+
+  - name: "Cleanup empty-cache base source"
+    sql: "DROP TABLE IF EXISTS empty_cache_base"
+
   # --- Cleanup ---
   - name: "Cleanup sc_base"
     sql: "DROP TABLE IF EXISTS sc_base"

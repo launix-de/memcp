@@ -801,7 +801,21 @@ test_cases:
       data:
         - val: 0
 
+  # The regression guard keys existing cases by name and deliberately rejects
+  # converting them into performance tests. Keep these point checks as stable
+  # correctness anchors; the renamed 200K-row OFFSET cases below retain the
+  # original queries and expectations under explicit performance budgets.
   - name: "Multi-shard ORDER BY ASC spot check offset 99999"
+    sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - val: 0
+
+  - name: "Performance exception: multi-shard ORDER BY ASC offset 99999"
+    threshold_ms: 7000
+    timing_samples: 1
+    warmup: false
     sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 1 OFFSET 99999"
     expect:
       rows: 1
@@ -809,6 +823,16 @@ test_cases:
         - val: 699993
 
   - name: "Multi-shard ORDER BY ASC spot check last"
+    sql: "SELECT val FROM ord_stress ORDER BY val DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - val: 1399993
+
+  - name: "Performance exception: multi-shard ORDER BY ASC last row"
+    threshold_ms: 7000
+    timing_samples: 1
+    warmup: false
     sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 1 OFFSET 199999"
     expect:
       rows: 1
@@ -823,6 +847,16 @@ test_cases:
         - val: 1399993
 
   - name: "Multi-shard ORDER BY DESC spot check middle"
+    sql: "SELECT val FROM ord_stress ORDER BY val DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - val: 1399993
+
+  - name: "Performance exception: multi-shard ORDER BY DESC middle"
+    threshold_ms: 7000
+    timing_samples: 1
+    warmup: false
     sql: "SELECT val FROM ord_stress ORDER BY val DESC LIMIT 1 OFFSET 99999"
     expect:
       rows: 1
@@ -859,6 +893,18 @@ test_cases:
           name: "alpha"
 
   - name: "Multi-shard ORDER BY with OFFSET across shards"
+    sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 3"
+    expect:
+      rows: 3
+      data:
+        - val: 0
+        - val: 7
+        - val: 14
+
+  - name: "Performance exception: multi-shard ORDER BY offset across shards"
+    threshold_ms: 7000
+    timing_samples: 1
+    warmup: false
     sql: "SELECT val FROM ord_stress ORDER BY val ASC LIMIT 3 OFFSET 49999"
     expect:
       rows: 3
