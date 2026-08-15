@@ -507,6 +507,14 @@ type genVal struct {
 	deferredIndexSSA string // SSA name of index operand (for deferred IndexAddr on slices)
 	deferredBaseSSA  string // SSA name of base operand for deferred local FieldAddr deref
 	offsetExpr       string // Go expression for byte offset from thisptr (for _fieldaddr/_fieldconst markers)
+	stackBase        string
+	stackLen         int
+	sourceInput      int
+	hasSourceInput   bool
+	sliceInput       int
+	hasSliceInput    bool
+	lengthInput      int
+	hasLengthInput   bool
 }
 
 // ssaValueRewriter can replace SSA values while traversing instructions.
@@ -3585,7 +3593,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("%s := args[%d]", dv, src.argIdx)
 				// Borrowed descriptor from caller: never own/free caller placements.
 				g.emit("%s.ID = 0", dv)
-				g.vals[name] = genVal{goVar: dv, isDesc: true}
+				g.vals[name] = genVal{goVar: dv, isDesc: true, sourceInput: src.argIdx, hasSourceInput: true}
 			} else if src.argIdxVar != "" {
 				// Variable-index IndexAddr+Deref on emitter args.
 				// If the index is known at emit-time, reuse args[idx] directly.
@@ -3740,16 +3748,20 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						g.emit("} else {")
 						g.emit("\tctx.EnsureDesc(&%s)", src.goVar)
 						g.emit("\tif %s.Loc == LocRegPair || %s.Loc == LocRegTriple {", src.goVar, src.goVar)
-						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2}", dv, src.goVar)
-						g.emit("\t\tctx.BindReg(%s.Reg2, &%s)", src.goVar, dv)
+						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2, ID: 0}", dv, src.goVar)
 						g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
-						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg}", dv, src.goVar)
-						g.emit("\t\tctx.BindReg(%s.Reg, &%s)", src.goVar, dv)
+						g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg, ID: 0}", dv, src.goVar)
 						g.emit("\t} else {")
 						g.emit("\t\tpanic(\"len on unsupported descriptor location\")")
 						g.emit("\t}")
 						g.emit("}")
 						g.vals[name] = genVal{goVar: dv, isDesc: true}
+						if src.hasSliceInput {
+							withProvenance := g.vals[name]
+							withProvenance.lengthInput = src.sliceInput
+							withProvenance.hasLengthInput = true
+							g.vals[name] = withProvenance
+						}
 					} else {
 						panic(fmt.Sprintf("len on non-parameter: %s", v))
 					}
@@ -3761,7 +3773,46 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 		callee := v.Call.StaticCallee()
 		if callee == nil {
-			panic(fmt.Sprintf("dynamic call: %s", v))
+			callable := g.vals[v.Call.Value.Name()]
+			if callable.marker != "_serial_callable" || len(v.Call.Args) != 1 {
+				panic(fmt.Sprintf("dynamic call: %s", v))
+			}
+			callArgs := g.vals[v.Call.Args[0].Name()]
+			if callArgs.stackBase == "" {
+				panic(fmt.Sprintf("dynamic call args are not a local Scmer array: %s", v))
+			}
+			dv := g.allocDesc()
+			argsVar := g.allocTemp("callbackArgs")
+			g.emit("%s := make([]JITValueDesc, %d)", argsVar, callArgs.stackLen)
+			for i := 0; i < callArgs.stackLen; i++ {
+				g.emit("%s[%d] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)+%d}", argsVar, i, callArgs.stackBase, i*16)
+			}
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("ctx.FreeDesc(&%s)", callArgs.goVar)
+			g.emit("if %s.Loc == LocLambdaTemplate && %s.Lambda != nil {", callable.goVar, callable.goVar)
+			preservedVar := g.allocTemp("outerRegs")
+			g.emit("\t%s := ctx.PreserveOuterRegs()", preservedVar)
+			g.emit("\t%s = JITEmitProcInlineWithOuter(ctx, &%s.Lambda.Proc, %s.Lambda.Outer, %s, ctx.SliceBase, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})", dv, callable.goVar, callable.goVar, argsVar)
+			g.emit("\tctx.RestoreOuterRegs(%s)", preservedVar)
+			g.emit("} else {")
+			callbackHelper := ""
+			switch callArgs.stackLen {
+			case 1:
+				callbackHelper = "jitInvokeCallback1"
+			case 2:
+				callbackHelper = "jitInvokeCallback2"
+			case 3:
+				callbackHelper = "jitInvokeCallback3"
+			default:
+				panic(fmt.Sprintf("dynamic callback with unsupported arity: %s", v))
+			}
+			g.emit("\tcallbackCallArgs := make([]JITValueDesc, 0, %d)", callArgs.stackLen+1)
+			g.emit("\tcallbackCallArgs = append(callbackCallArgs, %s)", callable.goVar)
+			g.emit("\tcallbackCallArgs = append(callbackCallArgs, %s...)", argsVar)
+			g.emit("\t%s = ctx.EmitGoCallScalarInto(GoFuncAddr(%s), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})", dv, callbackHelper)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			break
 		}
 		atomicPkg := callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() == "sync/atomic"
 		atomicLoad := callee.Name() == "LoadInt64" || (atomicPkg && callee.Name() == "Load")
@@ -3841,7 +3892,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
 			g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", sliceInput: arg.sourceInput, hasSliceInput: arg.hasSourceInput}
 		case "GetTag":
 			arg := g.vals[v.Call.Args[0].Name()]
 			if !arg.isDesc {
@@ -4068,6 +4119,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewSlice":
 			arg := g.vals[v.Call.Args[0].Name()]
+			if arg.marker == "_slice" {
+				dv := g.allocDesc()
+				g.emit("%s := ctx.EmitNewSliceFromGoSlice(&%s)", dv, arg.goVar)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+				break
+			}
 			if arg.marker != "_variadic_args" {
 				panic(fmt.Sprintf("NewSlice on non-variadic parameter: %s", v))
 			}
@@ -4076,11 +4133,22 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_newargslice"}
 		case "OptimizeProcToSerialFunction":
 			// OptimizeProcToSerialFunction(Scmer) func(...Scmer) Scmer
-			// arg: Scmer (2 words), result: func value (1 word)
+			// Known lambda templates remain compile-time values and can be inlined by
+			// the generated caller. Dynamic callbacks are optimized once at the JIT
+			// entry point and passed in as a hidden, GC-rooted function Scmer. Do not
+			// emit the optimizer call into a hot loop.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(OptimizeProcToSerialFunction), []JITValueDesc{%s}, 1)", dv, arg.goVar)
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Loc == LocLambdaTemplate {", arg.goVar)
+			g.emit("\t%s = %s", dv, arg.goVar)
+			g.emit("} else {")
+			if !arg.hasSourceInput {
+				panic(fmt.Sprintf("OptimizeProcToSerialFunction argument has no input provenance: %s", v))
+			}
+			g.emit("\t%s = ctx.RequestOptimizedCallback(%d)", dv, arg.sourceInput)
+			g.emit("}")
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_serial_callable"}
 		case "FastDict":
 			// (Scmer).FastDict() *FastDict — extract ptr field, free aux
 			arg := g.vals[v.Call.Args[0].Name()]
@@ -4226,30 +4294,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Slice":
-			// (Scmer).Slice() []Scmer — materialize the complete Go slice ABI
-			// header. Scmer stores ptr+len; a reconstructed slice has cap == len.
+			// (Scmer).Slice() []Scmer — decode the complete ptr/len/cap header.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			ptrReg := g.allocReg()
-			lenReg := g.allocReg()
-			capReg := g.allocReg()
-			g.emit("%s := ctx.AllocReg()", ptrReg)
-			g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
-			g.emit("%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
-			g.emit("if %s.Loc == LocImm {", arg.goVar)
-			g.emit("\tctx.TrackImm(%s.Imm)", arg.goVar)
-			g.emit("\tptrWord, _ := %s.Imm.RawWords()", arg.goVar)
-			g.emit("\tctx.EmitMovRegImm64(%s, uint64(ptrWord))", ptrReg)
-			g.emit("\tctx.EmitMovRegImm64(%s, uint64(len(%s.Imm.Slice())))", lenReg, arg.goVar)
-			g.emit("} else {")
-			g.emit("\tctx.EnsureDesc(&%s)", arg.goVar)
-			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", ptrReg, arg.goVar)
-			g.emit("\tctx.EmitMovRegReg(%s, %s.Reg2)", lenReg, arg.goVar)
-			g.emit("\tctx.EmitShrRegImm8(%s, 8)", lenReg)
-			g.emit("}")
-			g.emit("ctx.EmitMovRegReg(%s, %s)", capReg, lenReg)
-			g.emit("%s := JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			g.emit("%s := jitKnownSliceHeader(ctx, &%s)", dv, arg.goVar)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", sliceInput: arg.sourceInput, hasSliceInput: arg.hasSourceInput}
 		case "JITBuildMergeClosure":
 			// JITBuildMergeClosure(func(...Scmer) Scmer) func(Scmer, Scmer) Scmer
 			// arg: 1 word, result: 1 word
@@ -5475,6 +5524,19 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// Storing to an allocation: just remember the stored value
 			src := g.vals[v.Val.Name()]
 			g.vals[v.Addr.Name()] = genVal{goVar: src.goVar, isDesc: src.isDesc, marker: "_alloc_stored"}
+		} else if strings.HasPrefix(dst.marker, "_sliceaddr:") {
+			parts := strings.SplitN(dst.marker, ":", 3)
+			elemSize := parts[1]
+			sliceDescVar := g.overlayDescVar(parts[2], dst.deferredBaseSSA)
+			idxDescVar := g.overlayDescVar(dst.argIdxVar, dst.deferredIndexSSA)
+			src := g.resolveValue(v.Val)
+			address := g.allocDesc()
+			g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, int32(%s))", address, sliceDescVar, idxDescVar, elemSize)
+			g.emit("ctx.EmitStoreScmerAt(&%s, &%s)", address, src.goVar)
+			g.emit("ctx.FreeDesc(&%s)", address)
+			if dst.deferredIndexSSA != "" {
+				g.useOperand(dst.deferredIndexSSA)
+			}
 		} else {
 			panic(fmt.Sprintf("unsupported Store: %s", v))
 		}
@@ -5639,7 +5701,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("ctx.EmitMovRegImm64(%s, uint64(%d))", lenReg, arrayLen)
 			g.emit("ctx.EmitMovRegImm64(%s, uint64(%d))", capReg, arrayLen)
 			g.emit("%s := JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s, KnownSliceLen: int32(%d), KnownSliceCap: int32(%d), SliceSizeKnown: true}", dv, ptrReg, lenReg, capReg, arrayLen, arrayLen)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", stackBase: x.goVar, stackLen: int(arrayLen)}
 			break
 		}
 		if x.marker == "_alloc" {
@@ -5818,6 +5880,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		capacity := length
 		if v.Cap != nil {
 			capacity = g.resolveValue(v.Cap)
+		}
+		if length.hasLengthInput && capacity.hasLengthInput && length.lengthInput == capacity.lengthInput {
+			root := g.allocDesc()
+			dv := g.allocDesc()
+			g.emit("%s := ctx.RequestPreallocatedSlice(%d)", root, length.lengthInput)
+			g.emit("%s := jitKnownSliceHeader(ctx, &%s)", dv, root)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			break
 		}
 		g.emit("ctx.EnsureDesc(&%s)", length.goVar)
 		g.emit("ctx.EnsureDesc(&%s)", capacity.goVar)
@@ -6166,6 +6236,13 @@ func injectBindRegCalls(code string) string {
 	out := make([]string, 0, len(lines)+len(lines)/3)
 	for _, line := range lines {
 		out = append(out, line)
+		// ID 0 explicitly marks a borrowed register view. Its source descriptor
+		// remains the spill/liveness owner; rebinding the register here would make
+		// later consumers overwrite or free that source (for example a Go slice's
+		// len register in a loop).
+		if strings.Contains(line, "ID: 0") {
+			continue
+		}
 		if m := locRegTripleAssignRe.FindStringSubmatch(line); m != nil {
 			indent, descVar := m[1], m[2]
 			for _, expr := range m[3:6] {
