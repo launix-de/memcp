@@ -582,7 +582,7 @@ func getImport(path string) func(a ...scm.Scmer) scm.Scmer {
 		if err != nil {
 			panic(err)
 		}
-		return scm.EvalAll(filename, string(bytes), &otherPath)
+		return scm.EvalAllJIT(filename, string(bytes), &otherPath)
 	}
 }
 

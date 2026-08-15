@@ -436,6 +436,13 @@ restart:
 			return fn(args...)
 		case tagProc:
 			// Lambdas (procs)
+			if proc := procedure.Proc(); proc != nil && proc.Compiled != nil {
+				args := make([]Scmer, len(operands))
+				for i, operand := range operands {
+					args[i] = Eval(operand, en)
+				}
+				return proc.Compiled.Call(args...)
+			}
 			en, expression = prepareProcCall(procedure.Proc(), operands, en)
 			goto restart
 		case tagFuncEnv:
@@ -747,6 +754,9 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		return fn(id, args...)
 	// Lambdas
 	case tagProc:
+		if proc := procedure.Proc(); proc != nil && proc.Compiled != nil {
+			return proc.Compiled.Call(args...)
+		}
 		env, body := prepareProcCallWithArgs(procedure.Proc(), args)
 		return Eval(body, env)
 	// Assoc list
@@ -794,6 +804,10 @@ type Proc struct {
 	En           *Env
 	NumVars      int
 	NumberedOnly bool
+	// Compiled is an optional native implementation of this procedure. The
+	// original body remains attached so storage scan callbacks can later be
+	// specialized and recompiled against concrete column/storage types.
+	Compiled *JITEntryPoint
 }
 
 // CloseProcedure snapshots explicit captures of a procedure without retaining
@@ -823,6 +837,7 @@ func CloseProcedure(value Scmer) Scmer {
 	collectProcedureBindings(proc.Body, bound)
 	proc.Body = closeProcedureCaptures(proc.Body, callFrame, bound)
 	proc.En = &Globalenv
+	proc.Compiled = nil
 	return NewProcStruct(proc)
 }
 
@@ -2510,11 +2525,17 @@ func ComputeSize(v Scmer) uint {
 		if p == nil {
 			return base
 		}
-		// Proc struct: Params(16) + Body(16) + En(8) + NumVars(8) = 48 bytes
+		// Proc struct: Params(16) + Body(16) + En(8) + NumVars(8) plus
+		// NumberedOnly padding and the optional compiled-entry pointer.
 		// Params and Body are inline Scmer fields — their slots are covered by
 		// the recursive ComputeSize base (same pattern as slice backing array).
-		// Only count the non-Scmer fields: *Env(8) + NumVars(8) = 16 bytes.
-		return base + goAllocOverhead + 16 + ComputeSize(p.Params) + ComputeSize(p.Body)
+		// Only count non-Scmer fields here; avoid recursively recounting the
+		// source Proc retained by the compiled entry point.
+		sz := base + goAllocOverhead + 24 + ComputeSize(p.Params) + ComputeSize(p.Body)
+		if p.Compiled != nil {
+			sz += goAllocOverhead + align8(uint(p.Compiled.CodeLen))
+		}
+		return sz
 	case tagString, tagSymbol:
 		ln := uint(auxVal(v.aux))
 		if ln == 0 {

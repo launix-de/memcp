@@ -110,6 +110,14 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 		return func(args ...Scmer) Scmer { return captured }
 	}
 	p := *proc
+	// A Proc keeps its source body even after native compilation. Execute the
+	// attached entry point now; future scan specialization may recompile the same
+	// filter/map/reduce body against concrete storage and column types first.
+	if p.Compiled != nil {
+		return func(args ...Scmer) Scmer {
+			return p.Compiled.Call(args...)
+		}
+	}
 
 	// constant body
 	switch p.Body.GetTag() {

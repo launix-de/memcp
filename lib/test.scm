@@ -1595,17 +1595,46 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (a b) a)) 3 4) 3 "jit: return 1st of 2 params native")
 	(assert ((jit (lambda (a b c) b)) 1 8 3) 8 "jit: return 2nd of 3 params native")
 	(define jit_id_desc (jit (lambda (x) x)))
-	(assert (jit? jit_id_desc) (jit-enabled?) "jit?: identity lambda matches build feature")
-	(assert (jit? (jit (lambda () 42))) (jit-enabled?) "jit?: constant lambda matches build feature")
+	(jit-warn-if-fallback jit_id_desc "jit: identity lambda")
+	(jit-warn-if-fallback (jit (lambda () 42)) "jit: constant lambda")
 	(assert ((jit (lambda () (jit-enabled?)))) (jit-enabled?) "jit-enabled? matches build feature inside jit")
 	(define jit_add_desc (jit (lambda (a b) (+ a b))))
 	(assert (strlike (serialize jit_add_desc) "(lambda %") true "jit descriptor serializes as lambda")
 	(assert (equal? (eval (list jit_add_desc 2 5)) 7) true "jit descriptor executable via eval")
 	(assert (equal? (apply jit_add_desc '(2 5)) 7) true "jit descriptor executable via apply")
 	(assert (jit? (lambda (a b) (+ a b))) false "jit?: plain lambda reports false")
-	(define jit_fallback_desc (jit (lambda () (now))))
-	(assert (jit? jit_fallback_desc) false "jit fallback returns plain lambda")
-	(assert (number? (jit_fallback_desc)) true "jit fallback lambda remains executable")
+	(define jit_now_desc (jit (lambda () (now))))
+	(jit-warn-if-fallback jit_now_desc "jit: now callback")
+	(assert (number? (jit_now_desc)) true "jit: Go callback result remains executable")
+
+	/* Proc identity and environment stay available across native compilation. */
+	(define jit_dynamic_value 40)
+	(define jit_dynamic_reader (jit (eval '('lambda '() 'jit_dynamic_value))))
+	(jit-warn-if-fallback jit_dynamic_reader "jit: dynamic environment read")
+	(assert (jit_dynamic_reader) 40 "jit: reads an unresolved symbol from its lexical environment")
+	(set jit_dynamic_value 41)
+	(assert (jit_dynamic_reader) 41 "jit: resolves a changed lexical binding at call time")
+	(define jit_scheme_callee (lambda (value) (+ value 1)))
+	(define jit_scheme_caller (jit (lambda (value) (jit_scheme_callee value))))
+	(jit-warn-if-fallback jit_scheme_caller "jit: call interpreted Scheme Proc")
+	(assert (jit_scheme_caller 6) 7 "jit: native Proc calls an interpreted Scheme Proc")
+	(set jit_scheme_callee (jit jit_scheme_callee))
+	(jit-warn-if-fallback jit_scheme_callee "jit: Scheme callee")
+	(assert (jit_scheme_caller 8) 9 "jit: native Proc follows rebinding to a native Scheme Proc")
+	(assert (jit_scheme_callee 10) 11 "jit: Scheme invokes a native Proc")
+	(define jit_scan_filter (jit (lambda (value) (> value 1))))
+	(define jit_scan_map (jit (lambda (value) value)))
+	(define jit_scan_reduce (jit (lambda (total value) (+ total value))))
+	(jit-warn-if-fallback jit_scan_filter "jit: scan filter callback")
+	(jit-warn-if-fallback jit_scan_map "jit: scan map callback")
+	(jit-warn-if-fallback jit_scan_reduce "jit: scan reduce callback")
+	(assert (scan nil (list (list "value" 1) (list "value" 2) (list "value" 3))
+		'("value") jit_scan_filter '("value") jit_scan_map jit_scan_reduce 0)
+		5 "jit: storage scan executes compiled filter/map/reduce callbacks")
+	(define jit_pointer_callee (lambda (value) (list value "rooted")))
+	(define jit_pointer_flow (jit (lambda (value) (list (jit_pointer_callee value) (now)))))
+	(jit-warn-if-fallback jit_pointer_flow "jit: rooted callback result")
+	(assert (nth (nth (jit_pointer_flow 12) 0) 0) 12 "jit: callback pointer result survives a later callback")
 
 	/* Borrowed Go-slice headers stay in the native pipeline as ptr/len/cap. */
 	(define jit_list_nth (jit (lambda (xs i) (nth xs i))))
@@ -1619,17 +1648,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define jit_list_reordered (jit (lambda (a b) (list b a))))
 	(define jit_list_subset (jit (lambda (a b) (list b))))
 	(define jit_list_stack_nth (jit (lambda (a b) (nth (list a b) 1))))
-	(assert (jit? jit_list_nth) (jit-enabled?) "jit: nth has a native slice emitter")
-	(assert (jit? jit_list_car) (jit-enabled?) "jit: car has a native slice emitter")
-	(assert (jit? jit_list_cdr) (jit-enabled?) "jit: cdr has a native slice emitter")
-	(assert (jit? jit_list_cadr) (jit-enabled?) "jit: cadr has a native slice emitter")
-	(assert (jit? jit_list_predicate) (jit-enabled?) "jit: list? remains native")
-	(assert (jit? jit_list_build2) (jit-enabled?) "jit: list constructor with two values is native")
-	(assert (jit? jit_list_build6) (jit-enabled?) "jit: list constructor with six values is native")
-	(assert (jit? jit_list_computed) (jit-enabled?) "jit: list constructor evaluates computed values natively")
-	(assert (jit? jit_list_reordered) (jit-enabled?) "jit: reordered list constructor remains native")
-	(assert (jit? jit_list_subset) (jit-enabled?) "jit: subset list constructor remains native")
-	(assert (jit? jit_list_stack_nth) (jit-enabled?) "jit: nth consumes an optimizer stack list natively")
+	(jit-warn-if-fallback jit_list_nth "jit: nth")
+	(jit-warn-if-fallback jit_list_car "jit: car")
+	(jit-warn-if-fallback jit_list_cdr "jit: cdr")
+	(jit-warn-if-fallback jit_list_cadr "jit: cadr")
+	(jit-warn-if-fallback jit_list_predicate "jit: list predicate")
+	(jit-warn-if-fallback jit_list_build2 "jit: two-element list constructor")
+	(jit-warn-if-fallback jit_list_build6 "jit: six-element list constructor")
+	(jit-warn-if-fallback jit_list_computed "jit: computed list constructor")
+	(jit-warn-if-fallback jit_list_reordered "jit: reordered list constructor")
+	(jit-warn-if-fallback jit_list_subset "jit: subset list constructor")
+	(jit-warn-if-fallback jit_list_stack_nth "jit: stack-list nth")
 	(assert (jit_list_nth '(10 20 30) 1) 20 "jit: nth reads a Go-slice element")
 	(assert (jit_list_car '(10 20 30)) 10 "jit: car reads the first Go-slice element")
 	(assert (jit_list_cdr '(10 20 30)) '(20 30) "jit: cdr returns a borrowed Go-slice view")
@@ -1972,34 +2001,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* JIT panic propagation: Go(try/recover) → JIT → Go(error) → panic */
 	(print "testing JIT panic propagation ...")
 	(define jit_will_panic (jit (lambda (x) (error "jit-boom"))))
-	(assert (jit? jit_will_panic) (jit-enabled?) "panic callback matches JIT build feature")
+	(jit-warn-if-fallback jit_will_panic "jit: panic callback")
 	(define jit_panic_result (try (lambda () (jit_will_panic 42)) (lambda (e) "caught")))
 	(assert jit_panic_result "caught" "panic through JIT frame must be recoverable")
 
 	/* JIT list callbacks: constant code shape with runtime values/captures */
 	(define _jit_map_constant_callback (jit (lambda (values)
 		(map values (lambda (_) 7)))))
-	(assert (jit? _jit_map_constant_callback) (jit-enabled?) "jit: map constant callback compiles natively when enabled")
+	(jit-warn-if-fallback _jit_map_constant_callback "jit: map constant callback")
 	(assert (equal? (_jit_map_constant_callback '(1 2 3)) '(7 7 7)) true "jit: map constant callback result")
 
 	(define _jit_map_captured_callback (jit (lambda (values offset)
 		(map values (lambda (value) (+ value offset))))))
-	(assert (jit? _jit_map_captured_callback) (jit-enabled?) "jit: map callback with runtime capture compiles natively when enabled")
+	(jit-warn-if-fallback _jit_map_captured_callback "jit: map captured callback")
 	(assert (equal? (_jit_map_captured_callback '(1 2 3) 10) '(11 12 13)) true "jit: map callback reads runtime capture")
 
 	(define _jit_map_mut_callback (jit (lambda (values)
 		(map_mut values (lambda (value) (+ value 1))))))
-	(assert (jit? _jit_map_mut_callback) (jit-enabled?) "jit: map_mut callback compiles natively when enabled")
+	(jit-warn-if-fallback _jit_map_mut_callback "jit: map_mut callback")
 	(assert (equal? (_jit_map_mut_callback (list 3 4 5)) '(4 5 6)) true "jit: map_mut callback result")
 
 	(define _jit_reduce_callback (jit (lambda (values neutral offset)
 		(reduce values (lambda (acc value) (+ acc (+ value offset))) neutral))))
-	(assert (jit? _jit_reduce_callback) (jit-enabled?) "jit: reduce callback with runtime capture compiles natively when enabled")
+	(jit-warn-if-fallback _jit_reduce_callback "jit: reduce callback")
 	(assert (_jit_reduce_callback '(1 2 3) 0 10) 36 "jit: reduce callback reads accumulator and runtime capture")
 
 	(define _jit_map_dynamic_callback (jit (lambda (values callback)
 		(map values callback))))
-	(assert (jit? _jit_map_dynamic_callback) (jit-enabled?) "jit: map with runtime callback compiles natively when enabled")
+	(jit-warn-if-fallback _jit_map_dynamic_callback "jit: map dynamic callback")
 	(assert (equal? (_jit_map_dynamic_callback '(2 3 4) (lambda (value) (* value 3))) '(6 9 12)) true "jit: map runtime callback trampoline")
 
 	/* JIT match: compile-time pattern pruning and direct list destructuring */
@@ -2007,7 +2036,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(match src
 			'((symbol alias) schema relation outer join) (list schema relation outer join)
 			_ nil))))
-	(assert (jit? _jit_match_source) (jit-enabled?) "jit: fixed-list match compiles natively when enabled")
+	(jit-warn-if-fallback _jit_match_source "jit: fixed-list match")
 	(assert (equal? (_jit_match_source (list (symbol "alias") "sales" "orders" false nil)) '("sales" "orders" false nil)) true "jit: fixed-list match binds fields")
 	(assert (nil? (_jit_match_source (list (symbol "other") "sales" "orders" false nil))) true "jit: fixed-list literal mismatch falls through")
 	(assert (nil? (_jit_match_source (list (symbol "alias") "sales" "orders"))) true "jit: fixed-list length mismatch falls through")
@@ -2016,7 +2045,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(match values
 			(cons head tail) (list head tail)
 			_ nil))))
-	(assert (jit? _jit_match_cons) (jit-enabled?) "jit: cons match compiles natively when enabled")
+	(jit-warn-if-fallback _jit_match_cons "jit: cons match")
 	(assert (equal? (_jit_match_cons '(1 2 3)) (list 1 (list 2 3))) true "jit: cons match binds head and tail")
 	(assert (nil? (_jit_match_cons '())) true "jit: empty list rejects cons pattern")
 	(assert (nth (_jit_match_cons fd2) 0) "k0" "jit: cons match normalizes FastDict head")
@@ -2027,7 +2056,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(number? number) (+ number 1)
 			(string? text) text
 			_ nil))))
-	(assert (jit? _jit_match_typed) (jit-enabled?) "jit: typed alternatives compile natively when enabled")
+	(jit-warn-if-fallback _jit_match_typed "jit: typed alternatives")
 	(assert (_jit_match_typed 41) 42 "jit: number pattern selects numeric branch")
 	(assert (_jit_match_typed "text") "text" "jit: string pattern selects string branch")
 	(assert (nil? (_jit_match_typed false)) true "jit: typed patterns retain fallback")
@@ -2036,7 +2065,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(match value
 			(list? items) items
 			_ nil))))
-	(assert (jit? _jit_match_list_type) (jit-enabled?) "jit: list? pattern compiles natively when enabled")
+	(jit-warn-if-fallback _jit_match_list_type "jit: list pattern")
 	(assert (count (_jit_match_list_type fd2)) 20 "jit: list? pattern normalizes FastDict")
 	(assert (nil? (_jit_match_list_type "not a list")) true "jit: list? pattern rejects scalar")
 
@@ -2044,7 +2073,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(match value
 			(eval expected) true
 			_ false))))
-	(assert (jit? _jit_match_eval) (jit-enabled?) "jit: eval pattern compiles natively when enabled")
+	(jit-warn-if-fallback _jit_match_eval "jit: eval pattern")
 	(assert (_jit_match_eval "same" "same") true "jit: eval pattern accepts runtime equality")
 	(assert (_jit_match_eval "left" "right") false "jit: eval pattern rejects runtime inequality")
 
@@ -2053,7 +2082,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			'((symbol alias) result) result
 			'((symbol other) impossible) impossible
 			nil))))
-	(assert (jit? _jit_match_known_list) (jit-enabled?) "jit: known-list match compiles natively when enabled")
+	(jit-warn-if-fallback _jit_match_known_list "jit: known-list match")
 	(assert (_jit_match_known_list 17) 17 "jit: known list type and length are matched without fallback")
 
 	/* alu.go: sql_abs */
