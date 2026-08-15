@@ -166,8 +166,8 @@ test_cases:
         true)
         '(normalized bindings shape_hash)
         (if (and
-          (equal? normalized "SELECT d.id FROM ps_guard_left d WHERE d.id = 7 OR d.rhs IN (SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ? UNION SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ?)")
-          (equal? bindings '("%Ca%" "%Ca%"))
+          (equal? normalized "SELECT d.id FROM ps_guard_left d WHERE d.id = ? OR d.rhs IN (SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ? UNION SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE ?)")
+          (equal? bindings '(7 "%Ca%" "%Ca%"))
           (equal? shape_hash (fnv_hash normalized)))
           "ok"
           (error (concat "unexpected complex normalization: " normalized " / " bindings))))
@@ -222,6 +222,116 @@ test_cases:
           (equal? (sess "v3") 1))
           "ok"
           (error (concat "unexpected cache/bindings: " (count (cache)) " / " (sess "v1") "," (sess "v2") "," (sess "v3")))))
+    expect:
+      data: ["ok"]
+
+  - name: "Scalar SELECT keeps inner conditions structural"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "SELECT id, (SELECT 7 FROM ps_test inner_row WHERE inner_row.id = 1 OR inner_row.score = 6 LIMIT 1) AS marker FROM ps_test outer_row WHERE outer_row.score >= 8 LIMIT 2 OFFSET 0"
+        true)
+        '(normalized bindings shape_hash)
+        (if (and
+          (equal? normalized "SELECT id, (SELECT 7 FROM ps_test inner_row WHERE inner_row.id = 1 OR inner_row.score = 6 LIMIT 1) AS marker FROM ps_test outer_row WHERE outer_row.score >= ? LIMIT ? OFFSET ?")
+          (equal? bindings '(8 2 0))
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok"
+          (error (concat "unexpected nested normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Non-aggregate OR uses runtime literals"
+    sql: "SELECT id FROM ps_test WHERE score >= 9 OR id = 2 ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - {id: 1}
+        - {id: 2}
+
+  - name: "Non-aggregate OR cache reuse keeps changed literals"
+    sql: "SELECT id FROM ps_test WHERE score >= 10 OR id = 99 ORDER BY id"
+    expect:
+      rows: 0
+
+  - name: "Root aggregate conditions remain structural"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "SELECT COUNT(*) AS cnt FROM ps_test WHERE score >= 8 OR id = 2 HAVING COUNT(*) >= 1"
+        true)
+        '(normalized bindings shape_hash)
+        (if (and
+          (equal? normalized "SELECT COUNT(*) AS cnt FROM ps_test WHERE score >= 8 OR id = 2 HAVING COUNT(*) >= 1")
+          (equal? bindings '())
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok"
+          (error (concat "unexpected aggregate normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Nested aggregate conditions remain structural"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "SELECT id, (SELECT COUNT(*) FROM ps_test inner_row WHERE inner_row.score >= 6) AS matches FROM ps_test outer_row WHERE outer_row.score >= 8 LIMIT 2"
+        true)
+        '(normalized bindings shape_hash)
+        (if (and
+          (equal? normalized "SELECT id, (SELECT COUNT(*) FROM ps_test inner_row WHERE inner_row.score >= 6) AS matches FROM ps_test outer_row WHERE outer_row.score >= ? LIMIT ?")
+          (equal? bindings '(8 2))
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok"
+          (error (concat "unexpected nested aggregate normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Deep correlated conditions remain structural"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "SELECT wrapped.id FROM (SELECT outer_row.id, EXISTS (SELECT TRUE FROM ps_test inner_row WHERE inner_row.id = outer_row.id AND inner_row.score >= 6 LIMIT 1) AS visible FROM ps_test outer_row) wrapped WHERE wrapped.id = 1 LIMIT 2"
+        true)
+        '(normalized bindings shape_hash)
+        (if (and
+          (equal? normalized "SELECT wrapped.id FROM (SELECT outer_row.id, EXISTS (SELECT TRUE FROM ps_test inner_row WHERE inner_row.id = outer_row.id AND inner_row.score >= 6 LIMIT 1) AS visible FROM ps_test outer_row) wrapped WHERE wrapped.id = ? LIMIT ?")
+          (equal? bindings '(1 2))
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok"
+          (error (concat "unexpected deep normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Window rank conditions remain structural"
+    scm: |
+      (match (sql_parameterize_select_literals
+        "SELECT parent_row.id FROM ps_test parent_row LEFT JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY score DESC) AS rank_no FROM ps_test) ranked ON ranked.id = parent_row.id AND ranked.rank_no = 1 LIMIT 2"
+        true)
+        '(normalized bindings shape_hash)
+        (if (and
+          (equal? normalized "SELECT parent_row.id FROM ps_test parent_row LEFT JOIN (SELECT id, ROW_NUMBER() OVER (ORDER BY score DESC) AS rank_no FROM ps_test) ranked ON ranked.id = parent_row.id AND ranked.rank_no = 1 LIMIT 2")
+          (equal? bindings '())
+          (equal? shape_hash (fnv_hash normalized)))
+          "ok"
+          (error (concat "unexpected window normalization: " normalized " / " bindings))))
+    expect:
+      data: ["ok"]
+
+  - name: "Nested literal variants share one cached SELECT plan"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (cached_parse cache (lambda (_schema _query _policy) 7)
+          "memcp-tests" "SELECT wrapped.id FROM (SELECT inner_row.id FROM ps_test inner_row WHERE inner_row.score >= 6) wrapped WHERE wrapped.id >= 1 LIMIT 2"
+          nil "root" sess true)
+        (cached_parse cache (lambda (_schema _query _policy) 7)
+          "memcp-tests" "SELECT wrapped.id FROM (SELECT inner_row.id FROM ps_test inner_row WHERE inner_row.score >= 7) wrapped WHERE wrapped.id >= 2 LIMIT 4"
+          nil "root" sess true)
+        (if (and
+          (equal? (count (cache)) 1)
+          (equal? (sess "v1") 7)
+          (equal? (sess "v2") 2)
+          (equal? (sess "v3") 4))
+          "ok"
+          (error (concat "unexpected nested cache/bindings: " (count (cache)) " / "
+            (sess "v1") "," (sess "v2") "," (sess "v3")))))
     expect:
       data: ["ok"]
 

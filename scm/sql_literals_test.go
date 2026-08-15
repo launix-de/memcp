@@ -79,8 +79,6 @@ func TestParameterizeSQLSelectLiteralsKeepsUnsafeShapesExact(t *testing.T) {
 		"SELECT id FROM items WHERE id = ?",
 		"SELECT id FROM items WHERE created_at >= DATE '2026-01-01'",
 		"SELECT category, COUNT(*) FROM items WHERE state = 'open' GROUP BY category",
-		"SELECT id FROM items WHERE id IN (SELECT item_id FROM links WHERE kind = 2)",
-		"SELECT id FROM items WHERE state = 'open' OR score = 2",
 		"SELECT COUNT(*) FROM items WHERE state = 'open'",
 		"SELECT DISTINCT state FROM items WHERE score >= 2",
 		"SELECT id FROM items WHERE id = 1 UNION SELECT id FROM items WHERE id = 2",
