@@ -28,7 +28,7 @@ func newOptimizerTestEnv() *Env {
 
 func optimizeTestSource(t testing.TB, env *Env, source string) Scmer {
 	t.Helper()
-	return Optimize(Read("optimizer return test", source), env)
+	return Optimize(Read("optimizer return test", source), env, nil)
 }
 
 func serializedTestExpr(t testing.TB, env *Env, expr Scmer) string {
@@ -179,7 +179,7 @@ func TestOptimizeKeepsRecursiveLeafProcCall(t *testing.T) {
 func TestOptimizeKeepsLeafProcWithDifferentCapturedBinding(t *testing.T) {
 	source := newOptimizerTestEnv()
 	EvalAll("leaf inline test", `(define captured_value 7)`, source)
-	proc := Eval(Optimize(Read("leaf inline test", `(lambda (value) (+ value captured_value))`), source), source)
+	proc := Eval(Optimize(Read("leaf inline test", `(lambda (value) (+ value captured_value))`), source, nil), source)
 
 	target := newOptimizerTestEnv()
 	target.Vars[Symbol("captured_value")] = NewInt(9)
@@ -201,7 +201,7 @@ func BenchmarkOptimizeSchemeHelperFreshReturn(b *testing.B) {
 			NewSlice([]Scmer{NewSymbol("benchmark_fresh_pair"), NewInt(1), NewInt(2)}),
 			NewInt(3),
 		})
-		Optimize(expr, env)
+		Optimize(expr, env, nil)
 	}
 }
 

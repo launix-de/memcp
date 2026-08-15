@@ -53,6 +53,90 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
 }
 
+// runFanoutTasks executes a fanout without recursively multiplying worker
+// pools. Transactions reserve at most half of their remaining budget. When
+// only one worker is available, the caller performs the work directly without
+// goroutines, channels, wait groups, or GLS propagation.
+func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <-chan struct{} {
+	if taskCount <= 0 {
+		return nil
+	}
+	// This check must stay ahead of claimFanoutWorkers: point/range pruning to
+	// one shard must not read, write, or invalidate the budget cache line.
+	if taskCount == 1 {
+		task(0, true)
+		return nil
+	}
+
+	workers := runtime.GOMAXPROCS(0) / 2
+	claimedWorkers := 0
+	if currentTx != nil {
+		claimedWorkers = currentTx.claimFanoutWorkers(taskCount)
+		workers = claimedWorkers
+	}
+	if workers > taskCount {
+		workers = taskCount
+	}
+	if workers < 2 {
+		for i := 0; i < taskCount; i++ {
+			task(i, true)
+		}
+		return nil
+	}
+
+	jobs := make(chan int, taskCount)
+	doneCh := make(chan struct{})
+	var remainingWorkers atomic.Int32
+	remainingWorkers.Store(int32(workers))
+	startWorker := gls.Go
+	if currentTx != nil {
+		startWorker = func(worker func()) {
+			go func() {
+				withTxSession(currentTx, func() scm.Scmer {
+					worker()
+					return scm.NewNil()
+				})
+			}()
+		}
+	}
+	for i := 0; i < workers; i++ {
+		startWorker(func() {
+			defer func() {
+				if remainingWorkers.Add(-1) == 0 {
+					if currentTx != nil {
+						currentTx.releaseFanoutWorkers(claimedWorkers)
+					}
+					close(doneCh)
+				}
+			}()
+			for taskIndex := range jobs {
+				task(taskIndex, false)
+			}
+		})
+	}
+	for i := 0; i < taskCount; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	return doneCh
+}
+
+// shardResultBufferSize bounds synchronous multi-shard result buffering. It
+// snapshots only shard topology and does not touch the transaction fanout
+// budget; callers reach it after boundary analysis has selected a table scan.
+func (t *table) shardResultBufferSize() int {
+	t.shardModeMu.RLock()
+	defer t.shardModeMu.RUnlock()
+	size := len(t.PShards)
+	if t.ShardMode == ShardModeFree {
+		size = len(t.Shards)
+	}
+	if size < 1 {
+		return 1
+	}
+	return size
+}
+
 func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnboundaries, callback_old func(*storageShard, bool)) <-chan struct{} {
 	// Keep shard acquisition outside physical scan callbacks. In clustered mode
 	// this is the orchestration point that can choose a local SHARED copy or send
@@ -69,51 +153,15 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 	}
 
 	runWorkers := func(shards []*storageShard, onDone func(*storageShard)) <-chan struct{} {
-		workers := runtime.NumCPU()
-		if workers < 1 {
-			workers = 1
-		}
-		if workers > len(shards) {
-			workers = len(shards)
-		}
-
-		jobs := make(chan *storageShard, len(shards))
-		doneCh := make(chan struct{})
-		var done sync.WaitGroup
-		done.Add(len(shards))
-		startWorker := gls.Go
-		if currentTx != nil && currentTx.autoCommit {
-			startWorker = func(worker func()) {
-				go func() {
-					withTxSession(currentTx, func() scm.Scmer {
-						worker()
-						return scm.NewNil()
-					})
-				}()
+		return runFanoutTasks(currentTx, len(shards), func(i int, synchronous bool) {
+			s := shards[i]
+			release := s.GetRead()
+			defer release()
+			callback(s, synchronous)
+			if onDone != nil {
+				onDone(s)
 			}
-		}
-		for i := 0; i < workers; i++ {
-			startWorker(func() {
-				for s := range jobs {
-					release := s.GetRead()
-					callback(s, false)
-					release()
-					if onDone != nil {
-						onDone(s)
-					}
-					done.Done()
-				}
-			})
-		}
-		for _, s := range shards {
-			jobs <- s
-		}
-		close(jobs)
-		go func() {
-			done.Wait()
-			close(doneCh)
-		}()
-		return doneCh
+		})
 	}
 
 	// Hold shardModeMu.RLock while reading ShardMode and capturing shard list.

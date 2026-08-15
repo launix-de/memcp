@@ -84,10 +84,13 @@ test_cases:
         - "parse_ns"
         - "physical_prepare_ns"
         - "recipe_emit_ns"
+        - "optimizer_ns"
         - "serialize_ns"
         - "planner_total_ns"
         - "compile_total_ns"
         - "plan_bytes"
+        - "optimizer_input_nodes"
+        - "optimizer_output_nodes"
         - "query_blocks"
         - "scans"
 

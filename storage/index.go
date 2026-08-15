@@ -541,24 +541,35 @@ func indexHasComputedCol(s *storageShard, idx *StorageIndex) bool {
 	return false
 }
 
-func rebuildIndexes(t1 *storageShard, t2 *storageShard) {
-	if len(t1.Indexes) == 0 {
-		return
+// snapshotIndexesForRebuild copies the mutable index metadata while the caller
+// holds the source shard lock. Rebuild can then rank the candidates without
+// retaining or reacquiring the source lock.
+func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
+	if len(indexes) == 0 {
+		return nil
 	}
-
-	// 1. Clone index metadata from old shard, decay Savings, mark inactive
-	candidates := make([]*StorageIndex, 0, len(t1.Indexes))
-	for _, idx := range t1.Indexes {
+	candidates := make([]*StorageIndex, 0, len(indexes))
+	for _, idx := range indexes {
 		clone := new(StorageIndex)
-		clone.Cols = make([]string, len(idx.Cols))
-		copy(clone.Cols, idx.Cols)
+		clone.Cols = append([]string(nil), idx.Cols...)
 		clone.ColMapCols = idx.ColMapCols   // shallow copy OK (immutable per-col slices)
 		clone.ColMapFn = idx.ColMapFn       // shallow copy OK
 		clone.ColMatchers = idx.ColMatchers // shallow copy OK (singletons)
 		clone.Savings = idx.Savings * 0.9
-		clone.t = t2
 		clone.baseState.active = false
 		candidates = append(candidates, clone)
+	}
+	return candidates
+}
+
+func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
+	if len(candidates) == 0 {
+		return
+	}
+
+	// 1. Attach the snapshotted metadata to the new shard.
+	for _, candidate := range candidates {
+		candidate.t = t2
 	}
 
 	// 2. Prefix dedup: sort by len(Cols) descending so longer indexes absorb shorter ones

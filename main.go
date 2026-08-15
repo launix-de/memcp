@@ -1221,7 +1221,7 @@ func main() {
 			fmt.Println("Executing " + command + " ...")
 			code := scm.Read("command line", command)
 			scm.Validate(code, "any")
-			code = scm.Optimize(code, &IOEnv)
+			code = scm.Optimize(code, &IOEnv, nil)
 			scm.Eval(code, &IOEnv)
 		}
 	})

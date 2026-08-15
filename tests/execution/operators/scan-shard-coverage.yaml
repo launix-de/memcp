@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Scan & Shard Coverage Tests
 # Targeted tests to exercise uncovered code paths in scan.go, scan_order.go, shard.go
 
@@ -15,6 +30,8 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS cov_trig_log"
   - sql: "DROP TABLE IF EXISTS cov_collate"
   - sql: "DROP TABLE IF EXISTS cov_main_store"
+  - sql: "DROP TABLE IF EXISTS cov_fanout_outer"
+  - sql: "DROP TABLE IF EXISTS cov_fanout_lookup"
 
 setup:
   - sql: "CREATE TABLE cov_main (id INT, val INT, label VARCHAR(50))"
@@ -719,3 +736,37 @@ test_cases:
 
   - name: "Cleanup main storage table"
     sql: "DROP TABLE IF EXISTS cov_main_store"
+
+  - name: "Nested multi-shard probes preserve every result with bounded fanout"
+    setup:
+      - scm: '(settings "ShardSize" 8)'
+      - sql: "CREATE TABLE cov_fanout_outer (id INT PRIMARY KEY, lookup_id INT, bucket INT)"
+      - sql: "CREATE TABLE cov_fanout_lookup (id INT PRIMARY KEY, value INT, bucket INT)"
+      - scm: |
+          (begin
+            (define rows (produceN 256 (lambda (i) (list (+ i 1) (+ i 1) (mod i 32)))))
+            (insert (table "memcp-tests" "cov_fanout_outer") '("id" "lookup_id" "bucket") rows '() (lambda () true) false))
+      - scm: |
+          (begin
+            (define rows (produceN 256 (lambda (i) (list (+ i 1) (* (+ i 1) 3) (mod i 32)))))
+            (insert (table "memcp-tests" "cov_fanout_lookup") '("id" "value" "bucket") rows '() (lambda () true) false))
+      - sql: "SELECT COUNT(*) AS n FROM cov_fanout_outer WHERE bucket >= 0"
+      - sql: "SELECT COUNT(*) AS n FROM cov_fanout_lookup WHERE bucket >= 0"
+      - scm: '(rebuild (table "memcp-tests" "cov_fanout_outer") true true)'
+      - scm: '(rebuild (table "memcp-tests" "cov_fanout_lookup") true true)'
+    sql: |
+      SELECT SUM((
+        SELECT l.value
+        FROM cov_fanout_lookup l
+        WHERE l.id = o.lookup_id
+        LIMIT 1
+      )) AS total
+      FROM cov_fanout_outer o
+    max_time: 1.0
+    expect:
+      rows: 1
+      data:
+        - total: 98688
+
+  - name: "Restore default shard size after bounded fanout coverage"
+    scm: '(settings "ShardSize" 60000)'

@@ -528,8 +528,19 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	}
 
 	var q globalqueue
-	q_ := make(chan scanOrderResult, len(tables)*4)
-	var wg sync.WaitGroup
+	resultBufferSize := 0
+	for i := range tables {
+		if tables[i].recset != nil {
+			resultBufferSize += len(tables[i].recset.shards)
+		} else {
+			resultBufferSize += tables[i].backingTable().shardResultBufferSize()
+		}
+	}
+	if resultBufferSize < 1 {
+		resultBufferSize = 1
+	}
+	q_ := make(chan scanOrderResult, resultBufferSize)
+	doneChannels := make([]<-chan struct{}, 0, len(tables))
 	querySeq := querySeqFromTx(currentTx)
 	stats := make([]scanOrderStats, len(tables))
 
@@ -592,10 +603,12 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 		if spec.recset != nil {
 			if len(sortcols) > 0 {
-				wg.Add(1)
-				go func(parts []recSetShard) {
+				// Ordered RecSet parts intentionally form one sequential producer.
+				// The result channel is sized for every part, so a one-worker path
+				// can execute directly without a goroutine or waiter.
+				runFanoutTasks(currentTx, 1, func(_ int, _ bool) {
+					parts := spec.recset.shards
 					withTxSession(currentTx, func() scm.Scmer {
-						defer wg.Done()
 						defer func() {
 							if r := recover(); r != nil {
 								q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
@@ -625,35 +638,37 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 						}
 						return scm.NewNil()
 					})
-				}(spec.recset.shards)
+				})
 			} else {
+				activeParts := make([]int, 0, len(spec.recset.shards))
 				for i := range spec.recset.shards {
-					part := spec.recset.shards[i]
-					if part.count == 0 {
-						continue
+					if spec.recset.shards[i].count > 0 {
+						activeParts = append(activeParts, i)
 					}
-					wg.Add(1)
-					go func(part recSetShard) {
-						withTxSession(currentTx, func() scm.Scmer {
-							defer wg.Done()
-							defer func() {
-								if r := recover(); r != nil {
-									q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
-								}
-							}()
-							// Cancellation contract: check only at the scheduling boundary, before entering
-							// the shard. Once entered, a shard runs atomically without cancellation checks.
-							if ss != nil && ss.IsKilledSeq(querySeq) {
-								panic("query killed")
+				}
+				done := runFanoutTasks(currentTx, len(activeParts), func(taskIndex int, _ bool) {
+					part := spec.recset.shards[activeParts[taskIndex]]
+					withTxSession(currentTx, func() scm.Scmer {
+						defer func() {
+							if r := recover(); r != nil {
+								q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 							}
-							res := part.shard.scan_order_recset_part(&part, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
-							res.callbackCols = callbackCols
-							res.callback = callback
-							res.tableIdx = tableIdx
-							q_ <- scanOrderResult{res: res, inputCount: part.count, candidateCount: part.count, outputCount: int64(len(res.items))}
-							return scm.NewNil()
-						})
-					}(part)
+						}()
+						// Cancellation contract: check only at the scheduling boundary, before entering
+						// the shard. Once entered, a shard runs atomically without cancellation checks.
+						if ss != nil && ss.IsKilledSeq(querySeq) {
+							panic("query killed")
+						}
+						res := part.shard.scan_order_recset_part(&part, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+						res.callbackCols = callbackCols
+						res.callback = callback
+						res.tableIdx = tableIdx
+						q_ <- scanOrderResult{res: res, inputCount: part.count, candidateCount: part.count, outputCount: int64(len(res.items))}
+						return scm.NewNil()
+					})
+				})
+				if done != nil {
+					doneChannels = append(doneChannels, done)
 				}
 			}
 		} else {
@@ -675,21 +690,24 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				q_ <- scanOrderResult{res: res, inputCount: int64(s.Count()), candidateCount: res.candidateCount, outputCount: int64(len(res.items))}
 			})
 			if done != nil {
-				wg.Add(1)
-				go func(ch <-chan struct{}) {
-					<-ch
-					wg.Done()
-				}(done)
+				doneChannels = append(doneChannels, done)
 			}
 		}
 
 	}
 
-	// Close result channel when all tables' shard scans complete
-	go func() {
-		wg.Wait()
+	// Synchronous scans have already filled the bounded result channel. Only a
+	// real fanout needs a coordinator goroutine while this caller consumes.
+	if len(doneChannels) == 0 {
 		close(q_)
-	}()
+	} else {
+		go func() {
+			for _, done := range doneChannels {
+				<-done
+			}
+			close(q_)
+		}()
+	}
 
 	// Collect shard results into globalqueue
 	var scanErr scanError
