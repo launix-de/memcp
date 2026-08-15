@@ -159,7 +159,7 @@ test_cases:
     expect:
       data: ["ok"]
 
-  - name: "Complex LIKE UNION search normalizes nested conditions"
+  - name: "Complex LIKE UNION search normalizes only search literals"
     scm: |
       (match (sql_parameterize_select_literals
         "SELECT d.id FROM ps_guard_left d WHERE d.id = 7 OR d.rhs IN (SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE '%Ca%' UNION SELECT f.id FROM ps_guard_right f WHERE CAST(f.id AS CHAR) LIKE '%Ca%')"
