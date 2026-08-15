@@ -135,12 +135,16 @@ Generated emitters (tools/jitgen):
 // JITEntryPoint holds a JIT-compiled function alongside its original
 // Scheme representation for serialization and fallback.
 type JITEntryPoint struct {
-	Native     func(...Scmer) Scmer // compiled native function pointer
-	CodePtr    unsafe.Pointer       // start of code in arena
-	CodeLen    int                  // bytes used
-	Arena      *jitArena            // owning arena (for free on GC)
-	ConstRoots []unsafe.Pointer     // GC roots for constants embedded into machine code
-	Proc       Proc                 // original Proc for serialization
+	Native func(...Scmer) Scmer // compiled native function pointer
+	// TransferInputArgs means the native body returns its complete variadic
+	// argument array as an owned list. Call must make that array fresh because
+	// apply may otherwise pass caller-owned list backing directly.
+	TransferInputArgs bool
+	CodePtr           unsafe.Pointer   // start of code in arena
+	CodeLen           int              // bytes used
+	Arena             *jitArena        // owning arena (for free on GC)
+	ConstRoots        []unsafe.Pointer // GC roots for constants embedded into machine code
+	Proc              Proc             // original Proc for serialization
 }
 
 // Call keeps the entry point, embedded constant roots, and source arguments
@@ -151,6 +155,9 @@ type JITEntryPoint struct {
 func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if jep == nil || jep.Native == nil {
 		panic("JIT: nil entry point")
+	}
+	if jep.TransferInputArgs {
+		args = append([]Scmer(nil), args...)
 	}
 	defer func() {
 		runtime.KeepAlive(args)
@@ -301,7 +308,10 @@ type JITContext struct {
 	// invocation frame. Optimizer-internal !list values may borrow a bounded
 	// subrange while their NoEscape consumer is emitted inline.
 	LocalSlotCount int
-	RegOwners      [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	// TransferInputArgs is set when emission proves that the native result is
+	// exactly the complete variadic input array re-tagged as an owned list.
+	TransferInputArgs bool
+	RegOwners         [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 
 	// Stack frame: emitter locals use [RSP + offset], while register spills use
 	// [RBP - offset]. The two zones cannot overlap because the patched frame size
@@ -1989,7 +1999,7 @@ func jitCompile(a ...Scmer) Scmer {
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
 			ptr, arena := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena}
-			codeLen, roots, overflow := jitCompileProcToExec(proc, buf)
+			codeLen, roots, overflow, transferInputArgs := jitCompileProcToExec(proc, buf)
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
@@ -1999,12 +2009,13 @@ func jitCompile(a ...Scmer) Scmer {
 				fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
 				nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
 				jep := &JITEntryPoint{
-					Native:     nativeFn,
-					CodePtr:    ptr,
-					CodeLen:    codeLen,
-					Arena:      arena,
-					ConstRoots: roots,
-					Proc:       *proc,
+					Native:            nativeFn,
+					TransferInputArgs: transferInputArgs,
+					CodePtr:           ptr,
+					CodeLen:           codeLen,
+					Arena:             arena,
+					ConstRoots:        roots,
+					Proc:              *proc,
 				}
 				runtime.SetFinalizer(jep, func(jep *JITEntryPoint) {
 					if jep.Arena != nil && jep.CodePtr != nil {

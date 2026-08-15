@@ -62,7 +62,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
 	ptr, _ := globalJITPool.Alloc(defaultCodeBufSize)
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize}
-	codeLen, roots, _ := jitCompileProcToExec(proc, buf)
+	codeLen, roots, _, _ := jitCompileProcToExec(proc, buf)
 	if codeLen == 0 {
 		return nil, nil
 	}
@@ -72,8 +72,9 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 }
 
 // jitCompileProcToExec compiles a Proc body directly into writable executable memory.
-// Returns code length, GC roots and an overflow flag.
-func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool) {
+// Returns code length, GC roots, an overflow flag, and whether the call boundary
+// must provide a fresh variadic array that becomes the owned list result.
+func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool, bool) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		si := body.SourceInfo()
@@ -92,7 +93,7 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
 // executable buffer using Declaration.JITEmit callbacks.
-func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf) (codeLen int, roots []unsafe.Pointer, overflow bool) {
+func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r == jitCodeOverflowPanic {
@@ -103,6 +104,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 			}
 			codeLen = 0
 			roots = nil
+			transferInputArgs = false
 		}
 	}()
 
@@ -216,7 +218,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		case tagNil:
 			ctx.EmitMakeNil(result)
 		default:
-			return 0, nil, false
+			return 0, nil, false, false
 		}
 		// fall through to epilog
 	} else {
@@ -239,10 +241,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 			case tagFloat:
 				ctx.EmitMakeFloat(ret, desc)
 			default:
-				return 0, nil, false
+				return 0, nil, false, false
 			}
 		default:
-			return 0, nil, false
+			return 0, nil, false, false
 		}
 	}
 	// Unified epilog: patch SUB RSP with max frame size, then leave; ret.
@@ -254,7 +256,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-	return codeLen, ctx.ConstRoots, false
+	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs
 }
 
 func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
@@ -342,6 +344,21 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 	}
 	if len(virtual.Virtual) > 8 {
 		panic("jit: variadic slice materialization supports at most 8 elements")
+	}
+	forwardsInput := result.Loc == LocRegPair && result.Reg == RegRAX && result.Reg2 == RegRBX && len(virtual.Virtual) == ctx.InputArgCount
+	for i := range virtual.Virtual {
+		if virtual.Virtual[i].Loc != LocInputPair || virtual.Virtual[i].StackOff != int32(i) {
+			forwardsInput = false
+			break
+		}
+	}
+	if forwardsInput {
+		// The call boundary gives this invocation a fresh variadic array. List's
+		// body is therefore declarative: keep RAX as the result pointer and emit
+		// only the Scmer slice tag/length word required in RBX.
+		ctx.TransferInputArgs = true
+		ctx.EmitMovRegImm64(RegRBX, makeAux(tagSlice, makeSliceAux(ctx.InputArgCount, ctx.InputArgCount)))
+		return JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: RegRAX, Reg2: RegRBX}
 	}
 	pairs := make([]JITValueDesc, len(virtual.Virtual))
 	for i := range virtual.Virtual {
