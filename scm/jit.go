@@ -146,6 +146,13 @@ type JITEntryPoint struct {
 	Arena             *jitArena        // owning arena (for free on GC)
 	ConstRoots        []unsafe.Pointer // GC roots for constants embedded into machine code
 	Proc              Proc             // original Proc for serialization
+	// NeedsStableArgs is set when emitted code crosses into Go and therefore may
+	// survive a goroutine stack move while retaining the variadic data pointer.
+	NeedsStableArgs bool
+	// AutoImportSafe is false for native bodies that still rely on an
+	// experimental pointer-producing path. Explicit (jit ...) may exercise such
+	// paths, but module import keeps the interpreter until they are proven safe.
+	AutoImportSafe bool
 }
 
 // Call keeps the entry point, embedded constant roots, and source arguments
@@ -157,22 +164,51 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if jep == nil || jep.Native == nil {
 		panic("JIT: nil entry point")
 	}
-	if jep.TransferInputArgs {
+	// Native code keeps the variadic data pointer in R12. Calls that append
+	// hidden callback/GC state or transfer that array as an owned list therefore
+	// need a fresh stable frame. Pure scalar JIT functions retain the original
+	// allocation-free call path.
+	stableArgs := jep.TransferInputArgs || jep.NeedsStableArgs || len(jep.HiddenArgs) != 0
+	if stableArgs {
 		args = append([]Scmer(nil), args...)
 	}
-	for _, spec := range jep.HiddenArgs {
-		if spec.SourceInput < 0 || spec.SourceInput >= len(args) {
-			panic("JIT: invalid hidden argument input")
+	if jep.Proc.Params.GetTag() == tagSlice {
+		paramCount := len(jep.Proc.Params.Slice())
+		if len(args) > paramCount {
+			panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", paramCount, len(args)))
 		}
+		if len(args) < paramCount {
+			padded := make([]Scmer, paramCount)
+			copy(padded, args)
+			for i := len(args); i < paramCount; i++ {
+				padded[i] = NewNil()
+			}
+			args = padded
+		}
+	}
+	for _, spec := range jep.HiddenArgs {
 		switch spec.Kind {
 		case jitHiddenPreallocatedSlice:
+			if spec.SourceInput < 0 || spec.SourceInput >= len(args) {
+				panic("JIT: invalid hidden argument input")
+			}
 			length := len(asSlice(args[spec.SourceInput], "jit preallocation"))
 			args = append(args, NewSlice(make([]Scmer, length)))
 		case jitHiddenOptimizedCallback:
+			if spec.SourceInput < 0 || spec.SourceInput >= len(args) {
+				panic("JIT: invalid hidden argument input")
+			}
 			args = append(args, NewFunc(OptimizeProcToSerialFunction(args[spec.SourceInput])))
+		case jitHiddenRootSlots:
+			args = append(args, NewSlice(make([]Scmer, spec.Count)))
 		default:
 			panic("JIT: invalid hidden argument kind")
 		}
+	}
+	var callPin runtime.Pinner
+	if stableArgs && len(args) > 0 {
+		callPin.Pin(&args[0])
+		defer callPin.Unpin()
 	}
 	defer func() {
 		runtime.KeepAlive(args)
@@ -186,11 +222,13 @@ type jitHiddenArgKind uint8
 const (
 	jitHiddenPreallocatedSlice jitHiddenArgKind = iota
 	jitHiddenOptimizedCallback
+	jitHiddenRootSlots
 )
 
 type JITHiddenArg struct {
 	Kind        jitHiddenArgKind
 	SourceInput int
+	Count       int
 }
 
 // JITValueDesc describes a value during JIT compilation: its type and
@@ -230,6 +268,9 @@ type JITValueDesc struct {
 	// of Type so unions such as int|float|nil retain the fact without claiming an
 	// exact tag.
 	NoHeapPointer bool
+	// Rooted means a pointer-bearing runtime value has been mirrored into the
+	// invocation's Go-heap root slice and may safely survive later callbacks.
+	Rooted bool
 	// Virtual holds compiler-only aggregate elements. LocVirtualSlice never
 	// reaches generated machine code; consumers either operate on its elements
 	// directly or materialize it through a Go allocation trampoline.
@@ -339,6 +380,11 @@ type JITContext struct {
 	FreeRegs  uint64
 	AllRegs   uint64 // original set of all allocatable registers (for spilling)
 	SliceBase Reg    // register holding the args slice pointer (for variable-index access)
+	// OriginalArgsOff stores the incoming variadic slice data pointer in the
+	// invocation-local frame.
+	// Optimized local frames may repurpose SliceBase, while hidden GC roots still
+	// live after the source-level arguments in the original Go-owned slice.
+	OriginalArgsOff int32
 	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
 	// refreshed after helper calls (Go may grow/move the goroutine stack).
 	SliceBaseTracksRSP bool
@@ -354,6 +400,11 @@ type JITContext struct {
 	// exactly the complete variadic input array re-tagged as an owned list.
 	TransferInputArgs bool
 	HiddenArgs        []JITHiddenArg
+	RootHiddenArg     int
+	RootSlotCount     int
+	RuntimeEnv        Scmer
+	AutoImportSafe    bool
+	NeedsStableArgs   bool
 	RegOwners         [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 
 	// Stack frame: emitter locals use [RSP + offset], while register spills use
@@ -388,6 +439,24 @@ func (ctx *JITContext) RequestOptimizedCallback(sourceInput int) JITValueDesc {
 	hiddenIndex := ctx.InputArgCount + len(ctx.HiddenArgs)
 	ctx.HiddenArgs = append(ctx.HiddenArgs, JITHiddenArg{Kind: jitHiddenOptimizedCallback, SourceInput: sourceInput})
 	return JITValueDesc{Loc: LocInputPair, Type: tagFunc, StackOff: int32(hiddenIndex)}
+}
+
+// RequestRootSlot reserves one Scmer slot in a Go-heap-backed hidden slice.
+// JIT values stored there remain visible to the garbage collector while a Go
+// callback is running, without a process-global shadow stack.
+func (ctx *JITContext) RequestRootSlot() (rootSlice JITValueDesc, slot int) {
+	if ctx.InputArgCount < 0 {
+		panic("jit: GC-root slots require fixed procedure parameters")
+	}
+	if ctx.RootHiddenArg < 0 {
+		ctx.RootHiddenArg = len(ctx.HiddenArgs)
+		ctx.HiddenArgs = append(ctx.HiddenArgs, JITHiddenArg{Kind: jitHiddenRootSlots})
+	}
+	slot = ctx.RootSlotCount
+	ctx.RootSlotCount++
+	ctx.HiddenArgs[ctx.RootHiddenArg].Count = ctx.RootSlotCount
+	hiddenIndex := ctx.InputArgCount + ctx.RootHiddenArg
+	return JITValueDesc{Loc: LocInputPair, Type: tagSlice, StackOff: int32(hiddenIndex)}, slot
 }
 
 // jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
@@ -840,8 +909,16 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 	case LocInputPair:
 		r1 := ctx.AllocReg()
 		r2 := ctx.AllocRegExcept(r1)
-		ctx.EmitMovRegMem(r1, ctx.SliceBase, desc.StackOff*16)
-		ctx.EmitMovRegMem(r2, ctx.SliceBase, desc.StackOff*16+8)
+		base := ctx.SliceBase
+		if ctx.SliceBaseTracksRSP && int(desc.StackOff) >= ctx.InputArgCount {
+			base = ctx.AllocRegExcept(r1, r2)
+			ctx.EmitMovRegMem(base, RegRSP, ctx.OriginalArgsOff)
+		}
+		ctx.EmitMovRegMem(r1, base, desc.StackOff*16)
+		ctx.EmitMovRegMem(r2, base, desc.StackOff*16+8)
+		if base != ctx.SliceBase {
+			ctx.FreeReg(base)
+		}
 		desc.Loc = LocRegPair
 		desc.Reg = r1
 		desc.Reg2 = r2
@@ -1369,6 +1446,7 @@ func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 // Returns a slice into resultsBuf holding the result registers.
 // All live JIT registers are saved/restored around the call.
 func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg, resultTargets []Reg) []Reg {
+	ctx.NeedsStableArgs = true
 	if numResultWords > len(GoABIIntRegs) {
 		panic("jit: too many result words for Go ABI")
 	}
@@ -1937,7 +2015,7 @@ func init_jit() {
 		Name: "jit?",
 		Desc: "tells whether a value is a JIT-compiled function descriptor",
 		Fn: func(a ...Scmer) Scmer {
-			return NewBool(a[0].GetTag() == tagJIT)
+			return NewBool(a[0].GetTag() == tagJIT || (a[0].GetTag() == tagProc && a[0].Proc() != nil && a[0].Proc().Compiled != nil))
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
@@ -2004,6 +2082,30 @@ func init_jit() {
 				}
 				return result
 			},
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "jit-warn-if-fallback",
+		Desc: "prints a diagnostic warning when an enabled JIT build kept a procedure interpreted and returns the procedure unchanged",
+		Fn: func(a ...Scmer) Scmer {
+			value := a[0]
+			compiled := value.GetTag() == tagJIT || (value.GetTag() == tagProc && value.Proc() != nil && value.Proc().Compiled != nil)
+			if jitEnabled && !compiled {
+				label := SerializeToString(value, &Globalenv)
+				if len(a) > 1 {
+					label = String(a[1])
+				}
+				fmt.Printf("warning: JIT fallback: %s\n", label)
+			}
+			return value
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "any", ParamName: "procedure", ParamDesc: "procedure expected to be a native compilation candidate"},
+				{Kind: "string", ParamName: "label", ParamDesc: "optional diagnostic label", Optional: true},
+			},
+			Return:         &TypeDescriptor{Kind: "any"},
+			HasSideEffects: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2099,11 +2201,14 @@ func jitCompile(a ...Scmer) Scmer {
 	case tagProc:
 		// Lambda/procedure — compile into a pool arena
 		proc := v.Proc()
+		if proc != nil && proc.Compiled != nil {
+			return v
+		}
 		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
 			ptr, arena := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena}
-			codeLen, roots, overflow, transferInputArgs, hiddenArgs := jitCompileProcToExec(proc, buf)
+			codeLen, roots, overflow, transferInputArgs, hiddenArgs, autoImportSafe, needsStableArgs := jitCompileProcToExec(proc, buf)
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
@@ -2112,6 +2217,8 @@ func jitCompile(a ...Scmer) Scmer {
 				maybeDumpJITCode(ptr, code)
 				fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
 				nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
+				sourceProc := *proc
+				sourceProc.Compiled = nil
 				jep := &JITEntryPoint{
 					Native:            nativeFn,
 					TransferInputArgs: transferInputArgs,
@@ -2120,14 +2227,18 @@ func jitCompile(a ...Scmer) Scmer {
 					CodeLen:           codeLen,
 					Arena:             arena,
 					ConstRoots:        roots,
-					Proc:              *proc,
+					Proc:              sourceProc,
+					AutoImportSafe:    autoImportSafe && jitAutoImportSyntaxSafe(sourceProc.Body),
+					NeedsStableArgs:   needsStableArgs,
 				}
 				runtime.SetFinalizer(jep, func(jep *JITEntryPoint) {
 					if jep.Arena != nil && jep.CodePtr != nil {
 						globalJITPool.Free(jep.CodePtr, jep.CodeLen)
 					}
 				})
-				return NewJIT(jep)
+				compiledProc := sourceProc
+				compiledProc.Compiled = jep
+				return NewProcStruct(compiledProc)
 			}
 			if !overflow {
 				break
@@ -2142,6 +2253,66 @@ func jitCompile(a ...Scmer) Scmer {
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
 	}
+}
+
+// jitAutoImportSyntaxSafe is deliberately narrower than explicit (jit ...).
+// Module loading must never turn experimental emitter coverage into a semantic
+// regression. It enables leaf expressions, borrowed accessors, scalar
+// builtins, and rooted calls with at most two arguments; allocation-heavy
+// transforms remain interpreted until their callback/ABI paths are proven.
+func jitAutoImportSyntaxSafe(expr Scmer) bool {
+	for expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	if !expr.IsSlice() {
+		return true
+	}
+	items := expr.Slice()
+	if len(items) == 0 {
+		return true
+	}
+	if !items[0].IsSymbol() {
+		if len(items)-1 > 2 || !jitAutoImportSyntaxSafe(items[0]) {
+			return false
+		}
+		for _, item := range items[1:] {
+			if !jitAutoImportSyntaxSafe(item) {
+				return false
+			}
+		}
+		return true
+	}
+	name := items[0].String()
+	switch name {
+	case "quote":
+		return true
+	case "lambda", "begin", "begin_mut", "!begin", "set", "define", "setN", "!list", "!!list", "eval", "parallel":
+		return false
+	case "match", "match_mut":
+		return false
+	case "if", "and", "or", "coalesce", "coalesceNil":
+		return false
+	case "outer":
+		for _, item := range items[1:] {
+			if !jitAutoImportSyntaxSafe(item) {
+				return false
+			}
+		}
+		return true
+	}
+	if decl, ok := declarations[name]; ok && decl.Type != nil && decl.Type.JITEmit != nil {
+		if !jitAutoImportReturnSafe(name, decl.Type.Return) {
+			return false
+		}
+	} else {
+		return false
+	}
+	for _, item := range items[1:] {
+		if !jitAutoImportSyntaxSafe(item) {
+			return false
+		}
+	}
+	return true
 }
 
 // execBuf is a small wrapper for writable memory (arena-backed or standalone)

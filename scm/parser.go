@@ -51,14 +51,52 @@ func Read(source, s string) (expression Scmer) {
 }
 
 func EvalAll(source, s string, en *Env) (expression Scmer) {
+	return evalAll(source, s, en, false)
+}
+
+// EvalAllJIT evaluates a Scheme module and attaches native implementations to
+// every top-level procedure that the current emitter can compile. Unsupported
+// procedures stay ordinary Procs and retain the interpreter as a safe fallback.
+func EvalAllJIT(source, s string, en *Env) (expression Scmer) {
+	return evalAll(source, s, en, true)
+}
+
+func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scmer) {
 	tokens := tokenize(source, s)
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
 		Validate(code, "any")
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
+		if compileProcedures && expression.GetTag() == tagProc {
+			compiled := jitCompile(expression)
+			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil && compiled.Proc().Compiled.AutoImportSafe {
+				expression = compiled
+				if sym, ok := topLevelDefinitionSymbol(code); ok {
+					target := en.definitionTarget()
+					if target.Vars == nil {
+						target.Vars = make(Vars)
+					}
+					target.Vars[sym] = compiled
+				}
+			}
+		}
 	}
 	return
+}
+
+func topLevelDefinitionSymbol(code Scmer) (Symbol, bool) {
+	for code.IsSourceInfo() {
+		code = code.SourceInfo().value
+	}
+	if !code.IsSlice() {
+		return "", false
+	}
+	items := code.Slice()
+	if len(items) < 3 || !items[0].IsSymbol() || (!items[0].SymbolEquals("define") && !items[0].SymbolEquals("set")) || !items[1].IsSymbol() {
+		return "", false
+	}
+	return items[1].Symbol(), true
 }
 
 // Syntactic Analysis
