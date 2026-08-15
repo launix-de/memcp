@@ -888,7 +888,11 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 		<-done
 	}
 	closeAfter := len(activeParts)
-	akkumulator := neutral
+	collectorReducer := aggregate
+	if !aggregate2.IsNil() {
+		collectorReducer = aggregate2
+	}
+	akkumulator := ownedReducerNeutral(neutral, collectorReducer)
 	hadValue := false
 	var scanErr scanError
 	if !aggregate2.IsNil() {
@@ -1150,7 +1154,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
-	akkumulator := neutral
+	akkumulator := ownedReducerNeutral(neutral, aggregate)
 	var outCount int64
 	var buf [1024]uint32
 	pending := buf[:0]

@@ -46,6 +46,47 @@ func descriptorWithLength(td *TypeDescriptor, length int) *TypeDescriptor {
 	return &out
 }
 
+func descriptorWithElement(td *TypeDescriptor, element TypeInfo) *TypeDescriptor {
+	if element.Kind() == KindAny && element.Extra == nil && element.ownershipSources == 0 && !element.MayBorrow() {
+		return td
+	}
+	if td == nil {
+		td = &TypeDescriptor{}
+	}
+	out := *td
+	out.Element = element.ToTypeDescriptor()
+	return &out
+}
+
+// callbackResultType accepts both optimizer-native lambdas, whose TypeInfo is
+// their body result, and named procedures, whose descriptor retains Kind=func.
+// Collection operators care about the produced element, never the procedure
+// value itself.
+func callbackResultType(callback TypeInfo) TypeInfo {
+	if callback.Kind() == KindFunc && callback.Extra != nil && callback.Extra.Return != nil {
+		return TypeInfoFromTD(callback.Extra.Return)
+	}
+	return callback
+}
+
+func listElementType(list TypeInfo) TypeInfo {
+	if list.Extra == nil {
+		return tiZero
+	}
+	if list.Extra.Element != nil {
+		return TypeInfoFromTD(list.Extra.Element)
+	}
+	var merged *TypeDescriptor
+	for _, item := range list.Extra.Keys {
+		if merged == nil {
+			merged = copyTypeDescriptor(item)
+		} else {
+			merged, _ = mergeOptimizerTypes(merged, item)
+		}
+	}
+	return TypeInfoFromTD(merged)
+}
+
 func materializeCodeLiteral(expr Scmer) (Scmer, bool) {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
@@ -259,42 +300,6 @@ func exactAssocLengthFromExpr(expr Scmer) int {
 	return UnknownLength
 }
 
-func optimizedExactListLength(expr Scmer, oc *OptimizerContext) int {
-	optimized, ti := OptimizeEx(expr, oc.Env, oc.Ome, true)
-	if length := ti.Length(); length > 0 {
-		return length
-	}
-	if length := exactListLengthFromExpr(optimized); length >= 0 {
-		return length
-	}
-	if materialized, changed := materializeCodeLiteral(expr); changed {
-		materializedOptimized, _ := OptimizeEx(materialized, oc.Env, oc.Ome, true)
-		if length := exactListLengthFromExpr(materializedOptimized); length >= 0 {
-			return length
-		}
-		return exactListLengthFromExpr(materialized)
-	}
-	return exactListLengthFromExpr(expr)
-}
-
-func optimizedExactAssocLength(expr Scmer, oc *OptimizerContext) int {
-	optimized, ti := OptimizeEx(expr, oc.Env, oc.Ome, true)
-	if length := ti.Length(); length > 0 {
-		return length
-	}
-	if length := exactAssocLengthFromExpr(optimized); length >= 0 {
-		return length
-	}
-	if materialized, changed := materializeCodeLiteral(expr); changed {
-		materializedOptimized, _ := OptimizeEx(materialized, oc.Env, oc.Ome, true)
-		if length := exactAssocLengthFromExpr(materializedOptimized); length >= 0 {
-			return length
-		}
-		return exactAssocLengthFromExpr(materialized)
-	}
-	return exactAssocLengthFromExpr(expr)
-}
-
 func exactOptimizedListArgumentLength(expr Scmer, ti TypeInfo) int {
 	if length := exactListLengthFromExpr(expr); length >= 0 {
 		return length
@@ -352,72 +357,12 @@ func lambdaBodyResultExpr(expr Scmer) (Scmer, bool) {
 	return body, true
 }
 
-func exactCallbackListLength(expr Scmer, oc *OptimizerContext) int {
+func exactCallbackListLength(expr Scmer) int {
 	if body, ok := lambdaBodyResultExpr(expr); ok {
-		return optimizedExactListLength(body, oc)
+		return exactListLengthFromExpr(body)
 	}
 	if decl := DeclarationForValue(expr); decl != nil && decl.Type != nil && decl.Type.Return != nil && decl.Type.Return.Length > 0 {
 		return decl.Type.Return.Length
-	}
-	return UnknownLength
-}
-
-func exactFlattenedMergeLength(expr Scmer, oc *OptimizerContext) int {
-	if stripped, ok := scmerStripSourceInfo(expr); ok {
-		expr = stripped
-	}
-	inner, ok := scmerSlice(expr)
-	if !ok || len(inner) == 0 {
-		return UnknownLength
-	}
-	if sym, ok := scmerSymbol(inner[0]); ok {
-		switch sym {
-		case "quote":
-			if len(inner) == 2 {
-				return exactFlattenedMergeLength(inner[1], oc)
-			}
-			return UnknownLength
-		case "list":
-			total := 0
-			for _, item := range inner[1:] {
-				itemLen := optimizedExactListLength(item, oc)
-				if itemLen < 0 {
-					return UnknownLength
-				}
-				total += itemLen
-			}
-			return total
-		case "map", "map_mut", "parallel_map", "parallel_map_mut", "mapIndex", "mapIndex_mut":
-			if len(inner) >= 3 {
-				inputLen := optimizedExactListLength(inner[1], oc)
-				itemLen := exactCallbackListLength(inner[2], oc)
-				if inputLen >= 0 && itemLen >= 0 {
-					return inputLen * itemLen
-				}
-			}
-			return UnknownLength
-		case "extract_assoc", "extract_assoc_mut":
-			if len(inner) >= 3 {
-				inputLen := optimizedExactAssocLength(inner[1], oc)
-				itemLen := exactCallbackListLength(inner[2], oc)
-				if inputLen >= 0 && itemLen >= 0 {
-					return inputLen * itemLen
-				}
-			}
-			return UnknownLength
-		case "produceN", "produceN_mut", "parallelN", "parallelN_mut":
-			if len(inner) >= 3 {
-				if count := int(ToInt(inner[1])); count >= 0 {
-					itemLen := exactCallbackListLength(inner[2], oc)
-					if itemLen >= 0 {
-						return count * itemLen
-					}
-				}
-			}
-			return UnknownLength
-		case "merge":
-			return optimizedExactListLength(expr, oc)
-		}
 	}
 	return UnknownLength
 }
@@ -464,7 +409,9 @@ func optimizeFixedLengthInput(mutName string) func(v []Scmer, oc *OptimizerConte
 	return func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 		result, td := oc.applyDefaultOptimization(v, useResult, mutName)
 		if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-			return result, descriptorWithLength(td, exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)))
+			td = descriptorWithLength(td, exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)))
+			td = descriptorWithElement(td, listElementType(oc.ArgumentType(1)))
+			return result, td
 		}
 		return result, td
 	}
@@ -483,7 +430,8 @@ func optimizeAssocFixedLengthInput(mutName string) func(v []Scmer, oc *Optimizer
 func optimizeExtractAssoc(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	result, td := oc.applyDefaultOptimization(v, useResult, "extract_assoc_mut")
 	if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-		return result, descriptorWithLength(td, exactOptimizedAssocArgumentLength(rv[1], oc.ArgumentType(1)))
+		td = descriptorWithLength(td, exactOptimizedAssocArgumentLength(rv[1], oc.ArgumentType(1)))
+		return result, descriptorWithElement(td, callbackResultType(oc.ArgumentType(2)))
 	}
 	return result, td
 }
@@ -562,7 +510,7 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 						if isym, ok := scmerSymbol(inner[0]); ok && isym == "produceN" {
 							// Fuse: (map (produceN N) fn) → (produceN N fn)
 							if count := int(ToInt(inner[1])); count > 0 {
-								return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), descriptorWithLength(td, count)
+								return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), descriptorWithElement(descriptorWithLength(td, count), callbackResultType(oc.ArgumentType(2)))
 							}
 							return NewSlice([]Scmer{inner[0], inner[1], rv[2]}), td
 						}
@@ -572,9 +520,61 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		}
 	}
 	if rv, ok := scmerSlice(result); ok && len(rv) == 3 {
-		return result, descriptorWithLength(td, exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)))
+		return result, descriptorWithElement(descriptorWithLength(td, exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1))), callbackResultType(oc.ArgumentType(2)))
 	}
 	return result, td
+}
+
+func borrowedReducerValue(td *TypeDescriptor) *TypeDescriptor {
+	td = copyTypeDescriptor(normalizeOptimizerType(td))
+	td.Transfer = false
+	td.Const = false
+	td.MayBorrow = true
+	return td
+}
+
+// optimizeReduce keeps accumulator ownership and callback-result ownership in
+// the same optimizer walk. The first list element is only borrowed when reduce
+// is called without an explicit neutral value.
+func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if len(v) < 3 || len(v) > 4 {
+		return oc.ApplyDefaultOptimization(v, useResult)
+	}
+	source, sourceType := oc.OptimizeSub(v[1], true)
+	itemType := borrowedReducerValue(listElementType(TypeInfoFromTD(sourceType)).ToTypeDescriptor())
+	accumulatorType := itemType
+	result := []Scmer{v[0], source}
+	if len(v) == 4 {
+		neutral, neutralType := oc.OptimizeSub(v[3], true)
+		accumulatorType = neutralType
+		callback, resultType := oc.OptimizeReducerCallback(v[2], accumulatorType, itemType)
+		return NewSlice(append(result, callback, neutral)), resultType
+	}
+	callback, resultType := oc.OptimizeReducerCallback(v[2], accumulatorType, itemType)
+	return NewSlice(append(result, callback)), borrowedReducerValue(resultType)
+}
+
+func optimizeReduceAssoc(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if len(v) != 4 {
+		return oc.ApplyDefaultOptimization(v, useResult)
+	}
+	source, sourceType := oc.OptimizeSub(v[1], true)
+	neutral, neutralType := oc.OptimizeSub(v[3], true)
+	valueType := borrowedReducerValue(listElementType(TypeInfoFromTD(sourceType)).ToTypeDescriptor())
+	keyType := &TypeDescriptor{Kind: "string", Length: UnknownLength, MayBorrow: true}
+	callback, resultType := oc.OptimizeReducerCallback(v[2], neutralType, keyType, valueType)
+	return NewSlice([]Scmer{v[0], source, callback, neutral}), resultType
+}
+
+func optimizeMappedFixedLength(mutName string) func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	return func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+		result, td := oc.applyDefaultOptimization(v, useResult, mutName)
+		if rv, ok := scmerSlice(result); ok && len(rv) >= 3 {
+			td = descriptorWithLength(td, exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)))
+			return result, descriptorWithElement(td, callbackResultType(oc.ArgumentType(2)))
+		}
+		return result, td
+	}
 }
 
 // optimizeFilter fuses a serial map followed by a filter into one physical
@@ -594,7 +594,29 @@ func optimizeFilter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		return result, td
 	}
 	fused := NewSlice([]Scmer{NewSymbol("filter_map"), inner[1], inner[2], rv[2]})
-	return fused, descriptorWithLength(FreshAlloc, UnknownLength)
+	return fused, descriptorWithElement(descriptorWithLength(FreshAlloc, UnknownLength), listElementType(oc.ArgumentType(1)))
+}
+
+func optimizeFilterMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	return result, descriptorWithElement(descriptorWithLength(td, UnknownLength), callbackResultType(oc.ArgumentType(2)))
+}
+
+func optimizeFlatMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	width := UnknownLength
+	if rv, ok := scmerSlice(result); ok && len(rv) == 4 && (rv[3].IsInt() || rv[3].IsFloat()) {
+		width = int(ToInt(rv[3]))
+		if width < 0 {
+			width = UnknownLength
+		}
+	}
+	length := UnknownLength
+	if inputLength := oc.ArgumentType(1).Length(); inputLength >= 0 && width >= 0 {
+		length = inputLength * width
+	}
+	callbackList := callbackResultType(oc.ArgumentType(2))
+	return result, descriptorWithElement(descriptorWithLength(td, length), listElementType(callbackList))
 }
 
 // optimizeProduceN rewrites (produceN ...) to (produceN_mut ... nil) when the
@@ -608,11 +630,11 @@ func optimizeProduceN(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *
 		}
 	}
 	if useResult || !result.IsSlice() {
-		return result, descriptorWithLength(td, length)
+		return result, descriptorWithElement(descriptorWithLength(td, length), callbackResultType(oc.ArgumentType(2)))
 	}
 	rv := result.Slice()
 	if len(rv) < 2 {
-		return result, descriptorWithLength(td, length)
+		return result, descriptorWithElement(descriptorWithLength(td, length), callbackResultType(oc.ArgumentType(2)))
 	}
 	if sym, ok := scmerSymbol(rv[0]); !ok || sym != "produceN" {
 		return result, descriptorWithLength(td, length)
@@ -637,11 +659,11 @@ func optimizeParallelN(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, 
 		}
 	}
 	if useResult || !result.IsSlice() {
-		return result, descriptorWithLength(td, length)
+		return result, descriptorWithElement(descriptorWithLength(td, length), callbackResultType(oc.ArgumentType(2)))
 	}
 	rv := result.Slice()
 	if len(rv) < 3 {
-		return result, descriptorWithLength(td, length)
+		return result, descriptorWithElement(descriptorWithLength(td, length), callbackResultType(oc.ArgumentType(2)))
 	}
 	if sym, ok := scmerSymbol(rv[0]); !ok || sym != "parallelN" {
 		return result, descriptorWithLength(td, length)
@@ -664,6 +686,35 @@ func asSlice(v Scmer, ctx string) []Scmer {
 		return v.Slice()
 	}
 	panic(fmt.Sprintf("%s expects a list, got %s", ctx, v.String()))
+}
+
+// CloneForMutation transfers a possibly shared value into an exclusively owned
+// reducer accumulator. The clone happens once at the parallel/iteration
+// boundary; optimizer-selected _mut operators can then reuse it for every row.
+// Nested containers are cloned as well because a reducer may project and mutate
+// a child independently of its outer association.
+func CloneForMutation(value Scmer) Scmer {
+	if value.IsSlice() {
+		source := value.Slice()
+		cloned := make([]Scmer, len(source), cap(source))
+		for i := range source {
+			cloned[i] = CloneForMutation(source[i])
+		}
+		return NewSlice(cloned)
+	}
+	if value.IsFastDict() {
+		source := value.FastDict()
+		if source == nil {
+			return NewFastDict(nil)
+		}
+		cloned := NewFastDictValue(len(source.Pairs)/2 + 1)
+		source.Iterate(func(key, item Scmer) bool {
+			cloned.Set(CloneForMutation(key), CloneForMutation(item), nil)
+			return true
+		})
+		return NewFastDict(cloned)
+	}
+	return value
 }
 
 // jitAsSlice keeps the generated Go-call ABI compact. The surrounding builtin
@@ -3845,7 +3896,7 @@ func init_list() {
 				{Kind: "func", ParamName: "fn", ParamDesc: "function applied to each element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
-			Optimize: optimizeFixedLengthInput("parallel_map_mut"),
+			Optimize: optimizeMappedFixedLength("parallel_map_mut"),
 
 			JITEmit: nil,
 		},
@@ -3930,7 +3981,7 @@ func init_list() {
 			},
 			Return:   FreshAlloc,
 			Const:    true,
-			Optimize: optimizeFixedLengthInput("mapIndex_mut"),
+			Optimize: optimizeMappedFixedLength("mapIndex_mut"),
 
 			JITEmit: nil,
 		},
@@ -3961,8 +4012,9 @@ func init_list() {
 				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "any"},
-			Const:  true,
+			Return:   &TypeDescriptor{Kind: "any"},
+			Const:    true,
+			Optimize: optimizeReduce,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d3 JITValueDesc
@@ -6575,8 +6627,9 @@ func init_list() {
 				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "key"}, {ParamName: "value"}}, ParamName: "reduce", ParamDesc: "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", Return: &TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "initial value for the accumulator"},
 			},
-			Return: &TypeDescriptor{Kind: "any"},
-			Const:  true,
+			Return:   &TypeDescriptor{Kind: "any"},
+			Const:    true,
+			Optimize: optimizeReduceAssoc,
 
 			JITEmit: nil,
 		},
@@ -6854,6 +6907,7 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+			Optimize:  optimizeFilterMap,
 
 			JITEmit: nil,
 		},
@@ -6880,6 +6934,7 @@ func init_list() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
+			Optimize:  optimizeFlatMap,
 
 			JITEmit: nil,
 		},
@@ -7772,11 +7827,10 @@ func init_list() {
 			}
 			slice, fd := asAssoc(a[0], "set_assoc_mut")
 			if fd == nil {
-				// Small associations are slice-backed and may originate from a
-				// reducer neutral shared by parallel shards. Copy the bounded
-				// representation before changing or extending it; once promoted
-				// to a FastDict, ownership is exclusive and updates stay in place.
-				list := append([]Scmer(nil), slice...)
+				// Reducer boundaries transfer a private neutral value to each
+				// accumulator, so the optimizer's _mut contract permits direct
+				// reuse here. Append only reallocates when capacity is exhausted.
+				list := slice
 				for i := 0; i < len(list); i += 2 {
 					if Equal(list[i], a[1]) {
 						if mergeFn != nil {
@@ -8078,11 +8132,18 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 			if exprMayHaveSideEffects(producer[2]) {
 				return result, td
 			}
-			itemLength := exactCallbackListLength(producer[2], oc)
+			itemLength := UnknownLength
+			outerType := oc.ArgumentType(1)
+			if outerType.Extra != nil && outerType.Extra.Element != nil {
+				itemLength = outerType.Extra.Element.Length
+			}
+			if itemLength < 0 {
+				itemLength = exactCallbackListLength(producer[2])
+			}
 			if itemLength >= 0 {
 				switch {
 				case scmerIsSymbol(producer[0], "map"), scmerIsSymbol(producer[0], "map_mut"):
-					inputLength := optimizedExactListLength(producer[1], oc)
+					inputLength := outerType.Length()
 					resultLength := UnknownLength
 					if inputLength >= 0 {
 						resultLength = inputLength * itemLength
@@ -8108,8 +8169,9 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 				return NewSlice(merged), descriptorWithLength(FreshAlloc, len(merged)-1)
 			}
 		}
-		if totalLength := exactFlattenedMergeLength(rv[1], oc); totalLength > 0 {
-			return result, descriptorWithLength(td, totalLength)
+		outerType := oc.ArgumentType(1)
+		if outerType.Length() > 0 && outerType.Extra != nil && outerType.Extra.Element != nil && outerType.Extra.Element.Length > 0 {
+			return result, descriptorWithLength(td, outerType.Length()*outerType.Extra.Element.Length)
 		}
 		return result, td
 	}
@@ -8142,10 +8204,12 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 	return result, td
 }
 
-// optimizeMergeUnique keeps merge_unique on the standard variadic path, but
-// additionally treats a direct (list ...) first argument as fresh so the
-// optimizer can swap to merge_unique_mut without changing the global list
-// return contract.
+// optimizeMergeUnique deliberately does not use the general first-parameter
+// ownership rule. Its one-argument contract flattens a list of lists while
+// reusing the outer backing array, so owning the outer list alone does not prove
+// that its nested inputs are disjoint from that storage. A direct variadic
+// (list ...) base is the narrower shape for which the destructive rewrite is
+// proven safe.
 func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	firstArgListLiteral := false
 	if len(v) > 2 {

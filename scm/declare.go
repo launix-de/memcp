@@ -59,21 +59,23 @@ func (d *Declaration) MaxParams() int {
 // TypeDescriptor describes the type of any Scmer value at arbitrary depth.
 // Uses pointers throughout — nil means "unknown / don't care" (conservative).
 type TypeDescriptor struct {
-	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
-	NoEscape       bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
-	Transfer       bool                       // callee receives ownership, can mutate
-	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold
-	Length         int                        // exact positive list/assoc length; -1 = unknown
-	Optional       bool                       // for func params: parameter is optional
-	Variadic       bool                       // for func params: last param accepts 0+ values
-	Forbidden      bool                       // for func: optimizer-only, hidden from help
-	HasSideEffects bool                       // for func: true = call has side effects, cannot be eliminated even if result unused
-	ParamName      string                     // for func params: documentation name
-	ParamDesc      string                     // for func params: documentation description
-	Params         []*TypeDescriptor          // for Kind="func": parameter types
-	Return         *TypeDescriptor            // for Kind="func": return type
-	Keys           map[string]*TypeDescriptor // for Kind="assoc": per-key type info
-	Element        *TypeDescriptor            // for Kind="list": element type
+	Kind             string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
+	NoEscape         bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
+	Transfer         bool                       // callee receives ownership, can mutate
+	Const            bool                       // value is a compile-time constant; for func: safe to constant-fold
+	Length           int                        // exact positive list/assoc length; -1 = unknown
+	Optional         bool                       // for func params: parameter is optional
+	Variadic         bool                       // for func params: last param accepts 0+ values
+	Forbidden        bool                       // for func: optimizer-only, hidden from help
+	HasSideEffects   bool                       // for func: true = call has side effects, cannot be eliminated even if result unused
+	OwnershipSources uint8                      // optimizer provenance: callback parameters this value may alias
+	MayBorrow        bool                       // optimizer provenance: may alias storage outside the expression
+	ParamName        string                     // for func params: documentation name
+	ParamDesc        string                     // for func params: documentation description
+	Params           []*TypeDescriptor          // for Kind="func": parameter types
+	Return           *TypeDescriptor            // for Kind="func": return type
+	Keys             map[string]*TypeDescriptor // for Kind="assoc": per-key type info
+	Element          *TypeDescriptor            // for Kind="list": element type
 	// Custom optimizer hook for function types. When set, the optimizer calls this
 	// INSTEAD of the default arg optimization + post-processing.
 	Optimize func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
@@ -111,10 +113,11 @@ func (oc *OptimizerContext) ArgumentType(index int) TypeInfo {
 // No heap allocation for the common case (Kind + Flags). Extra info (sub-structure
 // types, function signatures) is stored in an optional *TypeDescriptor pointer.
 type TypeInfo struct {
-	kind   uint8
-	flags  uint8
-	length int
-	Extra  *TypeDescriptor // nil in common case; only allocated for sub-structure info
+	kind             uint8
+	flags            uint8
+	ownershipSources uint8
+	length           int
+	Extra            *TypeDescriptor // nil in common case; only allocated for sub-structure info
 }
 
 // Kind constants for TypeInfo
@@ -133,17 +136,19 @@ const (
 
 // Flag bits for TypeInfo
 const (
-	FlagTransfer uint8 = 1 << iota // callee receives ownership
-	FlagConst                      // compile-time constant
-	FlagEscape                     // value may outlive scope
+	FlagTransfer  uint8 = 1 << iota // callee receives ownership
+	FlagConst                       // compile-time constant
+	FlagEscape                      // value may outlive scope
+	FlagMayBorrow                   // value may alias storage outside this expression
 )
 
 const UnknownLength = -1
 
-func (ti TypeInfo) Transfer() bool { return ti.flags&FlagTransfer != 0 }
-func (ti TypeInfo) Const() bool    { return ti.flags&FlagConst != 0 }
-func (ti TypeInfo) Escape() bool   { return ti.flags&FlagEscape != 0 }
-func (ti TypeInfo) Kind() uint8    { return ti.kind }
+func (ti TypeInfo) Transfer() bool  { return ti.flags&FlagTransfer != 0 }
+func (ti TypeInfo) Const() bool     { return ti.flags&FlagConst != 0 }
+func (ti TypeInfo) Escape() bool    { return ti.flags&FlagEscape != 0 }
+func (ti TypeInfo) MayBorrow() bool { return ti.flags&FlagMayBorrow != 0 }
+func (ti TypeInfo) Kind() uint8     { return ti.kind }
 func (ti TypeInfo) Length() int {
 	if ti.length <= 0 {
 		return UnknownLength
@@ -190,6 +195,10 @@ func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
 	if td.Const {
 		ti.flags |= FlagConst
 	}
+	if td.MayBorrow {
+		ti.flags |= FlagMayBorrow
+	}
+	ti.ownershipSources = td.OwnershipSources
 	switch td.Kind {
 	case "string":
 		ti.kind = KindString
@@ -224,13 +233,16 @@ func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
 	if ti.kind == KindAny && ti.flags == 0 && ti.Extra == nil && ti.Length() == UnknownLength {
 		return nil
 	}
-	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape(), Length: ti.Length()}
+	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape(), Length: ti.Length(),
+		OwnershipSources: ti.ownershipSources, MayBorrow: ti.MayBorrow()}
 	if ti.Extra != nil {
 		*td = *ti.Extra
 		td.Transfer = ti.Transfer()
 		td.Const = ti.Const()
 		td.NoEscape = !ti.Escape()
 		td.Length = ti.Length()
+		td.OwnershipSources = ti.ownershipSources
+		td.MayBorrow = ti.MayBorrow()
 	}
 	if td.Kind == "" {
 		td.Kind = ti.kindName()

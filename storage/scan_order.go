@@ -736,7 +736,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	}
 
 	// Merge-collect phase: merge sorted shardqueues from all tables
-	akkumulator := neutral
+	akkumulator := ownedReducerNeutral(neutral, aggregate)
 	hadValue := false
 	// initialize MapReducers per shard (each shard uses its table's callbackCols/callback)
 	for _, sq := range q.q {
@@ -999,7 +999,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	}
 	mapperAlreadyLocked := foundShard.hasWriteOwnerForTx(currentTx)
 	mapper := foundShard.OpenMapReducer(callbackCols, callback, aggregate, mapperAlreadyLocked, 0, nil, currentTx)
-	result := mapper.Stream(neutral, []uint32{foundID}, nil)
+	result := mapper.Stream(ownedReducerNeutral(neutral, aggregate), []uint32{foundID}, nil)
 	mapper.FlushSideEffects()
 	return result
 }

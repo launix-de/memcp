@@ -331,7 +331,7 @@ func BenchmarkStorageIntSum(b *testing.B) {
 			NumVars: 2,
 		})
 
-		mr := shard.OpenMapReducer([]string{"x"}, mapProc, reduceProc, false, 0, nil, nil)
+		mr := shard.OpenMapReducer([]string{"x"}, mapProc, reduceProc)
 		defer mr.Close()
 
 		// build recid list [0..benchN-1]
@@ -341,14 +341,14 @@ func BenchmarkStorageIntSum(b *testing.B) {
 		}
 
 		// validate
-		got := mr.Stream(scm.NewInt(0), recids, nil)
+		got := mr.Stream(scm.NewInt(0), recids)
 		if got.Int() != expectedSum {
 			b.Fatalf("MapReducer sum mismatch: got %d, want %d", got.Int(), expectedSum)
 		}
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			mr.Stream(scm.NewInt(0), recids, nil)
+			mr.Stream(scm.NewInt(0), recids)
 		}
 	})
 }

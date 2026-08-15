@@ -36,6 +36,13 @@ func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 	return make([]scm.Scmer, len(callbackCols))
 }
 
+func ownedReducerNeutral(neutral, aggregate scm.Scmer) scm.Scmer {
+	if aggregate.IsNil() {
+		return neutral
+	}
+	return scm.CloneForMutation(neutral)
+}
+
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
 // optimizeScan is the Optimize hook for the scan declaration.
@@ -575,7 +582,11 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	}
 	close(values)
 
-	akkumulator := neutral
+	collectorReducer := aggregate
+	if !aggregate2.IsNil() {
+		collectorReducer = aggregate2
+	}
+	akkumulator := ownedReducerNeutral(neutral, collectorReducer)
 	hadValue := false
 	var scanErr scanError
 	if !aggregate2.IsNil() {
@@ -801,7 +812,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	if stride > 0 {
 		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
 	}
-	akkumulator := neutral
+	akkumulator := ownedReducerNeutral(neutral, aggregate)
 	var outCount int64
 	var candidateCount int64
 	if ss == nil {
@@ -1056,7 +1067,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 }
 
 func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64, int64) {
-	akkumulator := neutral
+	akkumulator := ownedReducerNeutral(neutral, aggregate)
 	var outCount int64
 	var candidateCount int64
 	if ss == nil {

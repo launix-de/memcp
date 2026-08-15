@@ -1335,6 +1335,48 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"length hook: count folds parallelN length")
 	/* scan callback ownership: reduce accumulator enables _mut inside reduce body */
 	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: reduce acc enables set_assoc_mut")
+	/* reducer ownership is resolved by the normal one-pass type flow. */
+	(define optimize_list_reducer (lambda (body)
+		(serialize (optimize
+			(list 'lambda (list 'lst)
+				(list 'reduce 'lst (list 'lambda (list 'acc 'value) body) (list 'list)))))))
+	(assert (match (optimize_list_reducer (list 'append 'acc 'value)) (regex "append_mut" _) true false) true "reduce ownership: append_mut")
+	(assert (match (optimize_list_reducer (list 'append_unique 'acc 'value)) (regex "append_unique_mut" _) true false) true "reduce ownership: append_unique_mut")
+	(assert (match (optimize_list_reducer (list 'reverse 'acc)) (regex "reverse_mut" _) true false) true "reduce ownership: reverse_mut")
+	(assert (match (optimize_list_reducer (list 'map 'acc (list 'lambda (list 'item) 'item))) (regex "map_mut" _) true false) true "reduce ownership: map_mut")
+	(assert (match (optimize_list_reducer (list 'parallel_map 'acc (list 'lambda (list 'item) 'item))) (regex "parallel_map_mut" _) true false) true "reduce ownership: parallel_map_mut")
+	(assert (match (optimize_list_reducer (list 'mapIndex 'acc (list 'lambda (list 'index 'item) 'item))) (regex "mapIndex_mut" _) true false) true "reduce ownership: mapIndex_mut")
+	(assert (match (optimize_list_reducer (list 'filter 'acc (list 'lambda (list 'item) true))) (regex "filter_mut" _) true false) true "reduce ownership: filter_mut")
+	(assert (match (optimize_list_reducer (list 'extract_assoc 'acc (list 'lambda (list 'key 'item) 'item))) (regex "extract_assoc_mut" _) true false) true "reduce ownership: extract_assoc_mut")
+	(assert (match (optimize_list_reducer (list 'filter_assoc 'acc (list 'lambda (list 'key 'item) true))) (regex "filter_assoc_mut" _) true false) true "reduce ownership: filter_assoc_mut")
+	(assert (match (optimize_list_reducer (list 'map_assoc 'acc (list 'lambda (list 'key 'item) 'item))) (regex "map_assoc_mut" _) true false) true "reduce ownership: map_assoc_mut")
+	(assert (match (optimize_list_reducer (list 'mapkey_assoc 'acc (list 'lambda (list 'key 'item) 'key))) (regex "mapkey_assoc_mut" _) true false) true "reduce ownership: mapkey_assoc_mut")
+	(assert (match (optimize_list_reducer (list 'set_assoc 'acc "key" 'value)) (regex "set_assoc_mut" _) true false) true "reduce ownership: set_assoc_mut")
+	(assert (match (optimize_list_reducer (list 'merge_assoc 'acc 'value)) (regex "merge_assoc_mut" _) true false) true "reduce ownership: merge_assoc_mut")
+	(assert (match (optimize_list_reducer (list 'sort 'acc (list 'lambda (list 'a 'b) (list '< 'a 'b)))) (regex "sort_mut" _) true false) true "reduce ownership: sort_mut")
+	(assert (match (optimize_list_reducer (list 'for 'acc (list 'lambda (list 'state) false) (list 'lambda (list 'state) (list 'list 'state)))) (regex "for_mut" _) true false) true "reduce ownership: for_mut")
+	(define reduce_borrowed_without_aliasing (eval (optimize '('lambda '('values 'borrowed)
+		'('list 'borrowed
+			'('reduce 'values
+				'('lambda '('acc 'use_acc) '('if 'use_acc '('append 'acc 9) 'borrowed))
+				'(list)))))))
+	(assert
+		(reduce_borrowed_without_aliasing (list false true) (list 1))
+		(list (list 1) (list 1 9))
+		"reduce ownership: a borrowed callback result disables append_mut")
+	(define reduce_without_neutral_without_aliasing (eval (optimize
+		(list 'lambda (list 'values)
+			(list 'list 'values
+				(list 'reduce 'values
+					(list 'lambda (list 'acc 'value) (list 'append 'acc 9))))))))
+	(assert
+		(reduce_without_neutral_without_aliasing (list (list 1) (list 2)))
+		(list (list (list 1) (list 2)) (list 1 9))
+		"reduce ownership: the implicit first accumulator remains borrowed")
+	(define opt_reduce_assoc_ser (serialize (optimize '('lambda '('dict)
+		'('reduce_assoc 'dict '('lambda '('acc 'key 'value) '('set_assoc 'acc 'key 'value)) '(list))))))
+	(assert (match opt_reduce_assoc_ser (regex "set_assoc_mut" _) true false) true "reduce_assoc ownership: set_assoc_mut")
+	(assert (match (optimize_list_reducer (list 'merge_unique 'acc 'value)) (regex "merge_unique_mut" _) true false) false "reduce ownership: outer ownership does not prove nested merge_unique ownership")
 	(define opt_merge_unique_ser (serialize (optimize
 		(list 'lambda
 			(list 'a 'b 'c)

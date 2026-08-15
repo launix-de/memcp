@@ -767,7 +767,7 @@ func Init(en scm.Env) {
 				if len(a) > layout.neutralIdx {
 					neutral = a[layout.neutralIdx]
 				}
-				result := neutral
+				result := scm.CloneForMutation(neutral)
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
@@ -800,10 +800,7 @@ func Init(en scm.Env) {
 				}
 				if len(a) > layout.reduce2Idx && !a[layout.reduce2Idx].IsNil() {
 					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx])
-					base := neutral
-					if len(a) > layout.neutralIdx {
-						base = a[layout.neutralIdx]
-					}
+					base := scm.CloneForMutation(neutral)
 					result = reduce2fn(base, result)
 				}
 				return result
@@ -881,7 +878,7 @@ func Init(en scm.Env) {
 				if len(a) > layout.neutralIdx+sbShift {
 					neutral = a[layout.neutralIdx+sbShift]
 				}
-				result := neutral
+				result := scm.CloneForMutation(neutral)
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
@@ -928,10 +925,7 @@ func Init(en scm.Env) {
 				}
 				if len(a) > layout.reduce2Idx+sbShift && !a[layout.reduce2Idx+sbShift].IsNil() {
 					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx+sbShift])
-					base := neutral
-					if len(a) > layout.neutralIdx+sbShift {
-						base = a[layout.neutralIdx+sbShift]
-					}
+					base := scm.CloneForMutation(neutral)
 					result = reduce2fn(base, result)
 				}
 				return result
@@ -1008,7 +1002,7 @@ func Init(en scm.Env) {
 			// metadata/RDF callers use physical scan sources. Query plans must never
 			// materialize cardinality-dependent rows into SCM lists.
 			if list, ok := scmerSlice(tableArg); ok {
-				result := neutral
+				result := ownedReducerNeutral(neutral, aggregate)
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapfn := scm.OptimizeProcToSerialFunction(a[layout.limitIdx+2])
