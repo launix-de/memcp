@@ -81,7 +81,8 @@ type storageShard struct {
 	lastAccessed uint64 // UnixNano, atomic; updated on GetRead/GetExclusive for LRU eviction
 
 	// repartition drain tracking: counts in-flight scans on this shard
-	activeScanners atomic.Int32
+	activeScanners     atomic.Int32
+	activeTransactions atomic.Int32
 
 	// guards RemoveFromDisk against double execution (finalizer + explicit cleanup)
 	cleanupOnce sync.Once
@@ -162,9 +163,8 @@ func (s *storageShard) syncNextVisibilityLocked(oldRecid uint32, trackedByTx map
 	}
 }
 
-// logVisibilityChangeLocked persists a visibility transition. WAL replay has
-// no undelete record, so restoring a tombstoned main row is represented by a
-// fresh insert of the same logical row. Caller must hold s.mu.Lock().
+// logVisibilityChangeLocked persists a visibility transition without changing
+// row identity. Caller must hold s.mu.Lock().
 func (s *storageShard) logVisibilityChangeLocked(recid uint32, deleted bool) {
 	if (s.t.PersistencyMode != Safe && s.t.PersistencyMode != Logged) || s.logfile == nil {
 		return
@@ -173,16 +173,7 @@ func (s *storageShard) logVisibilityChangeLocked(recid uint32, deleted bool) {
 		s.logfile.Write(LogEntryDelete{recid})
 		return
 	}
-	columns := make([]string, 0, len(s.t.Columns))
-	values := make([]scm.Scmer, 0, len(s.t.Columns))
-	for _, column := range s.t.Columns {
-		if isRuntimeComputedColumn(column) {
-			continue
-		}
-		columns = append(columns, column.Name)
-		values = append(values, s.rowValueByRecidLocked(recid, column.Name))
-	}
-	s.logfile.Write(LogEntryInsert{columns, [][]scm.Scmer{values}})
+	s.logfile.Write(LogEntryUndelete{recid})
 }
 
 // catchUpRebuildLocked replays only mutations that happened after the rebuild
@@ -368,8 +359,16 @@ func (u *storageShard) load(t *table) {
 			switch l := logentry.(type) {
 			case LogEntryDelete:
 				u.deletions.Set(uint(l.idx), true) // mark deletion
+			case LogEntryUndelete:
+				u.deletions.Set(uint(l.idx), false)
 			case LogEntryInsert:
 				u.insertDatasetFromLog(l.cols, l.values)
+			case LogEntryInsertHidden:
+				firstRecid := u.main_count + uint32(len(u.inserts))
+				u.insertDatasetFromLog(l.cols, l.values)
+				for i := range l.values {
+					u.deletions.Set(uint(firstRecid+uint32(i)), true)
+				}
 			default:
 				panic("unknown log sequence: " + fmt.Sprint(l))
 			}
@@ -1254,7 +1253,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Capture for dual-write forwarding (cols/d2 are closure-local).
 				// Use repartitionDualWriteActive (set after Phase B snapshot)
 				// so rows already in the snapshot are not dual-written again.
-				if t.t.repartitionDualWriteActive.Load() {
+				if t.t.repartitionDualWriteActive.Load() && t.t.isRepartitionSource(t) {
 					dualWriteCols = payloadCols
 					dualWriteRow = [][]scm.Scmer{payloadRow}
 				}
@@ -1279,7 +1278,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					currentTx.AddToUndeleteMask(t, newRecid)
 					// Only log the insert (delete applied at commit)
 					if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
-						t.logfile.Write(LogEntryInsert{payloadCols, [][]scm.Scmer{payloadRow}})
+						t.logfile.Write(LogEntryInsertHidden{payloadCols, [][]scm.Scmer{payloadRow}})
 					}
 				} else {
 					// Cursor-stability / no-tx: existing behavior
@@ -1295,7 +1294,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}()
 			// Dual-write: forward the new row to the secondary shard set
 			if result && dualWriteRow != nil {
-				t.t.dualWriteInsertFromOld(t, newRecid, dualWriteCols, dualWriteRow)
+				t.t.dualWriteInsertFromOld(t, newRecid, dualWriteCols, dualWriteRow, currentTx)
 			}
 			// transaction bookkeeping + deferred sync
 			// (shard is already registered via OpenMapReducer — no per-row RegisterTouchedShard)
@@ -1425,8 +1424,8 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 		}
 		if result {
 			// Dual-write: forward DELETE to PShards during repartition
-			if t.t.repartitionDualWriteActive.Load() {
-				t.t.dualWriteDelete(t, idx)
+			if t.t.repartitionDualWriteActive.Load() && t.t.isRepartitionSource(t) {
+				t.t.dualWriteDelete(t, idx, currentTx)
 			}
 			if maintenanceNext != nil {
 				// Propagate to the rebuild successor shard via the stable
@@ -2233,7 +2232,11 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 	if (t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged) && t.logfile != nil {
 		// Log the actual inserted rows (not the original columns/values) so that
 		// auto-incremented IDs and column defaults are preserved across restarts.
-		t.logfile.Write(LogEntryInsert{payloadCols, payloadVals})
+		if currentTx != nil && currentTx.Mode == TxACID {
+			t.logfile.Write(LogEntryInsertHidden{payloadCols, payloadVals})
+		} else {
+			t.logfile.Write(LogEntryInsert{payloadCols, payloadVals})
+		}
 	}
 	if propagateMaintenance {
 		if next := t.nextForMaintenanceLocked(nil); next != nil {
@@ -2242,7 +2245,7 @@ func (t *storageShard) insertPreparedLocked(columns []string, values [][]scm.Scm
 			t.recordNextInsertRange(firstNewRecid, firstNextRecid, len(payloadVals))
 		}
 		if t.t.repartitionDualWriteActive.Load() && t.t.isRepartitionSource(t) {
-			t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals)
+			t.t.dualWriteInsertFromOld(t, firstNewRecid, payloadCols, payloadVals, currentTx)
 		}
 	}
 	// transaction bookkeeping
@@ -2639,6 +2642,27 @@ func (t *storageShard) RemoveFromDisk() {
 		}
 		t.t.schema.persistence.RemoveLog(t.uuid.String())
 	})
+}
+
+// discardUnpublishedShard removes files belonging to a generation that failed
+// before schema.json ever referenced it. It is deliberately separate from
+// RemoveFromDisk: published generations may only be retired by the explicit
+// lifecycle paths documented in the storage contract.
+func discardUnpublishedShard(s *storageShard) {
+	if s == nil || s.t == nil || s.t.schema == nil || s.t.schema.persistence == nil {
+		return
+	}
+	if s.logfile != nil {
+		s.logfile.Close()
+		s.logfile = nil
+	}
+	if s.uuid == uuid.Nil {
+		return
+	}
+	for _, col := range s.t.Columns {
+		s.t.schema.persistence.RemoveColumn(s.uuid.String(), col.Name)
+	}
+	s.t.schema.persistence.RemoveLog(s.uuid.String())
 }
 
 // removePersistence removes on-disk files (columns + logfile) for this shard

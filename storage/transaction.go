@@ -85,8 +85,15 @@ type shardSavepoint struct {
 // Savepoint captures the state of a transaction at a point in time.
 // Used for nested transactions (trigger recovery, savepoints).
 type Savepoint struct {
-	shardLens map[*storageShard]shardSavepoint
-	Depth     uint32
+	shardLens            map[*storageShard]shardSavepoint
+	Depth                uint32
+	repartitionDeleteLen int
+}
+
+type repartitionDeleteAction struct {
+	table    *table
+	shard    *storageShard
+	oldRecid uint32
 }
 
 // global transaction ID counter
@@ -119,9 +126,10 @@ type TxContext struct {
 	shards map[*storageShard]*storageShardTransaction
 
 	// Deferred sync: shards with pending log writes that need fsync at commit.
-	touchedShards sync.Map // map[*storageShard]bool
-	autoCommit    bool
-	writeHeld     map[*storageShard]uint32 // reentrant write-lock depth per shard
+	touchedShards      sync.Map // map[*storageShard]bool
+	autoCommit         bool
+	writeHeld          map[*storageShard]uint32 // reentrant write-lock depth per shard
+	repartitionDeletes []repartitionDeleteAction
 
 	mu sync.Mutex
 }
@@ -213,8 +221,37 @@ func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShard
 	if st == nil {
 		st = new(storageShardTransaction)
 		tx.shards[shard] = st
+		shard.activeTransactions.Add(1)
 	}
 	return st
+}
+
+func (tx *TxContext) addRepartitionDelete(table *table, shard *storageShard, oldRecid uint32) {
+	tx.mu.Lock()
+	tx.repartitionDeletes = append(tx.repartitionDeletes, repartitionDeleteAction{table: table, shard: shard, oldRecid: oldRecid})
+	tx.mu.Unlock()
+}
+
+// finishRepartitionActions must run before activeTransactions is decremented:
+// repartition publication waits for that counter and may otherwise pass its
+// final pending-delete drain before the committed action is visible.
+func (tx *TxContext) finishRepartitionActions(commit bool) {
+	tx.mu.Lock()
+	actions := tx.repartitionDeletes
+	tx.repartitionDeletes = nil
+	tx.mu.Unlock()
+	if !commit {
+		return
+	}
+	for _, action := range actions {
+		action.table.dualWriteDelete(action.shard, action.oldRecid, nil)
+	}
+}
+
+func (tx *TxContext) releaseActiveTransactionsLocked() {
+	for shard := range tx.shards {
+		shard.activeTransactions.Add(-1)
+	}
 }
 
 // getShardTx returns the storageShardTransaction for a shard, or nil if none exists.
@@ -377,6 +414,7 @@ func (tx *TxContext) CreateSavepoint() Savepoint {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	sp := Savepoint{Depth: tx.Depth}
+	sp.repartitionDeleteLen = len(tx.repartitionDeletes)
 	tx.Depth++
 	if len(tx.shards) > 0 {
 		sp.shardLens = make(map[*storageShard]shardSavepoint, len(tx.shards))
@@ -409,6 +447,9 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	tx.Depth = sp.Depth
+	if sp.repartitionDeleteLen < len(tx.repartitionDeletes) {
+		tx.repartitionDeletes = tx.repartitionDeletes[:sp.repartitionDeleteLen]
+	}
 	trackedShards := tx.trackedShardSetLocked()
 	for shard, st := range tx.shards {
 		lens := sp.shardLens[shard] // zero value (all zeros) if shard is new since savepoint
@@ -434,21 +475,7 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 				st.DeletedMask.Set(uint(recid), false)
 				shard.mu.Lock()
 				shard.deletions.Set(uint(recid), false)
-				if shard.logfile != nil && recid >= shard.main_count {
-					deltaIdx := int(recid - shard.main_count)
-					if deltaIdx < len(shard.inserts) {
-						row := shard.inserts[deltaIdx]
-						cols := make([]string, 0, len(shard.deltaColumns))
-						vals := make([]scm.Scmer, 0, len(shard.deltaColumns))
-						for name, idx := range shard.deltaColumns {
-							if idx < len(row) {
-								cols = append(cols, name)
-								vals = append(vals, row[idx])
-							}
-						}
-						shard.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{vals}})
-					}
-				}
+				shard.logVisibilityChangeLocked(recid, false)
 				shard.rollbackProtected.Set(uint(recid), false)
 				shard.syncNextVisibilityLocked(recid, trackedShards)
 				shard.mu.Unlock()
@@ -479,6 +506,9 @@ func (tx *TxContext) RollbackToSavepoint(sp Savepoint) {
 			st.UndeleteRecids = st.UndeleteRecids[:lens.UndeleteLen]
 		}
 		st.mu.Unlock()
+		if tx.Mode == TxCursorStability && shard.t.PersistencyMode == Safe && shard.logfile != nil {
+			shard.logfile.Sync()
+		}
 	}
 }
 
@@ -502,6 +532,10 @@ func (tx *TxContext) Commit() error {
 			shard.mu.Unlock()
 			st.mu.Unlock()
 		}
+		tx.mu.Unlock()
+		tx.finishRepartitionActions(true)
+		tx.mu.Lock()
+		tx.releaseActiveTransactionsLocked()
 		tx.State = TxCommitted
 		tx.shards = nil
 		tx.mu.Unlock()
@@ -546,8 +580,11 @@ func (tx *TxContext) commitACID() error {
 				for _, s := range shards {
 					s.mu.Unlock()
 				}
+				tx.finishRepartitionActions(false)
 				tx.mu.Lock()
+				tx.releaseActiveTransactionsLocked()
 				tx.State = TxAborted
+				tx.shards = nil
 				tx.mu.Unlock()
 				return fmt.Errorf("ACID commit conflict: row %d already deleted", recid)
 			}
@@ -577,6 +614,7 @@ func (tx *TxContext) commitACID() error {
 			}
 			shard.deletions.Set(uint(recid), false)
 			shard.rollbackProtected.Set(uint(recid), false)
+			shard.logVisibilityChangeLocked(recid, false)
 			shard.syncNextVisibilityLocked(recid, trackedShards)
 		}
 	}
@@ -587,7 +625,9 @@ func (tx *TxContext) commitACID() error {
 		s.mu.Unlock()
 	}
 
+	tx.finishRepartitionActions(true)
 	tx.mu.Lock()
+	tx.releaseActiveTransactionsLocked()
 	tx.State = TxCommitted
 	tx.shards = nil
 	tx.mu.Unlock()
@@ -613,7 +653,6 @@ func (tx *TxContext) Rollback() {
 // rollbackCursorStability replays undo masks in reverse to restore global state.
 func (tx *TxContext) rollbackCursorStability() {
 	tx.mu.Lock()
-	defer tx.mu.Unlock()
 	trackedShards := tx.trackedShardSetLocked()
 	for shard, st := range tx.shards {
 		st.mu.Lock()
@@ -633,30 +672,22 @@ func (tx *TxContext) rollbackCursorStability() {
 			recid := st.DeletedRecids[i]
 			shard.mu.Lock()
 			shard.deletions.Set(uint(recid), false)
-			if shard.logfile != nil && recid >= shard.main_count {
-				deltaIdx := int(recid - shard.main_count)
-				if deltaIdx < len(shard.inserts) {
-					row := shard.inserts[deltaIdx]
-					cols := make([]string, 0, len(shard.deltaColumns))
-					vals := make([]scm.Scmer, 0, len(shard.deltaColumns))
-					for name, idx := range shard.deltaColumns {
-						if idx < len(row) {
-							cols = append(cols, name)
-							vals = append(vals, row[idx])
-						}
-					}
-					shard.logfile.Write(LogEntryInsert{cols, [][]scm.Scmer{vals}})
-				}
-			}
+			shard.logVisibilityChangeLocked(recid, false)
 			shard.rollbackProtected.Set(uint(recid), false)
 			shard.syncNextVisibilityLocked(recid, trackedShards)
 			shard.mu.Unlock()
 		}
 		st.mu.Unlock()
+		if shard.t.PersistencyMode == Safe && shard.logfile != nil {
+			shard.logfile.Sync()
+		}
 	}
+	tx.repartitionDeletes = nil
+	tx.releaseActiveTransactionsLocked()
 	tx.State = TxAborted
 	tx.shards = nil
 	tx.touchedShards = sync.Map{}
+	tx.mu.Unlock()
 }
 
 // rollbackACID discards overlay masks. Staged rows that were globally hidden
@@ -674,6 +705,8 @@ func (tx *TxContext) rollbackACID() {
 		shard.mu.Unlock()
 		st.mu.Unlock()
 	}
+	tx.repartitionDeletes = nil
+	tx.releaseActiveTransactionsLocked()
 	tx.State = TxAborted
 	tx.shards = nil
 	tx.mu.Unlock()

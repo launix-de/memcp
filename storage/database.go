@@ -787,28 +787,87 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 				}
 			}
 
-			t.mu.Lock()
-			tableLocked = true
-
 			// Collect pre-rebuild shards that were replaced so we can clean them up.
 			var replaced []*storageShard
-			// Publish the new shard list only after completion.
 			if targetIsP {
 				for i, oldShard := range origShardList {
 					if oldShard != nil && oldShard != newShardList[i] && oldShard.uuid != newShardList[i].uuid {
 						replaced = append(replaced, oldShard)
 					}
 				}
-				t.PShards = newShardList
 			} else {
 				for i, oldShard := range origShardList {
 					if oldShard != nil && oldShard != newShardList[i] && oldShard.uuid != newShardList[i].uuid {
 						replaced = append(replaced, oldShard)
 					}
 				}
+			}
+
+			// A persistent generation is named by schema.json. Keep the old
+			// topology authoritative and briefly drain its writers while the new
+			// UUID list is committed. Ephemeral tables have no schema commit
+			// boundary; waiting for their transaction here can self-deadlock cache
+			// initialization, which invokes RebuildTable inside that transaction.
+			durablePublication := len(replaced) > 0 && t.PersistencyMode != Memory && t.PersistencyMode != Cache
+			if durablePublication {
+				for _, shard := range origShardList {
+					if shard != nil {
+						shard.mu.Lock()
+					}
+				}
+			}
+
+			t.mu.Lock()
+			tableLocked = true
+			if targetIsP {
+				t.PShards = newShardList
+			} else {
 				t.Shards = newShardList
 			}
+			t.mu.Unlock()
+			tableLocked = false
+
+			var publicationPanic any
+			if durablePublication {
+				func() {
+					defer func() { publicationPanic = recover() }()
+					db.save()
+				}()
+			}
+			if publicationPanic != nil {
+				t.mu.Lock()
+				if targetIsP {
+					t.PShards = origShardList
+				} else {
+					t.Shards = origShardList
+				}
+				t.maintenanceKind = 0
+				t.mu.Unlock()
+				if durablePublication {
+					for i := len(origShardList) - 1; i >= 0; i-- {
+						if origShardList[i] != nil {
+							origShardList[i].mu.Unlock()
+						}
+					}
+				}
+				errMu.Lock()
+				rebuildErrors = append(rebuildErrors, fmt.Sprintf("schema publication failed for %s.%s: %v", db.Name, t.Name, publicationPanic))
+				errMu.Unlock()
+				t.maintenanceMu.Unlock()
+				rebuildClaimed = false
+				return
+			}
+
+			t.mu.Lock()
+			tableLocked = true
 			t.publishTopologyLocked()
+			if durablePublication {
+				for i := len(origShardList) - 1; i >= 0; i-- {
+					if origShardList[i] != nil {
+						origShardList[i].mu.Unlock()
+					}
+				}
+			}
 
 			if !hasColdShard {
 				// Update per-column statistics only when every rebuilt shard has
@@ -894,6 +953,16 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 
 			t.mu.Unlock()
 			tableLocked = false
+			for _, shard := range origShardList {
+				if shard == nil {
+					continue
+				}
+				for shard.activeScanners.Load() > 0 {
+					runtime.Gosched()
+				}
+			}
+			t.mutationMu.Lock()
+			t.mutationMu.Unlock()
 
 			if doRepart {
 				// maintenanceMu stays locked; repartition Phase G will unlock it
