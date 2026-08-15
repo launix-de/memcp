@@ -23,6 +23,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS usol_file"
   - sql: "DROP TABLE IF EXISTS usol_parent"
   - sql: "DROP TABLE IF EXISTS usol_assignment"
+  - sql: "DROP TABLE IF EXISTS usol_projection"
   - sql: "DROP TABLE IF EXISTS usol_item_multi"
   - sql: "DROP TABLE IF EXISTS usol_file_multi"
   - sql: "DROP TABLE IF EXISTS usol_text_outer"
@@ -31,6 +32,7 @@ setup:
   - sql: "CREATE TABLE usol_file (id INT, uploaded_at INT)"
   - sql: "CREATE TABLE usol_parent (id INT PRIMARY KEY, owner_id INT, team_id INT)"
   - sql: "CREATE TABLE usol_assignment (id INT PRIMARY KEY, team_id INT, member_id INT)"
+  - sql: "CREATE TABLE usol_projection (id INT PRIMARY KEY, uploaded_at INT)"
   - sql: "CREATE TABLE usol_item_multi (id INT PRIMARY KEY, bucket INT, file_id INT)"
   - sql: "CREATE TABLE usol_file_multi (bucket INT, id INT, uploaded_at INT)"
   - sql: "CREATE TABLE usol_text_outer (id INT PRIMARY KEY, lookup_key TEXT COLLATE utf8mb4_general_ci)"
@@ -45,6 +47,8 @@ setup:
         (insert (table "memcp-tests" "usol_item") '("id" "parent_id" "file_id")
           (map (produceN 10000) (lambda (i) (list (+ i 1) (+ (- i (* 2 (floor (/ i 2)))) 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_file") '("id" "uploaded_at")
+          (map (produceN 10000) (lambda (i) (list (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "usol_projection") '("id" "uploaded_at")
           (map (produceN 10000) (lambda (i) (list (+ i 1) (+ i 1)))))
         (insert (table "memcp-tests" "usol_file_multi") '("bucket" "id" "uploaded_at")
           (map (produceN 2000) (lambda (i)
@@ -185,6 +189,52 @@ test_cases:
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
 
+  - name: "Ordered ACL preserves late projection results"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests'"
+    sql: |
+      SELECT projected.id, projected.uploaded_at
+      FROM (
+        SELECT item.id, projection.uploaded_at,
+          COALESCE((
+            SELECT (parent.owner_id = 7 OR EXISTS (
+              SELECT TRUE FROM usol_assignment member
+              WHERE member.team_id = parent.team_id
+                AND member.member_id = 7 LIMIT 1
+            ))
+            FROM usol_parent parent
+            WHERE parent.id = item.parent_id LIMIT 1
+          ), FALSE) AS can_view
+        FROM usol_item item
+        LEFT JOIN usol_projection projection ON projection.id = item.file_id
+      ) projected
+      WHERE projected.can_view
+      ORDER BY projected.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 9999
+          uploaded_at: 9999
+        - id: 9997
+          uploaded_at: 9997
+        - id: 9995
+          uploaded_at: 9995
+
+  - name: "Ordered ACL projection probes run only for the native window"
+    sql: |
+      SELECT COUNT(*) AS scans, SUM(outputCount) AS outputs
+      FROM `system_statistic`.`scans`
+      WHERE `schema` = 'memcp-tests' AND `table` = 'usol_projection'
+    expect:
+      rows: 1
+      data:
+        - scans: 3
+          outputs: 3
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
   - name: "Nested direct outer correlation preserves scalar results"
     setup:
       - scm: '(settings "ScanDebugging" true)'
@@ -276,6 +326,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS usol_file"
   - sql: "DROP TABLE IF EXISTS usol_parent"
   - sql: "DROP TABLE IF EXISTS usol_assignment"
+  - sql: "DROP TABLE IF EXISTS usol_projection"
   - sql: "DROP TABLE IF EXISTS usol_item_multi"
   - sql: "DROP TABLE IF EXISTS usol_file_multi"
   - sql: "DROP TABLE IF EXISTS usol_text_outer"
