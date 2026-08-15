@@ -2002,6 +2002,60 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (jit? _jit_map_dynamic_callback) (jit-enabled?) "jit: map with runtime callback compiles natively when enabled")
 	(assert (equal? (_jit_map_dynamic_callback '(2 3 4) (lambda (value) (* value 3))) '(6 9 12)) true "jit: map runtime callback trampoline")
 
+	/* JIT match: compile-time pattern pruning and direct list destructuring */
+	(define _jit_match_source (jit (lambda (src)
+		(match src
+			'((symbol alias) schema relation outer join) (list schema relation outer join)
+			_ nil))))
+	(assert (jit? _jit_match_source) (jit-enabled?) "jit: fixed-list match compiles natively when enabled")
+	(assert (equal? (_jit_match_source (list (symbol "alias") "sales" "orders" false nil)) '("sales" "orders" false nil)) true "jit: fixed-list match binds fields")
+	(assert (nil? (_jit_match_source (list (symbol "other") "sales" "orders" false nil))) true "jit: fixed-list literal mismatch falls through")
+	(assert (nil? (_jit_match_source (list (symbol "alias") "sales" "orders"))) true "jit: fixed-list length mismatch falls through")
+
+	(define _jit_match_cons (jit (lambda (values)
+		(match values
+			(cons head tail) (list head tail)
+			_ nil))))
+	(assert (jit? _jit_match_cons) (jit-enabled?) "jit: cons match compiles natively when enabled")
+	(assert (equal? (_jit_match_cons '(1 2 3)) (list 1 (list 2 3))) true "jit: cons match binds head and tail")
+	(assert (nil? (_jit_match_cons '())) true "jit: empty list rejects cons pattern")
+	(assert (nth (_jit_match_cons fd2) 0) "k0" "jit: cons match normalizes FastDict head")
+	(assert (count (nth (_jit_match_cons fd2) 1)) 19 "jit: cons match normalizes FastDict tail")
+
+	(define _jit_match_typed (jit (lambda (value)
+		(match value
+			(number? number) (+ number 1)
+			(string? text) text
+			_ nil))))
+	(assert (jit? _jit_match_typed) (jit-enabled?) "jit: typed alternatives compile natively when enabled")
+	(assert (_jit_match_typed 41) 42 "jit: number pattern selects numeric branch")
+	(assert (_jit_match_typed "text") "text" "jit: string pattern selects string branch")
+	(assert (nil? (_jit_match_typed false)) true "jit: typed patterns retain fallback")
+
+	(define _jit_match_list_type (jit (lambda (value)
+		(match value
+			(list? items) items
+			_ nil))))
+	(assert (jit? _jit_match_list_type) (jit-enabled?) "jit: list? pattern compiles natively when enabled")
+	(assert (count (_jit_match_list_type fd2)) 20 "jit: list? pattern normalizes FastDict")
+	(assert (nil? (_jit_match_list_type "not a list")) true "jit: list? pattern rejects scalar")
+
+	(define _jit_match_eval (jit (lambda (value expected)
+		(match value
+			(eval expected) true
+			_ false))))
+	(assert (jit? _jit_match_eval) (jit-enabled?) "jit: eval pattern compiles natively when enabled")
+	(assert (_jit_match_eval "same" "same") true "jit: eval pattern accepts runtime equality")
+	(assert (_jit_match_eval "left" "right") false "jit: eval pattern rejects runtime inequality")
+
+	(define _jit_match_known_list (jit (lambda (value)
+		(match (list 'alias value)
+			'((symbol alias) result) result
+			'((symbol other) impossible) impossible
+			nil))))
+	(assert (jit? _jit_match_known_list) (jit-enabled?) "jit: known-list match compiles natively when enabled")
+	(assert (_jit_match_known_list 17) 17 "jit: known list type and length are matched without fallback")
+
 	/* alu.go: sql_abs */
 	(print "testing sql_abs ...")
 	(assert (equal? (sql_abs -5) 5) true "sql_abs of -5 = 5")
