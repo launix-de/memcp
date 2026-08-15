@@ -215,7 +215,7 @@ test_cases:
 
   - name: "Depth three scalar EXISTS references outermost scope"
     noncritical: true
-    fail_comment: "skip-level correlation loses the outer domain while lowering nested scalar stages"
+    fail_comment: "Neumann D is metadata-only here; the nested scalar cache loses empty outer domains"
     sql: |
       SELECT p.id,
         (SELECT
@@ -312,7 +312,7 @@ test_cases:
 
   - name: "Projected EXISTS keeps false through two scalar levels"
     noncritical: true
-    fail_comment: "the presence result is lost while it crosses two scalar stage boundaries"
+    fail_comment: "the nullable presence key replaces D and turns FALSE into an absent scalar row"
     sql: |
       SELECT p.id,
         (SELECT
@@ -494,7 +494,7 @@ test_cases:
 
   - name: "Deep NOT IN skips scopes and preserves NULL semantics"
     noncritical: true
-    fail_comment: "deep anti-membership loses its outer correlation and returns NULL for every scalar domain"
+    fail_comment: "skip-level anti-membership does not retain the complete outer D relation"
     sql: |
       SELECT p.id,
         (SELECT
@@ -525,6 +525,93 @@ test_cases:
           unassigned_label: null
         - id: 5
           unassigned_label: null
+
+  - name: "Skip-level IN UNION keeps every ancestor domain"
+    sql: |
+      SELECT p.id,
+        (SELECT
+          (SELECT r.label
+           FROM dcm_ref r
+           WHERE r.id = i.ref_id
+             AND r.id IN (
+               SELECT a.ref_id FROM dcm_assignment a
+               WHERE a.actor_id = p.owner_id
+               UNION ALL
+               SELECT a.ref_id FROM dcm_assignment a
+               WHERE a.actor_id = 7
+                 AND a.tenant_id = p.tenant_id
+             )
+           LIMIT 1)
+         FROM dcm_item i
+         WHERE i.parent_id = p.id
+         ORDER BY i.id
+         LIMIT 1) AS visible_label
+      FROM dcm_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          visible_label: "alpha"
+        - id: 2
+          visible_label: null
+        - id: 3
+          visible_label: null
+        - id: 4
+          visible_label: null
+        - id: 5
+          visible_label: null
+
+  - name: "Correlated aggregate preserves nested EXISTS and empty domains"
+    sql: |
+      SELECT p.id,
+        COALESCE((
+          SELECT SUM(i.score)
+          FROM dcm_item i
+          WHERE i.parent_id = p.id
+            AND EXISTS (
+              SELECT 1 FROM dcm_event e
+              WHERE e.item_id = i.id AND e.status = 'open'
+            )
+        ), 0) AS open_score
+      FROM dcm_parent p
+      ORDER BY p.id
+    expect:
+      rows: 5
+      data:
+        - id: 1
+          open_score: 14
+        - id: 2
+          open_score: 0
+        - id: 3
+          open_score: 3
+        - id: 4
+          open_score: 0
+        - id: 5
+          open_score: 0
+
+  - name: "Logical decorrelation stays free of physical scan artifacts"
+    sql: |
+      EXPLAIN IR SELECT p.id
+      FROM dcm_parent p
+      WHERE EXISTS (
+        SELECT 1 FROM dcm_item i
+        WHERE i.parent_id = p.id
+          AND EXISTS (
+            SELECT 1 FROM dcm_event e
+            WHERE e.item_id = i.id AND e.status = 'open'
+          )
+      )
+    expect:
+      contains:
+        - "group-stage"
+        - "purpose exists"
+        - "lookup-keys"
+      not_contains:
+        - "scan_order"
+        - "scan_recset"
+        - "touch_keytable"
+        - ".grp:"
 
 
 cleanup:

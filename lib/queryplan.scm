@@ -21,7 +21,8 @@ Neumann compiler rebuild
 
 This file is the clean query compiler pipeline:
 
-parser AST -> untangle_query -> join_reorder -> build_queryplan
+parser AST -> normalize_sql_syntax -> decorrelate_logical_query
+-> optimize_logical_query -> build_queryplan
 
 The logical IR deliberately uses a small set of combined operators instead of
 textbook one-operation nodes:
@@ -844,43 +845,32 @@ instead of capturing whichever session populated the cache first. */
 					false))
 			_ false))))
 
-(define exists_correlation_pair (lambda (inner_default inner_sources outer_sources term)
-	(match term
-		((symbol equal??) a b) (begin
-			(define a_inner (expr_refs_sources? inner_default inner_sources a))
-			(define b_inner (expr_refs_sources? inner_default inner_sources b))
-			(define a_outer (and (not a_inner) (expr_refs_sources? nil outer_sources a)))
-			(define b_outer (and (not b_inner) (expr_refs_sources? nil outer_sources b)))
-			(if (and a_inner b_outer)
-				(list a b)
-				(if (and b_inner a_outer)
-					(list b a)
-					nil)))
-		((quote equal??) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
-		((symbol equal?) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
-		((quote equal?) a b) (exists_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
-		_ nil)))
-
-(define presence_correlation_pair (lambda (inner_default inner_sources outer_sources term)
+(define correlation_pair_using (lambda (inner_default inner_sources outer_sources term include_session)
 	(match term
 		((symbol equal??) a b) (begin
 			(define a_inner (expr_refs_sources? inner_default inner_sources a))
 			(define b_inner (expr_refs_sources? inner_default inner_sources b))
 			(define a_outer (and (not a_inner) (or
 				(expr_refs_sources? nil outer_sources a)
-				(session_dependency_expr? a))))
+				(and include_session (session_dependency_expr? a)))))
 			(define b_outer (and (not b_inner) (or
 				(expr_refs_sources? nil outer_sources b)
-				(session_dependency_expr? b))))
+				(and include_session (session_dependency_expr? b)))))
 			(if (and a_inner b_outer)
 				(list a b)
 				(if (and b_inner a_outer)
 					(list b a)
 					nil)))
-		((quote equal??) a b) (presence_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
-		((symbol equal?) a b) (presence_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
-		((quote equal?) a b) (presence_correlation_pair inner_default inner_sources outer_sources (list (quote equal??) a b))
+		((quote equal??) a b) (correlation_pair_using inner_default inner_sources outer_sources (list (quote equal??) a b) include_session)
+		((symbol equal?) a b) (correlation_pair_using inner_default inner_sources outer_sources (list (quote equal??) a b) include_session)
+		((quote equal?) a b) (correlation_pair_using inner_default inner_sources outer_sources (list (quote equal??) a b) include_session)
 		_ nil)))
+
+(define exists_correlation_pair (lambda (inner_default inner_sources outer_sources term)
+	(correlation_pair_using inner_default inner_sources outer_sources term false)))
+
+(define presence_correlation_pair (lambda (inner_default inner_sources outer_sources term)
+	(correlation_pair_using inner_default inner_sources outer_sources term true)))
 
 (define unique_correlation_pairs (lambda (pairs)
 	(reduce (coalesceNil pairs '()) (lambda (acc pair)
@@ -1051,6 +1041,40 @@ then matched without repeated deep comparisons. */
 (define sources_without_outer_join_terms (lambda (inner_default inner_sources outer_sources sources)
 	(map (coalesceNil sources '()) (lambda (src)
 		(source_without_outer_join_terms inner_default inner_sources outer_sources src)))))
+
+/* Compute the Neumann dependent-join inputs once. EXISTS, IN and scalar
+builders differ in result semantics, not in how they partition correlated and
+local predicates. Keeping this analysis central prevents the six builders from
+drifting on source-join pairs or residual outer references. */
+(define analyze_query_correlations (lambda (inner outer_sources pair_fn extra_pairs include_source_pairs)
+	(begin
+		(define inner_sources (qb_sources inner))
+		(define inner_src (if (empty_list? inner_sources) nil (car inner_sources)))
+		(define inner_default (if (nil? inner_src) nil (source_alias inner_src)))
+		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
+		(define term_pairs (filter (map terms (lambda (term)
+			(pair_fn inner_default inner_sources outer_sources term)))
+			(lambda (pair) (not (nil? pair)))))
+		(define source_pairs (if include_source_pairs
+			(source_join_correlation_pairs inner_default inner_sources outer_sources inner_sources)
+			'()))
+		(define lookup_pairs (domain_correlation_pairs
+			(merge (list term_pairs source_pairs (coalesceNil extra_pairs '())))))
+		(define local_terms (filter terms (lambda (term)
+			(nil? (pair_fn inner_default inner_sources outer_sources term)))))
+		(define local_sources
+			(sources_without_outer_join_terms inner_default inner_sources outer_sources inner_sources))
+		(define residual_outer_refs (merge_unique (list
+			(btw2025_terms_outer_column_refs local_terms inner_sources outer_sources)
+			(btw2025_sources_outer_column_refs local_sources inner_sources outer_sources))))
+		(list
+			(list (quote inner_src) inner_src)
+			(list (quote inner_sources) inner_sources)
+			(list (quote inner_default) inner_default)
+			(list (quote lookup_pairs) lookup_pairs)
+			(list (quote local_terms) local_terms)
+			(list (quote local_sources) local_sources)
+			(list (quote residual_outer_refs) residual_outer_refs)))))
 
 (define btw2025_local_where_terms_after_simple (lambda (inner_default inner_sources outer_sources block)
 	(filter
@@ -1553,23 +1577,14 @@ physical membership probe. */
 		(if (not (exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "EXISTS group-stage(D) currently supports one plain inner query-block")
 			true)
-		(define inner_src (car (qb_sources inner)))
-		(define inner_sources (qb_sources inner))
-		(define inner_default (source_alias inner_src))
-		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
-		(define corr_pairs (filter (map terms (lambda (term)
-			(presence_correlation_pair inner_default inner_sources outer_sources term)))
-			(lambda (pair) (not (nil? pair)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list
-			corr_pairs source_corr_pairs (presence_session_domain_pairs inner)))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (presence_correlation_pair inner_default inner_sources outer_sources term)))))
-		(define local_sources
-			(sources_without_outer_join_terms inner_default inner_sources outer_sources inner_sources))
-		(define residual_outer_refs (merge_unique (list
-			(btw2025_terms_outer_column_refs local_terms inner_sources outer_sources)
-			(btw2025_sources_outer_column_refs local_sources inner_sources outer_sources))))
+		(define analysis (analyze_query_correlations inner outer_sources
+			presence_correlation_pair (presence_session_domain_pairs inner) true))
+		(define inner_src (qassoc_get analysis (quote inner_src) nil))
+		(define inner_default (qassoc_get analysis (quote inner_default) nil))
+		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define local_terms (qassoc_get analysis (quote local_terms) '()))
+		(define local_sources (qassoc_get analysis (quote local_sources) '()))
+		(define residual_outer_refs (qassoc_get analysis (quote residual_outer_refs) '()))
 		(define keys (if (and (empty_list? lookup_pairs) (empty_list? residual_outer_refs))
 			'(1)
 			(merge_unique (list
@@ -1643,18 +1658,12 @@ physical membership probe. */
 		(if (not (grouped_exists_inner_supported? inner))
 			(neumann_fail "untangle_query" "grouped EXISTS requires an unordered, unlimited query-block")
 			true)
-		(define inner_src (car (qb_sources inner)))
-		(define inner_sources (qb_sources inner))
-		(define inner_default (source_alias inner_src))
-		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
-		(define corr_pairs (filter (map terms (lambda (term)
-			(presence_correlation_pair inner_default inner_sources outer_sources term)))
-			(lambda (pair) (not (nil? pair)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list
-			corr_pairs source_corr_pairs (presence_session_domain_pairs inner)))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (presence_correlation_pair inner_default inner_sources outer_sources term)))))
+		(define analysis (analyze_query_correlations inner outer_sources
+			presence_correlation_pair (presence_session_domain_pairs inner) true))
+		(define inner_default (qassoc_get analysis (quote inner_default) nil))
+		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define local_terms (qassoc_get analysis (quote local_terms) '()))
+		(define local_sources (qassoc_get analysis (quote local_sources) '()))
 		(define explicit_keys (map (qb_group inner) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (group_keys_for_correlations inner_default lookup_pairs explicit_keys))
@@ -1666,7 +1675,7 @@ physical membership probe. */
 				(list aggregate_count_descriptor)))))
 		(define stage_input (make_query_block
 			(qb_schema inner)
-			(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
+			local_sources
 			'()
 			condition
 			'() nil '() nil nil
@@ -2069,17 +2078,14 @@ without separately proving two-valued semantics. */
 		(if (not (equal? (count (qb_fields membership_inner)) 2))
 			(neumann_fail "untangle_query" "IN subquery must expose exactly one column")
 			true)
-		(define inner_src (car (qb_sources membership_inner)))
-		(define inner_sources (qb_sources membership_inner))
-		(define inner_default (source_alias inner_src))
-		(define terms (split_and_terms (coalesceNil (qb_where membership_inner) true)))
-		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_sources outer_sources term)))
-			(lambda (pair) (not (nil? pair)))))
-		(define lookup_pairs (domain_correlation_pairs (merge (list
-			corr_pairs (session_domain_pairs membership_inner)))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
+		(define analysis (analyze_query_correlations membership_inner outer_sources
+			exists_correlation_pair (session_domain_pairs membership_inner) false))
+		(define inner_src (qassoc_get analysis (quote inner_src) nil))
+		(define inner_sources (qassoc_get analysis (quote inner_sources) '()))
+		(define inner_default (qassoc_get analysis (quote inner_default) nil))
+		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define local_terms (qassoc_get analysis (quote local_terms) '()))
+		(define local_sources (qassoc_get analysis (quote local_sources) '()))
 		(define rhs_expr (canonical_column_expr_for_alias inner_default (query_block_first_expr membership_inner)))
 		(define keys (cons rhs_expr
 			(correlation_inner_keys inner_default lookup_pairs)))
@@ -2098,7 +2104,7 @@ without separately proving two-valued semantics. */
 			inner_src
 			(make_query_block
 				(qb_schema membership_inner)
-				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources membership_inner))
+				local_sources
 				'()
 				condition
 				'() nil
@@ -2252,24 +2258,22 @@ without separately proving two-valued semantics. */
 			(neumann_fail "untangle_query" "scalar aggregate group-stage(D) currently supports one plain inner query-block")
 			true)
 		(define value_expr (query_block_first_expr inner))
-		(define inner_src (car (qb_sources inner)))
-		(define inner_sources (qb_sources inner))
-		(define inner_default (source_alias inner_src))
-		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
-		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_sources outer_sources term)))
-			(lambda (pair) (not (nil? pair)))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
+		(define analysis (analyze_query_correlations inner outer_sources
+			exists_correlation_pair (session_domain_pairs inner) true))
+		(define inner_src (qassoc_get analysis (quote inner_src) nil))
+		(define inner_sources (qassoc_get analysis (quote inner_sources) '()))
+		(define inner_default (qassoc_get analysis (quote inner_default) nil))
+		(define where_corr_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define local_terms (qassoc_get analysis (quote local_terms) '()))
+		(define local_sources (qassoc_get analysis (quote local_sources) '()))
 		(define having_terms (split_and_terms (coalesceNil (qb_having inner) true)))
 		(define having_corr_pairs (filter (map having_terms (lambda (term)
 			(exists_correlation_pair inner_default inner_sources outer_sources term)))
 			(lambda (pair) (not (nil? pair)))))
 		(define local_having_terms (filter having_terms (lambda (term)
 			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
 		(define all_corr_pairs (domain_correlation_pairs (merge (list
-			corr_pairs having_corr_pairs source_corr_pairs (session_domain_pairs inner)))))
+			where_corr_pairs having_corr_pairs))))
 		(define local_value_expr (decorrelate_expr_with_pairs inner_default all_corr_pairs value_expr))
 		(define ags (dedupe_aggregates_by_col (merge (list (extract_aggregates local_value_expr) (list aggregate_count_descriptor)))))
 		(if (empty_list? ags)
@@ -2287,7 +2291,7 @@ without separately proving two-valued semantics. */
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
+				local_sources
 				'()
 				condition
 				'() nil '() nil nil
@@ -2343,21 +2347,16 @@ without separately proving two-valued semantics. */
 			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
 			true)
 		(define value_expr (query_block_first_expr inner))
-		(define inner_src (car (qb_sources inner)))
+		(define analysis (analyze_query_correlations inner outer_sources
+			exists_correlation_pair (session_domain_pairs inner) true))
+		(define inner_src (qassoc_get analysis (quote inner_src) nil))
 		(if (not (source_is_base_table? inner_src))
 			(neumann_fail "untangle_query" "scalar once_limit stage requires a base inner source after FROM flattening")
 			true)
-		(define inner_sources (qb_sources inner))
-		(define inner_default (source_alias inner_src))
-		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
-		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_sources outer_sources term)))
-			(lambda (pair) (not (nil? pair)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list
-			corr_pairs source_corr_pairs (session_domain_pairs inner)))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
+		(define inner_default (qassoc_get analysis (quote inner_default) nil))
+		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define local_terms (qassoc_get analysis (quote local_terms) '()))
+		(define local_sources (qassoc_get analysis (quote local_sources) '()))
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(scalar_stage_inner_keys_for_correlations inner_default (qb_stages inner) (qb_sources inner) lookup_pairs)))
@@ -2375,7 +2374,7 @@ without separately proving two-valued semantics. */
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
+				local_sources
 				'()
 				condition
 				'() nil '() nil nil
@@ -2707,18 +2706,13 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
 			true)
 		(define value_expr (query_block_first_expr inner))
-		(define inner_src (car (qb_sources inner)))
-		(define inner_sources (qb_sources inner))
-		(define inner_default (source_alias inner_src))
-		(define terms (split_and_terms (coalesceNil (qb_where inner) true)))
-		(define corr_pairs (filter (map terms (lambda (term)
-			(exists_correlation_pair inner_default inner_sources outer_sources term)))
-			(lambda (pair) (not (nil? pair)))))
-		(define source_corr_pairs (source_join_correlation_pairs inner_default inner_sources outer_sources (qb_sources inner)))
-		(define lookup_pairs (domain_correlation_pairs (merge (list
-			corr_pairs source_corr_pairs (session_domain_pairs inner)))))
-		(define local_terms (filter terms (lambda (term)
-			(nil? (exists_correlation_pair inner_default inner_sources outer_sources term)))))
+		(define analysis (analyze_query_correlations inner outer_sources
+			exists_correlation_pair (session_domain_pairs inner) true))
+		(define inner_src (qassoc_get analysis (quote inner_src) nil))
+		(define inner_default (qassoc_get analysis (quote inner_default) nil))
+		(define lookup_pairs (qassoc_get analysis (quote lookup_pairs) '()))
+		(define local_terms (qassoc_get analysis (quote local_terms) '()))
+		(define local_sources (qassoc_get analysis (quote local_sources) '()))
 		(define keys (if (empty_list? lookup_pairs)
 			'(1)
 			(correlation_inner_keys inner_default lookup_pairs)))
@@ -2734,7 +2728,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			inner_src
 			(make_query_block
 				(qb_schema inner)
-				(sources_without_outer_join_terms inner_default inner_sources outer_sources (qb_sources inner))
+				local_sources
 				'()
 				condition
 				'() nil '() nil nil
@@ -16620,14 +16614,28 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir))))
 
+/* Keep phase ownership explicit. normalize_query_ast inside untangle_query
+removes parser-specific spelling before dependent joins are identified; this
+wrapper owns the output-shape normalizers which must precede binding.
+Decorrelation owns D and all subquery elimination; only then may logical join
+ordering run. Storage artifacts begin in build_queryplan. */
+(define normalize_sql_syntax (lambda (ast)
+	(sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast))))
+
+(define decorrelate_logical_query (lambda (ast)
+	(untangle_query_term (normalize_sql_syntax ast) nil)))
+
+(define optimize_logical_query (lambda (ir)
+	(join_reorder ir)))
+
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan
-		(join_reorder
-			(untangle_query_term (sanitize_temporal_outputs (sanitize_decimal_aggregate_outputs ast)) nil)))))
+		(optimize_logical_query
+			(decorrelate_logical_query ast)))))
 
 (define neumann_compile_ir_pipeline (lambda (ir)
 	(build_queryplan
-		(join_reorder
+		(optimize_logical_query
 			(require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir))))))
 
 /* ------------------------------------------------------------------------- */
@@ -16638,7 +16646,7 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 
 (define build_queryplan_term_with_sink (lambda (query sink_mode)
 	(neumann_compile_ir_pipeline
-		(ir_with_return (untangle_query_term query nil) sink_mode))))
+		(ir_with_return (decorrelate_logical_query query) sink_mode))))
 
 (define build_queryplan_term_from_logical (lambda (logical_ir)
 	(neumann_compile_ir_pipeline logical_ir)))
@@ -16661,7 +16669,7 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 			'() '()
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
-			(ir_with_return (untangle_query_term query nil) (list (quote dml) schema tbl))))))
+			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))))))
 
 (define sql_truncate (lambda (schema tbl)
 	(build_dml_plan schema tbl nil
@@ -16677,7 +16685,7 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 
 (define explain_queryplan_ir (lambda (query)
 	(begin
-		(define ir (untangle_query_term query nil))
+		(define ir (decorrelate_logical_query query))
 		(list (quote resultrow)
 			(list (quote list)
 				"ir"
@@ -16689,7 +16697,7 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 	(begin
 		(define planning_session (context "session"))
 		(planning_session "__memcp_explain_reorder_selectivities" true)
-		(define reordered (join_reorder (untangle_query_term query nil)))
+		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
 		(planning_session "__memcp_explain_reorder_selectivities" nil)
 		(list (quote resultrow)
 			(list (quote list)
@@ -16726,9 +16734,9 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 						(+ total (tree_count item))) 0))
 				_ 1)))
 		(define started_ns (nanotime))
-		(define ir (untangle_query_term query nil))
+		(define ir (decorrelate_logical_query query))
 		(define untangled_ns (nanotime))
-		(define reordered (join_reorder ir))
+		(define reordered (optimize_logical_query ir))
 		(define reordered_ns (nanotime))
 		(define prepared (prepare_physical_queryplan reordered))
 		(define prepared_ns (nanotime))

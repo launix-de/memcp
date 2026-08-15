@@ -29,20 +29,38 @@ The planner pipeline is:
 
 ```text
 parser AST
--> untangle_query
--> join_reorder / optimize
+-> normalize_sql_syntax
+-> decorrelate_logical_query / untangle_query
+-> logical predicate placement and join_reorder / optimize
 -> build_queryplan
 ```
 
 Each phase has a distinct job:
 
 - parser: preserve SQL syntax and produce neutral AST/query terms
-- `untangle_query`: build a decorrelated logical IR
-- `join_reorder` / optimize: choose logical order and record costing facts
-- `build_queryplan`: choose physical scan sources/operators and emit Scheme code
+- `normalize_sql_syntax`: remove parser-specific spelling and syntactic sugar;
+  normalization must be context-safe for SQL three-valued logic
+- `decorrelate_logical_query` / `untangle_query`: build a decorrelated logical
+  IR using Neumann domains, equivalence classes, and representatives
+- logical predicate placement and `join_reorder` / optimize: move selections
+  only across proven-safe logical boundaries, choose logical order, and record
+  costing facts after decorrelation has exposed the complete join graph
+- `build_queryplan`: choose physical scan sources/operators, bind conditions to
+  concrete scans, and emit Scheme code
 
 Do not move physical decisions into `untangle_query`. Do not leave logical
 decorrelation work for `build_queryplan`.
+
+Each transformation has exactly one owning phase. A later phase may consume
+facts established earlier, but it must not rediscover parser shapes or repeat a
+semantic rewrite. In particular:
+
+- syntax normalization must not choose RecSets, scans, keytables, or join order
+- join reorder must run after dependent joins have been eliminated
+- selection placement across query/group stages is logical; attaching a final
+  predicate callback or index bound to a scan is physical
+- physical lowering must consume canonical logical primitives instead of
+  matching the original SQL spelling again
 
 ## Logical IR Shape
 
@@ -87,6 +105,13 @@ possible later, for example:
 - `cardinality_mode`
 - `preserve_empty_domain`
 - order/window/group facts
+
+For Neumann decorrelation, `D` denotes the complete outer domain required by a
+dependent subtree. An equivalence-class representative from the nullable side
+of an outer join cannot replace `D`: missing matches would erase the very
+domain rows for which `EXISTS` must produce `FALSE` or a scalar aggregate must
+produce its empty-input result. Representative selection must preserve every
+outer domain row before later selection placement or join reordering.
 
 Positive membership in a WHERE truth context may use the semantic
 `membership_truth` expression primitive. It references a logical group-stage
