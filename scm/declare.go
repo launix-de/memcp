@@ -93,8 +93,18 @@ type TypeDescriptor struct {
 // OptimizerContext is an exported wrapper so packages like storage can use
 // optimizer hooks without importing unexported optimizerMetainfo.
 type OptimizerContext struct {
-	Env *Env
-	Ome *optimizerMetainfo
+	Env           *Env
+	Ome           *optimizerMetainfo
+	argumentTypes []TypeInfo
+}
+
+// ArgumentType returns the TypeInfo produced while optimizing a call argument.
+// index uses the expression's call-slice position, so the first argument is 1.
+func (oc *OptimizerContext) ArgumentType(index int) TypeInfo {
+	if index < 0 || index >= len(oc.argumentTypes) {
+		return TypeInfo{length: UnknownLength}
+	}
+	return oc.argumentTypes[index]
 }
 
 // TypeInfo is a compact, stack-allocated type descriptor returned by OptimizeEx.

@@ -275,9 +275,10 @@ func Optimize(val Scmer, env *Env, telemetryCallback func(Scmer)) Scmer {
 		started = time.Now()
 	}
 	ome := newOptimizerMetainfo()
-	// Recursive hook guards still need the original tree size. This walk goes
-	// away with OptimizeRewrite; it is not performed for telemetry alone.
-	ome.rewrite.inputNodes = optimizerNodeCount(val)
+	ome.rewrite.root = val
+	if telemetryCallback != nil {
+		ome.rewrite.inputNodes = optimizerNodeCount(val)
+	}
 	v, _ := OptimizeEx(val, env, &ome, true)
 	if telemetryCallback != nil {
 		compileNS := time.Since(started).Nanoseconds()
@@ -298,6 +299,7 @@ func Optimize(val Scmer, env *Env, telemetryCallback func(Scmer)) Scmer {
 type optimizerRewriteState struct {
 	remainingBudget  int
 	inputNodes       int
+	root             Scmer
 	rewrites         int
 	rejected         int
 	callbackAnalyses int
@@ -328,12 +330,14 @@ func newOptimizerMetainfo() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
 	result.variableTypes = make(map[Symbol]*TypeDescriptor)
 	result.numberedTypes = make(map[NthLocalVar]*TypeDescriptor)
-	result.rewrite = &optimizerRewriteState{
-		remainingBudget: defaultOptimizerRewriteBudget,
-		active:          make(map[string]bool),
-		seen:            make(map[uint64]bool),
-	}
+	result.rewrite = newOptimizerRewriteState()
 	return
+}
+
+func newOptimizerRewriteState() *optimizerRewriteState {
+	return &optimizerRewriteState{
+		remainingBudget: defaultOptimizerRewriteBudget,
+	}
 }
 
 func optimizerNodeCount(expr Scmer) int {
@@ -558,31 +562,6 @@ func callbackParameterType(td *TypeDescriptor) *TypeDescriptor {
 	}
 	result.Element = callbackParameterType(td.Element)
 	return &result
-}
-
-// CloneOptimizerExpression copies mutable AST containers so optimizer hooks can
-// analyze a speculative variant without rewriting the caller's original code.
-func CloneOptimizerExpression(expr Scmer) Scmer {
-	if expr.IsSourceInfo() {
-		source := *expr.SourceInfo()
-		source.value = CloneOptimizerExpression(source.value)
-		return NewSourceInfo(source)
-	}
-	if expr.GetTag() == tagAny {
-		if source, ok := expr.Any().(SourceInfo); ok {
-			source.value = CloneOptimizerExpression(source.value)
-			return NewSourceInfo(source)
-		}
-	}
-	items, ok := scmerSlice(expr)
-	if !ok {
-		return expr
-	}
-	cloned := make([]Scmer, len(items))
-	for i, item := range items {
-		cloned[i] = CloneOptimizerExpression(item)
-	}
-	return NewSlice(cloned)
 }
 
 func descriptorKey(td *TypeDescriptor, key string) *TypeDescriptor {
@@ -1672,8 +1651,19 @@ type OptimizerRewriteContract struct {
 func (oc *OptimizerContext) OptimizeRewrite(original, rewritten Scmer, useResult bool, contract OptimizerRewriteContract) (Scmer, *TypeDescriptor, bool) {
 	state := oc.Ome.rewrite
 	if state == nil {
-		state = newOptimizerMetainfo().rewrite
+		state = newOptimizerRewriteState()
 		oc.Ome.rewrite = state
+	}
+	if state.active == nil {
+		state.active = make(map[string]bool)
+		state.seen = make(map[uint64]bool)
+	}
+	if state.inputNodes == 0 {
+		if state.root.IsNil() {
+			state.inputNodes = optimizerNodeCount(original)
+		} else {
+			state.inputNodes = optimizerNodeCount(state.root)
+		}
 	}
 	activeKey := contract.Name + ":" + strconv.FormatUint(HashKey(original), 16)
 	if contract.Name == "" || !contract.PreconditionsMet || state.remainingBudget <= 0 || state.active[activeKey] {
@@ -1708,54 +1698,312 @@ func (oc *OptimizerContext) OptimizeRewrite(original, rewritten Scmer, useResult
 	return result, td, true
 }
 
-// AnalyzeCallback computes a callback result type without consuming pending
-// metadata or otherwise mutating the optimizer context used for emitted code.
-func (oc *OptimizerContext) AnalyzeCallback(callback Scmer, params []*TypeDescriptor) *TypeDescriptor {
-	if oc.Ome.rewrite != nil {
-		oc.Ome.rewrite.callbackAnalyses++
-		oc.Ome.rewrite.callbackClones++
-	}
-	analysisOme := newOptimizerMetainfo()
-	analysisOme.rewrite = oc.Ome.rewrite
-	analysisOme.loopDepth = oc.Ome.loopDepth
-	analysis := OptimizerContext{Env: oc.Env, Ome: &analysisOme}
-	analysis.SetCallbackParamTypes(params)
-	_, result := analysis.OptimizeSub(CloneOptimizerExpression(callback), true)
-	return result
+type callbackTypeFlowKind uint8
+
+const (
+	callbackFlowStatic callbackTypeFlowKind = iota
+	callbackFlowParameter
+	callbackFlowJoined
+	callbackFlowList
+	callbackFlowProjected
+)
+
+// callbackTypeFlow is the compact type transfer function produced for a
+// reducer lambda. Fixed-point iterations evaluate this graph; they never walk,
+// clone, or optimize the callback AST again.
+type callbackTypeFlow struct {
+	kind      callbackTypeFlowKind
+	parameter int
+	key       string
+	static    *TypeDescriptor
+	children  []*callbackTypeFlow
 }
 
-// OptimizeReducerCallback derives accumulator ownership from the neutral value
-// and the reducer's actual return flow. The descriptor join is monotonic: facts
-// are retained only while they hold for the initial value and every iteration.
+func staticCallbackTypeFlow(td *TypeDescriptor) *callbackTypeFlow {
+	return &callbackTypeFlow{kind: callbackFlowStatic, static: normalizeOptimizerType(td)}
+}
+
+func unknownCallbackTypeFlow() *callbackTypeFlow {
+	return staticCallbackTypeFlow(&TypeDescriptor{Kind: "any", Length: UnknownLength})
+}
+
+func (flow *callbackTypeFlow) evaluate(params []*TypeDescriptor) *TypeDescriptor {
+	if flow == nil {
+		return normalizeOptimizerType(nil)
+	}
+	switch flow.kind {
+	case callbackFlowParameter:
+		if flow.parameter >= 0 && flow.parameter < len(params) {
+			return normalizeOptimizerType(params[flow.parameter])
+		}
+	case callbackFlowJoined:
+		if len(flow.children) == 0 {
+			return normalizeOptimizerType(nil)
+		}
+		result := flow.children[0].evaluate(params)
+		for _, child := range flow.children[1:] {
+			result, _ = mergeOptimizerTypes(result, child.evaluate(params))
+		}
+		return result
+	case callbackFlowList:
+		result := &TypeDescriptor{Kind: "list", Transfer: true, Length: len(flow.children)}
+		if len(flow.children) > 0 {
+			result.Keys = make(map[string]*TypeDescriptor, len(flow.children))
+			for i, child := range flow.children {
+				result.Keys[strconv.Itoa(i)] = child.evaluate(params)
+			}
+		}
+		return result
+	case callbackFlowProjected:
+		if len(flow.children) == 1 {
+			return descriptorKey(flow.children[0].evaluate(params), flow.key)
+		}
+	default:
+		return normalizeOptimizerType(flow.static)
+	}
+	return normalizeOptimizerType(nil)
+}
+
+func callbackFlowJoin(flows ...*callbackTypeFlow) *callbackTypeFlow {
+	children := make([]*callbackTypeFlow, 0, len(flows))
+	for _, flow := range flows {
+		if flow == nil {
+			flow = unknownCallbackTypeFlow()
+		}
+		if flow.kind == callbackFlowJoined {
+			children = append(children, flow.children...)
+		} else {
+			children = append(children, flow)
+		}
+	}
+	if len(children) == 1 {
+		return children[0]
+	}
+	return &callbackTypeFlow{kind: callbackFlowJoined, children: children}
+}
+
+func callbackFlowProjection(base *callbackTypeFlow, key string) *callbackTypeFlow {
+	return &callbackTypeFlow{kind: callbackFlowProjected, key: key, children: []*callbackTypeFlow{base}}
+}
+
+func bindCallbackPatternFlow(pattern Scmer, value *callbackTypeFlow, bindings map[Symbol]*callbackTypeFlow) {
+	if stripped, ok := scmerStripSourceInfo(pattern); ok {
+		pattern = stripped
+	}
+	if items, ok := scmerSlice(pattern); ok && len(items) == 2 && scmerIsSymbol(items[0], "quote") {
+		pattern = items[1]
+	}
+	if sym, ok := scmerSymbol(pattern); ok {
+		if sym != Symbol("_") {
+			bindings[sym] = value
+		}
+		return
+	}
+	items, ok := scmerSlice(pattern)
+	if !ok || len(items) == 0 {
+		return
+	}
+	head, headOK := scmerSymbol(items[0])
+	if !headOK {
+		for i, item := range items {
+			bindCallbackPatternFlow(item, callbackFlowProjection(value, strconv.Itoa(i)), bindings)
+		}
+		return
+	}
+	switch head {
+	case Symbol("list"):
+		for i, item := range items[1:] {
+			bindCallbackPatternFlow(item, callbackFlowProjection(value, strconv.Itoa(i)), bindings)
+		}
+	case Symbol("cons"):
+		if len(items) >= 2 {
+			bindCallbackPatternFlow(items[1], callbackFlowProjection(value, "0"), bindings)
+		}
+		if len(items) >= 3 {
+			bindCallbackPatternFlow(items[2], unknownCallbackTypeFlow(), bindings)
+		}
+	case Symbol("string?"), Symbol("number?"), Symbol("list?"):
+		if len(items) >= 2 {
+			bindCallbackPatternFlow(items[1], value, bindings)
+		}
+	case Symbol("merge"), Symbol("concat"), Symbol("regex"):
+		for _, item := range items[1:] {
+			bindCallbackPatternFlow(item, unknownCallbackTypeFlow(), bindings)
+		}
+	}
+}
+
+func buildCallbackTypeFlow(expr Scmer, bindings map[Symbol]*callbackTypeFlow) *callbackTypeFlow {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if sym, ok := scmerSymbol(expr); ok {
+		if flow := bindings[sym]; flow != nil {
+			return flow
+		}
+		return unknownCallbackTypeFlow()
+	}
+	items, ok := scmerSlice(expr)
+	if !ok {
+		return staticCallbackTypeFlow(&TypeDescriptor{Transfer: true, Const: true, Length: UnknownLength})
+	}
+	if len(items) == 0 {
+		return staticCallbackTypeFlow(&TypeDescriptor{Kind: "list", Transfer: true, Const: true, Length: 0})
+	}
+	if scmerIsSymbol(items[0], "quote") {
+		// Quoted containers are embedded in the compiled procedure and can be
+		// returned by more than one reducer iteration. They are constants, but
+		// ownership is borrowed: a later iteration must never select a _mut
+		// operation for a previously returned quoted accumulator.
+		return staticCallbackTypeFlow(&TypeDescriptor{Const: true, Length: UnknownLength})
+	}
+	if (scmerIsSymbol(items[0], "outer") || scmerIsSymbol(items[0], "set") || scmerIsSymbol(items[0], "define")) && len(items) >= 2 {
+		return buildCallbackTypeFlow(items[len(items)-1], bindings)
+	}
+	if scmerIsSymbol(items[0], "begin") || scmerIsSymbol(items[0], "!begin") || scmerIsSymbol(items[0], "begin_mut") {
+		local := make(map[Symbol]*callbackTypeFlow, len(bindings)+4)
+		for symbol, flow := range bindings {
+			local[symbol] = flow
+		}
+		start := 1
+		if scmerIsSymbol(items[0], "begin_mut") {
+			start = 2
+		}
+		result := unknownCallbackTypeFlow()
+		for i := start; i < len(items); i++ {
+			child, childOK := scmerSlice(items[i])
+			if childOK && len(child) == 3 && (scmerIsSymbol(child[0], "set") || scmerIsSymbol(child[0], "define")) {
+				result = buildCallbackTypeFlow(child[2], local)
+				if symbol, symbolOK := scmerSymbol(child[1]); symbolOK {
+					local[symbol] = result
+				}
+				continue
+			}
+			result = buildCallbackTypeFlow(items[i], local)
+		}
+		return result
+	}
+	if scmerIsSymbol(items[0], "if") {
+		branches := make([]*callbackTypeFlow, 0, len(items)/2+1)
+		for i := 2; i < len(items); i += 2 {
+			branches = append(branches, buildCallbackTypeFlow(items[i], bindings))
+		}
+		if len(items)%2 == 0 {
+			branches = append(branches, buildCallbackTypeFlow(items[len(items)-1], bindings))
+		} else {
+			branches = append(branches, staticCallbackTypeFlow(&TypeDescriptor{Kind: "nil", Transfer: true, Const: true, Length: UnknownLength}))
+		}
+		return callbackFlowJoin(branches...)
+	}
+	if scmerIsSymbol(items[0], "and") || scmerIsSymbol(items[0], "or") {
+		branches := make([]*callbackTypeFlow, 0, len(items)-1)
+		for _, item := range items[1:] {
+			branches = append(branches, buildCallbackTypeFlow(item, bindings))
+		}
+		return callbackFlowJoin(branches...)
+	}
+	if scmerIsSymbol(items[0], "match") || scmerIsSymbol(items[0], "match_mut") {
+		value := buildCallbackTypeFlow(items[1], bindings)
+		branches := make([]*callbackTypeFlow, 0, len(items)/2)
+		for i := 3; i < len(items); i += 2 {
+			local := make(map[Symbol]*callbackTypeFlow, len(bindings)+4)
+			for symbol, flow := range bindings {
+				local[symbol] = flow
+			}
+			bindCallbackPatternFlow(items[i-1], value, local)
+			branches = append(branches, buildCallbackTypeFlow(items[i], local))
+		}
+		if len(items)%2 == 1 {
+			branches = append(branches, buildCallbackTypeFlow(items[len(items)-1], bindings))
+		}
+		return callbackFlowJoin(branches...)
+	}
+	if elements, isList := listConstructorElements(items); isList {
+		children := make([]*callbackTypeFlow, len(elements))
+		for i, element := range elements {
+			children[i] = buildCallbackTypeFlow(element, bindings)
+		}
+		return &callbackTypeFlow{kind: callbackFlowList, children: children}
+	}
+	callName := ""
+	if declaration := DeclarationForValue(items[0]); declaration != nil {
+		callName = declaration.Name
+	} else if symbol, symbolOK := scmerSymbol(items[0]); symbolOK {
+		callName = string(symbol)
+	}
+	if len(items) >= 2 {
+		key := ""
+		switch {
+		case callName == "car" && len(items) == 2:
+			key = "0"
+		case callName == "cadr" && len(items) == 2:
+			key = "1"
+		case callName == "nth" && len(items) == 3 && items[2].IsInt():
+			key = strconv.FormatInt(items[2].Int(), 10)
+		case callName == "get_assoc" && len(items) == 3 && items[2].IsString():
+			key = String(items[2])
+		}
+		if key != "" {
+			return callbackFlowProjection(buildCallbackTypeFlow(items[1], bindings), key)
+		}
+	}
+	if lambdaParams, lambdaBody, lambdaOK := optimizerLambdaParts(items[0]); lambdaOK && len(lambdaParams) == len(items)-1 {
+		local := make(map[Symbol]*callbackTypeFlow, len(bindings)+len(lambdaParams))
+		for symbol, flow := range bindings {
+			local[symbol] = flow
+		}
+		for i, param := range lambdaParams {
+			if symbol, symbolOK := scmerSymbol(param); symbolOK {
+				local[symbol] = buildCallbackTypeFlow(items[i+1], bindings)
+			}
+		}
+		return buildCallbackTypeFlow(lambdaBody, local)
+	}
+	if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.Type != nil && declaration.Type.Return != nil {
+		return staticCallbackTypeFlow(declaration.Type.Return)
+	}
+	return unknownCallbackTypeFlow()
+}
+
+func reducerCallbackTypeFlow(callback Scmer, parameterCount int) *callbackTypeFlow {
+	params, body, ok := optimizerLambdaParts(callback)
+	if !ok || len(params) != parameterCount {
+		return unknownCallbackTypeFlow()
+	}
+	bindings := make(map[Symbol]*callbackTypeFlow, len(params))
+	for i, param := range params {
+		if symbol, symbolOK := scmerSymbol(param); symbolOK {
+			bindings[symbol] = &callbackTypeFlow{kind: callbackFlowParameter, parameter: i}
+		}
+	}
+	return buildCallbackTypeFlow(body, bindings)
+}
+
+// OptimizeReducerCallback derives the stable loop-carried type from a compact
+// transfer graph and then optimizes the callback exactly once with that type.
 func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator *TypeDescriptor, values ...*TypeDescriptor) (Scmer, *TypeDescriptor) {
 	accumulator = normalizeOptimizerType(accumulator)
 	params := make([]*TypeDescriptor, len(values)+1)
 	copy(params[1:], values)
-	if !accumulator.Transfer {
-		params[0] = accumulator
-		oc.SetCallbackParamTypes(params)
-		optimized, result := oc.OptimizeSub(callback, true)
-		return optimized, normalizeOptimizerType(result)
-	}
+	flow := reducerCallbackTypeFlow(callback, len(params))
 	loopType := accumulator
 	for iteration := 0; iteration < 16; iteration++ {
 		params[0] = loopType
-		result := normalizeOptimizerType(oc.AnalyzeCallback(callback, params))
+		result := flow.evaluate(params)
 		next, changed := mergeOptimizerTypes(loopType, result)
 		if !changed {
-			params[0] = next
-			oc.SetCallbackParamTypes(params)
-			optimized, finalResult := oc.OptimizeSub(callback, true)
-			return optimized, normalizeOptimizerType(finalResult)
+			loopType = next
+			break
+		}
+		if oc.Ome.rewrite != nil {
+			oc.Ome.rewrite.callbackAnalyses++
 		}
 		loopType = next
 	}
-	// The join is monotonic, but malformed custom descriptors must not make
-	// optimizer compilation unbounded.
 	params[0] = loopType
 	oc.SetCallbackParamTypes(params)
-	optimized, finalResult := oc.OptimizeSub(callback, true)
-	return optimized, normalizeOptimizerType(finalResult)
+	optimized, _ := oc.OptimizeSub(callback, true)
+	return optimized, loopType
 }
 
 func normalizeOptimizerType(td *TypeDescriptor) *TypeDescriptor {
@@ -1858,6 +2106,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	var transferOwnership bool
 	var firstArgType TypeInfo
 	argTypes := make([]TypeInfo, len(v))
+	oc.argumentTypes = argTypes
 	var immediateLambdaParams []*TypeDescriptor
 	if immediateLambdaArity > 0 {
 		immediateLambdaParams = make([]*TypeDescriptor, immediateLambdaArity)

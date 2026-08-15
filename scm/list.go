@@ -27,6 +27,7 @@ package scm
 
 import "fmt"
 import "runtime"
+import "strconv"
 import "sync"
 import "sync/atomic"
 import "github.com/carli2/hybridsort"
@@ -294,6 +295,42 @@ func optimizedExactAssocLength(expr Scmer, oc *OptimizerContext) int {
 	return exactAssocLengthFromExpr(expr)
 }
 
+func exactOptimizedListArgumentLength(expr Scmer, ti TypeInfo) int {
+	if length := exactListLengthFromExpr(expr); length >= 0 {
+		return length
+	}
+	if materialized, changed := materializeCodeLiteral(expr); changed {
+		if length := exactListLengthFromExpr(materialized); length >= 0 {
+			return length
+		}
+	}
+	if ti.length >= 0 {
+		return ti.length
+	}
+	if ti.Extra != nil && ti.Extra.Length >= 0 {
+		return ti.Extra.Length
+	}
+	return UnknownLength
+}
+
+func exactOptimizedAssocArgumentLength(expr Scmer, ti TypeInfo) int {
+	if length := exactAssocLengthFromExpr(expr); length >= 0 {
+		return length
+	}
+	if materialized, changed := materializeCodeLiteral(expr); changed {
+		if length := exactAssocLengthFromExpr(materialized); length >= 0 {
+			return length
+		}
+	}
+	if ti.length >= 0 {
+		return ti.length
+	}
+	if ti.Extra != nil && ti.Extra.Length >= 0 {
+		return ti.Extra.Length
+	}
+	return UnknownLength
+}
+
 func lambdaBodyResultExpr(expr Scmer) (Scmer, bool) {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
@@ -414,14 +451,9 @@ func optimizeListCall(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *
 }
 
 func optimizeCount(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	if len(v) == 2 && !exprMayHaveSideEffects(v[1]) {
-		if length := optimizedExactListLength(v[1], oc); length >= 0 {
-			return NewInt(int64(length)), &TypeDescriptor{Kind: "int", Transfer: true, Const: true, Length: UnknownLength}
-		}
-	}
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
 	if rv, ok := scmerSlice(result); ok && len(rv) == 2 {
-		if length := optimizedExactListLength(rv[1], oc); length >= 0 && !exprMayHaveSideEffects(rv[1]) {
+		if length := exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)); length >= 0 && !exprMayHaveSideEffects(rv[1]) {
 			return NewInt(int64(length)), &TypeDescriptor{Kind: "int", Transfer: true, Const: true, Length: UnknownLength}
 		}
 	}
@@ -432,7 +464,7 @@ func optimizeFixedLengthInput(mutName string) func(v []Scmer, oc *OptimizerConte
 	return func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 		result, td := oc.applyDefaultOptimization(v, useResult, mutName)
 		if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-			return result, descriptorWithLength(td, optimizedExactListLength(rv[1], oc))
+			return result, descriptorWithLength(td, exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)))
 		}
 		return result, td
 	}
@@ -442,7 +474,7 @@ func optimizeAssocFixedLengthInput(mutName string) func(v []Scmer, oc *Optimizer
 	return func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 		result, td := oc.applyDefaultOptimization(v, useResult, mutName)
 		if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-			return result, descriptorWithLength(td, optimizedExactAssocLength(rv[1], oc))
+			return result, descriptorWithLength(td, exactOptimizedAssocArgumentLength(rv[1], oc.ArgumentType(1)))
 		}
 		return result, td
 	}
@@ -451,7 +483,7 @@ func optimizeAssocFixedLengthInput(mutName string) func(v []Scmer, oc *Optimizer
 func optimizeExtractAssoc(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	result, td := oc.applyDefaultOptimization(v, useResult, "extract_assoc_mut")
 	if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
-		return result, descriptorWithLength(td, optimizedExactAssocLength(rv[1], oc))
+		return result, descriptorWithLength(td, exactOptimizedAssocArgumentLength(rv[1], oc.ArgumentType(1)))
 	}
 	return result, td
 }
@@ -459,7 +491,7 @@ func optimizeExtractAssoc(v []Scmer, oc *OptimizerContext, useResult bool) (Scme
 func optimizeCdr(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
 	if rv, ok := scmerSlice(result); ok && len(rv) == 2 {
-		if length := optimizedExactListLength(rv[1], oc); length >= 0 {
+		if length := exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)); length >= 0 {
 			return result, descriptorWithLength(td, length-1)
 		}
 	}
@@ -476,8 +508,12 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		argExpr := rv[1]
 		if argList, ok := scmerSlice(argExpr); ok && len(argList) > 0 {
 			expected := UnknownLength
-			for _, item := range argList[1:] {
-				itemLen := optimizedExactListLength(item, oc)
+			for i, item := range argList[1:] {
+				itemType := tiZero
+				if outerType := oc.ArgumentType(1); outerType.Extra != nil && outerType.Extra.Keys != nil {
+					itemType = TypeInfoFromTD(outerType.Extra.Keys[strconv.Itoa(i)])
+				}
+				itemLen := exactOptimizedListArgumentLength(item, itemType)
 				if itemLen < 0 {
 					return result, td
 				}
@@ -496,8 +532,8 @@ func optimizeZip(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		return result, td
 	}
 	minLen := UnknownLength
-	for _, arg := range rv[1:] {
-		length := optimizedExactListLength(arg, oc)
+	for i, arg := range rv[1:] {
+		length := exactOptimizedListArgumentLength(arg, oc.ArgumentType(i+1))
 		if length < 0 {
 			return result, td
 		}
@@ -536,7 +572,7 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 		}
 	}
 	if rv, ok := scmerSlice(result); ok && len(rv) == 3 {
-		return result, descriptorWithLength(td, optimizedExactListLength(rv[1], oc))
+		return result, descriptorWithLength(td, exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1)))
 	}
 	return result, td
 }
@@ -8012,7 +8048,7 @@ func optimizeAppend(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 	if !ok || len(rv) < 2 {
 		return result, td
 	}
-	baseLength := optimizedExactListLength(rv[1], oc)
+	baseLength := exactOptimizedListArgumentLength(rv[1], oc.ArgumentType(1))
 	if baseLength >= 0 {
 		td = descriptorWithLength(td, baseLength+len(rv)-2)
 	}
@@ -8080,8 +8116,8 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 	totalLength := 0
 	allExact := len(rv) > 2
 	allDirectListArgs := len(rv) > 2
-	for _, arg := range rv[1:] {
-		length := optimizedExactListLength(arg, oc)
+	for i, arg := range rv[1:] {
+		length := exactOptimizedListArgumentLength(arg, oc.ArgumentType(i+1))
 		if length >= 0 {
 			totalLength += length
 		} else {
@@ -8230,7 +8266,7 @@ func optimizeCons(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Type
 				return NewSlice(merged), descriptorWithLength(FreshAlloc, len(merged)-1)
 			}
 		}
-		if tailLength := optimizedExactListLength(tail, oc); tailLength >= 0 {
+		if tailLength := exactOptimizedListArgumentLength(tail, oc.ArgumentType(2)); tailLength >= 0 {
 			return result, descriptorWithLength(td, tailLength+1)
 		}
 	}
