@@ -21,8 +21,8 @@ import "fmt"
 import "html"
 import "sync"
 import "regexp"
+import "unsafe"
 import "net/url"
-import "reflect"
 import "strings"
 import crand "crypto/rand"
 import "crypto/sha1"
@@ -37,6 +37,27 @@ import "golang.org/x/text/language"
 // Collation metadata registry for stable serialization of comparator closures.
 // Keyed by function pointer.
 var collateRegistry sync.Map // map[uintptr]struct{Collation string; Reverse bool}
+
+// collateLessRegistry holds the allocation-free executor belonging to a
+// canonical collate callback. The callback remains the public identity and the
+// single source of ordering semantics.
+var collateLessRegistry sync.Map // map[uintptr]func(Scmer, Scmer) bool
+
+// FunctionIdentity returns the runtime identity of a function value, including
+// its closure context. reflect.Value.Pointer only returns the shared code entry
+// and therefore aliases distinct collation closures.
+func FunctionIdentity(fn func(...Scmer) Scmer) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&fn))
+}
+
+type collateCacheKey struct {
+	Collation string
+	Reverse   bool
+}
+
+// collateCache canonicalizes order relations. Auto indexes compare callback
+// pointers, so equivalent plans must receive the same function instance.
+var collateCache sync.Map // map[collateCacheKey]Scmer
 
 func optimizeFNVHash(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	if len(v) == 2 {
@@ -89,7 +110,7 @@ func LookupCollate(fn func(...Scmer) Scmer) (string, bool, bool) {
 	if fn == nil {
 		return "", false, false
 	}
-	if v, ok := collateRegistry.Load(reflect.ValueOf(fn).Pointer()); ok {
+	if v, ok := collateRegistry.Load(FunctionIdentity(fn)); ok {
 		m := v.(struct {
 			Collation string
 			Reverse   bool
@@ -97,6 +118,16 @@ func LookupCollate(fn func(...Scmer) Scmer) (string, bool, bool) {
 		return m.Collation, m.Reverse, true
 	}
 	return "", false, false
+}
+
+// OrderRelationLess resolves the bool executor of an order callback once. The
+// fallback preserves arbitrary user callbacks; factory callbacks avoid a
+// Scmer(bool) roundtrip in storage sort loops.
+func OrderRelationLess(fn func(...Scmer) Scmer) func(Scmer, Scmer) bool {
+	if fast, ok := collateLessRegistry.Load(FunctionIdentity(fn)); ok {
+		return fast.(func(Scmer, Scmer) bool)
+	}
+	return func(a, b Scmer) bool { return ToBool(fn(a, b)) }
 }
 
 /* SQL LIKE operator implementation on strings */
@@ -9777,10 +9808,46 @@ func init_strings() {
 	collation_re := regexp.MustCompile("^([^_]+_)?(.+?)$") // caracterset_language_case
 	Declare(&Globalenv, &Declaration{
 		Name: "collate",
-		Desc: "returns the `<` operator for a given collation. MemCP allows natural sorting of numeric literals.",
+		Desc: "returns a canonical order relation for a collation and direction. MemCP allows natural sorting of numeric literals.",
 		Fn: func(a ...Scmer) Scmer {
-			collation := String(a[0])
-			ci := false
+			collationName := String(a[0])
+			reverse := len(a) > 1 && ToBool(a[1])
+			key := collateCacheKey{Collation: collationName, Reverse: reverse}
+			if cached, ok := collateCache.Load(key); ok {
+				return cached.(Scmer)
+			}
+			// Binary and bare-charset relations are the dominant index case. Keep
+			// their canonical callback to one function dispatch: Less already owns
+			// the required ASC NULL-first semantics, and swapping its operands owns
+			// DESC NULL-last semantics. A closure per metadata key keeps callback
+			// identity distinct even when two names have identical byte ordering.
+			if collationName == "bin" || collationName == "binary" || collationName == "utf8" || collationName == "utf8mb4" {
+				less := func(left, right Scmer) bool {
+					if reverse {
+						return Less(right, left)
+					}
+					return Less(left, right)
+				}
+				fn := func(args ...Scmer) Scmer {
+					return NewBool(less(args[0], args[1]))
+				}
+				result := NewFunc(fn)
+				collateRegistry.Store(FunctionIdentity(fn), struct {
+					Collation string
+					Reverse   bool
+				}{Collation: collationName, Reverse: reverse})
+				collateLessRegistry.Store(FunctionIdentity(fn), less)
+				canonical, _ := collateCache.LoadOrStore(key, result)
+				return canonical.(Scmer)
+			}
+			raw := func() Scmer {
+				collation := String(a[0])
+				// Bare charset names carry no language/case ordering. SQL columns use
+				// them as their default metadata and historically sort bytewise.
+				if collation == "utf8" || collation == "utf8mb4" || collation == "binary" {
+					collation = "bin"
+				}
+				ci := false
 			if strings.HasSuffix(collation, "_ci") {
 				ci = true
 				collation = collation[:len(collation)-3]
@@ -9792,14 +9859,14 @@ func init_strings() {
 					// Return closures that compare raw UTF-8 byte order; register for serialization
 					if len(a) > 1 && ToBool(a[1]) {
 						f := func(a ...Scmer) Scmer { return GreaterScm(a...) }
-						collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+						collateRegistry.Store(FunctionIdentity(f), struct {
 							Collation string
 							Reverse   bool
 						}{Collation: String(a[0]), Reverse: true})
 						return NewFunc(f)
 					}
 					f := func(a ...Scmer) Scmer { return LessScm(a...) }
-					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+					collateRegistry.Store(FunctionIdentity(f), struct {
 						Collation string
 						Reverse   bool
 					}{Collation: String(a[0]), Reverse: false})
@@ -9851,7 +9918,7 @@ func init_strings() {
 							}
 							return NewBool(res)
 						}
-						collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+						collateRegistry.Store(FunctionIdentity(f), struct {
 							Collation string
 							Reverse   bool
 						}{Collation: String(a[0]), Reverse: true})
@@ -9878,7 +9945,7 @@ func init_strings() {
 						}
 						return NewBool(res)
 					}
-					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+					collateRegistry.Store(FunctionIdentity(f), struct {
 						Collation string
 						Reverse   bool
 					}{Collation: String(a[0]), Reverse: false})
@@ -9928,7 +9995,7 @@ func init_strings() {
 						}
 						return NewBool(res)
 					}
-					collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+					collateRegistry.Store(FunctionIdentity(f), struct {
 						Collation string
 						Reverse   bool
 					}{Collation: String(a[0]), Reverse: true})
@@ -9941,7 +10008,7 @@ func init_strings() {
 					}
 					return NewBool(c.CompareString(String(a[0]), String(a[1])) == -1)
 				}
-				collateRegistry.Store(reflect.ValueOf(f).Pointer(), struct {
+				collateRegistry.Store(FunctionIdentity(f), struct {
 					Collation string
 					Reverse   bool
 				}{Collation: String(a[0]), Reverse: false})
@@ -9952,6 +10019,33 @@ func init_strings() {
 				}
 				return NewFunc(LessScm)
 			}
+			}()
+			rawFn := raw.Func()
+			less := func(left, right Scmer) bool {
+				leftNil := left.IsNil()
+				rightNil := right.IsNil()
+				if leftNil || rightNil {
+					if leftNil && rightNil {
+						return false
+					}
+					if reverse {
+						return !leftNil && rightNil
+					}
+					return leftNil && !rightNil
+				}
+				return ToBool(rawFn(left, right))
+			}
+			fn := func(args ...Scmer) Scmer {
+				return NewBool(less(args[0], args[1]))
+			}
+			result := NewFunc(fn)
+			collateRegistry.Store(FunctionIdentity(fn), struct {
+				Collation string
+				Reverse   bool
+			}{Collation: collationName, Reverse: reverse})
+			collateLessRegistry.Store(FunctionIdentity(fn), less)
+			canonical, _ := collateCache.LoadOrStore(key, result)
+			return canonical.(Scmer)
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", ParamName: "reverse", ParamDesc: "whether to reverse the order like in ORDER BY DESC", Optional: true}},

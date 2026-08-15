@@ -17,6 +17,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "math"
 import "sort"
 import "sync"
 import "github.com/carli2/hybridsort"
@@ -25,41 +26,6 @@ import "strings"
 import "runtime/debug"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
-
-// wrapScanOrderComparator adds SQL NULL positioning around the comparator
-// supplied to scan_order. The comparator itself only sees non-NULL values:
-// ascending order puts NULL first, descending order puts NULL last.
-func wrapScanOrderComparator(compare func(...scm.Scmer) scm.Scmer) func(...scm.Scmer) scm.Scmer {
-	descending := false
-	if decl := scm.DeclarationForValue(scm.NewFunc(compare)); decl != nil && (decl.Name == "<" || decl.Name == ">") {
-		descending = decl.Name == ">"
-	} else if _, reverse, ok := scm.LookupCollate(compare); ok {
-		descending = reverse
-	} else {
-		// User callbacks can be type-specific. Direction probing must not make a
-		// valid string/date comparator fail before it sees actual input values.
-		func() {
-			defer func() { _ = recover() }()
-			ascendingProbe := scm.ToBool(compare(scm.NewInt(1), scm.NewInt(2)))
-			descendingProbe := scm.ToBool(compare(scm.NewInt(2), scm.NewInt(1)))
-			descending = !ascendingProbe && descendingProbe
-		}()
-	}
-	return func(args ...scm.Scmer) scm.Scmer {
-		if len(args) < 2 {
-			return scm.NewBool(false)
-		}
-		leftNil := args[0].IsNil()
-		rightNil := args[1].IsNil()
-		if leftNil || rightNil {
-			if leftNil && rightNil {
-				return scm.NewBool(false)
-			}
-			return scm.NewBool(leftNil != descending)
-		}
-		return compare(args...)
-	}
-}
 
 func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
 	// scan_order_multi args: 0=fn, 1=tx, 2=tables, 3=filterCols, 4=filterFns,
@@ -176,6 +142,7 @@ type shardqueue struct {
 	err            scanError
 	scols          []func(uint32) scm.Scmer // sort criteria column reader
 	sortdirs       []func(...scm.Scmer) scm.Scmer
+	sortless       []func(scm.Scmer, scm.Scmer) bool
 	mapper         *ShardMapReducer
 	callbackCols   []string  // per-table map columns (for multi-table merge)
 	callback       scm.Scmer // per-table map function (for multi-table merge)
@@ -208,15 +175,15 @@ func (s *shardqueue) Less(i, j int) bool {
 		return i < j
 	}
 	cmpCount := len(s.scols)
-	if len(s.sortdirs) < cmpCount {
-		cmpCount = len(s.sortdirs)
+	if len(s.sortless) < cmpCount {
+		cmpCount = len(s.sortless)
 	}
 	for c := 0; c < cmpCount; c++ {
 		a := s.scols[c](s.items[i])
 		b := s.scols[c](s.items[j])
-		if scm.ToBool(s.sortdirs[c](a, b)) {
+		if s.sortless[c](a, b) {
 			return true
-		} else if scm.ToBool(s.sortdirs[c](b, a)) {
+		} else if s.sortless[c](b, a) {
 			return false
 		} // else: go to next level
 		// otherwise: move on to c++
@@ -278,18 +245,18 @@ func (s *globalqueue) Less(i, j int) bool {
 	if len(s.q[j].scols) < cmpCount {
 		cmpCount = len(s.q[j].scols)
 	}
-	if len(s.q[i].sortdirs) < cmpCount {
-		cmpCount = len(s.q[i].sortdirs)
+	if len(s.q[i].sortless) < cmpCount {
+		cmpCount = len(s.q[i].sortless)
 	}
-	if len(s.q[j].sortdirs) < cmpCount {
-		cmpCount = len(s.q[j].sortdirs)
+	if len(s.q[j].sortless) < cmpCount {
+		cmpCount = len(s.q[j].sortless)
 	}
 	for c := 0; c < cmpCount; c++ {
 		a := s.q[i].scols[c](s.q[i].items[0])
 		b := s.q[j].scols[c](s.q[j].items[0])
-		if scm.ToBool(s.q[i].sortdirs[c](a, b)) {
+		if s.q[i].sortless[c](a, b) {
 			return true
-		} else if scm.ToBool(s.q[i].sortdirs[c](b, a)) {
+		} else if s.q[i].sortless[c](b, a) {
 			return false
 		} // else: go to next level
 		// otherwise: move on to c++
@@ -366,10 +333,9 @@ func (s *scanOrderTableSpec) backingTable() *table {
 	return s.table
 }
 
-// extendBoundariesWithSortCols appends sort columns to the boundaries when all
-// existing filter boundaries are point lookups and the comparators are
-// index-order compatible (ASC). This lets the shard return rows already sorted
-// by ORDER BY, reducing the cross-shard merge to merging pre-sorted runs.
+// extendBoundariesWithSortCols appends sort columns and their order relations
+// when all existing filter boundaries are point lookups. The relation callback
+// is the complete ordering contract, including collation, direction and NULLs.
 func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (boundaries, bool) {
 	original := b
 	allEq := true
@@ -379,33 +345,15 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			break
 		}
 	}
-	canAppendSortPrefix := len(sortcols) > 0
-	for i := range sortcols {
-		if i >= len(sortdirs) || sortdirs[i] == nil {
-			continue // default ASC
-		}
-		asc := false
-		probeOK := true
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					probeOK = false
-				}
-			}()
-			if scm.ToBool(sortdirs[i](scm.NewInt(1), scm.NewInt(2))) &&
-				!scm.ToBool(sortdirs[i](scm.NewInt(2), scm.NewInt(1))) {
-				asc = true
-			}
-		}()
-		if !probeOK || !asc {
-			canAppendSortPrefix = false
-			break
-		}
-	}
+	canAppendSortPrefix := len(sortcols) > 0 && len(sortdirs) >= len(sortcols)
 	if !allEq || !canAppendSortPrefix {
 		return b, false
 	}
-	for _, scol := range sortcols {
+	for i, scol := range sortcols {
+		if sortdirs[i] == nil {
+			return original, false
+		}
+		orderMeta := orderRelationMeta(sortdirs[i])
 		if scol.IsString() {
 			col := scol.String()
 			already := false
@@ -416,7 +364,7 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 				}
 			}
 			if !already {
-				b = append(b, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil()})
+				b = append(b, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
 			}
 			continue
 		}
@@ -459,10 +407,48 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			}
 		}
 		if !already {
-			b = append(b, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), mapCols: mc, mapFn: mf})
+			b = append(b, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta, mapCols: mc, mapFn: mf})
 		}
 	}
 	return b, len(sortcols) > 0
+}
+
+func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds boundaries, effectiveCols int) bool {
+	if !active || index == nil {
+		return false
+	}
+	orderCols := 0
+	for i, boundary := range bounds {
+		if boundary.order == nil || boundaryIsPoint(boundary) {
+			continue
+		}
+		orderCols++
+		if i >= effectiveCols || i >= len(index.Cols) || i >= len(index.ColOrder) {
+			return false
+		}
+		if index.Cols[i] != boundary.col || !sameOrderRelation(index.ColOrder[i], boundary.order) {
+			return false
+		}
+	}
+	return orderCols > 0
+}
+
+// orderedIndexUsageWeight estimates how much of one full scan an ordered
+// index would save. Building the permutation costs O(n log n), while an
+// unindexed Top-k scan costs O(n log k). Savings therefore accumulate slowly
+// for tiny windows and at the normal rate for large offsets or full scans.
+func orderedIndexUsageWeight(rows, kept int) float64 {
+	if rows <= 1 || kept < 0 || kept >= rows {
+		return 1
+	}
+	if kept < 1 {
+		kept = 1
+	}
+	weight := 2 * math.Max(1, math.Log2(float64(kept)+1)) / math.Log2(float64(rows)+1)
+	if weight > 1 {
+		return 1
+	}
+	return weight
 }
 
 func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
@@ -570,7 +556,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds := extractBoundaries(spec.conditionCols, spec.condition)
 		bounds, recsetBoundary := splitRecSetBoundary(bounds, t)
 		reorderByFrequency(bounds, t)
-		bounds, indexCoversOrder := extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
+		bounds, _ = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		lower, upperLast := indexFromBoundaries(bounds)
 
 		if Settings.ScanDebugging {
@@ -598,7 +584,6 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		tableBounds := bounds
 		tableIdx := ti
 		shardLimit := shardTotalLimit
-		orderedEarlyLimit := indexCoversOrder && shardLimit >= 0 && limitPartitionCols == 0
 		recsetFilter := recsetBoundary
 
 		if spec.recset != nil {
@@ -683,7 +668,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, orderedEarlyLimit, recsetFilter)
+				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, recsetFilter)
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
@@ -1038,7 +1023,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState, orderedEarlyLimit bool, recsetFilter *recSet) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	if ss == nil {
@@ -1053,13 +1038,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		}
 	}
 	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
-	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
-		if len(args) < 2 {
-			return scm.NewBool(false)
-		}
-		return scm.NewBool(scm.Less(args[0], args[1]))
-	}
-
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	// prepare filter function
@@ -1114,75 +1092,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		panic("unknown sort criteria: " + scm.String(scol))
 	}
 
-	// If a sort column has a column-level collation and sortdir is the default < or >,
-	// replace the comparator with the appropriate collator-based comparator to honor
-	// column collation without explicit ORDER BY COLLATE.
-	// Build an adjusted sortdirs slice for this scan.
-	adjustedSortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcols))
-	for i := range sortcols {
-		dir := defaultSortDir
-		if i < len(sortdirs) && sortdirs[i] != nil {
-			dir = sortdirs[i]
-		}
-		adjustedSortdirs[i] = dir
-		colname := ""
-		if sortcols[i].IsString() {
-			colname = sortcols[i].String()
-		} else if sym, ok := sortcols[i].Any().(scm.Symbol); ok {
-			colname = string(sym)
-		} else {
-			continue
-		}
-		// find column definition
-		coll := ""
-		for _, c := range t.t.Columns {
-			if c.Name == colname {
-				coll = c.Collation
-				break
-			}
-		}
-		if coll == "" {
-			continue
-		}
-		// Only actionable collations: those with a language suffix or explicit 'bin'.
-		if !(strings.Contains(coll, "_") || strings.EqualFold(coll, "bin")) {
-			continue
-		}
-		// If sortdirs[i] already is a collate closure, respect it (explicit ORDER BY COLLATE)
-		if _, _, isCollate := scm.LookupCollate(sortdirs[i]); isCollate {
-			continue
-		}
-		// Derive reverse flag by probing comparator semantics (robust across pointer differences).
-		// Keep panic recovery strictly local to this probe: a function-wide defer-recover
-		// here would swallow unrelated panics from scan/filter/map and surface as empty
-		// result sets instead of proper SQL errors.
-		reverse := false // ASC by default
-		probeOK := true
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					probeOK = false
-				}
-			}()
-			// If dir(1,2) is true, comparator behaves like '<' (ASC) -> reverse=false
-			// Else if dir(2,1) is true, comparator behaves like '>' (DESC) -> reverse=true
-			if res := dir(scm.NewInt(1), scm.NewInt(2)); scm.ToBool(res) {
-				reverse = false
-			} else if res2 := dir(scm.NewInt(2), scm.NewInt(1)); scm.ToBool(res2) {
-				reverse = true
-			}
-		}()
-		if !probeOK {
-			continue
-		}
-		// Build comparator via (collate coll reverse?)
-		cmpScm := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(coll), scm.NewBool(reverse))
-		cmpFn := scm.OptimizeProcToSerialFunction(cmpScm)
-		adjustedSortdirs[i] = cmpFn
-	}
-	for i := range adjustedSortdirs {
-		adjustedSortdirs[i] = wrapScanOrderComparator(adjustedSortdirs[i])
-	}
+	adjustedSortdirs := sortdirs
 
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	if t.t.hasTableLock() {
@@ -1217,6 +1127,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// scan loop in read lock
 	var maxInsertIndex int
 	var visibleUpper uint32
+	resultAlreadySorted := false
 	func() {
 		shardLocked := false
 		if !skipShardReadLock {
@@ -1247,7 +1158,10 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		resultCap := 1024
 		result.items = make([]uint32, resultCap)
 		resultN := 0
-		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, func(batch []uint32) bool {
+		usageWeight := orderedIndexUsageWeight(int(visibleUpper), limit)
+		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, func(index *StorageIndex, active bool) {
+			resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
+		}, func(batch []uint32) bool {
 			result.candidateCount += int64(len(batch))
 			// filter in-place: overwrite batch with passing IDs
 			outN := 0
@@ -1310,7 +1224,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			}
 			copy(result.items[resultN:], batch[:outN])
 			resultN += outN
-			if orderedEarlyLimit && resultN >= limit {
+			if resultAlreadySorted && limit >= 0 && limitPartitionCols == 0 && resultN >= limit {
 				return false
 			}
 			return true
@@ -1320,6 +1234,10 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	// and now sort result!
 	result.sortdirs = adjustedSortdirs
+	result.sortless = make([]func(scm.Scmer, scm.Scmer) bool, len(adjustedSortdirs))
+	for i, relation := range adjustedSortdirs {
+		result.sortless[i] = scm.OrderRelationLess(relation)
+	}
 	itemPos := make(map[uint32]int, len(result.items))
 	for i, idx := range result.items {
 		itemPos[idx] = i
@@ -1341,16 +1259,16 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	}
 	lessByID := func(a, b uint32) bool {
 		cmpCount := len(result.scols)
-		if len(result.sortdirs) < cmpCount {
-			cmpCount = len(result.sortdirs)
+		if len(result.sortless) < cmpCount {
+			cmpCount = len(result.sortless)
 		}
 		for c := 0; c < cmpCount; c++ {
 			av := result.scols[c](a)
 			bv := result.scols[c](b)
-			if scm.ToBool(result.sortdirs[c](av, bv)) {
+			if result.sortless[c](av, bv) {
 				return true
 			}
-			if scm.ToBool(result.sortdirs[c](bv, av)) {
+			if result.sortless[c](bv, av) {
 				return false
 			}
 		}
@@ -1370,7 +1288,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	//    order matches ORDER BY and there are no deltas, the sort is free.
 	// When these conditions are met, the same knowledge could also be
 	// used to exit early during iterateIndex (stop after OFFSET+LIMIT).
-	if len(sortcols) > 0 {
+	if len(sortcols) > 0 && !resultAlreadySorted {
 		if limit >= 0 && limitPartitionCols == 0 {
 			// ORDER BY ... LIMIT only needs the best k rows from each shard.
 			// Keeping all matching rows and fully sorting them makes small-LIMIT

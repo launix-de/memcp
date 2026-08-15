@@ -261,6 +261,11 @@ type columnboundaries struct {
 	upperBatch       bool
 	upperBatchSubidx int
 	collation        string // non-empty only for collation-sensitive matchers
+	// order is the complete strict relation for an ORDER BY suffix, including
+	// direction, collation, and NULL placement. Nil means the column is only a
+	// filter boundary and uses its schema's canonical ascending relation.
+	order     func(...scm.Scmer) scm.Scmer
+	orderMeta string
 	// for computed index columns (col starts with ".")
 	mapCols []string  // source columns needed to compute the value
 	mapFn   scm.Scmer // function: mapFn(mapCols values...) → index value
@@ -278,6 +283,10 @@ func boundaryValueEqual(a, b scm.Scmer) bool {
 // boundaryIsPoint delegates to the matcher's IsPointLike.
 func boundaryIsPoint(b columnboundaries) bool {
 	return b.matcher.IsPointLike()
+}
+
+func boundaryIsUnboundedOrder(b columnboundaries) bool {
+	return b.order != nil && b.lower.IsNil() && b.upper.IsNil()
 }
 
 // addConstraint merges a column boundary into an existing set, narrowing the
@@ -1239,7 +1248,8 @@ func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scme
 		//fmt.Println("conditions:", cols)
 		// build up lower and upper bounds of index
 		for {
-			if len(cols) >= 2 && !boundaryIsPoint(cols[len(cols)-2]) {
+			if len(cols) >= 2 && !boundaryIsPoint(cols[len(cols)-2]) &&
+				!(boundaryIsUnboundedOrder(cols[len(cols)-2]) && boundaryIsUnboundedOrder(cols[len(cols)-1])) {
 				// remove last col -> we cant have two ranged cols
 				cols = cols[:len(cols)-1]
 			} else {

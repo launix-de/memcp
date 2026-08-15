@@ -24,6 +24,8 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS renderjob"
   - sql: "DROP TABLE IF EXISTS ua_fop_files"
+  - sql: "DROP TABLE IF EXISTS ua_order_a"
+  - sql: "DROP TABLE IF EXISTS ua_order_b"
   - sql: |
       CREATE TABLE ua_fop_files (
         ID INT PRIMARY KEY,
@@ -41,6 +43,10 @@ setup:
   - sql: |
       INSERT INTO renderjob (ID, result) VALUES
       (101, 1), (102, 3), (103, 3)
+  - sql: "CREATE TABLE ua_order_a (value VARCHAR(20) COLLATE utf8mb4_unicode_ci)"
+  - sql: "CREATE TABLE ua_order_b (value VARCHAR(20) COLLATE utf8mb4_unicode_ci)"
+  - sql: "INSERT INTO ua_order_a VALUES (NULL), ('beta')"
+  - sql: "INSERT INTO ua_order_b VALUES ('alpha'), (NULL)"
 
 test_cases:
 
@@ -257,6 +263,32 @@ test_cases:
         - name: "image3.png"
         - name: "image4.png"
         - name: "image5.png"
+
+  - name: "UNION ALL shared ASC relation puts NULL first"
+    sql: |
+      SELECT value FROM ua_order_a
+      UNION ALL
+      SELECT value FROM ua_order_b
+      ORDER BY value ASC
+    expect:
+      data:
+        - value: null
+        - value: null
+        - value: "alpha"
+        - value: "beta"
+
+  - name: "UNION ALL shared DESC relation puts NULL last"
+    sql: |
+      SELECT value FROM ua_order_a
+      UNION ALL
+      SELECT value FROM ua_order_b
+      ORDER BY value DESC
+    expect:
+      data:
+        - value: "beta"
+        - value: "alpha"
+        - value: null
+        - value: null
 
   - name: "EXPLAIN UNION ALL ORDER BY uses scan_order_multi"
     sql: |
@@ -560,3 +592,5 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS renderjob"
   - sql: "DROP TABLE IF EXISTS ua_fop_files"
+  - sql: "DROP TABLE IF EXISTS ua_order_a"
+  - sql: "DROP TABLE IF EXISTS ua_order_b"

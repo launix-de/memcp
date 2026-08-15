@@ -1226,12 +1226,6 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
-	defaultSortDir := func(args ...scm.Scmer) scm.Scmer {
-		if len(args) < 2 {
-			return scm.NewBool(false)
-		}
-		return scm.NewBool(scm.Less(args[0], args[1]))
-	}
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	result.scols = make([]func(uint32) scm.Scmer, len(sortcols))
@@ -1278,12 +1272,16 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 		panic("unknown sort criteria: " + scm.String(scol))
 	}
 	result.sortdirs = make([]func(...scm.Scmer) scm.Scmer, len(sortcols))
+	result.sortless = make([]func(scm.Scmer, scm.Scmer) bool, len(sortcols))
+	defaultOrder := scm.OptimizeProcToSerialFunction(scm.Apply(
+		scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString("bin"), scm.NewBool(false)))
 	for i := range sortcols {
 		if i < len(sortdirs) && sortdirs[i] != nil {
-			result.sortdirs[i] = wrapScanOrderComparator(sortdirs[i])
+			result.sortdirs[i] = sortdirs[i]
 		} else {
-			result.sortdirs[i] = wrapScanOrderComparator(defaultSortDir)
+			result.sortdirs[i] = defaultOrder
 		}
+		result.sortless[i] = scm.OrderRelationLess(result.sortdirs[i])
 	}
 
 	t.ensureLoaded()

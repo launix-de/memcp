@@ -17,13 +17,15 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 package storage
 
+import "fmt"
+import "sort"
 import "sync"
-import "sync/atomic"
 import "time"
 import "strings"
+import "sync/atomic"
 
-import "github.com/carli2/hybridsort"
 import "github.com/google/btree"
+import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
 type indexPair struct {
@@ -70,14 +72,107 @@ type StorageIndex struct {
 	ColMapCols  [][]string        // per-column source col names; nil entry means raw column
 	ColMapFn    []scm.Scmer       // per-column compute fn; IsNil() entry means raw column
 	ColMatchers []BoundaryMatcher // per-column matcher (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
-	Savings     float64           // store the amount of time savings here -> add selectivity (outputted / size) on each
-	Native      bool              // true when data is physically sorted by this index (zero-cost)
-	t           *storageShard
-	lastHit     atomic.Uint32 // last search position for sorted access pattern optimization
-	mu          sync.Mutex
-	sessionKeys []string
-	baseState   storageIndexState
-	variants    map[string]*storageIndexState
+	// ColOrder is the immutable per-column strict relation used by build, delta
+	// merge, lookup, and ordered scans. Each callback owns collation, direction,
+	// and NULL placement; storage must not infer or wrap those semantics.
+	ColOrder []func(...scm.Scmer) scm.Scmer
+	// ColOrderMeta is diagnostic metadata only. Equality and reuse are decided
+	// by canonical callback identity, never by reparsing this string.
+	ColOrderMeta []string
+	// ColOrderFast is derived once from ColOrder by the callback factory. It
+	// removes Scmer(bool) traffic from comparison loops without becoming a
+	// second source of ordering semantics.
+	ColOrderFast []func(scm.Scmer, scm.Scmer) bool
+	Savings      float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
+	Native       bool    // true when data is physically sorted by this index (zero-cost)
+	t            *storageShard
+	lastHit      atomic.Uint32 // last search position for sorted access pattern optimization
+	mu           sync.Mutex
+	sessionKeys  []string
+	baseState    storageIndexState
+	variants     map[string]*storageIndexState
+}
+
+func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
+	if collation, reverse, ok := scm.LookupCollate(order); ok {
+		if reverse {
+			return collation + ":desc"
+		}
+		return collation + ":asc"
+	}
+	if order == nil {
+		return ""
+	}
+	return fmt.Sprintf("callback:%x", scm.FunctionIdentity(order))
+}
+
+func sameOrderRelation(a, b func(...scm.Scmer) scm.Scmer) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return scm.FunctionIdentity(a) == scm.FunctionIdentity(b)
+}
+
+func canonicalColumnOrder(t *table, col string) (func(...scm.Scmer) scm.Scmer, string) {
+	collation := "bin"
+	for _, definition := range t.Columns {
+		if definition.Name == col {
+			if definition.Collation != "" {
+				collation = definition.Collation
+			}
+			break
+		}
+	}
+	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(collation), scm.NewBool(false))
+	order := scm.OptimizeProcToSerialFunction(value)
+	return order, orderRelationMeta(order)
+}
+
+func boundaryOrder(t *table, boundary columnboundaries) (func(...scm.Scmer) scm.Scmer, string) {
+	if boundary.order != nil {
+		meta := boundary.orderMeta
+		if meta == "" {
+			meta = orderRelationMeta(boundary.order)
+		}
+		return boundary.order, meta
+	}
+	return canonicalColumnOrder(t, boundary.col)
+}
+
+func (s *StorageIndex) lessAt(col int, a, b scm.Scmer) bool {
+	if col < len(s.ColOrderFast) && s.ColOrderFast[col] != nil {
+		return s.ColOrderFast[col](a, b)
+	}
+	if col < len(s.ColOrder) && s.ColOrder[col] != nil {
+		return scm.ToBool(s.ColOrder[col](a, b))
+	}
+	return scm.Less(a, b)
+}
+
+func (s *StorageIndex) compareAt(col int, a, b scm.Scmer) int {
+	if s.lessAt(col, a, b) {
+		return -1
+	}
+	if s.lessAt(col, b, a) {
+		return 1
+	}
+	return 0
+}
+
+func (s *StorageIndex) usesNaturalAscendingOrder(col int) bool {
+	if col >= len(s.ColOrder) || s.ColOrder[col] == nil {
+		return true
+	}
+	collation, reverse, ok := scm.LookupCollate(s.ColOrder[col])
+	if !ok || reverse {
+		return false
+	}
+	switch collation {
+	case "bin", "binary", "utf8", "utf8mb4":
+		return true
+	default:
+		return false
+	}
 }
 
 // buildGetters returns per-column value getters for this index, reading from the
@@ -284,33 +379,37 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 // rowWithinBounds checks sorted (equal/range) columns using lower/upper directly.
 // Non-sorted columns (LIKE etc.) are skipped — handled by block-level skipping
 // in iterate(); the scan layer applies the full condition afterwards.
-func (s *StorageIndex) rowWithinBounds(cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
+func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
 	for i := 0; i < cmpCols; i++ {
 		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
 			continue // non-sorted: block-skip handles this, scan() filters exact
 		}
 		v := getter(i)
+		if i < len(bounds) && boundaryIsUnboundedOrder(bounds[i]) {
+			continue // unbounded ORDER BY suffix, not a SQL range predicate
+		}
 		if i == cmpCols-1 {
 			if !upperLast.IsNil() {
 				if upperInclusive {
-					if scm.Less(upperLast, v) {
+					if s.compareAt(i, upperLast, v) < 0 {
 						return false, true
 					}
-				} else if !scm.Less(v, upperLast) {
+				} else if s.compareAt(i, v, upperLast) >= 0 {
 					return false, true
 				}
 			}
 			if len(lower) > i && !lower[i].IsNil() {
-				if scm.Less(v, lower[i]) {
+				if s.compareAt(i, v, lower[i]) < 0 {
 					return false, false
 				}
 			}
 			continue
 		}
-		if scm.Equal(v, lower[i]) {
+		cmp := s.compareAt(i, v, lower[i])
+		if cmp == 0 {
 			continue
 		}
-		if scm.Less(v, lower[i]) {
+		if cmp < 0 {
 			return false, false
 		}
 		return false, true
@@ -328,10 +427,10 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 		if !state.precomputedDelta {
 			deltaVal = s.getDeltaColValue(delta.data, i)
 		}
-		if scm.Less(mainVal, deltaVal) {
+		if s.lessAt(i, mainVal, deltaVal) {
 			return -1
 		}
-		if scm.Less(deltaVal, mainVal) {
+		if s.lessAt(i, deltaVal, mainVal) {
 			return 1
 		}
 	}
@@ -349,16 +448,24 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 // The callback receives batches of record IDs and returns false to stop iteration.
 // Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
 // for existence checks, large buffers (e.g. [1024]uint32) for full scans.
-func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, countUsage, false, nil, callback)
+func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, selected, callback)
 }
 
 func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, countUsage, true, nil, callback)
+	usageWeight := 0.0
+	if countUsage {
+		usageWeight = 1.0
+	}
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, true, nil, nil, callback)
 }
 
 func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, exactMain *bool, callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, countUsage, false, exactMain, callback)
+	usageWeight := 0.0
+	if countUsage {
+		usageWeight = 1.0
+	}
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, exactMain, nil, callback)
 }
 
 func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, bool) {
@@ -369,7 +476,7 @@ func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, b
 	return last.lowerInclusive, last.upperInclusive
 }
 
-func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, forceBuild bool, exactMain *bool, callback func([]uint32) bool) {
+func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 	if exactMain != nil {
 		*exactMain = false
 	}
@@ -398,9 +505,15 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 					if len(index.ColMatchers) > i && !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
 						goto skip_index // matcher kind mismatch
 					}
+					if cols[i].matcher.IsSorted() && !boundaryIsPoint(cols[i]) {
+						requiredOrder, _ := boundaryOrder(t.t, cols[i])
+						if len(index.ColOrder) <= i || !sameOrderRelation(requiredOrder, index.ColOrder[i]) {
+							goto skip_index
+						}
+					}
 				}
 				// this index fits!
-				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, forceBuild, exactMain, callback)
+				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, selected, callback)
 				return
 			}
 		skip_index:
@@ -425,11 +538,18 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 						covered = false
 						break
 					}
+					if cols[i].matcher.IsSorted() && !boundaryIsPoint(cols[i]) {
+						requiredOrder, _ := boundaryOrder(t.t, cols[i])
+						if len(index.ColOrder) <= i || !sameOrderRelation(requiredOrder, index.ColOrder[i]) {
+							covered = false
+							break
+						}
+					}
 				}
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, forceBuild, exactMain, callback)
+					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, selected, callback)
 					return
 				}
 			}
@@ -474,11 +594,16 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		index.ColMapCols = make([][]string, len(lower))
 		index.ColMapFn = make([]scm.Scmer, len(lower))
 		index.ColMatchers = make([]BoundaryMatcher, len(lower))
+		index.ColOrder = make([]func(...scm.Scmer) scm.Scmer, len(lower))
+		index.ColOrderMeta = make([]string, len(lower))
+		index.ColOrderFast = make([]func(scm.Scmer, scm.Scmer) bool, len(lower))
 		for i := range lower {
 			index.Cols[i] = cols[i].col
 			index.ColMapCols[i] = cols[i].mapCols  // nil for raw columns
 			index.ColMapFn[i] = cols[i].mapFn      // IsNil() for raw columns
 			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
+			index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
+			index.ColOrderFast[i] = scm.OrderRelationLess(index.ColOrder[i])
 		}
 		index.Savings = 0.0            // count how many cost we wasted so we decide when to build the index
 		index.baseState.active = false // tell the engine that index has to be built first
@@ -492,11 +617,14 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		}
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, countUsage, forceBuild, exactMain, callback)
+		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, selected, callback)
 		return
 	}
 
 	// otherwise: iterate over all items in batches
+	if selected != nil {
+		selected(nil, false)
+	}
 	bufN := 0
 	for i := uint32(0); i < t.main_count; i++ {
 		buf[bufN] = i
@@ -555,6 +683,9 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
 		clone.ColMapCols = idx.ColMapCols   // shallow copy OK (immutable per-col slices)
 		clone.ColMapFn = idx.ColMapFn       // shallow copy OK
 		clone.ColMatchers = idx.ColMatchers // shallow copy OK (singletons)
+		clone.ColOrder = append([]func(...scm.Scmer) scm.Scmer(nil), idx.ColOrder...)
+		clone.ColOrderMeta = append([]string(nil), idx.ColOrderMeta...)
+		clone.ColOrderFast = append([]func(scm.Scmer, scm.Scmer) bool(nil), idx.ColOrderFast...)
 		clone.Savings = idx.Savings * 0.9
 		clone.baseState.active = false
 		candidates = append(candidates, clone)
@@ -592,6 +723,11 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
 			isPrefix := true
 			for k := 0; k < len(shorter.Cols); k++ {
 				if shorter.Cols[k] != longer.Cols[k] {
+					isPrefix = false
+					break
+				}
+				if len(shorter.ColOrder) <= k || len(longer.ColOrder) <= k ||
+					!sameOrderRelation(shorter.ColOrder[k], longer.ColOrder[k]) {
 					isPrefix = false
 					break
 				}
@@ -669,6 +805,16 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	if !s.Native {
 		// main storage: build sort-order index
 		tmp := make([]uint32, s.t.main_count)
+		relations := make([]func(scm.Scmer, scm.Scmer) bool, len(cols))
+		for i := range relations {
+			if i < len(s.ColOrderFast) && s.ColOrderFast[i] != nil {
+				relations[i] = s.ColOrderFast[i]
+			} else if i < len(s.ColOrder) && s.ColOrder[i] != nil {
+				relations[i] = scm.OrderRelationLess(s.ColOrder[i])
+			} else {
+				relations[i] = scm.Less
+			}
+		}
 		for i := uint32(0); i < s.t.main_count; i++ {
 			tmp[i] = i // fill with natural order
 		}
@@ -681,9 +827,9 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				}
 				va := g.get(a)
 				vb := g.get(b)
-				if scm.Less(va, vb) {
+				if relations[colIdx](va, vb) {
 					return true // less
-				} else if !scm.Equal(va, vb) {
+				} else if relations[colIdx](vb, va) {
 					return false // greater
 				}
 				// otherwise: next iteration
@@ -741,9 +887,9 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				av = s.getDeltaColValue(a.data, colIdx)
 				bv = s.getDeltaColValue(b.data, colIdx)
 			}
-			if scm.Less(av, bv) {
+			if s.lessAt(colIdx, av, bv) {
 				return true // less
-			} else if !scm.Equal(av, bv) {
+			} else if s.lessAt(colIdx, bv, av) {
 				return false // greater
 			}
 			// otherwise: next iteration
@@ -852,7 +998,7 @@ func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, caches []*sy
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, countUsage bool, forceBuild bool, exactMain *bool, callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -863,14 +1009,17 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 	state := s.stateForTx(tx, true)
 	// no collation-specific helpers in the current implementation
 
-	savings_threshold := 2.0 // building an index costs 1x the time as traversing the list
-	if countUsage {
-		s.Savings = s.Savings + 1.0 // mark that a real query could save time
+	savingsThreshold := 2.0 // building an index costs 1x the time as traversing the list
+	if usageWeight > 0 {
+		s.Savings += usageWeight
 	}
 	if !state.active {
 		// index is not built yet
-		if s.Savings < savings_threshold && !forceBuild {
+		if s.Savings < savingsThreshold && !forceBuild {
 			// iterate over all items because we don't want to store the index
+			if selected != nil {
+				selected(s, false)
+			}
 			s.fullScan(maxInsertIndex, buf, callback)
 			return
 		} else {
@@ -879,6 +1028,9 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 			// Falling back to a single full scan keeps progress while another
 			// goroutine builds or updates this index.
 			if !s.mu.TryLock() {
+				if selected != nil {
+					selected(s, false)
+				}
 				s.fullScan(maxInsertIndex, buf, callback)
 				return
 			}
@@ -899,12 +1051,18 @@ start_scan:
 	// indexCleanup, which may set active=false / mainIndexes={} / deltaBtree=nil
 	// concurrently. The snapshot keeps the backing data alive via GC references.
 	if !s.mu.TryLock() {
+		if selected != nil {
+			selected(s, false)
+		}
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
 	if !state.active {
 		// Index was evicted between our initial check and here.
 		s.mu.Unlock()
+		if selected != nil {
+			selected(s, false)
+		}
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
@@ -916,6 +1074,9 @@ start_scan:
 	snapSkipLists := state.skipLists
 	isNative := s.Native
 	s.mu.Unlock()
+	if selected != nil {
+		selected(s, true)
+	}
 
 	// record-ID lookup: identity when data is physically sorted (Native), index dereference otherwise
 	getRecid := func(idx int) uint32 {
@@ -970,27 +1131,32 @@ start_scan:
 	if hint := int(s.lastHit.Load()); hint > 0 && hint < searchN && firstSorted >= 0 && !lower[firstSorted].IsNil() {
 		hintVal := cols[firstSorted].get(getRecid(hint))
 		if !hintVal.IsNil() {
-			if scm.Less(hintVal, lower[firstSorted]) {
+			if s.compareAt(firstSorted, hintVal, lower[firstSorted]) < 0 {
 				searchLo = hint
 				searchN -= hint
-			} else if scm.Less(lower[firstSorted], hintVal) {
+			} else if s.compareAt(firstSorted, lower[firstSorted], hintVal) < 0 {
 				searchN = hint + 1
 			}
 		}
 	}
-	// Interpolation search: estimate position from first sorted column's
-	// min/max, then binary search for exact multi-column position.
-	var interpMin, interpMax scm.Scmer
-	if firstSorted >= 0 && len(state.minVals) > firstSorted && !lower[firstSorted].IsNil() {
-		interpMin = state.minVals[firstSorted]
-		interpMax = state.maxVals[firstSorted]
-	}
 	mainIdx := 0
-	if firstSorted >= 0 {
-		mainIdx = interpolationSearch(searchLo, searchN, lower[firstSorted], interpMin, interpMax,
-			func(idx int) scm.Scmer {
-				return cols[firstSorted].get(getRecid(idx))
+	if firstSorted >= 0 && !lower[firstSorted].IsNil() {
+		if s.usesNaturalAscendingOrder(firstSorted) {
+			var interpMin, interpMax scm.Scmer
+			if len(state.minVals) > firstSorted {
+				interpMin = state.minVals[firstSorted]
+				interpMax = state.maxVals[firstSorted]
+			}
+			mainIdx = interpolationSearch(searchLo, searchN, lower[firstSorted], interpMin, interpMax,
+				func(idx int) scm.Scmer {
+					return cols[firstSorted].get(getRecid(idx))
+				})
+		} else {
+			mainIdx = searchLo + sort.Search(searchN, func(idx int) bool {
+				value := cols[firstSorted].get(getRecid(searchLo + idx))
+				return s.compareAt(firstSorted, value, lower[firstSorted]) >= 0
 			})
+		}
 	}
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
@@ -999,7 +1165,7 @@ start_scan:
 	if !lowerInclusive && !lastHasMatcher && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
-			if !scm.Equal(cols[cmpCols-1].get(recid), lower[cmpCols-1]) {
+			if s.compareAt(cmpCols-1, cols[cmpCols-1].get(recid), lower[cmpCols-1]) != 0 {
 				break
 			}
 			mainIdx++
@@ -1052,7 +1218,7 @@ start_scan:
 			}
 			recid := getRecid(mainIdx)
 			mainIdx++
-			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
+			inRange, beyond := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
 				return cols[i].get(recid)
 			})
 			if inRange {
@@ -1104,7 +1270,7 @@ start_scan:
 			if recid < s.t.main_count || p.itemid-int(s.t.main_count) >= maxInsertIndex {
 				return true
 			}
-			inRange, beyond := s.rowWithinBounds(cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
+			inRange, beyond := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(i int) scm.Scmer {
 				if state.precomputedDelta {
 					return p.data[i]
 				}
@@ -1134,7 +1300,7 @@ start_scan:
 		// don't map to sort order), so scan all.
 		hasUnsearchableInBounds := state.precomputedDelta
 		for i := 0; i < cmpCols; i++ {
-			if (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (len(bounds) > i && !bounds[i].matcher.IsSorted()) {
+			if lower[i].IsNil() || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (len(bounds) > i && !bounds[i].matcher.IsSorted()) {
 				hasUnsearchableInBounds = true
 				break
 			}
