@@ -224,18 +224,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 
 	// If result came back as LocImm, materialize into RAX+RBX
 	if desc.Loc == LocImm {
-		switch desc.Imm.GetTag() {
-		case tagBool:
-			ctx.EmitMakeBool(result, desc)
-		case tagInt:
-			ctx.EmitMakeInt(result, desc)
-		case tagFloat:
-			ctx.EmitMakeFloat(result, desc)
-		case tagNil:
-			ctx.EmitMakeNil(result)
-		default:
-			return 0, nil, false, false, nil, false, false
-		}
+		// Eval treats literals as complete Scmer values. Preserve both words for
+		// pointer-bearing and opaque literals instead of restricting native Proc
+		// returns to the four unboxed primitive tags.
+		desc = jitPlaceIntoPair(ctx, &desc, result)
 		// fall through to epilog
 	} else {
 		ctx.EnsureDesc(&desc)
@@ -1755,21 +1747,14 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		expr = si.value
 	}
 	switch expr.GetTag() {
-	case tagNil:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector,
+		tagFunc, tagFuncEnv, tagProc, tagJIT, tagParser, tagFastDict, tagAny,
+		tagClosure, tagPromise:
+		// Keep Eval's self-evaluating literal contract. Pointer-bearing constants
+		// are retained through the entry point's ConstRoots for the lifetime of
+		// the generated code.
 		ctx.TrackImm(expr)
-		return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: expr}
-	case tagBool:
-		ctx.TrackImm(expr)
-		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: expr}
-	case tagInt:
-		ctx.TrackImm(expr)
-		return JITValueDesc{Loc: LocImm, Type: tagInt, Imm: expr}
-	case tagFloat:
-		ctx.TrackImm(expr)
-		return JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: expr}
-	case tagString:
-		ctx.TrackImm(expr)
-		return JITValueDesc{Loc: LocImm, Type: tagString, Imm: expr}
+		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
 	case tagSymbol:
 		sym := expr.Symbol()
 		if string(sym) == "nil" {
@@ -2377,6 +2362,12 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		// also made every ordinary runtime function part of the experimental ABI.
 		return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 	default:
+		if expr.GetTag() >= 100 {
+			// Storage and extensions use opaque custom literal tags. Eval returns
+			// those values unchanged, so the emitter must do the same.
+			ctx.TrackImm(expr)
+			return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
+		}
 		panic(fmt.Sprintf("jit: unsupported expression tag=%d expr=%s", expr.GetTag(), SerializeToString(expr, &Globalenv)))
 	}
 }
