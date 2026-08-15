@@ -949,6 +949,16 @@ func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocke
 	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, currentTx)
 }
 
+// sameUpdateValue keeps Scheme's useful numeric/coercive equality while
+// preserving SQL NULL as a distinct stored value. In particular, NULL -> 0 is
+// a real row change even though (equal? nil 0) is true in Scheme.
+func sameUpdateValue(a, b scm.Scmer) bool {
+	if a.IsNil() || b.IsNil() {
+		return a.IsNil() && b.IsNil()
+	}
+	return scm.Equal(a, b)
+}
+
 func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
@@ -1086,7 +1096,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 							break
 						}
 					}
-					if !scm.Equal(d2[colidx], newVal) {
+					if !sameUpdateValue(d2[colidx], newVal) {
 						d2[colidx] = newVal
 						result = true // mark that something has changed
 						if uniqueColsSet[scm.String(changes[j])] {
@@ -1094,7 +1104,6 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 						}
 					}
 				}
-
 				// Execute BEFORE UPDATE triggers (can modify d2)
 				if withTrigger && triggerOldRow != nil {
 					newSchemaRow := schemaRowFromDelta(d2)
@@ -1125,7 +1134,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					// Recheck if anything changed after trigger modifications
 					result = false
 					for i, v := range d2 {
-						if i < len(oldDeltaRow) && !scm.Equal(oldDeltaRow[i], v) {
+						if i < len(oldDeltaRow) && !sameUpdateValue(oldDeltaRow[i], v) {
 							result = true
 							break
 						}
@@ -1149,7 +1158,7 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					for _, uk := range t.t.Unique {
 						for _, ucol := range uk.Cols {
 							colidx, ok := t.deltaColumns[ucol]
-							if ok && colidx < len(oldDeltaRow) && colidx < len(d2) && !scm.Equal(oldDeltaRow[colidx], d2[colidx]) {
+							if ok && colidx < len(oldDeltaRow) && colidx < len(d2) && !sameUpdateValue(oldDeltaRow[colidx], d2[colidx]) {
 								uniqueColsChanged = true
 								break
 							}

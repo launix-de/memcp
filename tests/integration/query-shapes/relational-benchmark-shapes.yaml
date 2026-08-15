@@ -195,6 +195,28 @@ test_cases:
       FROM rbq_parent p
       JOIN rbq_item i ON i.parent_id = p.id
       JOIN rbq_ref r ON r.id = i.ref_id
+      WHERE r.group_id IS NOT NULL
+      GROUP BY r.group_id
+      ORDER BY r.group_id
+    expect:
+      rows: 2
+      data:
+        - group_id: 1
+          total_score: 14
+        - group_id: 2
+          total_score: 7
+
+  # The fourth join makes this a cold planner benchmark. Keep the complete
+  # shape and result contract, but measure it outside the generic 5s gate.
+  - name: "Performance exception: TPC-H Q5 wide grouped join"
+    threshold_ms: 7000
+    timing_samples: 1
+    warmup: false
+    sql: |
+      SELECT r.group_id, SUM(i.score) AS total_score
+      FROM rbq_parent p
+      JOIN rbq_item i ON i.parent_id = p.id
+      JOIN rbq_ref r ON r.id = i.ref_id
       JOIN rbq_assignment a
         ON a.tenant_id = p.tenant_id AND a.allowed = TRUE
       GROUP BY r.group_id
