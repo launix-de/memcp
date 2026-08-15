@@ -1,12 +1,10 @@
-# Tests for $break pseudo-column early-exit semantics.
-# The $break pseudo-column injects a closure into mapFn args that, when called,
-# panics with a breakSentinel causing the ordered-scan merge loop to stop.
-# This enables ORC early-exit (LIMIT semantics inside ORC window materialization).
-# These tests verify LIMIT + ORDER BY correctness which exercises the break path.
+# Native scan_order OFFSET/LIMIT coverage.
+# SQL LIMIT must be passed to scan_order itself so filtering, shard-local Top-K,
+# the global ordered merge, and mapping retain their physical phase boundaries.
 
 metadata:
   version: "1.0"
-  description: "$break early-exit: ORDER BY + LIMIT correctness"
+  description: "native scan_order OFFSET/LIMIT correctness"
   isolated: true
 
 test_cases:
@@ -74,6 +72,15 @@ test_cases:
     sql: "SELECT id FROM break_test ORDER BY val LIMIT 0"
     expect:
       rows: 0
+
+  - name: "EXPLAIN ORDER LIMIT does not emit callback break"
+    sql: "EXPLAIN SELECT id FROM break_test ORDER BY val LIMIT 3 OFFSET 2"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "$break"
 
   - name: "Cleanup"
     sql: "DROP TABLE IF EXISTS break_test"

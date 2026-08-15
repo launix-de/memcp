@@ -1167,8 +1167,8 @@ test_cases:
             - "in_dv_file"
             - "recset_project_join"
             - "recset_union"
-            - "$break"
           not_contains:
+            - "$break"
             - ".grp:in_dv_file"
             - "touch_keytable"
 

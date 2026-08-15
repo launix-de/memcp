@@ -14351,6 +14351,28 @@ key-fill recipe per carrier. */
 	(late_projection_sources_preserve_rows_acc
 		stages sources sources prelimit_sources default_alias final_condition '())))
 
+(define ordered_join_sources_are_unique_lookups_acc (lambda (sources default_alias stages condition bound_sources remaining_sources)
+	(match (coalesceNil remaining_sources '())
+		(cons src rest) (and
+			(source_is_unique_lookup_from_sources? sources default_alias bound_sources src stages condition)
+			(ordered_join_sources_are_unique_lookups_acc
+				sources default_alias stages condition (cons src bound_sources) rest))
+		_ true)))
+
+(define ordered_join_native_limit_supported? (lambda (sources plan default_alias order_items stages final_condition)
+	(begin
+		(define ordered_sources (join_optimizer_sources_for_order sources
+			(join_optimizer_tree_aliases plan)))
+		(define driver (car ordered_sources))
+		(define order_parts (split_order_items_for_join_driver
+			ordered_sources default_alias driver order_items stages final_condition '()))
+		(define proof_condition (combine_where final_condition
+			(join_optimizer_node_condition (join_optimizer_tree_predicates plan))))
+		(and
+			(empty_list? (nth order_parts 1))
+			(ordered_join_sources_are_unique_lookups_acc
+				sources default_alias stages proof_condition (list driver) (cdr ordered_sources))))))
+
 (define ordered_join_limit_requires_complete_rows? (lambda (sources default_alias final_condition offset_value limit_value)
 	(and
 		(query_limit_active? offset_value limit_value)
@@ -14831,7 +14853,7 @@ either bound a real row or supplied the synthetic NULL row. */
 (define recset_contains_callback_symbol (symbol "__recset_contains"))
 
 (define scan_callback_symbol_for_alias (lambda (alias col)
-	(if (or (equal? col "$break") (equal? col "$tx"))
+	(if (equal? col "$tx")
 		(symbol col)
 		(if (equal? col "$recset_contains")
 			recset_contains_callback_symbol
@@ -14853,7 +14875,11 @@ either bound a real row or supplied the synthetic NULL row. */
 			recset_contains_callback_symbol
 			expr))))
 
-(define join_ordered_stream_plan (lambda (schema all_sources plan default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
+/* A bounded ordered join may use the logical driver directly only when every
+remaining source is a proven unique lookup. The ordinary filter stays driver-local
+and indexable. The nested lookup acceptance runs in scan_order's globally ordered
+stream before its native OFFSET/LIMIT counters; projection only sees the window. */
+(define join_ordered_native_limit_plan (lambda (schema all_sources plan default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(begin
 		(define ordered_aliases (join_optimizer_tree_aliases plan))
 		(define ordered_sources (join_optimizer_sources_for_order all_sources ordered_aliases))
@@ -14879,52 +14905,38 @@ either bound a real row or supplied the synthetic NULL row. */
 			(recset_project_join_expr_for_membership src membership)))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define acceptance_needed_exprs (merge (list
+			needed_exprs
+			(list remaining_condition)
+			(source_join_exprs remaining_sources))))
+		(define acceptance_probe (build_join_scan_reduce_using_recipe
+			schema all_sources remaining_plan default_alias acceptance_needed_exprs remaining_condition true
+			'() 0 1 true nil stages
+			(list (quote lambda) (list (quote _accepted) (quote _row)) true)
+			false
+			(list (quote lambda) (list (quote accepted) (quote shard_accepted))
+				(list (quote or) (quote accepted) (quote shard_accepted)))))
 		(define filtercols (join_cols_for_alias all_sources default_alias alias (list effective_condition)))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote optimize) (lower_column_expr_for_join all_sources default_alias effective_condition))))
-		(define row_expr (cons (quote list) (lower_join_result_fields all_sources default_alias fields)))
+			(list (quote optimize)
+				(lower_column_expr_for_join all_sources default_alias effective_condition))))
+		(define acceptance_cols (join_cols_for_alias all_sources default_alias alias acceptance_needed_exprs))
+		(define acceptance_expr (list (quote lambda)
+			(map acceptance_cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+			(list (quote optimize) acceptance_probe)))
+		(define row_expr (list (quote resultrow)
+			(cons (quote list) (lower_join_result_fields all_sources default_alias fields))))
 		(define offset (coalesceNil offset_value 0))
 		(define limit (coalesceNil limit_value -1))
-		(define finite_limit (not (equal? limit -1)))
-		(define mapcols (merge_unique (list
-			(join_cols_for_alias all_sources default_alias alias needed_exprs)
-			(if finite_limit (list "$break") '()))))
-		(define end (list (quote +) offset limit))
-		(define projection_reduce (list (quote lambda) (list (quote __matched) (quote __row))
-			(list (quote begin)
-				(list (quote define) (quote __position) (list (quote +) (quote __accepted) (quote __matched)))
-				(list (quote if)
-					(list (quote and)
-						(list (quote >=) (quote __position) offset)
-						(list (quote or)
-							(list (quote equal?) limit -1)
-							(list (quote <) (quote __position) end)))
-					(list (quote resultrow) (quote __row))
-					nil)
-				(list (quote +) (quote __matched) 1))))
-		(define projection (build_join_scan_reduce_using_recipe
+		(define mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
+		(define projection (build_join_scan_pipeline_using_recipe
 			schema all_sources remaining_plan default_alias needed_exprs remaining_condition row_expr
 			remaining_order_items 0 -1 true nil stages
-			projection_reduce
-			0
-			(list (quote lambda) (list (quote count) (quote matched))
-				(list (quote +) (quote count) (quote matched)))))
+		))
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote lambda) (list (quote __accepted))
-				(if finite_limit
-					(list (quote if)
-						(list (quote >=) (quote __accepted) (list (quote +) offset limit))
-						(list (symbol "$break"))
-						projection)
-					projection))))
-		(define reduce_expr (list (quote lambda)
-			(list (quote __accepted) (quote __continuation))
-			(list
-				(list (quote lambda) (list (quote __matched))
-					(list (quote +) (quote __accepted) (quote __matched)))
-				(list (quote __continuation) (quote __accepted)))))
+			projection))
 		(define scan_expr (list (quote scan_order)
 			'(session "__memcp_tx")
 			(coalesceNil membership_table_expr (source_table_expr_using stages src))
@@ -14933,12 +14945,12 @@ either bound a real row or supplied the synthetic NULL row. */
 			(cons (quote list) (scan_order_sort_columns_for_join_driver
 				ordered_sources default_alias src driver_order_items stages final_condition))
 			(cons (quote list) (order_relations_for_source src driver_order_items))
-			0 0 -1
+			0 offset limit
 			(cons (quote list) mapcols)
-			map_expr reduce_expr 0 false))
-		(list
-			(list (quote lambda) (list (quote __accepted)) nil)
-			scan_expr))))
+			map_expr nil nil false nil
+			(cons (quote list) acceptance_cols)
+			acceptance_expr))
+		scan_expr)))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -15304,6 +15316,16 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 			(join_order_intermediate_result_fields rest (cdr value_names))))
 		_ '())))
 
+(define join_order_intermediate_has_union_membership? (lambda (sources final_condition)
+	(reduce sources (lambda (found src)
+		(if found
+			true
+			(begin
+				(define membership (driver_membership_for_source src
+					(combine_where (source_join_expr src) final_condition)))
+				(and (not (nil? membership))
+					(union_block? (gs_input (nth membership 0))))))) false)))
+
 (define join_order_intermediate_reduce_scan (lambda (table_expr value_names order_names order_items offset_value limit_value map_expr reduce_expr neutral_expr)
 	(list (quote scan_order)
 		'(session "__memcp_tx")
@@ -15330,10 +15352,15 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 		(define table_key (concat "__join_order_intermediate:" (uuid)))
 		(define table_name (list (quote session) table_key))
 		(define table_expr (list (quote table) (qb_schema block) table_name))
+		/* Keep a logically implied membership as the scan source while filling
+		the storage carrier. Other joins retain their established base-table scan
+		path; enabling RecSet carriers globally regresses scalar ORDER pipelines. */
+		(define allow_membership_carrier
+			(join_order_intermediate_has_union_membership? scan_sources final_condition))
 		(define fill_plan (build_join_scan_pipeline_using_recipe
 			(qb_schema block) scan_sources scan_plan default_alias needed_exprs final_condition
 			(join_order_intermediate_insert table_expr column_names lowered_values)
-			'() 0 -1 false nil stage_catalog))
+			'() 0 -1 allow_membership_carrier nil stage_catalog))
 		(define scan_plan_expr (scan_builder table_expr value_names order_names))
 		(define drop_plan (list (quote droptable) (qb_schema block) table_name true))
 		(list (quote !begin)
@@ -15884,9 +15911,14 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 						(qb_schema block) scan_sources scan_plan first_alias needed_exprs
 						final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
 					(if hierarchical_order
-						(join_ordered_stream_plan
-							(qb_schema block) scan_sources scan_plan first_alias needed_exprs
-							final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
+						(if (ordered_join_native_limit_supported?
+							scan_sources scan_plan first_alias order_items stage_catalog final_condition)
+							(join_ordered_native_limit_plan
+								(qb_schema block) scan_sources scan_plan first_alias needed_exprs
+								final_condition fields order_items (qb_offset block) (qb_limit block) stage_catalog)
+							(lower_join_order_through_intermediate
+								block fields scan_sources scan_plan first_alias needed_exprs
+								final_condition order_items stage_catalog))
 						(if (physical_prejoin_supported? block)
 							(lower_query_block_through_prejoin block)
 							(lower_join_order_through_intermediate

@@ -471,6 +471,37 @@ test_cases:
     expect:
       rows: 0
 
+  - name: "Ordered LIMIT counts rows accepted by a unique lookup filter"
+    sql: |
+      SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE l.visible = 1
+      ORDER BY d.rank_value DESC
+      LIMIT 1 OFFSET 1
+    expect:
+      rows: 1
+      data:
+        - { id: 3, name: "alpha" }
+
+  - name: "Ordered unique lookup filter uses native scan limit"
+    sql: |
+      EXPLAIN SELECT d.id, l.name
+      FROM ord_member_doc d
+      LEFT JOIN ord_member_label l ON l.id = d.label_id
+      WHERE l.visible = 1
+      ORDER BY d.rank_value DESC
+      LIMIT 1 OFFSET 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "ord_member_label"
+      result_not_contains:
+        - "$break"
+        - ".join-order:"
+        - "joined_matches"
+
   - name: "Grouped nullable lookup WHERE stays at its null-extension boundary"
     sql: |
       SELECT t.id, t.score
