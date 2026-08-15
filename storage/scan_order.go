@@ -72,7 +72,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	// if rewritten := tryScanOrderBatchRewrite(v); !rewritten.IsNil() {
 	// 	return oc.OptimizeSub(rewritten, useResult)
 	// }
-	mapEnd, reduceIdx, neutralIdx, outerIdx, notFoundIdx := 11, 12, 13, 14, 15
+	mapEnd, reduceIdx, neutralIdx, outerIdx, notFoundIdx, postOrderColsIdx, postOrderFilterIdx := 11, 12, 13, 14, 15, 16, 17
 	rawReduce := scm.NewNil()
 	if len(v) > reduceIdx {
 		rawReduce = v[reduceIdx]
@@ -96,6 +96,12 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	}
 	if len(v) > notFoundIdx {
 		v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
+	}
+	if len(v) > postOrderColsIdx {
+		v[postOrderColsIdx], _ = oc.OptimizeSub(v[postOrderColsIdx], true)
+	}
+	if len(v) > postOrderFilterIdx {
+		v[postOrderFilterIdx], _ = oc.OptimizeSub(v[postOrderFilterIdx], true)
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
@@ -136,17 +142,18 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 }
 
 type shardqueue struct {
-	shard          *storageShard
-	items          []uint32 // TODO: refactor to chan, so we can block generating too much entries
-	candidateCount int64
-	err            scanError
-	scols          []func(uint32) scm.Scmer // sort criteria column reader
-	sortdirs       []func(...scm.Scmer) scm.Scmer
-	sortless       []func(scm.Scmer, scm.Scmer) bool
-	mapper         *ShardMapReducer
-	callbackCols   []string  // per-table map columns (for multi-table merge)
-	callback       scm.Scmer // per-table map function (for multi-table merge)
-	tableIdx       int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
+	shard           *storageShard
+	items           []uint32 // TODO: refactor to chan, so we can block generating too much entries
+	candidateCount  int64
+	err             scanError
+	scols           []func(uint32) scm.Scmer // sort criteria column reader
+	sortdirs        []func(...scm.Scmer) scm.Scmer
+	sortless        []func(scm.Scmer, scm.Scmer) bool
+	mapper          *ShardMapReducer
+	postOrderMapper *ShardMapReducer
+	callbackCols    []string  // per-table map columns (for multi-table merge)
+	callback        scm.Scmer // per-table map function (for multi-table merge)
+	tableIdx        int       // index into scanOrderMulti tables slice; 0 for single-table scan_order
 }
 
 // scanOrderResult bundles per-shard outputs for ordered scans.
@@ -310,13 +317,15 @@ func topKByOrder(items []uint32, keep int, less func(a, b uint32) bool) []uint32
 
 // scanOrderTableSpec holds per-table parameters for scanOrderMulti.
 type scanOrderTableSpec struct {
-	table         *table
-	recset        *recSet
-	conditionCols []string
-	condition     scm.Scmer
-	sortcols      []scm.Scmer
-	callbackCols  []string
-	callback      scm.Scmer
+	table           *table
+	recset          *recSet
+	conditionCols   []string
+	condition       scm.Scmer
+	sortcols        []scm.Scmer
+	callbackCols    []string
+	callback        scm.Scmer
+	postOrderCols   []string
+	postOrderFilter scm.Scmer
 	// perTableOffset / perTableLimit: -1 disables per-table limiting for this
 	// table; otherwise the first `perTableOffset` rows (in merge order) are
 	// skipped and at most `perTableLimit` rows are emitted from this table.
@@ -451,6 +460,20 @@ func orderedIndexUsageWeight(rows, kept int) float64 {
 	return weight
 }
 
+// orderedScanIndexUsageWeight distinguishes a selective access path from a
+// pure ORDER BY Top-k. A restrictive boundary can avoid the complete scan, so
+// it must train the autoindex at the normal rate even when the result window is
+// tiny. Unbounded order boundaries only accelerate Top-k and retain the lower
+// build weight above.
+func orderedScanIndexUsageWeight(bounds boundaries, rows, kept int) float64 {
+	for _, bound := range bounds {
+		if !boundaryIsUnboundedOrder(bound) {
+			return 1
+		}
+	}
+	return orderedIndexUsageWeight(rows, kept)
+}
+
 func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 	var p scm.Proc
 	if condition.IsProc() {
@@ -541,6 +564,11 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// per-table sort order. This prunes work at the shard level before
 		// the merge enforces the per-table offset/limit globally.
 		shardTotalLimit := total_limit
+		// A post-order predicate can reject any prefix of the ordered stream.
+		// Shards therefore cannot truncate before the global merge has applied it.
+		if !spec.postOrderFilter.IsNil() {
+			shardTotalLimit = -1
+		}
 		if spec.perTableLimit >= 0 {
 			ptTotal := spec.perTableLimit
 			if spec.perTableOffset > 0 {
@@ -713,7 +741,9 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			tableStats := &stats[msg.res.tableIdx]
 			tableStats.inputCount += msg.inputCount
 			tableStats.candidateCount += msg.candidateCount
-			tableStats.outputCount += msg.outputCount
+			if tables[msg.res.tableIdx].postOrderFilter.IsNil() {
+				tableStats.outputCount += msg.outputCount
+			}
 		}
 	}
 	if scanErr.r != nil {
@@ -726,6 +756,15 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	// initialize MapReducers per shard (each shard uses its table's callbackCols/callback)
 	for _, sq := range q.q {
 		sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, aggregate, false, 0, nil, currentTx)
+		spec := &tables[sq.tableIdx]
+		if !spec.postOrderFilter.IsNil() {
+			sq.postOrderMapper = sq.shard.OpenMapReducer(
+				spec.postOrderCols,
+				spec.postOrderFilter,
+				scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[1] }),
+				false, 0, nil, currentTx,
+			)
+		}
 	}
 
 	var buf [1024]uint32 // stack-allocated batch buffer (4 KB, fits in L1)
@@ -756,26 +795,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			continue
 		}
 
-		// Per-table limit: discard remaining shardqueue items once the
-		// per-table quota is exhausted. Sibling shardqueues of the same
-		// tableIdx are dropped as they reach the heap top.
 		ti := qx.tableIdx
-		if ti < len(tablePartLimit) && tablePartLimit[ti] == 0 {
-			heap.Pop(&q)
-			continue
-		}
-		// Per-table offset skip: consume leading items without emitting.
-		if ti < len(tablePartOffset) && tablePartOffset[ti] > 0 {
-			tablePartOffset[ti]--
-			qx.items = qx.items[1:]
-			if len(qx.items) > 0 {
-				heap.Fix(&q, 0)
-			} else {
-				heap.Pop(&q)
-			}
-			continue
-		}
-
 		// Extract partition key from leading sort columns (empty slice when limitPartitionCols == 0)
 		peekItem := qx.items[0]
 		curPK := make([]scm.Scmer, limitPartitionCols)
@@ -796,6 +816,38 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			partOffset = offset
 			partLimit = limit
 			prevPK = curPK
+		}
+
+		// This predicate intentionally runs after ordering, but before offsets and
+		// limits are counted. It supports expensive nested lookup acceptance without
+		// turning callback-controlled panics into an execution-control mechanism.
+		if qx.postOrderMapper != nil && !scm.ToBool(qx.postOrderMapper.MapOne(peekItem)) {
+			qx.items = qx.items[1:]
+			if len(qx.items) > 0 {
+				heap.Fix(&q, 0)
+			} else {
+				heap.Pop(&q)
+			}
+			continue
+		}
+		if qx.postOrderMapper != nil {
+			stats[ti].outputCount++
+		}
+
+		// Per-table offsets and limits count only post-order accepted records.
+		if ti < len(tablePartLimit) && tablePartLimit[ti] == 0 {
+			heap.Pop(&q)
+			continue
+		}
+		if ti < len(tablePartOffset) && tablePartOffset[ti] > 0 {
+			tablePartOffset[ti]--
+			qx.items = qx.items[1:]
+			if len(qx.items) > 0 {
+				heap.Fix(&q, 0)
+			} else {
+				heap.Pop(&q)
+			}
+			continue
 		}
 		// Per-partition offset skip
 		if partOffset > 0 {
@@ -912,19 +964,21 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 }
 
 // scan_order delegates to scanOrderMulti with a single-element table spec.
-func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
-	if len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !aggregate.IsNil() && !isOuter {
+func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
+	if postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !aggregate.IsNil() && !isOuter {
 		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral, notFoundValue)
 	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
-		table:          t,
-		conditionCols:  conditionCols,
-		condition:      condition,
-		sortcols:       sortcols,
-		callbackCols:   callbackCols,
-		callback:       callback,
-		perTableOffset: -1,
-		perTableLimit:  -1,
+		table:           t,
+		conditionCols:   conditionCols,
+		condition:       condition,
+		sortcols:        sortcols,
+		callbackCols:    callbackCols,
+		callback:        callback,
+		postOrderCols:   postOrderCols,
+		postOrderFilter: postOrderFilter,
+		perTableOffset:  -1,
+		perTableLimit:   -1,
 	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter, notFoundValue)
 }
 
@@ -989,19 +1043,21 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	return result
 }
 
-func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
+func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
 	if currentTx == nil {
 		currentTx = r.tx
 	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
-		recset:         r,
-		conditionCols:  conditionCols,
-		condition:      condition,
-		sortcols:       sortcols,
-		callbackCols:   callbackCols,
-		callback:       callback,
-		perTableOffset: -1,
-		perTableLimit:  -1,
+		recset:          r,
+		conditionCols:   conditionCols,
+		condition:       condition,
+		sortcols:        sortcols,
+		callbackCols:    callbackCols,
+		callback:        callback,
+		postOrderCols:   postOrderCols,
+		postOrderFilter: postOrderFilter,
+		perTableOffset:  -1,
+		perTableLimit:   -1,
 	}}, sortdirs, limitPartitionCols, offset, limit, aggregate, neutral, isOuter, notFoundValue)
 }
 
@@ -1158,7 +1214,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		resultCap := 1024
 		result.items = make([]uint32, resultCap)
 		resultN := 0
-		usageWeight := orderedIndexUsageWeight(int(visibleUpper), limit)
+		usageWeight := orderedScanIndexUsageWeight(boundaries, int(visibleUpper), limit)
 		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, func(index *StorageIndex, active bool) {
 			resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
 		}, func(batch []uint32) bool {

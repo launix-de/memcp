@@ -1535,6 +1535,19 @@ type ShardMapReducer struct {
 	shardWriteLocked bool
 }
 
+// MapOne evaluates the mapper for one already-visible record. Ordered scans use
+// this outside shard locks for predicates that must run after global ordering.
+func (m *ShardMapReducer) MapOne(id uint32) scm.Scmer {
+	getters := m.mainGetters
+	if id >= m.mainCount {
+		getters = m.deltaGetters
+	}
+	for i, getter := range getters {
+		m.args[i] = getter(id, 0)
+	}
+	return m.mapFn(m.args...)
+}
+
 // OpenMapReducer creates a MapReducer for the given columns. Column readers and
 // main storage references are built once; the args buffer is pre-allocated.
 // mapFn and reduceFn are stored as Scmer for future network serialization;

@@ -475,6 +475,9 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 }
 
 func Init(en scm.Env) {
+	const scanFilterColumnsDesc = "physical columns passed to filter before map/reduce; $recset_contains supplies a row-bound RecSet membership closure"
+	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
+	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"
 	scm.DeclareTitle("Storage")
 
 	// Register TagTable serializer for the printer.
@@ -847,9 +850,9 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local recset, or a list for temporary data"},
-				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
+				{Kind: "list", ParamName: "filterColumns", ParamDesc: scanFilterColumnsDesc},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
-				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},
+				{Kind: "list", ParamName: "mapColumns", ParamDesc: scanMapColumnsDesc},
 				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
@@ -1003,6 +1006,12 @@ func Init(en scm.Env) {
 			if len(a) > layout.limitIdx+6 {
 				notFoundValue = a[layout.limitIdx+6]
 			}
+			postOrderCols := []string(nil)
+			postOrderFilter := scm.NewNil()
+			if len(a) > layout.limitIdx+8 {
+				postOrderCols = scmerSliceToStrings(mustScmerSlice(a[layout.limitIdx+7], "postOrderFilterColumns"))
+				postOrderFilter = a[layout.limitIdx+8]
+			}
 
 			// TODO(planner-scalability): remove list-backed relational scans after
 			// metadata/RDF callers use physical scan sources. Query plans must never
@@ -1013,6 +1022,11 @@ func Init(en scm.Env) {
 				filterparams := make([]scm.Scmer, len(filtercols))
 				mapfn := scm.OptimizeProcToSerialFunction(a[layout.limitIdx+2])
 				mapparams := make([]scm.Scmer, len(mapcols))
+				var postOrderFn func(...scm.Scmer) scm.Scmer
+				postOrderParams := make([]scm.Scmer, len(postOrderCols))
+				if !postOrderFilter.IsNil() {
+					postOrderFn = scm.OptimizeProcToSerialFunction(postOrderFilter)
+				}
 				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
 				if !aggregate.IsNil() {
 					reducefn = scm.OptimizeProcToSerialFunction(aggregate)
@@ -1071,15 +1085,25 @@ func Init(en scm.Env) {
 				limit := int(scm.ToInt(a[layout.limitIdx]))
 				hadValue := false
 				count := 0
-				for idx, val := range filtered {
-					if idx < offset {
+				accepted := 0
+				for _, val := range filtered {
+					row := mustScmerSlice(val, "scan_order row")
+					ds := dataset(row)
+					if postOrderFn != nil {
+						for i, col := range postOrderCols {
+							postOrderParams[i], _ = ds.GetI(col)
+						}
+						if !scm.ToBool(postOrderFn(postOrderParams...)) {
+							continue
+						}
+					}
+					if accepted < offset {
+						accepted++
 						continue
 					}
 					if limit >= 0 && count >= limit {
 						break
 					}
-					row := mustScmerSlice(val, "scan_order row")
-					ds := dataset(row)
 					for i, col := range mapcols {
 						mapparams[i], _ = ds.GetI(col)
 					}
@@ -1100,30 +1124,32 @@ func Init(en scm.Env) {
 			}
 
 			if tableArg.IsCustom(TagRecSet) {
-				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue)
+				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
 			}
 
 			t := TableFromScmer(a[layout.tableIdx])
 
-			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue)
+			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list", ParamName: "table", ParamDesc: "table handle or a list for temporary data"},
-				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter"},
+				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local RecSet, or a list for temporary data"},
+				{Kind: "list", ParamName: "filterColumns", ParamDesc: scanFilterColumnsDesc},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 				{Kind: "list", ParamName: "sortcols", ParamDesc: "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
 				{Kind: "list", ParamName: "sortdirs", ParamDesc: "list of column directions to sort. Must be same length as sortcols. < means ascending, > means descending, (collate ...) will add collations"},
 				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "number of leading sort columns that form the partition key for per-partition offset/limit. 0 (default) means global offset/limit."},
-				{Kind: "number", ParamName: "offset", ParamDesc: "number of items to skip before the first one is fed into map"},
-				{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read"},
-				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map"},
+				{Kind: "number", ParamName: "offset", ParamDesc: "number of globally ordered, filter-accepted items to skip before map; apply SQL OFFSET here rather than in map"},
+				{Kind: "number", ParamName: "limit", ParamDesc: "maximum globally ordered, filter-accepted items passed to map; -1 means unlimited; apply SQL LIMIT here so shard-local Top-K and the global merge can brake early"},
+				{Kind: "list", ParamName: "mapColumns", ParamDesc: scanOrderMapColumnsDesc},
 				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc"}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
 				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 				{Kind: "any", ParamName: "notFoundValue", ParamDesc: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
+				{Kind: "list", ParamName: "postOrderFilterColumns", ParamDesc: "(optional) columns for a predicate evaluated in global order before OFFSET/LIMIT are counted; use for expensive acceptance checks that cannot participate in index boundaries", Optional: true},
+				{Kind: "func", ParamName: "postOrderFilter", ParamDesc: "(optional) late acceptance predicate. Rejected rows do not count toward OFFSET/LIMIT and never reach map. SQL plans use this instead of callback-driven $break control flow", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrder,
