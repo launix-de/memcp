@@ -333,6 +333,10 @@ func jitList6(a, b, c, d, e, f Scmer) Scmer       { return List(a, b, c, d, e, f
 func jitList7(a, b, c, d, e, f, g Scmer) Scmer    { return List(a, b, c, d, e, f, g) }
 func jitList8(a, b, c, d, e, f, g, h Scmer) Scmer { return List(a, b, c, d, e, f, g, h) }
 
+func jitMakeScmerSlice(length, capacity int) []Scmer {
+	return make([]Scmer, length, capacity)
+}
+
 // jitMaterializeVirtualSlice lowers the virtual variadic array produced from
 // List's Go SSA. A normal list always gets fresh backing storage, preserving
 // the optimizer's Transfer contract even when the JIT is invoked through

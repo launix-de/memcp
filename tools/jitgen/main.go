@@ -2870,7 +2870,28 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		} else {
 			// IndexAddr on a local slice (e.g. from Slice() or FieldAddr)
 			src := g.vals[v.X.Name()]
-			if strings.HasPrefix(src.marker, "_fieldaddr:array:") {
+			if strings.HasPrefix(src.marker, "_stackarray:") {
+				parts := strings.Split(src.marker, ":")
+				if len(parts) != 3 {
+					panic(fmt.Sprintf("malformed stack array marker: %q", src.marker))
+				}
+				elemSize, err := strconv.ParseInt(parts[1], 10, 64)
+				if err != nil {
+					panic(fmt.Sprintf("malformed stack array element size: %q", src.marker))
+				}
+				idx, ok := v.Index.(*ssa.Const)
+				if !ok {
+					panic(fmt.Sprintf("dynamic IndexAddr on local stack array: %s", v))
+				}
+				idxValue, ok := constInt64Value(idx.Value)
+				if !ok {
+					panic(fmt.Sprintf("non-integer IndexAddr on local stack array: %s", v))
+				}
+				g.vals[name] = genVal{
+					marker:     fmt.Sprintf("_stackaddr:%d", elemSize),
+					offsetExpr: fmt.Sprintf("int32(%s)+int32(%d)", src.goVar, idxValue*elemSize),
+				}
+			} else if strings.HasPrefix(src.marker, "_fieldaddr:array:") {
 				// Direct indexing on receiver array field address, e.g. &s.thresholds[i].
 				idxVal := g.resolveValue(v.Index)
 				elemType := v.Type().Underlying().(*types.Pointer).Elem().Underlying()
@@ -4016,7 +4037,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.keepAliveForMarker(v.Call.Args[0])
 			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat"}
 		case "NewNil":
-			g.vals[name] = genVal{goVar: "", marker: "_newnil"}
+			dv := g.allocDesc()
+			g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewString":
 			// NewString(s string) Scmer — arg is a Go string (2 words: ptr+len), result is Scmer (2 words)
 			arg := g.vals[v.Call.Args[0].Name()]
@@ -5423,13 +5446,32 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 
 	case *ssa.Alloc:
-		// Track allocation — no machine code emitted.
-		// The actual value will be set by Store and consumed by MakeClosure.
+		if ptr, ok := v.Type().Underlying().(*types.Pointer); ok {
+			if array, ok := ptr.Elem().Underlying().(*types.Array); ok {
+				elemSize := types.SizesFor("gc", "amd64").Sizeof(array.Elem())
+				stackBase := g.allocTemp("stackArray")
+				g.emit("%s := ctx.AllocStack(int32(%d))", stackBase, elemSize*array.Len())
+				g.vals[name] = genVal{
+					goVar:  stackBase,
+					marker: fmt.Sprintf("_stackarray:%d:%d", elemSize, array.Len()),
+				}
+				break
+			}
+		}
+		// Non-array allocations are currently closure cells. Their value is
+		// forwarded by Store and consumed by MakeClosure without runtime storage.
 		g.vals[name] = genVal{marker: "_alloc"}
 
 	case *ssa.Store:
 		dst := g.vals[v.Addr.Name()]
-		if dst.marker == "_alloc" {
+		if strings.HasPrefix(dst.marker, "_stackaddr:") {
+			src := g.resolveValue(v.Val)
+			if !isScmerType(v.Val.Type()) {
+				panic(fmt.Sprintf("unsupported non-Scmer stack array Store: %s", v))
+			}
+			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
+			g.emit("ctx.EmitStoreScmerToStack(%s, %s)", src.goVar, dst.offsetExpr)
+		} else if dst.marker == "_alloc" {
 			// Storing to an allocation: just remember the stored value
 			src := g.vals[v.Val.Name()]
 			g.vals[v.Addr.Name()] = genVal{goVar: src.goVar, isDesc: src.isDesc, marker: "_alloc_stored"}
@@ -5574,6 +5616,32 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		}
 		// Sub-slice: strings use ptr+len, Go slices use the complete ptr+len+cap ABI header.
 		x := g.vals[v.X.Name()]
+		if strings.HasPrefix(x.marker, "_stackarray:") {
+			if v.Low != nil || v.High != nil || v.Max != nil {
+				panic(fmt.Sprintf("partial Slice on local stack array: %s", v))
+			}
+			parts := strings.Split(x.marker, ":")
+			if len(parts) != 3 {
+				panic(fmt.Sprintf("malformed stack array marker: %q", x.marker))
+			}
+			arrayLen, err := strconv.ParseInt(parts[2], 10, 64)
+			if err != nil {
+				panic(fmt.Sprintf("malformed stack array length: %q", x.marker))
+			}
+			ptrReg := g.allocReg()
+			lenReg := g.allocReg()
+			capReg := g.allocReg()
+			dv := g.allocDesc()
+			g.emit("%s := ctx.AllocReg()", ptrReg)
+			g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
+			g.emit("%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
+			g.emit("ctx.EmitLeaRegMem(%s, RegRSP, int32(%s))", ptrReg, x.goVar)
+			g.emit("ctx.EmitMovRegImm64(%s, uint64(%d))", lenReg, arrayLen)
+			g.emit("ctx.EmitMovRegImm64(%s, uint64(%d))", capReg, arrayLen)
+			g.emit("%s := JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s, KnownSliceLen: int32(%d), KnownSliceCap: int32(%d), SliceSizeKnown: true}", dv, ptrReg, lenReg, capReg, arrayLen, arrayLen)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			break
+		}
 		if x.marker == "_alloc" {
 			ptr, ok := v.X.Type().Underlying().(*types.Pointer)
 			if !ok {
@@ -5741,6 +5809,24 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			marker = "_slice"
 		}
 		g.vals[name] = genVal{goVar: dv2, isDesc: true, marker: marker}
+
+	case *ssa.MakeSlice:
+		if !isScmerType(v.Type().Underlying().(*types.Slice).Elem()) {
+			panic(fmt.Sprintf("MakeSlice of unsupported element type: %s", v))
+		}
+		length := g.resolveValue(v.Len)
+		capacity := length
+		if v.Cap != nil {
+			capacity = g.resolveValue(v.Cap)
+		}
+		g.emit("ctx.EnsureDesc(&%s)", length.goVar)
+		g.emit("ctx.EnsureDesc(&%s)", capacity.goVar)
+		dv := g.allocDesc()
+		g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{%s, %s}, 3)", dv, length.goVar, capacity.goVar)
+		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
+		g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
+		g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
+		g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
 
 	default:
 		panic(instrDesc(instr))
