@@ -19,6 +19,7 @@ package storage
 import (
 	"os"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -160,6 +161,92 @@ func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 	}
 }
 
+func TestIterateShardsParallelReleasesFreeShardRegistrationOnPanic(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tscanparpanic")
+	shard := tbl.Shards[0]
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("iterateShardsParallel callback did not panic")
+			}
+		}()
+		tbl.iterateShardsParallel(nil, nil, func(*storageShard, bool) {
+			panic("forced scan failure")
+		})
+	}()
+
+	if got := shard.activeScanners.Load(); got != 0 {
+		t.Fatalf("active scanner registrations after panic = %d, want 0", got)
+	}
+}
+
+func TestOverflowRebuildPublishesShardTopologySafely(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tscanpartopology")
+	oldShardSize := Settings.ShardSize
+	Settings.ShardSize = 8
+	t.Cleanup(func() {
+		Settings.ShardSize = oldShardSize
+	})
+
+	rows := make([][]scm.Scmer, 8)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
+	}
+	tbl.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
+	oldShard := tbl.Shards[0]
+
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		close(started)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				shards := tbl.ActiveShards()
+				if len(shards) > 0 {
+					_ = shards[0]
+				}
+			}
+		}
+	}()
+	<-started
+
+	tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(8)}}, nil, scm.NewNil(), false, nil)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for oldShard.loadNext() == nil {
+		if time.Now().After(deadline) {
+			close(stop)
+			readers.Wait()
+			t.Fatal("overflow rebuild did not publish a successor")
+		}
+		runtime.Gosched()
+	}
+	next := oldShard.loadNext()
+	next.mu.Lock()
+	next.mu.Unlock()
+	for tbl.overflowRebuilds.Load() != 0 {
+		if time.Now().After(deadline) {
+			close(stop)
+			readers.Wait()
+			t.Fatal("overflow rebuild did not finish")
+		}
+		runtime.Gosched()
+	}
+	close(stop)
+	readers.Wait()
+
+	if got := tbl.Count(); got != 9 {
+		t.Fatalf("row count after overflow rebuild = %d, want 9", got)
+	}
+}
+
 func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscanparpartsolo")
 	tbl.ShardMode = ShardModePartition
@@ -169,6 +256,7 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 		Pivots:        []scm.Scmer{scm.NewInt(10)},
 	}}
 	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
 
 	calls := 0
 	sawSolo := false
@@ -204,6 +292,7 @@ func TestIterateShardsParallelMarksPartitionMultiShardNonSolo(t *testing.T) {
 		Pivots:        []scm.Scmer{scm.NewInt(10)},
 	}}
 	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
 
 	var calls atomic.Int32
 	var sawSolo atomic.Bool
@@ -235,6 +324,7 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 		Pivots:        []scm.Scmer{scm.NewInt(10)},
 	}}
 	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
 	tx := NewTxContext(TxCursorStability)
 	tx.autoCommit = true
 	tx.Session = scm.NewSession()

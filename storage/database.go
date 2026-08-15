@@ -501,6 +501,7 @@ func (db *database) ensureLoaded() {
 		} else {
 			t.ShardMode = ShardModeFree
 		}
+		t.publishTopologyLocked()
 		t.publishShowColumnsSnapshot()
 	}
 	// FK enforcement triggers are serializable Procs and persist with the table JSON.
@@ -807,6 +808,7 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 				}
 				t.Shards = newShardList
 			}
+			t.publishTopologyLocked()
 
 			if !hasColdShard {
 				// Update per-column statistics only when every rebuilt shard has
@@ -1173,6 +1175,7 @@ func (db *database) newTable(name string, pm PersistencyMode) *table {
 	t.lastAccessed = uint64(time.Now().UnixNano())
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
+	t.publishTopologyLocked()
 	t.Auto_increment = 1
 	t.publishShowColumnsSnapshot()
 	return t

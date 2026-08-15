@@ -202,6 +202,7 @@ func TestBoundaryLikePrefixIsRange(t *testing.T) {
 		scm.NewSymbol("strlike"),
 		scm.NewSymbol("x"),
 		scm.NewString("foo%"),
+		scm.NewString("utf8mb4_bin"),
 	})
 	cond := buildProc([]string{"x"}, body)
 	bounds := extractBoundaries([]string{"name"}, cond)
@@ -267,11 +268,11 @@ func TestRowWithinBoundsEqual(t *testing.T) {
 	idx := &StorageIndex{Cols: []string{"id"}, ColMatchers: []BoundaryMatcher{EqualMatcher}}
 	lower := []scm.Scmer{scm.NewInt(5)}
 
-	inRange, _ := idx.rowWithinBounds(1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(5) })
+	inRange, _ := idx.rowWithinBounds(boundaries{}, 1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(5) })
 	if !inRange {
 		t.Error("expected match for equal value")
 	}
-	inRange, beyond := idx.rowWithinBounds(1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(10) })
+	inRange, beyond := idx.rowWithinBounds(boundaries{}, 1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(10) })
 	if inRange {
 		t.Error("expected no match for different value")
 	}
@@ -286,7 +287,7 @@ func TestRowWithinBoundsLike(t *testing.T) {
 	lower := []scm.Scmer{scm.NewString("%Klaus%")}
 
 	// rowWithinBounds skips non-sorted columns entirely
-	inRange, _ := idx.rowWithinBounds(1, lower, scm.NewString("%Klaus%"), true, func(i int) scm.Scmer { return scm.NewString("anything") })
+	inRange, _ := idx.rowWithinBounds(boundaries{}, 1, lower, scm.NewString("%Klaus%"), true, func(i int) scm.Scmer { return scm.NewString("anything") })
 	if !inRange {
 		t.Error("expected inRange=true (LIKE skipped in rowWithinBounds)")
 	}

@@ -240,6 +240,30 @@ func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 	}
 }
 
+func TestShardRebuildForwardsInsertAcrossSuccessorChain(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "trebuildchain")
+	source := tbl.Shards[0]
+	firstSuccessor := NewShard(tbl)
+	latestSuccessor := NewShard(tbl)
+
+	source.storeNext(firstSuccessor)
+	source.nextReady.Store(true)
+	firstSuccessor.storeNext(latestSuccessor)
+	firstSuccessor.nextReady.Store(true)
+
+	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, false)
+
+	if got := source.Count(); got != 1 {
+		t.Fatalf("source count = %d, want 1", got)
+	}
+	if got := firstSuccessor.Count(); got != 1 {
+		t.Fatalf("first successor count = %d, want 1", got)
+	}
+	if got := latestSuccessor.Count(); got != 1 {
+		t.Fatalf("latest successor count = %d, want 1", got)
+	}
+}
+
 func TestShardRebuildDeletePropagationUsesStableTranslation(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-shard-rebuild-delete-*")
 	if err != nil {
