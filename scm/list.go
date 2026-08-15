@@ -664,9 +664,51 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "items", ParamDesc: "items to put into the list", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "list", Length: UnknownLength},
-			Const:    true,
-			Optimize: optimizeListCall,
+			Return:         &TypeDescriptor{Kind: "list", Length: UnknownLength},
+			Const:          true,
+			Optimize:       optimizeListCall,
+			JITVirtualArgs: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				d1 := JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, Virtual: append([]JITValueDesc(nil), args...)}
+				return jitMaterializeVirtualSlice(ctx, d1, result)
+				return result
+			},
 		},
 	})
 
@@ -716,7 +758,7 @@ func init_list() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -783,7 +825,12 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d0 = args[0]
 					d0.ID = 0
-					d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
+					var d1 JITValueDesc
+					if d0.Type == tagSlice {
+						d1 = jitKnownSliceHeader(ctx, &d0)
+					} else {
+						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
+					}
 					ctx.BindReg(d1.Reg, &d1)
 					ctx.BindReg(d1.Reg2, &d1)
 					ctx.BindReg(d1.Reg3, &d1)
@@ -1131,7 +1178,9 @@ func init_list() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					var d21 JITValueDesc
-					if d1.Loc == LocImm {
+					if d1.SliceSizeKnown {
+						d21 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1.KnownSliceLen))}
+					} else if d1.Loc == LocImm {
 						d21 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1.StackOff))}
 					} else {
 						ctx.EnsureDesc(&d1)

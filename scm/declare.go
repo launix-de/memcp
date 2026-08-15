@@ -79,6 +79,10 @@ type TypeDescriptor struct {
 	Optimize func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
 	// Optional JIT emitter for native code generation.
 	JITEmit func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
+	// JITVirtualArgs lets an emitter consume the caller's argument array as SSA
+	// data. Numbered parameters stay in their existing stack slots and constants
+	// stay immediate until an operation actually needs to materialize them.
+	JITVirtualArgs bool
 	// Specialized variants keyed by param-ownership bitmask.
 	// Built on-demand by the optimizer when a call site provides owned args.
 	// TODO: deoptimization — if the global function is redefined, all callsites
