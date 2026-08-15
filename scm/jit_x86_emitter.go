@@ -112,14 +112,19 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		(1 << uint(RegRSI)) | (1 << uint(RegRDI)) |
 		(1 << uint(RegR8)) | (1 << uint(RegR9)) | (1 << uint(RegR10)) |
 		(1 << uint(RegR13)) | (1 << uint(RegR15)))
+	inputArgCount := -1
+	if proc != nil && proc.Params.GetTag() == tagSlice {
+		inputArgCount = len(proc.Params.Slice())
+	}
 	ctx := &JITContext{
-		Ptr:       buf.ptr,
-		Start:     buf.ptr,
-		End:       unsafe.Add(buf.ptr, buf.n),
-		FreeRegs:  freeRegs,
-		AllRegs:   freeRegs,
-		SliceBase: RegR12,
-		Arena:     buf.arena,
+		Ptr:           buf.ptr,
+		Start:         buf.ptr,
+		End:           unsafe.Add(buf.ptr, buf.n),
+		FreeRegs:      freeRegs,
+		AllRegs:       freeRegs,
+		SliceBase:     RegR12,
+		InputArgCount: inputArgCount,
+		Arena:         buf.arena,
 	}
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
 
@@ -131,8 +136,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 	frameFixup := ctx.EmitSubRSP32Fixup() // sub rsp, <patched>
 
 	ctx.emitMovRegReg(RegR12, RegRAX) // save incoming args slice
+	useInputFrame := proc != nil && proc.NumberedOnly && numVars == inputArgCount
 	// Allocate local vars via AllocStack.
-	if numVars > 0 {
+	if numVars > 0 && !useInputFrame {
 		ctx.AllocStack(int32(numVars * 16))
 		for i := 0; i < numVars; i++ {
 			srcOff := int32(i * 16)
@@ -298,6 +304,103 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 	default:
 		panic("jit: unsupported source location for pair materialization")
 	}
+}
+
+func jitList0() Scmer                             { return List() }
+func jitList1(a Scmer) Scmer                      { return List(a) }
+func jitList2(a, b Scmer) Scmer                   { return List(a, b) }
+func jitList3(a, b, c Scmer) Scmer                { return List(a, b, c) }
+func jitList4(a, b, c, d Scmer) Scmer             { return List(a, b, c, d) }
+func jitList5(a, b, c, d, e Scmer) Scmer          { return List(a, b, c, d, e) }
+func jitList6(a, b, c, d, e, f Scmer) Scmer       { return List(a, b, c, d, e, f) }
+func jitList7(a, b, c, d, e, f, g Scmer) Scmer    { return List(a, b, c, d, e, f, g) }
+func jitList8(a, b, c, d, e, f, g, h Scmer) Scmer { return List(a, b, c, d, e, f, g, h) }
+
+// jitMaterializeVirtualSlice lowers the virtual variadic array produced from
+// List's Go SSA. When it is exactly the native function's input slice, Go's
+// escape analysis has already made that caller-owned array safe to return and
+// the JIT only emits the Scmer aux word. Other shapes use fixed-arity Go calls,
+// which are the JIT's GC-safe heap allocation and write-barrier path.
+func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JITValueDesc) JITValueDesc {
+	if virtual.Loc != LocVirtualSlice {
+		panic("jit: expected virtual variadic slice")
+	}
+	if len(virtual.Virtual) > 8 {
+		panic("jit: variadic slice materialization supports at most 8 elements")
+	}
+	forwardsInput := result.Loc == LocRegPair && result.Reg == RegRAX && result.Reg2 == RegRBX && len(virtual.Virtual) == ctx.InputArgCount
+	for i := range virtual.Virtual {
+		if virtual.Virtual[i].Loc != LocInputPair || virtual.Virtual[i].StackOff != int32(i) {
+			forwardsInput = false
+			break
+		}
+	}
+	if forwardsInput {
+		// RAX still contains the incoming slice pointer: no operation preceding
+		// this direct return can clobber it. JITEntryPoint.Call's escape result
+		// keeps the variadic backing array on the Go heap.
+		ctx.EmitMovRegImm64(RegRBX, makeAux(tagSlice, makeSliceAux(ctx.InputArgCount, ctx.InputArgCount)))
+		return JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: RegRAX, Reg2: RegRBX}
+	}
+	pairs := make([]JITValueDesc, len(virtual.Virtual))
+	for i := range virtual.Virtual {
+		src := virtual.Virtual[i]
+		loadedInput := false
+		if src.Loc == LocInputPair {
+			if ctx.SliceBaseTracksRSP {
+				src = JITValueDesc{Loc: LocStackPair, Type: src.Type, StackOff: src.StackOff * 16}
+			} else {
+				inputIndex := int(src.StackOff)
+				src = JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+				ctx.EmitLoadArgPair(src.Reg, src.Reg2, ctx.SliceBase, inputIndex)
+				loadedInput = true
+			}
+		}
+		if src.Loc == LocRegPair || src.Loc == LocStackPair {
+			pairs[i] = src
+			if loadedInput {
+				ctx.BindReg(pairs[i].Reg, &pairs[i])
+				ctx.BindReg(pairs[i].Reg2, &pairs[i])
+			}
+			continue
+		}
+		ctx.EnsureDesc(&src)
+		target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		pairs[i] = jitPlaceIntoPair(ctx, &src, target)
+		ctx.BindReg(pairs[i].Reg, &pairs[i])
+		ctx.BindReg(pairs[i].Reg2, &pairs[i])
+	}
+	var addr uint64
+	switch len(pairs) {
+	case 0:
+		addr = GoFuncAddr(jitList0)
+	case 1:
+		addr = GoFuncAddr(jitList1)
+	case 2:
+		addr = GoFuncAddr(jitList2)
+	case 3:
+		addr = GoFuncAddr(jitList3)
+	case 4:
+		addr = GoFuncAddr(jitList4)
+	case 5:
+		addr = GoFuncAddr(jitList5)
+	case 6:
+		addr = GoFuncAddr(jitList6)
+	case 7:
+		addr = GoFuncAddr(jitList7)
+	case 8:
+		addr = GoFuncAddr(jitList8)
+	}
+	if result.Loc == LocRegPair {
+		materialized := ctx.EmitGoCallScalarInto(addr, pairs, result)
+		materialized.Type = tagSlice
+		return materialized
+	}
+	materialized := ctx.EmitGoCallScalar(addr, pairs, 2)
+	materialized.Type = tagSlice
+	ctx.BindReg(materialized.Reg, &materialized)
+	ctx.BindReg(materialized.Reg2, &materialized)
+	return materialized
 }
 
 func jitCondToBool(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
@@ -1049,6 +1152,28 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			panic("jit: pointer-bearing return is not supported: " + name)
 		}
 		if decl.Type != nil && decl.Type.JITEmit != nil {
+			if decl.Type.JITVirtualArgs {
+				args := make([]JITValueDesc, len(list)-1)
+				for i := 1; i < len(list); i++ {
+					argExpr := list[i]
+					for argExpr.GetTag() == tagSourceInfo {
+						argExpr = argExpr.SourceInfo().value
+					}
+					if argExpr.IsNthLocalVar() {
+						idx := int(argExpr.NthLocalVar())
+						if idx < ctx.InputArgCount {
+							args[i-1] = JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(idx)}
+						} else if ctx.Env != nil && idx < len(ctx.Env.Numbered) {
+							args[i-1] = ctx.Env.Numbered[idx]
+						} else {
+							args[i-1] = jitCompileExpr(ctx, argExpr, sliceBase, JITValueDesc{Loc: LocAny})
+						}
+					} else {
+						args[i-1] = jitCompileExpr(ctx, argExpr, sliceBase, JITValueDesc{Loc: LocAny})
+					}
+				}
+				return decl.Type.JITEmit(ctx, list[1:], args, result)
+			}
 			// Descriptor ownership across nested generated emitters is not yet a
 			// stable part of the experimental contract. Compile leaf operations;
 			// let the interpreter handle composed calls until that ownership model
@@ -2478,11 +2603,18 @@ func (ctx *JITContext) EmitPopReg(r Reg) {
 
 // EmitCallIndirect emits an unwind marker followed by MOV R11, imm64; CALL R11.
 func (ctx *JITContext) EmitCallIndirect(addr uint64) {
+	ctx.emitCallIndirectWithSetup(addr, nil)
+}
+
+func (ctx *JITContext) emitCallIndirectWithSetup(addr uint64, setup func(callFrameBytes int32)) {
 	ctx.EmitMovRegReg(RegR11, RegRBP)
 	ctx.EmitSubInt64(RegR11, RegRSP)
 	ctx.EmitPushReg(RegR11)
 	ctx.EmitPushReg(RegR11)
 	ctx.EmitSubRSP32(int32(jitGoSpillBytes))
+	if setup != nil {
+		setup(int32(jitGoSpillBytes + 16))
+	}
 	ctx.EmitMovRegImm64(RegR11, addr)
 	ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
 	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))

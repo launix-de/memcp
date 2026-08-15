@@ -664,9 +664,51 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", ParamName: "items", ParamDesc: "items to put into the list", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "list", Length: UnknownLength},
-			Const:    true,
-			Optimize: optimizeListCall,
+			Return:         &TypeDescriptor{Kind: "list", Length: UnknownLength},
+			Const:          true,
+			Optimize:       optimizeListCall,
+			JITVirtualArgs: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				d1 := JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, Virtual: append([]JITValueDesc(nil), args...)}
+				return jitMaterializeVirtualSlice(ctx, d1, result)
+				return result
+			},
 		},
 	})
 

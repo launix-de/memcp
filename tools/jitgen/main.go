@@ -45,6 +45,7 @@ import (
 )
 
 var dumpOp string
+var onlyOp string
 var doPatch bool
 var doWipe bool
 var verbose bool
@@ -70,6 +71,8 @@ func main() {
 	for _, arg := range os.Args[1:] {
 		if strings.HasPrefix(arg, "-dump=") {
 			dumpOp = arg[len("-dump="):]
+		} else if strings.HasPrefix(arg, "-only=") {
+			onlyOp = arg[len("-only="):]
 		} else if arg == "-patch" {
 			doPatch = true
 		} else if arg == "-wipe" {
@@ -145,7 +148,12 @@ func main() {
 	// Prefer non-synthetic functions when multiple share the same position
 	// (e.g. method vs thunk).
 	ssaFuncs := map[token.Pos]*ssa.Function{}
+	ssaFuncsByName := map[string]*ssa.Function{}
 	for fn := range ssautil.AllFunctions(prog) {
+		if fn.Pkg == nil || fn.Pkg.Pkg == nil || fn.Pkg.Pkg.Path() != pkg.PkgPath || fn.Synthetic != "" {
+			continue
+		}
+		ssaFuncsByName[fn.Name()] = fn
 		if fn.Pos().IsValid() {
 			if existing, ok := ssaFuncs[fn.Pos()]; ok {
 				// Keep the non-synthetic one (real function, not thunk)
@@ -181,7 +189,15 @@ func main() {
 	// Process each operator (pattern 1: Declare)
 	patches := map[string][]patchEntry{}
 	for _, op := range ops {
-		ssaFn := ssaFuncs[op.funcLit.Pos()]
+		if onlyOp != "" && op.name != onlyOp {
+			continue
+		}
+		var ssaFn *ssa.Function
+		if op.funcLit != nil {
+			ssaFn = ssaFuncs[op.funcLit.Pos()]
+		} else {
+			ssaFn = ssaFuncsByName[op.funcName]
+		}
 		if ssaFn == nil {
 			fmt.Fprintf(os.Stderr, "  %s: %s — SSA function not found\n", op.path, op.name)
 			continue
@@ -193,6 +209,10 @@ func main() {
 
 		// Single-pass: try to generate, recover on failure
 		newText, genErr := generateClosure(op.name, ssaFn, nil)
+		// Declaration emitters are expressions nested one indentation level below
+		// their TypeDescriptor field. Keep generated output gofmt-stable both when
+		// inserting a new JITEmit field and when replacing an existing closure.
+		newText = strings.ReplaceAll(newText, "\n", "\n\t")
 		if genErr == "" {
 			genErr = nativeValidationFailures[op.name]
 		}
@@ -217,7 +237,7 @@ func main() {
 			} else {
 				pos = fset.Position(op.jitInsertPos)
 				end = pos
-				newText = "\nJITEmit: " + newText + ",\n"
+				newText = "\tJITEmit: " + newText + ",\n\t\t"
 			}
 			patches[op.path] = append(patches[op.path], patchEntry{
 				startOff: pos.Offset,
@@ -230,6 +250,9 @@ func main() {
 
 	// Process each storage type (pattern 2: ColumnStorage.GetValue → JITEmit)
 	for _, si := range stInfos {
+		if onlyOp != "" && si.typeName != onlyOp && si.typeName+".GetValue" != onlyOp {
+			continue
+		}
 		ssaFn := ssaFuncs[si.getValuePos]
 		if ssaFn == nil {
 			fmt.Fprintf(os.Stderr, "  %s: %s.GetValue — SSA function not found\n", si.path, si.typeName)
@@ -280,6 +303,7 @@ type operatorInfo struct {
 	path         string
 	line         int
 	funcLit      *ast.FuncLit
+	funcName     string
 	jitExpr      ast.Expr
 	jitInsertPos token.Pos
 }
@@ -343,8 +367,12 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 		if !ok || nameLit.Kind != token.STRING || (jitExpr == nil && !jitInsertPos.IsValid()) {
 			return true
 		}
-		funcLit, ok := fnExpr.(*ast.FuncLit)
-		if !ok {
+		funcLit, isLiteral := fnExpr.(*ast.FuncLit)
+		funcName := ""
+		if ident, ok := fnExpr.(*ast.Ident); ok {
+			funcName = ident.Name
+		}
+		if !isLiteral && funcName == "" {
 			return true
 		}
 		ops = append(ops, operatorInfo{
@@ -352,6 +380,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			path:         path,
 			line:         fset.Position(nameLit.Pos()).Line,
 			funcLit:      funcLit,
+			funcName:     funcName,
 			jitExpr:      jitExpr,
 			jitInsertPos: jitInsertPos,
 		})
@@ -2372,6 +2401,9 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 	fmt.Fprintf(&g.w, "\t\t\t%s\n", generatedBanner)
 	if len(fn.Params) > 0 {
 		g.paramName = fn.Params[0].Name()
+		if _, ok := fn.Params[0].Type().Underlying().(*types.Slice); ok {
+			g.vals[fn.Params[0].Name()] = genVal{marker: "_variadic_args"}
+		}
 	}
 
 	g.multiBlock = len(fn.Blocks) > 1
@@ -2381,7 +2413,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 		bbsDeclPrefix: "",
 	})
 
-	result := fmt.Sprintf("func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
+	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
 		g.wDecl.String(), injectBindRegCalls(g.w.String()))
 	return result, ""
 }
@@ -4004,6 +4036,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(NewFastDictValue), []JITValueDesc{%s}, 1)", dv, arg.goVar)
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
+		case "NewSlice":
+			arg := g.vals[v.Call.Args[0].Name()]
+			if arg.marker != "_variadic_args" {
+				panic(fmt.Sprintf("NewSlice on non-variadic parameter: %s", v))
+			}
+			dv := g.allocDesc()
+			g.emit("%s := JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, Virtual: append([]JITValueDesc(nil), args...)}", dv)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_newargslice"}
 		case "OptimizeProcToSerialFunction":
 			// OptimizeProcToSerialFunction(Scmer) func(...Scmer) Scmer
 			// arg: Scmer (2 words), result: func value (1 word)
@@ -5714,6 +5754,8 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 	}
 	res := g.vals[v.Results[0].Name()]
 	switch res.marker {
+	case "_newargslice":
+		g.emit("return jitMaterializeVirtualSlice(ctx, %s, result)", res.goVar)
 	case "_newbool":
 		g.emit("if result.Loc == LocAny {")
 		g.emit("\tresult = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}")
