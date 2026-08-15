@@ -758,7 +758,7 @@ func init_list() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -825,7 +825,12 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					d0 = args[0]
 					d0.ID = 0
-					d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
+					var d1 JITValueDesc
+					if d0.Type == tagSlice {
+						d1 = jitKnownSliceHeader(ctx, &d0)
+					} else {
+						d1 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d0}, 3)
+					}
 					ctx.BindReg(d1.Reg, &d1)
 					ctx.BindReg(d1.Reg2, &d1)
 					ctx.BindReg(d1.Reg3, &d1)
@@ -1173,7 +1178,9 @@ func init_list() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					var d21 JITValueDesc
-					if d1.Loc == LocImm {
+					if d1.SliceSizeKnown {
+						d21 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1.KnownSliceLen))}
+					} else if d1.Loc == LocImm {
 						d21 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d1.StackOff))}
 					} else {
 						ctx.EnsureDesc(&d1)

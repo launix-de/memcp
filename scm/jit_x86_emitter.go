@@ -117,14 +117,15 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		inputArgCount = len(proc.Params.Slice())
 	}
 	ctx := &JITContext{
-		Ptr:           buf.ptr,
-		Start:         buf.ptr,
-		End:           unsafe.Add(buf.ptr, buf.n),
-		FreeRegs:      freeRegs,
-		AllRegs:       freeRegs,
-		SliceBase:     RegR12,
-		InputArgCount: inputArgCount,
-		Arena:         buf.arena,
+		Ptr:            buf.ptr,
+		Start:          buf.ptr,
+		End:            unsafe.Add(buf.ptr, buf.n),
+		FreeRegs:       freeRegs,
+		AllRegs:        freeRegs,
+		SliceBase:      RegR12,
+		InputArgCount:  inputArgCount,
+		LocalSlotCount: numVars,
+		Arena:          buf.arena,
 	}
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
 
@@ -140,13 +141,27 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 	// Allocate local vars via AllocStack.
 	if numVars > 0 && !useInputFrame {
 		ctx.AllocStack(int32(numVars * 16))
-		for i := 0; i < numVars; i++ {
+		inputSlots := numVars
+		if inputArgCount >= 0 && inputArgCount < inputSlots {
+			inputSlots = inputArgCount
+		}
+		for i := 0; i < inputSlots; i++ {
 			srcOff := int32(i * 16)
 			dstOff := int32(i * 16)
 			ctx.EmitMovRegMem(RegR11, RegR12, srcOff)
 			ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
 			ctx.EmitMovRegMem(RegR11, RegR12, srcOff+8)
 			ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff+8)
+		}
+		if inputSlots < numVars {
+			nilPtr, nilAux := NewNil().RawWords()
+			for i := inputSlots; i < numVars; i++ {
+				dstOff := int32(i * 16)
+				ctx.EmitMovRegImm64(RegR11, uint64(nilPtr))
+				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+				ctx.EmitMovRegImm64(RegR11, nilAux)
+				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff+8)
+			}
 		}
 		ctx.emitMovRegReg(RegR12, RegRSP)
 		ctx.SliceBaseTracksRSP = true
@@ -317,10 +332,10 @@ func jitList7(a, b, c, d, e, f, g Scmer) Scmer    { return List(a, b, c, d, e, f
 func jitList8(a, b, c, d, e, f, g, h Scmer) Scmer { return List(a, b, c, d, e, f, g, h) }
 
 // jitMaterializeVirtualSlice lowers the virtual variadic array produced from
-// List's Go SSA. When it is exactly the native function's input slice, Go's
-// escape analysis has already made that caller-owned array safe to return and
-// the JIT only emits the Scmer aux word. Other shapes use fixed-arity Go calls,
-// which are the JIT's GC-safe heap allocation and write-barrier path.
+// List's Go SSA. A normal list always gets fresh backing storage, preserving
+// the optimizer's Transfer contract even when the JIT is invoked through
+// apply with a caller-owned argument slice. Only the internal !list form may
+// borrow invocation-frame storage under its optimizer-proven NoEscape scope.
 func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JITValueDesc) JITValueDesc {
 	if virtual.Loc != LocVirtualSlice {
 		panic("jit: expected virtual variadic slice")
@@ -328,40 +343,11 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 	if len(virtual.Virtual) > 8 {
 		panic("jit: variadic slice materialization supports at most 8 elements")
 	}
-	forwardsInput := result.Loc == LocRegPair && result.Reg == RegRAX && result.Reg2 == RegRBX && len(virtual.Virtual) == ctx.InputArgCount
-	for i := range virtual.Virtual {
-		if virtual.Virtual[i].Loc != LocInputPair || virtual.Virtual[i].StackOff != int32(i) {
-			forwardsInput = false
-			break
-		}
-	}
-	if forwardsInput {
-		// RAX still contains the incoming slice pointer: no operation preceding
-		// this direct return can clobber it. JITEntryPoint.Call's escape result
-		// keeps the variadic backing array on the Go heap.
-		ctx.EmitMovRegImm64(RegRBX, makeAux(tagSlice, makeSliceAux(ctx.InputArgCount, ctx.InputArgCount)))
-		return JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: RegRAX, Reg2: RegRBX}
-	}
 	pairs := make([]JITValueDesc, len(virtual.Virtual))
 	for i := range virtual.Virtual {
 		src := virtual.Virtual[i]
-		loadedInput := false
-		if src.Loc == LocInputPair {
-			if ctx.SliceBaseTracksRSP {
-				src = JITValueDesc{Loc: LocStackPair, Type: src.Type, StackOff: src.StackOff * 16}
-			} else {
-				inputIndex := int(src.StackOff)
-				src = JITValueDesc{Loc: LocRegPair, Type: src.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				ctx.EmitLoadArgPair(src.Reg, src.Reg2, ctx.SliceBase, inputIndex)
-				loadedInput = true
-			}
-		}
-		if src.Loc == LocRegPair || src.Loc == LocStackPair {
+		if src.Loc == LocRegPair || src.Loc == LocStackPair || src.Loc == LocInputPair {
 			pairs[i] = src
-			if loadedInput {
-				ctx.BindReg(pairs[i].Reg, &pairs[i])
-				ctx.BindReg(pairs[i].Reg2, &pairs[i])
-			}
 			continue
 		}
 		ctx.EnsureDesc(&src)
@@ -405,6 +391,80 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 
 func jitCondToBool(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
 	return ctx.EmitBoolDesc(cond, JITValueDesc{Loc: LocAny})
+}
+
+// jitCompileStackList lowers the optimizer-internal
+// (!list NthLocalVar(start) count expr...) form. The optimizer emits !list only
+// for a proven NoEscape argument, so its backing slots may live in the current
+// invocation frame and must never be returned from the JIT entry point.
+func jitCompileStackList(ctx *JITContext, list []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	if result.Loc != LocAny {
+		panic("jit: !list cannot escape its NoEscape consumer")
+	}
+	if len(list) < 3 || !list[1].IsNthLocalVar() || !list[2].IsInt() {
+		panic("jit: malformed optimized !list")
+	}
+	start := int(list[1].NthLocalVar())
+	count := int(list[2].Int())
+	if count < 0 || len(list) != count+3 || start < 0 || start+count > ctx.LocalSlotCount {
+		panic("jit: !list slots outside invocation frame")
+	}
+	if !ctx.SliceBaseTracksRSP {
+		panic("jit: !list requires an invocation-local stack frame")
+	}
+	for i := 0; i < count; i++ {
+		value := jitCompileExpr(ctx, list[i+3], sliceBase, JITValueDesc{Loc: LocAny})
+		ctx.EnsureDesc(&value)
+		if value.Loc != LocRegPair && value.Loc != LocImm {
+			target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			value = jitPlaceIntoPair(ctx, &value, target)
+		}
+		ctx.EmitStoreScmerToStack(value, int32((start+i)*16))
+		ctx.FreeDesc(&value)
+	}
+	target := jitEnsureResultPair(ctx, result)
+	ctx.EmitLeaRegMem(target.Reg, RegRSP, int32(start*16))
+	ctx.EmitMovRegImm64(target.Reg2, makeAux(tagSlice, makeSliceAux(count, count)))
+	target.Type = tagSlice
+	target.KnownSliceLen = int32(count)
+	target.KnownSliceCap = int32(count)
+	target.SliceSizeKnown = true
+	ctx.BindReg(target.Reg, &target)
+	ctx.BindReg(target.Reg2, &target)
+	return target
+}
+
+// jitKnownSliceHeader unwraps a Scmer whose tag is already proven to be a
+// slice. This is the constant-folded counterpart of jitAsSlice: it emits only
+// the ptr/len/cap extraction needed by the following list primitive and no Go
+// call or runtime type check.
+func jitKnownSliceHeader(ctx *JITContext, value *JITValueDesc) JITValueDesc {
+	ptrReg := ctx.AllocReg()
+	lenReg := ctx.AllocRegExcept(ptrReg)
+	capReg := ctx.AllocRegExcept(ptrReg, lenReg)
+	if value.Loc == LocImm {
+		ctx.TrackImm(value.Imm)
+		ptrWord, auxWord := value.Imm.RawWords()
+		length, capacity := decodeSliceAux(auxWord)
+		ctx.EmitMovRegImm64(ptrReg, uint64(ptrWord))
+		ctx.EmitMovRegImm64(lenReg, uint64(length))
+		ctx.EmitMovRegImm64(capReg, uint64(capacity))
+	} else {
+		ctx.EnsureDesc(value)
+		if value.Loc != LocRegPair {
+			panic("jit: known slice is not a Scmer pair")
+		}
+		ctx.EmitMovRegReg(ptrReg, value.Reg)
+		ctx.EmitMovRegReg(lenReg, value.Reg2)
+		ctx.EmitShrRegImm8(lenReg, 8+sliceCapBits)
+		ctx.EmitMovRegReg(capReg, value.Reg2)
+		ctx.EmitShrRegImm8(capReg, 8)
+		ctx.EmitAndRegImm32(capReg, int32(sliceCapMask))
+	}
+	return JITValueDesc{
+		Loc: LocRegTriple, Type: tagSlice, Reg: ptrReg, Reg2: lenReg, Reg3: capReg,
+		KnownSliceLen: value.KnownSliceLen, KnownSliceCap: value.KnownSliceCap, SliceSizeKnown: value.SliceSizeKnown,
+	}
 }
 
 // jitCondToBoolBorrowed evaluates truthiness without consuming cond.
@@ -808,6 +868,8 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			ctx.TrackImm(q)
 			return JITValueDesc{Loc: LocImm, Type: q.GetTag(), Imm: q}
+		case "!list":
+			return jitCompileStackList(ctx, list, sliceBase, result)
 		case "if":
 			if len(list) < 3 {
 				imm := NewNil()
@@ -1184,7 +1246,13 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				}
 				if argExpr.GetTag() == tagSlice {
 					nested := argExpr.Slice()
-					if len(nested) == 0 || !nested[0].IsSymbol() || nested[0].Symbol() != Symbol("quote") {
+					isQuote := len(nested) > 0 && nested[0].IsSymbol() && nested[0].Symbol() == Symbol("quote")
+					// !list's backing storage is the current JIT frame. Until the
+					// generated-emitter contract can express result aliasing, only
+					// nth may consume it: nth returns one Scmer value, never a view
+					// into the list backing array.
+					isStackListForNth := name == "nth" && len(nested) > 0 && nested[0].IsSymbol() && nested[0].Symbol() == Symbol("!list")
+					if !isQuote && !isStackListForNth {
 						panic("jit: nested generated emitters are not supported")
 					}
 				}

@@ -185,6 +185,12 @@ type JITValueDesc struct {
 	Reg3     Reg     // third register (for Go slices: ptr+len+cap); occupies former padding to keep the descriptor ABI stable
 	MemPtr   uintptr // memory address (only if Loc == LocMem)
 	Imm      Scmer   // compile-time constant (if Loc == LocImm); Imm.GetTag() carries type info
+	// KnownSliceLen/Cap carry optimizer-proven bounds for a slice descriptor.
+	// The boolean keeps the zero value unambiguously "unknown" while still
+	// representing an empty slice exactly.
+	KnownSliceLen  int32
+	KnownSliceCap  int32
+	SliceSizeKnown bool
 	// Virtual holds compiler-only aggregate elements. LocVirtualSlice never
 	// reaches generated machine code; consumers either operate on its elements
 	// directly or materialize it through a Go allocation trampoline.
@@ -287,11 +293,15 @@ type JITContext struct {
 	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
 	// refreshed after helper calls (Go may grow/move the goroutine stack).
 	SliceBaseTracksRSP bool
-	// InputArgCount is the fixed source-level parameter count. A virtual slice
-	// containing exactly LocInputPair(0..n-1) may reuse the caller-allocated
-	// variadic backing array when it is returned directly.
+	// InputArgCount is the fixed source-level parameter count. Virtual list
+	// arguments may refer to these input pairs without loading them eagerly;
+	// materializing a normal list still allocates fresh backing storage.
 	InputArgCount int
-	RegOwners     [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	// LocalSlotCount is the number of 16-byte Scmer slots reserved in the
+	// invocation frame. Optimizer-internal !list values may borrow a bounded
+	// subrange while their NoEscape consumer is emitted inline.
+	LocalSlotCount int
+	RegOwners      [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 
 	// Stack frame: emitter locals use [RSP + offset], while register spills use
 	// [RBP - offset]. The two zones cannot overlap because the patched frame size
@@ -1291,6 +1301,9 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 					ctx.EmitMovRegMem(RegR11, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
 				}
 				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
+			case LocInputPair:
+				ctx.EmitMovRegMem(RegR11, ctx.SliceBase, argWords[i].stackOff)
+				ctx.EmitStoreRegMem(RegR11, RegRSP, dstOff)
 			default:
 				panic("jit: unsupported Go-call stack arg location")
 			}
@@ -1363,6 +1376,8 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 				} else {
 					ctx.EmitMovRegMem(target, RegRSP, stackArgBaseDisp+argWords[i].stackOff)
 				}
+			case LocInputPair:
+				ctx.EmitMovRegMem(target, ctx.SliceBase, argWords[i].stackOff)
 			default:
 				panic("jit: unsupported Go-call arg location")
 			}
@@ -1492,6 +1507,12 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff}
 			n++
 			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff + 8}
+			n++
+		case LocInputPair:
+			inputOff := a.StackOff * 16
+			buf[n] = goCallArgWord{loc: LocInputPair, stackOff: inputOff}
+			n++
+			buf[n] = goCallArgWord{loc: LocInputPair, stackOff: inputOff + 8}
 			n++
 		case LocStackTriple:
 			buf[n] = goCallArgWord{loc: LocStack, stackOff: a.StackOff}

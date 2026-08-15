@@ -3706,7 +3706,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					if src.marker == "_slice" || src.marker == "_gostring" || src.isDesc {
 						dv := g.allocDesc()
 						g.emit("var %s JITValueDesc", dv)
-						g.emit("if %s.Loc == LocImm {", src.goVar)
+						g.emit("if %s.SliceSizeKnown {", src.goVar)
+						g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(%s.KnownSliceLen))}", dv, src.goVar)
+						g.emit("} else if %s.Loc == LocImm {", src.goVar)
 						if src.marker == "_gostring" {
 							// LocImm Scmer string constant: derive Go-string length.
 							g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(%s.Imm.String())))}", dv, src.goVar)
@@ -3809,7 +3811,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		case "asSlice":
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{%s}, 3)", dv, arg.goVar)
+			g.emit("var %s JITValueDesc", dv)
+			g.emit("if %s.Type == tagSlice {", arg.goVar)
+			g.emit("\t%s = jitKnownSliceHeader(ctx, &%s)", dv, arg.goVar)
+			g.emit("} else {")
+			g.emit("\t%s = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{%s}, 3)", dv, arg.goVar)
+			g.emit("}")
 			g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
 			g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
 			g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
