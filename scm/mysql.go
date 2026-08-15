@@ -334,6 +334,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		ss.Touch()
 		querySeq = ss.BeginQuery("Query", query)
 		ss.SetCancel(querySeq, queryCancel)
+		ss.SetQueryContext(querySeq, queryCtx)
 	}
 	if doneSession, ok := any(session).(mysqlSessionDone); ok {
 		go func() {

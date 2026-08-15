@@ -326,6 +326,44 @@ test_cases:
       - session_id: "lock-state-writer"
         sql: "UNLOCK TABLES"
 
+  # ── KILL QUERY interrupts a table-lock wait ───────────────────────────────
+
+  - name: "KILL QUERY interrupts a table-lock waiter without releasing the owner"
+    setup:
+      - sql: "DROP TABLE IF EXISTS lock_kill_ctrl"
+      - sql: "CREATE TABLE lock_kill_ctrl (id BIGINT)"
+    steps:
+      - session_id: "lock-kill-victim"
+        sql: "INSERT INTO lock_kill_ctrl VALUES (CONNECTION_ID())"
+      - session_id: "lock-kill-owner"
+        sql: "LOCK TABLES lock_test WRITE"
+      - session_id: "lock-kill-victim"
+        sql: "SELECT id FROM lock_test WHERE id = 1"
+        background: true
+        timeout: 5
+        expect:
+          error: true
+      - session_id: "lock-kill-owner"
+        sql: "SELECT 1"
+      - session_id: "lock-kill-attacker"
+        sql: "SELECT KILL_QUERY(id) AS killed FROM lock_kill_ctrl LIMIT 1"
+        expect:
+          rows: 1
+          contains: "True"
+      - wait_for_background: true
+        timeout: 5
+      - session_id: "lock-kill-owner"
+        sql: "SELECT COUNT(*) AS n FROM lock_test"
+        expect:
+          rows: 1
+      - session_id: "lock-kill-owner"
+        sql: "UNLOCK TABLES"
+      - session_id: "lock-kill-victim"
+        sql: "SELECT id FROM lock_test WHERE id = 1"
+        expect:
+          rows: 1
+          contains: "1"
+
   # ── KILL QUERY stops a running slow query ─────────────────────────────────
 
   - name: "KILL QUERY stops a running slow query"
