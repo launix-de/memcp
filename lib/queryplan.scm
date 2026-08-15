@@ -9417,6 +9417,47 @@ until lowering without creating a depth-proportional binary OR chain. */
 			'(_expr dir) dir
 			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
 
+(define source_column_order_collation (lambda (src col)
+	(if (not (source_is_base_table? src))
+		"bin"
+		(begin
+			(define meta (find (get_schema (source_schema src) (source_relation src))
+				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
+			(if (nil? meta)
+				"bin"
+				(begin
+					(define collation (meta "Collation"))
+					(if (or (nil? collation) (equal? collation "")) "bin" collation)))))))
+
+(define canonical_order_relation (lambda (dir collation)
+	(if (or (equal? dir <) (equal? dir >))
+		(collate collation (equal? dir >))
+		dir)))
+
+(define order_relations_default (lambda (order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(_expr dir) (canonical_order_relation dir "bin")
+			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
+
+/* Resolve implicit SQL directions to canonical callbacks while source metadata
+is still available. Explicit COLLATE and user callbacks pass through intact. */
+(define order_relations_for_source (lambda (src order_items)
+	(map (coalesceNil order_items '()) (lambda (item)
+		(match item
+			'(expr dir) (canonical_order_relation dir
+				(match expr
+					((symbol get_column) tblvar tbl_ignorecase _col _col_ignorecase)
+					(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+						(source_column_order_collation src (order_column_for_alias src expr))
+						"bin")
+					((quote get_column) tblvar tbl_ignorecase _col _col_ignorecase)
+					(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+						(source_column_order_collation src (order_column_for_alias src expr))
+						"bin")
+					_ "bin"))
+			_ (neumann_fail "build_queryplan" "malformed ORDER BY item"))))))
+
 (define order_expr_belongs_to_source? (lambda (src expr)
 	(match expr
 		((symbol scalar_first_probe) stage _requested_col)
@@ -9479,7 +9520,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 				(map filtercols (lambda (col) (symbol (concat grouptbl "." col))))
 				(list (quote optimize) (lower_column_expr_for_alias group_src session_filter)))
 			(cons (quote list) ordercols)
-			(cons (quote list) (order_dirs replaced_order))
+			(cons (quote list) (order_relations_for_source group_src replaced_order))
 			0
 			0
 			1
@@ -14665,7 +14706,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 								(cons (quote list) filtercols)
 								filter_expr
 								(cons (quote list) ordercols)
-								(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
+								(cons (quote list) (if (empty_list? order_items) '() (order_relations_for_source src order_items)))
 								0
 								(coalesceNil (qb_offset block) 0)
 								(coalesceNil (qb_limit block) -1)
@@ -14891,7 +14932,7 @@ either bound a real row or supplied the synthetic NULL row. */
 			filter_expr
 			(cons (quote list) (scan_order_sort_columns_for_join_driver
 				ordered_sources default_alias src driver_order_items stages final_condition))
-			(cons (quote list) (order_dirs driver_order_items))
+			(cons (quote list) (order_relations_for_source src driver_order_items))
 			0 0 -1
 			(cons (quote list) mapcols)
 			map_expr reduce_expr 0 false))
@@ -15139,7 +15180,7 @@ either bound a real row or supplied the synthetic NULL row. */
 						filter_expr
 						(cons (quote list) (if (empty_list? current_order_items) '()
 							(scan_order_sort_columns_for_join_driver ordered_sources default_alias src current_order_items stages final_condition)))
-						(cons (quote list) (if (empty_list? current_order_items) '() (order_dirs current_order_items)))
+						(cons (quote list) (if (empty_list? current_order_items) '() (order_relations_for_source src current_order_items)))
 						0
 						(coalesceNil offset_value 0)
 						(coalesceNil limit_value -1)
@@ -15270,7 +15311,7 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 		(quoted_runtime_list '())
 		(list (quote lambda) '() true)
 		(cons (quote list) order_names)
-		(cons (quote list) (order_dirs order_items))
+		(cons (quote list) (order_relations_default order_items))
 		0
 		(coalesceNil offset_value 0)
 		(coalesceNil limit_value -1)
@@ -15979,7 +16020,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(cons (quote list) filtercols)
 				filter_expr
 				(cons (quote list) ordercols)
-				(cons (quote list) (if (empty_list? order_items) '() (order_dirs order_items)))
+				(cons (quote list) (if (empty_list? order_items) '() (order_relations_for_source src order_items)))
 				0
 				(coalesceNil (qb_offset block) 0)
 				(coalesceNil (qb_limit block) -1)
@@ -16079,11 +16120,12 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 					pos))
 			_ (neumann_fail "build_queryplan" "malformed UNION ORDER BY item"))))))
 
-(define union_order_dirs (lambda (order_items)
-	(map (coalesceNil order_items '()) (lambda (item)
-		(match item
-			'(_expr dir) dir
-			_ (neumann_fail "build_queryplan" "malformed UNION ORDER BY item"))))))
+(define union_order_relations (lambda (order_items)
+	/* UNION branches share one merge relation. Until the logical UNION model
+	carries result-column collation metadata, use the canonical binary factory
+	relation rather than letting individual storage scans infer incompatible
+	per-branch callbacks. */
+	(order_relations_default order_items)))
 
 (define union_ordered_branch_supported? (lambda (branch)
 	(and (query_block? branch)
@@ -16353,7 +16395,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
 					(cons (quote list) (map specs (lambda (spec) (nth spec 2))))
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 3)))))
-					(cons (quote list) (union_order_dirs (union_order block)))
+					(cons (quote list) (union_order_relations (union_order block)))
 					nil
 					nil
 					0

@@ -2724,8 +2724,13 @@ func Init(en scm.Env) {
 						colRows = scm.NewSlice(colSlice)
 						idxSlice := make([]scm.Scmer, 0, len(s.Indexes))
 						for _, ix := range s.Indexes {
+							orders := make([]scm.Scmer, len(ix.ColOrderMeta))
+							for i, order := range ix.ColOrderMeta {
+								orders[i] = scm.NewString(order)
+							}
 							idxSlice = append(idxSlice, scm.NewSlice([]scm.Scmer{
 								scm.NewString("cols"), scm.NewString(ix.String()),
+								scm.NewString("orders"), scm.NewSlice(orders),
 								scm.NewString("active"), scm.NewBool(ix.baseState.active),
 								scm.NewString("native"), scm.NewBool(ix.Native),
 								scm.NewString("savings"), scm.NewFloat(ix.Savings),
