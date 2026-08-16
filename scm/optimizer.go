@@ -2215,8 +2215,41 @@ func optimizeIf(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDe
 	} else {
 		mergeResultType(&TypeDescriptor{Transfer: true, Const: true, Kind: "nil", Length: UnknownLength})
 	}
+	if base, item, ok := optimizedUniqueAppendBranches(out); ok {
+		return NewSlice([]Scmer{NewSymbol("append_unique_mut"), base, item}), FreshAlloc
+	}
 	// Single condition left: keep as (if cond then else)
 	return NewSlice(out), resultType
+}
+
+func optimizedUniqueAppendBranches(expr []Scmer) (Scmer, Scmer, bool) {
+	if len(expr) != 4 {
+		return NewNil(), NewNil(), false
+	}
+	condition, conditionOK := scmerSlice(expr[1])
+	otherwise, otherwiseOK := scmerSlice(expr[3])
+	if !conditionOK || len(condition) != 3 || !scmerIsSymbol(condition[0], "contains?") ||
+		!otherwiseOK || len(otherwise) != 3 || !scmerIsSymbol(otherwise[0], "append_mut") {
+		return NewNil(), NewNil(), false
+	}
+	base := condition[1]
+	item := condition[2]
+	if !optimizerStableReference(base) || !optimizerStableReference(item) ||
+		!structuralEqual(expr[2], base) || !structuralEqual(otherwise[1], base) || !structuralEqual(otherwise[2], item) {
+		return NewNil(), NewNil(), false
+	}
+	return base, item, true
+}
+
+func optimizerStableReference(expr Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsNthLocalVar() || expr.IsSymbol() {
+		return true
+	}
+	items, ok := scmerSlice(expr)
+	return ok && len(items) == 2 && scmerIsSymbol(items[0], "outer") && optimizerStableReference(items[1])
 }
 
 // optimizeAnd is the Optimize hook for the lazy (and ...) special form.
