@@ -1770,6 +1770,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define jit_pointer_flow (jit (lambda (value) (list (jit_pointer_callee value) (now)))))
 	(jit-warn-if-fallback jit_pointer_flow "jit: rooted callback result")
 	(assert (nth (nth (jit_pointer_flow 12) 0) 0) 12 "jit: callback pointer result survives a later callback")
+	(define jit_stackmap_flow (jit (lambda (value) (list (concat value "-rooted") (now)))))
+	(jit-warn-if-fallback jit_stackmap_flow "jit: stack-map pointer result")
+	(assert (nth (jit_stackmap_flow "value") 0) "value-rooted"
+		"jit: stack-map root survives a later allocating callback")
 
 	/* Borrowed Go-slice headers stay in the native pipeline as ptr/len/cap. */
 	(define jit_list_nth (jit (lambda (xs i) (nth xs i))))

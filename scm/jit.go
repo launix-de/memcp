@@ -146,8 +146,9 @@ type JITEntryPoint struct {
 	Arena             *jitArena        // owning arena (for free on GC)
 	ConstRoots        []unsafe.Pointer // GC roots for constants embedded into machine code
 	Proc              Proc             // original Proc for serialization
-	// NeedsStableArgs is set when emitted code crosses into Go and therefore may
-	// survive a goroutine stack move while retaining the variadic data pointer.
+	// NeedsStableArgs records that emitted code crosses into Go. Precise JIT
+	// stack maps now relocate the saved variadic data pointer during stack growth;
+	// the flag remains diagnostic metadata for compiled entry points.
 	NeedsStableArgs bool
 	// AutoImportSafe is false for native bodies that still rely on an
 	// experimental pointer-producing path. Explicit (jit ...) may exercise such
@@ -157,18 +158,16 @@ type JITEntryPoint struct {
 
 // Call keeps the entry point, embedded constant roots, and source arguments
 // reachable for the complete native invocation, including panic unwinding.
-// The basic JIT does not keep an otherwise unrooted pointer across a Go
-// callback; this is why its runtime/jit region does not require a separate
-// shadow stack yet.
+// Pointer-bearing JIT locals are owned by the generated frame and described by
+// precise runtime/jit safepoint maps rather than heap shadow roots.
 func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if jep == nil || jep.Native == nil {
 		panic("JIT: nil entry point")
 	}
-	// Native code keeps the variadic data pointer in R12. Calls that append
-	// hidden callback/GC state or transfer that array as an owned list therefore
-	// need a fresh stable frame. Pure scalar JIT functions retain the original
-	// allocation-free call path.
-	stableArgs := jep.TransferInputArgs || jep.NeedsStableArgs || len(jep.HiddenArgs) != 0
+	// A transferred list must own fresh backing, and appending hidden inputs must
+	// not reuse caller-owned capacity. Stack maps make an extra copy unnecessary
+	// merely because native code calls back into Go.
+	stableArgs := jep.TransferInputArgs || len(jep.HiddenArgs) != 0
 	if stableArgs {
 		args = append([]Scmer(nil), args...)
 	}
@@ -199,16 +198,9 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 				panic("JIT: invalid hidden argument input")
 			}
 			args = append(args, NewFunc(OptimizeProcToSerialFunction(args[spec.SourceInput])))
-		case jitHiddenRootSlots:
-			args = append(args, NewSlice(make([]Scmer, spec.Count)))
 		default:
 			panic("JIT: invalid hidden argument kind")
 		}
-	}
-	var callPin runtime.Pinner
-	if stableArgs && len(args) > 0 {
-		callPin.Pin(&args[0])
-		defer callPin.Unpin()
 	}
 	defer func() {
 		runtime.KeepAlive(args)
@@ -222,13 +214,11 @@ type jitHiddenArgKind uint8
 const (
 	jitHiddenPreallocatedSlice jitHiddenArgKind = iota
 	jitHiddenOptimizedCallback
-	jitHiddenRootSlots
 )
 
 type JITHiddenArg struct {
 	Kind        jitHiddenArgKind
 	SourceInput int
-	Count       int
 }
 
 // JITValueDesc describes a value during JIT compilation: its type and
@@ -268,8 +258,8 @@ type JITValueDesc struct {
 	// of Type so unions such as int|float|nil retain the fact without claiming an
 	// exact tag.
 	NoHeapPointer bool
-	// Rooted means a pointer-bearing runtime value has been mirrored into the
-	// invocation's Go-heap root slice and may safely survive later callbacks.
+	// Rooted means a pointer-bearing runtime value has an independently live Go
+	// owner or an invocation-local slot covered by every later safepoint map.
 	Rooted bool
 	// Virtual holds compiler-only aggregate elements. LocVirtualSlice never
 	// reaches generated machine code; consumers either operate on its elements
@@ -361,6 +351,37 @@ type descSpillMeta struct {
 	stackOff int32
 }
 
+type jitStackRootBase uint8
+
+const (
+	jitStackRootFrameSP jitStackRootBase = iota
+	jitStackRootFrameBP
+	jitStackRootCallSP
+)
+
+type jitStackRoot struct {
+	base   jitStackRootBase
+	offset int32
+}
+
+// jitSafepoint is recorded while emitting a Go call. FrameSize is deliberately
+// absent: the one-pass emitter only knows the final static frame size after the
+// complete function has been written.
+type jitSafepoint struct {
+	pcOffset  int32
+	dynamicSP int32
+	roots     []jitStackRoot
+}
+
+// jitStackMap is the runtime-independent form passed through the common JIT
+// code. The goexperiment.jit implementation converts it to runtime/jit maps;
+// the vanilla implementation deliberately ignores it.
+type jitStackMap struct {
+	pcOffset   uintptr
+	frameWords uintptr
+	pointerMap []byte
+}
+
 // JITContext is the central structure for descriptor-based JIT compilation.
 // W is a self-reference for backward compatibility with hand-written emitters
 // that use ctx.W.EmitXxx() (from the pre-consolidation JITWriter era).
@@ -400,12 +421,18 @@ type JITContext struct {
 	// exactly the complete variadic input array re-tagged as an owned list.
 	TransferInputArgs bool
 	HiddenArgs        []JITHiddenArg
-	RootHiddenArg     int
-	RootSlotCount     int
 	RuntimeEnv        Scmer
 	AutoImportSafe    bool
 	NeedsStableArgs   bool
 	RegOwners         [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	// DynamicSP is the temporary distance below the static frame bottom. It
+	// covers pushed live registers, variadic arrays, and the Go call area.
+	DynamicSP int32
+	// StackRoots contains pointer words that are live in the static frame at the
+	// current emission point. Safepoints copy this set before sibling control
+	// flow can restore a different allocator state.
+	StackRoots map[jitStackRoot]struct{}
+	Safepoints []jitSafepoint
 
 	// Stack frame: emitter locals use [RSP + offset], while register spills use
 	// [RBP - offset]. The two zones cannot overlap because the patched frame size
@@ -441,24 +468,6 @@ func (ctx *JITContext) RequestOptimizedCallback(sourceInput int) JITValueDesc {
 	return JITValueDesc{Loc: LocInputPair, Type: tagFunc, StackOff: int32(hiddenIndex)}
 }
 
-// RequestRootSlot reserves one Scmer slot in a Go-heap-backed hidden slice.
-// JIT values stored there remain visible to the garbage collector while a Go
-// callback is running, without a process-global shadow stack.
-func (ctx *JITContext) RequestRootSlot() (rootSlice JITValueDesc, slot int) {
-	if ctx.InputArgCount < 0 {
-		panic("jit: GC-root slots require fixed procedure parameters")
-	}
-	if ctx.RootHiddenArg < 0 {
-		ctx.RootHiddenArg = len(ctx.HiddenArgs)
-		ctx.HiddenArgs = append(ctx.HiddenArgs, JITHiddenArg{Kind: jitHiddenRootSlots})
-	}
-	slot = ctx.RootSlotCount
-	ctx.RootSlotCount++
-	ctx.HiddenArgs[ctx.RootHiddenArg].Count = ctx.RootSlotCount
-	hiddenIndex := ctx.InputArgCount + ctx.RootHiddenArg
-	return JITValueDesc{Loc: LocInputPair, Type: tagSlice, StackOff: int32(hiddenIndex)}, slot
-}
-
 // jitAllocStateSnapshot captures allocator/spill bookkeeping so emitter
 // generation can render sibling BBs from identical allocator state.
 type jitAllocStateSnapshot struct {
@@ -470,6 +479,8 @@ type jitAllocStateSnapshot struct {
 	spillOffset        int32
 	descSpills         map[uint32]descSpillMeta
 	nextDescID         uint32
+	stackRoots         map[jitStackRoot]struct{}
+	dynamicSP          int32
 }
 
 func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
@@ -479,6 +490,7 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		protectedRegCounts: ctx.ProtectedRegCounts,
 		spillOffset:        ctx.SpillOffset,
 		nextDescID:         ctx.nextDescID,
+		dynamicSP:          ctx.DynamicSP,
 	}
 	if len(ctx.descOwners) != 0 {
 		s.ownerValues = make(map[uint32]JITValueDesc, len(ctx.descOwners))
@@ -500,6 +512,12 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 			s.descSpills[k] = v
 		}
 	}
+	if len(ctx.StackRoots) != 0 {
+		s.stackRoots = make(map[jitStackRoot]struct{}, len(ctx.StackRoots))
+		for root := range ctx.StackRoots {
+			s.stackRoots[root] = struct{}{}
+		}
+	}
 	return s
 }
 
@@ -509,6 +527,7 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	ctx.ProtectedRegCounts = s.protectedRegCounts
 	ctx.SpillOffset = s.spillOffset
 	ctx.nextDescID = s.nextDescID
+	ctx.DynamicSP = s.dynamicSP
 
 	if s.ownerValues == nil {
 		ctx.descOwners = nil
@@ -534,6 +553,14 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 		ctx.descSpills = make(map[uint32]descSpillMeta, len(s.descSpills))
 		for k, v := range s.descSpills {
 			ctx.descSpills[k] = v
+		}
+	}
+	if s.stackRoots == nil {
+		ctx.StackRoots = nil
+	} else {
+		ctx.StackRoots = make(map[jitStackRoot]struct{}, len(s.stackRoots))
+		for root := range s.stackRoots {
+			ctx.StackRoots[root] = struct{}{}
 		}
 	}
 }
@@ -575,7 +602,27 @@ func (ctx *JITContext) AllocStack(size int32) int32 {
 
 // FreeStack releases size bytes from the stack frame.
 func (ctx *JITContext) FreeStack(size int32) {
+	newOffset := ctx.BPOffset - size
+	physicalStart := newOffset - ctx.DynamicSP
+	physicalEnd := ctx.BPOffset - ctx.DynamicSP
+	for root := range ctx.StackRoots {
+		if root.base == jitStackRootFrameSP && root.offset >= physicalStart && root.offset < physicalEnd {
+			delete(ctx.StackRoots, root)
+		}
+	}
 	ctx.BPOffset -= size
+}
+
+func (ctx *JITContext) setStackPointer(base jitStackRootBase, offset int32, pointer bool) {
+	root := jitStackRoot{base: base, offset: offset}
+	if pointer {
+		if ctx.StackRoots == nil {
+			ctx.StackRoots = make(map[jitStackRoot]struct{})
+		}
+		ctx.StackRoots[root] = struct{}{}
+		return
+	}
+	delete(ctx.StackRoots, root)
 }
 
 // AllocSpill reserves a slot in the invocation-local spill zone immediately
@@ -593,11 +640,10 @@ func (ctx *JITContext) TrackImm(v Scmer) {
 	if ctx == nil {
 		return
 	}
-	ptr, _ := v.RawWords()
-	if ptr == 0 {
+	if v.ptr == nil {
 		return
 	}
-	p := unsafe.Pointer(ptr)
+	p := unsafe.Pointer(v.ptr)
 	// Sentinel pointers are static globals and don't need GC rooting.
 	if p == unsafe.Pointer(&scmerIntSentinel) || p == unsafe.Pointer(&scmerFloatSentinel) {
 		return
@@ -820,6 +866,7 @@ func (ctx *JITContext) AllocReg() Reg {
 		stackOff := ctx.AllocSpill(16)
 		ctx.EmitStoreRegMem(spillR1, RegRBP, stackOff)
 		ctx.EmitStoreRegMem(spillR2, RegRBP, stackOff+8)
+		ctx.setStackPointer(jitStackRootFrameBP, stackOff, !owner.NoHeapPointer)
 		owner.Loc = LocStackPair
 		owner.MemPtr = 0
 		owner.StackOff = stackOff
@@ -840,6 +887,7 @@ func (ctx *JITContext) AllocReg() Reg {
 		ctx.EmitStoreRegMem(spillR1, RegRBP, stackOff)
 		ctx.EmitStoreRegMem(spillR2, RegRBP, stackOff+8)
 		ctx.EmitStoreRegMem(spillR3, RegRBP, stackOff+16)
+		ctx.setStackPointer(jitStackRootFrameBP, stackOff, true)
 		owner.Loc = LocStackTriple
 		owner.MemPtr = 0
 		owner.StackOff = stackOff
@@ -861,6 +909,7 @@ func (ctx *JITContext) AllocReg() Reg {
 	// Scalar spill: reserve a call-local slot in the generated function's frame.
 	stackOff := ctx.AllocSpill(8)
 	ctx.EmitStoreRegMem(r, RegRBP, stackOff)
+	ctx.setStackPointer(jitStackRootFrameBP, stackOff, false)
 
 	owner.Loc = LocStack
 	owner.MemPtr = 0
@@ -1580,7 +1629,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	if len(liveRegs) == 0 {
 		ctx.emitCallIndirectWithSetup(funcAddr, func(callFrameBytes int32) {
 			emitArgSetup(callFrameBytes)
-		})
+		}, nil)
 		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 			ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 		}
@@ -1609,6 +1658,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			ctx.emitBytes(0x48, 0x81, 0xEC)
 			ctx.emitU32(uint32(resultBytes)) // SUB RSP, imm32
 		}
+		ctx.DynamicSP += int32(resultBytes)
 	}
 
 	// Save live registers (PUSH)
@@ -1621,6 +1671,16 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	if padded {
 		ctx.EmitPushReg(RegRAX) // dummy padding
 	}
+	transientRoots := make([]int32, 0, len(liveRegs))
+	paddingBytes := int32(0)
+	if padded {
+		paddingBytes = 8
+	}
+	for i, r := range liveRegs {
+		if ctx.regHoldsPointer(r) || r == ctx.SliceBase {
+			transientRoots = append(transientRoots, paddingBytes+int32(len(liveRegs)-1-i)*8)
+		}
+	}
 	// Move argument words into Go ABI registers (clobber-safe planner).
 	stackArgBaseDisp := int32(resultBytes + len(liveRegs)*8)
 	if padded {
@@ -1632,7 +1692,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	// caller SP and are followed by the register spill slots.
 	ctx.emitCallIndirectWithSetup(funcAddr, func(callFrameBytes int32) {
 		emitArgSetup(stackArgBaseDisp + callFrameBytes)
-	})
+	}, transientRoots)
 
 	// Store results to reserved stack slots (above saved regs + padding)
 	paddingSize := 0
@@ -1821,6 +1881,40 @@ type jitArena struct {
 	sourceMu      sync.Mutex
 	sourceEntries []jitSourceEntry
 	sourceMap     atomic.Pointer[jitSourceMap]
+	metaMu        sync.Mutex
+	metaCond      *sync.Cond
+	reservations  []*jitCodeReservation
+	metaNext      int
+}
+
+type jitCodeReservation struct {
+	offset    int
+	done      bool
+	published bool
+	maps      []jitStackMap
+}
+
+// complete publishes arena metadata in allocation order. Compilation itself
+// may run concurrently, but an entry point does not become reachable before
+// every earlier reservation has either published its maps or reported failure.
+func (a *jitArena) complete(reservation *jitCodeReservation, maps []jitStackMap) {
+	if a == nil || reservation == nil {
+		return
+	}
+	a.metaMu.Lock()
+	reservation.maps = maps
+	reservation.done = true
+	for a.metaNext < len(a.reservations) && a.reservations[a.metaNext].done {
+		ready := a.reservations[a.metaNext]
+		publishJITStackMaps(a, ready.maps)
+		ready.published = true
+		a.metaNext++
+	}
+	a.metaCond.Broadcast()
+	for !reservation.published {
+		a.metaCond.Wait()
+	}
+	a.metaMu.Unlock()
 }
 
 // addSourceEntry publishes an immutable, offset-sorted source-map snapshot.
@@ -1862,7 +1956,7 @@ const jitArenaSize = 1 << 20 // 1 MB per arena
 var globalJITPool jitPool
 
 // Alloc bump-allocates size bytes from the pool, 16-byte aligned.
-func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena) {
+func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservation *jitCodeReservation) {
 	size = (size + 15) & ^15 // align to 16 bytes
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1872,8 +1966,12 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena) {
 		a := p.arenas[len(p.arenas)-1]
 		if a.offset+size <= a.size {
 			ptr = unsafe.Add(a.base, a.offset)
+			reservation = &jitCodeReservation{offset: a.offset}
+			a.metaMu.Lock()
+			a.reservations = append(a.reservations, reservation)
+			a.metaMu.Unlock()
 			a.offset += size
-			return ptr, a
+			return ptr, a, reservation
 		}
 	}
 
@@ -1892,11 +1990,14 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena) {
 		base: unsafe.Pointer(&b[0]),
 		size: arenaBytes,
 	}
+	a.metaCond = sync.NewCond(&a.metaMu)
 	a.handle = registerJITArena(a)
 	ptr = a.base
+	reservation = &jitCodeReservation{}
+	a.reservations = append(a.reservations, reservation)
 	a.offset = size
 	p.arenas = append(p.arenas, a)
-	return ptr, a
+	return ptr, a, reservation
 }
 
 // Free returns a code region to the arena. Currently a no-op placeholder;
@@ -2206,9 +2307,10 @@ func jitCompile(a ...Scmer) Scmer {
 		}
 		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
-			ptr, arena := globalJITPool.Alloc(codeCap)
-			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena}
+			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
+			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
 			codeLen, roots, overflow, transferInputArgs, hiddenArgs, autoImportSafe, needsStableArgs := jitCompileProcToExec(proc, buf)
+			arena.complete(reservation, buf.stackMaps)
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
@@ -2317,9 +2419,11 @@ func jitAutoImportSyntaxSafe(expr Scmer) bool {
 
 // execBuf is a small wrapper for writable memory (arena-backed or standalone)
 type execBuf struct {
-	ptr   unsafe.Pointer
-	n     int       // size
-	arena *jitArena // owning arena (nil for standalone buffers)
+	ptr         unsafe.Pointer
+	n           int       // size
+	arena       *jitArena // owning arena (nil for standalone buffers)
+	reservation *jitCodeReservation
+	stackMaps   []jitStackMap
 }
 
 func maybeDumpJITCode(base unsafe.Pointer, code []byte) {
