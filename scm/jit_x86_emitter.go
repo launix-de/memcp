@@ -274,6 +274,14 @@ func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
 	return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 }
 
+func jitAllocTrackedPair(ctx *JITContext, valueType uint8) JITValueDesc {
+	reg := ctx.AllocReg()
+	desc := JITValueDesc{Loc: LocRegPair, Type: valueType, Reg: reg, Reg2: ctx.AllocRegExcept(reg)}
+	ctx.BindReg(desc.Reg, &desc)
+	ctx.BindReg(desc.Reg2, &desc)
+	return desc
+}
+
 func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) JITValueDesc {
 	if target.Loc != LocRegPair {
 		panic("jit: jitPlaceIntoPair requires LocRegPair target")
@@ -381,6 +389,10 @@ func jitApplyCallable1(callable, envValue, arg0 Scmer) Scmer {
 
 func jitApplyCallable2(callable, envValue, arg0, arg1 Scmer) Scmer {
 	return ApplyEx(callable, []Scmer{arg0, arg1}, envValue.Any().(*Env))
+}
+
+func jitApplyCallableSlice(callable, envValue Scmer, args []Scmer) Scmer {
+	return ApplyEx(callable, args, envValue.Any().(*Env))
 }
 
 func jitInvokeCallback1(callback, arg0 Scmer) Scmer {
@@ -1578,24 +1590,38 @@ func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, ar
 	return out
 }
 
-func jitCompileRootedCallValue(ctx *JITContext, expr Scmer, sliceBase Reg) JITValueDesc {
-	off := ctx.AllocStack(16)
+func jitCompileRootedCallValueAt(ctx *JITContext, expr Scmer, sliceBase Reg, off int32) JITValueDesc {
 	value := jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
+	// Input values remain reachable through JITEntryPoint.Call's args slice for
+	// the complete native invocation. Calls into Go set NeedsStableArgs, which
+	// additionally copies and pins that slice before entering generated code.
+	if value.Loc == LocInputPair {
+		value.Rooted = true
+	}
 	pair := value
-	if pair.Loc != LocRegPair {
-		pair = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+	if pair.Loc != LocImm && pair.Loc != LocRegPair && pair.Loc != LocStackPair && pair.Loc != LocInputPair {
+		pair = jitAllocTrackedPair(ctx, JITTypeUnknown)
 		pair = jitPlaceIntoPair(ctx, &value, pair)
+	}
+	if pair.Loc == LocRegPair && pair.ID == 0 {
+		ctx.BindReg(pair.Reg, &pair)
+		ctx.BindReg(pair.Reg2, &pair)
 	}
 	pair = jitRootScmer(ctx, pair)
 	ctx.EmitStoreScmerToStack(pair, off)
+	valueType := pair.Type
+	noHeapPointer := pair.NoHeapPointer
+	rooted := pair.Rooted
 	ctx.FreeDesc(&pair)
-	return JITValueDesc{Loc: LocStackPair, Type: pair.Type, StackOff: off, NoHeapPointer: pair.NoHeapPointer, Rooted: pair.Rooted}
+	return JITValueDesc{Loc: LocStackPair, Type: valueType, StackOff: off, NoHeapPointer: noHeapPointer, Rooted: rooted}
+}
+
+func jitCompileRootedCallValue(ctx *JITContext, expr Scmer, sliceBase Reg) JITValueDesc {
+	off := ctx.AllocStack(16)
+	return jitCompileRootedCallValueAt(ctx, expr, sliceBase, off)
 }
 
 func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
-	if len(operands) > 2 {
-		panic("jit: dynamic calls with more than two arguments require Go stack-argument ABI support")
-	}
 	stackStart := ctx.BPOffset
 	callable := jitCompileRootedCallValue(ctx, callableExpr, sliceBase)
 	args := make([]JITValueDesc, 0, len(operands)+2)
@@ -1604,13 +1630,33 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	envImm := JITValueDesc{Loc: LocImm, Type: tagAny, Imm: ctx.RuntimeEnv}
 	ctx.TrackImm(ctx.RuntimeEnv)
 	envOff := ctx.AllocStack(16)
-	envPair := JITValueDesc{Loc: LocRegPair, Type: tagAny, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+	envPair := jitAllocTrackedPair(ctx, tagAny)
 	envPair = jitPlaceIntoPair(ctx, &envImm, envPair)
 	ctx.EmitStoreScmerToStack(envPair, envOff)
 	ctx.FreeDesc(&envPair)
 	args = append(args, JITValueDesc{Loc: LocStackPair, Type: tagAny, StackOff: envOff})
-	for _, operand := range operands {
-		args = append(args, jitCompileRootedCallValue(ctx, operand, sliceBase))
+	if len(operands) <= 2 {
+		for _, operand := range operands {
+			args = append(args, jitCompileRootedCallValue(ctx, operand, sliceBase))
+		}
+	} else {
+		// Keep the variadic backing array in the invocation-local JIT frame. Each
+		// pointer-bearing value is also mirrored into the hidden Go root slice,
+		// so a callback-triggered GC never depends on scanning JIT stack slots.
+		operandOff := ctx.AllocStack(int32(len(operands) * 16))
+		for i, operand := range operands {
+			jitCompileRootedCallValueAt(ctx, operand, sliceBase, operandOff+int32(i*16))
+		}
+
+		sliceOff := ctx.AllocStack(24)
+		ptr := ctx.AllocReg()
+		ctx.EmitLeaRegMem(ptr, RegRSP, operandOff)
+		ctx.EmitStoreRegMem(ptr, RegRSP, sliceOff)
+		ctx.FreeReg(ptr)
+		ctx.EmitMovRegImm64(RegR11, uint64(len(operands)))
+		ctx.EmitStoreRegMem(RegR11, RegRSP, sliceOff+8)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, sliceOff+16)
+		args = append(args, JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: sliceOff})
 	}
 
 	target := jitEnsureResultPair(ctx, result)
@@ -1622,6 +1668,8 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 		fn = jitApplyCallable1
 	case 2:
 		fn = jitApplyCallable2
+	default:
+		fn = jitApplyCallableSlice
 	}
 	out := ctx.EmitGoCallScalarInto(GoFuncAddr(fn), args, target)
 	out.Type = JITTypeUnknown
@@ -1637,9 +1685,9 @@ func jitCompileRuntimeSymbol(ctx *JITContext, symbol Scmer, result JITValueDesc)
 	symbolImm := JITValueDesc{Loc: LocImm, Type: tagSymbol, Imm: symbol}
 	ctx.TrackImm(ctx.RuntimeEnv)
 	ctx.TrackImm(symbol)
-	envPair := JITValueDesc{Loc: LocRegPair, Type: tagAny, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-	symbolPair := JITValueDesc{Loc: LocRegPair, Type: tagSymbol, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+	envPair := jitAllocTrackedPair(ctx, tagAny)
 	envPair = jitPlaceIntoPair(ctx, &envImm, envPair)
+	symbolPair := jitAllocTrackedPair(ctx, tagSymbol)
 	symbolPair = jitPlaceIntoPair(ctx, &symbolImm, symbolPair)
 	target := jitEnsureResultPair(ctx, result)
 	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitResolveRuntimeSymbol), []JITValueDesc{envPair, symbolPair}, target)
@@ -4107,6 +4155,24 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 	case LocRegPair:
 		ctx.EmitStoreRegMem(desc.Reg, RegRSP, disp)
 		ctx.EmitStoreRegMem(desc.Reg2, RegRSP, disp+8)
+	case LocStackPair:
+		ctx.EmitMovRegMem(RegR11, RegRSP, desc.StackOff)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
+		ctx.EmitMovRegMem(RegR11, RegRSP, desc.StackOff+8)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
+	case LocInputPair:
+		base := ctx.SliceBase
+		if ctx.SliceBaseTracksRSP && int(desc.StackOff) >= ctx.InputArgCount {
+			base = ctx.AllocReg()
+			ctx.EmitMovRegMem(base, RegRSP, ctx.OriginalArgsOff)
+		}
+		ctx.EmitMovRegMem(RegR11, base, desc.StackOff*16)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
+		ctx.EmitMovRegMem(RegR11, base, desc.StackOff*16+8)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
+		if base != ctx.SliceBase {
+			ctx.FreeReg(base)
+		}
 	case LocImm:
 		// Store ptr word
 		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(desc.Imm.ptr))))
