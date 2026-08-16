@@ -30,6 +30,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS trace_folder"
   - sql: "DROP TABLE IF EXISTS trace_message"
   - sql: "DROP TABLE IF EXISTS trace_share"
+  - sql: "DROP TABLE IF EXISTS trace_global_access"
   - sql: |
       CREATE TABLE trace_host (
         id INT PRIMARY KEY,
@@ -60,11 +61,18 @@ setup:
         box_id INT,
         owner_id INT
       )
+  - sql: |
+      CREATE TABLE trace_global_access (
+        id INT PRIMARY KEY,
+        actor_id INT,
+        scope_id INT
+      )
   - sql: "INSERT INTO trace_host (id, kind) VALUES (1, 1), (2, 2)"
   - sql: "INSERT INTO trace_box (id, host_id, owner_id) VALUES (100, 1, 7), (200, 2, 9)"
   - sql: "INSERT INTO trace_folder (id, box_id, name) VALUES (1001, 100, 'inbox'), (1002, 100, 'archive'), (2001, 200, 'other')"
   - sql: "INSERT INTO trace_message (id, box_id, folder_id, seen) VALUES (1, 100, 1001, FALSE), (2, 100, 1002, TRUE), (3, 200, 2001, FALSE)"
-  - sql: "INSERT INTO trace_share (id, box_id, owner_id) VALUES (1, 100, 7)"
+  - sql: "INSERT INTO trace_share (id, box_id, owner_id) VALUES (1, 100, 7), (2, 200, 8)"
+  - sql: "INSERT INTO trace_global_access (id, actor_id, scope_id) VALUES (1, 7, NULL), (2, 8, 10)"
   - sql: |
       CREATE TABLE trace_asset (
         id INT PRIMARY KEY,
@@ -372,6 +380,163 @@ test_cases:
       contains:
         - "touch_keytable"
 
+  - name: "Set actor for query-invariant nested presence probe"
+    session_id: "trace-invariant-probe"
+    sql: "SET @trace_actor = 7"
+    expect:
+      rows_affected: 0
+
+  - name: "Equivalent positive and negative invariant grants share nested semantics"
+    session_id: "trace-invariant-probe"
+    sql: |
+      SELECT
+        a.id,
+        COALESCE((
+          SELECT (
+            (
+              EXISTS (
+                SELECT TRUE FROM trace_global_access grant_positive
+                WHERE grant_positive.actor_id = @trace_actor
+                  AND grant_positive.scope_id IS NULL
+                LIMIT 1
+              )
+              OR NOT EXISTS (
+                SELECT TRUE FROM trace_global_access grant_negative
+                WHERE grant_negative.actor_id = @trace_actor
+                  AND grant_negative.scope_id IS NULL
+                LIMIT 1
+              )
+            )
+            AND CASE WHEN EXISTS (
+              SELECT TRUE FROM trace_global_access grant_branch
+              WHERE grant_branch.actor_id = @trace_actor
+                AND grant_branch.scope_id IS NULL
+              LIMIT 1
+            ) THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM trace_share local_access
+              WHERE local_access.box_id = box_row.id
+                AND local_access.owner_id = @trace_actor
+              LIMIT 1
+            ) END
+          )
+          FROM trace_box box_row
+          WHERE box_row.id = a.id * 100
+          LIMIT 1
+        ), FALSE) AS allowed
+      FROM trace_asset a
+      WHERE a.id IN (1, 2)
+      ORDER BY a.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          allowed: true
+        - id: 2
+          allowed: true
+
+  - name: "Nested session-only presence probe is bound once per query"
+    session_id: "trace-invariant-probe"
+    sql: |
+      EXPLAIN
+      SELECT
+        a.id,
+        COALESCE((
+          SELECT (
+            (
+              EXISTS (
+                SELECT TRUE FROM trace_global_access grant_positive
+                WHERE grant_positive.actor_id = @trace_actor
+                  AND grant_positive.scope_id IS NULL
+                LIMIT 1
+              )
+              OR NOT EXISTS (
+                SELECT TRUE FROM trace_global_access grant_negative
+                WHERE grant_negative.actor_id = @trace_actor
+                  AND grant_negative.scope_id IS NULL
+                LIMIT 1
+              )
+            )
+            AND CASE WHEN EXISTS (
+              SELECT TRUE FROM trace_global_access grant_branch
+              WHERE grant_branch.actor_id = @trace_actor
+                AND grant_branch.scope_id IS NULL
+              LIMIT 1
+            ) THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM trace_share local_access
+              WHERE local_access.box_id = box_row.id
+                AND local_access.owner_id = @trace_actor
+              LIMIT 1
+            ) END
+          )
+          FROM trace_box box_row
+          WHERE box_row.id = a.id * 100
+          LIMIT 1
+        ), FALSE) AS allowed
+      FROM trace_asset a
+      ORDER BY a.id
+      LIMIT 72
+    expect:
+      contains:
+        - "__query_invariant_probe_"
+        - "__scalar_query_probe_"
+      result_occurrences:
+        - text: "__query_invariant_probe_"
+          count: 4
+
+  - name: "Query-invariant presence binding observes the next session value"
+    session_id: "trace-invariant-probe"
+    sql: "SET @trace_actor = 8"
+    expect:
+      rows_affected: 0
+
+  - name: "Equivalent invariant grants preserve the false and fallback branches"
+    session_id: "trace-invariant-probe"
+    sql: |
+      SELECT
+        a.id,
+        COALESCE((
+          SELECT (
+            (
+              EXISTS (
+                SELECT TRUE FROM trace_global_access grant_positive
+                WHERE grant_positive.actor_id = @trace_actor
+                  AND grant_positive.scope_id IS NULL
+                LIMIT 1
+              )
+              OR NOT EXISTS (
+                SELECT TRUE FROM trace_global_access grant_negative
+                WHERE grant_negative.actor_id = @trace_actor
+                  AND grant_negative.scope_id IS NULL
+                LIMIT 1
+              )
+            )
+            AND CASE WHEN EXISTS (
+              SELECT TRUE FROM trace_global_access grant_branch
+              WHERE grant_branch.actor_id = @trace_actor
+                AND grant_branch.scope_id IS NULL
+              LIMIT 1
+            ) THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM trace_share local_access
+              WHERE local_access.box_id = box_row.id
+                AND local_access.owner_id = @trace_actor
+              LIMIT 1
+            ) END
+          )
+          FROM trace_box box_row
+          WHERE box_row.id = a.id * 100
+          LIMIT 1
+        ), FALSE) AS allowed
+      FROM trace_asset a
+      WHERE a.id IN (1, 2)
+      ORDER BY a.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          allowed: false
+        - id: 2
+          allowed: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_asset"
   - sql: "DROP TABLE IF EXISTS trace_ref_a"
@@ -384,3 +549,4 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS trace_folder"
   - sql: "DROP TABLE IF EXISTS trace_message"
   - sql: "DROP TABLE IF EXISTS trace_share"
+  - sql: "DROP TABLE IF EXISTS trace_global_access"
