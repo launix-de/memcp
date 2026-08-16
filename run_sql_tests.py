@@ -701,7 +701,7 @@ class SQLTestRunner:
         except Exception:
             pass
 
-    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None) -> Optional[requests.Response]:
+    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None, retry_on_connection_failure: bool = True) -> Optional[requests.Response]:
         # proactively ensure database exists (works for connect-only too)
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
@@ -717,11 +717,15 @@ class SQLTestRunner:
         body = query.encode("utf-8") if isinstance(query, str) else query
         if session_id:
             headers["X-Session-Id"] = session_id
-        # Try request; if connection fails, wait for memcp to be ready and retry a few times
-        for attempt in range(5):
+        # Normal probes tolerate a server restart. Crash-interruption tests must
+        # never replay a potentially mutating statement into the new process.
+        attempts = 5 if retry_on_connection_failure else 1
+        for attempt in range(attempts):
             try:
                 return requests.post(url, data=body, headers=headers, timeout=timeout)
             except Exception:
+                if not retry_on_connection_failure:
+                    return None
                 # parse port from base_url
                 try:
                     port = int(self.base_url.rsplit(':', 1)[1])
@@ -1260,7 +1264,11 @@ class SQLTestRunner:
             response = None
             for _ in range(repeat):
                 start_ns = time.monotonic_ns()
-                response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, session_id=session_id, timeout=sql_timeout, params=sql_params)
+                response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(
+                    database, query, auth_header, active_syntax,
+                    session_id=session_id, timeout=sql_timeout, params=sql_params,
+                    retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
+                )
                 samples_ns.append(time.monotonic_ns() - start_ns)
                 if response is None or response.status_code != 200:
                     break  # don't hammer a broken endpoint
@@ -1296,7 +1304,8 @@ class SQLTestRunner:
         # without an explicit `max_time` annotation must finish within
         # DEFAULT_MAX_TIME_SEC; slower queries must declare a higher limit so the
         # time budget stays explicit and visible in the test spec.
-        if not is_perf_test and response.status_code == 200:
+        if (not is_perf_test and response.status_code == 200
+                and not self._expect_interrupted_ok(test_case.get("expect"))):
             # max_time is a reference-machine budget.  Only its wall-clock
             # enforcement is machine-scaled; correctness, plan size, planner
             # metrics, data volume, and test criticality remain unchanged.
