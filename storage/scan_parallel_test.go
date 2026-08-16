@@ -164,6 +164,7 @@ func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 func TestIterateShardsParallelReleasesFreeShardRegistrationOnPanic(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscanparpanic")
 	shard := tbl.Shards[0]
+	topology := tbl.activeTopology()
 
 	func() {
 		defer func() {
@@ -178,6 +179,98 @@ func TestIterateShardsParallelReleasesFreeShardRegistrationOnPanic(t *testing.T)
 
 	if got := shard.activeScanners.Load(); got != 0 {
 		t.Fatalf("active scanner registrations after panic = %d, want 0", got)
+	}
+	if got := topology.operations.Load(); got != 0 {
+		t.Fatalf("topology user registrations after panic = %d, want 0", got)
+	}
+}
+
+func TestRepartitionPublishesWhileOldGenerationReaderRuns(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tscanparrepartitionreader")
+	rows := make([][]scm.Scmer, 128)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i))}
+	}
+	tbl.Insert([]string{"id"}, rows, nil, scm.NewNil(), false, nil)
+	dimensions := []shardDimension{tbl.NewShardDimension("id", 2)}
+	oldTopology := tbl.activeTopology()
+
+	readerEntered := make(chan struct{})
+	releaseReader := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		tbl.iterateShardsParallel(nil, nil, func(*storageShard, bool) {
+			close(readerEntered)
+			<-releaseReader
+		})
+	}()
+	<-readerEntered
+	t.Cleanup(func() {
+		select {
+		case <-releaseReader:
+		default:
+			close(releaseReader)
+		}
+		<-readerDone
+	})
+
+	if !tbl.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	repartitionDone := make(chan struct{})
+	go func() {
+		tbl.repartition(dimensions)
+		close(repartitionDone)
+	}()
+
+	select {
+	case <-repartitionDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repartition waited for a reader pinned to the old generation")
+	}
+	if topology := tbl.activeTopology(); topology == oldTopology || topology.mode != ShardModePartition {
+		t.Fatal("repartition did not publish the new partition generation")
+	}
+	select {
+	case <-oldTopology.drained:
+		t.Fatal("old generation drained before its reader returned")
+	default:
+	}
+
+	insertDone := make(chan struct{})
+	go func() {
+		tbl.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1000)}}, nil, scm.NewNil(), false, nil)
+		close(insertDone)
+	}()
+	select {
+	case <-insertDone:
+	case <-time.After(time.Second):
+		t.Fatal("writer on the published generation was blocked by an old reader")
+	}
+
+	close(releaseReader)
+	<-readerDone
+	select {
+	case <-oldTopology.drained:
+	case <-time.After(time.Second):
+		t.Fatal("old generation did not drain after its last reader returned")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		tbl.mu.Lock()
+		idle := tbl.maintenanceKind == 0
+		tbl.mu.Unlock()
+		if idle {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("repartition retirement did not release maintenance ownership")
+		}
+		runtime.Gosched()
+	}
+	if got := tbl.Count(); got != uint(len(rows)+1) {
+		t.Fatalf("row count after asynchronous generation retirement = %d, want %d", got, len(rows)+1)
 	}
 }
 

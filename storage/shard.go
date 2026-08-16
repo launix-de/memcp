@@ -80,12 +80,25 @@ type storageShard struct {
 	srState      SharedState
 	lastAccessed uint64 // UnixNano, atomic; updated on GetRead/GetExclusive for LRU eviction
 
-	// repartition drain tracking: counts in-flight scans on this shard
+	// Repartition generation tracking. Counters are atomic; generation points to
+	// the immutable topology owning this shard and changes only on publication.
 	activeScanners     atomic.Int32
 	activeTransactions atomic.Int32
+	generation         atomic.Pointer[tableShardTopology]
 
 	// guards RemoveFromDisk against double execution (finalizer + explicit cleanup)
 	cleanupOnce sync.Once
+}
+
+func (s *storageShard) beginTransactionUse() {
+	s.activeTransactions.Add(1)
+}
+
+func (s *storageShard) endTransactionUse() {
+	if s.activeTransactions.Add(-1) != 0 {
+		return
+	}
+	s.t.signalTransactionDrain()
 }
 
 func (s *storageShard) loadNext() *storageShard {

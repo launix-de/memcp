@@ -84,8 +84,46 @@ type rebuildDatabaseResult struct {
 	// replaced remains reachable until the caller has committed schema.json.
 	// On any build or publication error these shards must stay on disk because
 	// the last committed schema may still reference them.
-	replaced []*storageShard
+	replaced []replacedShardGeneration
 	errors   []string
+}
+
+type replacedShardGeneration struct {
+	shard   *storageShard
+	drained <-chan struct{}
+}
+
+func cleanupReplacedShardGenerations(replaced []replacedShardGeneration, context string) []string {
+	cleanup := func() []string {
+		var errors []string
+		for _, generation := range replaced {
+			<-generation.drained
+			if err := func() (err error) {
+				defer func() {
+					err = recoverAsError("cleanup failed for " + context + " shard " + generation.shard.uuid.String())
+				}()
+				generation.shard.RemoveFromDisk()
+				return nil
+			}(); err != nil {
+				errors = append(errors, err.Error())
+			}
+		}
+		return errors
+	}
+
+	for _, generation := range replaced {
+		select {
+		case <-generation.drained:
+		default:
+			go func() {
+				for _, err := range cleanup() {
+					fmt.Println("error:", err)
+				}
+			}()
+			return nil
+		}
+	}
+	return cleanup()
 }
 
 type schemaWriteOptions interface {
@@ -195,17 +233,7 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 	if len(errs) == 0 {
 		// tbl.schema.save() committed all replacement UUIDs. Only this success
 		// path may remove files belonging to the previous generation.
-		for _, s := range result.replaced {
-			if err := func() (err error) {
-				defer func() {
-					err = recoverAsError("cleanup failed for table " + tbl.schema.Name + "." + tbl.Name + " shard " + s.uuid.String())
-				}()
-				s.RemoveFromDisk()
-				return nil
-			}(); err != nil {
-				errs = append(errs, err.Error())
-			}
-		}
+		errs = append(errs, cleanupReplacedShardGenerations(result.replaced, "table "+tbl.schema.Name+"."+tbl.Name)...)
 	}
 
 	duration := fmt.Sprint(time.Since(start))
@@ -236,15 +264,7 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 			}
 			// db.save() committed all replacement UUIDs. A save failure returns
 			// above and deliberately retains every old generation.
-			for _, s := range result.replaced {
-				if err := func() (err error) {
-					defer func() { err = recoverAsError("cleanup failed for database " + db.Name + " shard " + s.uuid.String()) }()
-					s.RemoveFromDisk()
-					return nil
-				}(); err != nil {
-					errs = append(errs, err.Error())
-				}
-			}
+			errs = append(errs, cleanupReplacedShardGenerations(result.replaced, "database "+db.Name)...)
 		}(db)
 	}
 	duration := fmt.Sprint(time.Since(start))
@@ -612,7 +632,7 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 	// ALL table rebuilds finish to avoid deadlocks with concurrent .blobs
 	// repartition holding shard read-locks.
 	var replacedMu sync.Mutex
-	var allReplaced []*storageShard
+	var allReplaced []replacedShardGeneration
 	var errMu sync.Mutex
 	var rebuildErrors []string
 	dbs := db.tables.GetAll()
@@ -687,7 +707,8 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 			// expensive shard rebuild runs. Writers must not be blocked on
 			// the whole sdone.Wait() phase.
 			targetIsP := t.ShardMode == ShardModePartition
-			origShardList := append([]*storageShard(nil), t.ActiveShards()...)
+			origTopology := t.activeTopology()
+			origShardList := append([]*storageShard(nil), origTopology.shards...)
 			t.mu.Unlock()
 			tableLocked = false
 			newShardList := make([]*storageShard, len(origShardList))
@@ -904,7 +925,12 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 			// Collect replaced shards for deferred cleanup (see comment above).
 			if len(replaced) > 0 {
 				replacedMu.Lock()
-				allReplaced = append(allReplaced, replaced...)
+				for _, shard := range replaced {
+					allReplaced = append(allReplaced, replacedShardGeneration{
+						shard:   shard,
+						drained: origTopology.drained,
+					})
+				}
 				replacedMu.Unlock()
 			}
 
@@ -953,19 +979,14 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 
 			t.mu.Unlock()
 			tableLocked = false
-			for _, shard := range origShardList {
-				if shard == nil {
-					continue
-				}
-				for shard.activeScanners.Load() > 0 {
-					runtime.Gosched()
-				}
-			}
-			t.mutationMu.Lock()
-			t.mutationMu.Unlock()
+			// Publication retired origTopology. Wait without polling until every
+			// scan/write task that selected it has left; the authoritative topology
+			// and its writers are already live while this cleanup barrier drains.
+			<-origTopology.operationsDrained
 
 			if doRepart {
-				// maintenanceMu stays locked; repartition Phase G will unlock it
+				// maintenanceMu stays locked; repartition generation retirement
+				// releases it after the last old-topology user.
 				rebuildClaimed = false
 				t.repartitionDDLReadLocked(shardCandidates)
 			} else {
