@@ -1389,6 +1389,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		false
 		"optimizer: computed neutral keeps merge validation order")
 
+	/* cons consumes mapped tails without materializing and copying an intermediate list. */
+	(print "testing optimizer cons/map fusion ...")
+	(define opt_cons_map (optimize
+		(list 'lambda (list 'items)
+			(list 'cons (list 'quote 'node)
+				(list 'map 'items
+					(list 'lambda (list 'item) (list 'list (list 'quote 'wrapped) 'item)))))))
+	(assert
+		(match (serialize opt_cons_map) (regex "cons_map" _) true false)
+		true
+		"optimizer: cons maps directly into its result")
+	(define cons_map_fn (eval opt_cons_map))
+	(assert
+		(cons_map_fn (list 1 2 3))
+		(list 'node (list 'wrapped 1) (list 'wrapped 2) (list 'wrapped 3))
+		"cons/map fusion preserves values and order")
+	(assert
+		(cons_map_fn (list))
+		(list 'node)
+		"cons/map fusion preserves an empty mapped tail")
+	(define cons_map_input (list 4 5 6))
+	(cons_map_fn cons_map_input)
+	(assert
+		cons_map_input
+		(list 4 5 6)
+		"cons/map fusion does not mutate borrowed input")
+
 	/* owned builder reducers append without copying the growing accumulator. */
 	(print "testing optimizer owned list builders ...")
 	(define opt_owned_append_builder (optimize
@@ -1744,6 +1771,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(jit-warn-if-fallback jit_scheme_callee "jit: Scheme callee")
 	(assert (jit_scheme_caller 8) 9 "jit: native Proc follows rebinding to a native Scheme Proc")
 	(assert (jit_scheme_callee 10) 11 "jit: Scheme invokes a native Proc")
+	(define jit_dynamic_many_callee (lambda (a b c d) (list a b c d)))
+	(define jit_dynamic_many_caller (jit (eval '('lambda '('a 'b 'c 'd)
+		'('jit_dynamic_many_callee 'a 'b 'c 'd)))))
+	(define jit_dynamic_many_list_callee jit_dynamic_many_callee)
+	(jit-warn-if-fallback jit_dynamic_many_caller "jit: dynamic call with stack arguments")
+	(assert (jit_dynamic_many_caller 1 "two" false (list 4 5)) (list 1 "two" false (list 4 5))
+		"jit: dynamic call preserves more than two mixed arguments")
+	(set jit_dynamic_many_callee +)
+	(assert (jit_dynamic_many_caller 1 2 3 4) 10
+		"jit: dynamic call follows rebinding to a native function")
+	(set jit_dynamic_many_callee (jit jit_dynamic_many_list_callee))
+	(assert (jit_dynamic_many_caller 6 7 8 9) '(6 7 8 9)
+		"jit: dynamic call follows rebinding to a native Scheme Proc")
 	(define jit_scan_filter (jit (lambda (value) (> value 1))))
 	(define jit_scan_map (jit (lambda (value) value)))
 	(define jit_scan_reduce (jit (lambda (total value) (+ total value))))
@@ -1757,6 +1797,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define jit_pointer_flow (jit (lambda (value) (list (jit_pointer_callee value) (now)))))
 	(jit-warn-if-fallback jit_pointer_flow "jit: rooted callback result")
 	(assert (nth (nth (jit_pointer_flow 12) 0) 0) 12 "jit: callback pointer result survives a later callback")
+	(define jit_stackmap_flow (jit (lambda (value) (list (concat value "-rooted") (now)))))
+	(jit-warn-if-fallback jit_stackmap_flow "jit: stack-map pointer result")
+	(assert (nth (jit_stackmap_flow "value") 0) "value-rooted"
+		"jit: stack-map root survives a later allocating callback")
 
 	/* Borrowed Go-slice headers stay in the native pipeline as ptr/len/cap. */
 	(define jit_list_nth (jit (lambda (xs i) (nth xs i))))
@@ -1825,6 +1869,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (a b c d) (+ (* a b) (* c d)))) 2 3 4 5) 26 "jit: a*b + c*d")
 	(assert ((jit (lambda (x) (+ (+ (+ x 1) 2) 3))) 10) 16 "jit: deeply nested +")
 	(assert ((jit (lambda (x) (* (* (* x 2) 2) 2))) 3) 24 "jit: deeply nested *")
+	(define jit_nested_count_result (jit (lambda (values) (+ (count values) 1))))
+	(define jit_nested_equal_result (jit (lambda (left right) (not (equal? left right)))))
+	(jit-warn-if-fallback jit_nested_count_result "jit: nested pointer-free integer result")
+	(jit-warn-if-fallback jit_nested_equal_result "jit: nested pointer-free boolean result")
+	(assert (jit_nested_count_result '(2 4 6)) 4 "jit: nested count feeds arithmetic natively")
+	(assert (jit_nested_equal_result "left" "right") true "jit: nested equality feeds boolean logic natively")
 	(assert ((jit (lambda (a b) (- (* a a) (* b b)))) 5 3) 16 "jit: a²-b²")
 	(assert ((jit (lambda (a b c) (+ a (- b c)))) 10 7 3) 14 "jit: a+(b-c)")
 

@@ -149,12 +149,11 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 		}
 	}
 
-	runWorkers := func(shards []*storageShard, onDone func(*storageShard)) <-chan struct{} {
+	runWorkers := func(shards []*storageShard, topology *tableShardTopology) <-chan struct{} {
 		return runFanoutTasks(currentTx, len(shards), func(i int, synchronous bool) {
 			s := shards[i]
-			if onDone != nil {
-				defer onDone(s)
-			}
+			defer topology.releaseOperation()
+			defer s.activeScanners.Add(-1)
 			release := s.GetRead()
 			defer release()
 			callback(s, synchronous)
@@ -163,54 +162,51 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 
 	for {
 		topology := t.activeTopology()
-		if topology.mode != ShardModeFree {
-			relevant := collectRelevantShards(topology.dimensions, boundaries, topology.shards)
-			if len(relevant) == 0 {
-				return nil
+		var relevant []*storageShard
+		if topology.mode == ShardModeFree {
+			relevant = make([]*storageShard, 0, len(topology.shards))
+			for _, s := range topology.shards {
+				if s != nil {
+					relevant = append(relevant, s)
+				}
 			}
-			if len(relevant) == 1 {
-				s := relevant[0]
-				release := s.GetRead()
-				defer release()
-				callback(s, true)
-				return nil
-			}
-			return runWorkers(relevant, nil)
+		} else {
+			relevant = collectRelevantShards(topology.dimensions, boundaries, topology.shards)
+		}
+		if len(relevant) == 0 {
+			return nil
 		}
 
-		// Register against the loaded generation, then verify it is still
-		// authoritative. A concurrent publisher can drain the old generation
-		// without a reader lock: late registrations notice the changed pointer
-		// before touching a shard and retry on the new topology.
-		shards := topology.shards
-		relevant := make([]*storageShard, 0, len(shards))
-		for _, s := range shards {
-			if s != nil {
-				s.activeScanners.Add(1)
-				relevant = append(relevant, s)
+		// Pin every shard task to the loaded immutable generation, then verify
+		// that it is still authoritative. A publisher never waits for this
+		// registration; late readers simply release it and retry on the new
+		// generation before touching shard state.
+		registered := 0
+		for _, s := range relevant {
+			if !topology.acquireOperation() {
+				break
 			}
+			s.activeScanners.Add(1)
+			registered++
 		}
-		if t.topology.Load() != topology {
-			for _, s := range relevant {
+		if registered != len(relevant) || t.topology.Load() != topology {
+			for _, s := range relevant[:registered] {
 				s.activeScanners.Add(-1)
+				topology.releaseOperation()
 			}
 			continue
 		}
 
-		if len(relevant) == 0 {
-			return nil
-		}
 		if len(relevant) == 1 {
 			s := relevant[0]
+			defer topology.releaseOperation()
 			defer s.activeScanners.Add(-1)
 			release := s.GetRead()
 			defer release()
 			callback(s, true)
 			return nil
 		}
-		return runWorkers(relevant, func(s *storageShard) {
-			s.activeScanners.Add(-1)
-		})
+		return runWorkers(relevant, topology)
 	}
 }
 
@@ -498,8 +494,8 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 //	C. Build main storage (no locks held — long phase)
 //	C½. Build translation map for DELETE dual-write
 //	D. Install main storage + Delta shift (brief Lock per new shard)
-//	F. Flip ShardMode + Drain
-//	G. Cleanup
+//	F. Durably publish the new topology
+//	G. Retire the old generation after its users drain
 //
 // This function is called WITHOUT t.mu held (t.mu is released by the caller
 // before invoking repartition). It manages its own shard-level locking.
@@ -966,15 +962,11 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		fmt.Println("repartition: applied", totalPending, "pending deletions after Phase D")
 	}
 
-	// ── Phase F: Durable publication + topology flip + drain ──
+	// ── Phase F: Durable publication + topology flip ──
 	// Keep the old immutable topology authoritative while schema.json is being
 	// committed. Source writes remain synchronous old→new forwards. Locking the
 	// old shards only for this short commit boundary prevents a writer from
 	// completing between the final catch-up and durable metadata publication.
-	//
-	// If any old-shard scan or mutation is stuck, fail fast instead of holding
-	// the rebuild request open indefinitely. This turns an indefinite request
-	// hang into a deterministic failure with enough context for diagnosis.
 	startDeadline := time.Now().Add(repartitionDrainTimeout)
 	waitWithDeadline := func(step string, cond func() bool) {
 		for !cond() {
@@ -988,6 +980,9 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	lockAllOldShards := func() []*storageShard {
 		locked := make([]*storageShard, 0, len(oldshards))
 		for _, shard := range oldshards {
+			if shard == nil {
+				continue
+			}
 			if !shard.mu.TryLock() {
 				for i := len(locked) - 1; i >= 0; i-- {
 					locked[i].mu.Unlock()
@@ -1003,6 +998,9 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	for {
 		waitWithDeadline("draining shard transactions before phase F lock acquisition", func() bool {
 			for _, shard := range oldshards {
+				if shard == nil {
+					continue
+				}
 				if shard.activeTransactions.Load() > 0 {
 					return false
 				}
@@ -1019,6 +1017,9 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		}
 		active := false
 		for _, shard := range oldshards {
+			if shard == nil {
+				continue
+			}
 			if shard.activeTransactions.Load() > 0 {
 				active = true
 				break
@@ -1070,80 +1071,66 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	for i := len(oldshardsLocked) - 1; i >= 0; i-- {
 		oldshardsLocked[i].mu.Unlock()
 	}
-	// Wait for all in-flight scans on old shards to complete.
-	// During this drain, maintenanceKind == 2 is still true, so dual-write
-	// continues forwarding writes from old shards to PShards.
-	for _, s := range oldshards {
-		shard := s
-		waitWithDeadline("draining active scanners after topology flip", func() bool {
-			return shard.activeScanners.Load() == 0
-		})
-	}
-	waitWithDeadline("waiting for outstanding mutation scanners after topology flip", func() bool {
-		if !t.mutationMu.TryLock() {
-			return false
+
+	finishRetirement := func() {
+		// Every scan, insert, and transaction that selected the old immutable
+		// topology has now left it. No writer was stalled by that drain: old
+		// mutation pipelines kept forwarding into the published generation.
+		t.resolvePendingRepartitionSourceDeletes()
+		t.repartitionPendingMu.Lock()
+		unresolvedFinal := len(t.repartitionPendingSourceDels)
+		t.repartitionPendingMu.Unlock()
+		if unresolvedFinal != 0 {
+			panic(fmt.Sprintf("repartition published %s with %d unresolved source deletes; old generation retained", t.Name, unresolvedFinal))
 		}
-		t.mutationMu.Unlock()
-		return true
-	})
-	// Step 4: Drain any in-flight partition-path dual-writes that write to old
-	// Shards (Partition→Shards direction). These hold t.mutationMu for the whole
-	// scan+callback lifetime.
-	// Step 5: Drain any in-flight partition-path dual-writes that write to old
-	// Shards (Partition→Shards direction). These hold t.mu briefly.
-	t.mu.Lock()
-	t.mu.Unlock()
-
-	// Final drain of pending deletions. After Phase F drain, all in-flight
-	// DELETE scans have completed and their dual-write callbacks have finished.
-	// Any remaining pending entries are now final.
-	t.resolvePendingRepartitionSourceDeletes()
-	t.repartitionPendingMu.Lock()
-	unresolvedFinal := len(t.repartitionPendingSourceDels)
-	t.repartitionPendingMu.Unlock()
-	if unresolvedFinal != 0 {
-		panic(fmt.Sprintf("repartition published %s with %d unresolved source deletes; old generation retained", t.Name, unresolvedFinal))
-	}
-	finalPending := applyPendingDeletes()
-	if finalPending > 0 {
-		fmt.Println("repartition: applied", finalPending, "final pending deletions after Phase F drain")
-	}
-
-	// Verify transformation result
-	total_count2 := uint64(0)
-	for _, s := range newshards {
-		total_count2 += uint64(s.Count())
-	}
-	if total_count2 < total_count {
-		diff := total_count - total_count2
-		if diff > total_count/10 {
-			fmt.Println("warning: repartition count mismatch for", t.Name, ": before", total_count, "after", total_count2, "(", diff, "rows missing)")
+		finalPending := applyPendingDeletes()
+		if finalPending > 0 {
+			fmt.Println("repartition: applied", finalPending, "final pending deletions after generation retirement")
 		}
-	}
-	fmt.Println("activated new partitioning schema for", t.Name, "after", time.Since(start))
 
-	// ── Phase G: Retire the old generation ──
-	t.mu.Lock()
-	t.maintenanceKind = 0
-	t.repartitionDualWriteActive.Store(false)
-	t.repartitionSources.Store(nil)
-	t.mu.Unlock()
-	t.clearRepartitionTranslation()
-	t.maintenanceMu.Unlock()
-
-	for _, s := range oldshards {
-		// Deliberately after successful schema publication. Persistent cleanup
-		// must never move into a defer, finalizer, or failure path.
-		GlobalCache.Remove(s)
-		s.RemoveFromDisk()
-	}
-
-	// Register new PShards with CacheManager
-	if t.PersistencyMode != Memory && !strings.HasPrefix(t.Name, ".") {
+		total_count2 := uint64(0)
 		for _, s := range newshards {
-			atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
-			GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+			total_count2 += uint64(s.Count())
 		}
+		if total_count2 < total_count {
+			diff := total_count - total_count2
+			if diff > total_count/10 {
+				fmt.Println("warning: repartition count mismatch for", t.Name, ": before", total_count, "after", total_count2, "(", diff, "rows missing)")
+			}
+		}
+		fmt.Println("activated new partitioning schema for", t.Name, "after", time.Since(start))
+
+		t.mu.Lock()
+		t.maintenanceKind = 0
+		t.repartitionDualWriteActive.Store(false)
+		t.repartitionSources.Store(nil)
+		t.mu.Unlock()
+		t.clearRepartitionTranslation()
+		t.maintenanceMu.Unlock()
+
+		for _, s := range oldshards {
+			// Deliberately after successful schema publication and after the last
+			// generation user. Persistent cleanup must never run on an active shard.
+			GlobalCache.Remove(s)
+			s.RemoveFromDisk()
+		}
+
+		if t.PersistencyMode != Memory && !strings.HasPrefix(t.Name, ".") {
+			for _, s := range newshards {
+				atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
+				GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
+			}
+		}
+	}
+
+	select {
+	case <-oldTopology.drained:
+		finishRetirement()
+	default:
+		go func() {
+			<-oldTopology.drained
+			finishRetirement()
+		}()
 	}
 }
 

@@ -31,12 +31,6 @@ func registerJITArena(a *jitArena) interface{} {
 		Start:  start,
 		End:    start + uintptr(a.size),
 		Unwind: jit.UnwindDeclare,
-		// ScanStack is intentionally nil for the basic JIT. Native code may
-		// retain arguments and constants rooted by JITEntryPoint.Call. A pointer
-		// returned by the closure-builder callback is returned immediately; other
-		// pointer-producing and nested emitters fall back to the interpreter. Add
-		// a shadow-stack scanner before relaxing that rule.
-		ScanStack: nil,
 		Describe: func(pc uintptr) (name, file string, line int, ok bool) {
 			offset := int32(pc - uintptr(a.base))
 			entries := a.loadSourceEntries()
@@ -56,8 +50,33 @@ func registerJITArena(a *jitArena) interface{} {
 			}
 			return "MemCP JIT", "", 0, true
 		},
-		Next: jitNextCallback,
 	})
+}
+
+func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
+	if len(maps) == 0 {
+		return
+	}
+	handle, ok := a.handle.(jit.Handle)
+	if !ok {
+		panic("jit: invalid runtime registration handle")
+	}
+	runtimeMaps := make([]jit.StackMap, len(maps))
+	for i := range maps {
+		runtimeMaps[i] = jit.StackMap{
+			PCOffset:              maps[i].pcOffset,
+			FrameWords:            maps[i].frameWords,
+			PointerMask:           maps[i].pointerMap,
+			HasUnwind:             true,
+			UnwindBaseOffset:      jitGoSpillBytes + 16,
+			UnwindBaseDeltaOffset: jitGoSpillBytes,
+			UnwindBaseUsesDelta:   true,
+			CallerPCOffset:        8,
+			CallerSPOffset:        16,
+			CallerBPOffset:        0,
+		}
+	}
+	handle.AddStackMaps(runtimeMaps...)
 }
 
 // jitWrapCallTarget returns fn unchanged — runtime/jit handles unwinding
