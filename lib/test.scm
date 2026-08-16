@@ -1389,6 +1389,33 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		false
 		"optimizer: computed neutral keeps merge validation order")
 
+	/* cons consumes mapped tails without materializing and copying an intermediate list. */
+	(print "testing optimizer cons/map fusion ...")
+	(define opt_cons_map (optimize
+		(list 'lambda (list 'items)
+			(list 'cons (list 'quote 'node)
+				(list 'map 'items
+					(list 'lambda (list 'item) (list 'list (list 'quote 'wrapped) 'item)))))))
+	(assert
+		(match (serialize opt_cons_map) (regex "cons_map" _) true false)
+		true
+		"optimizer: cons maps directly into its result")
+	(define cons_map_fn (eval opt_cons_map))
+	(assert
+		(cons_map_fn (list 1 2 3))
+		(list 'node (list 'wrapped 1) (list 'wrapped 2) (list 'wrapped 3))
+		"cons/map fusion preserves values and order")
+	(assert
+		(cons_map_fn (list))
+		(list 'node)
+		"cons/map fusion preserves an empty mapped tail")
+	(define cons_map_input (list 4 5 6))
+	(cons_map_fn cons_map_input)
+	(assert
+		cons_map_input
+		(list 4 5 6)
+		"cons/map fusion does not mutate borrowed input")
+
 	/* owned builder reducers append without copying the growing accumulator. */
 	(print "testing optimizer owned list builders ...")
 	(define opt_owned_append_builder (optimize
