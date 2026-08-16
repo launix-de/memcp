@@ -953,16 +953,30 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 
 			t.mu.Unlock()
 			tableLocked = false
+			rebuildDeadline := time.Now().Add(repartitionDrainTimeout)
+			waitWithDeadline := func(step string, cond func() bool) {
+				for !cond() {
+					if time.Now().After(rebuildDeadline) {
+						panic(fmt.Sprintf("rebuild %s timed out while %s", t.Name, step))
+					}
+					runtime.Gosched()
+				}
+			}
 			for _, shard := range origShardList {
 				if shard == nil {
 					continue
 				}
-				for shard.activeScanners.Load() > 0 {
-					runtime.Gosched()
-				}
+				waitWithDeadline("draining active scanners before repartition", func() bool {
+					return shard.activeScanners.Load() == 0
+				})
 			}
-			t.mutationMu.Lock()
-			t.mutationMu.Unlock()
+			waitWithDeadline("waiting for mutator scanners before repartition", func() bool {
+				if !t.mutationMu.TryLock() {
+					return false
+				}
+				t.mutationMu.Unlock()
+				return true
+			})
 
 			if doRepart {
 				// maintenanceMu stays locked; repartition Phase G will unlock it

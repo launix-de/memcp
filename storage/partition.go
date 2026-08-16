@@ -28,6 +28,8 @@ import "github.com/jtolds/gls"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/scm"
 
+const repartitionDrainTimeout = 30 * time.Second
+
 type shardDimension struct {
 	Column        string
 	NumPartitions int
@@ -969,22 +971,51 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// committed. Source writes remain synchronous old→new forwards. Locking the
 	// old shards only for this short commit boundary prevents a writer from
 	// completing between the final catch-up and durable metadata publication.
-	for {
-		for {
-			active := false
-			for _, shard := range oldshards {
-				if shard.activeTransactions.Load() > 0 {
-					active = true
-					break
-				}
-			}
-			if !active {
-				break
+	//
+	// If any old-shard scan or mutation is stuck, fail fast instead of holding
+	// the rebuild request open indefinitely. This turns an indefinite request
+	// hang into a deterministic failure with enough context for diagnosis.
+	startDeadline := time.Now().Add(repartitionDrainTimeout)
+	waitWithDeadline := func(step string, cond func() bool) {
+		for !cond() {
+			if time.Now().After(startDeadline) {
+				panic(fmt.Sprintf("repartition %s timed out after %s while %s", t.Name, repartitionDrainTimeout, step))
 			}
 			runtime.Gosched()
 		}
+	}
+
+	lockAllOldShards := func() []*storageShard {
+		locked := make([]*storageShard, 0, len(oldshards))
 		for _, shard := range oldshards {
-			shard.mu.Lock()
+			if !shard.mu.TryLock() {
+				for i := len(locked) - 1; i >= 0; i-- {
+					locked[i].mu.Unlock()
+				}
+				return nil
+			}
+			locked = append(locked, shard)
+		}
+		return locked
+	}
+
+	var oldshardsLocked []*storageShard
+	for {
+		waitWithDeadline("draining shard transactions before phase F lock acquisition", func() bool {
+			for _, shard := range oldshards {
+				if shard.activeTransactions.Load() > 0 {
+					return false
+				}
+			}
+			return true
+		})
+		locked := lockAllOldShards()
+		if locked == nil {
+			if time.Now().After(startDeadline) {
+				panic(fmt.Sprintf("repartition %s timed out after %s while acquiring phase F old-shard locks", t.Name, repartitionDrainTimeout))
+			}
+			runtime.Gosched()
+			continue
 		}
 		active := false
 		for _, shard := range oldshards {
@@ -994,10 +1025,11 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			}
 		}
 		if !active {
+			oldshardsLocked = locked
 			break
 		}
-		for i := len(oldshards) - 1; i >= 0; i-- {
-			oldshards[i].mu.Unlock()
+		for i := len(locked); i > 0; i-- {
+			locked[i-1].mu.Unlock()
 		}
 	}
 	// With source writers stopped, every completed pre-publication delete must
@@ -1007,8 +1039,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	unresolvedBeforePublication := len(t.repartitionPendingSourceDels)
 	t.repartitionPendingMu.Unlock()
 	if unresolvedBeforePublication != 0 {
-		for i := len(oldshards) - 1; i >= 0; i-- {
-			oldshards[i].mu.Unlock()
+		for i := len(oldshardsLocked) - 1; i >= 0; i-- {
+			oldshardsLocked[i].mu.Unlock()
 		}
 		abortRepartition()
 		panic(fmt.Sprintf("repartition cannot publish %s: %d source deletes have no target translation", t.Name, unresolvedBeforePublication))
@@ -1026,8 +1058,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		t.schema.save()
 	}()
 	if savePanic != nil {
-		for i := len(oldshards) - 1; i >= 0; i-- {
-			oldshards[i].mu.Unlock()
+		for i := len(oldshardsLocked) - 1; i >= 0; i-- {
+			oldshardsLocked[i].mu.Unlock()
 		}
 		abortRepartition()
 		panic(savePanic)
@@ -1035,22 +1067,28 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	t.mu.Lock()
 	t.publishTopologyLocked()
 	t.mu.Unlock()
-	for i := len(oldshards) - 1; i >= 0; i-- {
-		oldshards[i].mu.Unlock()
+	for i := len(oldshardsLocked) - 1; i >= 0; i-- {
+		oldshardsLocked[i].mu.Unlock()
 	}
 	// Wait for all in-flight scans on old shards to complete.
 	// During this drain, maintenanceKind == 2 is still true, so dual-write
 	// continues forwarding writes from old shards to PShards.
 	for _, s := range oldshards {
-		for s.activeScanners.Load() > 0 {
-			runtime.Gosched()
-		}
+		shard := s
+		waitWithDeadline("draining active scanners after topology flip", func() bool {
+			return shard.activeScanners.Load() == 0
+		})
 	}
-	// Step 4: Drain any in-flight mutating scan pipelines (UPDATE / DELETE) that
-	// still operate on the old shard set. They hold mutationMu for the whole
+	waitWithDeadline("waiting for outstanding mutation scanners after topology flip", func() bool {
+		if !t.mutationMu.TryLock() {
+			return false
+		}
+		t.mutationMu.Unlock()
+		return true
+	})
+	// Step 4: Drain any in-flight partition-path dual-writes that write to old
+	// Shards (Partition→Shards direction). These hold t.mutationMu for the whole
 	// scan+callback lifetime.
-	t.mutationMu.Lock()
-	t.mutationMu.Unlock()
 	// Step 5: Drain any in-flight partition-path dual-writes that write to old
 	// Shards (Partition→Shards direction). These hold t.mu briefly.
 	t.mu.Lock()
