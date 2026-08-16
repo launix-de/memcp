@@ -7348,7 +7348,7 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: "cons_map",
+			Name: "cons_map",
 		Desc: "constructs a list head while mapping its tail (optimizer-only)",
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[1], "cons_map")

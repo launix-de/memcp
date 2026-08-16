@@ -24,6 +24,10 @@ func registerJITArena(a *jitArena) interface{} {
 	return nil
 }
 
+// publishJITStackMaps is a no-op on stock Go. JIT execution is disabled, but
+// keeping the common emitter path buildable makes (jit) retain its stub API.
+func publishJITStackMaps(_ *jitArena, _ []jitStackMap) {}
+
 // jitWrapCallTarget is retained so common code compiles in stock Go builds.
 func jitWrapCallTarget(fn func(...Scmer) Scmer) func(...Scmer) Scmer {
 	return fn
