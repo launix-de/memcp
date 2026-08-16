@@ -8174,6 +8174,15 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 	if !ok || len(rv) < 2 {
 		return result, td
 	}
+	if len(rv) == 3 && optimizedArgumentType(argumentTypes, 1).Transfer() {
+		if singleton, ok := optimizedSingletonListItem(rv[2]); ok {
+			length := UnknownLength
+			if baseLength := exactOptimizedListArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)); baseLength >= 0 {
+				length = baseLength + 1
+			}
+			return NewSlice([]Scmer{NewSymbol("append_mut"), rv[1], singleton}), descriptorWithLength(FreshAlloc, length)
+		}
+	}
 	if len(rv) == 2 {
 		if producer, ok := scmerSlice(rv[1]); ok && len(producer) == 3 {
 			if exprMayHaveSideEffects(producer[2]) {
@@ -8244,6 +8253,23 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 		return result, setOptimizedCallLength(td, totalLength)
 	}
 	return result, td
+}
+
+// optimizedSingletonListItem extracts the item from an already optimized
+// one-element list constructor. The !list form is the frame-local equivalent
+// emitted for a NoEscape merge argument.
+func optimizedSingletonListItem(expr Scmer) (Scmer, bool) {
+	items, ok := scmerSlice(expr)
+	if !ok {
+		return NewNil(), false
+	}
+	if len(items) == 2 && scmerIsSymbol(items[0], "list") {
+		return items[1], true
+	}
+	if len(items) == 4 && scmerIsSymbol(items[0], "!list") && items[2].IsInt() && items[2].Int() == 1 {
+		return items[3], true
+	}
+	return NewNil(), false
 }
 
 // optimizeMergeUnique keeps merge_unique on the standard variadic path, but

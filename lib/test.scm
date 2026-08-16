@@ -1389,6 +1389,41 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		false
 		"optimizer: computed neutral keeps merge validation order")
 
+	/* owned builder reducers append without copying the growing accumulator. */
+	(print "testing optimizer owned list builders ...")
+	(define opt_owned_append_builder (optimize
+		(list 'lambda (list 'items)
+			(list 'reduce 'items
+				(list 'lambda (list 'acc 'item)
+					(list 'merge 'acc (list 'list 'item)))
+				(list 'quote (list))))))
+	(assert
+		(match (serialize opt_owned_append_builder) (regex "append_mut" _) true false)
+		true
+		"optimizer: singleton merge appends to owned reducer accumulator")
+	(assert
+		((eval opt_owned_append_builder) (list 1 2 3 4))
+		(list 1 2 3 4)
+		"owned reducer append preserves item order")
+
+	(define opt_owned_unique_builder (optimize
+		(list 'lambda (list 'items)
+			(list 'reduce 'items
+				(list 'lambda (list 'acc 'item)
+					(list 'if
+						(list 'contains? 'acc 'item)
+						'acc
+						(list 'merge 'acc (list 'list 'item))))
+				(list 'quote (list))))))
+	(assert
+		(match (serialize opt_owned_unique_builder) (regex "append_unique_mut" _) true false)
+		true
+		"optimizer: contains plus owned append becomes one unique append")
+	(assert
+		((eval opt_owned_unique_builder) (list 1 2 1 3 2 4))
+		(list 1 2 3 4)
+		"owned unique builder preserves first occurrence order")
+
 	/* match / match_mut correctness */
 	(print "testing match/match_mut correctness ...")
 	/* match: literal patterns */

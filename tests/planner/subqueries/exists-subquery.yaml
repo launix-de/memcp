@@ -164,6 +164,124 @@ test_cases:
         - ".grp:query:"
         - ".grp:exists_point_acl:"
 
+  - name: "Bounded ordered projection probes EXISTS after native LIMIT"
+    setup:
+      - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND (`table` LIKE '.grp:exists_point_child:%' OR `table` LIKE '.grp:query:%')"
+    sql: |
+      SELECT p.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM exists_point_child c
+          WHERE c.parent_id = p.ID
+          LIMIT 1
+        ) AS has_child
+      FROM exists_point_parent p
+      ORDER BY p.ID
+      LIMIT 72
+    max_time: 2
+    expect:
+      rows: 72
+
+  - name: "Bounded ordered EXISTS projection performs no carrier scan"
+    sql: |
+      SELECT COUNT(*) AS carrier_scans
+      FROM system_statistic.scans
+      WHERE schema = 'memcp-tests'
+        AND (`table` LIKE '.grp:exists_point_child:%' OR `table` LIKE '.grp:query:%')
+    expect:
+      rows: 1
+      data:
+        - {carrier_scans: 0}
+
+  - name: "Bounded ordered EXISTS projection has a direct physical probe"
+    sql: |
+      EXPLAIN SELECT p.ID,
+        EXISTS (
+          SELECT TRUE
+          FROM exists_point_child c
+          WHERE c.parent_id = p.ID
+          LIMIT 1
+        ) AS has_child
+      FROM exists_point_parent p
+      ORDER BY p.ID
+      LIMIT 72
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+      result_not_contains:
+        - "touch_keytable"
+        - ".grp:exists_point_child:"
+        - ".grp:query:"
+
+  - name: "Set up point-selected nested access chain"
+    setup:
+      - sql: "CREATE TABLE exists_point_location (ID INT PRIMARY KEY, tenant_id INT)"
+      - sql: "CREATE TABLE exists_point_tenant (ID INT PRIMARY KEY)"
+      - sql: "CREATE TABLE exists_point_dav (ID INT PRIMARY KEY, content_id INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "exists_point_location") (list "ID" "tenant_id")
+              (map (produceN 2000) (lambda (i) (list (+ i 1) (+ (mod i 200) 1)))))
+            (insert (table "memcp-tests" "exists_point_tenant") (list "ID")
+              (map (produceN 200) (lambda (i) (list (+ i 1))))))
+      - scm: "(rebuild)"
+    sql: "SELECT COUNT(*) AS cnt FROM exists_point_location"
+    expect:
+      rows: 1
+      data:
+        - cnt: 2000
+
+  - name: "Point-selected nested access chain preserves EXISTS semantics"
+    sql: |
+      SELECT p.ID,
+        (
+          EXISTS (
+            SELECT ID
+            FROM exists_point_dav
+            WHERE content_id = p.ID
+            LIMIT 1
+          )
+          OR EXISTS (
+            SELECT ID
+            FROM exists_point_child
+            WHERE parent_id = p.ID
+            AND COALESCE((
+              SELECT (
+                EXISTS (
+                  SELECT TRUE
+                  FROM exists_point_acl global_acl
+                  WHERE global_acl.principal_id = 7
+                    AND global_acl.child_id IS NULL
+                  LIMIT 1
+                )
+                OR COALESCE((
+                  SELECT EXISTS (
+                    SELECT TRUE
+                    FROM exists_point_acl tenant_acl
+                    WHERE tenant_acl.principal_id = 7
+                      AND tenant_acl.child_id = tenant.ID
+                    LIMIT 1
+                  )
+                  FROM exists_point_tenant tenant
+                  WHERE tenant.ID = location.tenant_id
+                  LIMIT 1
+                ), FALSE)
+              )
+              FROM exists_point_location location
+              WHERE location.ID = exists_point_child.ID
+              LIMIT 1
+            ), FALSE)
+            LIMIT 1
+          )
+        ) AS can_read
+      FROM exists_point_parent p
+      WHERE p.ID = 1500
+    expect:
+      rows: 1
+      data:
+        - {ID: 1500, can_read: true}
+
   - name: "EXISTS with correlated subquery - customers with orders"
     sql: |
       SELECT ID, name FROM exists_customers c
@@ -741,6 +859,9 @@ test_cases:
           count: 2
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS exists_point_dav"
+  - sql: "DROP TABLE IF EXISTS exists_point_tenant"
+  - sql: "DROP TABLE IF EXISTS exists_point_location"
   - sql: "DROP TABLE IF EXISTS exists_point_acl"
   - sql: "DROP TABLE IF EXISTS exists_point_child"
   - sql: "DROP TABLE IF EXISTS exists_point_parent"

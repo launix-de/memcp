@@ -290,7 +290,7 @@ On parse error the result is not cached. */
 			ordered scans retain the smaller exact cache path. */
 			(define guarded_select (and select_query
 				(match (toUpper parse_query)
-					(regex "\\b(?:LIKE|MATCH|JOIN)\\b" _) true
+					(regex "\\b(?:LIKE|MATCH|JOIN|EXISTS)\\b" _) true
 					_ false)))
 			(define compile_diagnostic (match (toUpper parse_query)
 				(regex "^\\s*EXPLAIN\\s+COMPILE\\b" _) true
