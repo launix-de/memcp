@@ -8625,6 +8625,173 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 (define scalar_query_probe_recipe_key (lambda (stage requested_col)
 	(concat "__scalar_query_probe_" (fnv_hash (concat (gs_id stage) "\n" requested_col)))))
 
+(define expr_contains_column_ref? (lambda (expr)
+	(match expr
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) true
+		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) true
+		(cons head tail) (or
+			(expr_contains_column_ref? head)
+			(reduce tail (lambda (found item)
+				(or found (expr_contains_column_ref? item))) false))
+		_ false)))
+
+/* A base-table presence stage whose lookup domain contains only literals,
+parameters, or session values is invariant for one query execution. It may be
+bound once outside row callbacks; a column reference would make that unsafe. */
+(define query_invariant_presence_stage? (lambda (stage)
+	(and (presence_probe_stage? stage)
+		(and (source_is_base_table? (gs_input stage))
+			(and (not (stage_has_residual_outer_refs? stage))
+				(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '())
+					(lambda (invariant key)
+						(and invariant (not (expr_contains_column_ref? key))))
+					true))))))
+
+(define query_invariant_probe_requested_col (lambda (_stage)
+	(aggregate_col_name aggregate_count_descriptor)))
+
+(define query_invariant_probe_binding_key (lambda (stage requested_col)
+	(concat "__query_invariant_probe_" (fnv_hash (concat
+		(stage_prepare_backbone_signature stage) "\n" requested_col)))))
+
+(define query_invariant_probe_binding_for_col (lambda (stage requested_col)
+	(get_assoc
+		(qassoc_get (gs_facts stage) (quote query_invariant_probe_bindings) '())
+		requested_col)))
+
+(define group_stage_with_query_invariant_probe_binding (lambda (stage requested_col)
+	(group_stage_with_facts stage
+		(qassoc_set (gs_facts stage) (quote query_invariant_probe_bindings)
+			(set_assoc
+				(qassoc_get (gs_facts stage) (quote query_invariant_probe_bindings) '())
+				requested_col
+				(symbol (query_invariant_probe_binding_key stage requested_col)))))))
+
+(define query_invariant_probe_entries_for_stages (lambda (stages)
+	(nth (reduce (filter (lowering_catalog_stages stages) query_invariant_presence_stage?)
+		(lambda (state stage)
+			(begin
+				(define requested_col (query_invariant_probe_requested_col stage))
+				(define key (query_invariant_probe_binding_key stage requested_col))
+				(if (has_assoc? (nth state 1) key)
+					state
+					(list
+						(cons (list stage requested_col) (nth state 0))
+						(set_assoc (nth state 1) key true)))))
+		(list '() '())) 0)))
+
+(define query_invariant_probe_key_set (lambda (entries)
+	(reduce entries (lambda (keys entry)
+		(match entry
+			'(stage requested_col)
+			(set_assoc keys (query_invariant_probe_binding_key stage requested_col) true)
+			_ keys)) '())))
+
+(define stage_with_query_invariant_probe_binding_using (lambda (binding_keys stage)
+	(if (not (query_invariant_presence_stage? stage))
+		stage
+		(begin
+			(define requested_col (query_invariant_probe_requested_col stage))
+			(if (has_assoc? binding_keys (query_invariant_probe_binding_key stage requested_col))
+				(group_stage_with_query_invariant_probe_binding stage requested_col)
+				stage)))))
+
+(define stage_lookup_with_query_invariant_probe_bindings (lambda (stages entries)
+	(begin
+		(define binding_keys (query_invariant_probe_key_set entries))
+		(make_lowering_catalog
+			(map (lowering_catalog_stages stages) (lambda (stage)
+				(stage_with_query_invariant_probe_binding_using binding_keys stage)))))))
+
+(define query_invariant_probe_sources (lambda (stages sources)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(begin
+			(define stage (coalesceNil
+				(source_stage_output_stage stages src)
+				(stage_for_group_cache_source stages src)))
+			(and (not (nil? stage)) (query_invariant_presence_stage? stage)))))))
+
+(define query_invariant_probe_binding (lambda (entry)
+	(match entry
+		'(stage requested_col)
+		(list
+			(quote define)
+			(symbol (query_invariant_probe_binding_key stage requested_col))
+			(lower_scalar_first_probe_expr '() nil stage requested_col (list stage) 1))
+		_ (neumann_fail "build_queryplan" "malformed query-invariant probe binding"))))
+
+(define query_invariant_probe_bindings (lambda (entries)
+	(map (reverse entries) query_invariant_probe_binding)))
+
+(define rewrite_query_invariant_probe_expr (lambda (expr)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col)
+		(if (query_invariant_presence_stage? stage)
+			(symbol (query_invariant_probe_binding_key stage requested_col))
+			expr)
+		((quote scalar_first_probe) stage requested_col)
+		(rewrite_query_invariant_probe_expr
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((symbol scalar_first_probe) stage requested_col _dependencies)
+		(if (query_invariant_presence_stage? stage)
+			(symbol (query_invariant_probe_binding_key stage requested_col))
+			expr)
+		((quote scalar_first_probe) stage requested_col dependencies)
+		(rewrite_query_invariant_probe_expr
+			(list (symbol "scalar_first_probe") stage requested_col dependencies))
+		(cons head tail) (cons head (map tail rewrite_query_invariant_probe_expr))
+		_ expr)))
+
+(define query_invariant_probe_symbol_index (lambda (stages sources)
+	(begin
+		(define stage_index (reduce (filter (lowering_catalog_stages stages)
+			query_invariant_presence_stage?) (lambda (index stage)
+				(begin
+					(define requested_col (query_invariant_probe_requested_col stage))
+					(set_assoc index
+						(concat (exists_stage_alias (gs_id stage)) "." requested_col)
+						(symbol (query_invariant_probe_binding_key stage requested_col))))) '()))
+		(reduce (query_invariant_probe_sources stages sources) (lambda (index src)
+			(begin
+				(define stage (coalesceNil
+					(source_stage_output_stage stages src)
+					(stage_for_group_cache_source stages src)))
+				(define requested_col (query_invariant_probe_requested_col stage))
+				(set_assoc index
+					(concat (source_alias src) "." requested_col)
+					(symbol (query_invariant_probe_binding_key stage requested_col)))))
+			stage_index))))
+
+(define rewrite_query_invariant_probe_symbols_using (lambda (index bound expr)
+	(if (symbol? expr)
+		(if (contains? bound expr)
+			expr
+			(coalesceNil (get_assoc index (string expr)) expr))
+		(match expr
+			((symbol get_column) alias _alias_ignorecase col _col_ignorecase)
+			(coalesceNil (get_assoc index (concat alias "." col)) expr)
+			((quote get_column) alias alias_ignorecase col col_ignorecase)
+			(rewrite_query_invariant_probe_symbols_using index bound
+				(list (symbol "get_column") alias alias_ignorecase col col_ignorecase))
+			((symbol lambda) params body) (list
+				(quote lambda)
+				params
+				(rewrite_query_invariant_probe_symbols_using index (merge (list bound params)) body))
+			((symbol lambda) params body arity) (list
+				(quote lambda)
+				params
+				(rewrite_query_invariant_probe_symbols_using index (merge (list bound params)) body)
+				arity)
+			((symbol quote) _value) expr
+			(cons head tail) (cons
+				(rewrite_query_invariant_probe_symbols_using index bound head)
+				(map tail (lambda (item)
+					(rewrite_query_invariant_probe_symbols_using index bound item))))
+			_ expr))))
+
+(define rewrite_query_invariant_probe_symbols (lambda (index expr)
+	(rewrite_query_invariant_probe_symbols_using index '() expr)))
+
 (define scalar_query_probe_recipe_entry_add (lambda (state stage requested_col)
 	(if (not (query_block? (gs_input stage)))
 		state
@@ -8829,21 +8996,48 @@ dependency preparation does not emit free outer-row symbols. */
 			(define params (map (produceN (count keys)) (lambda (i)
 				(symbol (concat "__probe_key_" i)))))
 			(define param_index (scalar_query_probe_param_index lookup_keys params))
-			(define bound_stage (rewrite_scalar_query_probe_params param_index stage))
+			(define invariant_entries (query_invariant_probe_entries_for_stages nested_stages))
+			(define annotated_nested_lookup
+				(stage_lookup_with_query_invariant_probe_bindings nested_stages invariant_entries))
+			(define annotated_nested_stages (lowering_catalog_stages annotated_nested_lookup))
+			(define input_sources (qb_sources (gs_input stage)))
+			(define input_default_alias (qassoc_get (qb_facts (gs_input stage)) (quote default_alias)
+				(if (empty_list? input_sources) nil (source_alias (car input_sources)))))
+			(define invariant_sources
+				(query_invariant_probe_sources annotated_nested_lookup input_sources))
+			(define invariant_symbol_index
+				(query_invariant_probe_symbol_index annotated_nested_lookup input_sources))
+			(define rewrite_invariants (lambda (expr)
+				(rewrite_query_invariant_probe_symbols invariant_symbol_index
+					(rewrite_query_invariant_probe_expr
+						(rewrite_scalar_first_probe_expr
+							annotated_nested_lookup invariant_sources input_default_alias expr)))))
+			(define rewrite_bound (lambda (expr)
+				(rewrite_invariants
+					(rewrite_scalar_query_probe_params param_index expr))))
+			/* Stage descriptors retain their aggregate columns. Only the scalar
+			recipe expression may replace a stage output with its query binding. */
+			(define rewrite_bound_stage (lambda (expr)
+				(rewrite_query_invariant_probe_expr
+					(rewrite_scalar_query_probe_params param_index expr))))
+			(define bound_stage (rewrite_bound_stage stage))
 			(define bound_keys (gs_keys bound_stage))
-			(define bound_value_expr (rewrite_scalar_query_probe_params param_index value_expr))
-			(define bound_nested_stages (map nested_stages (lambda (nested_stage)
-				(rewrite_scalar_query_probe_params param_index nested_stage))))
+			(define bound_value_expr (rewrite_bound value_expr))
+			(define bound_nested_stages (map annotated_nested_stages (lambda (nested_stage)
+				(rewrite_bound_stage nested_stage))))
 			(define bound_prepare_stages (map prepare_stages (lambda (prepare_stage)
-				(rewrite_scalar_query_probe_params param_index prepare_stage))))
+				(rewrite_bound_stage
+					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id prepare_stage)) prepare_stage)))))
 			(define bound_inline_presence_stages (map inline_presence_stages (lambda (presence_stage)
-				(rewrite_scalar_query_probe_params param_index presence_stage))))
+				(rewrite_bound_stage
+					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id presence_stage)) presence_stage)))))
 			(list
 				(quote define)
 				(symbol (scalar_query_probe_recipe_key stage requested_col))
 				(list (quote lambda) params
-					(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr bound_keys params
-						bound_nested_stages bound_prepare_stages bound_inline_presence_stages))))
+					(rewrite_query_invariant_probe_symbols invariant_symbol_index
+						(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr bound_keys params
+							bound_nested_stages bound_prepare_stages bound_inline_presence_stages)))))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
 (define scalar_query_probe_recipe_bindings (lambda (plans)
@@ -12091,7 +12285,12 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 	(begin
 		(define entries (filter (map (coalesceNil sources '()) (lambda (src)
 			(begin
-				(define original (source_stage_output_stage stages src))
+				/* Eager preparation may already have replaced stage-output with the
+				canonical group-cache relation. Both names resolve to the same stage
+				handle and must therefore expose the same probe rewrite. */
+				(define original (coalesceNil
+					(source_stage_output_stage stages src)
+					(stage_for_group_cache_source stages src)))
 				(define direct (direct_group_probe_stage_for_block_source stages sources src consumers))
 				(define stage (coalesceNil direct original))
 				(if (or (scalar_or_presence_probe_stage? stage)
@@ -12153,13 +12352,16 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(begin
 					(define stage (nth entry 0))
 					(define dependencies (nth entry 1))
-					(if (scalar_aggregate_probe_stage? stage)
-						(coalesceNil
-							(scalar_first_stage_key_lookup_expr stage col)
-							(scalar_aggregate_probe_expr stage col))
-						(coalesceNil
-							(scalar_first_stage_key_lookup_expr stage col)
-							(scalar_first_probe_expr stage col dependencies))))))
+					(define invariant_binding (query_invariant_probe_binding_for_col stage col))
+					(if (not (nil? invariant_binding))
+						invariant_binding
+						(if (scalar_aggregate_probe_stage? stage)
+							(coalesceNil
+								(scalar_first_stage_key_lookup_expr stage col)
+								(scalar_aggregate_probe_expr stage col))
+							(coalesceNil
+								(scalar_first_stage_key_lookup_expr stage col)
+								(scalar_first_probe_expr stage col dependencies)))))))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
 		(rewrite_scalar_first_probe_expr_using_index stages index default_alias
 			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
@@ -14161,7 +14363,14 @@ key-fill recipe per carrier. */
 
 (define prepare_simple_query_block_physical_core_chosen (lambda (block)
 	(begin
-		(define stage_lookup (query_block_stage_lookup block))
+		(define raw_stage_lookup (query_block_stage_lookup block))
+		(define invariant_probe_entries
+			(query_invariant_probe_entries_for_stages raw_stage_lookup))
+		(define stage_lookup
+			(stage_lookup_with_query_invariant_probe_bindings
+				raw_stage_lookup invariant_probe_entries))
+		(define invariant_probe_bindings
+			(query_invariant_probe_bindings invariant_probe_entries))
 		(if (empty_list? (qb_stages block))
 			(begin
 				(define probe_recipe_entries (query_block_scalar_query_probe_recipe_entries block))
@@ -14175,7 +14384,7 @@ key-fill recipe per carrier. */
 				(define probe_recipe_prepares
 					(scalar_query_probe_recipe_prepare_exprs probe_recipe_plans))
 				(list
-					(merge (list probe_recipe_prepares probe_recipe_bindings))
+					(merge (list invariant_probe_bindings probe_recipe_prepares probe_recipe_bindings))
 					recipe_block))
 			(begin
 				(define stage_catalog (query_block_stage_catalog block))
@@ -14215,6 +14424,7 @@ key-fill recipe per carrier. */
 				(define lazy_stages (group_cache_stages_from_sources lazy_catalog (qb_sources core_block)))
 				(list
 					(merge (list
+						invariant_probe_bindings
 						probe_recipe_prepares
 						probe_recipe_bindings
 						(lazy_stage_prepare_bindings stage_catalog lazy_stages)
