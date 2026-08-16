@@ -151,6 +151,34 @@ class ErrorResponseContractTest(unittest.TestCase):
         self.assertTrue(is_error_response(response))
 
 
+class InterruptedRequestContractTest(unittest.TestCase):
+    def test_interrupted_mutation_is_not_retried_after_connection_loss(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.ensure_database = lambda _database: None
+        with mock.patch("run_sql_tests.requests.post", side_effect=ConnectionError), \
+                mock.patch("run_sql_tests.wait_for_memcp") as wait_for_memcp:
+            response = runner.execute_sql(
+                "memcp-tests", "UPDATE items SET value = value + 1",
+                retry_on_connection_failure=False,
+            )
+        self.assertIsNone(response)
+        wait_for_memcp.assert_not_called()
+
+    def test_completed_interrupted_request_is_exempt_from_normal_time_budget(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        response = SimpleNamespace(status_code=200, text='{"affected_rows": 999}')
+        runner.ensure_database = lambda _database: None
+        runner.execute_sql = mock.Mock(return_value=response)
+        with mock.patch("run_sql_tests.time.monotonic_ns", side_effect=[0, 10_000_000_000]):
+            passed = runner.run_test_case({
+                "name": "mutation racing a crash",
+                "sql": "UPDATE items SET value = value + 1",
+                "expect": {"interrupted_ok": True},
+            }, "memcp-tests")
+        self.assertTrue(passed)
+        self.assertFalse(runner.execute_sql.call_args.kwargs["retry_on_connection_failure"])
+
+
 class AtomicJSONObserverContractTest(unittest.TestCase):
     def test_accepts_complete_atomic_replacements(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
