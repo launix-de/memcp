@@ -8520,14 +8520,14 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(define probe_input (if (empty_list? inline_presence_sources)
 			keyed_input
 			(query_block_with_presence_probe_sources_using
-				inline_presence_stages inline_presence_sources keyed_input)))
+				nested_stages inline_presence_sources keyed_input)))
 		(define probe_value_expr (if (empty_list? inline_presence_sources)
 			value_expr
 			(begin
 				(define default_alias (qassoc_get (qb_facts keyed_input) (quote default_alias)
 					(if (empty_list? (qb_sources keyed_input)) nil (source_alias (car (qb_sources keyed_input))))))
 				(rewrite_scalar_first_probe_expr
-					inline_presence_stages inline_presence_sources default_alias value_expr))))
+					nested_stages inline_presence_sources default_alias value_expr))))
 		(define raw_prepared_input
 			(query_block_without_stages_after_eager_prepare_using nested_stages probe_input))
 		(define prepared_input (if (empty_list? prepare_stages)
@@ -8578,18 +8578,12 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 	(if (not (equal? (count direct_stages) 1))
 		'()
 		(filter direct_stages (lambda (nested_stage)
-			(if (not (group_stage? nested_stage))
-				false
-				(begin
-					(define stage_rows (planner_stage_input_rows (gs_input nested_stage)))
-					(define cache_preferred (and (number? stage_rows)
-						(and (number? probe_work_rows)
-							(< (+ 16 stage_rows) (* probe_work_rows 4)))))
-					(and (not cache_preferred)
-						(and (equal? (qassoc_get (gs_facts nested_stage) (quote purpose) nil) (quote exists))
-							(and (equal? (qassoc_get (gs_facts nested_stage) (quote presence_only) false) true)
-								(and (source_is_base_table? (gs_input nested_stage))
-									(not (stage_has_residual_outer_refs? nested_stage)))))))))))))
+			(and (group_stage? nested_stage)
+				(and (or (presence_probe_stage? nested_stage)
+					(not (stage_shared_prepare? nested_stage)))
+					(and (scalar_or_presence_probe_stage? nested_stage)
+						(and (not (stage_has_residual_outer_refs? nested_stage))
+							(stage_direct_probe_cost_preferred? nested_stage probe_work_rows))))))))))
 
 (define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys probe_work_rows)
 	(begin
@@ -8604,7 +8598,16 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(define inline_presence_stages (if (number? probe_work_rows)
 			(bounded_scalar_query_probe_inline_presence_stages direct_stages probe_work_rows)
 			'()))
-		(define inline_ids (stage_id_set inline_presence_stages))
+		/* Once a parent is selected for direct probing, its complete dependency
+		closure is owned by that probe. Preparing children separately would pay
+		the carrier build cost in addition to the selected direct path. */
+		(define dependency_graph (stage_dependency_graph all_stages))
+		(define closure_index (stage_dependency_closure_index_using_graph
+			dependency_graph inline_presence_stages))
+		(define inline_owned_stages
+			(scalar_first_query_probe_nested_stages_using_index
+				inline_presence_stages closure_index))
+		(define inline_ids (stage_id_set inline_owned_stages))
 		(define prepare_stages (filter nested_stages (lambda (nested_stage)
 			(not (has_assoc? inline_ids (gs_id nested_stage))))))
 		(lower_scalar_first_query_probe_expr_using
@@ -8738,28 +8741,27 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 			recipe. Attached and transitive stages belong to their nested consumer. */
 			(define direct_source_ids (stage_id_set
 				(stage_outputs_from_sources_using direct_stages (qb_sources (gs_input stage)))))
-			(define inline_candidates (if (equal? (count direct_stages) 1)
-				(filter direct_stages (lambda (nested_stage)
-					(and (has_assoc? direct_source_ids (gs_id nested_stage))
-						(and (group_stage? nested_stage)
-							(equal? (qassoc_get (gs_facts nested_stage) (quote purpose) nil) (quote exists))
-							(equal? (qassoc_get (gs_facts nested_stage) (quote presence_only) false) true)
-							(source_is_base_table? (gs_input nested_stage))
-							(not (stage_has_residual_outer_refs? nested_stage))))))
-				'()))
+			(define inline_candidates (filter direct_stages (lambda (nested_stage)
+				(and (has_assoc? direct_source_ids (gs_id nested_stage))
+					(and (or (presence_probe_stage? nested_stage)
+						(not (stage_shared_prepare? nested_stage)))
+						(and (scalar_or_presence_probe_stage? nested_stage)
+							(not (stage_has_residual_outer_refs? nested_stage))))))))
 			/* Bounded consumers execute selected presence checks after root braking.
 			Every other base-table group without residual outer references has a
 			closed initializer. Hoist those initializers to the shared recipe scope,
 			where canonical carrier collection can merge duplicate key fills and
 			aggregate-column extensions before code emission. */
 			(define inline_presence_stages (if bounded_consumer inline_candidates '()))
-			(define inline_presence_ids (stage_id_set inline_presence_stages))
+			(define inline_owned_stages
+				(scalar_first_query_probe_nested_stages_using_index inline_presence_stages closure_index))
+			(define inline_owned_ids (stage_id_set inline_owned_stages))
 			(define hoisted_stages (filter nested_stages (lambda (nested_stage)
 				(and (group_stage? nested_stage)
 					(and (source_is_base_table? (gs_input nested_stage))
 						(and (not (stage_has_residual_outer_refs? nested_stage))
-							(not (has_assoc? inline_presence_ids (gs_id nested_stage)))))))))
-			(define consumed_ids (stage_id_set (merge (list hoisted_stages inline_presence_stages))))
+							(not (has_assoc? inline_owned_ids (gs_id nested_stage)))))))))
+			(define consumed_ids (stage_id_set (merge (list hoisted_stages inline_owned_stages))))
 			(define prepare_stages (filter nested_stages (lambda (nested_stage)
 				(not (has_assoc? consumed_ids (gs_id nested_stage))))))
 			(list
@@ -9130,7 +9132,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 (define extract_columns_for_join_alias (lambda (sources default_alias alias expr)
 	(qassoc_get (collect_join_columns_acc sources default_alias alias expr '()) alias '())))
 
-(define lower_column_expr_for_join (lambda (sources default_alias expr)
+(define lower_column_expr_for_join_in_context (lambda (sources default_alias expr probe_work_rows)
 	(match expr
 		((symbol driver_membership_probe) stage probe)
 		(lower_driver_membership_probe_expr sources default_alias stage probe)
@@ -9141,13 +9143,13 @@ until lowering without creating a depth-proportional binary OR chain. */
 		((quote dml_driver_membership_probe) fallback_schema stage probe)
 		(lower_dml_driver_membership_probe_expr sources default_alias fallback_schema stage probe)
 		((symbol scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) nil)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) probe_work_rows)
 		((symbol scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages nil)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages probe_work_rows)
 		((quote scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) nil)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) probe_work_rows)
 		((quote scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages nil)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages probe_work_rows)
 		((symbol scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
@@ -9170,8 +9172,12 @@ until lowering without creating a depth-proportional binary OR chain. */
 			(if (nil? src)
 				(symbol (concat (resolve_column_alias tblvar default_alias) "." col))
 				(symbol (concat (source_alias src) "." (resolve_physical_column_name src col col_ignorecase)))))
-		(cons head tail) (cons head (map tail (lambda (item) (lower_column_expr_for_join sources default_alias item))))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(lower_column_expr_for_join_in_context sources default_alias item probe_work_rows))))
 		_ expr)))
+
+(define lower_column_expr_for_join (lambda (sources default_alias expr)
+	(lower_column_expr_for_join_in_context sources default_alias expr nil)))
 
 (define canonical_column_expr_for_alias (lambda (alias expr)
 	(match expr
@@ -12280,10 +12286,52 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define rows (probe_context_row_count sources))
 		(or (nil? rows) (< rows 1000)))))
 
-(define probe_limit_small_enough? (lambda (limit_value)
-	(and (number? limit_value)
-		(and (> limit_value 0)
-			(<= limit_value 512)))))
+(define probe_limit_work_rows (lambda (limit_value)
+	(begin
+		(define planning_limit (planner_literal_value limit_value))
+		(if (and (number? planning_limit) (> planning_limit 0))
+			planning_limit
+			nil))))
+
+(define probe_limit_bounded? (lambda (limit_value)
+	(not (nil? (probe_limit_work_rows limit_value)))))
+
+/* Calibrated on multi-shard data: direct indexed probes cost about 125us per
+accepted outer row. A reusable presence carrier has a fixed initialization
+cost and scans/builds one compact key per input row. */
+(define planner_direct_presence_probe_cost (lambda (probe_rows)
+	(planner_cost 0 0 (* probe_rows 125000) 0 0 0 0 0 probe_rows 0.75)))
+
+(define planner_presence_carrier_cost (lambda (input_rows)
+	(planner_cost 20000000 0 0 0 0 (* input_rows 850)
+		(* input_rows 8) 0 input_rows 0.65)))
+
+(define planner_direct_presence_probe_preferred? (lambda (probe_rows input_rows)
+	(and (number? probe_rows)
+		(and (> probe_rows 0)
+			(and (number? input_rows)
+				(planner_cost_better?
+					(planner_direct_presence_probe_cost probe_rows)
+					(planner_presence_carrier_cost input_rows)))))))
+
+(define stage_direct_probe_cost_preferred? (lambda (stage probe_rows_value)
+	(begin
+		(define probe_rows (planner_literal_value probe_rows_value))
+		(define input_rows (planner_stage_input_rows (gs_input stage)))
+		(define chosen (planner_direct_presence_probe_preferred? probe_rows input_rows))
+		(if (and (number? probe_rows) (number? input_rows))
+			(planner_guarded_choice chosen
+				(list (quote planner_direct_presence_probe_preferred?)
+					probe_rows_value
+					(list (quote planner_stage_input_rows)
+						(list (quote quote) (gs_input stage)))))
+			chosen))))
+
+(define stage_direct_probe_cost_preferred_for_limit? (lambda (stage limit_value)
+	(begin
+		(define work_rows (probe_limit_work_rows limit_value))
+		(and (not (nil? work_rows))
+			(stage_direct_probe_cost_preferred? stage limit_value)))))
 
 (define source_column_bound_by_equality? (lambda (src col condition)
 	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
@@ -12366,7 +12414,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define probeable_stage_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src)
 	(if (scalar_first_stage_output_source? stages src)
 		(or
-			(probe_limit_small_enough? limit_value)
+			(stage_direct_probe_cost_preferred_for_limit?
+				(stage_by_id stages (stage_output_relation_id (source_relation src))) limit_value)
 			(stage_probe_allowed_in_context?
 				(stage_by_id stages (stage_output_relation_id (source_relation src)))
 				(filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src)))))))
@@ -12385,8 +12434,9 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					probe. Building the dependent relation's full presence keytable
 					cannot amortize in that context, regardless of base table size. */
 					(or
-						(stage_probe_allowed_in_context? stage probe_sources)
-						(probe_context_unique_point? cardinality_sources default_alias driver_condition))
+						(stage_direct_probe_cost_preferred_for_limit? stage limit_value)
+						(or (stage_probe_allowed_in_context? stage probe_sources)
+							(probe_context_unique_point? cardinality_sources default_alias driver_condition)))
 					(or
 						(stage_has_residual_outer_refs? stage)
 						(or
@@ -12410,7 +12460,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 						(or
 							(stage_has_residual_outer_refs? stage)
 							(or
-								(probe_limit_small_enough? limit_value)
+								(stage_direct_probe_cost_preferred_for_limit? stage limit_value)
 								(probe_context_small_enough? probe_sources))))
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)))))))
 
@@ -12422,7 +12472,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(define probe_sources (filter sources (lambda (candidate)
 				(not (equal? (source_alias candidate) (source_alias src))))))
 			(and (stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
-				(or (probe_limit_small_enough? limit_value)
+				(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value)
 					(or (probe_context_small_enough? probe_sources)
 						(probe_context_unique_point? probe_sources default_alias driver_condition))))))))
 
@@ -12436,7 +12486,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 					(not (equal? (source_alias candidate) (source_alias src))))))
 				(and
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
-					(or (probe_limit_small_enough? limit_value)
+					(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value)
 						(or (probe_context_small_enough? probe_sources)
 							(probe_context_unique_point? probe_sources default_alias driver_condition)))))))))
 
@@ -14095,7 +14145,7 @@ key-fill recipe per carrier. */
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 			(if (empty_list? sources) nil (source_alias (car sources)))))
 		(define bounded_context (or
-			(probe_limit_small_enough? (qb_limit block))
+			(probe_limit_bounded? (qb_limit block))
 			(probe_context_unique_point? sources default_alias (qb_where block))))
 		(if (not bounded_context)
 			'()
@@ -14129,7 +14179,7 @@ key-fill recipe per carrier. */
 					recipe_block))
 			(begin
 				(define stage_catalog (query_block_stage_catalog block))
-				(define eager_stages (filter
+				(define candidate_eager_stages (filter
 					(query_block_stages_to_prepare_using stage_lookup block)
 					(lambda (stage) (not (stage_shared_prepare? stage)))))
 				(define dependency_graph (stage_dependency_graph stage_lookup))
@@ -14138,6 +14188,13 @@ key-fill recipe per carrier. */
 					(query_block_with_prepared_sources_using stage_lookup block)))
 				(define probe_recipe_entries
 					(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
+				/* A rewritten scalar recipe owns its stage. Emitting the same stage's
+				eager carrier would pay both physical alternatives and can block a
+				bounded projection on a full cache build before its first probe. */
+				(define probe_recipe_stage_ids (stage_id_set
+					(map probe_recipe_entries (lambda (entry) (car entry)))))
+				(define eager_stages (filter candidate_eager_stages (lambda (stage)
+					(not (has_assoc? probe_recipe_stage_ids (gs_id stage))))))
 				(define bounded_probe_recipe_keys
 					(query_block_bounded_scalar_probe_recipe_keys raw_prepared_block probe_recipe_entries))
 				(define probe_recipe_plans
@@ -15864,10 +15921,17 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(list final_condition)
 			(order_exprs order_items)
 			(source_join_exprs scan_sources))))
+		/* Dataset fields are mapped only after the native window accepts a row.
+		Propagate that bound so nested scalar probes can compare direct work with
+		the cost of preparing their complete dependent carriers. */
+		(define projection_probe_work_rows (if (query_limit_active? (qb_offset block) (qb_limit block))
+			(coalesceNil (probe_limit_work_rows (qb_limit block)) 0)
+			(if (probe_context_unique_point? scan_sources first_alias final_condition) 1 nil)))
 		(if direct_order_safe
 			(begin
 				(define row_expr (cons row_mapper (map field_exprs (lambda (expr)
-					(lower_column_expr_for_join scan_sources first_alias expr)))))
+					(lower_column_expr_for_join_in_context
+						scan_sources first_alias expr projection_probe_work_rows)))))
 				(build_join_scan_reduce_using_recipe
 					(qb_schema block)
 					scan_sources
