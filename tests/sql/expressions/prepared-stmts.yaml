@@ -478,6 +478,45 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Cached EXISTS projection recompiles across probe cost crossover"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (define compiles (newsession))
+        (define parser (lambda (_schema _query _policy) (begin
+          (define limit_expr (list (quote session) "v1"))
+          (define limit_value (planner_literal_value limit_expr))
+          (define direct (planner_direct_presence_probe_preferred? limit_value 1000000))
+          (planner_record_guard_condition
+            (list (quote equal?)
+              (list (quote planner_direct_presence_probe_preferred?) limit_expr 1000000)
+              direct))
+          (compiles (string (count (compiles))) direct)
+          (list (quote quote) (if direct "probe" "carrier")))))
+        (sess "v1" 72)
+        (define first_formula (cached_parse cache parser "memcp-tests"
+          "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
+          nil "root" sess true))
+        (define first_result (with_session sess (lambda () (eval first_formula))))
+        (sess "v1" 10000)
+        (define second_formula (cached_parse cache parser "memcp-tests"
+          "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
+          nil "root" sess true))
+        (define second_result (with_session sess (lambda () (eval second_formula))))
+        (define entry (car (cache (car (cache)))))
+        (if (and
+          (equal? first_result "probe")
+          (equal? second_result "carrier")
+          (equal? (count (compiles)) 2)
+          (equal? (count (entry "variants")) 2))
+          "ok"
+          (error (concat "unexpected EXISTS cost variants: " first_result "/" second_result
+            " compiles=" (count (compiles))
+            " variants=" (count (entry "variants"))))))
+    expect:
+      data: ["ok"]
+
   - name: "Literal front cache stores only generalized SELECTs"
     scm: |
       (begin
