@@ -70,6 +70,7 @@ type storageShardTransaction struct {
 	DeletedRecids  []uint32
 	DeleteRecids   []uint32
 	UndeleteRecids []uint32
+	generation     *tableShardTopology
 
 	mu sync.Mutex
 }
@@ -220,8 +221,12 @@ func (tx *TxContext) getOrCreateShardTxLocked(shard *storageShard) *storageShard
 	st := tx.shards[shard]
 	if st == nil {
 		st = new(storageShardTransaction)
+		st.generation = shard.generation.Load()
+		if st.generation != nil {
+			st.generation.pinTransaction()
+		}
 		tx.shards[shard] = st
-		shard.activeTransactions.Add(1)
+		shard.beginTransactionUse()
 	}
 	return st
 }
@@ -249,8 +254,11 @@ func (tx *TxContext) finishRepartitionActions(commit bool) {
 }
 
 func (tx *TxContext) releaseActiveTransactionsLocked() {
-	for shard := range tx.shards {
-		shard.activeTransactions.Add(-1)
+	for shard, st := range tx.shards {
+		shard.endTransactionUse()
+		if st.generation != nil {
+			st.generation.releaseTransaction()
+		}
 	}
 }
 

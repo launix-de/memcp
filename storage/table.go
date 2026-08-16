@@ -221,6 +221,58 @@ type tableShardTopology struct {
 	mode       ShardMode
 	shards     []*storageShard
 	dimensions []shardDimension
+
+	// Operations and transactions drain independently. A rebuild request may be
+	// running inside the transaction that touched the retiring generation, so it
+	// can wait for operations but must defer physical cleanup until transactions
+	// finish after the request returns.
+	operations         atomic.Int64
+	transactions       atomic.Int64
+	retired            atomic.Bool
+	operationsDrained  chan struct{}
+	drained            chan struct{}
+	operationDrainOnce sync.Once
+	drainOnce          sync.Once
+}
+
+func (topology *tableShardTopology) acquireOperation() bool {
+	topology.operations.Add(1)
+	if topology.retired.Load() {
+		topology.releaseOperation()
+		return false
+	}
+	return true
+}
+
+func (topology *tableShardTopology) pinTransaction() {
+	topology.transactions.Add(1)
+}
+
+func (topology *tableShardTopology) releaseOperation() {
+	if topology.operations.Add(-1) == 0 && topology.retired.Load() {
+		topology.closeDrains()
+	}
+}
+
+func (topology *tableShardTopology) releaseTransaction() {
+	if topology.transactions.Add(-1) == 0 && topology.retired.Load() {
+		topology.closeDrains()
+	}
+}
+
+func (topology *tableShardTopology) closeDrains() {
+	if topology.operations.Load() == 0 {
+		topology.operationDrainOnce.Do(func() { close(topology.operationsDrained) })
+		if topology.transactions.Load() == 0 {
+			topology.drainOnce.Do(func() { close(topology.drained) })
+		}
+	}
+}
+
+func (topology *tableShardTopology) retire() <-chan struct{} {
+	topology.retired.Store(true)
+	topology.closeDrains()
+	return topology.drained
 }
 
 type repartitionSourceSet struct {
@@ -415,6 +467,14 @@ type table struct {
 	overflowRebuilds           atomic.Int32 // background workers; observed without joining the write path
 	repartitionDualWriteActive atomic.Bool  // true after Phase B snapshot; dual-write only when true
 	repartitionSources         atomic.Pointer[repartitionSourceSet]
+	// transactionDrainMu/transactionDrain coordinate the rare repartition
+	// publication wait. Transaction start/end stays lock-free unless a waiter is
+	// present; transactionDrainWaiters is atomic and the condition is guarded by
+	// transactionDrainMu.
+	transactionDrainMu      sync.Mutex
+	transactionDrain        *sync.Cond
+	transactionDrainOnce    sync.Once
+	transactionDrainWaiters atomic.Int32
 
 	// repartitionTranslation maps old-shard rows to their new PShard locations.
 	// Snapshot rows are published after Phase B. Post-snapshot dual-written rows
@@ -429,6 +489,43 @@ type table struct {
 	repartitionPendingMu         sync.Mutex
 	repartitionPendingDels       []translatedRecid
 	repartitionPendingSourceDels []pendingSourceDelete
+}
+
+func (t *table) signalTransactionDrain() {
+	if t.transactionDrainWaiters.Load() == 0 {
+		return
+	}
+	t.transactionDrainMu.Lock()
+	if t.transactionDrain != nil {
+		t.transactionDrain.Broadcast()
+	}
+	t.transactionDrainMu.Unlock()
+}
+
+func (t *table) waitForTransactions(shards []*storageShard) {
+	hasActive := func() bool {
+		for _, shard := range shards {
+			if shard != nil && shard.activeTransactions.Load() != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasActive() {
+		return
+	}
+	t.transactionDrainOnce.Do(func() {
+		t.transactionDrainMu.Lock()
+		t.transactionDrain = sync.NewCond(&t.transactionDrainMu)
+		t.transactionDrainMu.Unlock()
+	})
+	t.transactionDrainMu.Lock()
+	t.transactionDrainWaiters.Add(1)
+	for hasActive() {
+		t.transactionDrain.Wait()
+	}
+	t.transactionDrainWaiters.Add(-1)
+	t.transactionDrainMu.Unlock()
 }
 
 // awaitCreationInitialization is the idempotent createtable barrier for an
@@ -532,12 +629,34 @@ func (t *table) publishTopologyLocked() *tableShardTopology {
 		shards = t.PShards
 	}
 	topology := &tableShardTopology{
-		mode:       mode,
-		shards:     append([]*storageShard(nil), shards...),
-		dimensions: append([]shardDimension(nil), t.PDimensions...),
+		mode:              mode,
+		shards:            append([]*storageShard(nil), shards...),
+		dimensions:        append([]shardDimension(nil), t.PDimensions...),
+		operationsDrained: make(chan struct{}),
+		drained:           make(chan struct{}),
 	}
-	t.topology.Store(topology)
+	for _, shard := range topology.shards {
+		if shard != nil {
+			shard.generation.Store(topology)
+		}
+	}
+	previous := t.topology.Swap(topology)
+	if previous != nil {
+		previous.retire()
+	}
 	return topology
+}
+
+func (t *table) pinActiveTopology() *tableShardTopology {
+	for {
+		topology := t.activeTopology()
+		if topology.acquireOperation() {
+			if t.topology.Load() == topology {
+				return topology
+			}
+			topology.releaseOperation()
+		}
+	}
 }
 
 func (t *table) activeTopology() *tableShardTopology {
@@ -1844,7 +1963,19 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		return 0
 	}
 
-	topology := t.activeTopology()
+	topology := t.pinActiveTopology()
+	defer func() { topology.releaseOperation() }()
+	switchTopology := func(next *tableShardTopology) {
+		topology.releaseOperation()
+		if next != nil && next.acquireOperation() {
+			if t.topology.Load() == next {
+				topology = next
+				return
+			}
+			next.releaseOperation()
+		}
+		topology = t.pinActiveTopology()
+	}
 	if topology.mode == ShardModeFree { // unpartitioned sharding
 		// Helper to get or create a shard with capacity for n rows
 		getShardWithCapacity := func(n uint) *storageShard {
@@ -1852,8 +1983,8 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				t.mu.Lock()
 				active := t.activeTopology()
 				if active != topology {
-					topology = active
 					t.mu.Unlock()
+					switchTopology(active)
 					if topology.mode != ShardModeFree {
 						return nil
 					}
@@ -1872,7 +2003,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				t.mu.Unlock()
 				published, appended := t.appendFreeShardDurably(topology, shard, n)
 				if published != nil {
-					topology = published
+					switchTopology(published)
 				}
 				if appended != nil {
 					return appended
@@ -1896,7 +2027,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// generation. Reload the published partition topology before routing
 				// the remaining rows; the old free generation may already have
 				// finished its forwarding drain.
-				topology = t.activeTopology()
+				switchTopology(nil)
 				values = values[start:]
 				repartitioned = true
 				break
