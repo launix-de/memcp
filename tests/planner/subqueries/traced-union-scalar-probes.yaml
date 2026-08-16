@@ -537,6 +537,53 @@ test_cases:
         - id: 2
           allowed: true
 
+  - name: "Derived scalar probe requalifies nested correlation keys"
+    sql: |
+      SELECT t.id, t.allowed
+      FROM (
+        SELECT
+          a.id,
+          ref.allowed
+        FROM trace_asset a
+        LEFT JOIN (
+          SELECT
+            b.id,
+            COALESCE((
+              SELECT (
+                EXISTS (
+                  SELECT TRUE
+                  FROM trace_global_access global_access
+                  WHERE global_access.actor_id = 7
+                    AND global_access.scope_id IS NULL
+                  LIMIT 1
+                )
+                AND EXISTS (
+                  SELECT TRUE
+                  FROM trace_share local_access
+                  WHERE local_access.box_id = b.id
+                    AND local_access.owner_id = 7
+                  LIMIT 1
+                )
+              )
+              FROM trace_host h
+              WHERE h.id = b.host_id
+              LIMIT 1
+            ), FALSE) AS allowed
+          FROM trace_box b
+        ) ref ON ref.id = a.id * 100
+        WHERE a.id IN (1, 2)
+      ) t
+      LEFT JOIN trace_box sorter ON sorter.id = t.id * 100
+      ORDER BY t.id
+      LIMIT 72
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          allowed: true
+        - id: 2
+          allowed: false
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_asset"
   - sql: "DROP TABLE IF EXISTS trace_ref_a"

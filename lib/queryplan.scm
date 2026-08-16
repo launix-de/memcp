@@ -8956,18 +8956,30 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 		entries
 		bounded_recipe_keys)))
 
-(define scalar_query_probe_param_index (lambda (lookup_keys params)
-	(reduce (produceN (count lookup_keys)) (lambda (index i)
-		(match (nth lookup_keys i)
-			((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
-			(set_assoc index (nth lookup_keys i) (nth params i))
-			((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
-			(set_assoc index (nth lookup_keys i) (nth params i))
-			_ index)) '())))
+(define scalar_query_probe_param_index_add (lambda (index key param)
+	(match key
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(set_assoc index key param)
+		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(set_assoc index key param)
+		_ index)))
+
+(define scalar_query_probe_param_index (lambda (lookup_keys logical_lookup_keys params)
+	(begin
+		(define logical_keys (if (equal? (count lookup_keys) (count logical_lookup_keys))
+			logical_lookup_keys
+			lookup_keys))
+		(reduce (produceN (count lookup_keys)) (lambda (index i)
+			(scalar_query_probe_param_index_add
+				(scalar_query_probe_param_index_add index (nth lookup_keys i) (nth params i))
+				(nth logical_keys i)
+				(nth params i))) '()))))
 
 /* A query-probe lambda evaluates its outer lookup keys before entering nested
 stages. Replace inherited direct column references with those parameters so
-dependency preparation does not emit free outer-row symbols. */
+dependency preparation does not emit free outer-row symbols. Derived flattening
+may rename the live lookup while nested stages retain its logical predecessor;
+both names therefore bind to the same parameter. */
 (define rewrite_scalar_query_probe_params (lambda (index expr)
 	(match expr
 		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
@@ -8984,6 +8996,8 @@ dependency preparation does not emit free outer-row symbols. */
 		'(stage requested_col nested_stages _hoisted_stages prepare_stages inline_presence_stages) (begin
 			(define raw_keys (gs_keys stage))
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define logical_lookup_keys
+				(qassoc_get (gs_facts stage) (quote btw2025_lookup_keys) lookup_keys))
 			(define keys (if (empty_list? lookup_keys) '() raw_keys))
 			(if (not (equal? (count keys) (count lookup_keys)))
 				(neumann_fail "build_queryplan" "scalar query probe recipe key/domain mismatch")
@@ -8995,7 +9009,7 @@ dependency preparation does not emit free outer-row symbols. */
 			(define value_expr (nth (scalar_first_probe_parts ag) 0))
 			(define params (map (produceN (count keys)) (lambda (i)
 				(symbol (concat "__probe_key_" i)))))
-			(define param_index (scalar_query_probe_param_index lookup_keys params))
+			(define param_index (scalar_query_probe_param_index lookup_keys logical_lookup_keys params))
 			(define invariant_entries (query_invariant_probe_entries_for_stages nested_stages))
 			(define annotated_nested_lookup
 				(stage_lookup_with_query_invariant_probe_bindings nested_stages invariant_entries))

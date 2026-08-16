@@ -484,14 +484,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(lambda (_e) true)) true
 		"physical preparation rejects a join tree that does not cover its source catalog")
 	(define probe_outer_column (list (quote get_column) "outer_row" true "id" true))
+	(define probe_logical_column (list (quote get_column) "derived_row" false "id" false))
 	(define probe_param (symbol "__probe_key_0"))
-	(define probe_param_index (scalar_query_probe_param_index (list probe_outer_column) (list probe_param)))
+	(define probe_param_index (scalar_query_probe_param_index
+		(list probe_outer_column) (list probe_logical_column) (list probe_param)))
 	(assert (equal?
 		(rewrite_scalar_query_probe_params probe_param_index probe_outer_column)
 		probe_param) true "scalar query probe binds a direct inherited column")
 	(assert (equal?
 		(rewrite_scalar_query_probe_params probe_param_index (list (quote stage-fixture) (list probe_outer_column)))
 		(list (quote stage-fixture) (list probe_param))) true "scalar query probe binds inherited columns throughout stage data")
+	(assert (equal?
+		(rewrite_scalar_query_probe_params probe_param_index probe_logical_column)
+		probe_param) true "scalar query probe binds pre-derived logical aliases")
 	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
 	(define canonical_group_count (list 1 (quote +) 0))
 	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
