@@ -982,7 +982,11 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 			// Publication retired origTopology. Wait without polling until every
 			// scan/write task that selected it has left; the authoritative topology
 			// and its writers are already live while this cleanup barrier drains.
-			<-origTopology.operationsDrained
+			select {
+			case <-origTopology.operationsDrained:
+			case <-time.After(repartitionDrainTimeout):
+				panic(fmt.Sprintf("rebuild %s timed out while waiting for repartition readiness", t.Name))
+			}
 
 			if doRepart {
 				// maintenanceMu stays locked; repartition generation retirement

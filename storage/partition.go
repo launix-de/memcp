@@ -28,6 +28,8 @@ import "github.com/jtolds/gls"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/scm"
 
+const repartitionDrainTimeout = 30 * time.Second
+
 type shardDimension struct {
 	Column        string
 	NumPartitions int
@@ -965,23 +967,70 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	// committed. Source writes remain synchronous old→new forwards. Locking the
 	// old shards only for this short commit boundary prevents a writer from
 	// completing between the final catch-up and durable metadata publication.
-	for {
-		t.waitForTransactions(oldshards)
+	startDeadline := time.Now().Add(repartitionDrainTimeout)
+	waitWithDeadline := func(step string, cond func() bool) {
+		for !cond() {
+			if time.Now().After(startDeadline) {
+				panic(fmt.Sprintf("repartition %s timed out after %s while %s", t.Name, repartitionDrainTimeout, step))
+			}
+			runtime.Gosched()
+		}
+	}
+
+	lockAllOldShards := func() []*storageShard {
+		locked := make([]*storageShard, 0, len(oldshards))
 		for _, shard := range oldshards {
-			shard.mu.Lock()
+			if shard == nil {
+				continue
+			}
+			if !shard.mu.TryLock() {
+				for i := len(locked) - 1; i >= 0; i-- {
+					locked[i].mu.Unlock()
+				}
+				return nil
+			}
+			locked = append(locked, shard)
+		}
+		return locked
+	}
+
+	var oldshardsLocked []*storageShard
+	for {
+		waitWithDeadline("draining shard transactions before phase F lock acquisition", func() bool {
+			for _, shard := range oldshards {
+				if shard == nil {
+					continue
+				}
+				if shard.activeTransactions.Load() > 0 {
+					return false
+				}
+			}
+			return true
+		})
+		locked := lockAllOldShards()
+		if locked == nil {
+			if time.Now().After(startDeadline) {
+				panic(fmt.Sprintf("repartition %s timed out after %s while acquiring phase F old-shard locks", t.Name, repartitionDrainTimeout))
+			}
+			runtime.Gosched()
+			continue
 		}
 		active := false
 		for _, shard := range oldshards {
+			if shard == nil {
+				continue
+			}
 			if shard.activeTransactions.Load() > 0 {
 				active = true
 				break
 			}
 		}
 		if !active {
+			oldshardsLocked = locked
 			break
 		}
-		for i := len(oldshards) - 1; i >= 0; i-- {
-			oldshards[i].mu.Unlock()
+		for i := len(locked); i > 0; i-- {
+			locked[i-1].mu.Unlock()
 		}
 	}
 	// With source writers stopped, every completed pre-publication delete must
@@ -991,8 +1040,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	unresolvedBeforePublication := len(t.repartitionPendingSourceDels)
 	t.repartitionPendingMu.Unlock()
 	if unresolvedBeforePublication != 0 {
-		for i := len(oldshards) - 1; i >= 0; i-- {
-			oldshards[i].mu.Unlock()
+		for i := len(oldshardsLocked) - 1; i >= 0; i-- {
+			oldshardsLocked[i].mu.Unlock()
 		}
 		abortRepartition()
 		panic(fmt.Sprintf("repartition cannot publish %s: %d source deletes have no target translation", t.Name, unresolvedBeforePublication))
@@ -1010,8 +1059,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		t.schema.save()
 	}()
 	if savePanic != nil {
-		for i := len(oldshards) - 1; i >= 0; i-- {
-			oldshards[i].mu.Unlock()
+		for i := len(oldshardsLocked) - 1; i >= 0; i-- {
+			oldshardsLocked[i].mu.Unlock()
 		}
 		abortRepartition()
 		panic(savePanic)
@@ -1019,8 +1068,8 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	t.mu.Lock()
 	t.publishTopologyLocked()
 	t.mu.Unlock()
-	for i := len(oldshards) - 1; i >= 0; i-- {
-		oldshards[i].mu.Unlock()
+	for i := len(oldshardsLocked) - 1; i >= 0; i-- {
+		oldshardsLocked[i].mu.Unlock()
 	}
 
 	finishRetirement := func() {
