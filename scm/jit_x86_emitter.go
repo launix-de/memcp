@@ -2342,7 +2342,8 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 						}
 					}
 					isSpecialForm := nestedType == nil
-					if !isQuote && !isStackListForNth && !isLambdaTemplate && !isSpecialForm {
+					noHeapPointerResult := nestedType != nil && jitReturnHasNoHeapPointer(nestedType.Return)
+					if !isQuote && !isStackListForNth && !isLambdaTemplate && !isSpecialForm && !noHeapPointerResult {
 						panic("jit: nested generated emitter has pointer-bearing or unknown result: " + SerializeToString(argExpr, &Globalenv))
 					}
 				}
@@ -2378,20 +2379,45 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					protectedRegs = append(protectedRegs, args[i-1].Reg, args[i-1].Reg2)
 				}
 			}
-			// Keep call arguments resident while compiling the callee emitter so
-			// later arguments cannot evict values that the emitter still consumes.
-			defer func() {
-				for _, r := range protectedRegs {
-					ctx.UnprotectReg(r)
-				}
-			}()
+			// Keep call arguments resident only while compiling this callee. A
+			// function-scoped defer would retain every nested emitter's inputs until
+			// the complete outer expression returned, exhausting the allocator and
+			// letting stale path-local values leak into later sibling emitters.
 			// Argument compilation may have rendered mutually exclusive type paths.
 			// Their path-local temporaries are intentionally unowned after merging;
 			// reclaim them before entering another generated emitter while retaining
 			// the explicitly bound and protected argument descriptors above.
 			ctx.ReclaimUntrackedRegs()
+			allocatedBeforeEmitter := ctx.AllRegs &^ ctx.FreeRegs
 			labelsBefore := ctx.LabelNext
 			out := decl.Type.JITEmit(ctx, list[1:], args, result)
+			outputRegs := uint64(0)
+			switch out.Loc {
+			case LocReg:
+				outputRegs = 1 << uint(out.Reg)
+			case LocRegPair:
+				outputRegs = 1<<uint(out.Reg) | 1<<uint(out.Reg2)
+			case LocRegTriple:
+				outputRegs = 1<<uint(out.Reg) | 1<<uint(out.Reg2) | 1<<uint(out.Reg3)
+			}
+			// SSA path rendering can leave path-local descriptors resident even
+			// though they are unreachable after the generated emitter returns. Keep
+			// only registers that predated this call or carry its result.
+			internalRegs := (ctx.AllRegs &^ ctx.FreeRegs) &^ allocatedBeforeEmitter &^ outputRegs
+			for r := Reg(0); r <= RegR15; r++ {
+				if internalRegs&(1<<uint(r)) != 0 {
+					ctx.FreeReg(r)
+				}
+			}
+			for _, r := range protectedRegs {
+				ctx.UnprotectReg(r)
+			}
+			// The args slice owns the descriptors that were bound above, so the call
+			// boundary must release them. FreeDesc preserves registers that the
+			// returned output descriptor has already rebound to itself.
+			for i := range args {
+				ctx.FreeDesc(&args[i])
+			}
 			// A generated emitter may render several runtime control-flow paths.
 			// Its mutable result descriptor then contains the type of whichever
 			// path happened to be rendered last, not a valid merged type. Keep the

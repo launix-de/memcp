@@ -1803,6 +1803,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert ((jit (lambda (a b c d) (+ (* a b) (* c d)))) 2 3 4 5) 26 "jit: a*b + c*d")
 	(assert ((jit (lambda (x) (+ (+ (+ x 1) 2) 3))) 10) 16 "jit: deeply nested +")
 	(assert ((jit (lambda (x) (* (* (* x 2) 2) 2))) 3) 24 "jit: deeply nested *")
+	(define jit_nested_count_result (jit (lambda (values) (+ (count values) 1))))
+	(define jit_nested_equal_result (jit (lambda (left right) (not (equal? left right)))))
+	(jit-warn-if-fallback jit_nested_count_result "jit: nested pointer-free integer result")
+	(jit-warn-if-fallback jit_nested_equal_result "jit: nested pointer-free boolean result")
+	(assert (jit_nested_count_result '(2 4 6)) 4 "jit: nested count feeds arithmetic natively")
+	(assert (jit_nested_equal_result "left" "right") true "jit: nested equality feeds boolean logic natively")
 	(assert ((jit (lambda (a b) (- (* a a) (* b b)))) 5 3) 16 "jit: a²-b²")
 	(assert ((jit (lambda (a b c) (+ a (- b c)))) 10 7 3) 14 "jit: a+(b-c)")
 
