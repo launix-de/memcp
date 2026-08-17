@@ -29,6 +29,23 @@ import (
 
 var jitCodeOverflowPanic = &struct{}{}
 
+func jitCapturedEnv(en *Env) *JITEnv {
+	if en == nil || en == &Globalenv {
+		return nil
+	}
+	out := &JITEnv{Outer: jitCapturedEnv(en.Outer)}
+	if len(en.VarsNumbered) != 0 {
+		out.Numbered = make([]JITValueDesc, len(en.VarsNumbered))
+		for i, value := range en.VarsNumbered {
+			out.Numbered[i] = JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value}
+		}
+	}
+	if len(out.Numbered) == 0 && out.Outer == nil {
+		return nil
+	}
+	return out
+}
+
 // Keep the unwind marker above the register-argument spill area used by Go
 // callees. MemCP's JIT call bridge supports at most nine ABI words (72 bytes).
 const jitGoSpillBytes = uintptr(128)
@@ -45,7 +62,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
 	ptr, arena, reservation := globalJITPool.Alloc(defaultCodeBufSize)
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize, arena: arena, reservation: reservation}
-	codeLen, roots, _, _, _, _, _ := jitCompileProcToExec(proc, buf)
+	codeLen, roots, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
 	arena.complete(reservation, buf.stackMaps)
 	if codeLen == 0 {
 		return nil, nil
@@ -58,7 +75,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 // jitCompileProcToExec compiles a Proc body directly into writable executable memory.
 // Returns code length, GC roots, an overflow flag, and whether the call boundary
 // must provide a fresh variadic array that becomes the owned list result.
-func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, bool) {
+func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, bool) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		si := body.SourceInfo()
@@ -72,12 +89,12 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf) (int, []unsafe.Pointer, bool
 		}
 		body = si.value
 	}
-	return jitCompileExprBodyToExec(proc, body, proc.NumVars, buf)
+	return jitCompileExprBodyToExec(proc, body, proc.NumVars, buf, recursiveLambdas)
 }
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
 // executable buffer using Declaration.JITEmit callbacks.
-func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, autoImportSafe bool, needsStableArgs bool) {
+func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, autoImportSafe bool, needsStableArgs bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r == jitCodeOverflowPanic {
@@ -106,16 +123,17 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 		inputArgCount = len(proc.Params.Slice())
 	}
 	ctx := &JITContext{
-		Ptr:            buf.ptr,
-		Start:          buf.ptr,
-		End:            unsafe.Add(buf.ptr, buf.n),
-		FreeRegs:       freeRegs,
-		AllRegs:        freeRegs,
-		SliceBase:      RegR12,
-		InputArgCount:  inputArgCount,
-		LocalSlotCount: numVars,
-		AutoImportSafe: true,
-		Arena:          buf.arena,
+		Ptr:              buf.ptr,
+		Start:            buf.ptr,
+		End:              unsafe.Add(buf.ptr, buf.n),
+		FreeRegs:         freeRegs,
+		AllRegs:          freeRegs,
+		SliceBase:        RegR12,
+		InputArgCount:    inputArgCount,
+		LocalSlotCount:   numVars,
+		AutoImportSafe:   true,
+		RecursiveLambdas: recursiveLambdas,
+		Arena:            buf.arena,
 	}
 	runtimeEnv := &Globalenv
 	if proc != nil && proc.En != nil {
@@ -171,6 +189,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 	// Map lambda parameters to local stack slots so symbol lookup remains correct
 	// even when the optimizer did not rewrite body symbols to NthLocalVar.
 	if proc != nil {
+		captured := jitCapturedEnv(proc.En)
 		var vars map[Symbol]JITValueDesc
 		putVar := func(sym Symbol, index int) {
 			if vars == nil {
@@ -199,8 +218,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf)
 				putVar(proc.Params.Symbol(), 0)
 			}
 		}
-		if len(vars) > 0 {
-			ctx.Env = &JITEnv{Vars: vars}
+		if len(vars) > 0 || captured != nil {
+			ctx.Env = &JITEnv{Vars: vars, Outer: captured}
 		}
 	}
 
@@ -367,18 +386,38 @@ func jitResolveRuntimeSymbol(envValue, symbol Scmer) Scmer {
 }
 
 func jitApplyCallable0(callable, envValue Scmer) Scmer {
+	if callable.GetTag() == tagProc {
+		if proc := callable.Proc(); proc != nil && proc.Compiled != nil {
+			return proc.Compiled.Call()
+		}
+	}
 	return ApplyEx(callable, nil, envValue.Any().(*Env))
 }
 
 func jitApplyCallable1(callable, envValue, arg0 Scmer) Scmer {
+	if callable.GetTag() == tagProc {
+		if proc := callable.Proc(); proc != nil && proc.Compiled != nil {
+			return proc.Compiled.Call(arg0)
+		}
+	}
 	return ApplyEx(callable, []Scmer{arg0}, envValue.Any().(*Env))
 }
 
 func jitApplyCallable2(callable, envValue, arg0, arg1 Scmer) Scmer {
+	if callable.GetTag() == tagProc {
+		if proc := callable.Proc(); proc != nil && proc.Compiled != nil {
+			return proc.Compiled.Call(arg0, arg1)
+		}
+	}
 	return ApplyEx(callable, []Scmer{arg0, arg1}, envValue.Any().(*Env))
 }
 
 func jitApplyCallableSlice(callable, envValue Scmer, args []Scmer) Scmer {
+	if callable.GetTag() == tagProc {
+		if proc := callable.Proc(); proc != nil && proc.Compiled != nil {
+			return proc.Compiled.Call(args...)
+		}
+	}
 	return ApplyEx(callable, args, envValue.Any().(*Env))
 }
 
@@ -1031,7 +1070,7 @@ func jitCompileMatchPattern(ctx *JITContext, value JITValueDesc, pattern Scmer, 
 		if len(p) == 0 {
 			panic("jit: empty match pattern")
 		}
-		if _, direct := scmerSymbolName(p[0]); !direct {
+		if _, direct := symbolName(p[0]); !direct {
 			if nested, ok := scmerAsSlice(p[0]); ok && len(nested) > 0 {
 				if head, ok := scmerSymbolName(nested[0]); ok && (head == "symbol" || head == "quote") {
 					return jitMatchFixedList(ctx, value, p, env, failLabel)
@@ -1039,7 +1078,7 @@ func jitCompileMatchPattern(ctx *JITContext, value JITValueDesc, pattern Scmer, 
 			}
 			panic("jit: unsupported nested match pattern")
 		}
-		name, _ := scmerSymbolName(p[0])
+		name, _ := symbolName(p[0])
 		switch name {
 		case "eval":
 			if len(p) != 2 {
@@ -1130,11 +1169,13 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 	value = jitMatchStableValue(ctx, value)
 	target := jitEnsureResultPair(ctx, result)
 	endLabel := ctx.ReserveLabel()
+	branchState := ctx.SnapshotAllocState()
 	hasBranch := false
 	terminated := false
 	baseEnv := ctx.Env
 	i := 2
 	for i+1 < len(list) {
+		ctx.RestoreAllocState(branchState)
 		nextLabel := ctx.ReserveLabel()
 		branchEnv := jitMatchBranchEnv(baseEnv)
 		outcome := jitCompileMatchPattern(ctx, value, list[i], branchEnv, nextLabel)
@@ -1147,6 +1188,7 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 			hasBranch = true
 		}
 		ctx.MarkLabel(nextLabel)
+		ctx.RestoreAllocState(branchState)
 		i += 2
 		if outcome.always {
 			terminated = true
@@ -1155,6 +1197,7 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 	}
 	ctx.Env = baseEnv
 	if !terminated {
+		ctx.RestoreAllocState(branchState)
 		var fallback JITValueDesc
 		if i < len(list) {
 			fallback = jitCompileExpr(ctx, list[i], sliceBase, target)
@@ -1505,12 +1548,7 @@ func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, ar
 			slot := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: slotOff}
 			v := jitCompileExpr(ctx, argExprs[i], sliceBase, slot)
 			if !(v.Loc == LocStackPair && v.MemPtr == 0 && v.StackOff == slotOff) {
-				tmp := JITValueDesc{
-					Loc:  LocRegPair,
-					Type: JITTypeUnknown,
-					Reg:  ctx.AllocReg(),
-					Reg2: ctx.AllocReg(),
-				}
+				tmp := jitAllocTrackedPair(ctx, JITTypeUnknown)
 				_ = jitPlaceIntoPair(ctx, &v, tmp)
 				ctx.EmitStoreRegMem(tmp.Reg, RegRSP, slotOff)
 				ctx.EmitStoreRegMem(tmp.Reg2, RegRSP, slotOff+8)
@@ -1520,27 +1558,13 @@ func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, ar
 			ctx.FreeDesc(&v)
 		}
 		// argslice: ptr + len (cap = len inside EmitGoCallVariadic).
-		argsSlice = JITValueDesc{
-			Loc:  LocRegPair,
-			Type: JITTypeUnknown,
-			Reg:  ctx.AllocReg(),
-			Reg2: ctx.AllocReg(),
-		}
+		argsSlice = jitAllocTrackedPair(ctx, JITTypeUnknown)
 		ctx.EmitMovRegReg(argsSlice.Reg, RegRSP)
 		ctx.EmitMovRegImm64(argsSlice.Reg2, uint64(argc))
-		ctx.BindReg(argsSlice.Reg, &argsSlice)
-		ctx.BindReg(argsSlice.Reg2, &argsSlice)
 	} else {
-		argsSlice = JITValueDesc{
-			Loc:  LocRegPair,
-			Type: JITTypeUnknown,
-			Reg:  ctx.AllocReg(),
-			Reg2: ctx.AllocReg(),
-		}
+		argsSlice = jitAllocTrackedPair(ctx, JITTypeUnknown)
 		ctx.EmitMovRegImm64(argsSlice.Reg, 0)
 		ctx.EmitMovRegImm64(argsSlice.Reg2, 0)
-		ctx.BindReg(argsSlice.Reg, &argsSlice)
-		ctx.BindReg(argsSlice.Reg2, &argsSlice)
 	}
 
 	out := ctx.EmitGoCallVariadic(fn, argsSlice, result)
@@ -2219,7 +2243,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				argExprs = append(argExprs, key)
 			}
 
-			return jitEmitGoVariadicCallFromExprs(ctx, jitBuildLambdaClosure, argExprs, sliceBase, result)
+			builder := jitBuildLambdaClosure
+			if ctx.RecursiveLambdas {
+				builder = jitBuildCompiledLambdaClosure
+			}
+			return jitEmitGoVariadicCallFromExprs(ctx, builder, argExprs, sliceBase, result)
 		case "error":
 			// Keep one real Go callback in the experimental JIT so panic/recover is
 			// exercised across the registered JIT frame. More complex variadic

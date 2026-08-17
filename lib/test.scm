@@ -1789,6 +1789,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(set jit_dynamic_many_callee (jit jit_dynamic_many_list_callee))
 	(assert (jit_dynamic_many_caller 6 7 8 9) '(6 7 8 9)
 		"jit: dynamic call follows rebinding to a native Scheme Proc")
+	(define jit_nested_maker (jit (lambda (offset)
+		(lambda (value) (+ value offset)))))
+	(define jit_nested_add7 (jit_nested_maker 7))
+	(assert (jit? jit_nested_add7) (jit-enabled?) "jit: captured nested lambda is compiled")
+	(assert (jit_nested_add7 5) 12 "jit: captured nested lambda reads its outer value")
 	(define jit_scan_filter (jit (lambda (value) (> value 1))))
 	(define jit_scan_map (jit (lambda (value) value)))
 	(define jit_scan_reduce (jit (lambda (total value) (+ total value))))
@@ -2903,6 +2908,23 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(lambda () (begin (sf_cm "get_or_compute" "retry" (lambda () (car (sf_calls "missing")))) false))
 		(lambda (e) true)) true "cachemap singleflight forwards producer panic")
 	(assert (sf_cm "get_or_compute" "retry" (lambda () 77)) 77 "cachemap singleflight retries after panic")
+
+	/* query_expr_alias_set is the planner JIT coverage target. Native compilation
+	is atomic, so a compiled descriptor means every expression in the function was
+	lowered without a whole-procedure fallback. Exercise representative match paths,
+	the nested reduce lambda, recursion, and both resolve_column_alias branches. */
+	(set resolve_column_alias (jit resolve_column_alias))
+	(set query_expr_alias_set (jit query_expr_alias_set))
+	(assert (jit? resolve_column_alias) (jit-enabled?) "jit coverage: resolve_column_alias is 100% native")
+	(assert (jit? query_expr_alias_set) (jit-enabled?) "jit coverage: query_expr_alias_set is 100% native")
+	(assert (query_expr_alias_set 'default (list 'get_column 'a 'x nil nil) '()) (list 'a true)
+		"jit coverage: symbol get_column match")
+	(assert (query_expr_alias_set 'default
+		(list '+ (list 'get_column 'a 'x nil nil) (list 'get_column nil 'y nil nil)) '())
+		(list 'a true 'default true)
+		"jit coverage: cons recursion and nested reduce lambda")
+	(assert (query_expr_alias_set 'default 42 (list 'existing true)) (list 'existing true)
+		"jit coverage: scalar fallback match")
 
 	(print "finished unit tests")
 	(print "test result: " (teststat "success") "/" (teststat "count"))
