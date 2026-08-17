@@ -69,7 +69,7 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
 		if compileProcedures && expression.GetTag() == tagProc {
-			compiled := jitCompile(expression)
+			compiled := jitCompileForImport(expression)
 			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil && compiled.Proc().Compiled.AutoImportSafe {
 				expression = compiled
 				if sym, ok := topLevelDefinitionSymbol(code); ok {

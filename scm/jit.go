@@ -154,6 +154,9 @@ type JITEntryPoint struct {
 	// experimental pointer-producing path. Explicit (jit ...) may exercise such
 	// paths, but module import keeps the interpreter until they are proven safe.
 	AutoImportSafe bool
+	// RecursiveLambdas makes lambda values constructed by this native body
+	// compile their own body before they are returned or passed onward.
+	RecursiveLambdas bool
 }
 
 // Call keeps the entry point, embedded constant roots, and source arguments
@@ -423,6 +426,7 @@ type JITContext struct {
 	HiddenArgs        []JITHiddenArg
 	RuntimeEnv        Scmer
 	AutoImportSafe    bool
+	RecursiveLambdas  bool
 	NeedsStableArgs   bool
 	RegOwners         [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DynamicSP is the temporary distance below the static frame bottom. It
@@ -1375,6 +1379,10 @@ func jitBuildLambdaClosure(args ...Scmer) Scmer {
 	})
 }
 
+func jitBuildCompiledLambdaClosure(args ...Scmer) Scmer {
+	return jitCompile(jitBuildLambdaClosure(args...))
+}
+
 // GoFuncAddr returns the entry point address of a Go function value.
 func GoFuncAddr(fn interface{}) uint64 {
 	return uint64(reflect.ValueOf(fn).Pointer())
@@ -2269,6 +2277,14 @@ func init_jit() {
 // jitCompile compiles a Proc to a native function (tagFunc)
 // Already compiled functions (tagFunc, tagFuncEnv) are passed through unchanged
 func jitCompile(a ...Scmer) Scmer {
+	return jitCompileMode(true, a...)
+}
+
+func jitCompileForImport(value Scmer) Scmer {
+	return jitCompileMode(false, value)
+}
+
+func jitCompileMode(recursiveLambdas bool, a ...Scmer) Scmer {
 	if len(a) != 1 {
 		panic("jit: expects exactly 1 argument")
 	}
@@ -2309,7 +2325,7 @@ func jitCompile(a ...Scmer) Scmer {
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
-			codeLen, roots, overflow, transferInputArgs, hiddenArgs, autoImportSafe, needsStableArgs := jitCompileProcToExec(proc, buf)
+			codeLen, roots, overflow, transferInputArgs, hiddenArgs, autoImportSafe, needsStableArgs := jitCompileProcToExec(proc, buf, recursiveLambdas)
 			arena.complete(reservation, buf.stackMaps)
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
@@ -2331,6 +2347,7 @@ func jitCompile(a ...Scmer) Scmer {
 					ConstRoots:        roots,
 					Proc:              sourceProc,
 					AutoImportSafe:    autoImportSafe && jitAutoImportSyntaxSafe(sourceProc.Body),
+					RecursiveLambdas:  recursiveLambdas,
 					NeedsStableArgs:   needsStableArgs,
 				}
 				runtime.SetFinalizer(jep, func(jep *JITEntryPoint) {
