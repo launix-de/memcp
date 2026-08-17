@@ -25,4 +25,30 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "decorrelated scalar stages own their physical row bounds"
+    scm: |
+      (begin
+        (define scalar_stage (lambda (mode max_rows on_overflow)
+          (make_group_stage "scalar-contract" nil '() '() '() nil '() '() nil nil
+            (list
+              (list 'cardinality_mode mode)
+              (list 'physical_max_rows max_rows)
+              (list 'on_overflow on_overflow)))))
+        (and
+          (equal? (bounded_probe_physical_max_rows (scalar_stage 'first 1 'ignore)) 1)
+          (equal? (bounded_probe_physical_max_rows (scalar_stage 'single_or_error 2 'error)) 2)))
+    expect:
+      data: [true]
+
+  - name: "physical lowering rejects a mismatched scalar row bound"
+    scm: |
+      (bounded_probe_physical_max_rows
+        (make_group_stage "invalid-scalar-contract" nil '() '() '() nil '() '() nil nil
+          (list
+            (list 'cardinality_mode 'first)
+            (list 'physical_max_rows 2)
+            (list 'on_overflow 'ignore))))
+    expect:
+      error: true
+
 cleanup: []

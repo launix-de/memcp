@@ -82,6 +82,25 @@ test_cases:
         - "__scalar_order_lookup"
         - "(sort rows"
 
+  - name: "EXPLAIN IR preserves scalar LIMIT 1 lowering contract"
+    sql: |
+      EXPLAIN IR
+      SELECT item.id, (
+        SELECT file.uploaded_at FROM usol_file file
+        WHERE file.id = item.file_id LIMIT 1
+      ) AS uploaded_at
+      FROM usol_item item
+      WHERE item.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "(cardinality_mode first)"
+        - "(physical_max_rows 1)"
+        - "(on_overflow ignore)"
+      result_not_contains:
+        - "inner_select"
+        - "dependent-subquery"
+
   - name: "Scalar LIMIT probe preserves case-insensitive SQL equality"
     sql: |
       SELECT o.id, (

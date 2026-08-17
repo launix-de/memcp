@@ -64,6 +64,8 @@ test_cases:
         - "scalar-single:"
         - "(purpose scalar_single)"
         - "(cardinality_mode single_or_error)"
+        - "(physical_max_rows 2)"
+        - "(on_overflow error)"
         - "jd_ref"
       not_contains:
         - "dependent-subquery"
@@ -190,6 +192,24 @@ test_cases:
         - "scan_order"
         - "jd_ref"
         - '\n\t\t\t\t\t0\n\t\t\t\t\t2\n'
+      result_not_contains:
+        - "scan_order_point"
+        - ".grp:jd_ref"
+
+  - name: "Explicit scalar LIMIT 1 physically owns an unordered bounded scan"
+    sql: |
+      EXPLAIN
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id LIMIT 1) AS label
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "jd_ref"
+        - "'()"
+        - '\n\t\t\t\t\t0\n\t\t\t\t\t0\n\t\t\t\t\t1\n'
       result_not_contains:
         - "scan_order_point"
         - ".grp:jd_ref"

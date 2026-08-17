@@ -1507,6 +1507,29 @@ physical membership probe. */
 										(and (equal? (count ags) 2)
 											(equal? (nth ags 1) aggregate_count_descriptor)))))))))))))
 
+/* Scalar row bounds belong to the decorrelated LEFT JOIN helper. Physical
+lowering consumes this contract instead of reconstructing scalar semantics from
+the original SQL shape after join reorder and stage rewrites. */
+(define bounded_probe_physical_max_rows (lambda (stage)
+	(begin
+		(define facts (gs_facts stage))
+		(define mode (qassoc_get facts (quote cardinality_mode) nil))
+		(define max_rows (qassoc_get facts (quote physical_max_rows) nil))
+		(define on_overflow (qassoc_get facts (quote on_overflow) nil))
+		(match mode
+			(symbol first) (if (and (equal? max_rows 1) (equal? on_overflow (quote ignore)))
+				max_rows
+				(neumann_fail "build_queryplan" "scalar first stage requires physical_max_rows=1 and on_overflow=ignore"))
+			(symbol single_or_error) (if (and (equal? max_rows 2) (equal? on_overflow (quote error)))
+				max_rows
+				(neumann_fail "build_queryplan" "scalar single_or_error stage requires physical_max_rows=2 and on_overflow=error"))
+			(symbol many) (if (and (equal? (qassoc_get facts (quote presence_only) false) true)
+				(and (equal? (qassoc_get facts (quote max_needed_per_domain) nil) 1)
+					(and (equal? max_rows 1) (equal? on_overflow (quote ignore)))))
+				max_rows
+				(neumann_fail "build_queryplan" "presence probe stage requires physical_max_rows=1 and on_overflow=ignore"))
+			_ (neumann_fail "build_queryplan" "bounded probe stage is missing its cardinality contract")))))
+
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
 		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
@@ -1649,6 +1672,8 @@ physical membership probe. */
 					(list (quote purpose) (quote exists))
 					(list (quote presence_only) true)
 					(list (quote max_needed_per_domain) 1)
+					(list (quote physical_max_rows) 1)
+					(list (quote on_overflow) (quote ignore))
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
@@ -1722,6 +1747,9 @@ physical membership probe. */
 					(list (quote condition) true)
 					(list (quote purpose) (quote exists))
 					(list (quote presence_only) true)
+					(list (quote max_needed_per_domain) 1)
+					(list (quote physical_max_rows) 1)
+					(list (quote on_overflow) (quote ignore))
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
@@ -1866,6 +1894,8 @@ physical membership probe. */
 				(list (quote purpose) (quote exists))
 				(list (quote presence_only) true)
 				(list (quote max_needed_per_domain) 1)
+				(list (quote physical_max_rows) 1)
+				(list (quote on_overflow) (quote ignore))
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) lookup_keys)
 				(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
@@ -8455,7 +8485,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(merge (map direct_stages (lambda (nested_stage)
 			(get_assoc closure_index (logical_stage_key nested_stage))))))))))
 
-(define lower_direct_scalar_query_probe (lambda (input value_expr)
+(define lower_direct_scalar_query_probe (lambda (input value_expr physical_max_rows)
 	(begin
 		(define sources (qb_sources input))
 		(if (and (single_source? sources)
@@ -8481,7 +8511,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 					(quoted_runtime_list '())
 					0
 					0
-					1
+					physical_max_rows
 					(cons (quote list) mapcols)
 					(list (quote lambda)
 						(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
@@ -8491,7 +8521,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 					false))
 			nil))))
 
-(define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages inline_presence_stages)
+(define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages inline_presence_stages physical_max_rows)
 	(begin
 		(define input (gs_input stage))
 		(define keyed_terms (map (produceN (count keys)) (lambda (i)
@@ -8533,13 +8563,26 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 		(define prepared_input (if (empty_list? prepare_stages)
 			(query_block_with_stage_catalog raw_prepared_input '())
 			raw_prepared_input))
+		(define bounded_prepared_input (make_query_block
+			(qb_schema prepared_input)
+			(qb_sources prepared_input)
+			(qb_fields prepared_input)
+			(qb_where prepared_input)
+			(qb_group prepared_input)
+			(qb_having prepared_input)
+			(qb_order prepared_input)
+			physical_max_rows
+			0
+			(qb_hidden prepared_input)
+			(qb_stages prepared_input)
+			(qb_facts prepared_input)))
 		(define direct_probe (if (empty_list? prepare_stages)
-			(lower_direct_scalar_query_probe prepared_input probe_value_expr)
+			(lower_direct_scalar_query_probe prepared_input probe_value_expr physical_max_rows)
 			nil))
 		(define probe_expr (if (nil? direct_probe)
 			(begin
 				(define reduced (lower_query_block_as_dataset_reduce
-					prepared_input
+					bounded_prepared_input
 					(list "__value" probe_value_expr)
 					(list (quote lambda) (list (quote __value)) (quote __value))
 					(scalar_query_probe_reduce_first)
@@ -8617,7 +8660,8 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			lookup_keys
 			nested_stages
 			prepare_stages
-			inline_presence_stages))))
+			inline_presence_stages
+			(bounded_probe_physical_max_rows stage)))))
 
 /* Query-input scalar probes can occur in many projected fields after their
 logical stages have merged. Emit the physical probe recipe once per block and
@@ -9051,7 +9095,8 @@ both names therefore bind to the same parameter. */
 				(list (quote lambda) params
 					(rewrite_query_invariant_probe_symbols invariant_symbol_index
 						(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr bound_keys params
-							bound_nested_stages bound_prepare_stages bound_inline_presence_stages)))))
+							bound_nested_stages bound_prepare_stages bound_inline_presence_stages
+							(bounded_probe_physical_max_rows bound_stage))))))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe plan"))))
 
 (define scalar_query_probe_recipe_bindings (lambda (plans)
@@ -9148,6 +9193,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 		(define order_exprs (nth parts 1))
 		(define dirs (nth parts 2))
 		(define offset_value (nth parts 3))
+		(define physical_max_rows (bounded_probe_physical_max_rows stage))
 		(if (union_block? src)
 			(list (quote if)
 				(lower_exists_union_probe_expr
@@ -9186,7 +9232,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 						(cons (quote list) dirs)
 						0
 						(coalesceNil offset_value 0)
-						1
+						physical_max_rows
 						(cons (quote list) mapcols)
 						(list (quote lambda)
 							(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
@@ -9260,6 +9306,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 		(define value_cols (extract_columns_for_alias src value_expr))
 		(define filtercols (merge_unique (list condition_cols key_cols)))
 		(define unset (list (quote quote) (quote __scalar_cardinality_unset)))
+		(define physical_max_rows (bounded_probe_physical_max_rows stage))
 		(list (quote scan_order)
 			'(session "__memcp_tx")
 			(source_table_expr src)
@@ -9275,7 +9322,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 			'(list)
 			0
 			0
-			2
+			physical_max_rows
 			(cons (quote list) value_cols)
 			(list (quote lambda)
 				(map value_cols (lambda (col) (symbol (concat (source_alias src) "." col))))

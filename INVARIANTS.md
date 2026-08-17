@@ -514,6 +514,14 @@ The logical stage must distinguish:
   yield `NULL`, one row yields the value, and the second matching row per
   domain binding throws the "more than one row" error
 
+Neumann decorrelation must attach the complete cardinality contract to the
+resulting LEFT JOIN helper before optimization: `first` carries
+`physical_max_rows = 1` and `on_overflow = ignore`; `single_or_error` carries
+`physical_max_rows = 2` and `on_overflow = error`. Physical lowering consumes
+these facts and emits `scan_order` with the exact bound, using an empty order
+array when no SQL ordering is required. It must not rediscover the original
+subquery syntax.
+
 Physical lowering may implement `single_or_error` with `scan_order` partition
 limits, `LIMIT 2`, reducers, promise/session state, or another efficient
 mechanism. It must never silently degrade to `LIMIT 1`.
