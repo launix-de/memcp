@@ -7348,7 +7348,7 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-			Name: "cons_map",
+		Name: "cons_map",
 		Desc: "constructs a list head while mapping its tail (optimizer-only)",
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[1], "cons_map")
@@ -9308,158 +9308,6 @@ func init_list() {
 	})
 
 	Declare(&Globalenv, &Declaration{
-		Name: "merge_unique_map",
-		Desc: "fused serial merge_unique and map (optimizer-only)",
-		Fn: func(a ...Scmer) Scmer {
-			input := asSlice(a[0], "merge_unique_map")
-			mapper := OptimizeProcToSerialFunction(a[1])
-			result := make([]Scmer, 0, len(input))
-			for _, item := range input {
-				mapped := mapper(item)
-				duplicate := false
-				for _, existing := range result {
-					if Equal(mapped, existing) {
-						duplicate = true
-						break
-					}
-				}
-				if !duplicate {
-					result = append(result, mapped)
-				}
-			}
-			return NewSlice(result)
-		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be deduped", NoEscape: true},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
-			},
-			Return:    FreshAlloc,
-			Const:     true,
-			Forbidden: true,
-
-			JITEmit: nil,
-		},
-	})
-
-	Declare(&Globalenv, &Declaration{
-		Name: "merge_unique_filter",
-		Desc: "fused serial merge_unique and filter (optimizer-only)",
-		Fn: func(a ...Scmer) Scmer {
-			input := asSlice(a[0], "merge_unique_filter")
-			predicate := OptimizeProcToSerialFunction(a[1])
-			result := make([]Scmer, 0, len(input))
-			for _, item := range input {
-				if !predicate(item).Bool() {
-					continue
-				}
-				duplicate := false
-				for _, existing := range result {
-					if Equal(item, existing) {
-						duplicate = true
-						break
-					}
-				}
-				if !duplicate {
-					result = append(result, item)
-				}
-			}
-			return NewSlice(result)
-		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be filtered and deduped", NoEscape: true},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
-			},
-			Return:    FreshAlloc,
-			Const:     true,
-			Forbidden: true,
-
-			JITEmit: nil,
-		},
-	})
-
-	Declare(&Globalenv, &Declaration{
-		Name: "merge_unique_filter_map",
-		Desc: "fused serial filter, map and merge_unique (optimizer-only)",
-		Fn: func(a ...Scmer) Scmer {
-			input := asSlice(a[0], "merge_unique_filter_map")
-			predicate := OptimizeProcToSerialFunction(a[1])
-			mapper := OptimizeProcToSerialFunction(a[2])
-			result := make([]Scmer, 0, len(input))
-			for _, item := range input {
-				if !predicate(item).Bool() {
-					continue
-				}
-				mapped := mapper(item)
-				duplicate := false
-				for _, existing := range result {
-					if Equal(mapped, existing) {
-						duplicate = true
-						break
-					}
-				}
-				if !duplicate {
-					result = append(result, mapped)
-				}
-			}
-			return NewSlice(result)
-		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be filtered, mapped and deduped", NoEscape: true},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
-			},
-			Return:    FreshAlloc,
-			Const:     true,
-			Forbidden: true,
-
-			JITEmit: nil,
-		},
-	})
-
-	Declare(&Globalenv, &Declaration{
-		Name: "merge_unique_map_filter",
-		Desc: "fused serial filter, map and merge_unique (optimizer-only)",
-		Fn: func(a ...Scmer) Scmer {
-			input := asSlice(a[0], "merge_unique_map_filter")
-			predicate := OptimizeProcToSerialFunction(a[1])
-			mapper := OptimizeProcToSerialFunction(a[2])
-			result := make([]Scmer, 0, len(input))
-			for _, item := range input {
-				if !predicate(item).Bool() {
-					continue
-				}
-				mapped := mapper(item)
-				duplicate := false
-				for _, existing := range result {
-					if Equal(mapped, existing) {
-						duplicate = true
-						break
-					}
-				}
-				if !duplicate {
-					result = append(result, mapped)
-				}
-			}
-			return NewSlice(result)
-		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped, filtered and deduped", NoEscape: true},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
-			},
-			Return:    FreshAlloc,
-			Const:     true,
-			Forbidden: true,
-
-			JITEmit: nil,
-		},
-	})
-
-	Declare(&Globalenv, &Declaration{
 		Name: "reset_mut",
 		Desc: "resets an owned list to len=0 while preserving capacity",
 		Fn: func(a ...Scmer) Scmer {
@@ -9716,38 +9564,6 @@ func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer
 			}
 			td.Transfer = true
 			return NewSlice(rv), td
-		}
-	}
-
-	if len(rv) >= 2 {
-		arg1 := rv[1]
-		if inner, ok := scmerSlice(arg1); ok && len(inner) == 3 {
-			switch {
-			case scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut"):
-				if exprMayHaveSideEffects(inner[2]) {
-					return result, td
-				}
-				return NewSlice([]Scmer{NewSymbol("merge_unique_map"), inner[1], inner[2]}), td
-			case scmerIsSymbol(inner[0], "filter") || scmerIsSymbol(inner[0], "filter_mut"):
-				if exprMayHaveSideEffects(inner[2]) {
-					return result, td
-				}
-				return NewSlice([]Scmer{NewSymbol("merge_unique_filter"), inner[1], inner[2]}), td
-			}
-		}
-		if inner, ok := scmerSlice(arg1); ok && len(inner) == 4 {
-			switch {
-			case scmerIsSymbol(inner[0], "filter_map"):
-				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(inner[3]) {
-					return result, td
-				}
-				return NewSlice([]Scmer{NewSymbol("merge_unique_filter_map"), inner[1], inner[2], inner[3]}), td
-			case scmerIsSymbol(inner[0], "map_filter"):
-				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(inner[3]) {
-					return result, td
-				}
-				return NewSlice([]Scmer{NewSymbol("merge_unique_map_filter"), inner[1], inner[2], inner[3]}), td
-			}
 		}
 	}
 
