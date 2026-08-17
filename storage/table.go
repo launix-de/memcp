@@ -1111,11 +1111,22 @@ func (t table) ComputeSize() uint {
 
 // increases PartitioningScore for a set of columns
 func (t *table) AddPartitioningScore(cols []string) {
+	t.AddPartitioningScoreWeighted(cols, 1)
+}
+
+// AddPartitioningScoreWeighted increases PartitioningScore by weight for a
+// set of columns. A larger weight lets columns backing high-volume inserts
+// (e.g. unique-key collision checks on a bulk INSERT) outrank low-volume
+// touches when proposerepartition later picks the partitioning columns.
+func (t *table) AddPartitioningScoreWeighted(cols []string, weight int) {
+	if weight <= 0 {
+		weight = 1
+	}
 	// we don't sync because we want to be fast; we ignore write-after-write hazards
 	for _, c := range t.Columns {
 		for _, col := range cols {
 			if col == c.Name {
-				c.PartitioningScore++
+				c.PartitioningScore += weight
 			}
 		}
 	}
@@ -2292,7 +2303,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 		return
 	}
 	uniq := t.Unique[idx]
-	t.AddPartitioningScore(uniq.Cols) // increases partitioning score, so partitioning is improved
+	t.AddPartitioningScoreWeighted(uniq.Cols, len(values)) // increases partitioning score proportional to insert volume
 	{
 		key := make([]scm.Scmer, len(uniq.Cols))
 		keyIdx := make([]int, len(uniq.Cols))
