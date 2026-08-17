@@ -25,6 +25,7 @@ import "sync"
 import "sync/atomic"
 import "time"
 import "strconv"
+import "runtime"
 import "reflect"
 import "strings"
 import "unicode/utf8"
@@ -1333,6 +1334,7 @@ func Init(en scm.Env) {
 			charset := ""
 			comment := ""
 			oninit := scm.NewNil()
+			var partitionCols []string
 			for i := 0; i+1 < len(options); i += 2 {
 				key := scm.String(options[i])
 				val := options[i+1]
@@ -1349,6 +1351,8 @@ func Init(en scm.Env) {
 					autoIncrement, _ = strconv.ParseUint(scm.String(val), 0, 64)
 				case "oninit":
 					oninit = val
+				case "partition", "partitioning":
+					partitionCols = scmerSliceToStrings(mustScmerSlice(val, "partition columns"))
 				default:
 					panic("unknown option: " + key)
 				}
@@ -1418,6 +1422,35 @@ func Init(en scm.Env) {
 					}
 				default:
 					panic("unknown column definition: " + head)
+				}
+			}
+			if len(partitionCols) > 0 {
+				newTable.AddPartitioningScoreWeighted(partitionCols, 1000)
+				numPartitions := 2 * runtime.NumCPU()
+				if numPartitions < 2 {
+					numPartitions = 2
+				}
+				dims := make([]shardDimension, 0, len(partitionCols))
+				for _, pcol := range partitionCols {
+					dim := newTable.NewShardDimension(pcol, numPartitions)
+					if dim.NumPartitions > 1 {
+						dims = append(dims, dim)
+					}
+				}
+				if len(dims) > 0 {
+					totalShards := 1
+					for _, sd := range dims {
+						totalShards *= sd.NumPartitions
+					}
+					newTable.PShards = make([]*storageShard, totalShards)
+					for i := 0; i < totalShards; i++ {
+						newTable.PShards[i] = NewShard(newTable)
+						newTable.PShards[i].srState = WRITE
+					}
+					newTable.PDimensions = dims
+					newTable.ShardMode = ShardModePartition
+					newTable.Shards = nil
+					newTable.publishTopologyLocked()
 				}
 			}
 			newTable.publishShowColumnsSnapshot()

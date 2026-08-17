@@ -315,7 +315,19 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		}
 	}
 	if len(pivotSamples) == 0 {
-		result.NumPartitions = 1
+		if n <= 1 {
+			result.NumPartitions = 1
+			return
+		}
+		var colType string
+		for _, c := range t.Columns {
+			if c.Name == col {
+				colType = c.Typ
+				break
+			}
+		}
+		result.Pivots = generateSyntheticPivots(n-1, colType)
+		result.NumPartitions = len(result.Pivots) + 1
 		return
 	}
 
@@ -336,6 +348,49 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 	result.NumPartitions = len(result.Pivots) + 1
 
 	return
+}
+
+func generateSyntheticPivots(count int, colType string) []scm.Scmer {
+	if count <= 0 {
+		return nil
+	}
+	pivots := make([]scm.Scmer, count)
+	typ := strings.ToUpper(colType)
+	switch {
+	case strings.Contains(typ, "CHAR"), strings.Contains(typ, "TEXT"), strings.Contains(typ, "STRING"):
+		letters := "abcdefghijklmnopqrstuvwxyz"
+		step := len(letters) / (count + 1)
+		if step < 1 {
+			step = 1
+		}
+		for i := 0; i < count; i++ {
+			idx := (i + 1) * step
+			if idx >= len(letters) {
+				idx = len(letters) - 1
+			}
+			pivots[i] = scm.NewString(string(letters[idx]))
+		}
+	case strings.Contains(typ, "FLOAT"), strings.Contains(typ, "DOUBLE"), strings.Contains(typ, "REAL"), strings.Contains(typ, "DECIMAL"):
+		step := 10000.0 / float64(count+1)
+		for i := 0; i < count; i++ {
+			pivots[i] = scm.NewFloat(float64(i+1) * step)
+		}
+	case strings.Contains(typ, "DATE"), strings.Contains(typ, "TIME"):
+		baseTS := int64(1577836800) // 2020-01-01
+		step := int64(31536000)
+		for i := 0; i < count; i++ {
+			pivots[i] = scm.NewDate(baseTS + int64(i+1)*step)
+		}
+	default:
+		step := 10000 / (count + 1)
+		if step < 1 {
+			step = 1
+		}
+		for i := 0; i < count; i++ {
+			pivots[i] = scm.NewInt(int64((i + 1) * step))
+		}
+	}
+	return pivots
 }
 
 type uintrange struct {

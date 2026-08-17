@@ -13702,10 +13702,17 @@ key-fill recipe per carrier. */
 				base_group_fill
 				(list (quote lambda) '() finalize_group_fill))))
 		(define create_options (if (nil? initial_fill_expr)
-			(quoted_runtime_list '("engine" "cache"))
-			(list (quote list)
-				"engine" "cache"
-				"oninit" (list (quote lambda) '() initial_fill_expr))))
+			(if (empty_list? key_names)
+				(quoted_runtime_list '("engine" "cache"))
+				(list (quote list) "engine" "cache" "partition" (cons (quote list) key_names)))
+			(if (empty_list? key_names)
+				(list (quote list)
+					"engine" "cache"
+					"oninit" (list (quote lambda) '() initial_fill_expr))
+				(list (quote list)
+					"engine" "cache"
+					"partition" (cons (quote list) key_names)
+					"oninit" (list (quote lambda) '() initial_fill_expr)))))
 		(define group_cache_created (symbol "__group_cache_created"))
 		(define keytable_init (list
 			(list (quote lambda) (list group_cache_created)
@@ -16091,7 +16098,9 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define table_expr (list (quote table) (qb_schema block) table_name))
 		(define prepare_plan (list (quote !begin)
 			(list (quote createtable) (qb_schema block) table_name
-				(prejoin_create_columns sources) (quoted_runtime_list '("engine" "cache")) true)
+				(prejoin_create_columns sources)
+				(list (quote list) "engine" "cache" "partition" (cons (quote list) (prejoin_primary_key_names sources)))
+				true)
 			(list (quote initialize_cache_table)
 				'(session "__memcp_tx")
 				table_expr

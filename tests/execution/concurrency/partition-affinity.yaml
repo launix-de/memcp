@@ -1,0 +1,21 @@
+metadata:
+  version: "1.0"
+  description: "Partition affinity and unique insert lock pruning test"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS test_unique_partition"
+  - sql: "CREATE TABLE test_unique_partition (id INT PRIMARY KEY, val VARCHAR(100)) ENGINE=cache"
+
+test_cases:
+  - name: "Insert unique rows into partitioned table"
+    sql: "INSERT INTO test_unique_partition VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    expect:
+      affected_rows: 3
+
+  - name: "Verify GROUP BY keytable query execution with proactive partitioning"
+    sql: "SELECT val, COUNT(*) FROM test_unique_partition GROUP BY val"
+    expect:
+      rows: 3
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS test_unique_partition"
