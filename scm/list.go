@@ -569,12 +569,21 @@ func mergeValidationSafeArgument(v Scmer, allowLambda bool) bool {
 	if stripped, ok := scmerStripSourceInfo(v); ok {
 		v = stripped
 	}
+	if v.IsNthLocalVar() {
+		return true
+	}
+	if v.IsSymbol() {
+		return true
+	}
 	inner, ok := scmerSlice(v)
 	if !ok {
 		return v.IsNil() || v.IsBool() || v.IsInt() || v.IsFloat() || v.IsString()
 	}
 	if len(inner) == 0 {
 		return true
+	}
+	if scmerIsSymbol(inner[0], "var") {
+		return len(inner) == 2 && inner[1].IsInt()
 	}
 	return scmerIsSymbol(inner[0], "quote") || (allowLambda && scmerIsSymbol(inner[0], "lambda"))
 }
@@ -587,6 +596,65 @@ func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 	rv, ok := scmerSlice(result)
 	if !ok || len(rv) < 3 || len(rv) > 4 || !scmerIsSymbol(rv[0], "reduce") {
 		return result, td
+	}
+	if len(rv) >= 3 {
+		if inner, ok := scmerSlice(rv[1]); ok && len(inner) == 3 {
+			switch {
+			case scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut"):
+				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
+					return result, td
+				}
+				fused := []Scmer{NewSymbol("reduce_map"), inner[1], inner[2], rv[2]}
+				if len(rv) == 4 {
+					fused = append(fused, rv[3])
+				}
+				return NewSlice(fused), td
+			case scmerIsSymbol(inner[0], "filter") || scmerIsSymbol(inner[0], "filter_mut"):
+				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
+					return result, td
+				}
+				fused := []Scmer{NewSymbol("reduce_filter"), inner[1], inner[2], rv[2]}
+				if len(rv) == 4 {
+					fused = append(fused, rv[3])
+				}
+				return NewSlice(fused), td
+			}
+		}
+		if inner, ok := scmerSlice(rv[1]); ok && len(inner) == 4 {
+			switch {
+			case scmerIsSymbol(inner[0], "filter_map"):
+				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(inner[3]) ||
+					exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
+					return result, td
+				}
+				fused := []Scmer{NewSymbol("reduce_map_filter"), inner[1], inner[2], inner[3], rv[2]}
+				if len(rv) == 4 {
+					fused = append(fused, rv[3])
+				}
+				return NewSlice(fused), td
+			case scmerIsSymbol(inner[0], "map_filter"):
+				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(inner[3]) ||
+					exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
+					return result, td
+				}
+				fused := []Scmer{NewSymbol("reduce_filter_map"), inner[1], inner[2], inner[3], rv[2]}
+				if len(rv) == 4 {
+					fused = append(fused, rv[3])
+				}
+				return NewSlice(fused), td
+			}
+		}
+	}
+	if inner, ok := scmerSlice(rv[1]); ok && len(inner) == 3 && scmerIsSymbol(inner[0], "merge") {
+		if !mergeValidationSafeArgument(inner[1], true) || !mergeValidationSafeArgument(inner[2], false) ||
+			exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
+			return result, td
+		}
+		fused := []Scmer{NewSymbol("reduce_merge2"), inner[1], inner[2], rv[2]}
+		if len(rv) == 4 {
+			fused = append(fused, rv[3])
+		}
+		return NewSlice(fused), td
 	}
 	segments, ok := optimizedMergeSegments(rv[1])
 	if !ok || !mergeValidationSafeArgument(rv[2], true) || (len(rv) == 4 && !mergeValidationSafeArgument(rv[3], false)) {
@@ -627,6 +695,27 @@ func optimizeMap(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeD
 						}
 					}
 				}
+				// Fuse: (map (filter x p) f) → (map_filter x p f)
+				if inner, ok := scmerSlice(rv[1]); ok && len(inner) == 3 {
+					isym, ok := scmerSymbol(inner[0])
+					if !ok {
+						return result, td
+					}
+					switch isym {
+					case "filter", "filter_mut":
+						if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
+							return result, td
+						}
+						return NewSlice([]Scmer{NewSymbol("map_filter"), inner[1], inner[2], rv[2]}), setOptimizedCallElement(FreshAlloc, elementType)
+					case "map", "map_mut":
+						if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
+							return result, td
+						}
+						innerType := callbackResultType(inner[2], optimizedArgumentType(argumentTypes, 1))
+						fusedType := callbackResultType(rv[2], innerType)
+						return NewSlice([]Scmer{NewSymbol("map_map"), inner[1], inner[2], rv[2]}), setOptimizedCallElement(setOptimizedCallLength(td, exactOptimizedListArgumentLength(inner[1], optimizedArgumentType(argumentTypes, 1))), fusedType)
+					}
+				}
 			}
 		}
 	}
@@ -646,14 +735,22 @@ func optimizeFilter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		return result, td
 	}
 	inner, ok := scmerSlice(rv[1])
-	if !ok || len(inner) != 3 || (!scmerIsSymbol(inner[0], "map") && !scmerIsSymbol(inner[0], "map_mut")) {
+	if !ok || len(inner) != 3 {
 		return result, td
 	}
-	if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
-		return result, td
+	switch {
+	case scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut"):
+		if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
+			return result, td
+		}
+		return NewSlice([]Scmer{NewSymbol("filter_map"), inner[1], inner[2], rv[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
+	case scmerIsSymbol(inner[0], "filter") || scmerIsSymbol(inner[0], "filter_mut"):
+		if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
+			return result, td
+		}
+		return NewSlice([]Scmer{NewSymbol("filter_filter"), inner[1], inner[2], rv[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
 	}
-	fused := NewSlice([]Scmer{NewSymbol("filter_map"), inner[1], inner[2], rv[2]})
-	return fused, descriptorWithLength(FreshAlloc, UnknownLength)
+	return result, td
 }
 
 // optimizeProduceN rewrites (produceN ...) to (produceN_mut ... nil) when the
@@ -6958,6 +7055,299 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "map_filter",
+		Desc: "fused serial filter and map (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "map_filter")
+			predicate := OptimizeProcToSerialFunction(a[1])
+			mapper := OptimizeProcToSerialFunction(a[2])
+			result := make([]Scmer, 0, len(input))
+			for _, item := range input {
+				if predicate(item).Bool() {
+					result = append(result, mapper(item))
+				}
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", NoEscape: true},
+				{Kind: "func", ParamName: "condition", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "map_map",
+		Desc: "fused serial map and map (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "map_map")
+			first := OptimizeProcToSerialFunction(a[1])
+			second := OptimizeProcToSerialFunction(a[2])
+			result := make([]Scmer, len(input))
+			for i, item := range input {
+				result[i] = second(first(item))
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", NoEscape: true},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_map",
+		Desc: "fused serial map and reduce (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "reduce_map")
+			mapper := OptimizeProcToSerialFunction(a[1])
+			reducer := OptimizeProcToSerialFunction(a[2])
+			result := NewNil()
+			hasResult := false
+			if len(a) > 3 {
+				result = a[3]
+				hasResult = true
+			}
+			for _, item := range input {
+				mapped := mapper(item)
+				if !hasResult {
+					result = mapped
+					hasResult = true
+					continue
+				}
+				result = reducer(result, mapped)
+			}
+			return result
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_filter",
+		Desc: "fused serial filter and reduce (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "reduce_filter")
+			predicate := OptimizeProcToSerialFunction(a[1])
+			reducer := OptimizeProcToSerialFunction(a[2])
+			result := NewNil()
+			hasResult := false
+			if len(a) > 3 {
+				result = a[3]
+				hasResult = true
+			}
+			for _, item := range input {
+				if !predicate(item).Bool() {
+					continue
+				}
+				if !hasResult {
+					result = item
+					hasResult = true
+					continue
+				}
+				result = reducer(result, item)
+			}
+			return result
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the list item"},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_merge2",
+		Desc: "fused serial merge of two lists and reduce (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			if len(a) < 3 {
+				panic("reduce_merge2 expects at least two input lists and a reduce function")
+			}
+			lhs := asSlice(a[0], "reduce_merge2 lhs")
+			rhs := asSlice(a[1], "reduce_merge2 rhs")
+			reducer := OptimizeProcToSerialFunction(a[2])
+			result := NewNil()
+			hasResult := false
+			if len(a) > 3 {
+				result = a[3]
+				hasResult = true
+			}
+			for _, item := range lhs {
+				if !hasResult {
+					result = item
+					hasResult = true
+					continue
+				}
+				result = reducer(result, item)
+			}
+			for _, item := range rhs {
+				if !hasResult {
+					result = item
+					hasResult = true
+					continue
+				}
+				result = reducer(result, item)
+			}
+			return result
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "lhs", ParamDesc: "first list to reduce"},
+				{Kind: "list", ParamName: "rhs", ParamDesc: "second list to reduce"},
+				{Kind: "func", ParamName: "reduce", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "optional initial value of the accumulator, defaults to nil", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_map_filter",
+		Desc: "fused serial map then filter and reduce (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "reduce_map_filter")
+			mapper := OptimizeProcToSerialFunction(a[1])
+			predicate := OptimizeProcToSerialFunction(a[2])
+			reducer := OptimizeProcToSerialFunction(a[3])
+			result := NewNil()
+			hasResult := false
+			if len(a) > 4 {
+				result = a[4]
+				hasResult = true
+			}
+			for _, item := range input {
+				mapped := mapper(item)
+				if !predicate(mapped).Bool() {
+					continue
+				}
+				if !hasResult {
+					result = mapped
+					hasResult = true
+					continue
+				}
+				result = reducer(result, mapped)
+			}
+			return result
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_filter_map",
+		Desc: "fused serial filter then map and reduce (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "reduce_filter_map")
+			predicate := OptimizeProcToSerialFunction(a[1])
+			mapper := OptimizeProcToSerialFunction(a[2])
+			reducer := OptimizeProcToSerialFunction(a[3])
+			result := NewNil()
+			hasResult := false
+			if len(a) > 4 {
+				result = a[4]
+				hasResult = true
+			}
+			for _, item := range input {
+				if !predicate(item).Bool() {
+					continue
+				}
+				mapped := mapper(item)
+				if !hasResult {
+					result = mapped
+					hasResult = true
+					continue
+				}
+				result = reducer(result, mapped)
+			}
+			return result
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "filter_filter",
+		Desc: "fused serial filter and filter (optimizer-only)",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "filter_filter")
+			left := OptimizeProcToSerialFunction(a[1])
+			right := OptimizeProcToSerialFunction(a[2])
+			result := make([]Scmer, 0, len(input))
+			for _, item := range input {
+				if left(item).Bool() && right(item).Bool() {
+					result = append(result, item)
+				}
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{
+				{Kind: "list", ParamName: "list", NoEscape: true},
+				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+			},
+			Return:    FreshAlloc,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "cons_map",
 		Desc: "constructs a list head while mapping its tail (optimizer-only)",
 		Fn: func(a ...Scmer) Scmer {
@@ -9160,32 +9550,24 @@ func optimizedSingletonListItem(expr Scmer) (Scmer, bool) {
 // optimizer can swap to merge_unique_mut without changing the global list
 // return contract.
 func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	firstArgListLiteral := false
-	if len(v) > 2 {
-		arg1 := v[1]
-		if stripped, ok := scmerStripSourceInfo(arg1); ok {
-			arg1 = stripped
-		}
-		if inner, ok := scmerSlice(arg1); ok && len(inner) > 0 && scmerIsSymbol(inner[0], "list") {
-			firstArgListLiteral = true
-		}
-	}
-
 	result, td := oc.ApplyDefaultOptimization(v, useResult)
-	if !firstArgListLiteral {
-		return result, td
-	}
-
 	rv, ok := scmerSlice(result)
 	if !ok || len(rv) < 2 || !scmerIsSymbol(rv[0], "merge_unique") {
 		return result, td
 	}
-	rv[0] = NewSymbol("merge_unique_mut")
-	if td == nil {
-		td = &TypeDescriptor{}
+	if rv[1].IsSlice() {
+		inner := rv[1].Slice()
+		if len(inner) > 0 && scmerIsSymbol(inner[0], "list") {
+			rv[0] = NewSymbol("merge_unique_mut")
+			if td == nil {
+				td = &TypeDescriptor{}
+			}
+			td.Transfer = true
+			return NewSlice(rv), td
+		}
 	}
-	td.Transfer = true
-	return NewSlice(rv), td
+
+	return result, td
 }
 
 func flattenConsList(v []Scmer) ([]Scmer, bool) {

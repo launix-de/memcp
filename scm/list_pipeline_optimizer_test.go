@@ -84,3 +84,132 @@ func TestOptimizeFusesFixedWidthMergeOverProduceN(t *testing.T) {
 		t.Fatalf("fused merge/produceN returned %s, want %s", String(got), String(want))
 	}
 }
+
+func TestOptimizeFusesMapOverFilter(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(map (filter values (lambda (value) (> value 1))) (lambda (value) (+ value 1))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "map_filter") {
+		t.Fatalf("map/filter pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(0), NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewSlice([]Scmer{NewInt(3), NewInt(4)})
+	if !Equal(got, want) {
+		t.Fatalf("fused map/filter returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesMapOverMap(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(map (map values (lambda (value) (+ value 1))) (lambda (value) (* value 2))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "map_map") {
+		t.Fatalf("map/map pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewSlice([]Scmer{NewInt(4), NewInt(6), NewInt(8)})
+	if !Equal(got, want) {
+		t.Fatalf("fused map/map returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesFilterOverFilter(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(filter (filter values (lambda (value) (> value 0))) (lambda (value) (< value 4))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "filter_filter") {
+		t.Fatalf("filter/filter pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(-1), NewInt(1), NewInt(3), NewInt(5)}))
+	want := NewSlice([]Scmer{NewInt(1), NewInt(3)})
+	if !Equal(got, want) {
+		t.Fatalf("fused filter/filter returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesReduceOverMap(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(reduce (map values (lambda (value) (+ value 1))) (lambda (acc value) (+ acc value))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "reduce_map") {
+		t.Fatalf("reduce/map pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewInt(9)
+	if !Equal(got, want) {
+		t.Fatalf("fused reduce/map returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesReduceOverFilter(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(reduce (filter values (lambda (value) (> value 1))) (lambda (acc value) (+ acc value))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "reduce_filter") {
+		t.Fatalf("reduce/filter pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(4)}))
+	want := NewInt(6)
+	if !Equal(got, want) {
+		t.Fatalf("fused reduce/filter returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesReduceOverMapThenFilter(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(reduce (map (filter values (lambda (value) (> value 1))) (lambda (value) (* value 2)))
+			(lambda (acc value) (+ acc value))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "reduce_filter_map") {
+		t.Fatalf("reduce/map/filter pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewInt(10)
+	if !Equal(got, want) {
+		t.Fatalf("fused reduce/map/filter returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesMergeUniqueOverMap(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(merge_unique (map values (lambda (value) (+ value 1)))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "merge_unique_map") {
+		t.Fatalf("merge_unique/map pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(2), NewInt(3)}))
+	want := NewSlice([]Scmer{NewInt(2), NewInt(3), NewInt(4)})
+	if !Equal(got, want) {
+		t.Fatalf("fused merge_unique/map returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesMergeUniqueOverFilterMap(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(merge_unique (map (filter values (lambda (value) (> value 1))) (lambda (value) (* value 2)))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "merge_unique_map_filter") {
+		t.Fatalf("merge_unique/map/filter pipeline was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(0), NewInt(1), NewInt(2), NewInt(2), NewInt(3)}))
+	want := NewSlice([]Scmer{NewInt(4), NewInt(6)})
+	if !Equal(got, want) {
+		t.Fatalf("fused merge_unique/map/filter returned %s, want %s", String(got), String(want))
+	}
+}
