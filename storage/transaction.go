@@ -784,6 +784,10 @@ func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Sc
 		defer func() {
 			if r := recover(); r != nil {
 				panicVal = r
+				// the stack is lost once we re-panic panicVal below (it gets
+				// re-wrapped by the Scheme error layer), so log it here while
+				// we still have the original panic's stack trace.
+				scm.PrintError(r)
 			}
 		}()
 		result = scm.Apply(fn)
