@@ -671,7 +671,7 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 				t.ddlMu.RUnlock()
 				if r := recover(); r != nil {
 					errmsg := fmt.Sprintf("rebuild failed for table %s.%s: %v", db.Name, t.Name, r)
-					fmt.Println("error:", errmsg)
+					scm.PrintError(errmsg)
 					errMu.Lock()
 					rebuildErrors = append(rebuildErrors, errmsg)
 					errMu.Unlock()
