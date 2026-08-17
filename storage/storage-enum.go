@@ -147,6 +147,22 @@ func (s *StorageEnum) jumpCum(j int) int {
 	return int(base) + int(s.jumpL2[j])
 }
 
+// chunkEnd returns the element count at which chunk j ends. This is normally
+// just jumpCum(j), but for the last chunk in a file written by the
+// pre-enumMaxChunkElems encoder, jumpCum can under-report due to uint16
+// wraparound (see enumMaxChunkElems and findChunk). The last chunk always
+// truly extends to s.count, so callers that cache a chunk boundary (e.g.
+// GetValueCached's sequential fast path) must use this instead of jumpCum
+// directly, or they silently fall back to the slow path for every remaining
+// element instead of just once.
+func (s *StorageEnum) chunkEnd(j int) int {
+	end := s.jumpCum(j)
+	if j == len(s.jumpL2)-1 && end < int(s.count) {
+		return int(s.count)
+	}
+	return end
+}
+
 func (s *StorageEnum) decodeOne(buffer uint64) (scm.Scmer, uint64) {
 	slice := buffer & enumBitMask
 	symIdx := s.decodeSymbol(slice)
@@ -382,7 +398,7 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 	idx := int(i)
 
 	if c.valid && c.fwdChunk < len(s.jumpL2) && c.fwdChunk < len(s.data) {
-		chunkEnd := s.jumpCum(c.fwdChunk)
+		chunkEnd := s.chunkEnd(c.fwdChunk)
 		// fast path: index is ahead of cache position in same chunk
 		if idx >= c.start+c.pos && idx < chunkEnd {
 			buffer := c.buf
@@ -398,7 +414,7 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 		// next chunk fast path
 		if idx >= chunkEnd {
 			nextFwd := c.fwdChunk + 1
-			if nextFwd < len(s.jumpL2) && nextFwd < len(s.data) && idx < s.jumpCum(nextFwd) {
+			if nextFwd < len(s.jumpL2) && nextFwd < len(s.data) && idx < s.chunkEnd(nextFwd) {
 				dataIdx := len(s.data) - 1 - nextFwd
 				buffer := s.data[dataIdx]
 				posInChunk := idx - chunkEnd
