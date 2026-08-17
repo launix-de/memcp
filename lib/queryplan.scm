@@ -13675,6 +13675,34 @@ key-fill recipe per carrier. */
 			stage_lookup
 			stage)))))
 
+/* Restores the group-cache partitioning hint that existed in the pre-Neumann
+planner (see df66a5831, "Queryplan: add table repartitioning hint in GROUP
+BY") and was dropped during the logical-operator rewrite. Real pivots are
+sampled from the live source column via the existing shardcolumn/
+partitiontable primitives -- no new core storage logic, just wiring them back
+up. shardcolumn's automatic partition count already scales off real row count
+(t.Count()/ShardSize), so small source tables naturally collapse to a single
+partition and partitiontable skips them; only direct column references to the
+scanned base table qualify, so session/constant-key groups (never plain
+get_column refs to the source) are excluded automatically too. */
+(define group_cache_partition_hint (lambda (schema tbl alias key col_name)
+	(match key
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase) (if (equal? tblvar alias)
+			(list col_name (list (quote shardcolumn) (list (quote table) schema tbl) col))
+			'())
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase) (if (equal? tblvar alias)
+			(list col_name (list (quote shardcolumn) (list (quote table) schema tbl) col))
+			'())
+		_ '())))
+
+(define group_cache_partition_plan (lambda (schema tbl alias src grouptbl keys key_names)
+	(begin
+		(define hints (merge (map (produceN (count keys)) (lambda (i)
+			(group_cache_partition_hint schema tbl alias (nth keys i) (nth key_names i))))))
+		(if (or (not (source_is_base_table? src)) (empty_list? hints))
+			nil
+			(list (quote partitiontable) (list (quote table) schema grouptbl) (cons (quote list) hints))))))
+
 (define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage)
 	(begin
 		(define src (gs_input stage))
@@ -13852,6 +13880,7 @@ key-fill recipe per carrier. */
 		(define base_group_fill (symbol "__group_base_fill"))
 		(define base_group_fill_call (list base_group_fill))
 		(define finalize_group_fill (list (quote rebuild) (list (quote table) schema grouptbl) true false))
+		(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
 		(define initial_fill_expr (if (nil? base_group_into_plan)
 			nil
 			(list (quote initialize_cache_table)
@@ -13859,7 +13888,7 @@ key-fill recipe per carrier. */
 				(list (quote table) schema grouptbl)
 				(list (quote list) (source_table_expr src))
 				(list (quote lambda) '()
-					(cons (quote !begin) (filter (list aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
+					(cons (quote !begin) (filter (list partition_plan aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
 				base_group_fill
 				(list (quote lambda) '() finalize_group_fill))))
 		(define create_options (if (nil? initial_fill_expr)
