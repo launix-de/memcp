@@ -1557,8 +1557,10 @@ func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, ar
 func jitCompileRootedCallValueAt(ctx *JITContext, expr Scmer, sliceBase Reg, off int32) JITValueDesc {
 	value := jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
 	// Input values remain reachable through JITEntryPoint.Call's args slice for
-	// the complete native invocation. The safepoint map relocates a saved input
-	// pointer if a callback grows the goroutine stack.
+	// the complete native invocation. Calls into Go set NeedsStableArgs, which
+	// additionally copies and pins that slice before entering generated code.
+	// The safepoint map relocates a saved input pointer if a callback grows
+	// the goroutine stack.
 	if value.Loc == LocInputPair {
 		value.Rooted = true
 	}
@@ -1605,7 +1607,9 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 		}
 	} else {
 		// Keep the variadic backing array in the invocation-local JIT frame. Its
-		// Scmer pointer words are part of the precise map at the Apply callback.
+		// Scmer pointer words are part of the precise map at the Apply callback,
+		// and each pointer-bearing value is mirrored into the hidden Go root
+		// slice.
 		operandOff := ctx.AllocStack(int32(len(operands) * 16))
 		for i, operand := range operands {
 			jitCompileRootedCallValueAt(ctx, operand, sliceBase, operandOff+int32(i*16))
