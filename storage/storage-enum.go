@@ -50,6 +50,14 @@ const enumBitMask = ^uint64(0) >> (64 - enumBitShift) // 0xFF
 const enumBitModulo = uint64(1) << enumBitShift       // 256
 const enumMaxSymbols = 8
 
+// enumMaxChunkElems bounds how many elements a single rANS chunk may hold.
+// jumpL2 cumulative counts are stored as uint16, so a chunk (or a jumpL1
+// group of chunks) must never account for more than 65535 elements. Highly
+// skewed columns (near-zero entropy) can otherwise pack far more than 65535
+// elements into one 64-bit buffer before it ever overflows on bit-width
+// alone, silently wrapping jumpL2 and corrupting random access.
+const enumMaxChunkElems = 65535
+
 type StorageEnum struct {
 	// rANS coded payload
 	data []uint64
@@ -137,6 +145,22 @@ func (s *StorageEnum) jumpCum(j int) int {
 		base = s.jumpL1[g-1]
 	}
 	return int(base) + int(s.jumpL2[j])
+}
+
+// chunkEnd returns the element count at which chunk j ends. This is normally
+// just jumpCum(j), but for the last chunk in a file written by the
+// pre-enumMaxChunkElems encoder, jumpCum can under-report due to uint16
+// wraparound (see enumMaxChunkElems and findChunk). The last chunk always
+// truly extends to s.count, so callers that cache a chunk boundary (e.g.
+// GetValueCached's sequential fast path) must use this instead of jumpCum
+// directly, or they silently fall back to the slow path for every remaining
+// element instead of just once.
+func (s *StorageEnum) chunkEnd(j int) int {
+	end := s.jumpCum(j)
+	if j == len(s.jumpL2)-1 && end < int(s.count) {
+		return int(s.count)
+	}
+	return end
 }
 
 func (s *StorageEnum) decodeOne(buffer uint64) (scm.Scmer, uint64) {
@@ -260,7 +284,7 @@ func (s *StorageEnum) finish() {
 		inv := s.invWidths[symIdx]
 
 		bufferx, rest := enumFastDivMod(buffer, width, inv)
-		if bufferx > ^uint64(0)>>enumBitShift {
+		if bufferx > ^uint64(0)>>enumBitShift || bufferlen >= enumMaxChunkElems {
 			s.data = append(s.data, buffer)
 			chunkSizes = append(chunkSizes, bufferlen)
 			buffer = 0
@@ -374,7 +398,7 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 	idx := int(i)
 
 	if c.valid && c.fwdChunk < len(s.jumpL2) && c.fwdChunk < len(s.data) {
-		chunkEnd := s.jumpCum(c.fwdChunk)
+		chunkEnd := s.chunkEnd(c.fwdChunk)
 		// fast path: index is ahead of cache position in same chunk
 		if idx >= c.start+c.pos && idx < chunkEnd {
 			buffer := c.buf
@@ -390,7 +414,7 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 		// next chunk fast path
 		if idx >= chunkEnd {
 			nextFwd := c.fwdChunk + 1
-			if nextFwd < len(s.jumpL2) && nextFwd < len(s.data) && idx < s.jumpCum(nextFwd) {
+			if nextFwd < len(s.jumpL2) && nextFwd < len(s.data) && idx < s.chunkEnd(nextFwd) {
 				dataIdx := len(s.data) - 1 - nextFwd
 				buffer := s.data[dataIdx]
 				posInChunk := idx - chunkEnd
@@ -445,6 +469,15 @@ func (s *StorageEnum) findChunk(idx int) int {
 		} else {
 			hi = mid
 		}
+	}
+	if lo >= len(s.jumpL2) && len(s.jumpL2) > 0 && idx < int(s.count) {
+		// jumpL2 cumulative counts are uint16 and can wrap for files written
+		// by the pre-enumMaxChunkElems encoder, which let one rANS chunk
+		// (typically for a near-constant, low-entropy column) hold more than
+		// 65535 elements. idx is still a genuinely valid row per the
+		// untruncated s.count, so the search "falling off the end" means the
+		// row lives in the last real chunk, not that it's out of range.
+		return len(s.jumpL2) - 1
 	}
 	return lo
 }
