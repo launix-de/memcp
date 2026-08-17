@@ -50,6 +50,14 @@ const enumBitMask = ^uint64(0) >> (64 - enumBitShift) // 0xFF
 const enumBitModulo = uint64(1) << enumBitShift       // 256
 const enumMaxSymbols = 8
 
+// enumMaxChunkElems bounds how many elements a single rANS chunk may hold.
+// jumpL2 cumulative counts are stored as uint16, so a chunk (or a jumpL1
+// group of chunks) must never account for more than 65535 elements. Highly
+// skewed columns (near-zero entropy) can otherwise pack far more than 65535
+// elements into one 64-bit buffer before it ever overflows on bit-width
+// alone, silently wrapping jumpL2 and corrupting random access.
+const enumMaxChunkElems = 65535
+
 type StorageEnum struct {
 	// rANS coded payload
 	data []uint64
@@ -260,7 +268,7 @@ func (s *StorageEnum) finish() {
 		inv := s.invWidths[symIdx]
 
 		bufferx, rest := enumFastDivMod(buffer, width, inv)
-		if bufferx > ^uint64(0)>>enumBitShift {
+		if bufferx > ^uint64(0)>>enumBitShift || bufferlen >= enumMaxChunkElems {
 			s.data = append(s.data, buffer)
 			chunkSizes = append(chunkSizes, bufferlen)
 			buffer = 0
@@ -445,6 +453,15 @@ func (s *StorageEnum) findChunk(idx int) int {
 		} else {
 			hi = mid
 		}
+	}
+	if lo >= len(s.jumpL2) && len(s.jumpL2) > 0 && idx < int(s.count) {
+		// jumpL2 cumulative counts are uint16 and can wrap for files written
+		// by the pre-enumMaxChunkElems encoder, which let one rANS chunk
+		// (typically for a near-constant, low-entropy column) hold more than
+		// 65535 elements. idx is still a genuinely valid row per the
+		// untruncated s.count, so the search "falling off the end" means the
+		// row lives in the last real chunk, not that it's out of range.
+		return len(s.jumpL2) - 1
 	}
 	return lo
 }

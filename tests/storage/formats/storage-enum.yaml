@@ -938,6 +938,90 @@ test_cases:
       data:
         - cnt: 3
 
+  # === Skewed column exceeding 65535 elements in one rANS chunk ===
+  # Regression test: a column with extremely low entropy (almost every row
+  # shares one value, only a couple of rows differ) can pack far more than
+  # 65535 elements into a single rANS chunk before the bit-buffer overflows
+  # on bit-width alone. The jumpL2 random-access index is stored as uint16
+  # per chunk; without an explicit element-count cap in finish(), such a
+  # chunk silently wraps that index, and any row past the wrapped (too
+  # small) cumulative count panics with "index out of range [-1]".
+  - name: "Create overflow-chunk table"
+    sql: "CREATE TABLE se_overflow_chunk (id INT, note VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert 70000 rows, 2 rare values among a near-constant majority"
+    scm: |
+      (begin
+        (set b (map (produceN 70000) (lambda (i)
+          (if (equal? i 1) (list i "x")
+            (if (equal? i 2) (list i "yz")
+              (list i ""))))))
+        (insert (table "memcp-tests" "se_overflow_chunk") '("id" "note") b)
+        70000)
+
+  - name: "Overflow: count total before compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_overflow_chunk"
+    expect:
+      rows: 1
+      data:
+        - cnt: 70000
+
+  - name: "Overflow: SHUTDOWN to trigger compression"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "Overflow: count total after compression"
+    sql: "SELECT COUNT(*) AS cnt FROM se_overflow_chunk"
+    expect:
+      rows: 1
+      data:
+        - cnt: 70000
+
+  - name: "Overflow: COUNT(note) forces a full sequential scan past 65535"
+    sql: "SELECT COUNT(note) AS cnt FROM se_overflow_chunk"
+    expect:
+      rows: 1
+      data:
+        - cnt: 70000
+
+  - name: "Overflow: verify rare value at id=1"
+    sql: "SELECT note FROM se_overflow_chunk WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - note: "x"
+
+  - name: "Overflow: verify rare value at id=2"
+    sql: "SELECT note FROM se_overflow_chunk WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - note: "yz"
+
+  - name: "Overflow: verify majority value near the wrapped uint16 boundary"
+    sql: "SELECT note FROM se_overflow_chunk WHERE id = 9960"
+    expect:
+      rows: 1
+      data:
+        - note: ""
+
+  - name: "Overflow: verify majority value well past the wrapped boundary"
+    sql: "SELECT note FROM se_overflow_chunk WHERE id = 69999"
+    expect:
+      rows: 1
+      data:
+        - note: ""
+
+  - name: "Overflow: ORDER BY + LIMIT scan past the wrapped boundary"
+    sql: "SELECT note FROM se_overflow_chunk ORDER BY id DESC LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - note: ""
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS se_bool"
   - sql: "DROP TABLE IF EXISTS se_status"
@@ -946,3 +1030,4 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS se_single"
   - sql: "DROP TABLE IF EXISTS se_max8"
   - sql: "DROP TABLE IF EXISTS se_constish"
+  - sql: "DROP TABLE IF EXISTS se_overflow_chunk"
