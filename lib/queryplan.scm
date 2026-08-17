@@ -675,6 +675,103 @@ work before decorrelation has even started. */
 		default_alias
 		(query_exprs_alias_set default_alias consumers)))))
 
+
+/* Walk an expression tree and collect every column name referenced from a
+specific derived-table alias. The result is a flat assoc-list col_name->true. */
+(define collect_alias_col_refs_deep (lambda (alias expr acc)
+	(match expr
+		((symbol get_column) tblvar _ col _) (if (equal? tblvar alias)
+			(set_assoc acc col true)
+			acc)
+		((quote get_column) tblvar _ col _) (if (equal? tblvar alias)
+			(set_assoc acc col true)
+			acc)
+		(cons head tail) (reduce tail
+			(lambda (acc2 item) (collect_alias_col_refs_deep alias item acc2))
+			(collect_alias_col_refs_deep alias head acc))
+		_ acc)))
+
+(define collect_alias_col_refs_from_exprs (lambda (alias exprs)
+	(reduce (coalesceNil exprs '())
+		(lambda (acc expr) (collect_alias_col_refs_deep alias expr acc))
+		'())))
+
+/* True if expr is or contains t.* or * for the given alias. */
+(define expr_derived_star_ref (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
+		((quote get_column) tblvar _ "*" _) (or (nil? tblvar) (equal? tblvar alias))
+		(cons head tail) (or (expr_derived_star_ref alias head)
+			(reduce tail
+				(lambda (found item) (or found (expr_derived_star_ref alias item)))
+				false))
+		_ false)))
+
+(define has_derived_star_ref (lambda (alias exprs)
+	(reduce (coalesceNil exprs '())
+		(lambda (found expr) (or found (expr_derived_star_ref alias expr)))
+		false)))
+
+/* Filter a stride-2 field list (title1 expr1 ...) to entries in needed. */
+(define filter_fields_by_needed (lambda (fields needed)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest))
+		(begin
+			(define tail (filter_fields_by_needed rest needed))
+			(if (has_assoc? needed title)
+				(cons title (cons expr tail))
+				tail))
+		_ '())))
+
+/* Build pruned replacement source when inner projection can be trimmed. */
+(define prune_derived_src_apply (lambda (src relation alias needed)
+	(begin
+		(define orig_fields (coalesceNil (qb_fields relation) '()))
+		(define pruned_fields (filter_fields_by_needed orig_fields needed))
+		(if (equal? (count pruned_fields) (count orig_fields))
+			src
+			(list
+				alias
+				(source_schema src)
+				(make_query_block
+					(qb_schema relation)
+					(qb_sources relation)
+					pruned_fields
+					(qb_where relation)
+					(qb_group relation)
+					(qb_having relation)
+					(qb_order relation)
+					(qb_limit relation)
+					(qb_offset relation)
+					(qb_hidden relation)
+					(qb_stages relation)
+					(qb_facts relation))
+				(source_outer? src)
+				(source_join_expr src))))))
+
+/* Pre-prune one derived-table source: drop inner fields not in needed.
+outer_direct_consumers already includes all outer ON conditions. */
+(define prune_derived_src (lambda (src outer_direct_consumers)
+	(begin
+		(define relation (source_relation src))
+		(if (or (string? relation) (union_block? relation))
+			src
+			(begin
+				(define alias (source_alias src))
+				(if (has_derived_star_ref alias outer_direct_consumers)
+					src
+					(begin
+						(define needed (collect_alias_col_refs_from_exprs alias outer_direct_consumers))
+						(if (empty_list? needed)
+							src
+							(prune_derived_src_apply src relation alias needed)))))))))
+
+/* For each derived-table source, drop inner projected columns not referenced
+by the outer block's direct consumers (fields/where/group/having/order/hidden). */
+(define prune_unreferenced_derived_fields (lambda (sources outer_direct_consumers)
+	(map (coalesceNil sources '())
+		(lambda (src) (prune_derived_src src outer_direct_consumers)))))
+
 (define btw2025_expr_accessing_aliases (lambda (expr outer_aliases)
 	(merge_unique (map (coalesceNil outer_aliases '()) (lambda (alias)
 		(if (expr_refs_any_alias? nil (list alias) expr)
@@ -4605,7 +4702,24 @@ source alias is the stable identity consumed by all later planner phases. */
 						(if (not (nil? embedded_union_rewrite))
 							(untangle_union_block embedded_union_rewrite child_ctx)
 							(begin
-								(define flattened_sources (flatten_source_list (qb_sources block) child_ctx))
+								/* Drop projected columns from derived tables that are not
+								referenced by this block's own fields/where/group/having/order
+								or by any outer source ON condition. The outer ON conditions
+								must be included so that join-key columns of non-pruneable
+								sources are never dropped. prune_unused_unique_left_joins
+								handles removing sorter-style joins whose output is unused. */
+								(define outer_direct_consumers (reduce
+									(coalesceNil (qb_sources block) '())
+									(lambda (acc src) (if (nil? (source_join_expr src))
+										acc
+										(cons (source_join_expr src) acc)))
+									(filter
+										(list (qb_fields block) (qb_where block) (qb_group block)
+											(qb_having block) (qb_order block) (qb_hidden block))
+										(lambda (x) (not (nil? x))))))
+								(define prepruned_sources (prune_unreferenced_derived_fields
+									(qb_sources block) outer_direct_consumers))
+								(define flattened_sources (flatten_source_list prepruned_sources child_ctx))
 								(define flattened_source_list (nth flattened_sources 0))
 								(define rewrites (nth flattened_sources 1))
 								(define source_where_terms (nth flattened_sources 2))
