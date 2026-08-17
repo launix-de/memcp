@@ -1680,6 +1680,61 @@ func TestFailedRebuildSchemaPublicationKeepsLaterWritesRecoverable(t *testing.T)
 	}
 }
 
+func TestRebuildInsideActiveTransactionDoesNotWaitForItself(t *testing.T) {
+	tbl, _ := createDurabilityTestTable(t, "trebuildselftransaction", 1)
+	oldTopology := tbl.activeTopology()
+	tx := NewTxContext(TxCursorStability)
+	tx.Session = scm.NewSession()
+	scm.Apply(tx.Session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
+	resultCh := make(chan string, 1)
+	panicCh := make(chan any, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicCh <- r
+			}
+		}()
+		withTxSession(tx, func() scm.Scmer {
+			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("same-request")}}, nil, scm.NewNil(), false, nil)
+			resultCh <- RebuildTable(tbl, true, false)
+			return scm.NewNil()
+		})
+	}()
+
+	select {
+	case r := <-panicCh:
+		t.Fatalf("rebuild in active transaction panicked: %v", r)
+	case result := <-resultCh:
+		if strings.Contains(result, "errors:") {
+			t.Fatalf("rebuild in active transaction returned %q", result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("rebuild waited for the transaction owned by its own request")
+	}
+	select {
+	case <-oldTopology.operationsDrained:
+	case <-time.After(time.Second):
+		t.Fatal("retired rebuild generation still has active operations")
+	}
+	select {
+	case <-oldTopology.drained:
+		t.Fatal("retired rebuild generation drained before its transaction completed")
+	default:
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-oldTopology.drained:
+	case <-time.After(time.Second):
+		t.Fatal("retired rebuild generation did not drain after transaction commit")
+	}
+	if got := tbl.Count(); got != 2 {
+		t.Fatalf("row count after transactional rebuild = %d, want 2", got)
+	}
+}
+
 func TestOverflowRebuildSchemaFailureKeepsWritesRecoverable(t *testing.T) {
 	oldShardSize := Settings.ShardSize
 	Settings.ShardSize = 2

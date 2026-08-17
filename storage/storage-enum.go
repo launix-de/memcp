@@ -343,8 +343,14 @@ func (s *StorageEnum) GetCachedReader() ColumnReader {
 // Uses binary search + sequential decode from chunk start. For O(1) sequential
 // access, use GetCachedReader() which returns a per-goroutine cached wrapper.
 func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
+	if uint64(i) >= s.count {
+		return scm.NewNil()
+	}
 	idx := int(i)
 	fwdIdx := s.findChunk(idx)
+	if fwdIdx >= len(s.data) {
+		return scm.NewNil()
+	}
 	chunkStart := 0
 	if fwdIdx > 0 {
 		chunkStart = s.jumpCum(fwdIdx - 1)
@@ -362,9 +368,12 @@ func (s *StorageEnum) GetValue(i uint32) scm.Scmer {
 // GetValueCached provides O(1) sequential access using a per-goroutine cache.
 // The cache must not be shared between goroutines.
 func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
+	if uint64(i) >= s.count {
+		return scm.NewNil()
+	}
 	idx := int(i)
 
-	if c.valid {
+	if c.valid && c.fwdChunk < len(s.jumpL2) && c.fwdChunk < len(s.data) {
 		chunkEnd := s.jumpCum(c.fwdChunk)
 		// fast path: index is ahead of cache position in same chunk
 		if idx >= c.start+c.pos && idx < chunkEnd {
@@ -381,7 +390,7 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 		// next chunk fast path
 		if idx >= chunkEnd {
 			nextFwd := c.fwdChunk + 1
-			if nextFwd < len(s.jumpL2) && idx < s.jumpCum(nextFwd) {
+			if nextFwd < len(s.jumpL2) && nextFwd < len(s.data) && idx < s.jumpCum(nextFwd) {
 				dataIdx := len(s.data) - 1 - nextFwd
 				buffer := s.data[dataIdx]
 				posInChunk := idx - chunkEnd
@@ -396,10 +405,15 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 				return result
 			}
 		}
+	} else if c.valid {
+		c.valid = false
 	}
 
 	// Binary search fallback
 	fwdIdx := s.findChunk(idx)
+	if fwdIdx >= len(s.data) {
+		return scm.NewNil()
+	}
 	chunkStart := 0
 	if fwdIdx > 0 {
 		chunkStart = s.jumpCum(fwdIdx - 1)

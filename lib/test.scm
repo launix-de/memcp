@@ -484,14 +484,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(lambda (_e) true)) true
 		"physical preparation rejects a join tree that does not cover its source catalog")
 	(define probe_outer_column (list (quote get_column) "outer_row" true "id" true))
+	(define probe_logical_column (list (quote get_column) "derived_row" false "id" false))
 	(define probe_param (symbol "__probe_key_0"))
-	(define probe_param_index (scalar_query_probe_param_index (list probe_outer_column) (list probe_param)))
+	(define probe_param_index (scalar_query_probe_param_index
+		(list probe_outer_column) (list probe_logical_column) (list probe_param)))
 	(assert (equal?
 		(rewrite_scalar_query_probe_params probe_param_index probe_outer_column)
 		probe_param) true "scalar query probe binds a direct inherited column")
 	(assert (equal?
 		(rewrite_scalar_query_probe_params probe_param_index (list (quote stage-fixture) (list probe_outer_column)))
 		(list (quote stage-fixture) (list probe_param))) true "scalar query probe binds inherited columns throughout stage data")
+	(assert (equal?
+		(rewrite_scalar_query_probe_params probe_param_index probe_logical_column)
+		probe_param) true "scalar query probe binds pre-derived logical aliases")
 	(define canonical_group_sum (list (list (quote get_column) "g" false "amount" false) (quote +) 0))
 	(define canonical_group_count (list 1 (quote +) 0))
 	(define canonical_group_source (list "g" "memcp-tests" "group_values" false nil))
@@ -1389,6 +1394,68 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		false
 		"optimizer: computed neutral keeps merge validation order")
 
+	/* cons consumes mapped tails without materializing and copying an intermediate list. */
+	(print "testing optimizer cons/map fusion ...")
+	(define opt_cons_map (optimize
+		(list 'lambda (list 'items)
+			(list 'cons (list 'quote 'node)
+				(list 'map 'items
+					(list 'lambda (list 'item) (list 'list (list 'quote 'wrapped) 'item)))))))
+	(assert
+		(match (serialize opt_cons_map) (regex "cons_map" _) true false)
+		true
+		"optimizer: cons maps directly into its result")
+	(define cons_map_fn (eval opt_cons_map))
+	(assert
+		(cons_map_fn (list 1 2 3))
+		(list 'node (list 'wrapped 1) (list 'wrapped 2) (list 'wrapped 3))
+		"cons/map fusion preserves values and order")
+	(assert
+		(cons_map_fn (list))
+		(list 'node)
+		"cons/map fusion preserves an empty mapped tail")
+	(define cons_map_input (list 4 5 6))
+	(cons_map_fn cons_map_input)
+	(assert
+		cons_map_input
+		(list 4 5 6)
+		"cons/map fusion does not mutate borrowed input")
+
+	/* owned builder reducers append without copying the growing accumulator. */
+	(print "testing optimizer owned list builders ...")
+	(define opt_owned_append_builder (optimize
+		(list 'lambda (list 'items)
+			(list 'reduce 'items
+				(list 'lambda (list 'acc 'item)
+					(list 'merge 'acc (list 'list 'item)))
+				(list 'quote (list))))))
+	(assert
+		(match (serialize opt_owned_append_builder) (regex "append_mut" _) true false)
+		true
+		"optimizer: singleton merge appends to owned reducer accumulator")
+	(assert
+		((eval opt_owned_append_builder) (list 1 2 3 4))
+		(list 1 2 3 4)
+		"owned reducer append preserves item order")
+
+	(define opt_owned_unique_builder (optimize
+		(list 'lambda (list 'items)
+			(list 'reduce 'items
+				(list 'lambda (list 'acc 'item)
+					(list 'if
+						(list 'contains? 'acc 'item)
+						'acc
+						(list 'merge 'acc (list 'list 'item))))
+				(list 'quote (list))))))
+	(assert
+		(match (serialize opt_owned_unique_builder) (regex "append_unique_mut" _) true false)
+		true
+		"optimizer: contains plus owned append becomes one unique append")
+	(assert
+		((eval opt_owned_unique_builder) (list 1 2 1 3 2 4))
+		(list 1 2 3 4)
+		"owned unique builder preserves first occurrence order")
+
 	/* match / match_mut correctness */
 	(print "testing match/match_mut correctness ...")
 	/* match: literal patterns */
@@ -1735,6 +1802,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define jit_pointer_flow (jit (lambda (value) (list (jit_pointer_callee value) (now)))))
 	(jit-warn-if-fallback jit_pointer_flow "jit: rooted callback result")
 	(assert (nth (nth (jit_pointer_flow 12) 0) 0) 12 "jit: callback pointer result survives a later callback")
+	(define jit_stackmap_flow (jit (lambda (value) (list (concat value "-rooted") (now)))))
+	(jit-warn-if-fallback jit_stackmap_flow "jit: stack-map pointer result")
+	(assert (nth (jit_stackmap_flow "value") 0) "value-rooted"
+		"jit: stack-map root survives a later allocating callback")
 
 	/* Borrowed Go-slice headers stay in the native pipeline as ptr/len/cap. */
 	(define jit_list_nth (jit (lambda (xs i) (nth xs i))))

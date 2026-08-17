@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # Loader coverage for SQL and PostgreSQL dump import paths.
 
 metadata:
@@ -9,6 +10,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS loader_sql"
   - sql: "DROP TABLE IF EXISTS loader_psql"
   - sql: "DROP TABLE IF EXISTS loader_psql_file"
+  - sql: "DROP TABLE IF EXISTS loader_psql_partial"
   - sql: "CREATE TABLE loader_psql (id INT PRIMARY KEY, flag BOOLEAN, note TEXT)"
 
 test_cases:
@@ -73,7 +75,51 @@ test_cases:
         - id: 1
           note: "from plain sql"
 
+  - name: "create table for partial COPY enum rebuild"
+    sql: "CREATE TABLE loader_psql_partial (id INT PRIMARY KEY, active BOOLEAN, note TEXT)"
+
+  - name: "seed enum-shaped imported column"
+    scm: |
+      (insert (table "memcp-tests" "loader_psql_partial") '("id" "active" "note")
+        (map (produceN 100) (lambda (i)
+          (list (+ i 1) (not (equal? i 99)) (concat "base-" (+ i 1))))))
+
+  - name: "rebuild seeded enum column"
+    scm: "(rebuild)"
+
+  - name: "load_psql imports later COPY rows with omitted enum column"
+    scm: |
+      (load_psql "memcp-tests"
+        (streamString (concat
+          "COPY public.loader_psql_partial (id, note) FROM stdin;\n"
+          "101\tpartial-101\n"
+          "102\tpartial-102\n"
+          "\\.\n"))
+        (sql_policy "root"))
+
+  - name: "rebuild partial COPY import"
+    scm: "(rebuild)"
+
+  - name: "omitted COPY columns remain null after rebuild"
+    sql: "SELECT id, active, note FROM loader_psql_partial WHERE id >= 99 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - id: 99
+          active: true
+          note: "base-99"
+        - id: 100
+          active: false
+          note: "base-100"
+        - id: 101
+          active: null
+          note: "partial-101"
+        - id: 102
+          active: null
+          note: "partial-102"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS loader_sql"
   - sql: "DROP TABLE IF EXISTS loader_psql"
   - sql: "DROP TABLE IF EXISTS loader_psql_file"
+  - sql: "DROP TABLE IF EXISTS loader_psql_partial"
