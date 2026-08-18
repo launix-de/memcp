@@ -564,6 +564,32 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric sentinel")
 	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage "72") false
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric string")
+	/* planner_recset_carrier_cost / scalar_first_probe_recset_cost_preferred?:
+	same "unknown stays unknown" discipline as the keytable check above, plus
+	the actual three-way comparison. A RecSet's build cost scales with
+	probe_rows (recset_project_join visits the driving side once, however
+	large it is); a keytable's dominant cost is its per-driving-row read
+	(row_ns, also scaled by probe_rows). For a large probe_rows count RecSet's
+	one-pass build must come out cheaper than both alternatives; for a tiny
+	probe_rows count (the same "selective driving query" shape
+	traced-union-scalar-probes.yaml guards against for the keytable) none of
+	the carriers should look worth building over a handful of direct probes. */
+	(assert (scalar_first_probe_recset_cost_preferred? cost_probe_stage nil) false
+		"recset cost check refuses the carrier when probe_work_rows is unknown")
+	(assert (scalar_first_probe_recset_cost_preferred? cost_probe_stage false) false
+		"recset cost check refuses the carrier when probe_work_rows is a non-numeric sentinel")
+	(assert (planner_cost_better?
+		(planner_recset_carrier_cost 20 200000)
+		(planner_direct_presence_probe_cost 200000)) true
+		"recset carrier beats direct probing at large driving-row counts")
+	(assert (planner_cost_better?
+		(planner_recset_carrier_cost 20 200000)
+		(planner_presence_carrier_cost 20 200000)) true
+		"recset carrier beats the keytable carrier at large driving-row counts (no per-row read term)")
+	(assert (planner_cost_better?
+		(planner_direct_presence_probe_cost 1)
+		(planner_recset_carrier_cost 20 1)) true
+		"direct probing beats building any carrier for a single accepted row")
 	/* scalar_first_probe_keytable_key_index: the stage's key domain may mix a
 	true per-outer-row key with session-constant reads (e.g. a permission check
 	correlated to the current user). Only the non-session key identifies which

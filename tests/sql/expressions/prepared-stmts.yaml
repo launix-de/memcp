@@ -484,17 +484,32 @@ test_cases:
         (define cache (newcachemap))
         (define sess (newsession))
         (define compiles (newsession))
+        /* Direct-vs-RecSet crossover: a RecSet carrier's one-pass build cost
+        (planner_recset_carrier_cost) has a fixed startup plus a per-driving-row
+        rate lower than direct probing, so past a small break-even point it
+        wins on total_ns even though direct probing wins below it -- the same
+        "guard flips as the row estimate crosses a threshold" shape this test
+        has always exercised, now against the carrier that actually has a
+        crossover (a plain keytable carrier's per-row read cost turned out, once
+        honestly calibrated via tools/costgen, to always exceed direct probing
+        for a shallow EXISTS like this one -- see planner_presence_carrier_cost's
+        row_ns coefficient). */
+        (define domain_rows 20)
         (define parser (lambda (_schema _query _policy) (begin
           (define limit_expr (list (quote session) "v1"))
           (define limit_value (planner_literal_value limit_expr))
-          (define direct (planner_direct_presence_probe_preferred? limit_value 1000000))
+          (define direct (planner_cost_better?
+            (planner_direct_presence_probe_cost limit_value)
+            (planner_recset_carrier_cost domain_rows limit_value)))
           (planner_record_guard_condition
             (list (quote equal?)
-              (list (quote planner_direct_presence_probe_preferred?) limit_expr 1000000)
+              (list (quote planner_cost_better?)
+                (list (quote planner_direct_presence_probe_cost) limit_expr)
+                (list (quote planner_recset_carrier_cost) domain_rows limit_expr))
               direct))
           (compiles (string (count (compiles))) direct)
           (list (quote quote) (if direct "probe" "carrier")))))
-        (sess "v1" 72)
+        (sess "v1" 5)
         (define first_formula (cached_parse cache parser "memcp-tests"
           "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
           nil "root" sess true))
