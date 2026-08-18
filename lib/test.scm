@@ -603,6 +603,50 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (planner_row_count_after_selectivity
 		row_count_unknown_src (list row_count_unknown_src) "rc" true 1) 1) true
 		"row count after selectivity preserves whatever fallback the caller passed in")
+	/* query_invariant_presence_stage?/query_invariant_probe_entries_for_stages:
+	a presence probe whose lookup key is a session read (not a reference to
+	an outer row's column) is invariant for the whole query execution -- it
+	is the same building block lower_group_stage_prepare_using now uses to
+	bind such a stage once instead of re-probing it per row. */
+	(define invariant_probe_stage (make_group_stage
+		"invariant-probe-stage"
+		(list "ip" "memcp-tests" "invariant_probe_source" false nil)
+		(list (list (quote session) "probe_user"))
+		(list (list (quote get_column) "ip" false "user" false))
+		(list aggregate_count_descriptor)
+		nil '() '() nil nil
+		(list
+			(list (quote purpose) (quote exists))
+			(list (quote presence_only) true)
+			(list (quote max_needed_per_domain) 1)
+			(list (quote physical_max_rows) 1)
+			(list (quote on_overflow) (quote ignore))
+			(list (quote cardinality_mode) (quote many))
+			(list (quote lookup-keys) (list (list (quote session) "probe_user"))))))
+	(assert (query_invariant_presence_stage? invariant_probe_stage) true
+		"a base-table presence stage whose lookup key is only a session read is query-invariant")
+	(define invariant_entries (query_invariant_probe_entries_for_stages (list invariant_probe_stage)))
+	(assert (not (empty_list? invariant_entries)) true
+		"query_invariant_probe_entries_for_stages finds the eligible stage")
+	(assert (not (empty_list? (query_invariant_probe_bindings invariant_entries))) true
+		"a non-empty entry list produces a once-bound define lower_group_stage_prepare_using can emit")
+	(define correlated_probe_stage (make_group_stage
+		"correlated-probe-stage"
+		(list "cp2" "memcp-tests" "correlated_probe_source" false nil)
+		(list (list (quote get_column) "outer" false "standort" false))
+		(list (list (quote get_column) "cp2" false "user" false))
+		(list aggregate_count_descriptor)
+		nil '() '() nil nil
+		(list
+			(list (quote purpose) (quote exists))
+			(list (quote presence_only) true)
+			(list (quote max_needed_per_domain) 1)
+			(list (quote physical_max_rows) 1)
+			(list (quote on_overflow) (quote ignore))
+			(list (quote cardinality_mode) (quote many))
+			(list (quote lookup-keys) (list (list (quote get_column) "outer" false "standort" false))))))
+	(assert (query_invariant_presence_stage? correlated_probe_stage) false
+		"a presence stage whose lookup key references an outer column is not query-invariant -- it must keep using its per-row/keytable probe unchanged")
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
