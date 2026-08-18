@@ -818,15 +818,44 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		for i := uint32(0); i < s.t.main_count; i++ {
 			tmp[i] = i // fill with natural order
 		}
+		// Pre-materialize sort-key values with one sequential pass per sorted
+		// column, instead of calling g.get(recid) from inside the sort
+		// comparator. Compressed encodings like StorageSeq keep a single-slot
+		// pivot cache tuned for sequential access; decoding here keeps every
+		// read on that cache's fast path, while decoding from the comparator
+		// visits recids in the sort's effectively random order and forces a
+		// fresh bisection on nearly every call (measured: >99% of buildIndex
+		// time for a StorageSeq-encoded column).
+		// Single flat, row-major buffer (materialized[recid*numCols+colIdx]):
+		// one contiguous allocation total. The comparator (called ~N*log(N)
+		// times) reads every sorted column of the same recid together, so
+		// keeping a row's values in one cache line matters more than keeping
+		// each column's materialization write sequential (called only N*K
+		// times total, i.e. far less often).
+		numCols := len(cols)
+		mainCount := uint(s.t.main_count)
+		materialized := make([]scm.Scmer, mainCount*uint(numCols))
+		hasSortCol := make([]bool, numCols)
+		for colIdx, g := range cols {
+			if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+				continue // query-level overlay column: never read by the comparator below
+			}
+			hasSortCol[colIdx] = true
+			for i := uint32(0); i < s.t.main_count; i++ {
+				materialized[uint(i)*uint(numCols)+uint(colIdx)] = g.get(i)
+			}
+		}
 		// sort indexes; skip non-sorted matcher columns (they don't affect
 		// sort order, they are query-level overlays for pruning)
 		hybridsort.HybridSort(tmp, func(a, b uint32) bool {
-			for colIdx, g := range cols {
-				if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+			rowA := uint(a) * uint(numCols)
+			rowB := uint(b) * uint(numCols)
+			for colIdx := range cols {
+				if !hasSortCol[colIdx] {
 					continue
 				}
-				va := g.get(a)
-				vb := g.get(b)
+				va := materialized[rowA+uint(colIdx)]
+				vb := materialized[rowB+uint(colIdx)]
 				if relations[colIdx](va, vb) {
 					return true // less
 				} else if relations[colIdx](vb, va) {
