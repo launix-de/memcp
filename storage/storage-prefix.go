@@ -52,6 +52,49 @@ func (s *StoragePrefix) GetValue(i uint32) scm.Scmer {
 	prefix := s.prefixdictionary[idx]
 	return scm.NewString(prefix + inner.String())
 }
+
+// GetValueRange and GetValueMulti bulk-fetch the suffix strings and the raw
+// prefix-dictionary indices via the two wrapped storages' own bulk methods
+// (one call each instead of 2*n GetValue calls) and then stitch prefix+suffix
+// together in a single post-process pass.
+func (s *StoragePrefix) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	s.values.GetValueRange(recid, count, target, stride)
+	idxbuf := make([]scm.Scmer, count)
+	s.prefixes.GetValueRange(recid, count, idxbuf, 1)
+	s.applyPrefixInPlace(target, idxbuf, count, stride)
+}
+
+func (s *StoragePrefix) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	s.values.GetValueMulti(recids, target, stride)
+	idxbuf := make([]scm.Scmer, len(recids))
+	s.prefixes.GetValueMulti(recids, idxbuf, 1)
+	s.applyPrefixInPlace(target, idxbuf, uint32(len(recids)), stride)
+}
+
+func (s *StoragePrefix) applyPrefixInPlace(target []scm.Scmer, idxbuf []scm.Scmer, count uint32, stride int) {
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		inner := target[idx]
+		if !inner.IsNil() {
+			if !inner.IsString() {
+				panic("invalid value in prefix storage")
+			}
+			pidx := idxbuf[k].Int()
+			if pidx < 0 || pidx >= int64(len(s.prefixdictionary)) {
+				panic("prefix index out of range")
+			}
+			target[idx] = scm.NewString(s.prefixdictionary[pidx] + inner.String())
+		}
+		idx += stride
+	}
+}
+
 func (s *StoragePrefix) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
 	/* TODO: RunDefers: rundefers */

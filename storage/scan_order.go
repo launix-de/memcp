@@ -1215,12 +1215,20 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		result.items = make([]uint32, resultCap)
 		resultN := 0
 		usageWeight := orderedScanIndexUsageWeight(boundaries, int(visibleUpper), limit)
+		// Reused across batches: survived/mainIds scratch lists and one value
+		// buffer per non-getter condition column, so a batch's main-storage rows
+		// are fetched with one GetValueMulti call per column instead of one
+		// GetValue call per row per column.
+		var survivedBuf, mainIdsBuf []uint32
+		colBufs := make([][]scm.Scmer, len(conditionCols))
 		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, func(index *StorageIndex, active bool) {
 			resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
 		}, func(batch []uint32) bool {
 			result.candidateCount += int64(len(batch))
-			// filter in-place: overwrite batch with passing IDs
-			outN := 0
+
+			// pass 1: data-independent skip checks (recset/visibility/deletion),
+			// producing the ordered surviving-id list without touching column data.
+			survived := survivedBuf[:0]
 			for _, idx := range batch {
 				if recsetPart != nil && !recsetPart.contains(idx) {
 					continue
@@ -1235,22 +1243,53 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				} else if t.deletions.Get(uint(idx)) {
 					continue // item is on delete list
 				}
+				survived = append(survived, idx)
+			}
+			survivedBuf = survived
 
+			// pass 2: bulk-fetch every non-getter condition column for the
+			// main-storage survivors of this batch, one call per column.
+			mainIds := mainIdsBuf[:0]
+			for _, idx := range survived {
 				if idx < t.main_count {
-					// value from main storage
-					// check condition
-					for i, k := range ccols { // iterate over columns
+					mainIds = append(mainIds, idx)
+				}
+			}
+			mainIdsBuf = mainIds
+			for i := range ccols {
+				if conditionGetters[i] != nil {
+					continue
+				}
+				if cap(colBufs[i]) < len(mainIds) {
+					colBufs[i] = make([]scm.Scmer, len(mainIds))
+				}
+				colBufs[i] = colBufs[i][:len(mainIds)]
+				if len(mainIds) == 0 {
+					continue
+				}
+				if cNeedsCachedReader[i] {
+					cReaders[i].GetValueMulti(mainIds, colBufs[i], 1)
+				} else {
+					ccols[i].GetValueMulti(mainIds, colBufs[i], 1)
+				}
+			}
+
+			// pass 3: evaluate the condition per row using the pre-fetched
+			// main-storage values; delta rows are still read one at a time.
+			outN := 0
+			mainBufIdx := 0
+			for _, idx := range survived {
+				if idx < t.main_count {
+					for i := range ccols {
 						if conditionGetters[i] != nil {
 							cdataset[i] = conditionGetters[i](idx, 0)
-						} else if cNeedsCachedReader[i] {
-							cdataset[i] = cReaders[i].GetValue(idx)
 						} else {
-							cdataset[i] = k.GetValue(idx)
+							cdataset[i] = colBufs[i][mainBufIdx]
 						}
 					}
+					mainBufIdx++
 				} else {
 					// value from delta storage
-					// prepare&call condition function
 					for i, k := range conditionCols { // iterate over columns
 						if conditionGetters[i] != nil {
 							cdataset[i] = conditionGetters[i](idx, 0)

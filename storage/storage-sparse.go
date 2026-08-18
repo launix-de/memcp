@@ -3700,6 +3700,119 @@ func (s *StorageSparse) GetValue(i uint32) scm.Scmer {
 	}
 }
 
+// sparseSeek returns the smallest pivot in [0,s.i) whose recid is >= want,
+// via binary search. Used once to seed the forward merge-scan below instead
+// of a fresh binary search per requested row.
+func (s *StorageSparse) sparseSeek(want uint32) uint32 {
+	var lower, upper uint32 = 0, uint32(s.i)
+	for lower < upper {
+		pivot := (lower + upper) / 2
+		recid := uint32(s.recids.GetValueUInt(pivot)) + uint32(s.recids.offset)
+		if recid < want {
+			lower = pivot + 1
+		} else {
+			upper = pivot
+		}
+	}
+	return lower
+}
+
+// GetValueRange and GetValueMulti (ascending case) do a single binary search
+// to seed a pointer into the sparse recids array, then merge-scan it forward
+// against the requested rows in one pass — O(touched sparse entries + n)
+// instead of a binary search per requested row.
+func (s *StorageSparse) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	n := uint32(s.i)
+	sp := s.sparseSeek(recid)
+	var curRecid uint32
+	haveCur := false
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		want := recid + k
+		for {
+			if !haveCur {
+				if sp >= n {
+					break
+				}
+				curRecid = uint32(s.recids.GetValueUInt(sp)) + uint32(s.recids.offset)
+				haveCur = true
+			}
+			if curRecid < want {
+				sp++
+				haveCur = false
+				continue
+			}
+			break
+		}
+		if haveCur && curRecid == want {
+			target[idx] = s.values[sp]
+		} else {
+			target[idx] = scm.NewNil()
+		}
+		idx += stride
+	}
+}
+
+func (s *StorageSparse) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	n := len(recids)
+	if n == 0 {
+		return
+	}
+	ascending := true
+	for k := 1; k < n; k++ {
+		if recids[k] < recids[k-1] {
+			ascending = false
+			break
+		}
+	}
+	if !ascending {
+		idx := 0
+		for _, want := range recids {
+			target[idx] = s.GetValue(want)
+			idx += stride
+		}
+		return
+	}
+
+	total := uint32(s.i)
+	sp := s.sparseSeek(recids[0])
+	var curRecid uint32
+	haveCur := false
+	idx := 0
+	for _, want := range recids {
+		for {
+			if !haveCur {
+				if sp >= total {
+					break
+				}
+				curRecid = uint32(s.recids.GetValueUInt(sp)) + uint32(s.recids.offset)
+				haveCur = true
+			}
+			if curRecid < want {
+				sp++
+				haveCur = false
+				continue
+			}
+			break
+		}
+		if haveCur && curRecid == want {
+			target[idx] = s.values[sp]
+		} else {
+			target[idx] = scm.NewNil()
+		}
+		idx += stride
+	}
+}
+
 func (s *StorageSparse) scan(i uint32, value scm.Scmer) {
 	if !value.IsNil() {
 		s.recids.scan(uint32(s.i), scm.NewInt(int64(i)))

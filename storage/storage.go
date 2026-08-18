@@ -34,14 +34,57 @@ import "github.com/launix-de/go-mysqlstack/sqldb"
 
 // ColumnReader provides sequential-access-optimized reads. Returned by
 // ColumnStorage.GetCachedReader(). Must not be shared between goroutines.
+//
+// GetValueMulti and GetValueRange are bulk counterparts to GetValue that
+// amortize per-call overhead (interface dispatch, binary search, shared
+// decode state) across many rows in one call:
+//
+//   - GetValueMulti(recids, target, stride) gathers values at arbitrary,
+//     caller-supplied row ids (e.g. an index-probe batch or a sort
+//     permutation). Implementations should detect runs of ascending recids
+//     and take a sequential fast path where their underlying encoding
+//     benefits from it (rANS chunk decode, run-length sequences, sparse
+//     merge), falling back to per-element lookup only for genuine jumps.
+//   - GetValueRange(recid, count, target, stride) reads count consecutive
+//     rows starting at recid. Implementations should use this to skip
+//     repeated binary search / bit-position division entirely.
+//
+// Both write results into target starting at target[0], target[stride],
+// target[2*stride], ... so a caller building an interleaved multi-column
+// row buffer can pass stride=rowWidth and a per-column offset slice
+// (target[colOffset:]). stride<=0 is treated as 1.
 type ColumnReader interface {
 	GetValue(uint32) scm.Scmer
+	GetValueMulti(recids []uint32, target []scm.Scmer, stride int)
+	GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int)
 }
 
 type ColumnReaderFunc func(uint32) scm.Scmer
 
 func (f ColumnReaderFunc) GetValue(idx uint32) scm.Scmer {
 	return f(idx)
+}
+
+func (f ColumnReaderFunc) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = f(recid)
+		idx += stride
+	}
+}
+
+func (f ColumnReaderFunc) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = f(recid + k)
+		idx += stride
+	}
 }
 
 // TxColumnReaderProvider optionally exposes a transaction-bound reader.
@@ -159,7 +202,15 @@ func normalizePartitionDataset(arg scm.Scmer) dataset {
 // THE basic storage pattern
 type ColumnStorage interface {
 	// info
-	GetValue(uint32) scm.Scmer     // read function (concurrent-safe, no mutable state)
+	GetValue(uint32) scm.Scmer // read function (concurrent-safe, no mutable state)
+	// GetValueMulti and GetValueRange are the bulk counterparts of GetValue;
+	// see the ColumnReader doc comment for the exact contract. Every storage
+	// format must implement both with a real bulk strategy for its own
+	// encoding (sequential cursor, cached decode, merge-scan, ...) rather
+	// than a naive per-element loop through GetValue, wherever that
+	// encoding has state worth amortizing across a batch.
+	GetValueMulti(recids []uint32, target []scm.Scmer, stride int)
+	GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int)
 	GetCachedReader() ColumnReader // returns a per-goroutine cached reader for O(1) sequential access
 	String() string                // self-description
 	scm.Sizable

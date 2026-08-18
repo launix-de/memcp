@@ -726,6 +726,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 	}
 	var rowCount uint64
 	var hasValue bool
+	var buf []scm.Scmer
 	for _, shard := range shards {
 		if shard == nil {
 			continue
@@ -734,10 +735,14 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 		if columnStorage == nil {
 			continue
 		}
+		if cap(buf) < int(shard.main_count) {
+			buf = make([]scm.Scmer, shard.main_count)
+		}
+		buf = buf[:shard.main_count]
 		reader := columnStorage.GetCachedReader()
-		for recid := uint32(0); recid < shard.main_count; recid++ {
+		reader.GetValueRange(0, shard.main_count, buf, 1)
+		for _, value := range buf {
 			rowCount++
-			value := reader.GetValue(recid)
 			if value.IsNil() {
 				stats.NullCount++
 				continue

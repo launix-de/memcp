@@ -674,7 +674,53 @@ func (s *StorageString) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageString) GetValue(i uint32) scm.Scmer {
 	atomic.AddUint64(&s.readCount, 1)
+	dict := s.ensureDict()
+	dictBase := unsafe.Pointer(unsafe.StringData(dict))
+	return s.decodeAt(i, dict, dictBase)
+}
 
+// GetValueRange and GetValueMulti hoist the two things that GetValue would
+// otherwise redo on every element — ensureDict()'s lock/branch and the dict
+// base pointer computation — out of the loop, and collapse the per-call
+// atomic readCount increment into a single batched add.
+func (s *StorageString) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	atomic.AddUint64(&s.readCount, uint64(count))
+	dict := s.ensureDict()
+	dictBase := unsafe.Pointer(unsafe.StringData(dict))
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = s.decodeAt(recid+k, dict, dictBase)
+		idx += stride
+	}
+}
+
+func (s *StorageString) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if len(recids) == 0 {
+		return
+	}
+	atomic.AddUint64(&s.readCount, uint64(len(recids)))
+	dict := s.ensureDict()
+	dictBase := unsafe.Pointer(unsafe.StringData(dict))
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = s.decodeAt(recid, dict, dictBase)
+		idx += stride
+	}
+}
+
+// decodeAt is the format-dispatch decode logic shared by GetValue and the
+// bulk readers. dict/dictBase are passed in so bulk callers materialize the
+// dictionary exactly once per batch instead of once per row.
+func (s *StorageString) decodeAt(i uint32, dict string, dictBase unsafe.Pointer) scm.Scmer {
 	var startVal, lensVal uint64
 	if s.nodict {
 		sv := uint64(int64(s.starts.GetValueUInt(i)) + s.starts.offset)
@@ -700,8 +746,6 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 	//   Base64: decoded byte count
 	//   UUID: unused (always 16 bytes / 36 chars)
 	//   Raw: byte count
-	dict := s.ensureDict()
-	dictBase := unsafe.Pointer(unsafe.StringData(dict))
 	switch s.format {
 	case FormatRaw:
 		byteStart := startVal

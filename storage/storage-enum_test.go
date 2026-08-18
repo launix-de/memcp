@@ -373,6 +373,109 @@ func BenchmarkEnumRandomCached(b *testing.B) {
 	}
 }
 
+// TestEnumBulkMatchesGetValue checks GetValueRange/GetValueMulti (including
+// non-cached and the persistent cachedEnumReader path) against a plain
+// per-element GetValue loop, across sequential, ascending-gappy, and
+// shuffled-with-repeats recid patterns.
+func TestEnumBulkMatchesGetValue(t *testing.T) {
+	for _, cfg := range configs {
+		cfg := cfg
+		t.Run(cfg.name, func(t *testing.T) {
+			s := buildEnum(cfg.n, cfg.gen)
+			want := make([]scm.Scmer, cfg.n)
+			for i := 0; i < cfg.n; i++ {
+				want[i] = s.GetValue(uint32(i))
+			}
+
+			checkAgainstWant := func(label string, got []scm.Scmer, recids []int) {
+				for k, recid := range recids {
+					if !scm.Equal(got[k], want[recid]) {
+						t.Errorf("%s: %s[%d] (recid %d) = %v, want %v", cfg.name, label, k, recid, got[k], want[recid])
+					}
+				}
+			}
+
+			readers := []struct {
+				name       string
+				valueRange func(uint32, uint32, []scm.Scmer, int)
+				valueMulti func([]uint32, []scm.Scmer, int)
+			}{
+				{"storage", s.GetValueRange, s.GetValueMulti},
+				{"cachedReader", s.GetCachedReader().GetValueRange, s.GetCachedReader().GetValueMulti},
+			}
+
+			for _, r := range readers {
+				full := make([]scm.Scmer, cfg.n)
+				r.valueRange(0, uint32(cfg.n), full, 1)
+				fullRecids := make([]int, cfg.n)
+				for i := range fullRecids {
+					fullRecids[i] = i
+				}
+				checkAgainstWant(r.name+"/GetValueRange(full)", full, fullRecids)
+
+				var ascending []uint32
+				var ascendingInt []int
+				for i := 0; i < cfg.n; i += 2 {
+					ascending = append(ascending, uint32(i))
+					ascendingInt = append(ascendingInt, i)
+				}
+				gotAsc := make([]scm.Scmer, len(ascending))
+				r.valueMulti(ascending, gotAsc, 1)
+				checkAgainstWant(r.name+"/GetValueMulti(ascending)", gotAsc, ascendingInt)
+
+				rng := rand.New(rand.NewSource(7))
+				shuffled := make([]uint32, cfg.n)
+				shuffledInt := make([]int, cfg.n)
+				for i := range shuffled {
+					shuffled[i] = uint32(i)
+					shuffledInt[i] = i
+				}
+				rng.Shuffle(len(shuffled), func(i, j int) {
+					shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+					shuffledInt[i], shuffledInt[j] = shuffledInt[j], shuffledInt[i]
+				})
+				gotShuf := make([]scm.Scmer, len(shuffled))
+				r.valueMulti(shuffled, gotShuf, 1)
+				checkAgainstWant(r.name+"/GetValueMulti(shuffled)", gotShuf, shuffledInt)
+			}
+		})
+	}
+}
+
+// --- Bulk (GetValueRange/GetValueMulti) benchmarks, for comparison against
+// the per-element Sequential/Random benchmarks above ---
+
+func BenchmarkEnumSequentialBulk(b *testing.B) {
+	for _, cfg := range configs {
+		s := buildEnum(cfg.n, cfg.gen)
+		target := make([]scm.Scmer, cfg.n)
+		b.Run(cfg.name, func(b *testing.B) {
+			b.ResetTimer()
+			for iter := 0; iter < b.N; iter++ {
+				s.GetValueRange(0, uint32(cfg.n), target, 1)
+			}
+		})
+	}
+}
+
+func BenchmarkEnumRandomBulk(b *testing.B) {
+	for _, cfg := range configs {
+		s := buildEnum(cfg.n, cfg.gen)
+		rng := rand.New(rand.NewSource(42))
+		indices := make([]uint32, cfg.n)
+		for i := range indices {
+			indices[i] = uint32(rng.Intn(cfg.n))
+		}
+		target := make([]scm.Scmer, cfg.n)
+		b.Run(cfg.name, func(b *testing.B) {
+			b.ResetTimer()
+			for iter := 0; iter < b.N; iter++ {
+				s.GetValueMulti(indices, target, 1)
+			}
+		})
+	}
+}
+
 // --- Per-element benchmarks for ns/op comparison ---
 
 func BenchmarkEnumPerElem(b *testing.B) {

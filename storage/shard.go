@@ -2787,6 +2787,29 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 	}
 }
 
+// replayRebuiltRows replays one column's values in rebuiltRowIDs order for
+// shard rebuild's scan/build passes. mainRecids/mainMask (precomputed once
+// per shard, shared across every column) identify which slots of
+// rebuiltRowIDs are sourced from main storage; those are bulk-fetched from
+// reader in a single GetValueMulti call instead of one GetValue per row.
+// Delta-sourced slots still go through getDelta one row at a time, since
+// that reads a plain Go map rather than a ColumnStorage.
+func replayRebuiltRows(reader ColumnReader, mainRecids []uint32, mainMask []bool, rebuiltRowIDs []uint32, mainCount uint32, col string, getDelta func(int, string) scm.Scmer, emit func(uint32, scm.Scmer)) {
+	buf := make([]scm.Scmer, len(mainRecids))
+	if len(mainRecids) > 0 {
+		reader.GetValueMulti(mainRecids, buf, 1)
+	}
+	bufIdx := 0
+	for k, id := range rebuiltRowIDs {
+		if mainMask[k] {
+			emit(uint32(k), buf[bufIdx])
+			bufIdx++
+		} else {
+			emit(uint32(k), getDelta(int(id-mainCount), col))
+		}
+	}
+}
+
 // rebuild main storage from main+delta
 func (t *storageShard) rebuild(all bool) *storageShard {
 	// An unchanged cold shard already is a complete persistent generation:
@@ -3025,6 +3048,19 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				}
 			}
 		}
+		// mainRecids/mainMask precompute, once per rebuilt shard (not per column),
+		// which slots of rebuiltRowIDs are sourced from main storage vs delta so
+		// every column's scan/build replay can bulk-fetch its main-sourced values
+		// in one GetValueMulti call instead of one GetValue per row.
+		mainRecids := make([]uint32, 0, len(rebuiltRowIDs))
+		mainMask := make([]bool, len(rebuiltRowIDs))
+		for k, id := range rebuiltRowIDs {
+			if id < mainCount {
+				mainMask[k] = true
+				mainRecids = append(mainRecids, id)
+			}
+		}
+
 		nextTranslation := make(map[uint32]uint32, len(rebuiltRowIDs))
 		for newRecid, oldRecid := range rebuiltRowIDs {
 			nextTranslation[oldRecid] = uint32(newRecid)
@@ -3072,36 +3108,10 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 			var reader ColumnReader
 			for {
 				// scan phase
-				i = 0
 				reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
 				newcol.prepare()
-				if sortPerm != nil {
-					for _, globalID := range sortPerm {
-						if globalID < mainCount {
-							newcol.scan(i, reader.GetValue(globalID))
-						} else {
-							newcol.scan(i, getDelta(int(globalID-mainCount), col))
-						}
-						i++
-					}
-				} else {
-					// scan main
-					for idx := uint32(0); idx < mainCount; idx++ {
-						if !keepRecid(idx) {
-							continue
-						}
-						newcol.scan(i, reader.GetValue(idx))
-						i++
-					}
-					// scan delta
-					for idx := 0; idx < maxInsertIndex; idx++ {
-						if !keepRecid(mainCount + uint32(idx)) {
-							continue
-						}
-						newcol.scan(i, getDelta(idx, col))
-						i++
-					}
-				}
+				replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.scan)
+				i = uint32(len(rebuiltRowIDs))
 				newcol2 := newcol.proposeCompression(i)
 				if newcol2 == nil {
 					break // we found the optimal storage format
@@ -3120,35 +3130,8 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				blob.schema = result.t.schema
 			}
 			newcol.init(i)
-			i = 0
 			reader = c.GetCachedReader() // must NOT use newCachedColumnReader: it strips OverlayBlob
-			if sortPerm != nil {
-				for _, globalID := range sortPerm {
-					if globalID < mainCount {
-						newcol.build(i, reader.GetValue(globalID))
-					} else {
-						newcol.build(i, getDelta(int(globalID-mainCount), col))
-					}
-					i++
-				}
-			} else {
-				// build main
-				for idx := uint32(0); idx < mainCount; idx++ {
-					if !keepRecid(idx) {
-						continue
-					}
-					newcol.build(i, reader.GetValue(idx))
-					i++
-				}
-				// build delta
-				for idx := 0; idx < maxInsertIndex; idx++ {
-					if !keepRecid(mainCount + uint32(idx)) {
-						continue
-					}
-					newcol.build(i, getDelta(idx, col))
-					i++
-				}
-			}
+			replayRebuiltRows(reader, mainRecids, mainMask, rebuiltRowIDs, mainCount, col, getDelta, newcol.build)
 			newcol.finish()
 
 			// LZ4 string dict compression: if the old column was a StorageString

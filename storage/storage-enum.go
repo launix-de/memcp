@@ -359,6 +359,33 @@ func (r *cachedEnumReader) GetValue(i uint32) scm.Scmer {
 	return r.s.GetValueCached(i, &r.cache)
 }
 
+// GetValueRange and GetValueMulti reuse this reader's persistent decode
+// cache across the whole batch via GetValueCached, so a scan that gathers
+// many rows through one reader gets the O(1)-amortized sequential/jump
+// decode path GetValueCached already implements, instead of paying a fresh
+// binary search (or a shared-cache reset) per row.
+func (r *cachedEnumReader) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = r.s.GetValueCached(recid+k, &r.cache)
+		idx += stride
+	}
+}
+
+func (r *cachedEnumReader) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = r.s.GetValueCached(recid, &r.cache)
+		idx += stride
+	}
+}
+
 func (s *StorageEnum) GetCachedReader() ColumnReader {
 	return &cachedEnumReader{s: s}
 }
@@ -457,6 +484,35 @@ func (s *StorageEnum) GetValueCached(i uint32, c *EnumDecodeCache) scm.Scmer {
 	c.pos = posInChunk + 1
 	c.buf = buffer
 	return result
+}
+
+// GetValueRange and GetValueMulti decode a whole batch through a single
+// local (stack-allocated, not shared-atomic) EnumDecodeCache, so the rANS
+// chunk decode state — the expensive part of an enum read — is amortized
+// across the batch via GetValueCached's O(1) sequential/jump fast paths
+// instead of every element paying its own binary search from GetValue.
+func (s *StorageEnum) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	var cache EnumDecodeCache
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = s.GetValueCached(recid+k, &cache)
+		idx += stride
+	}
+}
+
+func (s *StorageEnum) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	var cache EnumDecodeCache
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = s.GetValueCached(recid, &cache)
+		idx += stride
+	}
 }
 
 // findChunk returns the chunk index containing element idx via binary search.

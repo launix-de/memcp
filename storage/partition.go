@@ -376,20 +376,41 @@ func (snap shardPartitionSnapshot) count() uint64 {
 	return uint64(snap.mainCount) + uint64(len(snap.inserts)) - uint64(snap.deletions.Count())
 }
 
-func (snap shardPartitionSnapshot) partition(schema []shardDimension) (result map[int][]uint32) {
-	result = make(map[int][]uint32)
-	values := make([]scm.Scmer, len(schema))
-
-	for idx := uint32(0); idx < snap.mainCount; idx++ {
-		if snap.deletions.Get(uint(idx)) {
-			continue
+// partitionMainRows assigns each surviving (non-deleted) row of main storage
+// in [0,mainCount) to a target shard. Deletion is a data-independent skip, so
+// it is checked once up front to build the surviving recid list; each
+// dimension column is then read for the whole batch via one GetValueMulti
+// call instead of one GetValue per row per column.
+func partitionMainRows(schema []shardDimension, mainCount uint32, deletions *NonLockingReadMap.NonBlockingBitMap, mainCols []ColumnStorage, result map[int][]uint32) {
+	surviving := make([]uint32, 0, mainCount)
+	for idx := uint32(0); idx < mainCount; idx++ {
+		if !deletions.Get(uint(idx)) {
+			surviving = append(surviving, idx)
 		}
-		for i, cs := range snap.mainCols {
-			values[i] = cs.GetValue(idx)
+	}
+	if len(surviving) == 0 {
+		return
+	}
+	colValues := make([][]scm.Scmer, len(schema))
+	for i, cs := range mainCols {
+		colValues[i] = make([]scm.Scmer, len(surviving))
+		cs.GetValueMulti(surviving, colValues[i], 1)
+	}
+	values := make([]scm.Scmer, len(schema))
+	for row, idx := range surviving {
+		for i := range schema {
+			values[i] = colValues[i][row]
 		}
 		shardnum := computeShardIndex(schema, values)
 		result[shardnum] = append(result[shardnum], idx)
 	}
+}
+
+func (snap shardPartitionSnapshot) partition(schema []shardDimension) (result map[int][]uint32) {
+	result = make(map[int][]uint32)
+	values := make([]scm.Scmer, len(schema))
+
+	partitionMainRows(schema, snap.mainCount, &snap.deletions, snap.mainCols, result)
 
 	for idx, row := range snap.inserts {
 		recid := snap.mainCount + uint32(idx)
@@ -1149,17 +1170,7 @@ func (s *storageShard) partition(schema []shardDimension) (result map[int][]uint
 	for i, sd := range schema {
 		maincols[i], _ = s.columns[sd.Column]
 	}
-	for idx := uint32(0); idx < s.main_count; idx++ {
-		if s.deletions.Get(uint(idx)) {
-			continue
-		}
-		for i, cs := range maincols {
-			values[i] = cs.GetValue(idx)
-		}
-		shardnum := computeShardIndex(schema, values)
-		oldlist, _ := result[shardnum]
-		result[shardnum] = append(oldlist, idx)
-	}
+	partitionMainRows(schema, s.main_count, &s.deletions, maincols, result)
 
 	/* collect delta storage */
 	deltacols := make([]int, len(schema))

@@ -19333,6 +19333,141 @@ func (s *StorageSeq) GetValue(i uint32) scm.Scmer {
 
 }
 
+// findSegment does the same bisection as GetValue but as a plain local
+// search that never touches the shared s.lastValue atomic pivot cache.
+// GetValue's cache is a single field on the struct, so concurrent goroutines
+// doing bulk sequential reads over the same column would otherwise thrash
+// each other's cached pivot; the bulk paths below seed their own local walk
+// once and then advance it purely with local state.
+func (s *StorageSeq) findSegment(i uint32) uint32 {
+	var min, max uint32 = 0, s.seqCount - 1
+	for min < max {
+		pivot := (min + max + 1) / 2
+		recid := int64(s.recordId.GetValueUInt(pivot)) + s.recordId.offset
+		if uint32(recid) <= i {
+			min = pivot
+		} else {
+			max = pivot - 1
+		}
+	}
+	return min
+}
+
+// segmentAt reads the (recordId, isNil, start, stride) tuple for segment
+// seg. Called once per segment touched, not once per row.
+func (s *StorageSeq) segmentAt(seg uint32) (recordId int64, isNil bool, start int64, stride int64) {
+	recordId = int64(s.recordId.GetValueUInt(seg)) + s.recordId.offset
+	startRaw := s.start.GetValueUInt(seg)
+	if s.start.hasNull && startRaw == s.start.null {
+		isNil = true
+		return
+	}
+	start = int64(startRaw) + s.start.offset
+	stride = int64(s.stride.GetValueUInt(seg)) + s.stride.offset
+	return
+}
+
+func (s *StorageSeq) segmentEnd(seg uint32) int64 {
+	if seg+1 < s.seqCount {
+		return int64(s.recordId.GetValueUInt(seg+1)) + s.recordId.offset
+	}
+	return int64(s.count)
+}
+
+// GetValueRange reads count consecutive rows starting at recid. It seeds the
+// segment cursor with one local binary search and then walks forward: each
+// arithmetic-sequence segment is read as start+delta*stride incrementally
+// (a running add, no per-row multiply or search), and a nil segment fills
+// its whole span directly.
+func (s *StorageSeq) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	seg := s.findSegment(recid)
+	segRecordId, isNil, segStart, segStride := s.segmentAt(seg)
+	nextRecordId := s.segmentEnd(seg)
+	curVal := segStart + (int64(recid)-segRecordId)*segStride
+
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		i := int64(recid) + int64(k)
+		if i >= nextRecordId {
+			seg++
+			segRecordId, isNil, segStart, segStride = s.segmentAt(seg)
+			nextRecordId = s.segmentEnd(seg)
+			curVal = segStart + (i-segRecordId)*segStride
+		}
+		if isNil {
+			target[idx] = scm.NewNil()
+		} else {
+			target[idx] = scm.NewFloat(float64(curVal))
+			curVal += segStride
+		}
+		idx += stride
+	}
+}
+
+// GetValueMulti gathers arbitrary recids. When the batch is ascending (the
+// common case for an index-probe or range-scan batch), it walks the segment
+// cursor forward exactly like GetValueRange, recomputing the value with one
+// multiply per row (deltas between requested recids aren't necessarily 1)
+// but still only touching each crossed segment's recordId/start/stride once.
+// A genuinely unordered batch falls back to a fresh local findSegment per
+// row — still O(log seqCount) per row like GetValue, but without the shared
+// atomic pivot-cache contention.
+func (s *StorageSeq) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	n := len(recids)
+	if n == 0 {
+		return
+	}
+	ascending := true
+	for k := 1; k < n; k++ {
+		if recids[k] < recids[k-1] {
+			ascending = false
+			break
+		}
+	}
+
+	idx := 0
+	if ascending {
+		seg := s.findSegment(recids[0])
+		segRecordId, isNil, segStart, segStride := s.segmentAt(seg)
+		nextRecordId := s.segmentEnd(seg)
+		for _, recid := range recids {
+			i := int64(recid)
+			for i >= nextRecordId {
+				seg++
+				segRecordId, isNil, segStart, segStride = s.segmentAt(seg)
+				nextRecordId = s.segmentEnd(seg)
+			}
+			if isNil {
+				target[idx] = scm.NewNil()
+			} else {
+				target[idx] = scm.NewFloat(float64(segStart + (i-segRecordId)*segStride))
+			}
+			idx += stride
+		}
+		return
+	}
+
+	for _, recid := range recids {
+		seg := s.findSegment(recid)
+		segRecordId, isNil, segStart, segStride := s.segmentAt(seg)
+		if isNil {
+			target[idx] = scm.NewNil()
+		} else {
+			target[idx] = scm.NewFloat(float64(segStart + (int64(recid)-segRecordId)*segStride))
+		}
+		idx += stride
+	}
+}
+
 func (s *StorageSeq) prepare() {
 	// set up scan
 	s.recordId.prepare()
