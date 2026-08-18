@@ -589,6 +589,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list "mk" "memcp-tests" "multi_row_key_source" false nil)
 		(list (list (quote get_column) "mk" false "a" false) (list (quote get_column) "mk" false "b" false)))) true
 		"keytable key index declines when more than one non-session key remains")
+	/* planner_row_count_after_selectivity: an unlimited dataset reduce (a bare
+	COUNT(*) with no LIMIT and no unique point lookup) still has a knowable
+	call count -- its driving source's own row count -- it just isn't bounded
+	by a window. Only fall back to the caller-supplied sentinel when the
+	source's row count genuinely cannot be determined (not a base table, or
+	an unverifiable/fabricated one), matching the same "unknown stays
+	unknown" discipline as the keytable cost check above. */
+	(define row_count_unknown_src (list "rc" "memcp-tests" "row_count_unknown_source" false nil))
+	(assert (equal? (planner_row_count_after_selectivity
+		row_count_unknown_src (list row_count_unknown_src) "rc" true nil) nil) true
+		"row count after selectivity falls back to the caller's sentinel for an unverifiable source")
+	(assert (equal? (planner_row_count_after_selectivity
+		row_count_unknown_src (list row_count_unknown_src) "rc" true 1) 1) true
+		"row count after selectivity preserves whatever fallback the caller passed in")
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
