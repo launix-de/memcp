@@ -6642,6 +6642,19 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(planner_table_row_count (source_schema src) (source_relation src))
 		nil)))
 
+/* A driving source's own row count, scaled by how selective the residual
+condition is against it. Used wherever a nested probe's call count needs a
+real estimate instead of an unconditional "unknown": an unbounded scan still
+has a knowable multiplicity (its source's row count), it just isn't capped
+by a LIMIT or a unique point lookup. Falls back to `fallback` only when the
+source itself has no known row count (not a base table). */
+(define planner_row_count_after_selectivity (lambda (src sources default_alias condition fallback)
+	(begin
+		(define source_rows (planner_source_row_count src))
+		(if (number? source_rows)
+			(max 1 (* source_rows (join_optimizer_expr_selectivity sources default_alias condition)))
+			fallback))))
+
 (define planner_source_row_estimate (lambda (src)
 	(begin
 		(define rows (planner_source_row_count src))
@@ -9246,12 +9259,9 @@ both names therefore bind to the same parameter. */
 			true)
 		(define key_expr (query_block_first_expr prepared))
 		(define condition (combine_where (qb_where prepared) (source_join_expr src)))
-		(define source_rows (planner_source_row_count src))
 		(define probe_term (list (quote equal??) key_expr probe))
-		(define probe_work_rows (if (number? source_rows)
-			(max 1 (* source_rows
-				(join_optimizer_expr_selectivity (list src) (source_alias src) probe_term)))
-			1))
+		(define probe_work_rows (planner_row_count_after_selectivity
+			src (list src) (source_alias src) probe_term 1))
 		(define filtercols (merge_unique (list
 			(extract_columns_for_alias src condition)
 			(extract_columns_for_alias src key_expr))))
@@ -16456,10 +16466,15 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(source_join_exprs scan_sources))))
 		/* Dataset fields are mapped only after the native window accepts a row.
 		Propagate that bound so nested scalar probes can compare direct work with
-		the cost of preparing their complete dependent carriers. */
+		the cost of preparing their complete dependent carriers. An unlimited
+		reduce (e.g. a bare COUNT(*)) has no LIMIT window and no unique point
+		lookup to bound it, but its call count is still knowable: the driving
+		source's own row count, scaled by the residual condition's selectivity. */
 		(define projection_probe_work_rows (if (query_limit_active? (qb_offset block) (qb_limit block))
 			(coalesceNil (probe_limit_work_rows (qb_limit block)) 0)
-			(if (probe_context_unique_point? scan_sources first_alias final_condition) 1 nil)))
+			(if (probe_context_unique_point? scan_sources first_alias final_condition) 1
+				(planner_row_count_after_selectivity
+					driver_source scan_sources first_alias final_condition nil))))
 		(if direct_order_safe
 			(begin
 				(define row_expr (cons row_mapper (map field_exprs (lambda (expr)
