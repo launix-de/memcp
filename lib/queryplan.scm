@@ -9401,6 +9401,84 @@ through to reach the base table -- src already is it. */
 				nil
 				false)))))
 
+/* A scalar-first probe whose own value is presence-shaped (the same shape
+presence_bool_stage_output_expr? already recognizes for the group-stage-prepare
+path) can additionally be served by a RecSet: build the same group-cache
+keytable once, then materialize a RecSet of the domain rows where the cached
+value is true, and turn every driving row's check into an O(1) closure call
+via recset_key_index instead of a per-row scan_order point-read. Only
+presence-shaped values qualify -- recset_key_index answers membership, it
+cannot return an arbitrary scalar the way the keytable point-read can. */
+(define scalar_first_probe_boolean_value? (lambda (stage requested_col)
+	(begin
+		(define ag (scalar_first_probe_aggregate stage requested_col))
+		(and (not (nil? ag))
+			(presence_bool_stage_output_expr? (car (scalar_first_probe_parts ag)))))))
+
+/* Calibrated cost source: tools/costgen (see planner_recset_carrier_cost).
+RecSet's per-driving-row cost is folded entirely into its one-pass build --
+unlike the keytable carrier, there is no separate per-row read term because
+recset_project_join already visits every driving row once while building the
+membership set. */
+(define scalar_first_probe_recset_cost_preferred? (lambda (stage probe_work_rows)
+	(and (number? (planner_literal_value probe_work_rows))
+		(begin
+			(define probe_rows (planner_literal_value probe_work_rows))
+			(define input_rows (planner_stage_input_rows (gs_input stage)))
+			(and (number? input_rows)
+				(begin
+					(define recset_cost (planner_recset_carrier_cost input_rows probe_rows))
+					(and
+						(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
+						(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows)))))))))
+
+(define scalar_first_probe_recset_eligible? (lambda (stage src keys probe_work_rows requested_col)
+	(and (single_source? (qb_sources src))
+		(and (source_is_base_table? (car (qb_sources src)))
+			(and (empty_list? (qb_group src))
+				(and (nil? (qb_having src))
+					(and (empty_list? (qb_order src))
+						(and (nil? (qb_limit src)) (nil? (qb_offset src))
+							(and (not (nil? (scalar_first_probe_keytable_key_index stage (car (qb_sources src)) keys)))
+								(and (scalar_first_probe_boolean_value? stage requested_col)
+									(scalar_first_probe_recset_cost_preferred? stage probe_work_rows)))))))))))
+
+(define scalar_first_probe_recset_eligible_base? (lambda (stage src keys probe_work_rows requested_col)
+	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
+		(and (scalar_first_probe_boolean_value? stage requested_col)
+			(scalar_first_probe_recset_cost_preferred? stage probe_work_rows)))))
+
+(define recset_scalar_first_probe_lookup_key (lambda (stage)
+	(concat "__recset_probe_" (fnv_hash (gs_id stage)))))
+
+(define lower_recset_scalar_first_probe_expr (lambda (stage src requested_col resolved_lookup_key)
+	(begin
+		(define stage_catalog (stage_catalog_with_nested
+			(merge (list (nested_stage_catalog stage)
+				(if (query_block? src) (query_block_stage_catalog src) '())))))
+		(define cache (group_stage_cache stage))
+		(define cache_schema (group_cache_schema cache))
+		(define cache_relation (group_cache_relation cache))
+		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
+		(list (quote begin)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
+			(list
+				(list (quote context) "session")
+				lookup_key
+				(list (quote once) (list (quote lambda) '()
+					(list (quote recset_key_index)
+						(list (quote session) "__memcp_tx")
+						(list (quote scan_recset)
+							(list (quote session) "__memcp_tx")
+							(list (quote table) cache_schema cache_relation)
+							(quoted_runtime_list (list requested_col))
+							(list (quote lambda) (list (symbol requested_col))
+								(list (quote equal??) (symbol requested_col) true)))
+						(quoted_runtime_list (list "k0"))))))
+			(list (quote apply)
+				(list (list (quote context) "session") lookup_key)
+				(list (quote list) resolved_lookup_key))))))
+
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows)
 	(begin
 		(if (not (scalar_or_presence_probe_stage? stage))
@@ -9430,6 +9508,11 @@ through to reach the base table -- src already is it. */
 					(car lookup_keys) all_stages)
 				1
 				nil)
+			(if (and (query_block? src) (scalar_first_probe_recset_eligible? stage src keys probe_work_rows requested_col))
+				(lower_recset_scalar_first_probe_expr
+					stage src requested_col
+					(lower_column_expr_for_join sources default_alias
+						(nth lookup_keys (scalar_first_probe_keytable_key_index stage (car (qb_sources src)) keys))))
 			(if (and (query_block? src) (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows))
 				(lower_keytable_scalar_first_probe_expr
 					stage
@@ -9445,6 +9528,11 @@ through to reach the base table -- src already is it. */
 					keys
 					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
 					probe_work_rows)
+			(if (and (source_is_base_table? src) (scalar_first_probe_recset_eligible_base? stage src keys probe_work_rows requested_col))
+				(lower_recset_scalar_first_probe_expr
+					stage src requested_col
+					(lower_column_expr_for_join sources default_alias
+						(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys))))
 			(if (and (source_is_base_table? src) (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows))
 				(lower_keytable_scalar_first_probe_expr
 					stage
@@ -9482,7 +9570,7 @@ through to reach the base table -- src already is it. */
 							(lower_column_expr_for_alias src value_expr))
 						(scalar_once_reduce_first)
 						nil
-						false))))))))
+						false))))))))))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
@@ -12802,15 +12890,29 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 (define probe_limit_bounded? (lambda (limit_value)
 	(not (nil? (probe_limit_work_rows limit_value)))))
 
-/* Calibrated on multi-shard data: direct indexed probes cost about 125us per
-accepted outer row. A reusable presence carrier has a fixed initialization
-cost and scans/builds one compact key per input row. */
-(define planner_direct_presence_probe_cost (lambda (probe_rows)
-	(planner_cost 0 0 (* probe_rows 125000) 0 0 0 0 0 probe_rows 0.75)))
+/* BEGIN GENERATED COST CONSTANTS. DO NEVER MANUALLY EDIT THIS SECTION. RUN make costgen TO UPDATE.
+Calibrated by tools/costgen against a live storage engine (see that tool for the exact
+benchmark scenarios). Re-run make costgen whenever a storage-primitive perf change lands
+(e.g. an adaptive-index build fix) so these numbers keep tracking reality instead of
+silently drifting stale.
 
-(define planner_presence_carrier_cost (lambda (input_rows)
-	(planner_cost 20000000 0 0 0 0 (* input_rows 850)
-		(* input_rows 8) 0 input_rows 0.65)))
+domain_rows is the stage's own (usually small) input table -- what a carrier is built
+FROM. probe_rows is the driving table's row/evaluation count -- how many times the
+built carrier is actually READ. A keytable's dominant cost is per read (row_ns,
+scaled by probe_rows); a RecSet's dominant cost is its one-pass build over the driving
+side (build_ns, also scaled by probe_rows -- recset_project_join visits it once
+regardless of domain size, which is why domain_rows barely matters there). */
+(define planner_direct_presence_probe_cost (lambda (probe_rows)
+	(planner_cost 0 0 (* probe_rows 48685) 0 0 0 0 0 probe_rows 0.75)))
+
+(define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
+	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
+		(* domain_rows 8) 0 domain_rows 0.65)))
+
+(define planner_recset_carrier_cost (lambda (domain_rows probe_rows)
+	(planner_cost 365607 0 0 0 0 (* probe_rows 17681)
+		(* probe_rows 1) 0 probe_rows 0.6)))
+/* END GENERATED COST CONSTANTS */
 
 (define planner_direct_presence_probe_preferred? (lambda (probe_rows input_rows)
 	(and (number? probe_rows)
@@ -12818,7 +12920,7 @@ cost and scans/builds one compact key per input row. */
 			(and (number? input_rows)
 				(planner_cost_better?
 					(planner_direct_presence_probe_cost probe_rows)
-					(planner_presence_carrier_cost input_rows)))))))
+					(planner_presence_carrier_cost input_rows probe_rows)))))))
 
 (define stage_direct_probe_cost_preferred? (lambda (stage probe_rows_value)
 	(begin
