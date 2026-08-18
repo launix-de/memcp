@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "strings"
+import "unsafe"
 import "github.com/launix-de/memcp/scm"
 
 type StoragePrefix struct {
@@ -77,7 +78,17 @@ func (s *StoragePrefix) GetValueMulti(recids []uint32, target []scm.Scmer, strid
 	s.applyPrefixInPlace(target, idxbuf, uint32(len(recids)), stride)
 }
 
+// applyPrefixInPlace stitches each row's static dictionary prefix and its
+// already-bulk-fetched suffix (target[idx], from s.values' own bulk method)
+// together. Instead of one Go string concatenation (= one allocation) per
+// row, it sizes a single shared []byte arena for the whole batch, memcpys
+// every row's prefix+suffix bytes into it, and wraps each row's slice as a
+// zero-copy scm.NewString view — one allocation for the batch instead of one
+// per cell.
 func (s *StoragePrefix) applyPrefixInPlace(target []scm.Scmer, idxbuf []scm.Scmer, count uint32, stride int) {
+	pidxs := make([]int64, count)
+	rowLens := make([]int, count)
+	total := 0
 	idx := 0
 	for k := uint32(0); k < count; k++ {
 		inner := target[idx]
@@ -89,7 +100,23 @@ func (s *StoragePrefix) applyPrefixInPlace(target []scm.Scmer, idxbuf []scm.Scme
 			if pidx < 0 || pidx >= int64(len(s.prefixdictionary)) {
 				panic("prefix index out of range")
 			}
-			target[idx] = scm.NewString(s.prefixdictionary[pidx] + inner.String())
+			pidxs[k] = pidx
+			rowLens[k] = len(s.prefixdictionary[pidx]) + len(inner.String())
+			total += rowLens[k]
+		}
+		idx += stride
+	}
+
+	buf := make([]byte, total)
+	offset := 0
+	idx = 0
+	for k := uint32(0); k < count; k++ {
+		inner := target[idx]
+		if !inner.IsNil() {
+			n := copy(buf[offset:], s.prefixdictionary[pidxs[k]])
+			n += copy(buf[offset+n:], inner.String())
+			target[idx] = scm.NewString(unsafe.String(&buf[offset], n))
+			offset += n
 		}
 		idx += stride
 	}

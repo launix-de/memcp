@@ -2190,6 +2190,46 @@ func (s *StorageInt) GetValueMulti(recids []uint32, target []scm.Scmer, stride i
 	}
 }
 
+// getUIntMultiRaw decodes raw bit-packed values (no offset/null
+// interpretation, no Scmer boxing) at recids into dst. Package-internal use
+// only: wrapper formats that need these bits purely for an indirect lookup
+// (e.g. StorageString's dictionary-entry indirection) can skip the
+// Scmer-boxing round trip GetValueMulti pays for on every element, since
+// those boxed values would just be unwrapped again immediately. Duplicates
+// GetValueMulti's rolling-cursor loop rather than building on it, so the
+// public GetValueMulti keeps writing straight into its caller's target with
+// no extra intermediate allocation.
+func (s *StorageInt) getUIntMultiRaw(recids []uint32, dst []uint64) {
+	if len(recids) == 0 {
+		return
+	}
+	bitsize := uint(s.bitsize)
+	chunk := s.chunk
+
+	var chunkIdx, bitOff uint
+	havePos := false
+	var prevRecid uint32
+	for i, recid := range recids {
+		if !havePos || recid != prevRecid+1 {
+			bitpos := uint(recid) * bitsize
+			chunkIdx = bitpos / 64
+			bitOff = bitpos % 64
+		}
+		v := chunk[chunkIdx] << bitOff
+		if bitOff+bitsize > 64 {
+			v |= chunk[chunkIdx+1] >> (64 - bitOff)
+		}
+		dst[i] = v >> (64 - bitsize)
+		prevRecid = recid
+		havePos = true
+		bitOff += bitsize
+		if bitOff >= 64 {
+			bitOff -= 64
+			chunkIdx++
+		}
+	}
+}
+
 func (s *StorageInt) prepare() {
 	// set up scan
 	s.bitsize = 0

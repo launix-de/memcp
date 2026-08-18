@@ -313,21 +313,59 @@ func adjustStartsForFormat(starts *StorageInt) {
 
 // readNibbles decodes charLen nibble-encoded characters from ptr.
 // nibbleOff (0 or 1) is the nibble index within *ptr where decoding starts.
+// writeNibblesInto decodes len(dst) nibble-encoded characters from ptr
+// directly into dst. Shared by the single-value lazy decode path
+// (readNibbles) and the bulk arena decode path (bulkDecoder), so the nibble
+// unpacking logic exists exactly once regardless of whether the caller
+// wants a freshly allocated string or a slice of a shared batch buffer.
+func writeNibblesInto(dst []byte, ptr *byte, nibbleOff int, cs *nibbleCharset) {
+	for i := range dst {
+		absNibble := nibbleOff + i
+		b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absNibble/2)))
+		if absNibble%2 == 0 {
+			dst[i] = cs.enc[b&0x0F]
+		} else {
+			dst[i] = cs.enc[(b>>4)&0x0F]
+		}
+	}
+}
+
 func readNibbles(ptr *byte, nibbleOff int, charLen int, cs *nibbleCharset) string {
 	if charLen == 0 {
 		return ""
 	}
 	result := make([]byte, charLen)
-	for i := 0; i < charLen; i++ {
-		absNibble := nibbleOff + i
-		b := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(absNibble/2)))
-		if absNibble%2 == 0 {
-			result[i] = cs.enc[b&0x0F]
-		} else {
-			result[i] = cs.enc[(b>>4)&0x0F]
+	writeNibblesInto(result, ptr, nibbleOff, cs)
+	return unsafe.String(&result[0], charLen)
+}
+
+// writeUUIDInto decodes the 16 raw bytes at ptr into dst[:36] as a dashed
+// UUID string (upper selects the letter case). Shared by readUUID (single
+// value) and bulkDecoder (batch arena).
+func writeUUIDInto(dst []byte, ptr *byte, upper bool) {
+	b := unsafe.Slice(ptr, 16)
+	hex.Encode(dst[0:8], b[0:4])
+	dst[8] = '-'
+	hex.Encode(dst[9:13], b[4:6])
+	dst[13] = '-'
+	hex.Encode(dst[14:18], b[6:8])
+	dst[18] = '-'
+	hex.Encode(dst[19:23], b[8:10])
+	dst[23] = '-'
+	hex.Encode(dst[24:36], b[10:16])
+	if upper {
+		for i, c := range dst {
+			if c >= 'a' && c <= 'f' {
+				dst[i] = c - ('a' - 'A')
+			}
 		}
 	}
-	return unsafe.String(&result[0], charLen)
+}
+
+func readUUID(ptr *byte, upper bool) string {
+	var buf [36]byte
+	writeUUIDInto(buf[:], ptr, upper)
+	return string(buf[:])
 }
 
 // cstringDecompress materialises a tagCString Scmer into a plain Go string.
@@ -351,13 +389,9 @@ func cstringDecompress(ptr *byte, val uint64) string {
 	case FormatDateTime:
 		return readNibbles(ptr, nibbleOff, charLen, &dateTimeCharset)
 	case FormatUUIDLower:
-		b := unsafe.Slice(ptr, 16)
-		h := hex.EncodeToString(b)
-		return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+		return readUUID(ptr, false)
 	case FormatUUIDUpper:
-		b := unsafe.Slice(ptr, 16)
-		h := strings.ToUpper(hex.EncodeToString(b))
-		return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+		return readUUID(ptr, true)
 	default: // FormatRaw
 		if charLen == 0 {
 			return ""
@@ -679,47 +713,14 @@ func (s *StorageString) GetValue(i uint32) scm.Scmer {
 	return s.decodeAt(i, dict, dictBase)
 }
 
-// GetValueRange and GetValueMulti hoist the two things that GetValue would
-// otherwise redo on every element — ensureDict()'s lock/branch and the dict
-// base pointer computation — out of the loop, and collapse the per-call
-// atomic readCount increment into a single batched add.
-func (s *StorageString) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
-	if stride <= 0 {
-		stride = 1
-	}
-	if count == 0 {
-		return
-	}
-	atomic.AddUint64(&s.readCount, uint64(count))
-	dict := s.ensureDict()
-	dictBase := unsafe.Pointer(unsafe.StringData(dict))
-	idx := 0
-	for k := uint32(0); k < count; k++ {
-		target[idx] = s.decodeAt(recid+k, dict, dictBase)
-		idx += stride
-	}
-}
-
-func (s *StorageString) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
-	if stride <= 0 {
-		stride = 1
-	}
-	if len(recids) == 0 {
-		return
-	}
-	atomic.AddUint64(&s.readCount, uint64(len(recids)))
-	dict := s.ensureDict()
-	dictBase := unsafe.Pointer(unsafe.StringData(dict))
-	idx := 0
-	for _, recid := range recids {
-		target[idx] = s.decodeAt(recid, dict, dictBase)
-		idx += stride
-	}
-}
-
-// decodeAt is the format-dispatch decode logic shared by GetValue and the
-// bulk readers. dict/dictBase are passed in so bulk callers materialize the
-// dictionary exactly once per batch instead of once per row.
+// decodeAt is the single-row decode path: it returns a lazy CString/BString
+// for nibble/UUID/Base64 formats, deferring the actual decode to whenever
+// (and however many times) the value is eventually stringified. That is the
+// right tradeoff for a single GetValue call, where the caller may or may not
+// end up using the value (e.g. a rejected WHERE-filter row). The bulk
+// GetValueMulti/GetValueRange path below intentionally does not share this:
+// a bulk call is a promise that every value will be used, so it decodes
+// eagerly into one shared arena instead (see decodeBulk).
 func (s *StorageString) decodeAt(i uint32, dict string, dictBase unsafe.Pointer) scm.Scmer {
 	var startVal, lensVal uint64
 	if s.nodict {
@@ -775,6 +776,196 @@ func (s *StorageString) decodeAt(i uint32, dict string, dictBase unsafe.Pointer)
 		return scm.NewBString(ptr, decodedLen, s.format == FormatBase64Lower)
 	default:
 		return scm.NewNil()
+	}
+}
+
+// GetValueRange and GetValueMulti resolve every requested row's dictionary
+// position through the underlying starts/lens/values StorageInts' own bulk
+// methods (one call each, reusing their rolling-cursor optimization) instead
+// of decodeAt's per-row GetValueUInt calls, then decode the whole batch's
+// string content into one shared []byte arena instead of returning one lazy
+// CString/BString Scmer per row. A single GetValue only materializes the one
+// value it was asked for, so staying lazy there is correct; a bulk call is a
+// promise that every requested value will actually be used, so eagerly
+// decoding once into a shared, cache-local buffer beats paying for N small
+// allocations (one per lazy Scmer's eventual .String() call, or more if
+// called repeatedly) later.
+func (s *StorageString) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	recids := make([]uint32, count)
+	for k := range recids {
+		recids[k] = recid + uint32(k)
+	}
+	s.getValueBulk(recids, target, stride)
+}
+
+func (s *StorageString) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if len(recids) == 0 {
+		return
+	}
+	s.getValueBulk(recids, target, stride)
+}
+
+func (s *StorageString) getValueBulk(recids []uint32, target []scm.Scmer, stride int) {
+	atomic.AddUint64(&s.readCount, uint64(len(recids)))
+	rawStarts, rawLens, isNil := s.resolvePositions(recids)
+	s.decodeBulk(rawStarts, rawLens, isNil, target, stride)
+}
+
+// resolvePositions bulk-resolves the raw (offset not yet applied) start+lens
+// position for every requested row. In dict mode, a row's dictionary entry
+// index is looked up first (bulk), and starts/lens are then looked up at
+// those entry indices (also bulk — getUIntMultiRaw handles the resulting
+// non-sequential index list correctly, just without the sequential fast
+// path). dictIdxs stays row-indexed (length n, garbage-but-safe 0 for NULL
+// rows) rather than compacted to the non-NULL subset, trading a few wasted
+// starts/lens lookups for NULL rows against dropping a whole extra
+// position-mapping array and pass.
+func (s *StorageString) resolvePositions(recids []uint32) (rawStarts, rawLens []uint64, isNil []bool) {
+	n := len(recids)
+	isNil = make([]bool, n)
+
+	if s.nodict {
+		rawStarts = make([]uint64, n)
+		s.starts.getUIntMultiRaw(recids, rawStarts)
+		for i := 0; i < n; i++ {
+			if s.starts.hasNull && rawStarts[i] == s.starts.null {
+				isNil[i] = true
+			}
+		}
+		rawLens = make([]uint64, n)
+		s.lens.getUIntMultiRaw(recids, rawLens)
+		return
+	}
+
+	rawValues := make([]uint64, n)
+	s.values.getUIntMultiRaw(recids, rawValues)
+	dictIdxs := make([]uint32, n)
+	for i := 0; i < n; i++ {
+		if s.values.hasNull && rawValues[i] == s.values.null {
+			isNil[i] = true
+			continue
+		}
+		dictIdxs[i] = uint32(int64(rawValues[i]) + s.values.offset)
+	}
+	rawStarts = make([]uint64, n)
+	rawLens = make([]uint64, n)
+	if s.starts.count > 0 {
+		s.starts.getUIntMultiRaw(dictIdxs, rawStarts)
+		s.lens.getUIntMultiRaw(dictIdxs, rawLens)
+	}
+	return
+}
+
+// bulkDecodeFn decodes one row's content into dst (already sized to that
+// row's exact output length) given its dictionary start/lens position.
+type bulkDecodeFn func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64)
+
+// bulkDecoder resolves s.format once per batch (not once per row) into an
+// output-length function and a decode function, mirroring cstringDecompress's
+// format switch but writing into a caller-provided slice instead of
+// allocating a fresh string.
+func (s *StorageString) bulkDecoder() (outLen func(lensVal uint64) int, decode bulkDecodeFn, unknownFormat bool) {
+	if cs := nibbleCharsetFor(s.format); cs != nil {
+		return func(lensVal uint64) int { return int(lensVal) },
+			func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64) {
+				ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal>>1)))
+				writeNibblesInto(dst, ptr, int(startVal&1), cs)
+			}, false
+	}
+	switch s.format {
+	case FormatRaw:
+		return func(lensVal uint64) int { return int(lensVal) },
+			func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64) {
+				copy(dst, dict[startVal:startVal+lensVal])
+			}, false
+	case FormatUUIDLower, FormatUUIDUpper:
+		upper := s.format == FormatUUIDUpper
+		return func(uint64) int { return 36 },
+			func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64) {
+				ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
+				writeUUIDInto(dst, ptr, upper)
+			}, false
+	case FormatBase64Upper:
+		return func(lensVal uint64) int { return base64.StdEncoding.EncodedLen(int(lensVal)) },
+			func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64) {
+				ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
+				base64.StdEncoding.Encode(dst, unsafe.Slice(ptr, int(lensVal)))
+			}, false
+	case FormatBase64Lower:
+		return func(lensVal uint64) int { return base64.URLEncoding.EncodedLen(int(lensVal)) },
+			func(dst []byte, dictBase unsafe.Pointer, dict string, startVal, lensVal uint64) {
+				ptr := (*byte)(unsafe.Pointer(uintptr(dictBase) + uintptr(startVal)))
+				base64.URLEncoding.Encode(dst, unsafe.Slice(ptr, int(lensVal)))
+			}, false
+	default:
+		return nil, nil, true
+	}
+}
+
+// decodeBulk decodes every row's content into one shared []byte arena
+// (sized in a first pass, filled in a second) and wraps each row's slice of
+// it as a zero-copy scm.NewString view — one allocation for the whole batch
+// instead of one per row.
+// decodeBulk decodes every row's content into one shared []byte arena and
+// wraps each row's slice of it as a zero-copy scm.NewString view — one
+// allocation for the whole batch instead of one per row. It applies the
+// starts/lens StorageInt offsets inline (per row, in the size pass and again
+// in the decode pass) instead of pre-computing and storing offset-applied
+// values in their own arrays, trading a cheap redundant add+outLen() call
+// for one fewer n-sized array and one fewer pass over it.
+func (s *StorageString) decodeBulk(rawStarts, rawLens []uint64, isNil []bool, target []scm.Scmer, stride int) {
+	n := len(rawStarts)
+	idx := 0
+	outLen, decode, unknownFormat := s.bulkDecoder()
+	if unknownFormat {
+		for i := 0; i < n; i++ {
+			target[idx] = scm.NewNil()
+			idx += stride
+		}
+		return
+	}
+
+	dict := s.ensureDict()
+	dictBase := unsafe.Pointer(unsafe.StringData(dict))
+	startsOffset := s.starts.offset
+	lensOffset := s.lens.offset
+
+	total := 0
+	for i := 0; i < n; i++ {
+		if !isNil[i] {
+			total += outLen(uint64(int64(rawLens[i]) + lensOffset))
+		}
+	}
+
+	buf := make([]byte, total)
+	offset := 0
+	for i := 0; i < n; i++ {
+		if isNil[i] {
+			target[idx] = scm.NewNil()
+			idx += stride
+			continue
+		}
+		lensVal := uint64(int64(rawLens[i]) + lensOffset)
+		l := outLen(lensVal)
+		if l == 0 {
+			target[idx] = scm.NewString("")
+		} else {
+			startVal := uint64(int64(rawStarts[i]) + startsOffset)
+			row := buf[offset : offset+l]
+			decode(row, dictBase, dict, startVal, lensVal)
+			target[idx] = scm.NewString(unsafe.String(&row[0], l))
+			offset += l
+		}
+		idx += stride
 	}
 }
 
