@@ -9286,6 +9286,111 @@ until lowering without creating a depth-proportional binary OR chain. */
 				(lower_exists_union_probe_branch
 					sources default_alias branch probe stage_lookup dependency_graph)))))))
 
+/* A scalar-first probe whose input is a derived table wrapping exactly one
+base table, keyed by one of that table's own unique-key columns, is a
+foreign-key point lookup: the same (small) set of key values recurs across
+many outer rows (e.g. a dokument row's mandant/standort/... FK). Direct
+per-row probing (lower_scalar_first_query_probe_expr) recomputes the value
+fresh for every outer row even when many rows share the same key. When the
+cost model prefers a reusable carrier over N direct probes -- the same
+comparison already used to decide whether a nested presence stage should be
+inlined -- lower this as a group keytable instead, built once and read via
+O(1) point lookups. Multi-column and non-unique-key domains keep using the
+direct probe; only the single-unique-column case is eligible here.
+
+The stage's key domain may include session reads (e.g. a permission check
+correlated to the current user) alongside the true per-outer-row key. Those
+are constant for the whole query execution and are not part of what makes a
+row-to-row carrier worth building; group_stage_session_domain_keys already
+identifies them for other group-stage lowering, so the same rows/columns
+carrier semantics apply here. Only the remaining, single non-session key is
+what must resolve to src's own unique key. */
+(define scalar_first_probe_keytable_key_index (lambda (stage src keys)
+	(begin
+		(define session_indices (filter
+			(map (group_stage_session_domain_keys stage) (lambda (expr) (group_key_expr_index keys expr)))
+			(lambda (idx) (not (nil? idx)))))
+		(define row_indices (filter (produceN (count keys)) (lambda (i) (not (contains? session_indices i)))))
+		(if (not (equal? (count row_indices) 1))
+			nil
+			(begin
+				(define idx (car row_indices))
+				(define col (direct_column_name_for_alias src (nth keys idx)))
+				(if (nil? col)
+					nil
+					(if (reduce (source_unique_key_sets src) (lambda (found key_cols)
+							(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
+							false)
+						idx
+						nil)))))))
+
+/* stage_direct_probe_cost_preferred? only weighs the two costs against each
+other when probe_work_rows is a known number; planner_direct_presence_probe_preferred?
+short-circuits to false otherwise, purely because (number? probe_rows) fails,
+not because the comparison came out in the carrier's favor. Treating "not
+known to be direct-preferred" as "carrier preferred" is wrong: with no row
+estimate, the carrier's own cost (input_rows, e.g. a large base table) was
+never checked either, and a keytable over the whole source can be far more
+expensive than any number of direct probes. Only activate this path when we
+actually have a probe-count estimate to compare against; otherwise keep the
+existing, already-safe direct probe. */
+(define scalar_first_probe_keytable_cost_preferred? (lambda (stage probe_work_rows)
+	(and (number? (planner_literal_value probe_work_rows))
+		(not (stage_direct_probe_cost_preferred? stage probe_work_rows)))))
+
+(define scalar_first_probe_keytable_eligible? (lambda (stage src keys probe_work_rows)
+	/* Unlike lower_direct_scalar_query_probe, this path builds the keytable via
+	lower_group_stage_prepare_using, the same general machinery any group-stage
+	(including ones with nested dependent stages, like a nested EXISTS check)
+	already uses. So qb_stages on src need not be empty here -- only the shape
+	of src's own group/having/order/limit and its join-key's uniqueness matter. */
+	(and (single_source? (qb_sources src))
+		(and (source_is_base_table? (car (qb_sources src)))
+			(and (empty_list? (qb_group src))
+				(and (nil? (qb_having src))
+					(and (empty_list? (qb_order src))
+						(and (nil? (qb_limit src)) (nil? (qb_offset src))
+							(and (not (nil? (scalar_first_probe_keytable_key_index stage (car (qb_sources src)) keys)))
+								(scalar_first_probe_keytable_cost_preferred? stage probe_work_rows)))))))))))
+
+/* untangle_query's derived-table inlining commonly collapses a simple
+`FROM (SELECT ... FROM t WHERE t.pk = domain) alias` down to gs_input being
+t itself: there is no wrapping query-block left once the derived table's
+single source has been inlined. That shape is eligible for the same keytable
+treatment as the query-block case; there is just no (qb_sources src) to look
+through to reach the base table -- src already is it. */
+(define scalar_first_probe_keytable_eligible_base? (lambda (stage src keys probe_work_rows)
+	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
+		(scalar_first_probe_keytable_cost_preferred? stage probe_work_rows))))
+
+(define lower_keytable_scalar_first_probe_expr (lambda (stage requested_col resolved_lookup_key physical_max_rows)
+	(begin
+		(define src (gs_input stage))
+		(define stage_catalog (stage_catalog_with_nested
+			(merge (list (nested_stage_catalog stage)
+				(if (query_block? src) (query_block_stage_catalog src) '())))))
+		(define cache (group_stage_cache stage))
+		(define cache_schema (group_cache_schema cache))
+		(define cache_relation (group_cache_relation cache))
+		(list (quote begin)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
+			(list (quote scan_order)
+				'(session "__memcp_tx")
+				(list (quote table) cache_schema cache_relation)
+				(cons (quote list) (list "k0"))
+				(list (quote lambda) (list (quote __kt_k0))
+					(list (quote optimize) (list (quote equal??) (quote __kt_k0) resolved_lookup_key)))
+				(cons (quote list) '())
+				(cons (quote list) '())
+				0
+				0
+				physical_max_rows
+				(cons (quote list) (list requested_col))
+				(list (quote lambda) (list (symbol requested_col)) (symbol requested_col))
+				(scalar_once_reduce_first)
+				nil
+				false)))))
+
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows)
 	(begin
 		(if (not (scalar_or_presence_probe_stage? stage))
@@ -9315,6 +9420,13 @@ until lowering without creating a depth-proportional binary OR chain. */
 					(car lookup_keys) all_stages)
 				1
 				nil)
+			(if (and (query_block? src) (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows))
+				(lower_keytable_scalar_first_probe_expr
+					stage
+					requested_col
+					(lower_column_expr_for_join sources default_alias
+						(nth lookup_keys (scalar_first_probe_keytable_key_index stage (car (qb_sources src)) keys)))
+					physical_max_rows)
 			(if (query_block? src)
 				(lower_scalar_first_query_probe_expr
 					all_stages
@@ -9323,6 +9435,13 @@ until lowering without creating a depth-proportional binary OR chain. */
 					keys
 					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
 					probe_work_rows)
+			(if (and (source_is_base_table? src) (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows))
+				(lower_keytable_scalar_first_probe_expr
+					stage
+					requested_col
+					(lower_column_expr_for_join sources default_alias
+						(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys)))
+					physical_max_rows)
 				(begin
 					(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 					(define condition_cols (extract_columns_for_alias src condition))
@@ -9353,7 +9472,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 							(lower_column_expr_for_alias src value_expr))
 						(scalar_once_reduce_first)
 						nil
-						false))))))
+						false))))))))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
