@@ -13837,7 +13837,7 @@ get_column refs to the source) are excluded automatically too. */
 		(define src (gs_input stage))
 		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
 		(define fact_lookup (group_stage_lowering_catalog stage))
-		(define stage_lookup (if (lowering_catalog? lookup_stages)
+		(define raw_stage_lookup (if (lowering_catalog? lookup_stages)
 			lookup_stages
 			(if (lowering_catalog? fact_lookup)
 				fact_lookup
@@ -13846,6 +13846,18 @@ get_column refs to the source) are excluded automatically too. */
 						prepare_catalog
 						lookup_stages
 						(qassoc_get (gs_facts stage) (quote stage_catalog) '())))))))
+		/* A presence/scalar-first-probe source whose lookup domain is invariant
+		for the whole query (only literals, parameters, or session values -- no
+		outer-row column) is evaluated exactly once regardless of how many rows
+		this stage's own input scan accepts. Bind it before rewriting so
+		rewrite_scalar_first_probe_expr_using_index (via query_invariant_probe_
+		binding_for_col) replaces every reference with that one bound value
+		instead of a fresh per-row probe. Mirrors
+		prepare_simple_query_block_physical_core_chosen. */
+		(define invariant_probe_entries (query_invariant_probe_entries_for_stages raw_stage_lookup))
+		(define stage_lookup (stage_lookup_with_query_invariant_probe_bindings
+			raw_stage_lookup invariant_probe_entries))
+		(define invariant_probe_bindings (query_invariant_probe_bindings invariant_probe_entries))
 		(if (and (not (union_block? src)) (and (not (query_block? src)) (not (source_is_base_table? src))))
 			(neumann_fail "build_queryplan" "group-stage lowering expects a base table, query-block, or union-block input")
 			true)
@@ -14032,7 +14044,7 @@ get_column refs to the source) are excluded automatically too. */
 					(list (quote touch_keytable) (list (quote table) schema grouptbl))
 					group_cache_created))
 			(list (quote createtable) schema grouptbl create_cols create_options true)))
-		(define lowered_plan (if scalar_query_stage
+		(define lowered_plan_core (if scalar_query_stage
 			(list (quote !begin)
 				nested_prepare_expr
 				(if initializer_owner keytable_init nil)
@@ -14071,6 +14083,13 @@ get_column refs to the source) are excluded automatically too. */
 											aggregate_prepare_expr)))
 								keytable_init)
 							aggregate_prepare_expr))))))
+		/* A query-invariant presence/scalar-first probe (see the comment at
+		raw_stage_lookup above) is bound exactly once here, ahead of whatever
+		this stage's own prepare plan does, so every rewritten reference below
+		reads that one binding instead of re-probing per row. */
+		(define lowered_plan (if (empty_list? invariant_probe_bindings)
+			lowered_plan_core
+			(cons (quote !begin) (merge (list invariant_probe_bindings (list lowered_plan_core))))))
 		(if (nil? base_group_into_plan)
 			lowered_plan
 			(list
