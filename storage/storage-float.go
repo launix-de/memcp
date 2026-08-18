@@ -416,6 +416,39 @@ func (s *StorageFloat) GetValue(i uint32) scm.Scmer {
 	return scm.NewFloat(s.values[i])
 }
 
+func (s *StorageFloat) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	values := s.values[recid : uint32(recid)+count]
+	idx := 0
+	for _, v := range values {
+		if math.IsNaN(v) {
+			target[idx] = scm.NewNil()
+		} else {
+			target[idx] = scm.NewFloat(v)
+		}
+		idx += stride
+	}
+}
+
+func (s *StorageFloat) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	values := s.values
+	idx := 0
+	for _, recid := range recids {
+		v := values[recid]
+		if math.IsNaN(v) {
+			target[idx] = scm.NewNil()
+		} else {
+			target[idx] = scm.NewFloat(v)
+		}
+		idx += stride
+	}
+}
+
 func (s *StorageFloat) scan(i uint32, value scm.Scmer) {
 }
 func (s *StorageFloat) prepare() {

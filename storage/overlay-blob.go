@@ -144,7 +144,41 @@ func gunzipValue(gzipped string) scm.Scmer {
 func (s *OverlayBlob) GetCachedReader() ColumnReader { return s }
 
 func (s *OverlayBlob) GetValue(i uint32) scm.Scmer {
-	v := s.Base.GetValue(i)
+	return s.resolveBlob(s.Base.GetValue(i))
+}
+
+// GetValueRange and GetValueMulti bulk-fetch the base storage (one call
+// instead of n GetValue calls) and then resolve the blob-escape encoding for
+// each result in place.
+func (s *OverlayBlob) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	s.Base.GetValueRange(recid, count, target, stride)
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = s.resolveBlob(target[idx])
+		idx += stride
+	}
+}
+
+func (s *OverlayBlob) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	s.Base.GetValueMulti(recids, target, stride)
+	idx := 0
+	for range recids {
+		target[idx] = s.resolveBlob(target[idx])
+		idx += stride
+	}
+}
+
+// resolveBlob turns a base-storage value into its logical value: a plain
+// value passes through unchanged; a "!"-prefixed string is either an
+// escaped literal ("!!...") or a blob reference that must be loaded from
+// persistence (or the in-memory build-time cache) and gunzipped.
+func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
 	if v.IsString() {
 		vs := v.String()
 		if vs != "" && vs[0] == '!' {

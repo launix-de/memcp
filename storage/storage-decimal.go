@@ -120,6 +120,43 @@ func (s *StorageDecimal) GetValue(i uint32) scm.Scmer {
 	return scm.NewFloat(float64(v) * pow10f[int(s.scaleExp)+15])
 }
 
+// GetValueRange and GetValueMulti delegate the raw (offset-applied,
+// null-checked) integer decode to the wrapped StorageInt's own bulk method
+// — which is where the bit-unpacking cursor optimization lives — and then
+// rescale each non-nil result in place, avoiding a second per-element
+// GetValue dispatch.
+func (s *StorageDecimal) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	s.inner.GetValueRange(recid, count, target, stride)
+	s.rescaleInPlace(target, count, stride)
+}
+
+func (s *StorageDecimal) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	s.inner.GetValueMulti(recids, target, stride)
+	s.rescaleInPlace(target, uint32(len(recids)), stride)
+}
+
+func (s *StorageDecimal) rescaleInPlace(target []scm.Scmer, count uint32, stride int) {
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		v := target[idx]
+		if !v.IsNil() {
+			raw := v.Int()
+			if s.scaleExp > 0 {
+				target[idx] = scm.NewInt(raw * pow10i[s.scaleExp])
+			} else {
+				target[idx] = scm.NewFloat(float64(raw) * pow10f[int(s.scaleExp)+15])
+			}
+		}
+		idx += stride
+	}
+}
+
 // scaleValue converts a scm.Scmer to the scaled integer representation
 func (s *StorageDecimal) scaleValue(value scm.Scmer) scm.Scmer {
 	if value.IsNil() {

@@ -203,6 +203,34 @@ func (s *StorageSCMER) GetValue(i uint32) scm.Scmer {
 	return s.values[i]
 }
 
+func (s *StorageSCMER) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if stride == 1 {
+		copy(target[:count], s.values[recid:uint32(recid)+count])
+		return
+	}
+	values := s.values[recid : uint32(recid)+count]
+	idx := 0
+	for _, v := range values {
+		target[idx] = v
+		idx += stride
+	}
+}
+
+func (s *StorageSCMER) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	values := s.values
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = values[recid]
+		idx += stride
+	}
+}
+
 func (s *StorageSCMER) SetValue(i uint32, v scm.Scmer) {
 	s.values[i] = v
 }

@@ -44,6 +44,30 @@ func (s *StorageConst) GetValue(i uint32) scm.Scmer {
 	return s.value
 }
 
+// GetValueRange and GetValueMulti fill target with the single constant
+// value directly; there is no per-row work to batch.
+func (s *StorageConst) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = s.value
+		idx += stride
+	}
+}
+
+func (s *StorageConst) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	idx := 0
+	for range recids {
+		target[idx] = s.value
+		idx += stride
+	}
+}
+
 func (s *StorageConst) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {

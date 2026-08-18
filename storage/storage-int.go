@@ -2099,6 +2099,97 @@ func (s *StorageInt) GetValueUInt(i uint32) uint64 {
 	return uint64(v) >> (64 - uint(s.bitsize)) // shift right without sign
 }
 
+// GetValueRange decodes count consecutive bit-packed values starting at
+// recid. Unlike calling GetValueUInt in a loop, it keeps a running
+// chunk/bit-offset cursor and advances it by bitsize each step instead of
+// recomputing bitpos/64 and bitpos%64 (a division+modulo) from scratch for
+// every element, since consecutive rows are exactly bitsize bits apart.
+func (s *StorageInt) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	bitsize := uint(s.bitsize)
+	hasNull := s.hasNull
+	null := s.null
+	offset := s.offset
+	chunk := s.chunk
+
+	bitpos := uint(recid) * bitsize
+	chunkIdx := bitpos / 64
+	bitOff := bitpos % 64
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		v := chunk[chunkIdx] << bitOff
+		if bitOff+bitsize > 64 {
+			v |= chunk[chunkIdx+1] >> (64 - bitOff)
+		}
+		raw := v >> (64 - bitsize)
+		if hasNull && raw == null {
+			target[idx] = scm.NewNil()
+		} else {
+			target[idx] = scm.NewInt(int64(raw) + offset)
+		}
+		idx += stride
+		bitOff += bitsize
+		if bitOff >= 64 {
+			bitOff -= 64
+			chunkIdx++
+		}
+	}
+}
+
+// GetValueMulti gathers values at arbitrary recids. Consecutive recids that
+// happen to be adjacent (recids[k] == recids[k-1]+1, the common case for a
+// batch drawn from a contiguous index range) reuse the rolling cursor from
+// GetValueRange; any jump falls back to a direct bitpos computation for that
+// element only.
+func (s *StorageInt) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if len(recids) == 0 {
+		return
+	}
+	bitsize := uint(s.bitsize)
+	hasNull := s.hasNull
+	null := s.null
+	offset := s.offset
+	chunk := s.chunk
+
+	var chunkIdx, bitOff uint
+	havePos := false
+	var prevRecid uint32
+	idx := 0
+	for _, recid := range recids {
+		if !havePos || recid != prevRecid+1 {
+			bitpos := uint(recid) * bitsize
+			chunkIdx = bitpos / 64
+			bitOff = bitpos % 64
+		}
+		v := chunk[chunkIdx] << bitOff
+		if bitOff+bitsize > 64 {
+			v |= chunk[chunkIdx+1] >> (64 - bitOff)
+		}
+		raw := v >> (64 - bitsize)
+		if hasNull && raw == null {
+			target[idx] = scm.NewNil()
+		} else {
+			target[idx] = scm.NewInt(int64(raw) + offset)
+		}
+		idx += stride
+		prevRecid = recid
+		havePos = true
+		bitOff += bitsize
+		if bitOff >= 64 {
+			bitOff -= 64
+			chunkIdx++
+		}
+	}
+}
+
 func (s *StorageInt) prepare() {
 	// set up scan
 	s.bitsize = 0

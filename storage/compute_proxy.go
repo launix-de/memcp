@@ -256,6 +256,67 @@ func (r *computeVariantReader) GetValue(idx uint32) scm.Scmer {
 	return val
 }
 
+// GetValueRange and GetValueMulti mirror StorageComputeProxy's own bulk
+// fast path: delegate straight to v.main in one call when every row is
+// already valid and materialized there, otherwise fall back to this
+// reader's own GetValue per row (full delta/compute repair logic).
+func (r *computeVariantReader) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	v := r.variant
+	if v.compressed && v.main != nil && uint64(recid)+uint64(count) <= uint64(v.count) {
+		v.mu.RLock()
+		deltaEmpty := len(v.delta) == 0
+		v.mu.RUnlock()
+		if deltaEmpty {
+			v.main.GetValueRange(recid, count, target, stride)
+			return
+		}
+	}
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = r.GetValue(recid + k)
+		idx += stride
+	}
+}
+
+func (r *computeVariantReader) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if len(recids) == 0 {
+		return
+	}
+	v := r.variant
+	if v.compressed && v.main != nil {
+		allMain := true
+		for _, recid := range recids {
+			if recid >= v.count {
+				allMain = false
+				break
+			}
+		}
+		if allMain {
+			v.mu.RLock()
+			deltaEmpty := len(v.delta) == 0
+			v.mu.RUnlock()
+			if deltaEmpty {
+				v.main.GetValueMulti(recids, target, stride)
+				return
+			}
+		}
+	}
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = r.GetValue(recid)
+		idx += stride
+	}
+}
+
 func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
 	p := r.proxy
 
@@ -283,6 +344,65 @@ func (r *computeProxyReader) GetValue(idx uint32) scm.Scmer {
 	p.mu.Unlock()
 	p.validMask.Set(uint(idx), true)
 	return val
+}
+
+// GetValueRange and GetValueMulti mirror computeVariantReader's bulk fast
+// path against p (the proxy) instead of a session variant.
+func (r *computeProxyReader) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	p := r.proxy
+	if p.compressed && p.main != nil && uint64(recid)+uint64(count) <= uint64(p.count) {
+		p.mu.RLock()
+		deltaEmpty := len(p.delta) == 0
+		p.mu.RUnlock()
+		if deltaEmpty {
+			p.main.GetValueRange(recid, count, target, stride)
+			return
+		}
+	}
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = r.GetValue(recid + k)
+		idx += stride
+	}
+}
+
+func (r *computeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if len(recids) == 0 {
+		return
+	}
+	p := r.proxy
+	if p.compressed && p.main != nil {
+		allMain := true
+		for _, recid := range recids {
+			if recid >= p.count {
+				allMain = false
+				break
+			}
+		}
+		if allMain {
+			p.mu.RLock()
+			deltaEmpty := len(p.delta) == 0
+			p.mu.RUnlock()
+			if deltaEmpty {
+				p.main.GetValueMulti(recids, target, stride)
+				return
+			}
+		}
+	}
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = r.GetValue(recid)
+		idx += stride
+	}
 }
 
 func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
@@ -519,6 +639,70 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	p.validMask.Set(uint(idx), true)
 
 	return val
+}
+
+// GetValueRange and GetValueMulti take the fast path — one bulk call
+// straight into p.main — only when every requested row is guaranteed to
+// come from main with no repair work: not an ORC column, no pending delta
+// overrides, and the proxy is fully compressed. That mirrors GetValue's own
+// "fast path 1" above. Any other case (ORC, live delta entries, rows beyond
+// the compressed main, or a row still needing on-demand compute) falls back
+// to the existing per-row GetValue, which already contains the full
+// invalidation/session/delta repair logic; duplicating that logic here for
+// the sake of batching would risk subtly diverging from it.
+func (p *StorageComputeProxy) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if count == 0 {
+		return
+	}
+	if !p.isOrdered && p.compressed && p.main != nil && uint64(recid)+uint64(count) <= uint64(p.count) {
+		p.mu.RLock()
+		deltaEmpty := len(p.delta) == 0
+		p.mu.RUnlock()
+		if deltaEmpty {
+			p.main.GetValueRange(recid, count, target, stride)
+			return
+		}
+	}
+	idx := 0
+	for k := uint32(0); k < count; k++ {
+		target[idx] = p.GetValue(recid + k)
+		idx += stride
+	}
+}
+
+func (p *StorageComputeProxy) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if len(recids) == 0 {
+		return
+	}
+	if !p.isOrdered && p.compressed && p.main != nil {
+		allMain := true
+		for _, recid := range recids {
+			if recid >= p.count {
+				allMain = false
+				break
+			}
+		}
+		if allMain {
+			p.mu.RLock()
+			deltaEmpty := len(p.delta) == 0
+			p.mu.RUnlock()
+			if deltaEmpty {
+				p.main.GetValueMulti(recids, target, stride)
+				return
+			}
+		}
+	}
+	idx := 0
+	for _, recid := range recids {
+		target[idx] = p.GetValue(recid)
+		idx += stride
+	}
 }
 
 func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
