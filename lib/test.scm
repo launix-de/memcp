@@ -545,6 +545,50 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(nth rebound_parent_ref 3)
 		(aggregate_col_name (car (gs_aggregates rebound_parent_stage))))
 		true "derived stage rebinding updates aggregate column handles")
+	/* scalar_first_probe_keytable_cost_preferred? safety: an unknown (non-number)
+	probe_work_rows must never be treated as "the carrier is cheaper". The shared
+	comparison (planner_direct_presence_probe_preferred?) only weighs the two
+	costs when both estimates are numbers; without a probe-count estimate, the
+	carrier alternative was never actually costed either, so a keytable could be
+	built over a source table far larger than any realistic number of direct
+	probes would justify. Treating "not known to be direct-preferred" as
+	"carrier preferred" -- rather than "unknown, keep the existing safe path" --
+	previously caused exactly that regression against a real production table. */
+	(define cost_probe_stage (make_group_stage
+		"cost-probe-stage"
+		(list "cp" "memcp-tests" "cost_probe_source" false nil)
+		'() '(1) (list (list 1 (quote +) 0)) nil '() '() nil nil '()))
+	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage nil) false
+		"keytable cost check refuses the carrier when probe_work_rows is unknown")
+	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage false) false
+		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric sentinel")
+	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage "72") false
+		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric string")
+	/* scalar_first_probe_keytable_key_index: the stage's key domain may mix a
+	true per-outer-row key with session-constant reads (e.g. a permission check
+	correlated to the current user). Only the non-session key identifies which
+	outer value drives the lookup; with more than one non-session key, or none,
+	there is no single row-identity to build a carrier around. */
+	(define session_key_stage (make_group_stage
+		"session-key-stage"
+		(list "sk" "memcp-tests" "session_key_source" false nil)
+		(list (list (quote session) "probe_user"))
+		(list (list (quote get_column) "sk" false "id" false) (list (quote session) "probe_user"))
+		(list (list 1 (quote +) 0)) nil '() '() nil nil '()))
+	(define session_key_src (list "sk" "memcp-tests" "session_key_source" false nil))
+	(define session_key_keys (list (list (quote get_column) "sk" false "id" false) (list (quote session) "probe_user")))
+	(assert (nil? (scalar_first_probe_keytable_key_index session_key_stage session_key_src session_key_keys)) true
+		"keytable key index declines when the source's uniqueness cannot be verified (unknown table)")
+	(define multi_row_key_stage (make_group_stage
+		"multi-row-key-stage"
+		(list "mk" "memcp-tests" "multi_row_key_source" false nil)
+		'()
+		(list (list (quote get_column) "mk" false "a" false) (list (quote get_column) "mk" false "b" false))
+		(list (list 1 (quote +) 0)) nil '() '() nil nil '()))
+	(assert (nil? (scalar_first_probe_keytable_key_index multi_row_key_stage
+		(list "mk" "memcp-tests" "multi_row_key_source" false nil)
+		(list (list (quote get_column) "mk" false "a" false) (list (quote get_column) "mk" false "b" false)))) true
+		"keytable key index declines when more than one non-session key remains")
 	(define no_from_select_ast (list "memcp-tests" '() (list "result" 8) true nil nil nil nil nil))
 	(assert (equal? (serialize (build_queryplan_term no_from_select_ast))
 		"(resultrow '(\"result\" 8))") true "build_queryplan_term lowers no-FROM projection")
