@@ -645,18 +645,21 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_recset",
-		Desc: "builds a query-local record-set handle from one table scan; the returned value is not persisted and can be scanned like a table",
+		Desc: "builds a query-local record-set handle from one table scan, or -- when given an existing recset instead of a table -- narrows that recset to the members which also satisfy filter, re-evaluating filter only over its existing membership. The latter is the cheap way to AND a further (possibly subscan-heavy) condition onto an already-narrowed recset without re-touching rows outside it (e.g. evaluating an expensive correlated check only over the rows a cheap selective filter already narrowed a table down to). The returned value is not persisted and can be scanned like a table",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
-			t := TableFromScmer(a[1])
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
+			if a[1].IsCustom(TagRecSet) {
+				return NewRecSetScmer(RecSetFromScmer(a[1]).filterToRecSet(currentTx, filtercols, a[3]))
+			}
+			t := TableFromScmer(a[1])
 			return NewRecSetScmer(t.scanRecSet(currentTx, filtercols, a[3]))
 		},
 		Type: &scm.TypeDescriptor{
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table", ParamName: "table"},
+				{Kind: "any", ParamName: "table", ParamDesc: "a table, or an existing recset to narrow further"},
 				{Kind: "list", ParamName: "filterColumns"},
 				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row enters the recset", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 			},
