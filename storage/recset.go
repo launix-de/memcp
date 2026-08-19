@@ -695,10 +695,44 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 	return result
 }
 
+// hasEqualityIndexPrefix reports whether an existing index already covers
+// cols as an equality prefix, without triggering a build. The sparse
+// per-key lookup path below is only cheap when such an index already
+// exists; forcing one into existence for a single ad-hoc query can cost far
+// more than the linear scan it was meant to avoid.
+func (t *storageShard) hasEqualityIndexPrefix(cols []string) bool {
+	for _, index := range t.Indexes {
+		if len(index.Cols) < len(cols) {
+			continue
+		}
+		match := true
+		for i := range cols {
+			if index.Cols[i] != cols[i] {
+				match = false
+				break
+			}
+			if len(index.ColMatchers) > i && !matcherKindEqual(EqualMatcher, index.ColMatchers[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, dense bool) recSetShard {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
+	if !dense && !t.hasEqualityIndexPrefix(targetKeyCols) {
+		// Building a fresh index just for this one-off lookup would cost far
+		// more than scanning the shard directly -- fall back to the dense
+		// (linear scan) path instead of forcing an index build.
+		dense = true
+	}
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	targetReaders := make([]ColumnReader, len(targetKeyCols))
 	targetNeedsTxReader := make([]bool, len(targetKeyCols))
@@ -1219,6 +1253,159 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 		return scm.NewNil(), 0
 	}
 	return akkumulator, outCount
+}
+
+// filterRecSetPart re-evaluates condition only over the recids already present
+// in part, instead of the shard's full boundary-indexed row space. Used to
+// narrow an existing RecSet by a further condition (including one with its own
+// subscans) without ever touching rows outside the incoming membership --
+// e.g. evaluating an expensive correlated ACL check only over the ~30k rows a
+// mandant filter already narrowed a table down to, not the full table.
+func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	t.ensureLoaded()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
+	t.ensureMainCount(skipShardReadLock)
+
+	ccols := make([]ColumnStorage, len(conditionCols))
+	cReaders := make([]ColumnReader, len(conditionCols))
+	conditionGetters := make([]mapArgGetter, len(conditionCols))
+	for i, k := range conditionCols {
+		if k == "$recset_contains" {
+			fnptr := recSetContainsClosure(t)
+			getter := func(id uint32, batchid uint32) scm.Scmer {
+				return scm.NewClosure(fnptr, id)
+			}
+			conditionGetters[i] = getter
+			continue
+		}
+		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+	}
+	cdataset := make([]scm.Scmer, len(conditionCols))
+
+	locked := false
+	if !skipShardReadLock {
+		t.mu.RLock()
+		locked = true
+		if t.t.hasTableLock() {
+			t.mu.RUnlock()
+			locked = false
+			t.t.waitTableLock(ss, false)
+			t.mu.RLock()
+			locked = true
+		}
+	}
+	defer func() {
+		if locked {
+			t.mu.RUnlock()
+		}
+	}()
+
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	mainCount := t.main_count
+	visibleUpper := mainCount + uint32(len(t.inserts))
+	matches := make([]uint32, 0, part.count)
+	part.forEachID(func(idx uint32) bool {
+		if idx >= visibleUpper {
+			return true
+		}
+		if acidMode {
+			if !currentTx.IsVisible(t, idx) {
+				return true
+			}
+		} else if t.deletions.Get(uint(idx)) {
+			return true
+		}
+		if idx < mainCount {
+			for i, c := range cReaders {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else {
+					cdataset[i] = c.GetValue(idx)
+				}
+			}
+		} else {
+			for i, col := range conditionCols {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(idx, 0)
+				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+					cdataset[i] = cReaders[i].GetValue(idx)
+				} else {
+					cdataset[i] = t.getDelta(int(idx-mainCount), col)
+				}
+			}
+		}
+		if !scm.ToBool(conditionFn(cdataset...)) {
+			return true
+		}
+		matches = append(matches, idx)
+		return true
+	})
+	return newRecSetShardFromSortedIDs(t, visibleUpper, matches)
+}
+
+// filterToRecSet narrows r to the members that also satisfy condition,
+// re-evaluating condition only over r's existing membership. See
+// filterRecSetPart for why this is a distinct, cheaper operation than
+// building a fresh RecSet over the whole table and intersecting.
+func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer) *recSet {
+	if r == nil {
+		return nil
+	}
+	if currentTx == nil {
+		currentTx = r.tx
+	}
+	ss := SessionStateFromTx(currentTx)
+	querySeq := scm.CurrentQuerySeq()
+	result := &recSet{tx: currentTx, table: r.table}
+	values := make(chan recSetBuildResult, len(r.shards))
+	activeParts := make([]int, 0, len(r.shards))
+	for i := range r.shards {
+		if r.shards[i].count > 0 {
+			activeParts = append(activeParts, i)
+		}
+	}
+	done := runFanoutTasks(currentTx, len(activeParts), func(taskIndex int, _ bool) {
+		part := r.shards[activeParts[taskIndex]]
+		withTxSession(currentTx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			if ss != nil && ss.IsKilledSeq(querySeq) {
+				panic("query killed")
+			}
+			values <- recSetBuildResult{
+				part: part.shard.filterRecSetPart(&part, conditionCols, condition, currentTx, ss),
+			}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
+	}
+	close(values)
+
+	var buildErr scanError
+	for msg := range values {
+		if msg.err.r != nil {
+			if buildErr.r == nil {
+				buildErr = msg.err
+			}
+			continue
+		}
+		if buildErr.r != nil {
+			continue
+		}
+		result.count += msg.part.count
+		result.shards = append(result.shards, msg.part)
+	}
+	if buildErr.r != nil {
+		panic(buildErr)
+	}
+	return result
 }
 
 func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) *shardqueue {
