@@ -7340,21 +7340,38 @@ prepared cache instead. */
 				(if (source_is_base_table? real_src) real_src nil))
 			nil))))
 
-/* No domain-shape restriction here: exists_recset_project_join_expr builds
-the recset from the stage's own prepared group-cache, not its raw domain, so
-this is agnostic to whether gs_input is a base table, a query-block wrapping
-one, or a union -- lower_group_stage_prepare_using already knows how to
-materialize any of those, nested dependencies included. */
+/* exists_recset_project_join_expr builds the recset from the stage's own
+prepared group-cache rather than its raw domain, so in principle this is
+agnostic to whether gs_input is a base table, a query-block wrapping one, or
+a union. In practice the where-term consumption path
+(recset_project_join_expr_for_membership) is the only one proven safe for a
+multi-source domain (e.g. an EXISTS body that itself joins two tables); the
+value-embedding path (lower_driver_membership_probe_expr's scan_exists
+fallback, used whenever the where-term path declines) still needs a single
+concrete table to scan and fails hard otherwise -- so this keeps the
+original single-real-source restriction. A stage with residual outer refs
+(btw2025_accessing_after_simple) reaches further out than its own domain for
+a value that isn't local to it or its declared lookup-keys --
+exists_recset_project_join_expr's stage_catalog (scoped to the discovering
+block's own stages) has no way to resolve that, so those stages are
+excluded here rather than crashing during preparation. */
 (define stage_recset_domain_eligible? (lambda (graph stage)
 	(if (not (group_stage? stage))
 		false
 		(begin
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define input (gs_input stage))
 			(and
+				(not (stage_has_residual_outer_refs? stage))
 				(recset_probe_stage_shape? stage)
 				(stage_boolean_shaped? graph stage nil)
 				(not (empty_list? lookup_keys))
-				(equal? (count lookup_keys) (count (gs_keys stage))))))))
+				(equal? (count lookup_keys) (count (gs_keys stage)))
+				(or (not (nil? (recset_domain_source input)))
+					(and (union_block? input)
+						(reduce (union_branches input) (lambda (supported branch)
+							(and supported (candidate_recset_branch_supported? branch)))
+							true))))))))
 
 (define recset_domain_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
@@ -10315,10 +10332,10 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 
 (define driver_membership_probe_branch_expr (lambda (sources default_alias branch probe)
 	(begin
-		(if (not (and (query_block? branch) (single_source? (qb_sources branch))))
+		(if (not (and (query_block? branch) (single_real_source? (qb_sources branch))))
 			(neumann_fail "build_queryplan" "driver membership probe expects simple query-block branches")
 			true)
-		(define src (car (qb_sources branch)))
+		(define src (single_real_source (qb_sources branch)))
 		(if (not (source_is_base_table? src))
 			(neumann_fail "build_queryplan" "driver membership probe expects base table branches")
 			true)
@@ -10346,6 +10363,18 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			nil
 			false))))
 
+/* driver_membership_probe markers reach physical lowering through two
+routes: as a WHERE-term (stripped by driver_membership_for_source, built via
+recset_project_join_expr_for_membership) and, when the probed value feeds
+directly into a projected column or a further expression (e.g. a derived
+table's own boolean field), as a value embedded anywhere in an expression
+tree -- dispatched here, straight from lower_column_expr_for_alias_in_context
+/lower_column_expr_for_join_in_context. Only the first route is recset-backed
+today: a value-returning recset_key_index variant of this path was tried and
+reproducibly mis-evaluates a nested-dependency stage's condition once the
+enclosing query block gains an additional join partner (verified with a
+wrong-row A/B comparison, root cause not yet found), so this route keeps the
+plain scan_exists probe below unconditionally. */
 (define lower_driver_membership_probe_expr (lambda (sources default_alias stage probe)
 	(begin
 		(define input (gs_input stage))
@@ -10382,7 +10411,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 						(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
 						(list (quote optimize)
 							(cons (quote and)
-								(cons (lower_column_expr_for_alias input_src condition) key_terms)))))))))))
+								(cons (lower_column_expr_for_alias input_src condition) key_terms))))))))))))
 
 (define lower_dml_driver_membership_probe_expr (lambda (sources default_alias fallback_schema stage _probe)
 	(begin
@@ -10543,8 +10572,12 @@ boolean-shaped one way or the other -- this just picks the matching test. */
 				(define filter_condition (combine_where_terms
 					(cons (stage_recset_value_filter_term stage value_col) (nth parts 2))
 					true))
+				(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
+				(define stage_catalog (stage_catalog_with_nested
+					(merge (list stamped_catalog (nested_stage_catalog stage)
+						(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 				(list (quote begin)
-					(lower_group_stage_prepare_using '() nil stage)
+					(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
 					(list (quote recset_project_join)
 						'(session "__memcp_tx")
 						(list (quote scan_recset)
@@ -10595,28 +10628,7 @@ the auto-index chooses the concrete access path on both tables. */
 			(if (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
 				(membership_cache_recset_project_join_expr src stage target_col)
 				(if (recset_probe_stage_shape? stage)
-					(if (> (count (gs_keys stage)) 1)
-						(exists_recset_project_join_expr src stage)
-						(begin
-							(define source_col (direct_column_name_for_alias input (car (gs_keys stage))))
-							(if (nil? source_col)
-								nil
-								(begin
-									(define alias (source_alias input))
-									(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-									(define filtercols (extract_columns_for_alias input condition))
-									(list (quote recset_project_join)
-										'(session "__memcp_tx")
-										(list (quote scan_recset)
-											'(session "__memcp_tx")
-											(source_table_expr input)
-											(cons (quote list) filtercols)
-											(list (quote lambda)
-												(map filtercols (lambda (col) (symbol (concat alias "." col))))
-												(list (quote optimize) (lower_column_expr_for_alias input condition))))
-										(quoted_runtime_list (list source_col))
-										(source_table_expr src)
-										(quoted_runtime_list (list target_col)))))))
+					(exists_recset_project_join_expr src stage)
 					nil))))))
 
 (define lower_scalar_marker_expr (lambda (expr)
