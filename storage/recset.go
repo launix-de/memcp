@@ -201,11 +201,57 @@ func recSetUnion(items []*recSet) *recSet {
 			byShard[part.shard] = append(byShard[part.shard], &rs.shards[i])
 		}
 	}
-	for shard, parts := range byShard {
-		part := unionRecSetShards(shard, parts)
-		result.count += part.count
-		result.shards = append(result.shards, part)
+	type shardUnionTask struct {
+		shard *storageShard
+		parts []*recSetShard
 	}
+	tasks := make([]shardUnionTask, 0, len(byShard))
+	for shard, parts := range byShard {
+		tasks = append(tasks, shardUnionTask{shard, parts})
+	}
+
+	// Each shard's combine is an independent, allocation-only computation
+	// (no shard lock needed — the recSetShards involved are already-built,
+	// query-local snapshots) costing on the order of 100µs-1ms; fanning out
+	// via runFanoutTasks pays off even for a single mixed-kind shard, since
+	// its own channel-dispatch overhead is roughly 1µs — well under 1% of a
+	// single combine's cost, let alone many shards' worth done serially.
+	values := make(chan recSetBuildResult, len(tasks))
+	done := runFanoutTasks(tx, len(tasks), func(taskIndex int, _ bool) {
+		withTxSession(tx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			task := tasks[taskIndex]
+			values <- recSetBuildResult{part: unionRecSetShards(task.shard, task.parts)}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
+	}
+	close(values)
+
+	var buildErr scanError
+	for msg := range values {
+		if msg.err.r != nil {
+			if buildErr.r == nil {
+				buildErr = msg.err
+			}
+			continue
+		}
+		if buildErr.r != nil {
+			continue
+		}
+		result.count += msg.part.count
+		result.shards = append(result.shards, msg.part)
+	}
+	if buildErr.r != nil {
+		panic(buildErr)
+	}
+
 	sort.Slice(result.shards, func(i, j int) bool {
 		return result.shards[i].shard.uuid.String() < result.shards[j].shard.uuid.String()
 	})
@@ -230,19 +276,60 @@ func recSetIntersect(items []*recSet) *recSet {
 	if base == nil || len(items) == 0 {
 		return result
 	}
-	for _, shard := range base.ActiveShards() {
-		parts := make([]*recSetShard, len(items))
-		for i, rs := range items {
-			if rs != nil {
-				parts[i] = rs.shardEntry(shard)
+	shards := base.ActiveShards()
+
+	// See recSetUnion for why this is worth fanning out even for a single
+	// shard: channel-dispatch overhead (~1µs) is under 1% of a single
+	// combine's cost (~100µs-1ms).
+	values := make(chan recSetBuildResult, len(shards))
+	done := runFanoutTasks(tx, len(shards), func(taskIndex int, _ bool) {
+		withTxSession(tx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			shard := shards[taskIndex]
+			parts := make([]*recSetShard, len(items))
+			for i, rs := range items {
+				if rs != nil {
+					parts[i] = rs.shardEntry(shard)
+				}
 			}
+			values <- recSetBuildResult{part: intersectRecSetShards(shard, parts)}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
+	}
+	close(values)
+
+	var buildErr scanError
+	for msg := range values {
+		if msg.err.r != nil {
+			if buildErr.r == nil {
+				buildErr = msg.err
+			}
+			continue
 		}
-		part := intersectRecSetShards(shard, parts)
-		if part.count > 0 {
-			result.count += part.count
-			result.shards = append(result.shards, part)
+		if buildErr.r != nil {
+			continue
+		}
+		if msg.part.count > 0 {
+			result.count += msg.part.count
+			result.shards = append(result.shards, msg.part)
 		}
 	}
+	if buildErr.r != nil {
+		panic(buildErr)
+	}
+	// The serial loop this replaced preserved ActiveShards()'s deterministic
+	// order implicitly; fanout results arrive in completion order instead,
+	// so restore a stable order the same way recSetUnion does.
+	sort.Slice(result.shards, func(i, j int) bool {
+		return result.shards[i].shard.uuid.String() < result.shards[j].shard.uuid.String()
+	})
 	return result
 }
 
