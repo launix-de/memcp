@@ -7326,17 +7326,25 @@ recursive proof happened once, upstream, and does not need re-deriving. */
 query-block wrapping one (the shape a correlated scalar subselect's FROM
 clause unnests into, e.g. `FROM standort s WHERE s.ID = doc.standort`) --
 either way there is exactly one real physical table backing the domain.
-Returns that base-table source, or nil otherwise (multi-source, or itself
-sourced from another stage output). Used by lower_driver_membership_probe_expr,
-whose scan_exists fallback needs a concrete table to scan directly; the
-recset path below has no such restriction since it scans the stage's own
-prepared cache instead. */
+Returns that base-table source, or nil otherwise: multi-source, itself
+sourced from another stage output, or -- critically -- a wrapping
+query-block whose qb_sources also carries a stage-output pseudo-source for a
+nested dependency (the extra entry group_stage_direct_dependencies_using_indexes
+adds so that dependency's own graph edge is discoverable, e.g. a WHERE clause
+with its own nested correlated EXISTS). single_source? (not single_real_source?)
+is deliberate here: lower_driver_membership_probe_expr's scan_exists fallback
+reconstructs that wrapping block's raw WHERE clause by hand and has no
+mechanism to join in such a pseudo-source's cache, so unlike most other
+single-real-source checks in this file, a nested dependency here disqualifies
+the domain rather than being transparently ignored (the WHERE-term-stripped
+recset path has no such restriction, since it scans the stage's own
+already-prepared cache instead). */
 (define recset_domain_source (lambda (input)
 	(if (source_is_base_table? input)
 		input
-		(if (and (query_block? input) (single_real_source? (qb_sources input)))
+		(if (and (query_block? input) (single_source? (qb_sources input)))
 			(begin
-				(define real_src (single_real_source (qb_sources input)))
+				(define real_src (car (qb_sources input)))
 				(if (source_is_base_table? real_src) real_src nil))
 			nil))))
 
