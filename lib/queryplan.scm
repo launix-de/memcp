@@ -13244,58 +13244,38 @@ regardless of domain size, which is why domain_rows barely matters there). */
 							(scalar_aggregate_probe_stage_safe? stage))))))
 			true))))
 
-(define stage_input_small_enough? (lambda (stage)
-	(begin
-		(define rows (planner_stage_input_rows (gs_input stage)))
-		(and (not (nil? rows)) (< rows 1000)))))
+/* Whether promoting stage to a probe marker is allowed in this context.
+Previously gated on driving-context row-count heuristics
+(probe_context_small_enough?/the now-removed stage_input_small_enough?,
+both <1000-row checks) -- but that heuristic is a physical-cost concern,
+not a semantic one, and it structurally excluded exactly the large-table/
+no-LIMIT/non-unique-key correlated subqueries that dominate real
+production cost from ever becoming a probe marker at all, regardless of
+how good any physical strategy (keytable, RecSet, or the always-correct
+materialized query-probe fallback) might be for them. Promotion itself is
+now unconditional; the actual cost tradeoff is decided downstream, once,
+by the already-calibrated *_cost_preferred? functions that choose between
+physical carriers for an established probe marker
+(scalar_first_probe_recset_cost_preferred?/
+scalar_first_probe_keytable_cost_preferred?/stage_direct_probe_cost_preferred?). */
+(define stage_probe_allowed_in_context? (lambda (_stage _sources) true))
 
-(define stage_probe_allowed_in_context? (lambda (stage sources)
-	(if (stage_has_residual_outer_refs? stage)
-		true
-		(if (not (stage_keys_are_input_local? stage))
-			true
-			(if (presence_probe_stage? stage)
-				(or
-					(stage_input_small_enough? stage)
-					(probe_context_small_enough? sources))
-				(if (query_block? (gs_input stage))
-					(probe_context_small_enough? sources)
-					true))))))
-
-(define probeable_stage_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src)
+(define probeable_stage_output_source_for_block? (lambda (stages sources default_alias src)
 	(if (scalar_first_stage_output_source? stages src)
-		(or
-			(stage_direct_probe_cost_preferred_for_limit?
-				(stage_by_id stages (stage_output_relation_id (source_relation src))) limit_value)
-			(stage_probe_allowed_in_context?
-				(stage_by_id stages (stage_output_relation_id (source_relation src)))
-				(filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src)))))))
+		true
 		(if (not (presence_stage_output_source? stages src))
 			false
 			(begin
 				(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 				(define probe_sources (filter sources (lambda (candidate) (not (equal? (source_alias candidate) (source_alias src))))))
-				/* A sibling presence output contributes at most one row for the same
-				lookup domain. It can supply predicates, but it does not multiply the
-				base driver cardinality used for a point-probe decision. */
-				(define cardinality_sources (filter probe_sources (lambda (candidate)
-					(not (presence_stage_output_source? stages candidate)))))
-				(and
-					/* A complete UNIQUE-key equality bounds the whole consumer to one
-					probe. Building the dependent relation's full presence keytable
-					cannot amortize in that context, regardless of base table size. */
+				(or
+					(stage_has_residual_outer_refs? stage)
 					(or
-						(stage_direct_probe_cost_preferred_for_limit? stage limit_value)
-						(or (stage_probe_allowed_in_context? stage probe_sources)
-							(probe_context_unique_point? cardinality_sources default_alias driver_condition)))
-					(or
-						(stage_has_residual_outer_refs? stage)
-						(or
-							(not (stage_keys_are_input_local? stage))
-							(stage_lookup_keys_resolve_in_sources?
-								stage
-								probe_sources
-								default_alias)))))))))
+						(not (stage_keys_are_input_local? stage))
+						(stage_lookup_keys_resolve_in_sources?
+							stage
+							probe_sources
+							default_alias))))))))
 
 (define scalar_aggregate_probe_output_source_for_block? (lambda (stages sources default_alias limit_value src)
 	(if (not (scalar_aggregate_probe_stage_output_source? stages src))
@@ -13344,7 +13324,7 @@ regardless of domain size, which is why domain_rows barely matters there). */
 (define probe_output_sources_for_block (lambda (stages sources default_alias limit_value driver_condition consumers)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(or
-			(probeable_stage_output_source_for_block? stages sources default_alias limit_value driver_condition src)
+			(probeable_stage_output_source_for_block? stages sources default_alias src)
 			(or
 				(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src)
 				(or
@@ -14885,7 +14865,7 @@ get_column refs to the source) are excluded automatically too. */
 				false))
 		_ false)))
 
-(define stage_consumed_by_probe_source? (lambda (stage stages sources default_alias limit_value driver_condition)
+(define stage_consumed_by_probe_source? (lambda (stage stages sources default_alias)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(or found
 			(and (stage_output_relation? (source_relation src))
@@ -14893,7 +14873,7 @@ get_column refs to the source) are excluded automatically too. */
 					(and
 						(probeable_stage_output_source? stages src)
 						(probeable_stage_output_source_for_block?
-							stages sources default_alias limit_value driver_condition src))))))
+							stages sources default_alias src))))))
 		false)))
 
 (define scalar_first_inline_only_stage? (lambda (stage)
@@ -14966,7 +14946,7 @@ get_column refs to the source) are excluded automatically too. */
 			(row_number_stage_consumed_by_join? stage sources)
 			(stage_consumed_by_membership_source? stage (qb_stages block) sources (qb_facts block))
 			(stage_consumed_by_probe_source?
-				stage (qb_stages block) sources default_alias (qb_limit block) (qb_where block)))))))
+				stage (qb_stages block) sources default_alias))))))
 
 (define stage_direct_prepare_semantic_candidate? (lambda (consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)
 	(and
