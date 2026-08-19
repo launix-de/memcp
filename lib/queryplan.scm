@@ -1652,37 +1652,98 @@ list of direct-dependency stages); a stage with no entry has none. */
 (define stage_direct_deps (lambda (graph stage)
 	(if (has_assoc? graph (logical_stage_key stage)) (graph (logical_stage_key stage)) '())))
 
-/* A scalar_single stage that does nothing but pass a nested stage's own
-presence/boolean result through -- optionally COALESCE'd to a boolean
-default, with no ">0" count-encoding involved (unlike
-presence_bool_stage_output_expr?'s case, which is the shape a *count*-typed
-nested aggregate gets rewritten into). This is the shape
-`COALESCE((SELECT bool_expr FROM ... LIMIT 1), FALSE)` produces: value_expr is
-just a coalesced reference to the inner scalar_single stage's own output. */
-(define stage_output_boolean_passthrough_expr? (lambda (expr)
+/* SQL CASE compiles to a flat multi-arm (if cond1 val1 cond2 val2 ... [else])
+form (see sql-parser.scm's CASE rule), not nested per-branch ifs -- so
+proving a CASE boolean-shaped means every VALUE position (never a condition
+position) is boolean-shaped. args is the tail of the (if ...) node: pairs of
+(cond val) with an optional trailing else value. */
+(define boolean_typed_if_branches_shaped? (lambda (graph stage args)
+	(match args
+		'() true
+		(cons _cond (cons val rest)) (and (boolean_typed_expr_shaped? graph stage val)
+			(boolean_typed_if_branches_shaped? graph stage rest))
+		(cons elseval '()) (boolean_typed_expr_shaped? graph stage elseval)
+		_ false)))
+
+/* Comparison operators and literal booleans are boolean-typed by SQL type
+rules alone, regardless of what they compare -- no stage lookup needed, and
+no need to recurse into their operands (an operand's own shape is
+irrelevant to whether the comparison itself is boolean). Also covers the
+generic presence_bool_stage_output_expr? count>0 encoding, since that shape
+has head `>` and would otherwise fall through here as a plain comparison. */
+(define boolean_typed_comparison_or_literal_expr? (lambda (expr)
+	(if (presence_bool_stage_output_expr? expr)
+		true
+		(match expr
+			((symbol equal??) _a _b) true
+			((quote equal??) _a _b) true
+			((symbol <) _a _b) true
+			((quote <) _a _b) true
+			((symbol >) _a _b) true
+			((quote >) _a _b) true
+			((symbol <=) _a _b) true
+			((quote <=) _a _b) true
+			((symbol >=) _a _b) true
+			((quote >=) _a _b) true
+			((symbol nil?) _a) true
+			((quote nil?) _a) true
+			((symbol not) _a) true
+			((quote not) _a) true
+			((symbol sql_not) _a) true
+			((quote sql_not) _a) true
+			((symbol strlike) _a _b) true
+			((quote strlike) _a _b) true
+			((symbol has?) _a _b) true
+			((quote has?) _a _b) true
+			_ (or (equal?? expr true) (equal?? expr false))))))
+
+/* Whether expr is boolean-shaped: AND/OR operands, every CASE branch, and a
+COALESCE's non-default argument all recurse structurally with no stage
+lookup needed (see boolean_typed_if_branches_shaped?/
+boolean_typed_comparison_or_literal_expr? above); a chain of "just forwards
+the inner stage's boolean" wrappers -- exactly what COALESCE-wrapped nested
+EXISTS/CASE/AND/OR chains compile into -- is recognized as boolean many
+levels down, not just at the first one, and not just when the whole
+expression is one bare passthrough. Only a leaf that reads another stage's
+realized value (a `get_column` into a "__exists_%"-aliased cache column)
+still needs graph-based confirmation: "any direct dependency of stage is
+itself boolean-shaped" -- sound because every nested leaf this decorrelator
+produces is itself boolean-shaped by construction. */
+(define boolean_typed_expr_shaped? (lambda (graph stage expr)
 	(match expr
 		((symbol coalesceNil) inner _default)
 			(and (or (equal?? _default false) (equal?? _default true))
-				(stage_output_boolean_passthrough_expr? inner))
+				(boolean_typed_expr_shaped? graph stage inner))
 		((quote coalesceNil) inner _default)
 			(and (or (equal?? _default false) (equal?? _default true))
-				(stage_output_boolean_passthrough_expr? inner))
+				(boolean_typed_expr_shaped? graph stage inner))
 		((symbol get_column) tblvar _ignorecase _col _col_ignorecase)
-			(and (string? tblvar) (strlike tblvar "__exists_%"))
+			(and (string? tblvar) (strlike tblvar "__exists_%")
+				(reduce (stage_direct_deps graph stage) (lambda (found dep)
+					(or found (stage_boolean_shaped? graph dep nil)))
+					false))
 		((quote get_column) tblvar _ignorecase _col _col_ignorecase)
-			(and (string? tblvar) (strlike tblvar "__exists_%"))
-		_ false)))
+			(and (string? tblvar) (strlike tblvar "__exists_%")
+				(reduce (stage_direct_deps graph stage) (lambda (found dep)
+					(or found (stage_boolean_shaped? graph dep nil)))
+					false))
+		(cons head tail)
+			(if (or (equal? head (quote and)) (equal? head (symbol "and"))
+					(equal? head (quote or)) (equal? head (symbol "or")))
+				(reduce tail (lambda (ok operand) (and ok (boolean_typed_expr_shaped? graph stage operand))) true)
+				(if (or (equal? head (quote if)) (equal? head (symbol "if")))
+					(boolean_typed_if_branches_shaped? graph stage tail)
+					(boolean_typed_comparison_or_literal_expr? expr)))
+		_ (boolean_typed_comparison_or_literal_expr? expr))))
 
-/* Whether stage's own realized value is boolean-shaped, considering both the
-count>0 encoding (presence_probe_stage? itself, or a passthrough of one) and a
-plain/coalesced passthrough of another boolean-shaped nested stage --
-recursively, so a chain of "just forwards the inner stage's boolean" wrappers
-(exactly what COALESCE-wrapped nested EXISTS chains compile into) is still
-recognized as boolean many levels down, not just at the first one.
+/* Whether stage's own realized value is boolean-shaped: presence_probe_stage?
+(the count>0 encoding) short-circuits directly; otherwise the stage's
+primary aggregate's value expression must prove boolean-shaped via the
+recursive walk above.
 
 requested_col picks which of stage's (possibly several) aggregates to inspect
 at the top of the recursion, matching scalar_first_probe_aggregate's lookup;
-pass nil for the recursive dependency checks below, where there is no
+pass nil for the recursive dependency checks above, where there is no
 specific requested column to match against and the stage's first/primary
 aggregate is the best available approximation. */
 (define stage_boolean_shaped? (lambda (graph stage requested_col)
@@ -1692,13 +1753,7 @@ aggregate is the best available approximation. */
 				(if (empty_list? (gs_aggregates stage)) nil (car (gs_aggregates stage)))
 				(scalar_first_probe_aggregate stage requested_col)))
 			(and (not (nil? ag))
-				(begin
-					(define value_expr (car (scalar_first_probe_parts ag)))
-					(and (or (presence_bool_stage_output_expr? value_expr)
-							(stage_output_boolean_passthrough_expr? value_expr))
-						(reduce (stage_direct_deps graph stage) (lambda (found dep)
-							(or found (stage_boolean_shaped? graph dep nil)))
-							false))))))))
+				(boolean_typed_expr_shaped? graph stage (car (scalar_first_probe_parts ag))))))))
 
 (define scalar_once_descriptor (lambda (value_expr order_items offset_value)
 	(if (empty_list? order_items)
@@ -7362,7 +7417,25 @@ original single-real-source restriction. A stage with residual outer refs
 a value that isn't local to it or its declared lookup-keys --
 exists_recset_project_join_expr's stage_catalog (scoped to the discovering
 block's own stages) has no way to resolve that, so those stages are
-excluded here rather than crashing during preparation. */
+excluded here rather than crashing during preparation.
+
+Deliberately presence_probe_stage? here, not the broader
+recset_probe_stage_shape? (which also accepts scalar_first_probe_stage?):
+this gate feeds the where-term-stripping "driver membership" reorder route
+(first_exists_recset_source -> recset_project_join_expr_for_membership),
+used to push a whole base-group's aggregate through a recset-backed
+membership join. That route is proven correct for presence/exists-purpose
+stages (see application-read-models.yaml); a scalar_single-purpose stage
+reaching it via this same route was found to over-count a COUNT(*)-pushdown
+aggregate on a self-correlated domain (the driving table and the
+scalar_single's own domain being the same underlying table) even though
+the same stage's value read correctly through the unrelated, already-proven
+scalar_first_probe_recset_eligible? value-embedding path (lower_scalar_
+first_probe_expr) for the identical query without the COUNT(*) wrapper.
+Root cause not yet isolated further; excluding scalar_single from this
+specific route is the narrow, correctness-first fix -- it does not affect
+scalar_first_probe_recset_eligible?, which stays fully available via
+stage_boolean_shaped? for scalar_single stages through its own path. */
 (define stage_recset_domain_eligible? (lambda (graph stage)
 	(if (not (group_stage? stage))
 		false
@@ -7371,7 +7444,7 @@ excluded here rather than crashing during preparation. */
 			(define input (gs_input stage))
 			(and
 				(not (stage_has_residual_outer_refs? stage))
-				(recset_probe_stage_shape? stage)
+				(presence_probe_stage? stage)
 				(stage_boolean_shaped? graph stage nil)
 				(not (empty_list? lookup_keys))
 				(equal? (count lookup_keys) (count (gs_keys stage)))
@@ -7499,7 +7572,7 @@ excluded here rather than crashing during preparation. */
 /* The other probe shape a group-stage-output alias can appear as: a plain or
 COALESCE-wrapped bare boolean passthrough (no ">0" count-encoding), the shape
 `COALESCE((SELECT bool_expr ...) ...)` compiles into for a scalar_single
-boolean probe -- mirrors stage_output_boolean_passthrough_expr?'s unwrap, but
+boolean probe -- mirrors boolean_typed_expr_shaped?'s COALESCE unwrap, but
 matched against a specific alias instead of the "__exists_%" naming
 convention, since this runs before that convention is even assigned. */
 (define stage_output_boolean_probe_term? (lambda (alias term)
