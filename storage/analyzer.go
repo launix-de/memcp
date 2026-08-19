@@ -78,12 +78,28 @@ func (c *skipListCursor) NextBlock(pos uint32) (uint32, uint32, bool) {
 		return 0, 0, false
 	}
 	set := &c.skip.matches
-	if pos >= set.universe || set.kind == recSetEmpty {
+	if pos >= set.universe || set.count == 0 {
 		return 0, 0, false
 	}
 	switch set.kind {
-	case recSetFull:
-		return pos, set.universe - pos, true
+	case recSetRanges:
+		// A "full" set (everything matches) is just one pair covering
+		// [0,universe) here — no separate case needed; if pos lands inside
+		// that pair, it's trimmed to start at pos below, same as it would
+		// for any other range.
+		ranges := set.listedRanges()
+		for c.listPos < len(ranges) && ranges[c.listPos]+ranges[c.listPos+1] <= pos {
+			c.listPos += 2
+		}
+		if c.listPos >= len(ranges) {
+			return 0, 0, false
+		}
+		base, count := ranges[c.listPos], ranges[c.listPos+1]
+		if base < pos {
+			count -= pos - base
+			base = pos
+		}
+		return base, count, true
 	case recSetPositive:
 		values := set.listedValues()
 		for c.listPos < len(values) && values[c.listPos] < pos {
@@ -100,23 +116,6 @@ func (c *skipListCursor) NextBlock(pos uint32) (uint32, uint32, bool) {
 			c.listPos++
 		}
 		return start, end - start, true
-	case recSetNegative:
-		excluded := set.listedValues()
-		for c.listPos < len(excluded) && excluded[c.listPos] < pos {
-			c.listPos++
-		}
-		for c.listPos < len(excluded) && excluded[c.listPos] == pos {
-			pos++
-			c.listPos++
-		}
-		if pos >= set.universe {
-			return 0, 0, false
-		}
-		end := set.universe
-		if c.listPos < len(excluded) {
-			end = excluded[c.listPos]
-		}
-		return pos, end - pos, true
 	case recSetBitmap:
 		wordIndex := pos >> 5
 		word := set.data[wordIndex] & (^uint32(0) << (pos & 31))

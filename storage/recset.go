@@ -42,17 +42,69 @@ func (s *recSetShard) contains(recid uint32) bool {
 		return false
 	}
 	switch s.kind {
-	case recSetFull:
-		return true
+	case recSetRanges:
+		return s.rangesContains(recid)
 	case recSetPositive:
 		return sortedUint32Contains(s.listedValues(), recid)
-	case recSetNegative:
-		return !sortedUint32Contains(s.listedValues(), recid)
 	case recSetBitmap:
 		return s.data[recid>>5]&(uint32(1)<<(recid&31)) != 0
 	default:
 		return false
 	}
+}
+
+// forEachVisibleRun walks part via forEachRange, splitting each range into
+// maximal runs of currently-visible rows (below visibleUpper, and neither
+// deleted nor tx-invisible), and calls onRun(base, count) once per such
+// run — the natural granularity for a bulk column read (GetValueRange)
+// instead of one GetValue call per row. Visibility is still checked one row
+// at a time (that was never avoidable — it's a property check, not a column
+// read, and doesn't get any cheaper by batching); what this saves is the
+// column reads inside onRun, which can cover however many consecutive rows
+// happen to be visible in a row, often the whole run for a recSetRanges
+// shard with no deletions in flight.
+func (t *storageShard) forEachVisibleRun(part *recSetShard, visibleUpper uint32, acidMode bool, currentTx *TxContext, onRun func(base, count uint32) bool) {
+	cont := true
+	part.forEachRange(func(base, count uint32) bool {
+		end := base + count
+		if base >= visibleUpper {
+			return true
+		}
+		if end > visibleUpper {
+			end = visibleUpper
+		}
+		var runStart uint32
+		haveRun := false
+		for idx := base; idx < end; idx++ {
+			visible := true
+			if acidMode {
+				visible = currentTx.IsVisible(t, idx)
+			} else if t.deletions.Get(uint(idx)) {
+				visible = false
+			}
+			if visible {
+				if !haveRun {
+					runStart = idx
+					haveRun = true
+				}
+				continue
+			}
+			if haveRun {
+				if !onRun(runStart, idx-runStart) {
+					cont = false
+					return false
+				}
+				haveRun = false
+			}
+		}
+		if haveRun {
+			if !onRun(runStart, end-runStart) {
+				cont = false
+				return false
+			}
+		}
+		return cont
+	})
 }
 
 // recSet is a query-local, non-persistent subset of one table represented by
@@ -598,30 +650,54 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
 	write := 0
-	part.forEachID(func(idx uint32) bool {
-		if idx >= visibleUpper {
-			return true
+	colBufs := make([][]scm.Scmer, len(sourceKeyCols))
+	t.forEachVisibleRun(part, visibleUpper, acidMode, currentTx, func(base, count uint32) bool {
+		end := base + count
+		mainEnd := end
+		if mainEnd > mainCount {
+			mainEnd = mainCount
 		}
-		if acidMode {
-			if !currentTx.IsVisible(t, idx) {
-				return true
-			}
-		} else if t.deletions.Get(uint(idx)) {
-			return true
+		if mainEnd < base {
+			// Run lies entirely in the delta region (base >= mainCount):
+			// without this, the delta loop below would incorrectly start
+			// at mainCount instead of base, reprocessing indices
+			// [mainCount,base) that aren't part of this run at all.
+			mainEnd = base
 		}
-		skip := false
-		if idx < mainCount {
-			for i, col := range cols {
+		if base < mainEnd {
+			// Main-storage sub-run: bulk-fetch every column for the whole
+			// run in one GetValueRange call each, instead of one GetValue
+			// call per row per column.
+			runLen := mainEnd - base
+			for i := range sourceKeyCols {
+				if cap(colBufs[i]) < int(runLen) {
+					colBufs[i] = make([]scm.Scmer, runLen)
+				}
+				colBufs[i] = colBufs[i][:runLen]
 				if needsTxReader[i] {
-					dst[write+i] = readers[i].GetValue(idx)
+					readers[i].GetValueRange(base, runLen, colBufs[i], 1)
 				} else {
-					dst[write+i] = col.GetValue(idx)
-				}
-				if dst[write+i].IsNil() {
-					skip = true
+					cols[i].GetValueRange(base, runLen, colBufs[i], 1)
 				}
 			}
-		} else {
+			for row := uint32(0); row < runLen; row++ {
+				skip := false
+				for i := range sourceKeyCols {
+					v := colBufs[i][row]
+					dst[write+i] = v
+					if v.IsNil() {
+						skip = true
+					}
+				}
+				if !skip {
+					write += len(sourceKeyCols)
+				}
+			}
+		}
+		// Delta sub-run (idx >= mainCount): getDelta is a plain map lookup,
+		// not a ColumnStorage read, so there's nothing to batch here.
+		for idx := mainEnd; idx < end; idx++ {
+			skip := false
 			for i, col := range sourceKeyCols {
 				if needsTxReader[i] {
 					dst[write+i] = readers[i].GetValue(idx)
@@ -634,9 +710,9 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 					skip = true
 				}
 			}
-		}
-		if !skip {
-			write += len(sourceKeyCols)
+			if !skip {
+				write += len(sourceKeyCols)
+			}
 		}
 		return true
 	})
@@ -1188,26 +1264,71 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 	var outCount int64
 	var buf [1024]uint32
 	pending := buf[:0]
-	part.forEachID(func(idx uint32) bool {
-		if idx >= visibleUpper {
-			return true
+	flush := func() {
+		if len(pending) == 0 {
+			return
 		}
-		if acidMode {
-			if !currentTx.IsVisible(t, idx) {
-				return true
+		if locked {
+			t.mu.RUnlock()
+			locked = false
+		}
+		akkumulator = mapper.Stream(akkumulator, pending, nil)
+		pending = buf[:0]
+		if !skipShardReadLock {
+			t.mu.RLock()
+			locked = true
+		}
+	}
+	colBufs := make([][]scm.Scmer, len(conditionCols))
+	t.forEachVisibleRun(part, visibleUpper, acidMode, currentTx, func(base, count uint32) bool {
+		end := base + count
+		mainEnd := end
+		if mainEnd > mainCount {
+			mainEnd = mainCount
+		}
+		if mainEnd < base {
+			// Run lies entirely in the delta region (base >= mainCount):
+			// without this, the delta loop below would incorrectly start
+			// at mainCount instead of base, reprocessing indices
+			// [mainCount,base) that aren't part of this run at all.
+			mainEnd = base
+		}
+		if base < mainEnd {
+			// Main-storage sub-run: bulk-fetch every non-getter condition
+			// column for the whole run in one GetValueRange call each.
+			runLen := mainEnd - base
+			for i := range conditionCols {
+				if conditionGetters[i] != nil {
+					continue
+				}
+				if cap(colBufs[i]) < int(runLen) {
+					colBufs[i] = make([]scm.Scmer, runLen)
+				}
+				colBufs[i] = colBufs[i][:runLen]
+				cReaders[i].GetValueRange(base, runLen, colBufs[i], 1)
 			}
-		} else if t.deletions.Get(uint(idx)) {
-			return true
-		}
-		if idx < mainCount {
-			for i, c := range cReaders {
-				if getter := conditionGetters[i]; getter != nil {
-					cdataset[i] = getter(idx, 0)
-				} else {
-					cdataset[i] = c.GetValue(idx)
+			for row := uint32(0); row < runLen; row++ {
+				idx := base + row
+				for i := range conditionCols {
+					if getter := conditionGetters[i]; getter != nil {
+						cdataset[i] = getter(idx, 0)
+					} else {
+						cdataset[i] = colBufs[i][row]
+					}
+				}
+				if !scm.ToBool(conditionFn(cdataset...)) {
+					continue
+				}
+				pending = append(pending, idx)
+				outCount++
+				if len(pending) == cap(buf) {
+					flush()
 				}
 			}
-		} else {
+		}
+		// Delta sub-run: unchanged, per-row (getDelta is a map lookup, not a
+		// ColumnStorage read).
+		for idx := mainEnd; idx < end; idx++ {
 			for i, col := range conditionCols {
 				if getter := conditionGetters[i]; getter != nil {
 					cdataset[i] = getter(idx, 0)
@@ -1217,33 +1338,18 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 					cdataset[i] = t.getDelta(int(idx-mainCount), col)
 				}
 			}
-		}
-		if !scm.ToBool(conditionFn(cdataset...)) {
-			return true
-		}
-		pending = append(pending, idx)
-		outCount++
-		if len(pending) == cap(buf) {
-			if locked {
-				t.mu.RUnlock()
-				locked = false
+			if !scm.ToBool(conditionFn(cdataset...)) {
+				continue
 			}
-			akkumulator = mapper.Stream(akkumulator, pending, nil)
-			pending = buf[:0]
-			if !skipShardReadLock {
-				t.mu.RLock()
-				locked = true
+			pending = append(pending, idx)
+			outCount++
+			if len(pending) == cap(buf) {
+				flush()
 			}
 		}
 		return true
 	})
-	if len(pending) > 0 {
-		if locked {
-			t.mu.RUnlock()
-			locked = false
-		}
-		akkumulator = mapper.Stream(akkumulator, pending, nil)
-	}
+	flush()
 	if locked {
 		t.mu.RUnlock()
 		locked = false
@@ -1513,26 +1619,51 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
 	result.items = make([]uint32, 0, part.count)
-	part.forEachID(func(idx uint32) bool {
-		if idx >= visibleUpper {
-			return true
+	colBufs := make([][]scm.Scmer, len(conditionCols))
+	t.forEachVisibleRun(part, visibleUpper, acidMode, currentTx, func(base, count uint32) bool {
+		end := base + count
+		mainEnd := end
+		if mainEnd > mainCount {
+			mainEnd = mainCount
 		}
-		if acidMode {
-			if !currentTx.IsVisible(t, idx) {
-				return true
+		if mainEnd < base {
+			// Run lies entirely in the delta region (base >= mainCount):
+			// without this, the delta loop below would incorrectly start
+			// at mainCount instead of base, reprocessing indices
+			// [mainCount,base) that aren't part of this run at all.
+			mainEnd = base
+		}
+		if base < mainEnd {
+			// Main-storage sub-run: bulk-fetch every non-getter condition
+			// column for the whole run in one GetValueRange call each.
+			runLen := mainEnd - base
+			for i := range conditionCols {
+				if conditionGetters[i] != nil {
+					continue
+				}
+				if cap(colBufs[i]) < int(runLen) {
+					colBufs[i] = make([]scm.Scmer, runLen)
+				}
+				colBufs[i] = colBufs[i][:runLen]
+				cReaders[i].GetValueRange(base, runLen, colBufs[i], 1)
 			}
-		} else if t.deletions.Get(uint(idx)) {
-			return true
-		}
-		if idx < mainCount {
-			for i, c := range cReaders {
-				if getter := conditionGetters[i]; getter != nil {
-					cdataset[i] = getter(idx, 0)
-				} else {
-					cdataset[i] = c.GetValue(idx)
+			for row := uint32(0); row < runLen; row++ {
+				idx := base + row
+				for i := range conditionCols {
+					if getter := conditionGetters[i]; getter != nil {
+						cdataset[i] = getter(idx, 0)
+					} else {
+						cdataset[i] = colBufs[i][row]
+					}
+				}
+				if scm.ToBool(conditionFn(cdataset...)) {
+					result.items = append(result.items, idx)
 				}
 			}
-		} else {
+		}
+		// Delta sub-run: unchanged, per-row (getDelta is a map lookup, not a
+		// ColumnStorage read).
+		for idx := mainEnd; idx < end; idx++ {
 			for i, col := range conditionCols {
 				if getter := conditionGetters[i]; getter != nil {
 					cdataset[i] = getter(idx, 0)
@@ -1542,9 +1673,9 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 					cdataset[i] = t.getDelta(int(idx-mainCount), col)
 				}
 			}
-		}
-		if scm.ToBool(conditionFn(cdataset...)) {
-			result.items = append(result.items, idx)
+			if scm.ToBool(conditionFn(cdataset...)) {
+				result.items = append(result.items, idx)
+			}
 		}
 		return true
 	})
