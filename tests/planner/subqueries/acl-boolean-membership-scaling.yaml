@@ -1,0 +1,157 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# Regression: a compound CASE/OR/EXISTS/nested-COALESCE(subselect) boolean
+# ACL predicate, correlated against a large (>= 1000 rows, live-statistics)
+# driving table with no LIMIT and a non-unique correlation key, must not
+# silently stay an un-costed per-row JOIN re-evaluation forever. This is a
+# minimal reduction of the real omnestum `dokument` pagination COUNT query's
+# WHERE clause. Per Neumann unnesting the correlated subquery decorrelates
+# into a group-stage; whether that group-stage's value ever becomes eligible
+# for a bounded physical carrier (keytable/RecSet) instead of a plain,
+# uncosted JOIN against its cache table is the thing under test here.
+
+metadata:
+  version: "1.0"
+  description: "Compound boolean ACL predicate over a large correlated domain stays bounded"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS bqm_standort_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_mandant_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_standort"
+  - sql: "DROP TABLE IF EXISTS bqm_document"
+  - sql: "CREATE TABLE bqm_document (id INT PRIMARY KEY, standort_id INT)"
+  - sql: "CREATE TABLE bqm_standort (id INT PRIMARY KEY, mandant_id INT, direct_flag INT)"
+  - sql: "CREATE TABLE bqm_mandant_assignment (actor_id INT, mandant_id INT, allowed BOOL)"
+  - sql: "CREATE TABLE bqm_standort_assignment (actor_id INT, standort_id INT, allowed BOOL)"
+  # 200 standort rows: mandant_id = id*10; direct_flag=1 only for id in
+  # {1,51,101,151} (id-1 divisible by 50).
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "bqm_standort") '("id" "mandant_id" "direct_flag")
+          (map (produceN 200) (lambda (i) (list (+ i 1) (* (+ i 1) 10) (if (equal? (mod i 50) 0) 1 0)))))
+        (rebuild (table "memcp-tests" "bqm_standort") true false)
+        1)
+  # actor 7 has a mandant-level grant for every standort with id % 5 == 3
+  # (mandant_id in {30,80,...,1980}), and a standort-level grant for every
+  # standort with id % 5 == 4 (standort_id in {4,9,...,199}).
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "bqm_mandant_assignment") '("actor_id" "mandant_id" "allowed")
+          (map (produceN 40) (lambda (i) (list 7 (* (+ (* i 5) 3) 10) true))))
+        (insert (table "memcp-tests" "bqm_standort_assignment") '("actor_id" "standort_id" "allowed")
+          (map (produceN 40) (lambda (i) (list 7 (+ (* i 5) 4) true))))
+        (rebuild (table "memcp-tests" "bqm_mandant_assignment") true false)
+        (rebuild (table "memcp-tests" "bqm_standort_assignment") true false)
+        1)
+  # 100,000 document rows cycling through the 200 standort ids 500 times,
+  # rebuilt so the driving table's row count is live/known (>= 1000, well
+  # past today's implicit "small enough" probe-promotion heuristics).
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "bqm_document") '("id" "standort_id")
+          (map (produceN 100000) (lambda (i) (list (+ i 1) (+ 1 (mod i 200))))))
+        (rebuild (table "memcp-tests" "bqm_document") true false)
+        1)
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS bqm_standort_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_mandant_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_standort"
+  - sql: "DROP TABLE IF EXISTS bqm_document"
+
+test_cases:
+  - name: "Compound CASE/OR/EXISTS/COALESCE ACL predicate evaluates correctly per branch"
+    sql: |
+      SELECT d.id,
+        COALESCE((
+          SELECT CASE
+            WHEN s.direct_flag = 1 THEN TRUE
+            ELSE (
+              EXISTS (SELECT 1 FROM bqm_mandant_assignment ma
+                      WHERE ma.actor_id = 7 AND ma.mandant_id = s.mandant_id AND ma.allowed = TRUE)
+              OR
+              COALESCE((SELECT sa.allowed FROM bqm_standort_assignment sa
+                        WHERE sa.actor_id = 7 AND sa.standort_id = s.id LIMIT 1), FALSE)
+            )
+          END
+          FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1
+        ), FALSE) AS visible
+      FROM bqm_document d WHERE d.id <= 8
+      ORDER BY d.id
+    expect:
+      rows: 8
+      data:
+        - id: 1
+          visible: true
+        - id: 2
+          visible: false
+        - id: 3
+          visible: true
+        - id: 4
+          visible: true
+        - id: 5
+          visible: false
+        - id: 6
+          visible: false
+        - id: 7
+          visible: false
+        - id: 8
+          visible: true
+
+  - name: "Aggregated COUNT over 100k driving rows matches the compound ACL predicate and stays bounded"
+    max_time: 1
+    sql: |
+      SELECT COUNT(*) AS c FROM (
+        SELECT d.id FROM bqm_document d WHERE COALESCE((
+          SELECT CASE
+            WHEN s.direct_flag = 1 THEN TRUE
+            ELSE (
+              EXISTS (SELECT 1 FROM bqm_mandant_assignment ma
+                      WHERE ma.actor_id = 7 AND ma.mandant_id = s.mandant_id AND ma.allowed = TRUE)
+              OR
+              COALESCE((SELECT sa.allowed FROM bqm_standort_assignment sa
+                        WHERE sa.actor_id = 7 AND sa.standort_id = s.id LIMIT 1), FALSE)
+            )
+          END
+          FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1
+        ), FALSE) AND TRUE
+      ) t
+    expect:
+      rows: 1
+      data:
+        - c: 42000
+
+  - name: "EXPLAIN shows a bounded physical carrier for the compound ACL predicate"
+    sql: |
+      EXPLAIN SELECT COUNT(*) AS c FROM (
+        SELECT d.id FROM bqm_document d WHERE COALESCE((
+          SELECT CASE
+            WHEN s.direct_flag = 1 THEN TRUE
+            ELSE (
+              EXISTS (SELECT 1 FROM bqm_mandant_assignment ma
+                      WHERE ma.actor_id = 7 AND ma.mandant_id = s.mandant_id AND ma.allowed = TRUE)
+              OR
+              COALESCE((SELECT sa.allowed FROM bqm_standort_assignment sa
+                        WHERE sa.actor_id = 7 AND sa.standort_id = s.id LIMIT 1), FALSE)
+            )
+          END
+          FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1
+        ), FALSE) AND TRUE
+      ) t
+    expect:
+      result_contains:
+        - "recset_key_index"
