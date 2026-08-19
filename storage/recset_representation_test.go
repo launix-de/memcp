@@ -26,23 +26,20 @@ import (
 // buildRecSetShard drives a recSetShardBuilder over want (a boolean mask
 // indexed by recid, len(want)==universe) exactly the way every real caller
 // (recset.go's collectRecSet/projectJoinKeysPart, analyzer.go's
-// BuildSkipList) does: one ascending add() call per recid, watching for the
-// (zero-allocation) transition into bitmap mode and replaying everything up
-// to that point via addBitmap once it happens — see recSetShardBuilder's
-// doc comment for exactly which transitions need this and which don't.
+// BuildSkipList) does: one straight ascending add() call per recid. Every
+// escalation is self-contained inside the builder (see its doc comment), so
+// unlike an earlier version of this harness, there is nothing to watch for
+// or replay here — mirroring that a real caller's filter predicate is never
+// re-run either.
 func buildRecSetShard(want []bool) recSetShard {
+	return buildRecSetShardWithBreak(want, 0)
+}
+
+func buildRecSetShardWithBreak(want []bool, breakAt uint32) recSetShard {
 	universe := uint32(len(want))
-	b := newRecSetShardBuilder(nil, universe, true)
-	replayFrom := uint32(0)
+	b := newRecSetShardBuilder(nil, universe, true, breakAt)
 	for recid, hit := range want {
-		wasBitmap := b.bitmap
 		b.add(uint32(recid), hit)
-		if !wasBitmap && b.bitmap {
-			replayFrom = uint32(recid) + 1
-		}
-	}
-	for recid := uint32(0); recid < replayFrom; recid++ {
-		b.addBitmap(recid, want[recid])
 	}
 	return b.finish()
 }
@@ -178,6 +175,72 @@ func TestRecSetShardBuilderPatterns(t *testing.T) {
 	}
 }
 
+// TestRecSetShardBuilderNeverReEvaluatesFilter is the regression test for
+// the bug this file's escalation redesign fixes: an earlier version cleared
+// the backing array on escalation and relied on the *caller* re-running its
+// scan and filter predicate to replay the abandoned prefix. Since add()'s
+// hit argument stands in for a real SQL predicate evaluation (interpreted
+// Scheme, column reads — arbitrarily expensive), that meant escalating late
+// silently doubled scan+filter cost. Every escalation must now be
+// self-contained: driving add() in one straight forward pass, reading each
+// recid's hit value exactly once, must produce a correct shard regardless of
+// which phase(s) it escalates through.
+func TestRecSetShardBuilderNeverReEvaluatesFilter(t *testing.T) {
+	drive := func(name string, universe uint32, want []bool, wantEscalatesTo recSetRepresentation) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			calls := make([]int, universe)
+			b := newRecSetShardBuilder(nil, universe, true, 0)
+			for recid := uint32(0); recid < universe; recid++ {
+				calls[recid]++
+				b.add(recid, want[recid])
+			}
+			part := b.finish()
+			verifyRecSetShard(t, name, part, want)
+			if part.kind != wantEscalatesTo {
+				t.Fatalf("%s: kind = %v, want %v (fixture didn't escalate the way this test expects)", name, part.kind, wantEscalatesTo)
+			}
+			for recid, n := range calls {
+				if n != 1 {
+					t.Fatalf("%s: recid %d had its filter value read %d times, want exactly 1 (escalation re-drove the caller's predicate)", name, recid, n)
+				}
+			}
+		})
+	}
+
+	// Direct ranges→bitmap: many non-singleton (count=2) runs so the
+	// range-pair budget overflows in addRange's own escalation check, before
+	// the singleton-run threshold (which stays 0) is ever reached.
+	universeA := uint32(2000) // budget = (2000+31)/32 = 63 words = 31 pairs
+	wantA := make([]bool, universeA)
+	for base := uint32(0); base+1 < universeA; base += 4 {
+		wantA[base] = true
+		wantA[base+1] = true
+	}
+	drive("DirectRangesToBitmap", universeA, wantA, recSetBitmap)
+
+	// Direct positive→bitmap: many isolated singletons, past both the
+	// singleton-run threshold (ranges→positive) and the flat-list budget
+	// (positive→bitmap), all reached via addPositive's own escalation check.
+	universeB := uint32(2000) // budget = 63 hits
+	wantB := make([]bool, universeB)
+	for pos := uint32(5); pos < universeB; pos += 20 { // ~100 scattered singletons > 63
+		wantB[pos] = true
+	}
+	drive("DirectPositiveToBitmap", universeB, wantB, recSetBitmap)
+
+	// ranges→positive's *own* overflow-to-bitmap fallback (inside
+	// tryConvertToPositive): a few large (non-singleton) ranges whose total
+	// hit count alone exceeds budget, plus just enough singletons (>3) to
+	// trigger the ranges→positive conversion that discovers the overflow.
+	universeC := uint32(100000) // budget = (100000+31)/32 = 3126 words
+	wantC := wantFromRange(universeC, [][2]uint32{
+		{100, 2000}, {30000, 2000}, {60000, 2000}, // 3 big ranges, 6000 hits total > 3126 budget
+		{10, 1}, {50000, 1}, {70000, 1}, {90000, 1}, // 4 singletons > maxSingletonRuns(3)
+	})
+	drive("RangesToPositiveOverflowToBitmap", universeC, wantC, recSetBitmap)
+}
+
 // TestRecSetShardBuilderPhaseTransitions specifically checks the two
 // escalation boundaries (singleton-count threshold, and budget overflow) at
 // and around their exact trigger points, since off-by-one errors there are
@@ -214,6 +277,79 @@ func TestRecSetShardBuilderPhaseTransitions(t *testing.T) {
 		t.Errorf("dense random: kind = %v, want recSetBitmap", partDense.kind)
 	}
 	verifyRecSetShard(t, "dense-random", partDense, wantDense)
+}
+
+// TestRecSetShardBuilderMainDeltaBreak checks that breakAt (set by real
+// callers to a shard's main_count) forces a contiguous hit-run to split into
+// two range pairs exactly at the boundary, instead of coalescing across it —
+// so forEachVisibleRun and the bulk-wired scan paths in recset.go can slice
+// a range into its main/delta sub-runs with a plain bound instead of
+// clamping. Correctness (contains/forEachID/forEachRange) must be unaffected
+// by the split — it's purely a change to how the same logical hits are
+// grouped into pairs.
+func TestRecSetShardBuilderMainDeltaBreak(t *testing.T) {
+	universe := uint32(1000)
+
+	t.Run("RunStraddlesBreak", func(t *testing.T) {
+		want := wantFromRange(universe, [][2]uint32{{400, 300}}) // hits 400..699
+		part := buildRecSetShardWithBreak(want, 550)
+		verifyRecSetShard(t, "RunStraddlesBreak", part, want)
+		if part.kind != recSetRanges {
+			t.Fatalf("kind = %v, want recSetRanges", part.kind)
+		}
+		got := part.listedRanges()
+		wantPairs := []uint32{400, 150, 550, 150}
+		if len(got) != len(wantPairs) {
+			t.Fatalf("listedRanges = %v, want %v (run must split into two pairs at breakAt=550)", got, wantPairs)
+		}
+		for i := range wantPairs {
+			if got[i] != wantPairs[i] {
+				t.Fatalf("listedRanges = %v, want %v", got, wantPairs)
+			}
+		}
+	})
+
+	t.Run("BreakAtExistingRunStart_NoSpuriousSplit", func(t *testing.T) {
+		want := wantFromRange(universe, [][2]uint32{{100, 50}, {600, 50}})
+		part := buildRecSetShardWithBreak(want, 600)
+		verifyRecSetShard(t, "BreakAtExistingRunStart", part, want)
+		got := part.listedRanges()
+		wantPairs := []uint32{100, 50, 600, 50}
+		if len(got) != len(wantPairs) {
+			t.Fatalf("listedRanges = %v, want %v (breakAt landing exactly on a run start must not add an empty pair)", got, wantPairs)
+		}
+		for i := range wantPairs {
+			if got[i] != wantPairs[i] {
+				t.Fatalf("listedRanges = %v, want %v", got, wantPairs)
+			}
+		}
+	})
+
+	t.Run("BreakDisabled_ZeroMeansNoSplit", func(t *testing.T) {
+		want := wantFromRange(universe, [][2]uint32{{0, 1000}})
+		part := buildRecSetShardWithBreak(want, 0)
+		verifyRecSetShard(t, "BreakDisabled", part, want)
+		got := part.listedRanges()
+		if len(got) != 2 || got[0] != 0 || got[1] != 1000 {
+			t.Fatalf("listedRanges = %v, want [0 1000] (breakAt=0 must be a no-op)", got)
+		}
+	})
+
+	t.Run("OnlyOneOfTwoRunsStraddles", func(t *testing.T) {
+		want := wantFromRange(universe, [][2]uint32{{100, 50}, {400, 300}}) // second run 400..699 straddles 550
+		part := buildRecSetShardWithBreak(want, 550)
+		verifyRecSetShard(t, "OnlyOneOfTwoRunsStraddles", part, want)
+		got := part.listedRanges()
+		wantPairs := []uint32{100, 50, 400, 150, 550, 150}
+		if len(got) != len(wantPairs) {
+			t.Fatalf("listedRanges = %v, want %v", got, wantPairs)
+		}
+		for i := range wantPairs {
+			if got[i] != wantPairs[i] {
+				t.Fatalf("listedRanges = %v, want %v", got, wantPairs)
+			}
+		}
+	})
 }
 
 // TestRecSetShardUnionIntersect checks unionRecSetShards/intersectRecSetShards
@@ -309,6 +445,92 @@ func TestRecSetShardUnionIntersectThreeWay(t *testing.T) {
 	verifyRecSetShard(t, "3way-union", gotUnion, wantUnion)
 	gotIntersect := intersectRecSetShards(nil, []*recSetShard{&partA, &partB, &partC})
 	verifyRecSetShard(t, "3way-intersect", gotIntersect, wantIntersect)
+}
+
+// TestCombineTwoRecSetShardsDispatchesOptimizedPath proves the dedicated
+// pairwise algorithm actually ran for each (kind,kind) combination that has
+// one — not just that the result is correct, which the generic bitmap
+// fallback (combineRecSetBitmapsWithData) would also produce. The
+// discriminator: for every pairing below, the dedicated algorithm's own
+// result kind is ranges or positive (never bitmap) whenever the true
+// intersect/union is small and non-empty, while the fallback always returns
+// bitmap-kind for any non-empty result (recSetShardFromBitmap only
+// downgrades to ranges on an empty result) — so kind==recSetBitmap here
+// would mean the optimized path was skipped.
+func TestCombineTwoRecSetShardsDispatchesOptimizedPath(t *testing.T) {
+	universe := uint32(2000)
+
+	rangesWant := wantFromRange(universe, [][2]uint32{{100, 300}})                                          // -> recSetRanges
+	positiveWant := wantFromRange(universe, [][2]uint32{{50, 1}, {500, 1}, {900, 1}, {1500, 1}, {1900, 1}}) // 5 singletons -> recSetPositive
+	bitmapWant := func() []bool {
+		w := make([]bool, universe)
+		rng := rand.New(rand.NewSource(7))
+		for i := range w {
+			if i >= 100 && i < 400 {
+				continue // keep ranges' own [100,400) span clear (below) so the
+				// ranges/bitmap intersect stays small enough to fit the
+				// dedicated path's budget instead of genuinely overflowing —
+				// a ~50% random fill *inside* that span would legitimately
+				// fragment past budget and isn't what this test is checking
+			}
+			w[i] = rng.Intn(2) == 0 // ~50% dense scattered elsewhere -> recSetBitmap
+		}
+		for i := 150; i < 160; i++ {
+			w[i] = true // one small clustered block inside ranges' span
+		}
+		return w
+	}()
+
+	ranges := buildRecSetShard(rangesWant)
+	positive := buildRecSetShard(positiveWant)
+	bitmap := buildRecSetShard(bitmapWant)
+	if ranges.kind != recSetRanges || positive.kind != recSetPositive || bitmap.kind != recSetBitmap {
+		t.Fatalf("fixture kinds = %v/%v/%v, want ranges/positive/bitmap", ranges.kind, positive.kind, bitmap.kind)
+	}
+
+	cases := []struct {
+		name              string
+		a, b              *recSetShard
+		wantA             []bool
+		wantB             []bool
+		wantNonBitmapKind bool // false only where bitmap output is architecturally correct, not a fallback signal
+	}{
+		{"ranges_ranges", &ranges, &ranges, rangesWant, rangesWant, true},
+		{"positive_positive", &positive, &positive, positiveWant, positiveWant, true},
+		{"ranges_positive", &ranges, &positive, rangesWant, positiveWant, true},
+		{"ranges_bitmap", &ranges, &bitmap, rangesWant, bitmapWant, false}, // union must stay non-bitmap only for intersect; checked separately below
+		{"positive_bitmap", &positive, &bitmap, positiveWant, bitmapWant, false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name+"_intersect", func(t *testing.T) {
+			want := make([]bool, universe)
+			for i := range want {
+				want[i] = tc.wantA[i] && tc.wantB[i]
+			}
+			got := intersectRecSetShards(nil, []*recSetShard{tc.a, tc.b})
+			verifyRecSetShard(t, tc.name+"_intersect", got, want)
+			// Intersect with a compact (ranges/positive) operand is always
+			// bounded by that operand's own size, so it must never overflow
+			// to bitmap for these small fixtures regardless of which side
+			// is bitmap-kind.
+			if got.count > 0 && got.kind == recSetBitmap {
+				t.Errorf("%s: intersect kind = recSetBitmap, want ranges/positive (fallback path ran instead of the dedicated one)", tc.name)
+			}
+		})
+		t.Run(tc.name+"_union", func(t *testing.T) {
+			want := make([]bool, universe)
+			for i := range want {
+				want[i] = tc.wantA[i] || tc.wantB[i]
+			}
+			got := unionRecSetShards(nil, []*recSetShard{tc.a, tc.b})
+			verifyRecSetShard(t, tc.name+"_union", got, want)
+			if tc.wantNonBitmapKind && got.count > 0 && got.kind == recSetBitmap {
+				t.Errorf("%s: union kind = recSetBitmap, want ranges/positive (fallback path ran instead of the dedicated one)", tc.name)
+			}
+		})
+	}
 }
 
 // TestNewRecSetShardFromSortedIDs checks the project-join builder path
@@ -577,5 +799,71 @@ func sortUint32(ids []uint32) {
 		for j := i; j > 0 && ids[j-1] > ids[j]; j-- {
 			ids[j-1], ids[j] = ids[j], ids[j-1]
 		}
+	}
+}
+
+// --- Benchmarks: dedicated pairwise combine vs. full-universe fallback ----
+//
+// These isolate the combine step itself (combineTwoRecSetShards vs.
+// combineRecSetBitmapsWithData) from everything else a real query pays for
+// (index probe, scan, filter predicate) — an end-to-end SQL benchmark is
+// dominated by scan cost and can't show this difference cleanly. Both sides
+// call the exact functions unionRecSetShards/intersectRecSetShards actually
+// dispatch to; FullMaterializeFallback is what every mixed-kind combine did
+// unconditionally before this file's pairwise dispatch matrix existed.
+
+func benchmarkFixtures(universe uint32) (rangesPart, positivePart, bitmapPart recSetShard) {
+	rangesPart = buildRecSetShard(wantFromRange(universe, [][2]uint32{{universe / 2, 2000}}))
+	positiveWant := make([]bool, universe)
+	rng := rand.New(rand.NewSource(11))
+	for i := 0; i < 100; i++ {
+		positiveWant[rng.Intn(int(universe))] = true
+	}
+	positivePart = buildRecSetShard(positiveWant)
+	bitmapWant := make([]bool, universe)
+	for i := range bitmapWant {
+		bitmapWant[i] = rng.Intn(3) == 0
+	}
+	bitmapPart = buildRecSetShard(bitmapWant)
+	if rangesPart.kind != recSetRanges || positivePart.kind != recSetPositive || bitmapPart.kind != recSetBitmap {
+		panic("benchmark fixture kinds drifted (ranges/positive/bitmap) — adjust the generators above")
+	}
+	return
+}
+
+func BenchmarkRecSetShardCombine(b *testing.B) {
+	universe := uint32(5_000_000)
+	ranges, positive, bitmap := benchmarkFixtures(universe)
+
+	cases := []struct {
+		name string
+		a, b *recSetShard
+	}{
+		{"RangesVsBitmap", &ranges, &bitmap},
+		{"RangesVsPositive", &ranges, &positive},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name+"/Intersect/DedicatedPath", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				intersectRecSetShards(nil, []*recSetShard{tc.a, tc.b})
+			}
+		})
+		b.Run(tc.name+"/Intersect/FullMaterializeFallback", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				data := make([]uint32, (universe+31)/32)
+				combineRecSetBitmapsWithData(nil, universe, []*recSetShard{tc.a, tc.b}, false, data)
+			}
+		})
+		b.Run(tc.name+"/Union/DedicatedPath", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				unionRecSetShards(nil, []*recSetShard{tc.a, tc.b})
+			}
+		})
+		b.Run(tc.name+"/Union/FullMaterializeFallback", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				data := make([]uint32, (universe+31)/32)
+				combineRecSetBitmapsWithData(nil, universe, []*recSetShard{tc.a, tc.b}, true, data)
+			}
+		})
 	}
 }

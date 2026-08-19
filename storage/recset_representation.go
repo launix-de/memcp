@@ -48,24 +48,34 @@ const (
 // order (see the add() callers in recset.go / analyzer.go — all drive it via
 // a single forward scan).
 //
-// DESIGN INVARIANT (build phase): exactly one allocation while add() is
-// being called. newRecSetShardBuilder allocates the eventual bitmap
-// footprint ((universe+31)/32 words) once; every phase (ranges, positive,
-// bitmap) reuses that same backing array — ranges as (base,count) pairs,
-// positive as a flat hit-id list, bitmap as literal bits — and escalating
-// from one phase to a less compact one is a plain clear() of that same
-// array, never a new allocation. This is why escalation historically
-// discarded whatever the abandoned phase had recorded and relied on the
-// caller replaying: see the `wasBitmap`-watching code in recset.go's
-// collectRecSet/projectJoinKeysPart and analyzer.go's BuildSkipList,
-// unchanged by this rewrite. For that contract to be safe, every escalation
-// must happen synchronously inside an add() call the caller can see — never
-// deferred to finish(), which runs after the caller's add() loop has
-// already ended with no replay window left. The ranges phase's escalation
-// is therefore triggered the moment a new run *starts* (reserving its pair
-// slot immediately, in addRange), not when it closes — closeRun() only ever
-// fills in an already-reserved slot, so it can run safely from finish()
-// without ever needing to escalate itself.
+// DESIGN INVARIANT (build phase): exactly one allocation for the shared
+// backing array while add() is driving normal (non-escalating) progress.
+// newRecSetShardBuilder allocates the eventual bitmap footprint
+// ((universe+31)/32 words) once; every phase (ranges, positive, bitmap)
+// reuses that same backing array — ranges as (base,count) pairs, positive as
+// a flat hit-id list, bitmap as literal bits.
+//
+// HARDER INVARIANT, and the one that actually matters: a caller's filter
+// predicate (the recid→hit decision fed into add()) must NEVER be evaluated
+// more than once per recid. add() is driven from a live SQL scan — the hit
+// value the caller passes in already paid for an index lookup and a
+// predicate evaluation, both of which can be arbitrarily expensive
+// (interpreted Scheme, column reads). An earlier version of this file
+// escalated phases with a bare clear() of the backing array and left the
+// caller to "replay" the abandoned prefix by re-running its scan and
+// predicate a second time — this was wrong: it silently doubled scan+filter
+// cost on any shard that escalates late, and is exactly what must never
+// happen. Every escalation in this file is therefore self-contained instead:
+// escalateRangesToBitmap and escalatePositiveToBitmap each copy the
+// already-collected content (which already reflects every filter result
+// seen so far) into a small temporary buffer, clear the shared backing
+// array, and replay *from that copy* — never by asking the caller to
+// re-decide anything. This temporary buffer is the one place a second
+// allocation is deliberately permitted (bounded by the same budget as
+// everything else here, at most once per escalation); the shared backing
+// array itself is still allocated exactly once. Because escalation no longer
+// needs a caller-visible replay window, callers (recset.go, analyzer.go)
+// drive add() in one straight forward pass and never re-run their scan.
 //
 // finish() itself adds exactly one more allocation for ranges/positive
 // results (not bitmap): it copies the logically-used prefix of the backing
@@ -76,29 +86,31 @@ const (
 // spanning a huge universe, down to 2 words), that would silently defeat
 // the entire memory point of the representation. This copy is bounded by
 // the logical size actually recorded (2×rangePairs or hits words), not by
-// universe, and paid exactly once — it is not part of the build-phase
-// invariant above, which is specifically about not re-allocating or
-// growing anything *while* add() is still being called.
+// universe, and paid exactly once.
 //
-// The one deliberate exception is the tryConvertToPositive path
-// (ranges→positive, triggered by too many isolated singleton runs, plus its
-// own overflow-to-bitmap fallback if positive wouldn't fit either):
-// flattening (base,count) pairs into individual ids is not a pure
+// tryConvertToPositive (ranges→positive, triggered by too many isolated
+// singleton runs) needs the same kind of temporary buffer for a different
+// reason: flattening (base,count) pairs into individual ids is not a pure
 // clear+rebuild, and a naive in-place left-to-right expansion is unsafe —
 // any range with count>1 writes ahead of where a not-yet-read later pair
 // lives, corrupting it before it's read (a range with count=1000 at the
 // front, for instance, overwrites the read position of a pair many slots
-// further in before that pair has been read). Making this transition
-// correct needs a temporary buffer sized to the flattened hit count —
-// bounded by the same budget as everything else here, allocated at most
-// once per shard build, and only on the (by design, rare) path where ranges
-// already gave up on clustering.
+// further in before that pair has been read).
 type recSetShardBuilder struct {
 	shard       *storageShard
 	universe    uint32
 	data        []uint32
 	matched     uint32
 	initialized bool
+
+	// breakAt, when nonzero, forces the ranges phase to end whatever run is
+	// open the moment recid reaches it, even if the hit is otherwise
+	// contiguous with the run — see addRange. Callers set this to a shard's
+	// main_count so a stored range pair never straddles the main/delta
+	// boundary, letting consumers (forEachVisibleRun and friends) split a
+	// range into its main-storage and delta sub-runs with a plain Go slice
+	// bound instead of clamping/re-deriving the split point themselves.
+	breakAt uint32
 
 	bitmap   bool // once true, add() operates in bitmap mode
 	positive bool // once true (and !bitmap), add() operates in flat hit-list mode
@@ -119,11 +131,16 @@ type recSetShardBuilder struct {
 // to a flat hit list instead.
 const maxSingletonRuns = 3
 
-func newRecSetShardBuilder(shard *storageShard, universe uint32, allowFull bool) *recSetShardBuilder {
+// breakAt forces the ranges phase to close a run the moment recid reaches
+// it (see recSetShardBuilder.breakAt) — pass a shard's main_count so ranges
+// never straddle the main/delta boundary, or 0 to disable (no meaningful
+// main/delta split, e.g. the SkipList builder in analyzer.go).
+func newRecSetShardBuilder(shard *storageShard, universe uint32, allowFull bool, breakAt uint32) *recSetShardBuilder {
 	builder := &recSetShardBuilder{
 		shard:    shard,
 		universe: universe,
 		data:     make([]uint32, (universe+31)/32),
+		breakAt:  breakAt,
 	}
 	if !allowFull {
 		builder.initialized = true
@@ -154,18 +171,17 @@ func (b *recSetShardBuilder) addBitmap(recid uint32, hit bool) {
 }
 
 // addPositive appends a hit recid to the flat list. Overflowing the shared
-// backing array's budget escalates to bitmap the zero-allocation way: clear
-// and rely on the caller's replay (see the type doc). This is always safe
-// here because addPositive's budget check fires on every single hit, not on
-// some deferred flush — there is no closeRun()-style batching that could
-// let the last hit of a shard slip past the caller's add() loop unseen.
+// backing array's budget escalates to bitmap self-contained (see
+// escalatePositiveToBitmap): the already-collected hits are converted from a
+// temp copy, never re-derived by asking the caller to re-run its filter
+// predicate — see recSetShardBuilder's doc comment for why that's a hard
+// requirement, not just an optimization.
 func (b *recSetShardBuilder) addPositive(recid uint32, hit bool) {
 	if !hit {
 		return
 	}
 	if b.hits >= uint32(len(b.data)) {
-		clear(b.data)
-		b.bitmap = true
+		b.escalatePositiveToBitmap()
 		b.addBitmap(recid, true)
 		return
 	}
@@ -173,9 +189,22 @@ func (b *recSetShardBuilder) addPositive(recid uint32, hit bool) {
 	b.hits++
 }
 
+// escalatePositiveToBitmap converts the hit ids already collected into
+// bitmap bits before clearing the backing array, exactly like
+// escalateRangesToBitmap does for the ranges phase — see there for why this
+// must never be a bare clear()-and-rely-on-replay.
+func (b *recSetShardBuilder) escalatePositiveToBitmap() {
+	oldHits := append([]uint32(nil), b.data[:b.hits]...)
+	clear(b.data)
+	b.bitmap = true
+	for _, id := range oldHits {
+		b.addBitmap(id, true)
+	}
+}
+
 func (b *recSetShardBuilder) addRange(recid uint32, hit bool) {
 	if hit {
-		if b.haveRun && recid == b.runStart+b.runLen {
+		if b.haveRun && recid == b.runStart+b.runLen && recid != b.breakAt {
 			b.runLen++
 			return
 		}
@@ -191,12 +220,13 @@ func (b *recSetShardBuilder) addRange(recid uint32, hit bool) {
 			return
 		}
 		// Reserve this new run's pair slot right now, while still inside a
-		// real add() call — never deferred to closeRun()/finish() — so
-		// this is the one and only place ranges→bitmap escalation can
-		// trigger, guaranteeing the caller always has a replay window.
+		// real add() call — never deferred to closeRun()/finish(). Escalation
+		// here is self-contained (escalateRangesToBitmap converts the pairs
+		// already recorded from a temp copy), so it needs no replay window
+		// from the caller — see recSetShardBuilder's doc comment for why a
+		// filter predicate must never be re-run to reconstruct lost state.
 		if (b.rangePairs+1)*2 > uint32(len(b.data)) {
-			clear(b.data)
-			b.bitmap = true
+			b.escalateRangesToBitmap()
 			b.addBitmap(recid, true)
 			return
 		}
@@ -216,8 +246,9 @@ func (b *recSetShardBuilder) addRange(recid uint32, hit bool) {
 // checks the one escalation closeRun can still trigger: too many isolated
 // singleton runs, meaning the data isn't clustering, so switch to a flat
 // hit list instead (tryConvertToPositive). Safe to run from finish() (i.e.
-// with no caller replay window left) purely because tryConvertToPositive
-// itself is lossless — it doesn't clear anything here.
+// after the caller's add() loop has already ended) because every escalation
+// this file performs is self-contained — see recSetShardBuilder's doc
+// comment.
 func (b *recSetShardBuilder) closeRun() {
 	if !b.haveRun {
 		return
@@ -237,22 +268,15 @@ func (b *recSetShardBuilder) closeRun() {
 
 // tryConvertToPositive flattens the ranges accumulated so far into a flat
 // hit-id list, using a small temporary buffer sized exactly to the total hit
-// count — see the type doc for why this one transition can't be a plain
-// clear()+replay or a naive in-place expansion.
-//
-// If the total hit count doesn't fit the shared backing array's budget
-// either, this falls back to bitmap — but NOT via the zero-allocation
-// clear()+replay pattern addRange/addPositive use above. closeRun() (this
-// function's only caller) can run from finish(), flushing the very last run
-// of a shard with no caller add() loop left to replay from; a bare clear()
-// here would silently drop every range pair recorded before this one,
-// exactly the bug this design is built around avoiding (see the type doc).
-// escalateRangesToBitmap keeps this transition self-contained the same way
-// the flatten above is: convert what's already in `data` before touching
-// it. This — like the flatten itself — is a second, disclosed exception to
-// the one-allocation invariant, reached only via the same rare ">3
-// singleton runs" path, bounded by the same budget, at most once per shard
-// build.
+// count — see recSetShardBuilder's doc comment for why every transition in
+// this file (this one included) must convert what's already recorded rather
+// than clear()+ask the caller to replay: a bare clear() here would silently
+// drop every range pair recorded before this one, and closeRun() (this
+// function's only caller) can run from finish(), after the caller's add()
+// loop has already ended with nothing left to replay from even if that were
+// acceptable. If the total hit count doesn't fit the shared backing array's
+// budget either, escalateRangesToBitmap keeps that fallback self-contained
+// the same way.
 func (b *recSetShardBuilder) tryConvertToPositive() {
 	var total uint32
 	for i := uint32(0); i < b.rangePairs; i++ {
@@ -279,9 +303,10 @@ func (b *recSetShardBuilder) tryConvertToPositive() {
 }
 
 // escalateRangesToBitmap converts the range pairs already recorded into
-// bitmap bits before clearing the backing array, so nothing is lost even
-// when there's no caller replay window left to fall back on (see
-// tryConvertToPositive, its only caller).
+// bitmap bits before clearing the backing array, so nothing is lost and the
+// caller's filter predicate never needs to be re-run — called from both
+// addRange (direct ranges→bitmap escalation) and tryConvertToPositive (its
+// own overflow-to-bitmap fallback).
 func (b *recSetShardBuilder) escalateRangesToBitmap() {
 	oldRanges := append([]uint32(nil), b.data[:b.rangePairs*2]...)
 	clear(b.data)
@@ -387,13 +412,21 @@ func sortedUint32Contains(values []uint32, value uint32) bool {
 	return pos < len(values) && values[pos] == value
 }
 
-// listedValues returns the flat hit-id list (recSetPositive only).
+// listedValues returns the flat hit-id list (recSetPositive only). Always
+// sorted ascending, deduplicated — see recSetShard's INVARIANT doc comment
+// in recset.go. Every pairwise combine below that consumes this (union/
+// intersect with another recSetPositive, recSetRanges, or recSetBitmap
+// operand) relies on that ordering to run as a linear sweep.
 func (s *recSetShard) listedValues() []uint32 {
 	return s.data[:s.used]
 }
 
 // listedRanges returns the flat [base0,count0,base1,count1,...] pair array
-// (recSetRanges only).
+// (recSetRanges only). Always sorted ascending by base, non-overlapping and
+// non-adjacent (the builder always coalesces touching runs) — see
+// recSetShard's INVARIANT doc comment in recset.go. Every pairwise combine
+// below that consumes this relies on that ordering to run as a linear
+// sweep instead of a per-pair search.
 func (s *recSetShard) listedRanges() []uint32 {
 	return s.data[:2*s.used]
 }
@@ -465,11 +498,18 @@ func unionRecSetShards(shard *storageShard, parts []*recSetShard) recSetShard {
 		if !overflow {
 			return recSetShardFromList(shard, universe, data, used)
 		}
+	} else {
+		// Mixed kinds: fold pairwise through combineTwoRecSetShards instead of
+		// jumping straight to full-universe bitmap materialization — see its
+		// doc comment for why every (kind,kind) pairing gets an algorithm
+		// proportional to the more compact operand.
+		return foldRecSetShards(shard, universe, true, parts)
 	}
-	// Mixed kinds (or a native-representation overflow): every part still
-	// answers .contains()/word() correctly regardless of its own kind, so
-	// this is always correct, just without the compact-representation
-	// shortcut above.
+	// A native-representation N-way merge overflowed its budget (every part
+	// was the same kind, but the combined result still didn't fit) — every
+	// part still answers .contains()/word() correctly regardless of its own
+	// kind, so full materialization is always correct here, just without the
+	// compact-representation shortcut above.
 	return combineRecSetBitmapsWithData(shard, universe, parts, true, data)
 }
 
@@ -514,8 +554,17 @@ func intersectRecSetShards(shard *storageShard, parts []*recSetShard) recSetShar
 		if !overflow {
 			return recSetShardFromRangePairs(shard, universe, data, used)
 		}
+		// Same-kind N-way merge overflowed its budget: every part still
+		// answers .contains()/word() correctly regardless of kind, so full
+		// materialization is always correct here, just without the
+		// compact-representation shortcut above.
+		return combineRecSetBitmapsWithData(shard, universe, parts, false, data)
 	}
-	return combineRecSetBitmapsWithData(shard, universe, parts, false, data)
+	// Mixed kinds: fold pairwise through combineTwoRecSetShards instead of
+	// jumping straight to full-universe bitmap materialization — see its doc
+	// comment for why every (kind,kind) pairing gets an algorithm
+	// proportional to the more compact operand.
+	return foldRecSetShards(shard, universe, false, parts)
 }
 
 func cloneRecSetShardTo(shard *storageShard, part *recSetShard) recSetShard {
@@ -684,6 +733,341 @@ func intersectSortedRanges(dst []uint32, lists [][]uint32) (uint32, bool) {
 		if !advanced {
 			return used, false
 		}
+	}
+}
+
+// --- Pairwise mixed-kind combine -------------------------------------------
+//
+// unionRecSetShards/intersectRecSetShards above have fast N-way paths for
+// the uniform case (every part the same kind). When parts mix kinds, this
+// section supplies a dedicated algorithm for every (kind,kind) pairing —
+// ranges/positive/bitmap gives 3 kinds, so 6 unordered pairs per op — rather
+// than falling back to combineRecSetBitmapsWithData's full-universe word
+// materialization for anything not uniform. Only bitmap-bitmap is a genuine
+// full-universe operation (there's no way to skip words when both sides are
+// already fully expanded); every pairing involving at least one ranges or
+// positive operand instead costs proportional to that operand's own
+// compactness (its range-pair count or hit count), which is the entire
+// point of not having flattened it to a bitmap in the first place.
+//
+// foldRecSetShards drives this pairwise, reducing a >2-part heterogeneous
+// list left to right; each step still gets a kind-optimized algorithm
+// because the dispatch in combineTwoRecSetShards is re-evaluated on the
+// (possibly kind-changed) accumulator every time.
+//
+// Every pairing below is a linear sweep, never a per-element binary search
+// or an O(n*m) scan, because both operands are guaranteed sorted ascending
+// (see recSetShard's INVARIANT doc comment): ranges-ranges/positive-positive
+// reuse the same sorted-merge primitives the uniform-kind N-way paths use;
+// ranges-positive walks both sorted sequences in lockstep
+// (intersectRangesWithList) or folds the positive side into the same sorted
+// sweep as ranges (listAsRangePairs + unionSortedRanges); ranges-bitmap and
+// positive-bitmap touch the bitmap only within the compact side's own spans
+// (intersectRangesWithBitmap, setBitRange) or only at the compact side's own
+// ids (intersectListWithBitmap, unionListWithBitmap) rather than the whole
+// universe — sortedness isn't what bounds their cost (bitmap access is O(1)
+// either way), but it's still what guarantees their output stays a valid
+// ascending recSetPositive/recSetRanges instead of needing a re-sort after.
+func foldRecSetShards(shard *storageShard, universe uint32, union bool, parts []*recSetShard) recSetShard {
+	acc := parts[0]
+	for _, part := range parts[1:] {
+		combined := combineTwoRecSetShards(shard, universe, union, acc, part)
+		acc = &combined
+	}
+	return cloneRecSetShardTo(shard, acc)
+}
+
+// combineTwoRecSetShards combines exactly two shards over the same universe
+// (mixed-universe combines are handled by the caller before reaching here —
+// see unionRecSetShards/intersectRecSetShards). left/right are read-only;
+// the result always lives in a freshly allocated buffer.
+func combineTwoRecSetShards(shard *storageShard, universe uint32, union bool, left, right *recSetShard) recSetShard {
+	// Canonicalize so the dispatch below only needs one entry per unordered
+	// pair — recSetRanges < recSetPositive < recSetBitmap by iota order.
+	if left.kind > right.kind {
+		left, right = right, left
+	}
+	data := make([]uint32, (universe+31)/32)
+
+	switch {
+	case left.kind == recSetRanges && right.kind == recSetRanges:
+		lists := [][]uint32{left.listedRanges(), right.listedRanges()}
+		var used uint32
+		var overflow bool
+		if union {
+			used, overflow = unionSortedRanges(data, lists)
+		} else {
+			used, overflow = intersectSortedRanges(data, lists)
+		}
+		if !overflow {
+			return recSetShardFromRangePairs(shard, universe, data, used)
+		}
+
+	case left.kind == recSetPositive && right.kind == recSetPositive:
+		if union {
+			used, overflow := unionSortedLists(data, [][]uint32{left.listedValues(), right.listedValues()})
+			if !overflow {
+				return recSetShardFromList(shard, universe, data, used)
+			}
+		} else {
+			used := intersectSortedLists(data, left.listedValues(), right.listedValues())
+			return recSetShardFromList(shard, universe, data, used)
+		}
+
+	case left.kind == recSetRanges && right.kind == recSetPositive:
+		if union {
+			synthetic := make([]uint32, 2*len(right.listedValues()))
+			listAsRangePairs(synthetic, right.listedValues())
+			used, overflow := unionSortedRanges(data, [][]uint32{left.listedRanges(), synthetic})
+			if !overflow {
+				return recSetShardFromRangePairs(shard, universe, data, used)
+			}
+		} else {
+			used := intersectRangesWithList(data, left.listedRanges(), right.listedValues())
+			return recSetShardFromList(shard, universe, data, used)
+		}
+
+	case left.kind == recSetRanges && right.kind == recSetBitmap:
+		if union {
+			result := unionRangesWithBitmap(data, left.listedRanges(), right.data)
+			return recSetShardFromBitmap(shard, universe, result)
+		}
+		used, overflow := intersectRangesWithBitmap(data, left.listedRanges(), right.data)
+		if !overflow {
+			return recSetShardFromRangePairs(shard, universe, data, used)
+		}
+
+	case left.kind == recSetPositive && right.kind == recSetBitmap:
+		if union {
+			result := unionListWithBitmap(data, left.listedValues(), right.data)
+			return recSetShardFromBitmap(shard, universe, result)
+		}
+		used := intersectListWithBitmap(data, left.listedValues(), right.data)
+		return recSetShardFromList(shard, universe, data, used)
+
+	default: // bitmap, bitmap
+		if union {
+			unionBitmaps(data, left.data, right.data)
+		} else {
+			intersectBitmaps(data, left.data, right.data)
+		}
+		return recSetShardFromBitmap(shard, universe, data)
+	}
+	// The dedicated path's own budget overflowed (only reachable for the
+	// ranges-involving cases above — every other case returns unconditionally):
+	// fall back to full materialization, still always correct.
+	return combineRecSetBitmapsWithData(shard, universe, []*recSetShard{left, right}, union, data)
+}
+
+// intersectSortedLists computes the sorted intersection of two sorted,
+// deduplicated recid lists via a two-pointer merge. The result can never
+// exceed min(len(a),len(b)), which is itself bounded by the shared
+// recSetPositive budget both a and b were built under, so unlike the
+// range-producing combines above this can never overflow dst.
+func intersectSortedLists(dst []uint32, a, b []uint32) uint32 {
+	var used, i, j uint32
+	for i < uint32(len(a)) && j < uint32(len(b)) {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			dst[used] = a[i]
+			used++
+			i++
+			j++
+		}
+	}
+	return used
+}
+
+// listAsRangePairs writes values (a sorted recid list) into dst as
+// synthetic singleton (id,1) range pairs, so a recSetPositive operand can be
+// fed through the same unionSortedRanges sweep a recSetRanges operand uses.
+// dst must be 2*len(values) long.
+func listAsRangePairs(dst []uint32, values []uint32) {
+	for i, id := range values {
+		dst[i*2] = id
+		dst[i*2+1] = 1
+	}
+}
+
+// intersectRangesWithList keeps every value that falls inside one of ranges'
+// pairs, via a two-pointer sweep over both (already sorted, non-overlapping)
+// inputs. The result is a subsequence of values, so it's already sorted and
+// bounded by len(values) — never overflows dst.
+func intersectRangesWithList(dst []uint32, ranges, values []uint32) uint32 {
+	var used uint32
+	ri := 0
+	for _, id := range values {
+		for ri < len(ranges) && ranges[ri]+ranges[ri+1] <= id {
+			ri += 2
+		}
+		if ri >= len(ranges) {
+			break
+		}
+		if ranges[ri] <= id {
+			dst[used] = id
+			used++
+		}
+	}
+	return used
+}
+
+// setBitRange sets bits [base,base+count) in a bitmap word array, touching
+// only the words the range actually spans (whole interior words get a
+// single OR with ^0, boundary words get a masked OR) instead of looping bit
+// by bit — the primitive both unionRangesWithBitmap and unionListWithBitmap
+// (for count==1) are built on.
+func setBitRange(data []uint32, base, count uint32) {
+	if count == 0 {
+		return
+	}
+	end := base + count
+	for pos, wordIdx := base, base>>5; pos < end; wordIdx++ {
+		wordStart := wordIdx << 5
+		lo := pos - wordStart
+		hi := uint32(32)
+		if wordStart+32 > end {
+			hi = end - wordStart
+		}
+		var mask uint32
+		if hi-lo >= 32 {
+			mask = ^uint32(0)
+		} else {
+			mask = ((uint32(1) << (hi - lo)) - 1) << lo
+		}
+		if int(wordIdx) < len(data) {
+			data[wordIdx] |= mask
+		}
+		pos = wordStart + hi
+	}
+}
+
+// unionRangesWithBitmap ORs ranges' pairs into a clone of bitmapData. The
+// result is necessarily bitmap-sized (it must preserve every one-bit of
+// bitmapData, which may be scattered across the whole universe), so unlike
+// the ranges-producing combines above this never overflows — dst is exactly
+// len(bitmapData) long.
+func unionRangesWithBitmap(dst []uint32, ranges []uint32, bitmapData []uint32) []uint32 {
+	copy(dst, bitmapData)
+	for i := 0; i < len(ranges); i += 2 {
+		setBitRange(dst, ranges[i], ranges[i+1])
+	}
+	return dst
+}
+
+// unionListWithBitmap ORs individual hit ids into a clone of bitmapData. See
+// unionRangesWithBitmap — same reasoning, never overflows.
+func unionListWithBitmap(dst []uint32, values []uint32, bitmapData []uint32) []uint32 {
+	copy(dst, bitmapData)
+	for _, id := range values {
+		dst[id>>5] |= uint32(1) << (id & 31)
+	}
+	return dst
+}
+
+// intersectRangesWithBitmap visits only the bitmap words within ranges'
+// spans (never the full universe) and coalesces the set bits found there
+// into output range pairs. Unlike the union direction, this genuinely can
+// overflow dst: a highly fragmented bitmap (e.g. alternating bits) within a
+// large range span can produce far more runs than the range/positive budget
+// allows, so the caller must still be ready to fall back to full
+// materialization.
+func intersectRangesWithBitmap(dst []uint32, ranges []uint32, bitmapData []uint32) (uint32, bool) {
+	var used uint32
+	for i := 0; i < len(ranges); i += 2 {
+		base, count := ranges[i], ranges[i+1]
+		end := base + count
+		var runStart uint32
+		haveRun := false
+		flush := func(runEnd uint32) bool {
+			if !haveRun {
+				return true
+			}
+			if (used+1)*2 > uint32(len(dst)) {
+				return false
+			}
+			dst[used*2] = runStart
+			dst[used*2+1] = runEnd - runStart
+			used++
+			haveRun = false
+			return true
+		}
+		for pos := base; pos < end; {
+			wordIdx := pos >> 5
+			wordStart := wordIdx << 5
+			var word uint32
+			if int(wordIdx) < len(bitmapData) {
+				word = bitmapData[wordIdx]
+			}
+			hi := uint32(32)
+			if wordStart+32 > end {
+				hi = end - wordStart
+			}
+			for b := pos - wordStart; b < hi; b++ {
+				id := wordStart + b
+				if word&(uint32(1)<<b) != 0 {
+					if !haveRun {
+						runStart = id
+						haveRun = true
+					}
+				} else if !flush(id) {
+					return used, true
+				}
+			}
+			pos = wordStart + hi
+		}
+		if !flush(end) {
+			return used, true
+		}
+	}
+	return used, false
+}
+
+// intersectListWithBitmap keeps every value whose bit is set in bitmapData.
+// The result is a subsequence of values — already sorted, bounded by
+// len(values), never overflows dst.
+func intersectListWithBitmap(dst []uint32, values []uint32, bitmapData []uint32) uint32 {
+	var used uint32
+	for _, id := range values {
+		word := id >> 5
+		if int(word) < len(bitmapData) && bitmapData[word]&(uint32(1)<<(id&31)) != 0 {
+			dst[used] = id
+			used++
+		}
+	}
+	return used
+}
+
+// unionBitmaps/intersectBitmaps are the direct word-parallel AND/OR for two
+// genuinely bitmap-kind operands — the one pairing in this section that
+// really does cost a full universe pass, since neither side has anything
+// more compact to skip to.
+func unionBitmaps(dst, a, b []uint32) {
+	for i := range dst {
+		var av, bv uint32
+		if i < len(a) {
+			av = a[i]
+		}
+		if i < len(b) {
+			bv = b[i]
+		}
+		dst[i] = av | bv
+	}
+}
+
+func intersectBitmaps(dst, a, b []uint32) {
+	for i := range dst {
+		var av, bv uint32
+		if i < len(a) {
+			av = a[i]
+		}
+		if i < len(b) {
+			bv = b[i]
+		}
+		dst[i] = av & bv
 	}
 }
 

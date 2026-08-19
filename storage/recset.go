@@ -28,6 +28,26 @@ import "github.com/launix-de/memcp/scm"
 // TagRecSet is the custom Scmer tag for query-local RecSet handles.
 const TagRecSet = 102
 
+// recSetShard is one shard's contribution to a query-local RecSet, in one of
+// three kinds (see recSetRepresentation in recset_representation.go).
+//
+// INVARIANT: for recSetRanges and recSetPositive, data is always sorted
+// ascending — recSetRanges as non-overlapping, non-adjacent (base,count)
+// pairs ordered by base; recSetPositive as a deduplicated ascending id list.
+// This is not incidental: every constructor (recSetShardBuilder.finish(),
+// newRecSetShardFromSortedIDs, and every union/intersect result builder in
+// recset_representation.go) either scans/merges its inputs in ascending
+// order by construction or is fed a precondition-documented pre-sorted
+// input, and recSetShardBuilder.finish()'s positive path additionally
+// enforces it with an explicit sort as a guard. The entire point of
+// maintaining this is that every merge/intersect algorithm operating on
+// recSetShards (unionSortedRanges, intersectSortedRanges, unionSortedLists,
+// intersectSortedLists, intersectRangesWithList, intersectRangesWithBitmap,
+// intersectListWithBitmap, ...) is a linear two-pointer/N-way sweep, not a
+// per-element binary search or O(n*m) scan — that only works because both
+// operands are already ordered. A shard reaching those algorithms out of
+// order would silently corrupt them rather than fail loudly, so this
+// invariant must never be broken by a future constructor.
 type recSetShard struct {
 	shard    *storageShard
 	kind     recSetRepresentation
@@ -376,8 +396,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	completeTraversal := len(boundaries) == 0 && recsetFilter == nil
 	singleExactLike := len(boundaries) == 1 && singleLikeBoundaryCoversCondition(conditionCols, condition, boundaries[0])
 	exactLikeMain := false
-	builder := newRecSetShardBuilder(t, visibleUpper, completeTraversal)
-	replayCandidates := 0
+	builder := newRecSetShardBuilder(t, visibleUpper, completeTraversal, t.main_count)
 	evaluate := func(idx uint32) bool {
 		if recsetPart != nil && !recsetPart.contains(idx) {
 			return false
@@ -421,36 +440,15 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 		return scm.ToBool(conditionFn(cdataset...))
 	}
 	var buf [1024]uint32
-	processedCandidates := 0
 	t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, &exactLikeMain, func(batch []uint32) bool {
 		for _, idx := range batch {
 			if idx >= visibleUpper {
 				continue
 			}
-			processedCandidates++
-			wasBitmap := builder.bitmap
 			builder.add(idx, evaluate(idx))
-			if !wasBitmap && builder.bitmap {
-				replayCandidates = processedCandidates
-			}
 		}
 		return true
 	})
-	if replayCandidates > 0 {
-		replayed := 0
-		t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], false, &exactLikeMain, func(batch []uint32) bool {
-			for _, idx := range batch {
-				if idx < visibleUpper {
-					builder.addBitmap(idx, evaluate(idx))
-					replayed++
-					if replayed >= replayCandidates {
-						return false
-					}
-				}
-			}
-			return true
-		})
-	}
 	return builder.finish()
 }
 
@@ -842,9 +840,8 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	if dense {
-		builder := newRecSetShardBuilder(t, visibleUpper, true)
+		builder := newRecSetShardBuilder(t, visibleUpper, true, t.main_count)
 		actual := make([]scm.Scmer, len(targetKeyCols))
-		replayUntil := uint32(0)
 		evaluate := func(idx uint32) bool {
 			visible := true
 			if acidMode {
@@ -873,16 +870,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 			return keys.contains(actual)
 		}
 		for idx := uint32(0); idx < visibleUpper; idx++ {
-			wasBitmap := builder.bitmap
 			builder.add(idx, evaluate(idx))
-			if !wasBitmap && builder.bitmap {
-				replayUntil = idx + 1
-			}
-		}
-		if replayUntil > 0 {
-			for idx := uint32(0); idx < replayUntil; idx++ {
-				builder.addBitmap(idx, evaluate(idx))
-			}
 		}
 		return builder.finish()
 	}

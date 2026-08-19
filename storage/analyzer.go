@@ -196,19 +196,14 @@ func (m *likeMatcher) BuildSkipList(pattern, collation string, count uint32, get
 		return nil
 	}
 
-	builder := newRecSetShardBuilder(nil, count, candidate == nil)
-	replayUntil := uint32(0)
+	builder := newRecSetShardBuilder(nil, count, candidate == nil, 0)
 	matches := func(pos uint32) bool {
 		recid := getRecid(pos)
 		v := colStorage.GetValue(recid)
 		return v.IsString() && scm.StrLikeCollation(v.String(), pattern, collation)
 	}
 	add := func(pos uint32) bool {
-		wasBitmap := builder.bitmap
 		builder.add(pos, matches(pos))
-		if !wasBitmap && builder.bitmap {
-			replayUntil = pos + 1
-		}
 		return true
 	}
 	if candidate != nil {
@@ -216,21 +211,6 @@ func (m *likeMatcher) BuildSkipList(pattern, collation string, count uint32, get
 	} else {
 		for pos := uint32(0); pos < count; pos++ {
 			add(pos)
-		}
-	}
-	if replayUntil > 0 {
-		if candidate != nil {
-			candidate.matches.forEachID(func(pos uint32) bool {
-				if pos >= replayUntil {
-					return false
-				}
-				builder.addBitmap(pos, matches(pos))
-				return true
-			})
-		} else {
-			for pos := uint32(0); pos < replayUntil; pos++ {
-				builder.addBitmap(pos, matches(pos))
-			}
 		}
 	}
 	sl := &SkipList{matches: builder.finish()}
