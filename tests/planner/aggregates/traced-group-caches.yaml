@@ -19,6 +19,8 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trace_partition_document"
+  - sql: "DROP TABLE IF EXISTS trace_partition_access"
   - sql: "DROP TABLE IF EXISTS trace_count_access"
   - sql: "DROP TABLE IF EXISTS trace_count_reference"
   - sql: "DROP TABLE IF EXISTS trace_count_parent"
@@ -41,8 +43,79 @@ setup:
   - sql: "INSERT INTO trace_count_parent (id, reference_id) VALUES (1, 10), (2, 20), (3, 30)"
   - sql: "INSERT INTO trace_count_reference (id, label) VALUES (10, 'north'), (20, 'south'), (30, 'west')"
   - sql: "INSERT INTO trace_count_access (id, reference_id, actor_id) VALUES (1, 10, 7), (2, 30, 8)"
+  - sql: |
+      CREATE TABLE trace_partition_access (
+        id INT PRIMARY KEY,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_partition_document (
+        id INT PRIMARY KEY,
+        reference_id INT,
+        FOREIGN KEY trace_partition_reference_fk (reference_id)
+          REFERENCES trace_partition_access(id)
+      )
+  - sql: "INSERT INTO trace_partition_access (id, allowed) VALUES (10, TRUE), (20, FALSE)"
+  - scm: |
+      (begin
+        (define rows (map (produceN 2000) (lambda (i)
+          (list (+ i 1) (if (< i 1000) 10 20)))))
+        (insert (table "memcp-tests" "trace_partition_document")
+          '("id" "reference_id") rows)
+        2000)
 
 test_cases:
+  - name: "COUNT pushes a selective correlated stage above an FK partition"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_partition_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_partition_access access
+        WHERE access.id = document.reference_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 1000
+
+  - name: "Logical costing exposes the aggregate partition decision"
+    sql: |
+      EXPLAIN REORDER
+      SELECT COUNT(*) AS total
+      FROM trace_partition_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_partition_access access
+        WHERE access.id = document.reference_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      contains:
+        - "aggregate_pushdown"
+        - "aggregate_partition"
+        - "estimated_driver_rows 2000"
+        - "estimated_group_rows 3"
+      not_contains:
+        - ".grp:"
+        - "(scan"
+
+  - name: "FK metadata bounds partition groups when column NDV is unknown"
+    scm: |
+      (begin
+        (define driver (list "document" "memcp-tests"
+          "trace_partition_document" false nil))
+        (define keys (list (list (quote get_column)
+          "document" false "reference_id" false)))
+        (and
+          (equal? (planner_foreign_key_group_bound driver '("reference_id")) 3)
+          (equal? (planner_aggregate_pushdown_group_estimate driver keys 2000) 3)
+          (aggregate_pushdown_cost_preferred? 2000 3)
+          (not (aggregate_pushdown_cost_preferred? 2000 1000))))
+    expect:
+      data: [true]
+
   - name: "COUNT lowers a grouped derived stage with an outer presence stage"
     max_plan_size: 20000
     sql: |
@@ -95,6 +168,8 @@ test_cases:
         - "(scan"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_partition_document"
+  - sql: "DROP TABLE IF EXISTS trace_partition_access"
   - sql: "DROP TABLE IF EXISTS trace_count_access"
   - sql: "DROP TABLE IF EXISTS trace_count_reference"
   - sql: "DROP TABLE IF EXISTS trace_count_parent"

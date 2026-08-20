@@ -1662,15 +1662,15 @@ just a coalesced reference to the inner scalar_single stage's own output. */
 (define stage_output_boolean_passthrough_expr? (lambda (expr)
 	(match expr
 		((symbol coalesceNil) inner _default)
-			(and (or (equal?? _default false) (equal?? _default true))
-				(stage_output_boolean_passthrough_expr? inner))
+		(and (or (equal?? _default false) (equal?? _default true))
+			(stage_output_boolean_passthrough_expr? inner))
 		((quote coalesceNil) inner _default)
-			(and (or (equal?? _default false) (equal?? _default true))
-				(stage_output_boolean_passthrough_expr? inner))
+		(and (or (equal?? _default false) (equal?? _default true))
+			(stage_output_boolean_passthrough_expr? inner))
 		((symbol get_column) tblvar _ignorecase _col _col_ignorecase)
-			(and (string? tblvar) (strlike tblvar "__exists_%"))
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
 		((quote get_column) tblvar _ignorecase _col _col_ignorecase)
-			(and (string? tblvar) (strlike tblvar "__exists_%"))
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
 		_ false)))
 
 /* Whether stage's own realized value is boolean-shaped, considering both the
@@ -1695,7 +1695,7 @@ aggregate is the best available approximation. */
 				(begin
 					(define value_expr (car (scalar_first_probe_parts ag)))
 					(and (or (presence_bool_stage_output_expr? value_expr)
-							(stage_output_boolean_passthrough_expr? value_expr))
+						(stage_output_boolean_passthrough_expr? value_expr))
 						(reduce (stage_direct_deps graph stage) (lambda (found dep)
 							(or found (stage_boolean_shaped? graph dep nil)))
 							false))))))))
@@ -6777,6 +6777,75 @@ source itself has no known row count (not a base table). */
 				(if (nil? distinct) nil (min row_count (* estimate distinct))))))
 		1)))
 
+/* An enforced foreign key gives a useful hard upper bound for a grouped
+driver: grouping the referencing columns cannot produce more non-NULL keys
+than the referenced unique relation has rows. Keep one extra bucket for NULL.
+The ordinary NDV estimate remains preferable when it is tighter. */
+(define planner_columns_unique? (lambda (src columns)
+	(or (equal? (source_primary_key_columns src) columns)
+		(contains? (source_unique_key_sets src) columns))))
+
+(define planner_foreign_key_group_bounds (lambda (src columns)
+	(if (not (source_is_base_table? src))
+		'()
+		(try
+			(lambda ()
+				(begin
+					(define info (show (source_schema src) (source_relation src) true))
+					(define foreign_keys (coalesceNil ((info "meta") "ForeignKeys") '()))
+					(filter (map foreign_keys (lambda (foreign_key)
+						(if (and (equal? (foreign_key "Role") "referencing")
+							(equal? (foreign_key "LocalColumns") columns))
+							(begin
+								(define target (list "__aggregate_pushdown_fk_target"
+									(source_schema src) (foreign_key "OtherTable") false nil))
+								(define target_columns (foreign_key "OtherColumns"))
+								(define target_rows (planner_source_row_count target))
+								(if (and (number? target_rows)
+									(planner_columns_unique? target target_columns))
+									(+ target_rows 1)
+									nil))
+							nil)))
+						(lambda (bound) (number? bound)))))
+			(lambda (_e) '())))))
+
+(define planner_foreign_key_group_bound (lambda (src columns)
+	(reduce (planner_foreign_key_group_bounds src columns) (lambda (best bound)
+		(if (or (nil? best) (< bound best)) bound best)) nil)))
+
+(define planner_aggregate_pushdown_group_estimate (lambda (src keys row_count)
+	(if (not (number? row_count))
+		nil
+		(begin
+			(define distinct_estimate (planner_group_distinct_estimate src keys row_count))
+			(define columns (map keys (lambda (key) (direct_column_name_for_alias src key))))
+			(define foreign_key_bound (if (reduce columns (lambda (missing column)
+				(or missing (nil? column))) false)
+				nil
+				(planner_foreign_key_group_bound src columns)))
+			(define estimate (if (nil? distinct_estimate)
+				foreign_key_bound
+				(if (nil? foreign_key_bound)
+					distinct_estimate
+					(min distinct_estimate foreign_key_bound))))
+			(if (nil? estimate) nil (min row_count estimate))))))
+
+(define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows)
+	(and (number? driver_rows)
+		(and (>= driver_rows 1024)
+			(and (number? group_rows)
+				(< (* group_rows 4) driver_rows))))))
+
+(define planner_aggregate_pushdown_driver_rows (lambda (src residual)
+	(begin
+		(define total_rows (planner_source_row_count src))
+		(if (not (number? total_rows))
+			nil
+			(if (literal_true? residual)
+				total_rows
+				(planner_row_count_after_selectivity src (list src)
+					(source_alias src) residual total_rows))))))
+
 (define direct_base_group_plan_preferred? (lambda (stage)
 	(begin
 		(define src (gs_input stage))
@@ -8661,6 +8730,230 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			true)
 		ir)))
 
+/* ------------------------------------------------------------------------- */
+/* Aggregate partition pushdown                                               */
+
+/* COUNT(*) is distributive: COUNT over driver rows can become SUM of counts
+over any partition of those rows. This first rule deliberately accepts only
+plain root COUNT(*) fields and a single base driver. Predicates involving a
+decorrelated stage output move above the partition; driver-local predicates
+stay on the partition build. Statistics choose between the equivalent logical
+forms, but never participate in the semantic proof. */
+
+(define aggregate_pushdown_count_expr? (lambda (expr)
+	(and (aggregate_expr? expr)
+		(equal? (extract_aggregates expr) (list aggregate_count_descriptor)))))
+
+(define aggregate_pushdown_count_fields? (lambda (fields)
+	(and (not (empty_list? fields))
+		(reduce (extract_assoc fields (lambda (_title expr) expr)) (lambda (ok expr)
+			(and ok (aggregate_pushdown_count_expr? expr))) true))))
+
+(define aggregate_pushdown_stage_sources (lambda (block)
+	(filter (qb_sources block) source_is_stage_output?)))
+
+(define aggregate_pushdown_base_sources (lambda (block)
+	(filter (qb_sources block) source_is_base_table?)))
+
+(define aggregate_pushdown_stage_source_safe? (lambda (stages src)
+	(if (not (source_is_stage_output? src))
+		false
+		(begin
+			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+			(and (group_stage? stage)
+				(and (not (stage_has_residual_outer_refs? stage))
+					(equal? (count (gs_keys stage))
+						(count (qassoc_get (gs_facts stage) (quote lookup-keys) '())))))))))
+
+(define aggregate_pushdown_root_shape? (lambda (block)
+	(begin
+		(define base_sources (aggregate_pushdown_base_sources block))
+		(define stage_sources (aggregate_pushdown_stage_sources block))
+		(and (single_source? base_sources)
+			(and (equal? (count (qb_sources block)) (+ 1 (count stage_sources)))
+				(and (not (source_outer? (car base_sources)))
+					(and (or (nil? (source_join_expr (car base_sources)))
+						(equal? (source_join_expr (car base_sources)) true))
+						(and (aggregate_pushdown_count_fields? (qb_fields block))
+							(and (empty_list? (qb_group block))
+								(and (nil? (qb_having block))
+									(and (empty_list? (qb_order block))
+										(and (nil? (qb_limit block))
+											(and (nil? (qb_offset block))
+												(and (empty_list? (qb_hidden block))
+													(reduce stage_sources (lambda (safe src)
+														(and safe (aggregate_pushdown_stage_source_safe? (qb_stages block) src)))
+														true)))))))))))))))
+
+(define aggregate_pushdown_movable_term? (lambda (stage_aliases term)
+	(or (expr_refs_one_of_aliases? term stage_aliases)
+		(expr_contains_session_dependency? term))))
+
+(define aggregate_pushdown_terms (lambda (block movable)
+	(begin
+		(define stage_aliases (map (aggregate_pushdown_stage_sources block) source_alias))
+		(filter (split_and_terms (qb_where block)) (lambda (term)
+			(equal? (aggregate_pushdown_movable_term? stage_aliases term) movable))))))
+
+(define aggregate_pushdown_key_columns (lambda (block driver movable_terms)
+	(merge_unique (list
+		(merge (map movable_terms (lambda (term)
+			(extract_columns_for_alias driver term))))
+		(merge (map (aggregate_pushdown_stage_sources block) (lambda (src)
+			(extract_columns_for_alias driver (source_join_expr src)))))
+		(merge (map (qb_stages block) (lambda (stage)
+			(extract_columns_for_alias driver stage))))))))
+
+(define aggregate_pushdown_keys (lambda (driver columns)
+	(map columns (lambda (column)
+		(list (quote get_column) (source_alias driver) false column false)))))
+
+(define aggregate_pushdown_key_index (lambda (driver columns expr)
+	(begin
+		(define column (direct_column_name_for_alias driver expr))
+		(if (nil? column)
+			nil
+			(reduce (produceN (count columns)) (lambda (found i)
+				(if (not (nil? found)) found
+					(if (equal?? (nth columns i) column) i nil))) nil)))))
+
+(define aggregate_pushdown_rewrite_expr (lambda (driver partition_alias columns expr)
+	(match expr
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(begin
+			(define index (aggregate_pushdown_key_index driver columns expr))
+			(if (nil? index) expr
+				(list (quote get_column) partition_alias false (group_key_col_name index) false)))
+		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(aggregate_pushdown_rewrite_expr driver partition_alias columns
+			(list (quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase))
+		(cons head tail) (cons
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns head)
+			(map tail (lambda (item)
+				(aggregate_pushdown_rewrite_expr driver partition_alias columns item))))
+		_ expr)))
+
+(define aggregate_pushdown_rewrite_source (lambda (driver partition_alias columns src)
+	(source_with_join_expr src
+		(aggregate_pushdown_rewrite_expr driver partition_alias columns (source_join_expr src)))))
+
+(define aggregate_pushdown_rewrite_stage (lambda (driver partition_alias columns stage)
+	(if (not (group_stage? stage))
+		stage
+		(make_group_stage
+			(gs_id stage)
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_input stage))
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_domain stage))
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_keys stage))
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_aggregates stage))
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_having stage))
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_output stage))
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_order stage))
+			(gs_limit stage)
+			(gs_offset stage)
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns (gs_facts stage))))))
+
+(define aggregate_pushdown_rewrite_count_fields (lambda (fields partition_alias input aggregate)
+	(match fields
+		(cons title (cons _expr rest))
+		(cons title (cons
+			(list (quote aggregate)
+				(list (quote get_column) partition_alias false
+					(aggregate_col_name_using input aggregate) false)
+				(quote +) 0)
+			(aggregate_pushdown_rewrite_count_fields rest partition_alias input aggregate)))
+		_ '())))
+
+(define aggregate_pushdown_build_rewrite (lambda (ir block driver movable_terms residual_terms columns driver_rows group_rows)
+	(begin
+		(define keys (aggregate_pushdown_keys driver columns))
+		(define residual (combine_where_terms residual_terms true))
+		(define movable (combine_where_terms movable_terms true))
+		(define partition_id (concat "aggregate-partition:" (fnv_hash (serialize (list
+			(source_schema driver) (source_relation driver) keys residual)))))
+		(define partition_alias (concat "__aggregate_partition_" (fnv_hash partition_id)))
+		(define partition_stage (make_group_stage
+			partition_id
+			driver
+			'()
+			keys
+			(list aggregate_count_descriptor)
+			nil '() '() nil nil
+			(list
+				(list (quote condition) residual)
+				(list (quote purpose) (quote aggregate_partition))
+				(list (quote domain) '())
+				(list (quote lookup-keys) '())
+				(list (quote preserve_empty_domain) false)
+				(list (quote null_semantics) (quote aggregate))
+				(list (quote cardinality_mode) (quote many)))))
+		(define rewritten_stages (map (qb_stages block) (lambda (stage)
+			(aggregate_pushdown_rewrite_stage driver partition_alias columns stage))))
+		(define rewritten_stage_sources (map (aggregate_pushdown_stage_sources block) (lambda (src)
+			(aggregate_pushdown_rewrite_source driver partition_alias columns src))))
+		(define all_stages (merge (list (list partition_stage) rewritten_stages)))
+		(define partition_source (list partition_alias (qb_schema block)
+			(make_stage_output_relation partition_id) false nil))
+		(define outer_block (make_query_block
+			(qb_schema block)
+			(cons partition_source rewritten_stage_sources)
+			(aggregate_pushdown_rewrite_count_fields
+				(qb_fields block) partition_alias driver aggregate_count_descriptor)
+			(aggregate_pushdown_rewrite_expr driver partition_alias columns movable)
+			'() nil '() nil nil '()
+			all_stages
+			(qassoc_set
+				(qassoc_set (qb_facts block) (quote default_alias) partition_alias)
+				(quote aggregate_pushdown)
+				(list
+					(list (quote driver) (list (source_schema driver) (source_relation driver)))
+					(list (quote keys) columns)
+					(list (quote estimated_driver_rows) driver_rows)
+					(list (quote estimated_group_rows) group_rows)
+					(list (quote estimated_compression)
+						(if (and (number? group_rows) (> group_rows 0)) (/ driver_rows group_rows) nil))))))
+		(if (expr_refs_alias? (source_alias driver) (source_alias driver)
+			(list (qb_sources outer_block) (qb_fields outer_block) (qb_where outer_block) rewritten_stages))
+			ir
+			(make_ir (ir_kind ir) outer_block all_stages (ir_context_of ir) (ir_return ir))))))
+
+(define aggregate_pushdown_logical (lambda (ir)
+	(begin
+		(define block (ir_root ir))
+		(if (or (not (equal? (ir_return ir) (quote rows)))
+			(or (not (query_block? block))
+				(or (qassoc_get (qb_facts block) (quote aggregate_pushdown) false)
+					(not (aggregate_pushdown_root_shape? block)))))
+			ir
+			(begin
+				(define movable_terms (aggregate_pushdown_terms block true))
+				(define residual_terms (aggregate_pushdown_terms block false))
+				(define driver (car (aggregate_pushdown_base_sources block)))
+				(define columns (aggregate_pushdown_key_columns block driver movable_terms))
+				(if (or (empty_list? movable_terms) (empty_list? columns))
+					ir
+					(begin
+						(define residual (combine_where_terms residual_terms true))
+						(define driver_rows (planner_aggregate_pushdown_driver_rows driver residual))
+						(define keys (aggregate_pushdown_keys driver columns))
+						(define group_rows (planner_aggregate_pushdown_group_estimate driver keys driver_rows))
+						(define chosen (aggregate_pushdown_cost_preferred? driver_rows group_rows))
+						(define driver_rows_expr (planner_guard_runtime_binding
+							(list (quote planner_aggregate_pushdown_driver_rows)
+								(planner_quoted_value driver)
+								(planner_quoted_value residual))))
+						(define group_rows_expr (planner_guard_runtime_binding
+							(list (quote planner_aggregate_pushdown_group_estimate)
+								(planner_quoted_value driver)
+								(planner_quoted_value keys)
+								driver_rows_expr)))
+						(if (planner_guarded_choice chosen
+							(list (quote aggregate_pushdown_cost_preferred?)
+								driver_rows_expr group_rows_expr))
+							(aggregate_pushdown_build_rewrite ir block driver movable_terms residual_terms
+								columns driver_rows group_rows)
+							ir))))))))
+
 (define join_reorder (lambda (ir)
 	(begin
 		(define stage_catalog (ir_stages ir))
@@ -9636,8 +9929,8 @@ what must resolve to src's own unique key. */
 				(if (nil? col)
 					nil
 					(if (reduce (source_unique_key_sets src) (lambda (found key_cols)
-							(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
-							false)
+						(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
+						false)
 						idx
 						nil)))))))
 
@@ -9778,18 +10071,18 @@ membership set. */
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
 			/* session_setter builds a ZERO-ARG once-wrapped lookup-closure builder; without this guard
-			   every driving row would re-run this setter, constructing a fresh once-wrapper each time
-			   and discarding the previous memoization (defeating the point of `once`). */
+			every driving row would re-run this setter, constructing a fresh once-wrapper each time
+			and discarding the previous memoization (defeating the point of `once`). */
 			(list (quote if)
 				(list (quote nil?) session_read)
 				session_setter
 				true)
 			/* session_read stores a zero-arg builder (not the lookup closure itself), so retrieving the
-			   actual boolean requires TWO applies: one zero-arg apply to run/fetch the memoized builder
-			   and obtain the recset_key_index closure, then a second apply of that closure to the real key.
-			   Single-applying session_read directly to resolved_lookup_key would instead pass the key as
-			   an ignored extra argument to the zero-arg builder, which just returns the closure itself
-			   (a non-nil/truthy value) rather than ever checking membership. */
+			actual boolean requires TWO applies: one zero-arg apply to run/fetch the memoized builder
+			and obtain the recset_key_index closure, then a second apply of that closure to the real key.
+			Single-applying session_read directly to resolved_lookup_key would instead pass the key as
+			an ignored extra argument to the zero-arg builder, which just returns the closure itself
+			(a non-nil/truthy value) rather than ever checking membership. */
 			(list (quote apply)
 				(list (quote apply) session_read (quoted_runtime_list '()))
 				(list (quote list) resolved_lookup_key))))))
@@ -9829,64 +10122,64 @@ membership set. */
 					stage src requested_col
 					(lower_column_expr_for_join sources default_alias
 						(nth lookup_keys (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys))))
-			(if (and (query_block? src) (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows))
-				(lower_keytable_scalar_first_probe_expr
-					stage
-					requested_col
-					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys (scalar_first_probe_keytable_key_index stage (car (qb_sources src)) keys)))
-					physical_max_rows)
-			(if (query_block? src)
-				(lower_scalar_first_query_probe_expr
-					all_stages
-					stage
-					value_expr
-					keys
-					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
-					probe_work_rows)
-			(if (and (source_is_base_table? src) (scalar_first_probe_recset_eligible_base? graph stage src keys probe_work_rows requested_col))
-				(lower_recset_scalar_first_probe_expr
-					stage src requested_col
-					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys))))
-			(if (and (source_is_base_table? src) (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows))
-				(lower_keytable_scalar_first_probe_expr
-					stage
-					requested_col
-					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys)))
-					physical_max_rows)
-				(begin
-					(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-					(define condition_cols (extract_columns_for_alias src condition))
-					(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-					(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
-					(define value_cols (extract_columns_for_alias src value_expr))
-					(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
-					(define mapcols (merge_unique (list value_cols)))
-					(list (quote scan_order)
-						'(session "__memcp_tx")
-						(source_table_expr src)
-						(cons (quote list) filtercols)
-						(list (quote lambda)
-							(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-							(list (quote optimize)
-								(cons (quote and)
-									(cons
-										(lower_column_expr_for_alias src condition)
-										(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
-						(cons (quote list) order_cols)
-						(cons (quote list) dirs)
-						0
-						(coalesceNil offset_value 0)
-						physical_max_rows
-						(cons (quote list) mapcols)
-						(list (quote lambda)
-							(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
-							(lower_column_expr_for_alias src value_expr))
-						(scalar_once_reduce_first)
-						nil
-						false))))))))))
+				(if (and (query_block? src) (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows))
+					(lower_keytable_scalar_first_probe_expr
+						stage
+						requested_col
+						(lower_column_expr_for_join sources default_alias
+							(nth lookup_keys (scalar_first_probe_keytable_key_index stage (car (qb_sources src)) keys)))
+						physical_max_rows)
+					(if (query_block? src)
+						(lower_scalar_first_query_probe_expr
+							all_stages
+							stage
+							value_expr
+							keys
+							(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
+							probe_work_rows)
+						(if (and (source_is_base_table? src) (scalar_first_probe_recset_eligible_base? graph stage src keys probe_work_rows requested_col))
+							(lower_recset_scalar_first_probe_expr
+								stage src requested_col
+								(lower_column_expr_for_join sources default_alias
+									(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys))))
+							(if (and (source_is_base_table? src) (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows))
+								(lower_keytable_scalar_first_probe_expr
+									stage
+									requested_col
+									(lower_column_expr_for_join sources default_alias
+										(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys)))
+									physical_max_rows)
+								(begin
+									(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+									(define condition_cols (extract_columns_for_alias src condition))
+									(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+									(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
+									(define value_cols (extract_columns_for_alias src value_expr))
+									(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
+									(define mapcols (merge_unique (list value_cols)))
+									(list (quote scan_order)
+										'(session "__memcp_tx")
+										(source_table_expr src)
+										(cons (quote list) filtercols)
+										(list (quote lambda)
+											(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+											(list (quote optimize)
+												(cons (quote and)
+													(cons
+														(lower_column_expr_for_alias src condition)
+														(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+										(cons (quote list) order_cols)
+										(cons (quote list) dirs)
+										0
+										(coalesceNil offset_value 0)
+										physical_max_rows
+										(cons (quote list) mapcols)
+										(list (quote lambda)
+											(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+											(lower_column_expr_for_alias src value_expr))
+										(scalar_once_reduce_first)
+										nil
+										false))))))))))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
@@ -17842,7 +18135,7 @@ ordering run. Storage artifacts begin in build_queryplan. */
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
 
 (define optimize_logical_query (lambda (ir)
-	(join_reorder ir)))
+	(join_reorder (aggregate_pushdown_logical ir))))
 
 (define neumann_compile_pipeline (lambda (ast)
 	(build_queryplan
