@@ -9779,6 +9779,68 @@ membership set. */
 						(quoted_runtime_list (list "k0")))))
 				(list (quote list) resolved_lookup_key))))))
 
+/* Select one physical realization at the consumer which owns this probe.
+Logical decorrelation contributes the stage shape; the current scan node
+contributes its work estimate. Emitters below only implement the selected
+operator and do not repeat policy gates, so future carriers join this one
+choice table instead of adding another promotion path. */
+(define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows requested_col)
+	(if (union_block? src)
+		(quote union-probe)
+		(if (query_block? src)
+			(if (scalar_first_probe_recset_eligible?
+				graph stage src keys probe_work_rows requested_col)
+				(quote recset)
+				(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
+					(quote keytable)
+					(quote query-scan)))
+			(if (source_is_base_table? src)
+				(if (scalar_first_probe_recset_eligible_base?
+					graph stage src keys probe_work_rows requested_col)
+					(quote recset)
+					(if (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows)
+						(quote keytable)
+						(quote table-scan)))
+				(quote unsupported))))))
+
+(define scalar_first_probe_carrier_source (lambda (src)
+	(if (query_block? src)
+		(single_real_source (qb_sources src))
+		src)))
+
+(define lower_table_scalar_first_probe_expr (lambda (sources default_alias src stage value_expr keys lookup_keys order_exprs dirs offset_value physical_max_rows)
+	(begin
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define condition_cols (extract_columns_for_alias src condition))
+		(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
+		(define value_cols (extract_columns_for_alias src value_expr))
+		(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
+		(define mapcols (merge_unique (list value_cols)))
+		(list (quote scan_order)
+			'(session "__memcp_tx")
+			(source_table_expr src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(list (quote optimize)
+					(cons (quote and)
+						(cons
+							(lower_column_expr_for_alias src condition)
+							(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+			(cons (quote list) order_cols)
+			(cons (quote list) dirs)
+			0
+			(coalesceNil offset_value 0)
+			physical_max_rows
+			(cons (quote list) mapcols)
+			(list (quote lambda)
+				(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(lower_column_expr_for_alias src value_expr))
+			(scalar_once_reduce_first)
+			nil
+			false))))
+
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows)
 	(begin
 		(if (not (scalar_or_presence_probe_stage? stage))
@@ -9810,78 +9872,46 @@ membership set. */
 		(define probe_stages (stage_catalog_with_nested
 			(merge (list all_stages (list stage)))))
 		(define graph (stage_dependency_graph probe_stages))
-		(if (union_block? src)
+		(define operator (scalar_first_probe_physical_operator
+			graph stage src keys effective_probe_work_rows requested_col))
+		(match operator
+			(symbol union-probe)
 			(list (quote if)
 				(lower_exists_union_probe_expr
 					sources default_alias (union_branches src)
 					(car lookup_keys) probe_stages)
 				1
 				nil)
-			(if (and (query_block? src) (scalar_first_probe_recset_eligible? graph stage src keys effective_probe_work_rows requested_col))
+			(symbol recset) (begin
+				(define carrier_src (scalar_first_probe_carrier_source src))
+				(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
 				(lower_recset_scalar_first_probe_expr
 					probe_stages stage requested_col
 					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys))))
-			(if (and (query_block? src) (scalar_first_probe_keytable_eligible? stage src keys effective_probe_work_rows))
+						(nth lookup_keys key_index))))
+			(symbol keytable) (begin
+				(define carrier_src (scalar_first_probe_carrier_source src))
+				(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
 				(lower_keytable_scalar_first_probe_expr
 					probe_stages
 					stage
 					requested_col
 					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys (scalar_first_probe_keytable_key_index stage (car (qb_sources src)) keys)))
-					physical_max_rows)
-			(if (query_block? src)
-				(lower_scalar_first_query_probe_expr
-					probe_stages
-					stage
-					value_expr
-					keys
-					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
-					probe_work_rows)
-			(if (and (source_is_base_table? src) (scalar_first_probe_recset_eligible_base? graph stage src keys effective_probe_work_rows requested_col))
-				(lower_recset_scalar_first_probe_expr
-					probe_stages stage requested_col
-					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys))))
-			(if (and (source_is_base_table? src) (scalar_first_probe_keytable_eligible_base? stage src keys effective_probe_work_rows))
-				(lower_keytable_scalar_first_probe_expr
-					probe_stages
-					stage
-					requested_col
-					(lower_column_expr_for_join sources default_alias
-						(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys)))
-					physical_max_rows)
-				(begin
-					(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
-					(define condition_cols (extract_columns_for_alias src condition))
-					(define key_cols (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-					(define order_cols (merge_unique (map order_exprs (lambda (expr) (extract_columns_for_alias src expr)))))
-					(define value_cols (extract_columns_for_alias src value_expr))
-					(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
-					(define mapcols (merge_unique (list value_cols)))
-					(list (quote scan_order)
-						'(session "__memcp_tx")
-						(source_table_expr src)
-						(cons (quote list) filtercols)
-						(list (quote lambda)
-							(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-							(list (quote optimize)
-								(cons (quote and)
-									(cons
-										(lower_column_expr_for_alias src condition)
-										(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
-						(cons (quote list) order_cols)
-						(cons (quote list) dirs)
-						0
-						(coalesceNil offset_value 0)
-						physical_max_rows
-						(cons (quote list) mapcols)
-						(list (quote lambda)
-							(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
-							(lower_column_expr_for_alias src value_expr))
-						(scalar_once_reduce_first)
-						nil
-						false))))))))))
+						(nth lookup_keys key_index))
+					physical_max_rows))
+			(symbol query-scan)
+			(lower_scalar_first_query_probe_expr
+				probe_stages
+				stage
+				value_expr
+				keys
+				(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
+				probe_work_rows)
+			(symbol table-scan)
+			(lower_table_scalar_first_probe_expr
+				sources default_alias src stage value_expr keys lookup_keys
+				order_exprs dirs offset_value physical_max_rows)
+			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator"))))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
