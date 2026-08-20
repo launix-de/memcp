@@ -2962,6 +2962,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define s1_keys (s1))
 	(assert (contains? s1_keys "x") true "session: lists key x")
 	(assert (contains? s1_keys "y") true "session: lists key y")
+	(define s1_compute_calls (newsession))
+	(define s1_scope_a (newsession))
+	(define s1_compute_values (parallelN 8 (lambda (i)
+		(s1 "get_or_compute_scoped" s1_scope_a "shared" (lambda () (begin
+			(s1_compute_calls (string i) true)
+			123))))))
+	(assert s1_compute_values '(123 123 123 123 123 123 123 123) "session: scoped compute shares producer value")
+	(assert (count (s1_compute_calls)) 1 "session: scoped compute runs one producer")
+	(define s1_scope_b (newsession))
+	(assert (s1 "get_or_compute_scoped" s1_scope_a "shared" (lambda () 7)) 123 "session: scoped compute reuses first scope")
+	(assert (s1 "get_or_compute_scoped" s1_scope_b "value" (lambda () 9)) 9 "session: scoped compute isolates scopes")
 	(assert (equal? (try (lambda () (s1 "a" "b" "c")) (lambda (e) "caught")) "caught") true "session: too many args panics")
 
 	/* deep callback signature validation */
