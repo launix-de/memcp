@@ -11310,18 +11310,53 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			nil
 			false))))
 
+/* A complex decorrelated membership domain cannot be reconstructed as one raw
+scan, but its canonical group cache already represents the complete query-block
+semantics. Probe that carrier by its canonical keys and boolean aggregate value.
+This adds a consumer for the existing cache; it does not introduce a second
+cache identity or a logical fallback. */
+(define lower_driver_membership_cache_probe_expr (lambda (sources default_alias stage)
+	(begin
+		(define keys (gs_keys stage))
+		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(if (not (equal? (count keys) (count lookup_keys)))
+			(neumann_fail "build_queryplan" "cached driver membership probe key/domain mismatch")
+			true)
+		(define key_names (group_key_cols keys))
+		(define value_col (aggregate_col_name_using (gs_input stage) (car (gs_aggregates stage))))
+		(define filtercols (merge_unique (list key_names (list value_col))))
+		(define key_terms (map (produceN (count keys)) (lambda (i)
+			(list (quote equal??)
+				(symbol (nth key_names i))
+				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
+		(define filter_condition (combine_where_terms
+			(cons (stage_recset_value_filter_term stage value_col) key_terms)
+			true))
+		(define raw_input (gs_input stage))
+		(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
+		(define stage_catalog (stage_catalog_with_nested
+			(merge (list stamped_catalog (nested_stage_catalog stage)
+				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
+		(list (quote begin)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
+			(list (quote scan_exists)
+				'(session "__memcp_tx")
+				(list (quote table) (group_stage_cache_schema stage) (group_stage_cache_relation stage))
+				(cons (quote list) filtercols)
+				(list (quote lambda)
+					(map filtercols symbol)
+					(list (quote optimize) filter_condition)))))))
+
 /* driver_membership_probe markers reach physical lowering through two
 routes: as a WHERE-term (stripped by driver_membership_for_source, built via
 recset_project_join_expr_for_membership) and, when the probed value feeds
 directly into a projected column or a further expression (e.g. a derived
 table's own boolean field), as a value embedded anywhere in an expression
 tree -- dispatched here, straight from lower_column_expr_for_alias_in_context
-/lower_column_expr_for_join_in_context. Only the first route is recset-backed
-today: a value-returning recset_key_index variant of this path was tried and
-reproducibly mis-evaluates a nested-dependency stage's condition once the
-enclosing query block gains an additional join partner (verified with a
-wrong-row A/B comparison, root cause not yet found), so this route keeps the
-plain scan_exists probe below unconditionally. */
+/lower_column_expr_for_join_in_context. A simple raw domain keeps the cheaper
+direct scan_exists path. A complex decorrelated domain probes its prepared
+canonical cache instead, because reconstructing only part of its query tree
+would lose nested-stage and join semantics. */
 (define lower_driver_membership_probe_expr (lambda (sources default_alias stage probe)
 	(begin
 		(define input (gs_input stage))
@@ -11333,32 +11368,32 @@ plain scan_exists probe below unconditionally. */
 			(begin
 				(define input_src (recset_domain_source input))
 				(if (nil? input_src)
-					(neumann_fail "build_queryplan" "driver membership probe expects UNION or simple base-table input")
-					true)
-				(define keys (gs_keys stage))
-				(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-				(if (not (equal? (count keys) (count lookup_keys)))
-					(neumann_fail "build_queryplan" "driver membership probe key/domain mismatch")
-					true)
-				(define condition (if (query_block? input)
-					(combine_where (qb_where input) (source_join_expr input_src))
-					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
-				(define key_terms (map (produceN (count keys)) (lambda (i)
-					(list (quote equal??)
-						(lower_column_expr_for_alias input_src (nth keys i))
-						(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
-				(define filtercols (merge_unique (list
-					(extract_columns_for_alias input_src condition)
-					(merge_unique (map keys (lambda (key) (extract_columns_for_alias input_src key)))))))
-				(list (quote scan_exists)
-					'(session "__memcp_tx")
-					(source_table_expr input_src)
-					(cons (quote list) filtercols)
-					(list (quote lambda)
-						(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
-						(list (quote optimize)
-							(cons (quote and)
-								(cons (lower_column_expr_for_alias input_src condition) key_terms))))))))))))
+					(lower_driver_membership_cache_probe_expr sources default_alias stage)
+					(begin
+						(define keys (gs_keys stage))
+						(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+						(if (not (equal? (count keys) (count lookup_keys)))
+							(neumann_fail "build_queryplan" "driver membership probe key/domain mismatch")
+							true)
+						(define condition (if (query_block? input)
+							(combine_where (qb_where input) (source_join_expr input_src))
+							(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+						(define key_terms (map (produceN (count keys)) (lambda (i)
+							(list (quote equal??)
+								(lower_column_expr_for_alias input_src (nth keys i))
+								(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
+						(define filtercols (merge_unique (list
+							(extract_columns_for_alias input_src condition)
+							(merge_unique (map keys (lambda (key) (extract_columns_for_alias input_src key)))))))
+						(list (quote scan_exists)
+							'(session "__memcp_tx")
+							(source_table_expr input_src)
+							(cons (quote list) filtercols)
+							(list (quote lambda)
+								(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
+								(list (quote optimize)
+									(cons (quote and)
+										(cons (lower_column_expr_for_alias input_src condition) key_terms)))))))))))))
 
 (define lower_dml_driver_membership_probe_expr (lambda (sources default_alias fallback_schema stage _probe)
 	(begin
