@@ -19,6 +19,13 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS trace_partition_document"
+  - sql: "DROP TABLE IF EXISTS trace_partition_access"
+  - sql: "DROP TABLE IF EXISTS trace_multi_document"
+  - sql: "DROP TABLE IF EXISTS trace_multi_owner"
+  - sql: "DROP TABLE IF EXISTS trace_multi_class"
+  - sql: "DROP TABLE IF EXISTS trace_multi_tenant"
+  - sql: "DROP TABLE IF EXISTS trace_multi_access"
   - sql: "DROP TABLE IF EXISTS trace_count_access"
   - sql: "DROP TABLE IF EXISTS trace_count_reference"
   - sql: "DROP TABLE IF EXISTS trace_count_parent"
@@ -41,8 +48,270 @@ setup:
   - sql: "INSERT INTO trace_count_parent (id, reference_id) VALUES (1, 10), (2, 20), (3, 30)"
   - sql: "INSERT INTO trace_count_reference (id, label) VALUES (10, 'north'), (20, 'south'), (30, 'west')"
   - sql: "INSERT INTO trace_count_access (id, reference_id, actor_id) VALUES (1, 10, 7), (2, 30, 8)"
+  - sql: |
+      CREATE TABLE trace_partition_access (
+        id INT PRIMARY KEY,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_partition_document (
+        id INT PRIMARY KEY,
+        reference_id INT,
+        FOREIGN KEY trace_partition_reference_fk (reference_id)
+          REFERENCES trace_partition_access(id)
+      )
+  - sql: "INSERT INTO trace_partition_access (id, allowed) VALUES (10, TRUE), (20, FALSE)"
+  - scm: |
+      (begin
+        (define rows (map (produceN 2000) (lambda (i)
+          (list (+ i 1) (if (< i 1000) 10 20)))))
+        (insert (table "memcp-tests" "trace_partition_document")
+          '("id" "reference_id") rows)
+        2000)
+  - sql: |
+      CREATE TABLE trace_multi_access (
+        id INT PRIMARY KEY,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_multi_tenant (
+        id INT PRIMARY KEY,
+        active BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_multi_class (
+        id INT PRIMARY KEY,
+        visible BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_multi_owner (
+        id INT PRIMARY KEY,
+        enabled BOOL
+      )
+  - sql: |
+      CREATE TABLE trace_multi_document (
+        id INT PRIMARY KEY,
+        access_id INT,
+        tenant_id INT,
+        owner_id INT,
+        FOREIGN KEY trace_multi_access_fk (access_id)
+          REFERENCES trace_multi_access(id),
+        FOREIGN KEY trace_multi_tenant_fk (tenant_id)
+          REFERENCES trace_multi_tenant(id)
+      )
+  - sql: "INSERT INTO trace_multi_access (id, allowed) VALUES (10, TRUE), (20, FALSE)"
+  - sql: "INSERT INTO trace_multi_tenant (id, active) VALUES (1, TRUE), (2, FALSE), (3, TRUE)"
+  - sql: "INSERT INTO trace_multi_class (id, visible) VALUES (10, TRUE), (20, TRUE)"
+  - scm: |
+      (begin
+        (define owners (map (produceN 2400) (lambda (i)
+          (list (+ i 1) true))))
+        (define documents (map (produceN 2400) (lambda (i)
+          (list
+            (+ i 1)
+            (if (equal? 0 (- i (* 2 (floor (/ i 2))))) 10 20)
+            (+ 1 (- i (* 3 (floor (/ i 3)))))
+            (+ i 1)))))
+        (insert (table "memcp-tests" "trace_multi_owner")
+          '("id" "enabled") owners)
+        (insert (table "memcp-tests" "trace_multi_document")
+          '("id" "access_id" "tenant_id" "owner_id") documents)
+        2400)
 
 test_cases:
+  - name: "COUNT pushes a selective correlated stage above an FK partition"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_partition_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_partition_access access
+        WHERE access.id = document.reference_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 1000
+
+  - name: "Logical costing exposes the aggregate partition decision"
+    sql: |
+      EXPLAIN REORDER
+      SELECT COUNT(*) AS total
+      FROM trace_partition_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_partition_access access
+        WHERE access.id = document.reference_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      contains:
+        - "aggregate_pushdown"
+        - "aggregate_partition"
+        - "estimated_driver_rows 2000"
+        - "estimated_group_rows 3"
+      not_contains:
+        - ".grp:"
+        - "(scan"
+
+  - name: "FK metadata bounds partition groups when column NDV is unknown"
+    scm: |
+      (begin
+        (define driver (list "document" "memcp-tests"
+          "trace_partition_document" false nil))
+        (define keys (list (list (quote get_column)
+          "document" false "reference_id" false)))
+        (and
+          (equal? (planner_foreign_key_group_bound driver '("reference_id")) 3)
+          (equal? (planner_aggregate_pushdown_group_estimate driver keys 2000) 3)
+          (aggregate_pushdown_cost_preferred? 2000 3)
+          (not (aggregate_pushdown_cost_preferred? 2000 1000))))
+    expect:
+      data: [true]
+
+  - name: "Two filtered dimensions use one composite partition"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+      AND COALESCE((
+        SELECT tenant.active
+        FROM trace_multi_tenant tenant
+        WHERE tenant.id = document.tenant_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - total: 800
+
+  - name: "Composite partition is driven by both filtered stage values"
+    sql: |
+      EXPLAIN REORDER
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+      AND COALESCE((
+        SELECT tenant.active
+        FROM trace_multi_tenant tenant
+        WHERE tenant.id = document.tenant_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      contains:
+        - "aggregate_pushdown"
+        - "filtered_stage_aliases"
+        - "keys (\"access_id\" \"tenant_id\")"
+        - "estimated_group_rows 12"
+
+  - name: "Independent FK bounds estimate a multidimensional partition"
+    scm: |
+      (begin
+        (define driver (list "document" "memcp-tests"
+          "trace_multi_document" false nil))
+        (define columns '("access_id" "tenant_id"))
+        (define keys (map columns (lambda (column)
+          (list (quote get_column) "document" false column false))))
+        (and
+          (equal? (planner_foreign_key_product_bound driver columns 2400) 12)
+          (equal? (planner_aggregate_pushdown_group_estimate driver keys 2400) 12)
+          (aggregate_pushdown_cost_preferred? 2400 12)))
+    expect:
+      data: [true]
+
+  - name: "Only filters over stage values can drive segmentation"
+    scm: |
+      (and
+        (aggregate_pushdown_stage_filter_term?
+          '("filtered_stage")
+          '((quote get_column) "filtered_stage" false "allowed" false))
+        (not (aggregate_pushdown_stage_filter_term?
+          '("filtered_stage")
+          '((quote session) "gate"))))
+    expect:
+      data: [true]
+
+  - name: "Two filtered stages sharing a dimension deduplicate the partition key"
+    sql: |
+      EXPLAIN REORDER
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+      AND COALESCE((
+        SELECT class.visible
+        FROM trace_multi_class class
+        WHERE class.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      contains:
+        - "aggregate_pushdown"
+        - "keys (\"access_id\")"
+        - "estimated_group_rows 3"
+      not_contains:
+        - "keys (\"access_id\" \"access_id\")"
+
+  - name: "An unused stage does not widen the filtered partition"
+    sql: |
+      EXPLAIN REORDER
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      LEFT JOIN (
+        SELECT owner.id, COUNT(*) AS hits
+        FROM trace_multi_owner owner
+        GROUP BY owner.id
+      ) unused_owner ON unused_owner.id = document.owner_id
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      contains:
+        - "aggregate_pushdown"
+        - "keys (\"access_id\")"
+      not_contains:
+        - "keys (\"access_id\" \"owner_id\")"
+
+  - name: "A high-cardinality filtered dimension rejects the combined partition"
+    sql: |
+      EXPLAIN REORDER
+      SELECT COUNT(*) AS total
+      FROM trace_multi_document document
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM trace_multi_access access
+        WHERE access.id = document.access_id
+        LIMIT 1
+      ), FALSE)
+      AND COALESCE((
+        SELECT owner.enabled
+        FROM trace_multi_owner owner
+        WHERE owner.id = document.owner_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      not_contains:
+        - "aggregate_pushdown"
+        - "aggregate_partition"
+
   - name: "COUNT lowers a grouped derived stage with an outer presence stage"
     max_plan_size: 20000
     sql: |
@@ -95,6 +364,13 @@ test_cases:
         - "(scan"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS trace_multi_document"
+  - sql: "DROP TABLE IF EXISTS trace_multi_owner"
+  - sql: "DROP TABLE IF EXISTS trace_multi_class"
+  - sql: "DROP TABLE IF EXISTS trace_multi_tenant"
+  - sql: "DROP TABLE IF EXISTS trace_multi_access"
+  - sql: "DROP TABLE IF EXISTS trace_partition_document"
+  - sql: "DROP TABLE IF EXISTS trace_partition_access"
   - sql: "DROP TABLE IF EXISTS trace_count_access"
   - sql: "DROP TABLE IF EXISTS trace_count_reference"
   - sql: "DROP TABLE IF EXISTS trace_count_parent"

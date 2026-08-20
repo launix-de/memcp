@@ -1,0 +1,98 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Run with:
+#   PERF_TEST=1 python3 run_sql_tests.py tests/performance/aggregate-pushdown.yaml --log-times
+#
+# The fact table is deliberately much larger than the FK domain. Aggregate
+# pushdown can count each FK partition once before applying the scalar stage.
+
+metadata:
+  version: "1.0"
+  description: "COUNT aggregate pushdown across a low-cardinality FK stage"
+  isolated: true
+
+test_cases:
+  - name: "Perf: aggregate pushdown cold FK partition count"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ap_fact"
+      - sql: "DROP TABLE IF EXISTS ap_access"
+      - sql: |
+          CREATE TABLE ap_access (
+            id INT PRIMARY KEY,
+            allowed BOOL NOT NULL
+          )
+      - sql: |
+          CREATE TABLE ap_fact (
+            id INT PRIMARY KEY,
+            access_id INT,
+            FOREIGN KEY ap_fact_access_fk (access_id) REFERENCES ap_access(id)
+          )
+      - scm: |
+          (begin
+            (define access_rows (map (produceN 64) (lambda (i)
+              (list (+ i 1) (equal? 0 (- i (* 4 (floor (/ i 4)))))))))
+            (define fact_rows (map (produceN {rows}) (lambda (i)
+              (list (+ i 1) (+ 1 (- i (* 64 (floor (/ i 64)))))))))
+            (insert (table "{database}" "ap_access")
+              '("id" "allowed") access_rows)
+            (insert (table "{database}" "ap_fact")
+              '("id" "access_id") fact_rows)
+            (rebuild)
+            {rows})
+    warmup: false
+    timing_samples: 1
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM ap_fact fact
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM ap_access access
+        WHERE access.id = fact.access_id
+        LIMIT 1
+      ), FALSE)
+    threshold_ms: 30000
+    on_fail:
+      - sql: |
+          EXPLAIN REORDER
+          SELECT COUNT(*) AS total
+          FROM ap_fact fact
+          WHERE COALESCE((
+            SELECT access.allowed
+            FROM ap_access access
+            WHERE access.id = fact.access_id
+            LIMIT 1
+          ), FALSE)
+    expect:
+      rows: 1
+
+  - name: "Perf: aggregate pushdown warm FK partition count"
+    timing_samples: 7
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM ap_fact fact
+      WHERE COALESCE((
+        SELECT access.allowed
+        FROM ap_access access
+        WHERE access.id = fact.access_id
+        LIMIT 1
+      ), FALSE)
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS ap_fact"
+  - sql: "DROP TABLE IF EXISTS ap_access"
