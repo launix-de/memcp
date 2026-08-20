@@ -1935,20 +1935,31 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 
 	// _mut swap: when mutName is set and first arg is exclusively owned,
 	// swap to the in-place variant
+	firstArgTransferred := false
 	if mutName != "" {
 		firstArgFresh := false
 		if len(v) >= 2 {
 			arg1 := v[1]
-			if si, ok := arg1.Any().(SourceInfo); ok {
-				arg1 = si.value
+			if stripped, ok := scmerStripSourceInfo(arg1); ok {
+				arg1 = stripped
 			}
 			if td := optimizerExpressionDescriptor(arg1, env, ome); td != nil {
 				firstArgFresh = td.Transfer && !td.Const
+			}
+			// merge_unique accepts either a segment catalog or variadic lists, so
+			// its public return contract cannot expose first-argument ownership.
+			// A direct catalog constructor is nevertheless fresh. Decide this
+			// before NoEscape lowering can turn it into !list.
+			if items, ok := scmerSlice(arg1); ok && mutName == "merge_unique_mut" {
+				if _, directList := listConstructorElements(items); directList {
+					firstArgFresh = true
+				}
 			}
 		}
 		if firstArgFresh && len(v) >= 2 {
 			v[0] = NewSymbol(mutName)
 			transferOwnership = true
+			firstArgTransferred = true
 		}
 	}
 
@@ -1971,6 +1982,12 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	if !allConstArgs && ome.nextSlot != nil {
 		if decl := callDecl; decl != nil && decl.Type != nil && len(decl.Type.Params) > 0 {
 			for i := 1; i < len(v); i++ {
+				// A mutating variant returns the first argument's backing storage.
+				// Rewriting that argument to a frame-local !list would let the
+				// returned value escape after the frame has been reused.
+				if i == 1 && firstArgTransferred {
+					continue
+				}
 				paramIdx := i - 1
 				if paramIdx >= len(decl.Type.Params) {
 					paramIdx = len(decl.Type.Params) - 1 // variadic: use last param
