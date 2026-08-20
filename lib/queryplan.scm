@@ -8151,10 +8151,8 @@ that are never SQL-NULL by construction. */
 
 (define expr_head_and? (lambda (head) (or (equal? head (quote and)) (equal? head (symbol "and")))))
 (define expr_head_or? (lambda (head) (or (equal? head (quote or)) (equal? head (symbol "or")))))
-(define expr_head_not? (lambda (head)
-	(or (equal? head (quote not))
-		(or (equal? head (symbol "not"))
-			(or (equal? head (quote sql_not)) (equal? head (symbol "sql_not")))))))
+(define expr_head_not? (lambda (head) (or (equal? head (quote not)) (equal? head (symbol "not")))))
+(define expr_head_sql_not? (lambda (head) (or (equal? head (quote sql_not)) (equal? head (symbol "sql_not")))))
 (define expr_head_if? (lambda (head) (or (equal? head (quote if)) (equal? head (symbol "if")))))
 
 /* SQL parser literals retain their spelling. Within an explicit boolean
@@ -8237,9 +8235,14 @@ wrapped in an extra NOT. */
 					(boolean_fold_or_terms folded_tail)
 					(if (and (expr_head_not? head) (equal? (count folded_tail) 1))
 						(boolean_fold_not (car folded_tail))
-						(if (and (expr_head_if? head) (equal? (count folded_tail) 3))
-							(boolean_fold_if (nth folded_tail 0) (nth folded_tail 1) (nth folded_tail 2))
-							(cons (boolean_fold_expr head) folded_tail))))))
+						(if (and (expr_head_sql_not? head) (equal? (count folded_tail) 1))
+							(if (or (boolean_fold_true_literal? (car folded_tail))
+								(boolean_fold_false_literal? (car folded_tail)))
+								(boolean_fold_not (car folded_tail))
+								(list (quote sql_not) (car folded_tail)))
+							(if (and (expr_head_if? head) (equal? (count folded_tail) 3))
+								(boolean_fold_if (nth folded_tail 0) (nth folded_tail 1) (nth folded_tail 2))
+								(cons (boolean_fold_expr head) folded_tail)))))))
 		_ expr)))
 
 (define boolean_fold_maybe_expr (lambda (expr)

@@ -161,7 +161,8 @@ test_cases:
           (equal? (boolean_fold_expr (list (quote or) col
             (list (quote and) (list (quote sql_not) "0")
               (list (quote sql_not) "0")
-              (list (quote sql_not) col)))) true)
+              (list (quote sql_not) col))))
+            (list (quote or) col (list (quote sql_not) col)))
           (equal? (boolean_fold_expr (list (quote if) col true false)) col)
           (equal? (boolean_fold_expr (list (quote if) col false true)) (list (quote not) col))
           (equal? (fold_boolean_stage_aggregate '() nil
