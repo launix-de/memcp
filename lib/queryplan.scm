@@ -648,16 +648,23 @@ work before decorrelation has even started. */
 
 (define unused_unique_left_join? (lambda (default_alias referenced_aliases src)
 	(begin
-		(define keys (source_primary_key_columns src))
+		(define primary_key (source_primary_key_columns src))
+		(define unique_keys (merge_unique (list
+			(source_unique_key_sets src)
+			(if (empty_list? primary_key) '() (list primary_key)))))
 		(define terms (split_and_terms (coalesceNil (source_join_expr src) true)))
 		(and (source_outer? src)
 			(and (source_is_base_table? src)
 				(and (not (has_assoc? referenced_aliases (source_alias src)))
-					(and (not (empty_list? keys))
-						(reduce keys (lambda (bound key)
-							(and bound (reduce terms (lambda (found term)
-								(or found (unique_left_join_key_term? default_alias src key term))) false)))
-							true))))))))
+					(reduce unique_keys (lambda (found key_cols)
+						(or found
+							(and (not (empty_list? key_cols))
+								(reduce key_cols (lambda (bound key_col)
+									(and bound (reduce terms (lambda (matched term)
+										(or matched (unique_left_join_key_term?
+											default_alias src key_col term))) false)))
+									true))))
+						false)))))))
 
 (define prune_unused_unique_left_joins_reversed (lambda (reversed_sources default_alias referenced_aliases)
 	(match (coalesceNil reversed_sources '())
