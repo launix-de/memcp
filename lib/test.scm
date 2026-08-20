@@ -1758,6 +1758,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (once_fn 2) 3) true "once first call computes")
 	(assert (equal? (once_fn 99) 3) true "once second call returns cached")
 	(assert (equal? (once_calls "n") 1) true "once executes only once")
+	/* a zero-arg once-wrapped builder returns a closure, not the closure's result;
+	   single-applying it to an argument just ignores that argument as noise */
+	(define once_builder (once (lambda () (lambda (x) (equal? x 1)))))
+	(assert (nil? (apply once_builder (list 1))) false
+		"single-applying a zero-arg once-wrapper still returns a closure (non-nil/truthy), not the intended boolean result")
+	(assert (equal? (apply (apply once_builder (list)) (list 1)) true) true
+		"double-applying a zero-arg once-wrapper runs the memoized builder first, then calls the built closure with the real argument")
+	(assert (equal? (apply (apply once_builder (list)) (list 2)) false) true
+		"the closure retrieved via the zero-arg call behaves correctly for a non-matching argument too")
 	/* mutex */
 	(define mtx (mutex))
 	(assert (equal? (mtx (lambda () 42)) 42) true "mutex executes inner function")

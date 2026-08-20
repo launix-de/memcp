@@ -4498,6 +4498,11 @@ source alias is the stable identity consumed by all later planner phases. */
 		true true
 		_ false)))
 
+(define literal_false? (lambda (expr)
+	(match expr
+		false true
+		_ false)))
+
 (define build_and_terms (lambda (terms)
 	(begin
 		(define filtered (filter (coalesceNil terms '()) (lambda (term) (not (literal_true? (coalesceNil term true))))))
@@ -8001,16 +8006,150 @@ created. Canonicalize that unambiguous interface before physical lowering. */
 					'() block_with_stages))
 				(make_ir (ir_kind ir) block stages (ir_context_of ir) (ir_return ir)))))))
 
+/* ------------------------------------------------------------------------- */
+/* Boolean constant-folding on the normalized IR (todos/boolean-tautology-folding.md).
+Runs on the already-decorrelated, already-merged IR (after
+merge_compatible_stage_output_left_joins_ir), so two occurrences of the same
+correlated EXISTS check are already the same stage-output alias and match
+structurally without any further alias-normalization here. Plain 2-valued
+boolean algebra is safe in this truth context: every predicate this pass
+folds already reached its final IR shape via coalesceNil/comparison
+encodings (e.g. EXISTS lowers to `(> (coalesceNil (get_column ...) 0) 0)`)
+that are never SQL-NULL by construction. */
+
+(define expr_head_and? (lambda (head) (or (equal? head (quote and)) (equal? head (symbol "and")))))
+(define expr_head_or? (lambda (head) (or (equal? head (quote or)) (equal? head (symbol "or")))))
+(define expr_head_not? (lambda (head) (or (equal? head (quote not)) (equal? head (symbol "not")))))
+(define expr_head_if? (lambda (head) (or (equal? head (quote if)) (equal? head (symbol "if")))))
+
+(define boolean_fold_not (lambda (folded_inner)
+	(if (literal_true? folded_inner)
+		false
+		(if (literal_false? folded_inner)
+			true
+			(match folded_inner
+				(cons head tail) (if (and (expr_head_not? head) (equal? (count tail) 1))
+					(car tail)
+					(list (quote not) folded_inner))
+				_ (list (quote not) folded_inner))))))
+
+/* True when some folded term's negation is also present among the folded
+terms -- the (A OR NOT A) / (A AND NOT A) shape. Both sides were normalized
+by this same fold pass, so a correlated EXISTS check appearing verbatim on
+both sides of the connective always matches here, even when one side is
+wrapped in an extra NOT. */
+(define terms_have_negation_pair? (lambda (folded_terms)
+	(reduce folded_terms (lambda (found term)
+		(or found (contains? folded_terms (boolean_fold_not term))))
+		false)))
+
+(define boolean_fold_and_terms (lambda (folded_terms)
+	(begin
+		(define has_false (reduce folded_terms (lambda (found term) (or found (literal_false? term))) false))
+		(if has_false
+			false
+			(begin
+				(define kept (reduce folded_terms (lambda (acc term)
+					(if (literal_true? term) acc (append_unique acc term)))
+					'()))
+				(if (terms_have_negation_pair? kept)
+					false
+					(match kept
+						'() true
+						(cons single '()) single
+						_ (cons (quote and) kept))))))))
+
+(define boolean_fold_or_terms (lambda (folded_terms)
+	(begin
+		(define has_true (reduce folded_terms (lambda (found term) (or found (literal_true? term))) false))
+		(if has_true
+			true
+			(begin
+				(define kept (reduce folded_terms (lambda (acc term)
+					(if (literal_false? term) acc (append_unique acc term)))
+					'()))
+				(if (terms_have_negation_pair? kept)
+					true
+					(match kept
+						'() false
+						(cons single '()) single
+						_ (cons (quote or) kept))))))))
+
+(define boolean_fold_if (lambda (folded_cond folded_then folded_else)
+	(if (and (literal_true? folded_then) (literal_false? folded_else))
+		folded_cond
+		(if (and (literal_false? folded_then) (literal_true? folded_else))
+			(boolean_fold_not folded_cond)
+			(list (quote if) folded_cond folded_then folded_else)))))
+
+(define boolean_fold_expr (lambda (expr)
+	(match expr
+		(cons head tail) (begin
+			(define folded_tail (map tail boolean_fold_expr))
+			(if (and (expr_head_and? head) (>= (count folded_tail) 1))
+				(boolean_fold_and_terms folded_tail)
+				(if (and (expr_head_or? head) (>= (count folded_tail) 1))
+					(boolean_fold_or_terms folded_tail)
+					(if (and (expr_head_not? head) (equal? (count folded_tail) 1))
+						(boolean_fold_not (car folded_tail))
+						(if (and (expr_head_if? head) (equal? (count folded_tail) 3))
+							(boolean_fold_if (nth folded_tail 0) (nth folded_tail 1) (nth folded_tail 2))
+							(cons (boolean_fold_expr head) folded_tail))))))
+		_ expr)))
+
+(define boolean_fold_maybe_expr (lambda (expr)
+	(if (nil? expr) nil (boolean_fold_expr expr))))
+
+(define fold_stage_facts_condition (lambda (facts)
+	(begin
+		(define existing (qassoc_get facts (quote condition) nil))
+		(if (nil? existing)
+			facts
+			(qassoc_set facts (quote condition) (boolean_fold_expr existing))))))
+
+(define fold_boolean_tautologies_stage (lambda (stage)
+	(if (group_stage? stage)
+		(make_group_stage
+			(gs_id stage)
+			(gs_input stage)
+			(gs_domain stage)
+			(gs_keys stage)
+			(gs_aggregates stage)
+			(boolean_fold_maybe_expr (gs_having stage))
+			(gs_output stage)
+			(gs_order stage)
+			(gs_limit stage)
+			(gs_offset stage)
+			(fold_stage_facts_condition (gs_facts stage)))
+		stage)))
+
+(define fold_boolean_tautologies_ir (lambda (ir)
+	(begin
+		(define root (ir_root ir))
+		(if (not (query_block? root))
+			ir
+			(begin
+				(define folded_stages (map (qb_stages root) fold_boolean_tautologies_stage))
+				(define folded_block (make_query_block
+					(qb_schema root) (qb_sources root) (qb_fields root)
+					(boolean_fold_maybe_expr (qb_where root))
+					(qb_group root)
+					(boolean_fold_maybe_expr (qb_having root))
+					(qb_order root) (qb_limit root) (qb_offset root) (qb_hidden root)
+					folded_stages (qb_facts root)))
+				(make_ir (ir_kind ir) folded_block folded_stages (ir_context_of ir) (ir_return ir)))))))
+
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
 		(define root_result (normalize_stage_dependencies_node (ir_root ir)))
 		(canonicalize_stage_output_interfaces
-			(merge_compatible_stage_output_left_joins_ir (make_ir
-				(ir_kind ir)
-				(nth root_result 0)
-				(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
-				(ir_context_of ir)
-				(ir_return ir)))))))
+			(fold_boolean_tautologies_ir
+				(merge_compatible_stage_output_left_joins_ir (make_ir
+					(ir_kind ir)
+					(nth root_result 0)
+					(if (query_block? (nth root_result 0)) (qb_stages (nth root_result 0)) (nth root_result 1))
+					(ir_context_of ir)
+					(ir_return ir))))))))
 
 /* Scalar stages are merged after decorrelation. Build their signatures bottom-up
 so generated aliases and dependency IDs do not hide equivalent stage graphs. */
@@ -9759,24 +9898,37 @@ membership set. */
 		(define cache_schema (group_cache_schema cache))
 		(define cache_relation (group_cache_relation cache))
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
-		(list (quote begin)
-			(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
-			(list (quote apply)
-				(list
-					(list (quote context) "session")
-					"get_or_compute_scoped"
+		(define session_read (list (list (quote context) "session") lookup_key))
+		(define session_setter (list
+			(list (quote context) "session")
+			lookup_key
+			(list (quote once) (list (quote lambda) '()
+				(list (quote recset_key_index)
 					(list (quote session) "__memcp_tx")
-					lookup_key
-					(list (quote lambda) '()
-					(list (quote recset_key_index)
+					(list (quote scan_recset)
 						(list (quote session) "__memcp_tx")
-						(list (quote scan_recset)
-							(list (quote session) "__memcp_tx")
-							(list (quote table) cache_schema cache_relation)
-							(quoted_runtime_list (list requested_col))
-							(list (quote lambda) (list (symbol requested_col))
-								(list (quote equal??) (symbol requested_col) true)))
-						(quoted_runtime_list (list "k0")))))
+						(list (quote table) cache_schema cache_relation)
+						(quoted_runtime_list (list requested_col))
+						(list (quote lambda) (list (symbol requested_col))
+							(list (quote equal??) (symbol requested_col) true)))
+					(quoted_runtime_list (list "k0")))))))
+		(list (quote begin)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
+			/* session_setter builds a ZERO-ARG once-wrapped lookup-closure builder; without this guard
+			   every driving row would re-run this setter, constructing a fresh once-wrapper each time
+			   and discarding the previous memoization (defeating the point of `once`). */
+			(list (quote if)
+				(list (quote nil?) session_read)
+				session_setter
+				true)
+			/* session_read stores a zero-arg builder (not the lookup closure itself), so retrieving the
+			   actual boolean requires TWO applies: one zero-arg apply to run/fetch the memoized builder
+			   and obtain the recset_key_index closure, then a second apply of that closure to the real key.
+			   Single-applying session_read directly to resolved_lookup_key would instead pass the key as
+			   an ignored extra argument to the zero-arg builder, which just returns the closure itself
+			   (a non-nil/truthy value) rather than ever checking membership. */
+			(list (quote apply)
+				(list (quote apply) session_read (quoted_runtime_list '()))
 				(list (quote list) resolved_lookup_key))))))
 
 /* Select one physical realization at the consumer which owns this probe.

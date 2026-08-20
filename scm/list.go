@@ -561,19 +561,14 @@ func optimizedMergeSegments(v Scmer) (Scmer, bool) {
 	return NewSlice(segments), true
 }
 
-// mergeValidationSafeArgument reports whether evaluating an argument before
-// merge's list validation is unobservable. Fused calls evaluate their ordinary
-// arguments before reduce_segments validates the segment catalog, whereas the
-// unfused spelling validates during evaluation of reduce's first argument.
-func mergeValidationSafeArgument(v Scmer, allowLambda bool) bool {
+// mergeValidationSafeDeferredArgument reports whether evaluating a reduce
+// argument before merge's list validation is unobservable. Fused calls evaluate
+// their reducer and neutral value before validating the segment catalog, whereas
+// the unfused spelling finishes evaluating merge first. Dynamic lookups are not
+// safe here even when they have already been numbered by the optimizer.
+func mergeValidationSafeDeferredArgument(v Scmer, allowLambda bool) bool {
 	if stripped, ok := scmerStripSourceInfo(v); ok {
 		v = stripped
-	}
-	if v.IsNthLocalVar() {
-		return true
-	}
-	if v.IsSymbol() {
-		return true
 	}
 	inner, ok := scmerSlice(v)
 	if !ok {
@@ -581,9 +576,6 @@ func mergeValidationSafeArgument(v Scmer, allowLambda bool) bool {
 	}
 	if len(inner) == 0 {
 		return true
-	}
-	if scmerIsSymbol(inner[0], "var") {
-		return len(inner) == 2 && inner[1].IsInt()
 	}
 	return scmerIsSymbol(inner[0], "quote") || (allowLambda && scmerIsSymbol(inner[0], "lambda"))
 }
@@ -646,7 +638,8 @@ func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		}
 	}
 	if inner, ok := scmerSlice(rv[1]); ok && len(inner) == 3 && scmerIsSymbol(inner[0], "merge") {
-		if !mergeValidationSafeArgument(inner[1], true) || !mergeValidationSafeArgument(inner[2], false) ||
+		if !mergeValidationSafeDeferredArgument(rv[2], true) ||
+			(len(rv) == 4 && !mergeValidationSafeDeferredArgument(rv[3], false)) ||
 			exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
 			return result, td
 		}
@@ -657,7 +650,8 @@ func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		return NewSlice(fused), td
 	}
 	segments, ok := optimizedMergeSegments(rv[1])
-	if !ok || !mergeValidationSafeArgument(rv[2], true) || (len(rv) == 4 && !mergeValidationSafeArgument(rv[3], false)) {
+	if !ok || !mergeValidationSafeDeferredArgument(rv[2], true) ||
+		(len(rv) == 4 && !mergeValidationSafeDeferredArgument(rv[3], false)) {
 		return result, td
 	}
 	fused := make([]Scmer, 0, len(rv))
@@ -9545,29 +9539,12 @@ func optimizedSingletonListItem(expr Scmer) (Scmer, bool) {
 	return NewNil(), false
 }
 
-// optimizeMergeUnique keeps merge_unique on the standard variadic path, but
-// additionally treats a direct (list ...) first argument as fresh so the
-// optimizer can swap to merge_unique_mut without changing the global list
-// return contract.
+// optimizeMergeUnique keeps merge_unique on the standard variadic path and
+// reuses an exclusively owned first argument. The common mutating-operator
+// pipeline also keeps that transferred argument heap-backed so the returned
+// list cannot alias a numbered lambda frame.
 func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	result, td := oc.ApplyDefaultOptimization(v, useResult)
-	rv, ok := scmerSlice(result)
-	if !ok || len(rv) < 2 || !scmerIsSymbol(rv[0], "merge_unique") {
-		return result, td
-	}
-	if rv[1].IsSlice() {
-		inner := rv[1].Slice()
-		if len(inner) > 0 && scmerIsSymbol(inner[0], "list") {
-			rv[0] = NewSymbol("merge_unique_mut")
-			if td == nil {
-				td = &TypeDescriptor{}
-			}
-			td.Transfer = true
-			return NewSlice(rv), td
-		}
-	}
-
-	return result, td
+	return oc.applyDefaultOptimization(v, useResult, "merge_unique_mut")
 }
 
 func flattenConsList(v []Scmer) ([]Scmer, bool) {

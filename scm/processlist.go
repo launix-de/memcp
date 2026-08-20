@@ -112,6 +112,22 @@ func (s *SessionState) BeginQuery(cmd, info string) uint64 {
 	return seq
 }
 
+// SetQueryInfo updates the processlist text for an active query generation.
+// HTTP requests use this after lazily reading a SQL request body. A stale
+// request must not overwrite the text of a newer request sharing the session.
+func (s *SessionState) SetQueryInfo(seq uint64, info string) bool {
+	if seq == 0 || s.activeQuery.Load() != seq {
+		return false
+	}
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	if !s.active[seq] || s.activeQuery.Load() != seq {
+		return false
+	}
+	s.Info.Store(&info)
+	return true
+}
+
 // EndQuery clears the active generation if it still matches seq and restores
 // the idle processlist state. Older requests finishing late must not overwrite
 // a newer active request on the same persistent HTTP session.
