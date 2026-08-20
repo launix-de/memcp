@@ -191,7 +191,7 @@ test_cases:
       result_contains:
         - "scan_order"
         - "jd_ref"
-        - '\n\t\t\t\t\t0\n\t\t\t\t\t2\n'
+        - '\n\t\t\t\t\t\t0\n\t\t\t\t\t\t2\n'
       result_not_contains:
         - "scan_order_point"
         - ".grp:jd_ref"
@@ -209,7 +209,7 @@ test_cases:
         - "scan_order"
         - "jd_ref"
         - "'()"
-        - '\n\t\t\t\t\t0\n\t\t\t\t\t0\n\t\t\t\t\t1\n'
+        - '\n\t\t\t\t\t\t0\n\t\t\t\t\t\t0\n\t\t\t\t\t\t1\n'
       result_not_contains:
         - "scan_order_point"
         - ".grp:jd_ref"
