@@ -182,12 +182,12 @@ func TestOptimizeFusesReduceOverMapThenFilter(t *testing.T) {
 	}
 }
 
-func TestOptimizeFusesMergeUniqueOverMap(t *testing.T) {
+func TestOptimizeKeepsMergeUniqueOverMapOfLists(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (values)
-		(merge_unique (map values (lambda (value) (+ value 1)))))`)
+		(merge_unique (map values (lambda (value) (list (+ value 1))))))`)
 	serialized := serializedTestExpr(t, env, optimized)
-	if !strings.Contains(serialized, "merge_unique_map") {
-		t.Fatalf("merge_unique/map pipeline was not fused: %s", serialized)
+	if strings.Contains(serialized, "merge_unique_map") {
+		t.Fatalf("merge_unique/map-of-lists pipeline was unsafely fused: %s", serialized)
 	}
 
 	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
@@ -198,18 +198,73 @@ func TestOptimizeFusesMergeUniqueOverMap(t *testing.T) {
 	}
 }
 
-func TestOptimizeFusesMergeUniqueOverFilterMap(t *testing.T) {
+func TestOptimizeKeepsMergeUniqueOverFilterMapOfLists(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (values)
-		(merge_unique (map (filter values (lambda (value) (> value 1))) (lambda (value) (* value 2)))))`)
+		(merge_unique (map (filter values (lambda (value) (> value 1))) (lambda (value) (list (* value 2))))))`)
 	serialized := serializedTestExpr(t, env, optimized)
-	if !strings.Contains(serialized, "merge_unique_map_filter") {
-		t.Fatalf("merge_unique/map/filter pipeline was not fused: %s", serialized)
+	if strings.Contains(serialized, "merge_unique_map_filter") {
+		t.Fatalf("merge_unique/map/filter-of-lists pipeline was unsafely fused: %s", serialized)
 	}
 
 	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
 	got := fn(NewSlice([]Scmer{NewInt(0), NewInt(1), NewInt(2), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(4), NewInt(6)})
 	if !Equal(got, want) {
-		t.Fatalf("fused merge_unique/map/filter returned %s, want %s", String(got), String(want))
+		t.Fatalf("merge_unique/map/filter returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeMergeUniqueMutatesFreshList(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (a b c)
+		(merge_unique (list (list a b) (list b c))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "merge_unique_mut") {
+		t.Fatalf("fresh list did not select merge_unique_mut: %s", serialized)
+	}
+	if strings.Contains(serialized, "!list") {
+		t.Fatalf("transferred merge_unique input was lowered to a frame-local list: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewInt(1), NewInt(2), NewInt(3))
+	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
+	if !Equal(got, want) {
+		t.Fatalf("merge_unique_mut returned %s, want %s", String(got), String(want))
+	}
+	second := fn(NewInt(4), NewInt(5), NewInt(6))
+	if !Equal(got, want) {
+		t.Fatalf("later call mutated escaped result to %s, want %s", String(got), String(want))
+	}
+	secondWant := NewSlice([]Scmer{NewInt(4), NewInt(5), NewInt(6)})
+	if !Equal(second, secondWant) {
+		t.Fatalf("second merge_unique_mut returned %s, want %s", String(second), String(secondWant))
+	}
+}
+
+func TestOptimizeKeepsDynamicReducerAfterMergeValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		fused  string
+	}{
+		{
+			name:   "segment catalog",
+			source: `(lambda (parts reducer) (reduce (merge parts) reducer 0))`,
+			fused:  "reduce_segments",
+		},
+		{
+			name:   "two lists",
+			source: `(lambda (left right reducer) (reduce (merge left right) reducer 0))`,
+			fused:  "reduce_merge2",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			optimized, env := optimizeListPipeline(t, tc.source)
+			serialized := serializedTestExpr(t, env, optimized)
+			if strings.Contains(serialized, tc.fused) {
+				t.Fatalf("dynamic reducer moved ahead of merge validation: %s", serialized)
+			}
+		})
 	}
 }
