@@ -8253,7 +8253,10 @@ wrapped in an extra NOT. */
 			(qassoc_set facts (quote condition) (boolean_fold_expr existing))))))
 
 (define two_valued_boolean_expr? (lambda (graph stage expr)
-	(if (or (boolean_fold_true_literal? expr) (boolean_fold_false_literal? expr))
+	/* Numeric 0/1 have truth values inside AND/OR/NOT, but remain numeric
+	values in CASE results and aggregate inputs. Only actual boolean literals
+	prove that the surrounding expression has a boolean result type. */
+	(if (or (literal_true? expr) (literal_false? expr))
 		true
 		(if (presence_bool_stage_output_expr? expr)
 			true
@@ -8271,8 +8274,8 @@ wrapped in an extra NOT. */
 									(two_valued_boolean_expr? graph stage (nth tail 2))))
 							(if (or (equal? head (quote coalesceNil)) (equal? head (symbol "coalesceNil")))
 								(and (equal? (count tail) 2)
-									(and (or (boolean_fold_true_literal? (nth tail 1))
-										(boolean_fold_false_literal? (nth tail 1)))
+									(and (or (literal_true? (nth tail 1))
+										(literal_false? (nth tail 1)))
 										(boolean_typed_expr_shaped? graph stage (car tail))))
 								false))))
 				_ false)))))
@@ -12784,7 +12787,11 @@ ever-larger subtrees. */
 			(define membership_expr (car membership_parts))
 			(define effective_condition (cadr membership_parts))
 			(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-			(define condition_cols (extract_columns_for_alias src effective_condition))
+			/* The ordinary per-group scan still lowers condition in full. Its
+			membership marker is a semantic leaf whose driver probe can require
+			columns removed from effective_condition, so collect dependencies from
+			the same expression the callback evaluates. */
+			(define condition_cols (extract_columns_for_alias src condition))
 			(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols)))
 			(define aggcols (extract_columns_for_alias src agg_expr))
 			(define direct_recset_count (and (not (nil? membership_expr))
