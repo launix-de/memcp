@@ -6813,6 +6813,21 @@ The ordinary NDV estimate remains preferable when it is tighter. */
 	(reduce (planner_foreign_key_group_bounds src columns) (lambda (best bound)
 		(if (or (nil? best) (< bound best)) bound best)) nil)))
 
+/* Independent single-column foreign keys also bound a multi-dimensional
+partition before rebuilt NDV statistics exist. Composite foreign keys keep
+their tighter direct bound; this product is only an additional candidate. */
+(define planner_foreign_key_product_bound (lambda (src columns row_count)
+	(if (or (not (number? row_count)) (empty_list? columns))
+		nil
+		(begin
+			(define factors (map columns (lambda (column)
+				(planner_foreign_key_group_bound src (list column)))))
+			(if (reduce factors (lambda (missing factor)
+				(or missing (nil? factor))) false)
+				nil
+				(min row_count (reduce factors (lambda (product factor)
+					(* product factor)) 1)))))))
+
 (define planner_aggregate_pushdown_group_estimate (lambda (src keys row_count)
 	(if (not (number? row_count))
 		nil
@@ -6823,11 +6838,14 @@ The ordinary NDV estimate remains preferable when it is tighter. */
 				(or missing (nil? column))) false)
 				nil
 				(planner_foreign_key_group_bound src columns)))
-			(define estimate (if (nil? distinct_estimate)
-				foreign_key_bound
-				(if (nil? foreign_key_bound)
-					distinct_estimate
-					(min distinct_estimate foreign_key_bound))))
+			(define foreign_key_product_bound
+				(planner_foreign_key_product_bound src columns row_count))
+			(define estimate (reduce
+				(list distinct_estimate foreign_key_bound foreign_key_product_bound)
+				(lambda (best candidate)
+					(if (nil? candidate) best
+						(if (nil? best) candidate (min best candidate))))
+				nil))
 			(if (nil? estimate) nil (min row_count estimate))))))
 
 (define aggregate_pushdown_cost_preferred? (lambda (driver_rows group_rows)
@@ -8785,24 +8803,30 @@ forms, but never participate in the semantic proof. */
 														(and safe (aggregate_pushdown_stage_source_safe? (qb_stages block) src)))
 														true)))))))))))))))
 
-(define aggregate_pushdown_movable_term? (lambda (stage_aliases term)
-	(or (expr_refs_one_of_aliases? term stage_aliases)
-		(expr_contains_session_dependency? term))))
+(define aggregate_pushdown_stage_filter_term? (lambda (stage_aliases term)
+	(expr_refs_one_of_aliases? term stage_aliases)))
 
-(define aggregate_pushdown_terms (lambda (block movable)
+(define aggregate_pushdown_terms (lambda (block stage_filters)
 	(begin
 		(define stage_aliases (map (aggregate_pushdown_stage_sources block) source_alias))
 		(filter (split_and_terms (qb_where block)) (lambda (term)
-			(equal? (aggregate_pushdown_movable_term? stage_aliases term) movable))))))
+			(equal? (aggregate_pushdown_stage_filter_term? stage_aliases term) stage_filters))))))
 
-(define aggregate_pushdown_key_columns (lambda (block driver movable_terms)
+(define aggregate_pushdown_filtered_stage_sources (lambda (block filter_terms)
+	(filter (aggregate_pushdown_stage_sources block) (lambda (src)
+		(reduce filter_terms (lambda (filtered term)
+			(or filtered (expr_refs_alias? nil (source_alias src) term))) false)))))
+
+(define aggregate_pushdown_key_columns (lambda (block driver filter_terms filtered_sources)
 	(merge_unique (list
-		(merge (map movable_terms (lambda (term)
+		(merge (map filter_terms (lambda (term)
 			(extract_columns_for_alias driver term))))
-		(merge (map (aggregate_pushdown_stage_sources block) (lambda (src)
+		(merge (map filtered_sources (lambda (src)
 			(extract_columns_for_alias driver (source_join_expr src)))))
-		(merge (map (qb_stages block) (lambda (stage)
-			(extract_columns_for_alias driver stage))))))))
+		(merge (map filtered_sources (lambda (src)
+			(extract_columns_for_alias driver
+				(stage_by_id (qb_stages block)
+					(stage_output_relation_id (source_relation src)))))))))))
 
 (define aggregate_pushdown_keys (lambda (driver columns)
 	(map columns (lambda (column)
@@ -8869,6 +8893,8 @@ forms, but never participate in the semantic proof. */
 		(define keys (aggregate_pushdown_keys driver columns))
 		(define residual (combine_where_terms residual_terms true))
 		(define movable (combine_where_terms movable_terms true))
+		(define filtered_stage_aliases
+			(map (aggregate_pushdown_filtered_stage_sources block movable_terms) source_alias))
 		(define partition_id (concat "aggregate-partition:" (fnv_hash (serialize (list
 			(source_schema driver) (source_relation driver) keys residual)))))
 		(define partition_alias (concat "__aggregate_partition_" (fnv_hash partition_id)))
@@ -8908,6 +8934,7 @@ forms, but never participate in the semantic proof. */
 				(list
 					(list (quote driver) (list (source_schema driver) (source_relation driver)))
 					(list (quote keys) columns)
+					(list (quote filtered_stage_aliases) filtered_stage_aliases)
 					(list (quote estimated_driver_rows) driver_rows)
 					(list (quote estimated_group_rows) group_rows)
 					(list (quote estimated_compression)
@@ -8929,7 +8956,10 @@ forms, but never participate in the semantic proof. */
 				(define movable_terms (aggregate_pushdown_terms block true))
 				(define residual_terms (aggregate_pushdown_terms block false))
 				(define driver (car (aggregate_pushdown_base_sources block)))
-				(define columns (aggregate_pushdown_key_columns block driver movable_terms))
+				(define filtered_sources
+					(aggregate_pushdown_filtered_stage_sources block movable_terms))
+				(define columns
+					(aggregate_pushdown_key_columns block driver movable_terms filtered_sources))
 				(if (or (empty_list? movable_terms) (empty_list? columns))
 					ir
 					(begin
