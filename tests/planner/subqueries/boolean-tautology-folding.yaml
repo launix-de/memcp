@@ -1,0 +1,150 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Boolean constant-folding on the normalized IR (todos/boolean-tautology-folding.md).
+# A correlated EXISTS check combined with its own negation via OR/AND is a
+# boolean tautology/contradiction that never depends on the EXISTS result, but
+# without folding it still compiles into real physical probe work every time.
+
+metadata:
+  version: "1.0"
+  description: "Boolean tautology/contradiction folding for duplicated correlated EXISTS checks"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS taut_child"
+  - sql: "DROP TABLE IF EXISTS taut_parent"
+  - sql: |
+      CREATE TABLE taut_parent (
+        ID INT PRIMARY KEY,
+        val INT
+      )
+  - sql: |
+      CREATE TABLE taut_child (
+        ID INT PRIMARY KEY,
+        parent_id INT
+      )
+  - sql: |
+      INSERT INTO taut_parent (ID, val) VALUES
+      (1, 10), (2, 20), (3, -5)
+  - sql: |
+      INSERT INTO taut_child (ID, parent_id) VALUES
+      (1, 1)
+
+test_cases:
+  - name: "(A OR NOT A) tautology keeps correct rows regardless of EXISTS"
+    sql: |
+      SELECT ID FROM taut_parent p
+      WHERE p.val > 0
+        AND (
+          EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+          OR NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+        )
+      ORDER BY ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1}
+        - {ID: 2}
+
+  - name: "(A AND NOT A) contradiction drops all rows regardless of EXISTS"
+    sql: |
+      SELECT ID FROM taut_parent p
+      WHERE p.val > 0
+        AND (
+          EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+          AND NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+        )
+      ORDER BY ID
+    expect:
+      rows: 0
+
+  - name: "EXPLAIN for the (A OR NOT A) tautology has no physical EXISTS probe left"
+    sql: |
+      EXPLAIN SELECT ID FROM taut_parent p
+      WHERE p.val > 0
+        AND (
+          EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+          OR NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+        )
+      ORDER BY ID
+    expect:
+      rows: 1
+      result_contains:
+        - "taut_parent"
+      result_not_contains:
+        - "taut_child"
+        - "touch_keytable"
+        - ".grp:"
+        - "recset_project_join"
+
+  - name: "EXPLAIN IR folds the tautological branch out of the WHERE clause"
+    sql: |
+      EXPLAIN IR SELECT ID FROM taut_parent p
+      WHERE p.val > 0
+        AND (
+          EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+          OR NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+        )
+      ORDER BY ID
+    expect:
+      rows: 1
+      result_contains:
+        - "get_column"
+        - "val"
+      result_not_contains:
+        - "(or"
+        - "(not"
+
+  - name: "Non-tautological OR of two distinct correlated EXISTS checks is not folded"
+    sql: |
+      EXPLAIN SELECT ID FROM taut_parent p
+      WHERE p.val > 0
+        AND (
+          EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+          OR EXISTS (SELECT 1 FROM taut_child c2 WHERE c2.parent_id = p.ID AND c2.ID > 100)
+        )
+      ORDER BY ID
+    expect:
+      rows: 1
+      result_contains:
+        - "taut_child"
+        - "scan_order"
+
+  - name: "Direct fold rule check: and/or/not/if simplification via /scm"
+    scm: |
+      (begin
+        (define col (list (quote get_column) "a" false "x" false))
+        (define checks (list
+          (equal? (boolean_fold_expr (list (quote and) true col)) col)
+          (equal? (boolean_fold_expr (list (quote and) false col)) false)
+          (equal? (boolean_fold_expr (list (quote or) true col)) true)
+          (equal? (boolean_fold_expr (list (quote or) false col)) col)
+          (equal? (boolean_fold_expr (list (quote not) true)) false)
+          (equal? (boolean_fold_expr (list (quote not) false)) true)
+          (equal? (boolean_fold_expr (list (quote not) (list (quote not) col))) col)
+          (equal? (boolean_fold_expr (list (quote and) col col)) col)
+          (equal? (boolean_fold_expr (list (quote or) col col)) col)
+          (equal? (boolean_fold_expr (list (quote or) col (list (quote not) col))) true)
+          (equal? (boolean_fold_expr (list (quote and) col (list (quote not) col))) false)
+          (equal? (boolean_fold_expr (list (quote if) col true false)) col)
+          (equal? (boolean_fold_expr (list (quote if) col false true)) (list (quote not) col))))
+        (if (reduce checks (lambda (acc c) (and acc c)) true)
+          true
+          (error (concat "boolean_fold_expr rule mismatch: " (string checks)))))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS taut_child"
+  - sql: "DROP TABLE IF EXISTS taut_parent"
