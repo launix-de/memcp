@@ -9622,23 +9622,37 @@ membership set. */
 		(define cache_schema (group_cache_schema cache))
 		(define cache_relation (group_cache_relation cache))
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
+		(define session_read (list (list (quote context) "session") lookup_key))
+		(define session_setter (list
+			(list (quote context) "session")
+			lookup_key
+			(list (quote once) (list (quote lambda) '()
+				(list (quote recset_key_index)
+					(list (quote session) "__memcp_tx")
+					(list (quote scan_recset)
+						(list (quote session) "__memcp_tx")
+						(list (quote table) cache_schema cache_relation)
+						(quoted_runtime_list (list requested_col))
+						(list (quote lambda) (list (symbol requested_col))
+							(list (quote equal??) (symbol requested_col) true)))
+					(quoted_runtime_list (list "k0")))))))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
-			(list
-				(list (quote context) "session")
-				lookup_key
-				(list (quote once) (list (quote lambda) '()
-					(list (quote recset_key_index)
-						(list (quote session) "__memcp_tx")
-						(list (quote scan_recset)
-							(list (quote session) "__memcp_tx")
-							(list (quote table) cache_schema cache_relation)
-							(quoted_runtime_list (list requested_col))
-							(list (quote lambda) (list (symbol requested_col))
-								(list (quote equal??) (symbol requested_col) true)))
-						(quoted_runtime_list (list "k0"))))))
+			/* session_setter builds a ZERO-ARG once-wrapped lookup-closure builder; without this guard
+			   every driving row would re-run this setter, constructing a fresh once-wrapper each time
+			   and discarding the previous memoization (defeating the point of `once`). */
+			(list (quote if)
+				(list (quote nil?) session_read)
+				session_setter
+				true)
+			/* session_read stores a zero-arg builder (not the lookup closure itself), so retrieving the
+			   actual boolean requires TWO applies: one zero-arg apply to run/fetch the memoized builder
+			   and obtain the recset_key_index closure, then a second apply of that closure to the real key.
+			   Single-applying session_read directly to resolved_lookup_key would instead pass the key as
+			   an ignored extra argument to the zero-arg builder, which just returns the closure itself
+			   (a non-nil/truthy value) rather than ever checking membership. */
 			(list (quote apply)
-				(list (list (quote context) "session") lookup_key)
+				(list (quote apply) session_read (quoted_runtime_list '()))
 				(list (quote list) resolved_lookup_key))))))
 
 (define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows)
