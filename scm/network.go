@@ -95,6 +95,8 @@ type HttpServer struct {
 
 func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	res.Header().Set("Content-Type", "text/plain")
+	var ss *SessionState
+	var querySeq uint64
 	query_scm := make([]Scmer, 0)
 	for k, v := range req.URL.Query() {
 		for _, v2 := range v {
@@ -128,7 +130,11 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			var b strings.Builder
 			io.Copy(&b, req.Body)
 			req.Body.Close()
-			return NewString(b.String())
+			body := b.String()
+			if req.Method == http.MethodPost && strings.HasPrefix(req.URL.Path, "/sql/") {
+				ss.SetQueryInfo(querySeq, body)
+			}
+			return NewString(body)
 		}),
 		NewString("bodyParts"), NewFunc(func(a ...Scmer) Scmer {
 			result := []Scmer{}
@@ -282,7 +288,6 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 			})
 		}),
 	}
-	var ss *SessionState
 	if sid := req.Header.Get("X-Session-Id"); sid != "" {
 		// Persistent HTTP session: reuse or create a long-lived SessionState.
 		if v, ok := httpStates.Load(sid); ok {
@@ -300,7 +305,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		defer ss.ReleaseAllLocks() // non-persistent: release locks when request ends
 	}
 	ss.Touch()
-	querySeq := ss.BeginQuery("Query", req.Method+" "+req.URL.Path)
+	querySeq = ss.BeginQuery("Query", req.Method+" "+req.URL.Path)
 	ctx, cancel := context.WithCancel(req.Context())
 	ss.SetCancel(querySeq, cancel)
 	ss.SetQueryContext(querySeq, ctx)
