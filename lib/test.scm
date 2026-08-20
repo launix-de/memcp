@@ -1758,6 +1758,27 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (once_fn 2) 3) true "once first call computes")
 	(assert (equal? (once_fn 99) 3) true "once second call returns cached")
 	(assert (equal? (once_calls "n") 1) true "once executes only once")
+	/* once wrapping a *zero-arg* builder (the idiom used to lazily construct a
+	shared per-query resource exactly once, e.g. a RecSet lookup closure via
+	(context "session") key (once (lambda () ...))) must be invoked with zero
+	arguments to run the memoized builder and get back the built resource.
+	Applying the once-wrapper directly to an argument instead -- as
+	lower_recset_scalar_first_probe_expr's session binding once did -- passes
+	that argument to the zero-arg builder, which just ignores it (once's
+	memoization ignores arguments after the first call, per the "once second
+	call returns cached" case above) and returns the builder's own result: a
+	closure, which is non-nil and therefore "truthy" in any boolean context
+	regardless of the argument, silently short-circuiting every check to
+	true. This regression shipped undetected because no test exercised this
+	exact call shape; pin it down directly here rather than only through a
+	planner cost-model path that may or may not select it. */
+	(define once_builder (once (lambda () (lambda (x) (equal? x 1)))))
+	(assert (nil? (apply once_builder (list 1))) false
+		"single-applying a zero-arg once-wrapper still returns a closure (non-nil/truthy), not the intended boolean result")
+	(assert (equal? (apply (apply once_builder (list)) (list 1)) true) true
+		"double-applying a zero-arg once-wrapper runs the memoized builder first, then calls the built closure with the real argument")
+	(assert (equal? (apply (apply once_builder (list)) (list 2)) false) true
+		"the closure retrieved via the zero-arg call behaves correctly for a non-matching argument too")
 	/* mutex */
 	(define mtx (mutex))
 	(assert (equal? (mtx (lambda () 42)) 42) true "mutex executes inner function")
