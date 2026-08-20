@@ -9615,9 +9615,8 @@ expensive than any number of direct probes. Only activate this path when we
 actually have a probe-count estimate to compare against; otherwise keep the
 existing, already-safe direct probe. */
 (define scalar_first_probe_keytable_cost_preferred? (lambda (stage probe_work_rows)
-	(or (qassoc_get (gs_facts stage) (quote promoted_probe) false)
-		(and (number? (planner_literal_value probe_work_rows))
-			(not (stage_direct_probe_cost_preferred? stage probe_work_rows))))))
+	(and (number? (planner_literal_value probe_work_rows))
+		(not (stage_direct_probe_cost_preferred? stage probe_work_rows)))))
 
 (define scalar_first_probe_keytable_eligible? (lambda (stage src keys probe_work_rows)
 	/* Unlike lower_direct_scalar_query_probe, this path builds the keytable via
@@ -12967,12 +12966,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(if insensitive (quote insensitive) (quote exact))
 		(if (and insensitive (string? alias)) (toLower alias) alias))))
 
-(define probe_stage_alias_index_using (lambda (stages sources consumers)
+(define probe_stage_alias_index_using_graph (lambda (stages dependency_graph sources consumers)
 	(begin
-		/* Keep physical ownership on the dependency closure, and retain a separate
-		read-only catalog for nested source lookup after query-block rewrites. */
-		(define probe_catalog (stage_catalog_with_nested (lowering_catalog_stages stages)))
-		(define dependency_graph (stage_dependency_graph stages))
 		(define entries (filter (map (coalesceNil sources '()) (lambda (src)
 			(begin
 				/* Eager preparation may already have replaced stage-output with the
@@ -12997,6 +12992,11 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(define stage (nth entry 1))
 				(define direct (qassoc_get (gs_facts stage) (quote direct_group_probe) false))
 				(begin
+					/* A marker only needs its proper dependency closure. Embedding the
+					whole query catalog in every independent marker makes emitted IR
+					quadratic in the number of scalar subqueries. */
+					(define probe_catalog
+						(cdr (get_assoc closures (logical_stage_key stage))))
 					(define marker_stage (if direct
 						stage
 						(group_stage_with_facts stage
@@ -13016,7 +13016,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 						(set_assoc with_exact insensitive_key index_entry))))) '()))))
 
 (define probe_stage_alias_index (lambda (stages sources consumers)
-	(probe_stage_alias_index_using stages sources consumers)))
+	(probe_stage_alias_index_using_graph
+		stages (stage_dependency_graph stages) sources consumers)))
 
 (define probe_stage_entry_for_alias_using_index (lambda (index default_alias tblvar tbl_ignorecase)
 	(get_assoc index
@@ -13857,8 +13858,8 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 		(define probe_sources (if (nil? retained_order_alias)
 			probe_candidates
 			(merge_unique (list probe_candidates (list (nth order_lookup 0))))))
-		(define probe_index
-			(probe_stage_alias_index stages probe_sources consumers))
+		(define probe_index (probe_stage_alias_index_using_graph
+			stages dependency_graph probe_sources consumers))
 		(define rewritten_sources (rewrite_scalar_first_probe_sources_using_index stages sources probe_index default_alias))
 		(make_query_block
 			(qb_schema block)
