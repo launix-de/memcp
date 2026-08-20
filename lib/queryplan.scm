@@ -19032,10 +19032,12 @@ though both handles are constant for the complete query generation. */
 				(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
 				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))
+		(define consolidated_plan (consolidate_closed_group_prepares ir plan))
+		(define memoized_plan (if (empty_list? (ir_stages ir))
+			consolidated_plan
+			(consolidate_query_invariant_presence_memos consolidated_plan)))
 		(require_physical_scan_relations
-			(with_physical_query_context
-				(consolidate_query_invariant_presence_memos
-					(consolidate_closed_group_prepares ir plan)))))))
+			(with_physical_query_context memoized_plan)))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir))))
