@@ -399,10 +399,15 @@ func isScanPseudoColName(name string) bool {
 }
 
 // lockTablePublicationShards closes the publication race with shard users.
-// A READ table lock only needs to drain writers, so shard read locks are both
-// sufficient and essential: waiting for sibling readers can deadlock when a
-// parallel query worker prepares a cache consumed by one of those readers.
-func lockTablePublicationShards(shards []*storageShard, write bool) func() {
+// User-visible locks drain incompatible work before returning. Cache
+// initialization is different: its READ lock is immediately followed by a
+// complete snapshot scan, which serializes any writer already past the atomic
+// table-lock recheck. Taking a recursive shard RLock for that path can deadlock
+// behind a queued writer when initialization runs inside a parallel reader.
+func lockTablePublicationShards(shards []*storageShard, write bool, snapshotFollows bool) func() {
+	if !write && snapshotFollows {
+		return func() {}
+	}
 	if write {
 		for _, shard := range shards {
 			shard.mu.Lock()
@@ -428,7 +433,7 @@ func lockTablePublicationShards(shards []*storageShard, write bool) func() {
 // registered with the session so that ReleaseAllLocks() can free it later.
 // A run of FIFO-adjacent READ requests shares the lock. The first reader, or an
 // exclusive writer, drains in-flight shard readers before publishing the lock.
-func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) func() {
+func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss *scm.SessionState) func() {
 	if ss == nil {
 		panic("LOCK TABLES requires a query session")
 	}
@@ -485,10 +490,9 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		}
 	}
 	t.tableLockMu.Unlock()
-	// Drain incompatible in-flight shard users: writers for a READ table lock,
-	// readers and writers for WRITE. We MUST publish while retaining these locks
-	// so that any new scan that does RLock -> tableLockState.Load() sees the
-	// lock before it can proceed past its own RLock.
+	// User locks drain incompatible shard users. Cache snapshot READ publication
+	// instead relies on lockForMutation's post-shard-lock recheck; an already-
+	// running writer is serialized by the initializer's immediately following scan.
 	acquired := false
 	defer func() {
 		if acquired {
@@ -502,7 +506,7 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		t.tableLockMu.Unlock()
 	}()
 	shards := t.ActiveShards()
-	unlockShards := lockTablePublicationShards(shards, write)
+	unlockShards := lockTablePublicationShards(shards, write, snapshotFollows)
 	if write {
 		t.tableLockOwner.Store(ss)
 		t.tableLockState.Store(-1)
@@ -539,7 +543,7 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 }
 
 func lockTable(schema, name string, write bool, ss *scm.SessionState) {
-	unlock := acquireTableLock(schema, name, write, ss)
+	unlock := acquireTableLock(schema, name, write, false, ss)
 	if ss != nil {
 		ss.AddLock(unlock)
 	}
@@ -2364,7 +2368,7 @@ func Init(en scm.Env) {
 					}
 				}()
 				for _, source := range sourceTables {
-					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, ss))
+					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, ss))
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
