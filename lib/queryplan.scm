@@ -16344,13 +16344,110 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 (define join_scan_shard_reduce_expr (lambda (result_mode)
 	(if (join_scan_reduce? result_mode) (join_scan_reduce_expr result_mode true) nil)))
 
+(define join_scan_probe_context? (lambda (value)
+	(match value
+		(cons ((symbol probe_work_context) true) _rest) true
+		(cons ((quote probe_work_context) true) _rest) true
+		_ false)))
+
 (define join_scan_probe_work_rows (lambda (result_mode)
-	(if (and (join_scan_reduce? result_mode) (> (count result_mode) 4))
-		(nth result_mode 4)
+	(begin
+		(define value (if (and (join_scan_reduce? result_mode) (> (count result_mode) 4))
+			(nth result_mode 4)
 		(if (and (list? result_mode)
 			(and (> (count result_mode) 1) (equal? (car result_mode) (quote pipeline))))
 			(nth result_mode 1)
-			nil))))
+			nil)))
+		(if (join_scan_probe_context? value)
+			(qassoc_get value (quote default) nil)
+			value))))
+
+(define join_scan_probe_work_rows_for_alias (lambda (result_mode alias)
+	(begin
+		(define value (if (and (join_scan_reduce? result_mode) (> (count result_mode) 4))
+			(nth result_mode 4)
+			(if (and (list? result_mode)
+				(and (> (count result_mode) 1) (equal? (car result_mode) (quote pipeline))))
+				(nth result_mode 1)
+				nil)))
+		(if (join_scan_probe_context? value)
+			(qassoc_get (qassoc_get value (quote by_alias) '()) alias
+				(qassoc_get value (quote default) nil))
+			value))))
+
+(define physical_probe_predicate_selectivity (lambda (predicates)
+	(reduce (coalesceNil predicates '()) (lambda (product predicate)
+		(* product (join_order_pred_selectivity predicate))) 1)))
+
+(define physical_probe_work_index_scaled (lambda (index factor)
+	(map (coalesceNil index '()) (lambda (entry)
+		(list (car entry)
+			(if (and (number? (cadr entry)) (number? factor))
+				(* (cadr entry) factor)
+				nil))))))
+
+/* Return (rows-per-invocation, alias->scan-work) for a fixed physical join
+tree. Right subtrees are continuations of every surviving left row, so their
+probe count must be scaled at that node rather than inherited from the root
+driver. This is physical costing metadata only; it never enters logical IR. */
+(define physical_join_tree_probe_work (lambda (tree sources)
+	(match tree
+		((symbol join-leaf) alias predicates) (begin
+			(define src (join_optimizer_source_by_alias sources alias))
+			(define source_rows (if (nil? src) nil (planner_source_row_count src)))
+			(define rows (if (number? source_rows)
+				(max 1 (* source_rows (physical_probe_predicate_selectivity predicates)))
+				nil))
+			(list rows (list (list alias rows))))
+		((quote join-leaf) alias predicates)
+		(physical_join_tree_probe_work
+			(list (symbol "join-leaf") alias predicates) sources)
+		((symbol join-leaf) alias)
+		(physical_join_tree_probe_work
+			(list (symbol "join-leaf") alias '()) sources)
+		((quote join-leaf) alias)
+		(physical_join_tree_probe_work
+			(list (symbol "join-leaf") alias '()) sources)
+		((symbol join-node) kind left right predicates) (begin
+			(define left_work (physical_join_tree_probe_work left sources))
+			(define right_work (physical_join_tree_probe_work right sources))
+			(define left_rows (car left_work))
+			(define right_rows (car right_work))
+			(define selectivity (physical_probe_predicate_selectivity predicates))
+			(define right_invocations (if (number? left_rows)
+				(* left_rows selectivity)
+				nil))
+			(define joined_rows (if (and (number? left_rows) (number? right_rows))
+				(max 1 (* left_rows right_rows selectivity))
+				nil))
+			(define output_rows (if (and (equal? kind (quote left-outer)) (number? left_rows))
+				(max left_rows (coalesceNil joined_rows left_rows))
+				joined_rows))
+			(list output_rows (merge (list
+				(cadr left_work)
+				(physical_probe_work_index_scaled (cadr right_work) right_invocations)))))
+		((quote join-node) kind left right predicates)
+		(physical_join_tree_probe_work
+			(list (symbol "join-node") kind left right predicates) sources)
+		_ (list nil '()))))
+
+(define join_scan_probe_context (lambda (tree sources default_rows)
+	(begin
+		(define work (if (nil? tree) (list nil '())
+			(physical_join_tree_probe_work tree sources)))
+		(list
+			(list (quote probe_work_context) true)
+			(list (quote default) (coalesceNil (car work) default_rows))
+			(list (quote by_alias) (cadr work))))))
+
+(define join_scan_result_mode_with_probe_context (lambda (result_mode context)
+	(if (join_scan_reduce? result_mode)
+		(list (quote reduce)
+			(nth result_mode 1)
+			(nth result_mode 2)
+			(nth result_mode 3)
+			context)
+		(list (quote pipeline) context))))
 
 (define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
 	(begin
@@ -16404,7 +16501,8 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			all_sources
 			alias
 			(lower_column_expr_for_join_in_context
-				all_sources default_alias filter_condition (join_scan_probe_work_rows result_mode))))
+				all_sources default_alias filter_condition
+				(join_scan_probe_work_rows_for_alias result_mode alias))))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(list (quote optimize) lowered_filter_condition)))
@@ -16413,7 +16511,8 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			continuation_expr
 			(list (quote if)
 				(list (quote optimize) (lower_column_expr_for_join_in_context
-					all_sources default_alias post_outer_condition (join_scan_probe_work_rows result_mode)))
+					all_sources default_alias post_outer_condition
+					(join_scan_probe_work_rows_for_alias result_mode alias)))
 				continuation_expr
 				(join_scan_skip_expr result_mode))))
 		(define map_expr (list (quote lambda)
@@ -16503,6 +16602,10 @@ ownership remain available until the physical scans are emitted. */
 (define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode)
 	(begin
 		(define tree (physical_join_plan_for_sources sources))
+		(define costed_result_mode (join_scan_result_mode_with_probe_context
+			result_mode
+			(join_scan_probe_context tree all_sources
+				(join_scan_probe_work_rows result_mode))))
 		(define residual_condition (if (nil? tree) final_condition
 			(condition_without_join_tree_predicates final_condition tree)))
 		(define terminal (lambda (remaining_condition final_row_expr remaining_order_items)
@@ -16515,14 +16618,14 @@ ownership remain available until the physical scans are emitted. */
 					(list (quote if)
 						(list (quote optimize) (lower_column_expr_for_join_in_context
 							all_sources default_alias remaining_condition
-							(join_scan_probe_work_rows result_mode)))
+							(join_scan_probe_work_rows costed_result_mode)))
 						final_row_expr
-						(join_scan_skip_expr result_mode))))))
+						(join_scan_skip_expr costed_result_mode))))))
 		(if (nil? tree)
 			(terminal residual_condition row_expr order_items)
 			(build_join_tree_scan_using_recipe
 				schema all_sources tree '() default_alias needed_exprs residual_condition row_expr
-				order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode
+				order_items offset_value limit_value allow_membership_recset column_recipe stages costed_result_mode
 				terminal false)))))
 
 (define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier probe_work_rows column_recipe stages)

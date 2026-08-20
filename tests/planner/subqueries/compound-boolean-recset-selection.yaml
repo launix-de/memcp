@@ -10,6 +10,9 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS cbr_node_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_node"
+  - sql: "DROP TABLE IF EXISTS cbr_singleton"
   - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
   - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
   - sql: "DROP TABLE IF EXISTS cbr_item"
@@ -18,18 +21,29 @@ setup:
   - sql: "CREATE TABLE cbr_item (id INT PRIMARY KEY, scope_id INT)"
   - sql: "CREATE TABLE cbr_exists_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
   - sql: "CREATE TABLE cbr_fallback_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
+  - sql: "CREATE TABLE cbr_singleton (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE cbr_node (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE cbr_node_acl (node_id INT UNIQUE, allowed BOOL)"
   - sql: "INSERT INTO cbr_scope VALUES (1, 1), (2, 0), (3, 0), (4, 0)"
   - sql: "INSERT INTO cbr_exists_acl VALUES (1, 2, TRUE)"
   - sql: "INSERT INTO cbr_fallback_acl VALUES (1, 3, TRUE)"
+  - sql: "INSERT INTO cbr_singleton VALUES (1)"
   - scm: |
       (begin
         (insert (table "memcp-tests" "cbr_item") (list "id" "scope_id")
           (map (produceN 900) (lambda (i)
             (list (+ i 1) (+ (mod i 4) 1)))))
+        (insert (table "memcp-tests" "cbr_node") (list "id")
+          (map (produceN 100) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "cbr_node_acl") (list "node_id" "allowed")
+          (map (produceN 100) (lambda (i) (list (+ i 1) true))))
         (rebuild (table "memcp-tests" "cbr_item") true false)
         (rebuild (table "memcp-tests" "cbr_scope") true false)
         (rebuild (table "memcp-tests" "cbr_exists_acl") true false)
         (rebuild (table "memcp-tests" "cbr_fallback_acl") true false)
+        (rebuild (table "memcp-tests" "cbr_singleton") true false)
+        (rebuild (table "memcp-tests" "cbr_node") true false)
+        (rebuild (table "memcp-tests" "cbr_node_acl") true false)
         900)
 
 test_cases:
@@ -85,7 +99,29 @@ test_cases:
         - text: "recset_key_index"
           count: 1
 
+  - name: "nullable join node costs its own scalar probe work"
+    sql: |
+      EXPLAIN SELECT COUNT(*)
+      FROM cbr_singleton root_row
+      LEFT JOIN cbr_node node_row ON COALESCE((
+          SELECT node_acl.allowed = TRUE
+          FROM cbr_node_acl node_acl
+          WHERE node_acl.node_id = node_row.id
+          LIMIT 1
+        ), FALSE)
+      WHERE TRUE
+    expect:
+      rows: 1
+      contains:
+        - "recset_key_index"
+      result_occurrences:
+        - text: "recset_key_index"
+          count: 1
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS cbr_node_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_node"
+  - sql: "DROP TABLE IF EXISTS cbr_singleton"
   - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
   - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
   - sql: "DROP TABLE IF EXISTS cbr_item"
