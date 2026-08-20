@@ -17,11 +17,13 @@ setup:
   - sql: "DROP TABLE IF EXISTS cbr_numeric"
   - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
   - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_large_item"
   - sql: "DROP TABLE IF EXISTS cbr_item"
   - sql: "DROP TABLE IF EXISTS cbr_scope"
   - sql: "CREATE TABLE cbr_scope (id INT PRIMARY KEY, direct_flag INT)"
   - sql: "CREATE TABLE cbr_global_acl (id INT PRIMARY KEY, actor INT, allowed BOOL)"
   - sql: "CREATE TABLE cbr_item (id INT PRIMARY KEY, scope_id INT)"
+  - sql: "CREATE TABLE cbr_large_item (id INT PRIMARY KEY, scope_id INT)"
   - sql: "CREATE TABLE cbr_exists_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
   - sql: "CREATE TABLE cbr_fallback_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
   - sql: "CREATE TABLE cbr_singleton (id INT PRIMARY KEY)"
@@ -39,6 +41,9 @@ setup:
         (insert (table "memcp-tests" "cbr_item") (list "id" "scope_id")
           (map (produceN 900) (lambda (i)
             (list (+ i 1) (+ (mod i 4) 1)))))
+        (insert (table "memcp-tests" "cbr_large_item") (list "id" "scope_id")
+          (map (produceN 5000) (lambda (i)
+            (list (+ i 1) (+ (mod i 4) 1)))))
         (insert (table "memcp-tests" "cbr_node") (list "id")
           (map (produceN 100) (lambda (i) (list (+ i 1)))))
         (insert (table "memcp-tests" "cbr_node_acl") (list "node_id" "allowed")
@@ -46,6 +51,7 @@ setup:
         (insert (table "memcp-tests" "cbr_global_acl") (list "id" "actor" "allowed")
           (map (produceN 5000) (lambda (i) (list (+ i 1) 1 (equal? i 0)))))
         (rebuild (table "memcp-tests" "cbr_item") true false)
+        (rebuild (table "memcp-tests" "cbr_large_item") true false)
         (rebuild (table "memcp-tests" "cbr_scope") true false)
         (rebuild (table "memcp-tests" "cbr_exists_acl") true false)
         (rebuild (table "memcp-tests" "cbr_fallback_acl") true false)
@@ -171,10 +177,76 @@ test_cases:
         ), FALSE)
     expect:
       rows: 1
-      contains:
+      result_contains:
         - "recset_project_join"
-      not_contains:
+      result_not_contains:
         - "recset_key_index"
+
+  - name: "nested compound scalar reused by filter and projections keeps its RecSet carrier"
+    sql: |
+      EXPLAIN SELECT i.id,
+        COALESCE((
+          SELECT (CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (
+            SELECT TRUE FROM cbr_exists_acl ea
+            WHERE ea.scope_id = s.id AND ea.allowed = TRUE
+            LIMIT 1
+          ) END) AND COALESCE((
+            SELECT (nested_scope.direct_flag = 1) OR EXISTS (
+              SELECT TRUE FROM cbr_fallback_acl fa
+              WHERE fa.scope_id = nested_scope.id AND fa.allowed = TRUE
+              LIMIT 1
+            )
+            FROM cbr_scope nested_scope
+            WHERE nested_scope.id = s.id
+            LIMIT 1
+          ), FALSE)
+          FROM cbr_scope s WHERE s.id = i.scope_id LIMIT 1
+        ), FALSE) AS can_view,
+        COALESCE((
+          SELECT (CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (
+            SELECT TRUE FROM cbr_exists_acl ea
+            WHERE ea.scope_id = s.id AND ea.allowed = TRUE
+            LIMIT 1
+          ) END) AND COALESCE((
+            SELECT (nested_scope.direct_flag = 1) OR EXISTS (
+              SELECT TRUE FROM cbr_fallback_acl fa
+              WHERE fa.scope_id = nested_scope.id AND fa.allowed = TRUE
+              LIMIT 1
+            )
+            FROM cbr_scope nested_scope
+            WHERE nested_scope.id = s.id
+            LIMIT 1
+          ), FALSE)
+          FROM cbr_scope s WHERE s.id = i.scope_id LIMIT 1
+        ), FALSE) AS can_edit
+      FROM cbr_large_item i
+      WHERE COALESCE((
+        SELECT (CASE WHEN s.direct_flag = 1 THEN TRUE ELSE EXISTS (
+          SELECT TRUE FROM cbr_exists_acl ea
+          WHERE ea.scope_id = s.id AND ea.allowed = TRUE
+          LIMIT 1
+        ) END) AND COALESCE((
+          SELECT (nested_scope.direct_flag = 1) OR EXISTS (
+            SELECT TRUE FROM cbr_fallback_acl fa
+            WHERE fa.scope_id = nested_scope.id AND fa.allowed = TRUE
+            LIMIT 1
+          )
+          FROM cbr_scope nested_scope
+          WHERE nested_scope.id = s.id
+          LIMIT 1
+        ), FALSE)
+        FROM cbr_scope s WHERE s.id = i.scope_id LIMIT 1
+      ), FALSE)
+      ORDER BY i.id
+      LIMIT 72
+    expect:
+      rows: 1
+      result_contains:
+        - "recset_project_join"
+        - "get_or_compute_scoped"
+      result_occurrences:
+        - text: "get_or_compute_scoped"
+          count: 1
 
   - name: "nullable join node costs its own scalar probe work"
     sql: |
@@ -294,5 +366,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS cbr_numeric"
   - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
   - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_large_item"
   - sql: "DROP TABLE IF EXISTS cbr_item"
   - sql: "DROP TABLE IF EXISTS cbr_scope"
