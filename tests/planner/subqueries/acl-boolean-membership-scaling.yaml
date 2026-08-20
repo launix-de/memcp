@@ -47,44 +47,14 @@ setup:
           (map (produceN 5000) (lambda (i)
             (list (+ i 1) (+ (mod i 4) 1)))))
         (rebuild (table "memcp-tests" "bqm_document") true false)
+        (rebuild (table "memcp-tests" "bqm_standort") true false)
+        (rebuild (table "memcp-tests" "bqm_mandant_assignment") true false)
+        (rebuild (table "memcp-tests" "bqm_standort_assignment") true false)
         5000)
 
 test_cases:
-  - name: "compound correlated ACL predicate preserves every boolean branch"
-    sql: |
-      SELECT d.id
-      FROM bqm_document d
-      WHERE d.id <= 8 AND COALESCE((
-        SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
-          EXISTS (
-            SELECT TRUE FROM bqm_mandant_assignment ma
-            WHERE ma.standort_id = s.id
-              AND ma.actor_id = 7
-              AND ma.allowed = TRUE
-            LIMIT 1
-          ) OR COALESCE((
-            SELECT sa.allowed FROM bqm_standort_assignment sa
-            WHERE sa.standort_id = s.id
-              AND sa.actor_id = 7
-            LIMIT 1
-          ), FALSE)
-        ) END
-        FROM bqm_standort s
-        WHERE s.id = d.standort_id
-        LIMIT 1
-      ), FALSE)
-      ORDER BY d.id
-    expect:
-      rows: 6
-      data:
-        - {id: 1}
-        - {id: 2}
-        - {id: 3}
-        - {id: 5}
-        - {id: 6}
-        - {id: 7}
-
   - name: "large filtered count keeps correlated scalar semantics"
+    max_time: 2
     sql: |
       SELECT COUNT(*) AS permitted_count FROM (
         SELECT d.id

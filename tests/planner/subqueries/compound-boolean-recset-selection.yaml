@@ -1,0 +1,92 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Exercise boolean-shape recognition independently with a compact fixture. A
+# missing RecSet proves that the compound CASE/OR tree was not recognized as
+# boolean-valued even when repeated probes amortize its small input carrier.
+
+metadata:
+  version: "1.0"
+  description: "Compound scalar boolean stages are eligible for RecSet lookup"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_item"
+  - sql: "DROP TABLE IF EXISTS cbr_scope"
+  - sql: "CREATE TABLE cbr_scope (id INT PRIMARY KEY, direct_flag INT)"
+  - sql: "CREATE TABLE cbr_item (id INT PRIMARY KEY, scope_id INT)"
+  - sql: "CREATE TABLE cbr_exists_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
+  - sql: "CREATE TABLE cbr_fallback_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
+  - sql: "INSERT INTO cbr_scope VALUES (1, 1), (2, 0), (3, 0), (4, 0)"
+  - sql: "INSERT INTO cbr_exists_acl VALUES (1, 2, TRUE)"
+  - sql: "INSERT INTO cbr_fallback_acl VALUES (1, 3, TRUE)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "cbr_item") (list "id" "scope_id")
+          (map (produceN 900) (lambda (i)
+            (list (+ i 1) (+ (mod i 4) 1)))))
+        (rebuild (table "memcp-tests" "cbr_item") true false)
+        (rebuild (table "memcp-tests" "cbr_scope") true false)
+        (rebuild (table "memcp-tests" "cbr_exists_acl") true false)
+        (rebuild (table "memcp-tests" "cbr_fallback_acl") true false)
+        900)
+
+test_cases:
+  - name: "compound scalar boolean projection preserves CASE and OR results"
+    sql: |
+      SELECT i.id, COALESCE((
+        SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+          EXISTS (
+            SELECT TRUE FROM cbr_exists_acl ea
+            WHERE ea.scope_id = s.id AND ea.allowed = TRUE
+            LIMIT 1
+          ) OR COALESCE((
+            SELECT fa.allowed FROM cbr_fallback_acl fa
+            WHERE fa.scope_id = s.id
+            LIMIT 1
+          ), FALSE)
+        ) END
+        FROM cbr_scope s WHERE s.id = i.scope_id LIMIT 1
+      ), FALSE) AS permitted
+      FROM cbr_item i
+      WHERE i.id <= 4
+      ORDER BY i.id
+    expect:
+      rows: 4
+      data:
+        - {id: 1, permitted: true}
+        - {id: 2, permitted: true}
+        - {id: 3, permitted: true}
+        - {id: 4, permitted: false}
+
+  - name: "compound scalar boolean filter selects one RecSet lookup"
+    sql: |
+      EXPLAIN SELECT COUNT(*) FROM cbr_item i
+      WHERE COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM cbr_exists_acl ea
+              WHERE ea.scope_id = s.id AND ea.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT fa.allowed FROM cbr_fallback_acl fa
+              WHERE fa.scope_id = s.id
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM cbr_scope s WHERE s.id = i.scope_id LIMIT 1
+        ), FALSE)
+    expect:
+      rows: 1
+      contains:
+        - "recset_key_index"
+      result_occurrences:
+        - text: "recset_key_index"
+          count: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
+  - sql: "DROP TABLE IF EXISTS cbr_item"
+  - sql: "DROP TABLE IF EXISTS cbr_scope"
