@@ -112,3 +112,26 @@ func TestKillSessionLogsKilledQuery(t *testing.T) {
 		t.Fatalf("unexpected kill log: %q", msgs[0])
 	}
 }
+
+func TestSetQueryInfoRejectsStaleGeneration(t *testing.T) {
+	ss := RegisterSession("u", "h", "db")
+	defer UnregisterSession(ss.ID)
+
+	stale := ss.BeginQuery("Query", "POST /sql/db")
+	current := ss.BeginQuery("Query", "SELECT 2")
+	defer ss.EndQuery(stale, "Sleep", "")
+	defer ss.EndQuery(current, "Sleep", "")
+
+	if ss.SetQueryInfo(stale, "SELECT 1") {
+		t.Fatal("expected stale generation update to be rejected")
+	}
+	if info := strPtr(&ss.Info); info != "SELECT 2" {
+		t.Fatalf("expected current query info to remain unchanged, got %q", info)
+	}
+	if !ss.SetQueryInfo(current, "SELECT 2 FROM dual") {
+		t.Fatal("expected current generation update to succeed")
+	}
+	if info := strPtr(&ss.Info); info != "SELECT 2 FROM dual" {
+		t.Fatalf("expected updated query info, got %q", info)
+	}
+}
