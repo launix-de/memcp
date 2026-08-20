@@ -8315,12 +8315,17 @@ wrapped in an extra NOT. */
 				(define folded (get_assoc folded_index stage_id))
 				(if (or (nil? original) (nil? folded))
 					'()
-					(map (produceN (min (count (gs_aggregates original)) (count (gs_aggregates folded))))
+					(filter (map (produceN (min (count (gs_aggregates original)) (count (gs_aggregates folded))))
 						(lambda (i)
-							(list
-								(source_alias src)
-								(aggregate_col_name_using (gs_input original) (nth (gs_aggregates original) i))
-								(aggregate_col_name_using (gs_input folded) (nth (gs_aggregates folded) i)))))))))))
+							(begin
+								(define original_col (aggregate_col_name_using
+									(gs_input original) (nth (gs_aggregates original) i)))
+								(define folded_col (aggregate_col_name_using
+									(gs_input folded) (nth (gs_aggregates folded) i)))
+								(if (equal? original_col folded_col)
+									'()
+									(list (source_alias src) original_col folded_col)))))
+						(lambda (entry) (not (empty_list? entry))))))))))
 
 /* Boolean folding can change an aggregate descriptor's physical column hash.
 Keep every consumer synchronized, including stages with the implicit
@@ -8348,8 +8353,11 @@ which output was renamed. */
 					(fold_boolean_tautologies_stage graph stage))))
 				(define aggregate_col_map (stage_output_aggregate_fold_map
 					root (qb_stages root) folded_stages))
-				(define rewritten_stages (rewrite_stage_graph_stages
-					aggregate_col_map '() folded_stages))
+				/* Most queries contain no foldable stage aggregate. Avoid copying the
+				whole stage graph when every aggregate keeps its canonical column. */
+				(define rewritten_stages (if (empty_list? aggregate_col_map)
+					folded_stages
+					(rewrite_stage_graph_stages aggregate_col_map '() folded_stages)))
 				(define folded_block (make_query_block
 					(qb_schema root) (qb_sources root) (qb_fields root)
 					(boolean_fold_maybe_expr (qb_where root))
@@ -8357,8 +8365,9 @@ which output was renamed. */
 					(boolean_fold_maybe_expr (qb_having root))
 					(qb_order root) (qb_limit root) (qb_offset root) (qb_hidden root)
 					rewritten_stages (qb_facts root)))
-				(define rewritten_block (rewrite_stage_graph_expr
-					aggregate_col_map '() folded_block))
+				(define rewritten_block (if (empty_list? aggregate_col_map)
+					folded_block
+					(rewrite_stage_graph_expr aggregate_col_map '() folded_block)))
 				(make_ir (ir_kind ir) rewritten_block rewritten_stages
 					(ir_context_of ir) (ir_return ir)))))))
 
