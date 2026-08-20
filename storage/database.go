@@ -889,6 +889,11 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 					}
 				}
 			}
+			// The published generations can now receive ordinary mutations. Release
+			// table.mu before taking their shard locks for statistics: mutation
+			// callbacks may already own a shard lock and need table metadata.
+			t.mu.Unlock()
+			tableLocked = false
 
 			if !hasColdShard {
 				// Update per-column statistics only when every rebuilt shard has
@@ -921,6 +926,8 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 				t.collectStatisticsFromShards(newShardList)
 			}
 			t.publishShowColumnsSnapshot()
+			t.mu.Lock()
+			tableLocked = true
 
 			// Collect replaced shards for deferred cleanup (see comment above).
 			if len(replaced) > 0 {
