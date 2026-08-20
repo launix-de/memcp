@@ -1659,27 +1659,6 @@ list of direct-dependency stages); a stage with no entry has none. */
 (define stage_direct_deps (lambda (graph stage)
 	(if (has_assoc? graph (logical_stage_key stage)) (graph (logical_stage_key stage)) '())))
 
-/* A scalar_single stage that does nothing but pass a nested stage's own
-presence/boolean result through -- optionally COALESCE'd to a boolean
-default, with no ">0" count-encoding involved (unlike
-presence_bool_stage_output_expr?'s case, which is the shape a *count*-typed
-nested aggregate gets rewritten into). This is the shape
-`COALESCE((SELECT bool_expr FROM ... LIMIT 1), FALSE)` produces: value_expr is
-just a coalesced reference to the inner scalar_single stage's own output. */
-(define stage_output_boolean_passthrough_expr? (lambda (expr)
-	(match expr
-		((symbol coalesceNil) inner _default)
-		(and (or (equal?? _default false) (equal?? _default true))
-			(stage_output_boolean_passthrough_expr? inner))
-		((quote coalesceNil) inner _default)
-		(and (or (equal?? _default false) (equal?? _default true))
-			(stage_output_boolean_passthrough_expr? inner))
-		((symbol get_column) tblvar _ignorecase _col _col_ignorecase)
-		(and (string? tblvar) (strlike tblvar "__exists_%"))
-		((quote get_column) tblvar _ignorecase _col _col_ignorecase)
-		(and (string? tblvar) (strlike tblvar "__exists_%"))
-		_ false)))
-
 (define boolean_expr_comparison_head? (lambda (head)
 	(reduce (list
 		(quote equal??) (symbol "equal??")
@@ -1703,29 +1682,56 @@ boolean-shaped. A missing ELSE is the implicit nullable boolean result. */
 			(and (boolean_typed_expr_shaped? graph stage (nth items 1))
 				(boolean_case_results_shaped? graph stage (cdr (cdr items))))))))
 
+(define stage_dependency_for_output_alias (lambda (graph stage alias)
+	(reduce (stage_direct_deps graph stage) (lambda (found dep)
+		(if (not (nil? found))
+			found
+			(if (equal? alias (exists_stage_alias (gs_id dep))) dep nil)))
+		nil)))
+
+(define stage_value_sources (lambda (stage)
+	(if (query_block? (gs_input stage))
+		(qb_sources (gs_input stage))
+		(if (source_is_base_table? (gs_input stage))
+			(list (gs_input stage))
+			'()))))
+
+(define source_boolean_column? (lambda (src col)
+	(if (not (source_is_base_table? src))
+		false
+		(begin
+			(define info (find (get_schema (source_schema src) (source_relation src))
+				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
+			(define raw_type (toLower
+				(if (nil? info) "" (coalesceNil (info "RawType") ""))))
+			(or (equal? raw_type "bool") (equal? raw_type "boolean"))))))
+
+(define stage_base_boolean_column? (lambda (stage tblvar col)
+	(begin
+		(define src (source_for_alias (stage_value_sources stage) nil tblvar false))
+		(and (not (nil? src)) (source_boolean_column? src col)))))
+
 (define boolean_stage_dependency_leaf? (lambda (graph stage expr)
 	(match expr
-		((symbol get_column) _tblvar _ignorecase _col _col_ignorecase)
-			(and (expr_refs_stage_output_alias? expr)
-				(reduce (stage_direct_deps graph stage) (lambda (found dep)
-					(or found (stage_boolean_shaped? graph dep nil)))
-					false))
-		((quote get_column) _tblvar _ignorecase _col _col_ignorecase)
-			(and (expr_refs_stage_output_alias? expr)
-				(reduce (stage_direct_deps graph stage) (lambda (found dep)
-					(or found (stage_boolean_shaped? graph dep nil)))
-					false))
+		((symbol get_column) tblvar _ignorecase col _col_ignorecase) (begin
+			(define dep (stage_dependency_for_output_alias graph stage tblvar))
+			(if (nil? dep)
+				(stage_base_boolean_column? stage tblvar col)
+				(stage_boolean_shaped? graph dep col)))
+		((quote get_column) tblvar _ignorecase col _col_ignorecase)
+		(boolean_stage_dependency_leaf? graph stage
+			(list (symbol "get_column") tblvar false col false))
 		_ false)))
 
 /* Recognize boolean values structurally, independent of the SQL spelling
 which produced them. Nested stage-output columns remain conservative leaves:
-today every direct dependency made for these boolean wrappers is itself
-boolean-shaped, so any recursively proven dependency is sufficient. */
+their generated alias selects the exact direct dependency and their column
+selects that dependency's exact aggregate. Base-table leaves use the declared
+column type instead of borrowing a sibling dependency's shape. */
 (define boolean_typed_expr_shaped? (lambda (graph stage expr)
 	(if (or (equal?? expr true) (equal?? expr false))
 		true
-		(if (or (presence_bool_stage_output_expr? expr)
-			(stage_output_boolean_passthrough_expr? expr))
+		(if (presence_bool_stage_output_expr? expr)
 			true
 			(match expr
 				(cons head tail)
@@ -1760,9 +1766,8 @@ recognized as boolean many levels down, not just at the first one.
 
 requested_col picks which of stage's (possibly several) aggregates to inspect
 at the top of the recursion, matching scalar_first_probe_aggregate's lookup;
-pass nil for the recursive dependency checks below, where there is no
-specific requested column to match against and the stage's first/primary
-aggregate is the best available approximation. */
+nil deliberately selects the stage's primary aggregate for callers which
+validate the stage as a whole rather than a particular output column. */
 (define stage_boolean_shaped? (lambda (graph stage requested_col)
 	(or (presence_probe_stage? stage)
 		(begin
@@ -1772,7 +1777,26 @@ aggregate is the best available approximation. */
 			(and (not (nil? ag))
 				(begin
 					(define value_expr (car (scalar_first_probe_parts ag)))
-					(boolean_typed_expr_shaped? graph stage value_expr)))))))
+				(boolean_typed_expr_shaped? graph stage value_expr)))))))
+
+(define driver_membership_boolean_passthrough? (lambda (graph stage expr)
+	(if (presence_bool_stage_output_expr? expr)
+		true
+		(match expr
+			((symbol coalesceNil) inner default)
+			(and (or (equal?? default false) (equal?? default true))
+				(driver_membership_boolean_passthrough? graph stage inner))
+			((quote coalesceNil) inner default)
+			(driver_membership_boolean_passthrough? graph stage
+				(list (symbol "coalesceNil") inner default))
+			((symbol get_column) tblvar _ignorecase col _col_ignorecase) (begin
+				(define dep (stage_dependency_for_output_alias graph stage tblvar))
+				(and (not (nil? dep))
+					(driver_membership_stage_boolean_shaped? graph dep col)))
+			((quote get_column) tblvar _ignorecase col _col_ignorecase)
+			(driver_membership_boolean_passthrough? graph stage
+				(list (symbol "get_column") tblvar false col false))
+			_ false))))
 
 /* Driver-membership RecSets have a separate, deliberately conservative
 consumer whose value-embedding fallback is not valid for every join shape.
@@ -1787,11 +1811,8 @@ general recursive boolean proof above. */
 			(and (not (nil? ag))
 				(begin
 					(define value_expr (car (scalar_first_probe_parts ag)))
-					(and (or (presence_bool_stage_output_expr? value_expr)
-						(stage_output_boolean_passthrough_expr? value_expr))
-						(reduce (stage_direct_deps graph stage) (lambda (found dep)
-							(or found (driver_membership_stage_boolean_shaped? graph dep nil)))
-							false))))))))
+					(driver_membership_boolean_passthrough?
+						graph stage value_expr)))))))
 
 (define scalar_once_descriptor (lambda (value_expr order_items offset_value)
 	(if (empty_list? order_items)
@@ -7533,21 +7554,34 @@ already-prepared cache instead). */
 				(if (source_is_base_table? real_src) real_src nil))
 			nil))))
 
-/* exists_recset_project_join_expr builds the recset from the stage's own
-prepared group-cache rather than its raw domain, so in principle this is
-agnostic to whether gs_input is a base table, a query-block wrapping one, or
-a union. In practice the where-term consumption path
-(recset_project_join_expr_for_membership) is the only one proven safe for a
-multi-source domain (e.g. an EXISTS body that itself joins two tables); the
-value-embedding path (lower_driver_membership_probe_expr's scan_exists
-fallback, used whenever the where-term path declines) still needs a single
-concrete table to scan and fails hard otherwise -- so this keeps the
-original single-real-source restriction. A stage with residual outer refs
-(btw2025_accessing_after_simple) reaches further out than its own domain for
-a value that isn't local to it or its declared lookup-keys --
-exists_recset_project_join_expr's stage_catalog (scoped to the discovering
-block's own stages) has no way to resolve that, so those stages are
-excluded here rather than crashing during preparation. */
+/* The prepared-cache projection can also consume the common nested-stage
+shape: one real base-table domain plus stage-output pseudo-sources. Keep this
+separate from recset_domain_source because the raw-domain fallback cannot
+reconstruct those pseudo-source joins safely. */
+(define recset_cache_domain_supported? (lambda (input)
+	(or (not (nil? (recset_domain_source input)))
+		(and (query_block? input)
+			(begin
+				(define real_src (single_real_source (qb_sources input)))
+				(and (not (nil? real_src)) (source_is_base_table? real_src))))
+		(and (union_block? input)
+			(reduce (union_branches input) (lambda (supported branch)
+				(and supported (candidate_recset_branch_supported? branch)))
+				true)))))
+
+/* This eligibility check is consumed only by the WHERE-term projection
+path. exists_recset_project_join_expr builds the recset from the stage's own
+prepared group-cache rather than reconstructing its raw domain, so the full
+recursive boolean proof is valid here even when the scalar value contains
+nested stages. The separate value-embedding path remains deliberately
+conservative: lower_driver_membership_probe_expr may have to rebuild a raw
+domain scan and therefore must not inherit this broader proof.
+
+A stage with residual outer refs (btw2025_accessing_after_simple) reaches
+further out than its own domain for a value that isn't local to it or its
+declared lookup-keys. exists_recset_project_join_expr's stage_catalog is
+scoped to the discovering block's own stages and cannot resolve that, so
+those stages remain excluded rather than crashing during preparation. */
 (define stage_recset_domain_eligible? (lambda (graph stage)
 	(if (not (group_stage? stage))
 		false
@@ -7557,14 +7591,10 @@ excluded here rather than crashing during preparation. */
 			(and
 				(not (stage_has_residual_outer_refs? stage))
 				(recset_probe_stage_shape? stage)
-				(driver_membership_stage_boolean_shaped? graph stage nil)
+				(stage_boolean_shaped? graph stage nil)
 				(not (empty_list? lookup_keys))
 				(equal? (count lookup_keys) (count (gs_keys stage)))
-				(or (not (nil? (recset_domain_source input)))
-					(and (union_block? input)
-						(reduce (union_branches input) (lambda (supported branch)
-							(and supported (candidate_recset_branch_supported? branch)))
-							true))))))))
+				(recset_cache_domain_supported? input))))))
 
 (define recset_domain_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
@@ -7684,9 +7714,7 @@ excluded here rather than crashing during preparation. */
 /* The other probe shape a group-stage-output alias can appear as: a plain or
 COALESCE-wrapped bare boolean passthrough (no ">0" count-encoding), the shape
 `COALESCE((SELECT bool_expr ...) ...)` compiles into for a scalar_single
-boolean probe -- mirrors stage_output_boolean_passthrough_expr?'s unwrap, but
-matched against a specific alias instead of the "__exists_%" naming
-convention, since this runs before that convention is even assigned. */
+boolean probe, matched against the specific logical output alias. */
 (define stage_output_boolean_probe_term? (lambda (alias term)
 	(match term
 		((symbol coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
@@ -7761,18 +7789,67 @@ convention, since this runs before that convention is even assigned. */
 				nil)))
 		nil)))
 
-(define first_exists_recset_source (lambda (stages sources default_alias condition)
-	(reduce (coalesceNil sources '()) (lambda (found src)
-		(if (not (nil? found))
-			found
-			(if (and (recset_domain_stage_output_source? stages src)
-				(and (not (nil? (first_driver_lookup_key
-					(stage_by_id stages (stage_output_relation_id (source_relation src)))
-					(without_source_alias sources (source_alias src)))))
-					(condition_has_exists_recset_probe? (source_alias src) condition)))
-				src
-				nil)))
-		nil)))
+(define cache_only_recset_stage? (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(and (nil? (recset_domain_source input)) (not (union_block? input))))))
+
+/* Nested-stage domains are admitted only for a pure WHERE consumer with one
+base-table driver. In that shape the membership marker is guaranteed to be
+owned by the driver's projected-RecSet path. Projected fields and wider joins
+may carry the same marker into value lowering, whose raw-domain fallback is
+intentionally narrower. */
+(define cache_only_recset_consumer_supported? (lambda (stage candidate block default_alias)
+	(if (not (cache_only_recset_stage? stage))
+		true
+		(begin
+			(define candidate_alias (source_alias candidate))
+			(define drivers (without_source_alias (qb_sources block) candidate_alias))
+			(define non_where_exprs (merge (list
+				(extract_assoc (qb_fields block) (lambda (_title expr) expr))
+				(qb_group block)
+				(if (nil? (qb_having block)) '() (list (qb_having block)))
+				(map (coalesceNil (qb_order block) '()) car)
+				(extract_assoc (qb_hidden block) (lambda (_title expr) expr)))))
+			(define real_driver (single_real_source drivers))
+			(define auxiliary_sources_supported (reduce drivers (lambda (supported src)
+				(if (source_is_base_table? src)
+					supported
+					(and supported
+						(and (stage_output_relation? (source_relation src))
+							(begin
+								(define auxiliary_stage (stage_by_id
+									(qb_stages block)
+									(stage_output_relation_id (source_relation src))))
+								(and (not (nil? auxiliary_stage))
+									(query_invariant_presence_stage? auxiliary_stage)))))))
+				true))
+			(and (not (nil? real_driver))
+				(and (source_is_base_table? real_driver)
+					(and auxiliary_sources_supported
+						(and (nil? (qb_limit block))
+							(and (nil? (qb_offset block))
+								(not (reduce non_where_exprs (lambda (found expr)
+									(or found (expr_refs_alias_after_group? default_alias candidate_alias expr)))
+									false)))))))))))
+
+(define first_exists_recset_source (lambda (stages block default_alias condition)
+	(begin
+		(define sources (qb_sources block))
+		(reduce (coalesceNil sources '()) (lambda (found src)
+			(if (not (nil? found))
+				found
+				(if (and (recset_domain_stage_output_source? stages src)
+					(begin
+						(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+						(and (cache_only_recset_consumer_supported? stage src block default_alias)
+							(and (not (nil? (first_driver_lookup_key
+								stage
+								(without_source_alias sources (source_alias src)))))
+								(condition_has_exists_recset_probe? (source_alias src) condition)))))
+					src
+					nil)))
+			nil))))
 
 (define without_source_alias (lambda (sources alias)
 	(filter (coalesceNil sources '()) (lambda (src)
@@ -7833,7 +7910,7 @@ convention, since this runs before that convention is even assigned. */
 				(if (nil? candidate)
 					(begin
 						(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
-						(define exists_src (first_exists_recset_source (qb_stages block) sources default_alias (qb_where block)))
+						(define exists_src (first_exists_recset_source (qb_stages block) block default_alias (qb_where block)))
 						(if (nil? exists_src)
 							(hybrid_reorder_query_block_using stage_catalog block)
 							(begin
@@ -8106,13 +8183,26 @@ that are never SQL-NULL by construction. */
 
 (define expr_head_and? (lambda (head) (or (equal? head (quote and)) (equal? head (symbol "and")))))
 (define expr_head_or? (lambda (head) (or (equal? head (quote or)) (equal? head (symbol "or")))))
-(define expr_head_not? (lambda (head) (or (equal? head (quote not)) (equal? head (symbol "not")))))
+(define expr_head_not? (lambda (head)
+	(or (equal? head (quote not))
+		(or (equal? head (symbol "not"))
+			(or (equal? head (quote sql_not)) (equal? head (symbol "sql_not")))))))
 (define expr_head_if? (lambda (head) (or (equal? head (quote if)) (equal? head (symbol "if")))))
 
+/* SQL parser literals retain their spelling. Within an explicit boolean
+operator, "0" and "1" have the same truth values as false and true; keep this
+local to the boolean fold so string-valued expressions elsewhere remain
+untouched. */
+(define boolean_fold_true_literal? (lambda (expr)
+	(or (literal_true? expr) (or (equal? expr "1") (equal? expr 1)))))
+
+(define boolean_fold_false_literal? (lambda (expr)
+	(or (literal_false? expr) (or (equal? expr "0") (equal? expr 0)))))
+
 (define boolean_fold_not (lambda (folded_inner)
-	(if (literal_true? folded_inner)
+	(if (boolean_fold_true_literal? folded_inner)
 		false
-		(if (literal_false? folded_inner)
+		(if (boolean_fold_false_literal? folded_inner)
 			true
 			(match folded_inner
 				(cons head tail) (if (and (expr_head_not? head) (equal? (count tail) 1))
@@ -8132,12 +8222,12 @@ wrapped in an extra NOT. */
 
 (define boolean_fold_and_terms (lambda (folded_terms)
 	(begin
-		(define has_false (reduce folded_terms (lambda (found term) (or found (literal_false? term))) false))
+		(define has_false (reduce folded_terms (lambda (found term) (or found (boolean_fold_false_literal? term))) false))
 		(if has_false
 			false
 			(begin
 				(define kept (reduce folded_terms (lambda (acc term)
-					(if (literal_true? term) acc (append_unique acc term)))
+					(if (boolean_fold_true_literal? term) acc (append_unique acc term)))
 					'()))
 				(if (terms_have_negation_pair? kept)
 					false
@@ -8148,12 +8238,12 @@ wrapped in an extra NOT. */
 
 (define boolean_fold_or_terms (lambda (folded_terms)
 	(begin
-		(define has_true (reduce folded_terms (lambda (found term) (or found (literal_true? term))) false))
+		(define has_true (reduce folded_terms (lambda (found term) (or found (boolean_fold_true_literal? term))) false))
 		(if has_true
 			true
 			(begin
 				(define kept (reduce folded_terms (lambda (acc term)
-					(if (literal_false? term) acc (append_unique acc term)))
+					(if (boolean_fold_false_literal? term) acc (append_unique acc term)))
 					'()))
 				(if (terms_have_negation_pair? kept)
 					true
@@ -8163,9 +8253,9 @@ wrapped in an extra NOT. */
 						_ (cons (quote or) kept))))))))
 
 (define boolean_fold_if (lambda (folded_cond folded_then folded_else)
-	(if (and (literal_true? folded_then) (literal_false? folded_else))
+	(if (and (boolean_fold_true_literal? folded_then) (boolean_fold_false_literal? folded_else))
 		folded_cond
-		(if (and (literal_false? folded_then) (literal_true? folded_else))
+		(if (and (boolean_fold_false_literal? folded_then) (boolean_fold_true_literal? folded_else))
 			(boolean_fold_not folded_cond)
 			(list (quote if) folded_cond folded_then folded_else)))))
 
@@ -8194,14 +8284,47 @@ wrapped in an extra NOT. */
 			facts
 			(qassoc_set facts (quote condition) (boolean_fold_expr existing))))))
 
-(define fold_boolean_tautologies_stage (lambda (stage)
+(define two_valued_boolean_expr? (lambda (graph stage expr)
+	(if (or (boolean_fold_true_literal? expr) (boolean_fold_false_literal? expr))
+		true
+		(if (presence_bool_stage_output_expr? expr)
+			true
+			(match expr
+				(cons head tail) (if (or (expr_head_and? head) (expr_head_or? head))
+					(reduce tail (lambda (two_valued item)
+						(and two_valued (two_valued_boolean_expr? graph stage item)))
+						true)
+					(if (expr_head_not? head)
+						(and (equal? (count tail) 1)
+							(two_valued_boolean_expr? graph stage (car tail)))
+						(if (expr_head_if? head)
+							(and (equal? (count tail) 3)
+								(and (two_valued_boolean_expr? graph stage (nth tail 1))
+									(two_valued_boolean_expr? graph stage (nth tail 2))))
+							(if (or (equal? head (quote coalesceNil)) (equal? head (symbol "coalesceNil")))
+								(and (equal? (count tail) 2)
+									(and (or (boolean_fold_true_literal? (nth tail 1))
+										(boolean_fold_false_literal? (nth tail 1)))
+										(boolean_typed_expr_shaped? graph stage (car tail))))
+								false))))
+				_ false)))))
+
+(define fold_boolean_stage_aggregate (lambda (graph stage ag)
+	(match ag
+		'(expr reduce_fn neutral) (if (two_valued_boolean_expr? graph stage expr)
+			(list (boolean_fold_expr expr) reduce_fn neutral)
+			ag)
+		_ ag)))
+
+(define fold_boolean_tautologies_stage (lambda (graph stage)
 	(if (group_stage? stage)
 		(make_group_stage
 			(gs_id stage)
 			(gs_input stage)
 			(gs_domain stage)
 			(gs_keys stage)
-			(gs_aggregates stage)
+			(map (gs_aggregates stage) (lambda (ag)
+				(fold_boolean_stage_aggregate graph stage ag)))
 			(boolean_fold_maybe_expr (gs_having stage))
 			(gs_output stage)
 			(gs_order stage)
@@ -8210,21 +8333,63 @@ wrapped in an extra NOT. */
 			(fold_stage_facts_condition (gs_facts stage)))
 		stage)))
 
+(define stage_output_aggregate_fold_map_for_source (lambda (original_index folded_index src)
+	(begin
+		(define relation (source_relation src))
+		(if (not (stage_output_relation? relation))
+			'()
+			(begin
+				(define stage_id (stage_output_relation_id relation))
+				(define original (get_assoc original_index stage_id))
+				(define folded (get_assoc folded_index stage_id))
+				(if (or (nil? original) (nil? folded))
+					'()
+					(map (produceN (min (count (gs_aggregates original)) (count (gs_aggregates folded))))
+						(lambda (i)
+							(list
+								(source_alias src)
+								(aggregate_col_name_using (gs_input original) (nth (gs_aggregates original) i))
+								(aggregate_col_name_using (gs_input folded) (nth (gs_aggregates folded) i)))))))))))
+
+/* Boolean folding can change an aggregate descriptor's physical column hash.
+Keep every consumer synchronized, including stages with the implicit
+cardinality aggregate where the older single-output canonicalizer cannot infer
+which output was renamed. */
+(define stage_output_aggregate_fold_map (lambda (block original_stages folded_stages)
+	(begin
+		(define original_index (stage_output_stage_index original_stages))
+		(define folded_index (stage_output_stage_index folded_stages))
+		(define sources (merge (list
+			(qb_sources block)
+			(merge (map original_stages (lambda (stage)
+				(stage_semantic_input_sources (gs_input stage))))))))
+		(merge (map sources (lambda (src)
+			(stage_output_aggregate_fold_map_for_source original_index folded_index src)))))))
+
 (define fold_boolean_tautologies_ir (lambda (ir)
 	(begin
 		(define root (ir_root ir))
 		(if (not (query_block? root))
 			ir
 			(begin
-				(define folded_stages (map (qb_stages root) fold_boolean_tautologies_stage))
+				(define graph (stage_dependency_graph (qb_stages root)))
+				(define folded_stages (map (qb_stages root) (lambda (stage)
+					(fold_boolean_tautologies_stage graph stage))))
+				(define aggregate_col_map (stage_output_aggregate_fold_map
+					root (qb_stages root) folded_stages))
+				(define rewritten_stages (rewrite_stage_graph_stages
+					aggregate_col_map '() folded_stages))
 				(define folded_block (make_query_block
 					(qb_schema root) (qb_sources root) (qb_fields root)
 					(boolean_fold_maybe_expr (qb_where root))
 					(qb_group root)
 					(boolean_fold_maybe_expr (qb_having root))
 					(qb_order root) (qb_limit root) (qb_offset root) (qb_hidden root)
-					folded_stages (qb_facts root)))
-				(make_ir (ir_kind ir) folded_block folded_stages (ir_context_of ir) (ir_return ir)))))))
+					rewritten_stages (qb_facts root)))
+				(define rewritten_block (rewrite_stage_graph_expr
+					aggregate_col_map '() folded_block))
+				(make_ir (ir_kind ir) rewritten_block rewritten_stages
+					(ir_context_of ir) (ir_return ir)))))))
 
 (define normalize_stage_dependencies (lambda (ir)
 	(begin
@@ -8401,16 +8566,26 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 (define stage_output_left_join_stage_key (lambda (signature_index stage)
 	(if (not (group_stage? stage))
 		nil
-		(if (and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
-			(equal? (count (gs_aggregates stage)) 1))
-			(get_assoc signature_index (gs_id stage))
+		(begin
+			(define purpose (qassoc_get (gs_facts stage) (quote purpose) nil))
+			(define signature (get_assoc signature_index (gs_id stage)))
+			(if (and (equal? (count (gs_aggregates stage)) 1)
+				(or (equal? purpose (quote scalar_single)) (equal? purpose (quote exists))))
+				(if (equal? purpose (quote exists))
+					/* EXISTS stages from different decorrelation parents can have the
+					same value signature but live in different domain scopes. Derived
+					rebinding records the containing query scope in the stage ID. */
+					(concat signature ":scope:" (serialize (list
+						(cdr (split (gs_id stage) ":derived:"))
+						(qassoc_get (gs_facts stage) (quote btw2025_parent) nil))))
+					signature)
 			/* Alias-normalized interning is safe for base-table groups. Query-input
 			stages retain distinct correlation scopes until scope equivalence can
 			be proven independently of their canonical carrier name. */
 			(if (and (source_is_base_table? (gs_input stage))
 				(empty_list? (stage_semantic_outer_aliases stage)))
 				(stage_semantic_backbone_signature signature_index stage)
-				nil)))))
+				nil))))))
 
 (define normalize_stage_output_left_join_expr (lambda (alias expr)
 	(match expr
@@ -8844,16 +9019,48 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 /* ------------------------------------------------------------------------- */
 /* Aggregate partition pushdown                                               */
 
-/* COUNT(*) is distributive: COUNT over driver rows can become SUM of counts
-over any partition of those rows. This first rule deliberately accepts only
-plain root COUNT(*) fields and a single base driver. Predicates involving a
-decorrelated stage output move above the partition; driver-local predicates
-stay on the partition build. Statistics choose between the equivalent logical
-forms, but never participate in the semantic proof. */
+/* COUNT(*) and COUNT(non-null literal) are distributive row counts: either can
+become SUM of counts over any partition of the driver. Keep the proof shared
+with the physical RecSet cardinality operator so logical and physical choices
+accept exactly the same aggregate descriptors. */
+(define non_nil_scalar_literal? (lambda (expr)
+	(or (string? expr)
+		(or (number? expr)
+			(or (equal? expr true) (equal? expr false))))))
+
+(define nil_test_of_non_nil_literal? (lambda (expr)
+	(match expr
+		(cons nil_head (cons value '())) (and
+			(or (equal? nil_head (quote nil?)) (equal? nil_head (symbol "nil?")))
+			(non_nil_scalar_literal? value))
+		_ false)))
+
+(define count_every_input_row_map_expr? (lambda (expr)
+	(if (equal? expr 1)
+		true
+		(match expr
+			(cons head tail) (if (expr_head_not? head)
+				(and (equal? (count tail) 1) (nil_test_of_non_nil_literal? (car tail)))
+				(if (expr_head_if? head)
+					(and (equal? (count tail) 3)
+						(and (nil_test_of_non_nil_literal? (nth tail 0))
+							(and (equal? (nth tail 1) 0) (equal? (nth tail 2) 1))))
+					false))
+			_ false))))
+
+(define aggregate_counts_every_input_row? (lambda (ag)
+	(match ag
+		'(map_expr reduce_fn neutral) (and (equal? reduce_fn (quote +))
+			(and (equal? neutral 0) (count_every_input_row_map_expr? map_expr)))
+		_ false)))
 
 (define aggregate_pushdown_count_expr? (lambda (expr)
-	(and (aggregate_expr? expr)
-		(equal? (extract_aggregates expr) (list aggregate_count_descriptor)))))
+	(if (not (aggregate_expr? expr))
+		false
+		(begin
+			(define aggregates (extract_aggregates expr))
+			(and (single_source? aggregates)
+				(aggregate_counts_every_input_row? (car aggregates)))))))
 
 (define aggregate_pushdown_count_fields? (lambda (fields)
 	(and (not (empty_list? fields))
@@ -9217,13 +9424,13 @@ partner. */
 		((quote dml_driver_membership_probe) fallback_schema stage probe)
 		(lower_dml_driver_membership_probe_expr (list src) (source_alias src) fallback_schema stage probe)
 		((symbol scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage) probe_work_rows)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage) probe_work_rows (quote value))
 		((symbol scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages probe_work_rows)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages probe_work_rows (quote value))
 		((quote scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage) probe_work_rows)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col (list stage) probe_work_rows (quote value))
 		((quote scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages probe_work_rows)
+		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages probe_work_rows (quote value))
 		((symbol scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
@@ -9232,6 +9439,13 @@ partner. */
 		(lower_scalar_cardinality_probe_expr (list src) (source_alias src) stage requested_col)
 		((quote scalar_cardinality_probe) stage requested_col)
 		(lower_scalar_cardinality_probe_expr (list src) (source_alias src) stage requested_col)
+		((symbol coalesceNil) inner default)
+		(lower_column_expr_for_join_in_context
+			(list src) (source_alias src)
+			(list (symbol "coalesceNil") inner default) probe_work_rows)
+		((quote coalesceNil) inner default)
+		(lower_column_expr_for_join_in_context (list src) (source_alias src)
+			(list (symbol "coalesceNil") inner default) probe_work_rows)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		((quote get_column) tblvar tbl_ignorecase col col_ignorecase) (symbol (concat (resolve_column_alias tblvar (source_alias src)) "." (resolve_physical_column_name src col col_ignorecase)))
 		(cons head tail) (cons head (map tail (lambda (item)
@@ -9623,11 +9837,14 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 
 (define query_invariant_probe_binding (lambda (entry)
 	(match entry
-		'(stage requested_col)
-		(list
-			(quote define)
-			(symbol (query_invariant_probe_binding_key stage requested_col))
-			(lower_scalar_first_probe_expr '() nil stage requested_col (list stage) 1))
+		'(stage requested_col) (begin
+			(define annotated_stage
+				(group_stage_with_query_invariant_probe_binding stage requested_col))
+			(list
+				(quote define)
+				(symbol (query_invariant_probe_binding_key stage requested_col))
+				(lower_scalar_first_probe_expr '() nil annotated_stage requested_col
+					(list annotated_stage) 1 (quote value))))
 		_ (neumann_fail "build_queryplan" "malformed query-invariant probe binding"))))
 
 (define query_invariant_probe_bindings (lambda (entries)
@@ -10198,11 +10415,20 @@ membership set. */
 (define recset_scalar_first_probe_lookup_key (lambda (stage)
 	(concat "__recset_probe_" (fnv_hash (gs_id stage)))))
 
+(define physical_query_session_symbol (lambda ()
+	(symbol "__physical_query_session")))
+
+(define physical_query_scope_symbol (lambda ()
+	(symbol "__physical_query_scope")))
+
+(define physical_query_tx_symbol (lambda ()
+	(symbol "__physical_query_tx")))
+
 (define lower_recset_stage_prepare_once_expr (lambda (stage_catalog stage)
 	(list
-		(list (quote context) "session")
-		"get_or_compute_scoped"
-		(list (quote session) "__memcp_tx")
+		(physical_query_session_symbol)
+			"get_or_compute_scoped"
+		(physical_query_scope_symbol)
 		(stage_prepare_key stage)
 		(list (quote lambda) '()
 			(list (quote !begin)
@@ -10221,37 +10447,24 @@ membership set. */
 		(define cache_schema (group_cache_schema cache))
 		(define cache_relation (group_cache_relation cache))
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
-		(define session_read (list (list (quote context) "session") lookup_key))
-		(define session_setter (list
-			(list (quote context) "session")
-			lookup_key
-			(list (quote once) (list (quote lambda) '()
-				(list (quote recset_key_index)
-					(list (quote session) "__memcp_tx")
-					(list (quote scan_recset)
+		(list (quote begin)
+			(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
+			(list (quote apply)
+				(list
+					(physical_query_session_symbol)
+					"get_or_compute_scoped"
+					(physical_query_scope_symbol)
+					lookup_key
+					(list (quote lambda) '()
+					(list (quote recset_key_index)
 						(list (quote session) "__memcp_tx")
+						(list (quote scan_recset)
+							(list (quote session) "__memcp_tx")
 						(list (quote table) cache_schema cache_relation)
 						(quoted_runtime_list (list requested_col))
 						(list (quote lambda) (list (symbol requested_col))
 							(list (quote equal??) (symbol requested_col) true)))
-					(quoted_runtime_list (list "k0")))))))
-		(list (quote begin)
-			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
-			/* session_setter builds a ZERO-ARG once-wrapped lookup-closure builder; without this guard
-			every driving row would re-run this setter, constructing a fresh once-wrapper each time
-			and discarding the previous memoization (defeating the point of `once`). */
-			(list (quote if)
-				(list (quote nil?) session_read)
-				session_setter
-				true)
-			/* session_read stores a zero-arg builder (not the lookup closure itself), so retrieving the
-			actual boolean requires TWO applies: one zero-arg apply to run/fetch the memoized builder
-			and obtain the recset_key_index closure, then a second apply of that closure to the real key.
-			Single-applying session_read directly to resolved_lookup_key would instead pass the key as
-			an ignored extra argument to the zero-arg builder, which just returns the closure itself
-			(a non-nil/truthy value) rather than ever checking membership. */
-			(list (quote apply)
-				(list (quote apply) session_read (quoted_runtime_list '()))
+						(quoted_runtime_list (list "k0")))))
 				(list (quote list) resolved_lookup_key))))))
 
 /* Select one physical realization at the consumer which owns this probe.
@@ -10259,19 +10472,21 @@ Logical decorrelation contributes the stage shape; the current scan node
 contributes its work estimate. Emitters below only implement the selected
 operator and do not repeat policy gates, so future carriers join this one
 choice table instead of adding another promotion path. */
-(define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows requested_col)
+(define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows requested_col probe_semantics)
 	(if (union_block? src)
 		(quote union-probe)
 		(if (query_block? src)
-			(if (scalar_first_probe_recset_eligible?
-				graph stage src keys probe_work_rows requested_col)
+			(if (and (equal? probe_semantics (quote truth))
+				(scalar_first_probe_recset_eligible?
+					graph stage src keys probe_work_rows requested_col))
 				(quote recset)
 				(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
 					(quote keytable)
 					(quote query-scan)))
 			(if (source_is_base_table? src)
-				(if (scalar_first_probe_recset_eligible_base?
-					graph stage src keys probe_work_rows requested_col)
+				(if (and (equal? probe_semantics (quote truth))
+					(scalar_first_probe_recset_eligible_base?
+						graph stage src keys probe_work_rows requested_col))
 					(quote recset)
 					(if (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows)
 						(quote keytable)
@@ -10282,6 +10497,23 @@ choice table instead of adding another promotion path. */
 	(if (query_block? src)
 		(single_real_source (qb_sources src))
 		src)))
+
+(define scalar_first_probe_query_invariant? (lambda (stage requested_col)
+	(and (presence_probe_stage? stage)
+		(not (nil? (query_invariant_probe_binding_for_col stage requested_col))))))
+
+(define query_invariant_scalar_first_probe_key (lambda (stage requested_col)
+	(concat
+		(if (presence_probe_stage? stage) "__query_presence_probe_" "__query_scalar_probe_")
+		(fnv_hash (serialize (list (gs_id stage) requested_col))))))
+
+(define lower_query_invariant_scalar_first_probe_expr (lambda (stage requested_col expr)
+	(list
+		(physical_query_session_symbol)
+		"get_or_compute_scoped"
+		(physical_query_scope_symbol)
+		(query_invariant_scalar_first_probe_key stage requested_col)
+		(list (quote lambda) '() expr))))
 
 (define lower_table_scalar_first_probe_expr (lambda (sources default_alias src stage value_expr keys lookup_keys order_exprs dirs offset_value physical_max_rows)
 	(begin
@@ -10316,7 +10548,7 @@ choice table instead of adding another promotion path. */
 			nil
 			false))))
 
-(define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows)
+(define lower_scalar_first_probe_expr (lambda (sources default_alias stage requested_col all_stages probe_work_rows probe_semantics)
 	(begin
 		(if (not (scalar_or_presence_probe_stage? stage))
 			(neumann_fail "build_queryplan" "stage probe requires scalar_single first or presence stage")
@@ -10348,8 +10580,8 @@ choice table instead of adding another promotion path. */
 			(merge (list all_stages (list stage)))))
 		(define graph (stage_dependency_graph probe_stages))
 		(define operator (scalar_first_probe_physical_operator
-			graph stage src keys effective_probe_work_rows requested_col))
-		(match operator
+			graph stage src keys effective_probe_work_rows requested_col probe_semantics))
+		(define lowered (match operator
 			(symbol union-probe)
 			(list (quote if)
 				(lower_exists_union_probe_expr
@@ -10386,7 +10618,10 @@ choice table instead of adding another promotion path. */
 			(lower_table_scalar_first_probe_expr
 				sources default_alias src stage value_expr keys lookup_keys
 				order_exprs dirs offset_value physical_max_rows)
-			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator"))))
+			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator")))
+		(if (scalar_first_probe_query_invariant? stage requested_col)
+			(lower_query_invariant_scalar_first_probe_expr stage requested_col lowered)
+			lowered)))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
@@ -10545,13 +10780,13 @@ choice table instead of adding another promotion path. */
 		((quote dml_driver_membership_probe) fallback_schema stage probe)
 		(lower_dml_driver_membership_probe_expr sources default_alias fallback_schema stage probe)
 		((symbol scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) probe_work_rows)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) probe_work_rows (quote value))
 		((symbol scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages probe_work_rows)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages probe_work_rows (quote value))
 		((quote scalar_first_probe) stage requested_col)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) probe_work_rows)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col (list stage) probe_work_rows (quote value))
 		((quote scalar_first_probe) stage requested_col stages)
-		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages probe_work_rows)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages probe_work_rows (quote value))
 		((symbol scalar_aggregate_probe) stage requested_col)
 		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col)
 		((quote scalar_aggregate_probe) stage requested_col)
@@ -10560,6 +10795,19 @@ choice table instead of adding another promotion path. */
 		(lower_scalar_cardinality_probe_expr sources default_alias stage requested_col)
 		((quote scalar_cardinality_probe) stage requested_col)
 		(lower_scalar_cardinality_probe_expr sources default_alias stage requested_col)
+		((symbol coalesceNil) inner default)
+		(if (equal?? default false)
+			(list (quote coalesceNil)
+				(lower_column_expr_for_join_truth_context
+					sources default_alias inner probe_work_rows)
+				default)
+			(cons (quote coalesceNil)
+				(map (list inner default) (lambda (item)
+					(lower_column_expr_for_join_in_context
+						sources default_alias item probe_work_rows)))))
+		((quote coalesceNil) inner default)
+		(lower_column_expr_for_join_in_context sources default_alias
+			(list (symbol "coalesceNil") inner default) probe_work_rows)
 		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
 			(define src (if (nil? tblvar)
 				(source_for_unqualified_column sources default_alias col col_ignorecase)
@@ -10577,6 +10825,56 @@ choice table instead of adding another promotion path. */
 		(cons head tail) (cons head (map tail (lambda (item)
 			(lower_column_expr_for_join_in_context sources default_alias item probe_work_rows))))
 		_ expr)))
+
+/* A RecSet represents only the rows for which a predicate is SQL TRUE. It may
+replace a scalar probe only where FALSE and UNKNOWN are observationally equal:
+the positive truth context of WHERE/ON, AND/OR, CASE selection, or
+COALESCE(predicate, FALSE). Every other expression is a value context and must
+retain the scalar's complete value, including SQL NULL. */
+(define truth_context_compositional_head? (lambda (head)
+	(or (equal? head (quote and))
+		(or (equal? head (symbol "and"))
+			(or (equal? head (quote or))
+				(or (equal? head (symbol "or"))
+					(or (equal? head (quote if))
+						(or (equal? head (symbol "if"))
+							(or (equal? head (quote optimize))
+								(equal? head (symbol "optimize")))))))))))
+
+(define lower_column_expr_for_join_truth_context (lambda (sources default_alias expr probe_work_rows)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col
+			(list stage) probe_work_rows (quote truth))
+		((symbol scalar_first_probe) stage requested_col stages)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col
+			stages probe_work_rows (quote truth))
+		((quote scalar_first_probe) stage requested_col)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col
+			(list stage) probe_work_rows (quote truth))
+		((quote scalar_first_probe) stage requested_col stages)
+		(lower_scalar_first_probe_expr sources default_alias stage requested_col
+			stages probe_work_rows (quote truth))
+		((symbol coalesceNil) inner default)
+		(if (equal?? default false)
+			(list (quote coalesceNil)
+				(lower_column_expr_for_join_truth_context
+					sources default_alias inner probe_work_rows)
+				default)
+			(lower_column_expr_for_join_in_context
+				sources default_alias expr probe_work_rows))
+		((quote coalesceNil) inner default)
+		(lower_column_expr_for_join_truth_context sources default_alias
+			(list (symbol "coalesceNil") inner default) probe_work_rows)
+		(cons head tail)
+		(if (truth_context_compositional_head? head)
+			(cons head (map tail (lambda (item)
+				(lower_column_expr_for_join_truth_context
+					sources default_alias item probe_work_rows))))
+			(lower_column_expr_for_join_in_context
+				sources default_alias expr probe_work_rows))
+		_ (lower_column_expr_for_join_in_context
+			sources default_alias expr probe_work_rows))))
 
 (define lower_column_expr_for_join (lambda (sources default_alias expr)
 	(lower_column_expr_for_join_in_context sources default_alias expr nil)))
@@ -12459,10 +12757,44 @@ ever-larger subtrees. */
 		'(agg_expr agg_reduce agg_neutral) (begin
 			(define src (list alias schema tbl false nil))
 			(define agg_col (aggregate_col_name_using src ag))
+			(define membership_parts (base_group_membership_parts src condition))
+			(define membership_expr (car membership_parts))
+			(define effective_condition (cadr membership_parts))
 			(define group_key_cols_for_scan (merge_unique (map keys (lambda (expr) (extract_columns_for_alias src expr)))))
-			(define condition_cols (extract_columns_for_alias src condition))
+			(define condition_cols (extract_columns_for_alias src effective_condition))
 			(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols)))
 			(define aggcols (extract_columns_for_alias src agg_expr))
+			(define direct_recset_count (and (not (nil? membership_expr))
+				(and (equal? effective_condition true)
+					(and (not (reduce keys (lambda (has_columns key)
+						(or has_columns (expr_contains_column_ref? key))) false))
+						(aggregate_counts_every_input_row? ag)))))
+			(define aggregate_value_expr (if direct_recset_count
+				(list (quote recset_count)
+					(list
+						(physical_query_session_symbol)
+						"get_or_compute_scoped"
+						(physical_query_scope_symbol)
+						(concat "__group_count_recset_" (fnv_hash (serialize membership_expr)))
+						(list (quote lambda) '() membership_expr)))
+				(list (quote scan)
+					'(session "__memcp_tx")
+					(list (quote table) schema tbl)
+					(cons (quote list) filtercols)
+					(list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat alias "." col))))
+						(list (quote optimize)
+							(cons (quote and) (cons
+								(lower_column_expr_for_alias src condition)
+								(group_key_equality_terms alias key_names keys)))))
+					(cons (quote list) aggcols)
+					(list (quote lambda)
+						(map aggcols (lambda (col) (symbol (concat alias "." col))))
+						(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr)))
+					agg_reduce
+					agg_neutral
+					(aggregate_shard_combine ag)
+					false)))
 			(list (quote createcolumn)
 				(list (quote table) schema grouptbl)
 				agg_col
@@ -12472,24 +12804,7 @@ ever-larger subtrees. */
 				(cons (quote list) key_names)
 				(list (quote lambda)
 					(map key_names (lambda (col) (symbol col)))
-					(list (quote scan)
-						'(session "__memcp_tx")
-						(list (quote table) schema tbl)
-						(cons (quote list) filtercols)
-						(list (quote lambda)
-							(map filtercols (lambda (col) (symbol (concat alias "." col))))
-							(list (quote optimize)
-								(cons (quote and) (cons
-									(lower_column_expr_for_alias src condition)
-									(group_key_equality_terms alias key_names keys)))))
-						(cons (quote list) aggcols)
-						(list (quote lambda)
-							(map aggcols (lambda (col) (symbol (concat alias "." col))))
-							(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr)))
-						agg_reduce
-						agg_neutral
-						(aggregate_shard_combine ag)
-						false)))))))
+					aggregate_value_expr))))))
 
 (define build_query_group_aggregate_column (lambda (input grouptbl keys key_names ag)
 	(match ag '(agg_expr agg_reduce agg_neutral) (begin
@@ -12969,6 +13284,43 @@ ever-larger subtrees. */
 		(group_cleanup_missing_keys_plan schema grouptbl key_names)
 		(group_insert_batches_expr schema grouptbl key_names value_cols computed_values (quote grouped)))))
 
+(define query_group_direct_recset_count_source (lambda (input keys ags)
+	(if (or (not (empty_list? (qb_order input)))
+		(or (not (nil? (qb_limit input))) (not (nil? (qb_offset input)))))
+		nil
+		(begin
+			(define driver (single_real_source (qb_sources input)))
+			(if (or (nil? driver)
+				(or (not (source_is_base_table? driver))
+					(or (reduce keys (lambda (has_columns key)
+							(or has_columns (expr_contains_column_ref? key))) false)
+						(not (reduce ags (lambda (all_counts ag)
+							(and all_counts (aggregate_counts_every_input_row? ag))) true)))))
+				nil
+				(begin
+					(define membership_parts (base_group_membership_parts driver (qb_where input)))
+					(if (equal? (cadr membership_parts) true)
+						(car membership_parts)
+						nil)))))))
+
+(define build_query_group_direct_recset_count_plan (lambda (schema grouptbl keys key_names aggregate_cols ags membership_expr)
+	(begin
+		(define membership_var (symbol "__group_count_membership"))
+		(define count_var (symbol "__group_count_cardinality"))
+		(define key_expr (runtime_cons_list_expr keys))
+		(define payload_expr (runtime_cons_list_expr (map ags (lambda (_ag) count_var))))
+		(define grouped_expr (list (quote set_assoc) (list (quote list)) key_expr payload_expr))
+		(define finish_expr (group_insert_finish_expr schema grouptbl key_names aggregate_cols false))
+		(list
+			(list (quote lambda) (list membership_var)
+				(list
+					(list (quote lambda) (list count_var)
+						(list
+							(list (quote lambda) (list (quote grouped)) finish_expr)
+							grouped_expr))
+					(list (quote recset_count) membership_var)))
+			membership_expr))))
+
 /* Eager preparation may rewrite nested stage-output sources and aggregate
 expressions. Persistent column identity was selected from the original logical
 stage before that rewrite; thread it through unchanged to keep create and fill
@@ -12979,6 +13331,7 @@ on the same columns. */
 			(neumann_fail "build_queryplan" "query-input aggregate columns do not match aggregate descriptors")
 			true)
 		(define schema (qb_schema input))
+		(define direct_recset_source (query_group_direct_recset_count_source input keys ags))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define value_cols (map (produceN (count ags)) (lambda (i) (concat "__agg" i))))
 		(define row_fields (merge (list
@@ -13003,22 +13356,25 @@ on the same columns. */
 			(aggregate_payload_merge_expr ags 0)))
 		(define finish_expr (group_insert_finish_expr schema grouptbl key_names aggregate_cols false))
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
-		(list
-			(list (quote lambda) (list (quote grouped)) finish_expr)
-			(lower_query_block_as_dataset_reduce
-				input
-				row_fields
-				(list (quote lambda)
-					(extract_assoc row_fields (lambda (title _expr) (symbol title)))
-					(runtime_cons_list_expr (list key_expr payload_expr)))
-				(list (quote lambda) (list (quote acc) (quote rowvals))
-					(list (quote set_assoc)
-						(quote acc)
-						(list (quote car) (quote rowvals))
-						(list (quote cadr) (quote rowvals))
-						merge_payload))
-				(list (quote list))
-				combine_grouped)))))
+		(if (nil? direct_recset_source)
+			(list
+				(list (quote lambda) (list (quote grouped)) finish_expr)
+				(lower_query_block_as_dataset_reduce
+					input
+					row_fields
+					(list (quote lambda)
+						(extract_assoc row_fields (lambda (title _expr) (symbol title)))
+						(runtime_cons_list_expr (list key_expr payload_expr)))
+					(list (quote lambda) (list (quote acc) (quote rowvals))
+						(list (quote set_assoc)
+							(quote acc)
+							(list (quote car) (quote rowvals))
+							(list (quote cadr) (quote rowvals))
+							merge_payload))
+					(list (quote list))
+					combine_grouped))
+			(build_query_group_direct_recset_count_plan
+				schema grouptbl keys key_names aggregate_cols ags direct_recset_source)))))
 
 (define union_branch_group_row_fields (lambda (candidate_alias branch keys key_names ags value_cols)
 	(begin
@@ -14941,7 +15297,12 @@ get_column refs to the source) are excluded automatically too. */
 			(if (union_block? src)
 				(build_union_group_aggregates_insert_plan prepared_src src grouptbl keys key_names (list aggregate_count_descriptor))
 				(build_query_group_collect_plan prepared_src grouptbl keys key_names))))
-		(define base_group_into_plan (if (or query_input scalar_order_base_stage)
+		/* A base-table bulk fill cannot evaluate a dependent stage value by
+		itself. Those conditions are realized by the per-aggregate physical
+		operator below (including projected RecSets), after nested stages have
+		been prepared. */
+		(define base_group_into_plan (if (or query_input
+			(or scalar_order_base_stage (expr_refs_stage_output_alias? condition)))
 			nil
 			(build_base_group_into_plan schema tbl alias src grouptbl keys key_names condition
 				(non_scalar_order_aggregates ags))))
@@ -15741,19 +16102,11 @@ probes remain recipes and still execute after root braking. */
 						(query_block_bounded_scalar_probe_recipe_entries
 							raw_prepared_block raw_probe_recipe_entries)
 						'()))
-				/* Bounded direct recipes and cost-selected RecSet recipes own their
-				stage preparation. Keep eager preparation for cheap direct probes, but
-				do not build the same carrier both eagerly and inside a RecSet marker. */
-				(define recipe_probe_work_rows (probe_context_row_count (qb_sources raw_prepared_block)))
-				(define recset_probe_entries (filter raw_probe_recipe_entries (lambda (entry)
-					(match entry
-						'(stage requested_col)
-						(and (stage_boolean_shaped? dependency_graph stage requested_col)
-							(scalar_first_probe_recset_cost_preferred? stage recipe_probe_work_rows))
-						_ false))))
+				/* Every promoted scalar probe owns its physical realization. Eager
+				preparation here would make a second operator decision before the
+				consumer's join-node cardinality is known. */
 				(define probe_marker_stage_ids (stage_id_set
-					(map (merge_unique (list probe_recipe_entries recset_probe_entries))
-						(lambda (entry) (car entry)))))
+					(map raw_probe_recipe_entries (lambda (entry) (car entry)))))
 				(define eager_stages (filter candidate_eager_stages (lambda (stage)
 					(not (has_assoc? probe_marker_stage_ids (gs_id stage))))))
 				(define eager_stage_lookup (stages_without_ids
@@ -16618,7 +16971,7 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			(source_join_exprs acceptance_sources))))
 		(define acceptance_probe (if (empty_list? acceptance_sources)
 			(list (quote optimize)
-				(lower_column_expr_for_join_in_context
+				(lower_column_expr_for_join_truth_context
 					all_sources default_alias remaining_condition acceptance_probe_work_rows))
 			(build_join_scan_reduce_using_recipe
 				schema all_sources acceptance_plan default_alias acceptance_needed_exprs remaining_condition true
@@ -16631,7 +16984,7 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(list (quote optimize)
-				(lower_column_expr_for_join_in_context
+				(lower_column_expr_for_join_truth_context
 					all_sources default_alias effective_condition acceptance_probe_work_rows))))
 		(define acceptance_cols (join_cols_for_alias all_sources default_alias alias acceptance_needed_exprs))
 		(define acceptance_expr (list (quote lambda)
@@ -16693,7 +17046,7 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 				(map tail (lambda (item) (replace_lowered_row_number_symbol alias col item))))
 			_ expr))))
 
-(define build_join_row_number_scan_pipeline (lambda (schema all_sources src default_alias needed_exprs remaining_condition row_expr stage_filter membership_var membership_filter column_recipe stages result_mode combines_state continuation outer_scan)
+(define build_join_row_number_scan_pipeline (lambda (schema all_sources src default_alias needed_exprs remaining_condition row_expr stage_filter membership_var membership_filter column_recipe stages result_mode probe_context combines_state continuation outer_scan)
 	(begin
 		(define alias (source_alias src))
 		(define stage (nth stage_filter 0))
@@ -16719,7 +17072,9 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 				(define rewritten_row_expr (replace_lowered_row_number_symbol alias col row_expr))
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias alias filter_col)))
-					(list (quote optimize) (lower_column_expr_for_join all_sources default_alias filter_condition))))
+					(list (quote optimize) (lower_column_expr_for_join_truth_context
+						all_sources default_alias filter_condition
+						(probe_work_context_rows_for_alias probe_context alias)))))
 				(define continuation_expr (list (quote lambda) (list (quote __row_number))
 					(continuation remaining_condition rewritten_row_expr '())))
 				(define map_expr (list (quote lambda)
@@ -16819,36 +17174,22 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 (define join_scan_shard_reduce_expr (lambda (result_mode)
 	(if (join_scan_reduce? result_mode) (join_scan_reduce_expr result_mode true) nil)))
 
-(define join_scan_probe_context? (lambda (value)
+(define probe_work_context? (lambda (value)
 	(match value
 		(cons ((symbol probe_work_context) true) _rest) true
 		(cons ((quote probe_work_context) true) _rest) true
 		_ false)))
 
-(define join_scan_probe_work_rows (lambda (result_mode)
-	(begin
-		(define value (if (and (join_scan_reduce? result_mode) (> (count result_mode) 4))
-			(nth result_mode 4)
-		(if (and (list? result_mode)
-			(and (> (count result_mode) 1) (equal? (car result_mode) (quote pipeline))))
-			(nth result_mode 1)
-			nil)))
-		(if (join_scan_probe_context? value)
-			(qassoc_get value (quote default) nil)
-			value))))
+(define probe_work_context_default_rows (lambda (context)
+	(if (probe_work_context? context)
+		(qassoc_get context (quote default) nil)
+		nil)))
 
-(define join_scan_probe_work_rows_for_alias (lambda (result_mode alias)
-	(begin
-		(define value (if (and (join_scan_reduce? result_mode) (> (count result_mode) 4))
-			(nth result_mode 4)
-			(if (and (list? result_mode)
-				(and (> (count result_mode) 1) (equal? (car result_mode) (quote pipeline))))
-				(nth result_mode 1)
-				nil)))
-		(if (join_scan_probe_context? value)
-			(qassoc_get (qassoc_get value (quote by_alias) '()) alias
-				(qassoc_get value (quote default) nil))
-			value))))
+(define probe_work_context_rows_for_alias (lambda (context alias)
+	(if (probe_work_context? context)
+		(qassoc_get (qassoc_get context (quote by_alias) '()) alias
+			(qassoc_get context (quote default) nil))
+		nil)))
 
 (define physical_probe_predicate_selectivity (lambda (predicates)
 	(reduce (coalesceNil predicates '()) (lambda (product predicate)
@@ -16915,16 +17256,7 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 			(list (quote default) (coalesceNil (car work) default_rows))
 			(list (quote by_alias) (cadr work))))))
 
-(define join_scan_result_mode_with_probe_context (lambda (result_mode context)
-	(if (join_scan_reduce? result_mode)
-		(list (quote reduce)
-			(nth result_mode 1)
-			(nth result_mode 2)
-			(nth result_mode 3)
-			context)
-		(list (quote pipeline) context))))
-
-(define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+(define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 	(begin
 		(define src (physical_join_leaf_source all_sources leaf))
 		(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
@@ -16975,9 +17307,9 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 		(define lowered_filter_condition (mark_outer_join_symbols
 			all_sources
 			alias
-			(lower_column_expr_for_join_in_context
+			(lower_column_expr_for_join_truth_context
 				all_sources default_alias filter_condition
-				(join_scan_probe_work_rows_for_alias result_mode alias))))
+				(probe_work_context_rows_for_alias probe_context alias))))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(list (quote optimize) lowered_filter_condition)))
@@ -16985,9 +17317,9 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 		(define map_body (if (equal? post_outer_condition true)
 			continuation_expr
 			(list (quote if)
-				(list (quote optimize) (lower_column_expr_for_join_in_context
+				(list (quote optimize) (lower_column_expr_for_join_truth_context
 					all_sources default_alias post_outer_condition
-					(join_scan_probe_work_rows_for_alias result_mode alias)))
+					(probe_work_context_rows_for_alias probe_context alias)))
 				continuation_expr
 				(join_scan_skip_expr result_mode))))
 		(define map_expr (list (quote lambda)
@@ -16997,7 +17329,7 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 		(define reduce_expr (join_scan_reduce_expr result_mode combines_state))
 		(define scan_expr
 			(if (not (nil? row_number_stage_filter))
-				(build_join_row_number_scan_pipeline schema all_sources src default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe stages result_mode combines_state continuation outer_scan)
+				(build_join_row_number_scan_pipeline schema all_sources src default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe stages result_mode probe_context combines_state continuation outer_scan)
 				(if (and (empty_list? current_order_items) (not (query_limit_active? offset_value limit_value)))
 					(list (quote scan)
 						'(session "__memcp_tx")
@@ -17035,19 +17367,19 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 /* Consume the logical join tree recursively. The right subtree is lowered as
 the continuation of the left subtree, so join-node boundaries and outer-join
 ownership remain available until the physical scans are emitted. */
-(define build_join_tree_scan_using_recipe (lambda (schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+(define build_join_tree_scan_using_recipe (lambda (schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 	(match tree
 		((symbol join-leaf) _alias)
-		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 		((quote join-leaf) alias)
-		(build_join_tree_scan_using_recipe schema all_sources (make_join_optimizer_leaf alias) future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+		(build_join_tree_scan_using_recipe schema all_sources (make_join_optimizer_leaf alias) future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 		((symbol join-leaf) _alias _predicates)
-		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 		((quote join-leaf) alias predicates)
 		(build_join_tree_scan_using_recipe schema all_sources
 			(list (quote join-leaf) alias predicates) future_aliases default_alias needed_exprs
 			final_condition row_expr order_items offset_value limit_value allow_membership_recset
-			column_recipe stages result_mode continuation outer_scan)
+			column_recipe stages result_mode probe_context continuation outer_scan)
 		((symbol join-node) kind left right predicates)
 		(begin
 			(if (and (equal? kind (quote left-outer))
@@ -17059,28 +17391,25 @@ ownership remain available until the physical scans are emitted. */
 			(build_join_tree_scan_using_recipe
 				schema all_sources left (merge_unique (list right_aliases future_aliases))
 				default_alias needed_exprs final_condition row_expr
-				order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode
+				order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context
 				(lambda (left_condition left_row_expr left_order_items)
 					(build_join_tree_scan_using_recipe
 						schema all_sources right future_aliases
 						default_alias needed_exprs (combine_where left_condition node_condition) left_row_expr
-						left_order_items 0 -1 allow_membership_recset column_recipe stages result_mode continuation
+						left_order_items 0 -1 allow_membership_recset column_recipe stages result_mode probe_context continuation
 						(equal? kind (quote left-outer))))
 				outer_scan))
 		((quote join-node) kind left right predicates)
 		(build_join_tree_scan_using_recipe schema all_sources
 			(make_join_optimizer_node kind left right predicates) future_aliases
 			default_alias needed_exprs final_condition row_expr order_items offset_value limit_value
-			allow_membership_recset column_recipe stages result_mode continuation outer_scan)
+			allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 		_ (neumann_fail "build_queryplan" "malformed logical join tree"))))
 
-(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode)
+(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_work_rows)
 	(begin
 		(define tree (physical_join_plan_for_sources sources))
-		(define costed_result_mode (join_scan_result_mode_with_probe_context
-			result_mode
-			(join_scan_probe_context tree all_sources
-				(join_scan_probe_work_rows result_mode))))
+		(define probe_context (join_scan_probe_context tree all_sources probe_work_rows))
 		(define residual_condition (if (nil? tree) final_condition
 			(condition_without_join_tree_predicates final_condition tree)))
 		(define terminal (lambda (remaining_condition final_row_expr remaining_order_items)
@@ -17091,29 +17420,29 @@ ownership remain available until the physical scans are emitted. */
 				(if (equal? (coalesceNil remaining_condition true) true)
 					final_row_expr
 					(list (quote if)
-						(list (quote optimize) (lower_column_expr_for_join_in_context
+						(list (quote optimize) (lower_column_expr_for_join_truth_context
 							all_sources default_alias remaining_condition
-							(join_scan_probe_work_rows costed_result_mode)))
+							(probe_work_context_default_rows probe_context)))
 						final_row_expr
-						(join_scan_skip_expr costed_result_mode))))))
+						(join_scan_skip_expr result_mode))))))
 		(if (nil? tree)
 			(terminal residual_condition row_expr order_items)
 			(build_join_tree_scan_using_recipe
 				schema all_sources tree '() default_alias needed_exprs residual_condition row_expr
-				order_items offset_value limit_value allow_membership_recset column_recipe stages costed_result_mode
+				order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context
 				terminal false)))))
 
 (define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier probe_work_rows column_recipe stages)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
 		order_items offset_value limit_value allow_membership_carrier column_recipe stages
-		(list (quote pipeline) probe_work_rows))))
+		(list (quote pipeline)) probe_work_rows)))
 
 (define build_join_scan_reduce_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier probe_work_rows column_recipe stages reduce_expr neutral_expr shard_reduce_expr)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
 		order_items offset_value limit_value allow_membership_carrier column_recipe stages
-		(list (quote reduce) reduce_expr neutral_expr shard_reduce_expr probe_work_rows))))
+		(list (quote reduce) reduce_expr neutral_expr shard_reduce_expr) probe_work_rows)))
 
 (define build_join_scan_sink (lambda (schema sources default_alias needed_exprs final_condition sink_expr stages)
 	(build_join_scan_pipeline_using_recipe
@@ -18526,6 +18855,166 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 							(map selected shared_prepare_alias_binding)
 							(list (without_prepare_bindings plan selected_keys)))))))))))
 
+(define physical_plan_uses_query_scope? (lambda (expr)
+	(if (or (equal? expr (physical_query_session_symbol))
+			(or (equal? expr (physical_query_scope_symbol))
+				(equal? expr (physical_query_tx_symbol))))
+		true
+		(match expr
+			((symbol quote) _value) false
+			((quote quote) _value) false
+			(cons head tail) (or (physical_plan_uses_query_scope? head)
+				(reduce tail (lambda (found item)
+					(or found (physical_plan_uses_query_scope? item))) false))
+			_ false))))
+
+/* `session` is optimized to its helper closure while planner code is loaded,
+whereas dynamically-built fragments can retain the symbol. Normalize both
+representations without depending on their printed form. */
+(define physical_session_call_parts (lambda (expr)
+	(match expr
+		((symbol quote) _value) nil
+		((quote quote) _value) nil
+		(cons head tail) (if (or (equal? head session) (equal? head (quote session)))
+			(list tail)
+			nil)
+		_ nil)))
+
+/* Track literal session reads and writes independently. A key read by a plan
+may be hoisted only when that same execution cannot write it. Dynamic keys stay
+at their original evaluation point. */
+(define collect_physical_session_usage (lambda (expr usage)
+	(begin
+		(define parts (physical_session_call_parts expr))
+		(if (not (nil? parts))
+			(begin
+				(define args (car parts))
+				(define marked (if (and (> (count args) 0) (string? (car args)))
+					(if (equal? (count args) 1)
+						(list (set_assoc (nth usage 0) (car args) true) (nth usage 1))
+						(list (nth usage 0) (set_assoc (nth usage 1) (car args) true)))
+					usage))
+				(reduce args (lambda (state arg)
+					(collect_physical_session_usage arg state)) marked))
+			(match expr
+				((symbol quote) _value) usage
+				((quote quote) _value) usage
+				(cons head tail) (reduce tail (lambda (state item)
+					(collect_physical_session_usage item state))
+					(collect_physical_session_usage head usage))
+				_ usage)))))
+
+(define physical_session_value_symbol (lambda (key)
+	(symbol (concat "__physical_session_value_" (fnv_hash key)))))
+
+(define safe_physical_session_read_keys (lambda (usage)
+	(filter (extract_assoc (nth usage 0) (lambda (key _value) key))
+		(lambda (key) (and (not (equal? key "__memcp_tx"))
+			(not (has_assoc? (nth usage 1) key)))))))
+
+/* Physical operators share one transaction and immutable session snapshot for
+a query execution. Resolve both at the physical boundary instead of repeating
+goroutine-local context lookups in scan callbacks. */
+(define rewrite_physical_session_reads (lambda (expr safe_keys)
+	(begin
+		(define parts (physical_session_call_parts expr))
+		(if (not (nil? parts))
+			(begin
+				(define args (car parts))
+				(if (and (equal? (count args) 1) (string? (car args)))
+					(if (equal? (car args) "__memcp_tx")
+						(physical_query_tx_symbol)
+						(if (contains? safe_keys (car args))
+							(physical_session_value_symbol (car args))
+							expr))
+					expr))
+			(match expr
+				((symbol quote) _value) expr
+				((quote quote) _value) expr
+				(cons head tail) (cons
+					(rewrite_physical_session_reads head safe_keys)
+					(map tail (lambda (item)
+						(rewrite_physical_session_reads item safe_keys))))
+				_ expr)))))
+
+(define query_invariant_presence_memo_parts (lambda (expr)
+	(match expr
+		'(session_symbol "get_or_compute_scoped" scope_symbol key producer)
+		(if (and (equal? session_symbol (physical_query_session_symbol))
+			(and (equal? scope_symbol (physical_query_scope_symbol))
+				(and (string? key) (strlike key "__query_presence_probe_%"))))
+			(list key producer)
+			nil)
+		_ nil)))
+
+(define collect_query_invariant_presence_memos (lambda (expr entries)
+	(begin
+		(define parts (query_invariant_presence_memo_parts expr))
+		(define found (if (nil? parts) entries (set_assoc entries (nth parts 0) expr)))
+		(match expr
+			((symbol quote) _value) found
+			((quote quote) _value) found
+			(cons head tail) (reduce tail (lambda (acc item)
+				(collect_query_invariant_presence_memos item acc))
+				(collect_query_invariant_presence_memos head found))
+			_ found))))
+
+(define query_invariant_presence_value_symbol (lambda (key)
+	(symbol (concat "__query_presence_value_" (fnv_hash key)))))
+
+(define rewrite_query_invariant_presence_memos (lambda (expr)
+	(begin
+		(define parts (query_invariant_presence_memo_parts expr))
+		(if (not (nil? parts))
+			(query_invariant_presence_value_symbol (nth parts 0))
+			(match expr
+				((symbol quote) _value) expr
+				((quote quote) _value) expr
+				(cons head tail) (cons
+					(rewrite_query_invariant_presence_memos head)
+					(map tail rewrite_query_invariant_presence_memos))
+				_ expr)))))
+
+/* Presence probes have bounded boolean semantics, so evaluating their
+query-invariant producers at the physical boundary cannot introduce scalar
+cardinality errors. Share one lexical value across every lowered consumer;
+this also prevents optimizer inlining from moving the producer back into a
+row callback. */
+(define consolidate_query_invariant_presence_memos (lambda (plan)
+	(begin
+		(define entries (collect_query_invariant_presence_memos plan '()))
+		(if (empty_list? entries)
+			plan
+			(cons (quote !begin) (merge (list
+				(extract_assoc entries (lambda (key expr)
+					(list (quote define)
+						(query_invariant_presence_value_symbol key)
+						expr)))
+				(list (rewrite_query_invariant_presence_memos plan)))))))))
+
+/* Resolve request-local state once at the physical-plan boundary. RecSet
+lookups execute inside deeply nested row callbacks; resolving `(context
+"session")` there would repeat the goroutine-local lookup for every row even
+though both handles are constant for the complete query generation. */
+(define with_physical_query_context (lambda (plan)
+	(begin
+		(define usage (collect_physical_session_usage plan (list '() '())))
+		(define safe_keys (safe_physical_session_read_keys usage))
+		(define rewritten (rewrite_physical_session_reads plan safe_keys))
+		(if (and (empty_list? safe_keys) (not (physical_plan_uses_query_scope? rewritten)))
+			rewritten
+			(cons (quote !begin) (merge (list
+				(list (list (quote define) (physical_query_session_symbol)
+					(list (quote context) "session")))
+				(list (list (quote define) (physical_query_scope_symbol)
+					(list (quote context) "query")))
+				(list (list (quote define) (physical_query_tx_symbol)
+					(list (physical_query_session_symbol) "__memcp_tx")))
+				(map safe_keys (lambda (key)
+					(list (quote define) (physical_session_value_symbol key)
+						(list (physical_query_session_symbol) key))))
+				(list rewritten))))))))
+
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define plan (match (ir_return ir)
@@ -18538,7 +19027,10 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 				(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
 				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))
-		(require_physical_scan_relations (consolidate_closed_group_prepares ir plan)))))
+		(require_physical_scan_relations
+			(with_physical_query_context
+				(consolidate_query_invariant_presence_memos
+					(consolidate_closed_group_prepares ir plan)))))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir))))

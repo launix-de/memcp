@@ -930,7 +930,13 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 		if len(condCols) > 0 {
 			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols)
 		}
+		// A physical table expression can itself be a plan (for example a
+		// recset_project_join whose producer prepares correlated stage caches).
+		// Those nested scans are dependencies of this computed column just as
+		// scans in the filter and mapper are; otherwise source mutations leave a
+		// cached aggregate valid even though its projected input changed.
 		result := []scanJoinInfo{info}
+		result = append(result, extractScanJoinInfoBody(tableExpr)...)
 		for _, item := range items[filterIdx+1:] {
 			result = append(result, extractScanJoinInfoBody(item)...)
 		}

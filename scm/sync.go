@@ -384,6 +384,8 @@ func Context(a ...Scmer) (result Scmer) {
 				panic("no session set")
 			}
 			return val.(Scmer)
+		case "query":
+			return NewInt(int64(CurrentQuerySeq()))
 		case "check":
 			ctxVal, ok := mgr.GetValue("context")
 			if !ok {

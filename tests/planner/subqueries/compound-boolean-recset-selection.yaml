@@ -1,33 +1,39 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
 #
 # Exercise boolean-shape recognition independently with a compact fixture. A
-# missing RecSet proves that the compound CASE/OR tree was not recognized as
-# boolean-valued even when repeated probes amortize its small input carrier.
+# missing projected RecSet proves that the compound CASE/OR tree was not
+# recognized as a boolean-valued driver constraint.
 
 metadata:
   version: "1.0"
-  description: "Compound scalar boolean stages are eligible for RecSet lookup"
+  description: "Compound scalar boolean stages are eligible for projected RecSet drivers"
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS cbr_global_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node"
   - sql: "DROP TABLE IF EXISTS cbr_singleton"
+  - sql: "DROP TABLE IF EXISTS cbr_numeric"
   - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
   - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
   - sql: "DROP TABLE IF EXISTS cbr_item"
   - sql: "DROP TABLE IF EXISTS cbr_scope"
   - sql: "CREATE TABLE cbr_scope (id INT PRIMARY KEY, direct_flag INT)"
+  - sql: "CREATE TABLE cbr_global_acl (id INT PRIMARY KEY, actor INT, allowed BOOL)"
   - sql: "CREATE TABLE cbr_item (id INT PRIMARY KEY, scope_id INT)"
   - sql: "CREATE TABLE cbr_exists_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
   - sql: "CREATE TABLE cbr_fallback_acl (id INT PRIMARY KEY, scope_id INT, allowed BOOL)"
   - sql: "CREATE TABLE cbr_singleton (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE cbr_numeric (id INT PRIMARY KEY, scope_id INT UNIQUE, value INT)"
   - sql: "CREATE TABLE cbr_node (id INT PRIMARY KEY)"
   - sql: "CREATE TABLE cbr_node_acl (node_id INT UNIQUE, allowed BOOL)"
   - sql: "INSERT INTO cbr_scope VALUES (1, 1), (2, 0), (3, 0), (4, 0)"
+  - sql: "SET @cbr_actor = 1"
   - sql: "INSERT INTO cbr_exists_acl VALUES (1, 2, TRUE)"
   - sql: "INSERT INTO cbr_fallback_acl VALUES (1, 3, TRUE)"
   - sql: "INSERT INTO cbr_singleton VALUES (1)"
+  - sql: "INSERT INTO cbr_numeric VALUES (1, 1, 9), (2, 2, 7)"
   - scm: |
       (begin
         (insert (table "memcp-tests" "cbr_item") (list "id" "scope_id")
@@ -37,13 +43,17 @@ setup:
           (map (produceN 100) (lambda (i) (list (+ i 1)))))
         (insert (table "memcp-tests" "cbr_node_acl") (list "node_id" "allowed")
           (map (produceN 100) (lambda (i) (list (+ i 1) true))))
+        (insert (table "memcp-tests" "cbr_global_acl") (list "id" "actor" "allowed")
+          (map (produceN 5000) (lambda (i) (list (+ i 1) 1 (equal? i 0)))))
         (rebuild (table "memcp-tests" "cbr_item") true false)
         (rebuild (table "memcp-tests" "cbr_scope") true false)
         (rebuild (table "memcp-tests" "cbr_exists_acl") true false)
         (rebuild (table "memcp-tests" "cbr_fallback_acl") true false)
         (rebuild (table "memcp-tests" "cbr_singleton") true false)
+        (rebuild (table "memcp-tests" "cbr_numeric") true false)
         (rebuild (table "memcp-tests" "cbr_node") true false)
         (rebuild (table "memcp-tests" "cbr_node_acl") true false)
+        (rebuild (table "memcp-tests" "cbr_global_acl") true false)
         900)
 
 test_cases:
@@ -74,7 +84,75 @@ test_cases:
         - {id: 3, permitted: true}
         - {id: 4, permitted: false}
 
-  - name: "compound scalar boolean filter selects one RecSet lookup"
+  - name: "repeated equivalent EXISTS aliases preserve boolean results"
+    sql: |
+      SELECT COUNT(*) AS permitted
+      FROM cbr_item i
+      WHERE EXISTS (
+          SELECT TRUE FROM cbr_exists_acl first_acl
+          WHERE first_acl.scope_id = i.scope_id
+            AND first_acl.allowed = TRUE
+          LIMIT 1
+        ) OR EXISTS (
+          SELECT TRUE FROM cbr_exists_acl second_acl
+          WHERE second_acl.scope_id = i.scope_id
+            AND second_acl.allowed = TRUE
+          LIMIT 1
+        )
+    expect:
+      rows: 1
+      data:
+        - {permitted: 225}
+
+  - name: "repeated equivalent EXISTS aliases share one logical stage"
+    sql: |
+      EXPLAIN IR SELECT COUNT(*)
+      FROM cbr_item i
+      WHERE EXISTS (
+          SELECT TRUE FROM cbr_exists_acl first_acl
+          WHERE first_acl.scope_id = i.scope_id
+            AND first_acl.allowed = TRUE
+          LIMIT 1
+        ) OR EXISTS (
+          SELECT TRUE FROM cbr_exists_acl second_acl
+          WHERE second_acl.scope_id = i.scope_id
+            AND second_acl.allowed = TRUE
+          LIMIT 1
+        )
+    expect:
+      rows: 1
+      result_occurrences:
+        - text: "purpose exists"
+          count: 2
+
+  - name: "query-invariant EXISTS is realized once per query"
+    sql: |
+      EXPLAIN SELECT COUNT(*)
+      FROM cbr_item i
+      WHERE COALESCE((
+        SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM cbr_global_acl global_acl
+          WHERE global_acl.actor = @cbr_actor
+            AND global_acl.allowed = TRUE
+          LIMIT 1
+        ) THEN TRUE ELSE FALSE END
+        FROM cbr_scope s
+        WHERE s.id = i.scope_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      contains:
+        - "__query_presence_probe_"
+        - "__physical_query_tx"
+        - "get_or_compute_scoped"
+      result_occurrences:
+        - text: "__query_presence_probe_"
+          count: 1
+        - text: "__memcp_tx"
+          count: 1
+
+  - name: "compound scalar boolean filter selects a projected RecSet driver"
     sql: |
       EXPLAIN SELECT COUNT(*) FROM cbr_item i
       WHERE COALESCE((
@@ -94,10 +172,9 @@ test_cases:
     expect:
       rows: 1
       contains:
+        - "recset_project_join"
+      not_contains:
         - "recset_key_index"
-      result_occurrences:
-        - text: "recset_key_index"
-          count: 1
 
   - name: "nullable join node costs its own scalar probe work"
     sql: |
@@ -118,10 +195,103 @@ test_cases:
         - text: "recset_key_index"
           count: 1
 
+  - name: "boolean dependency does not change a numeric scalar value"
+    sql: |
+      SELECT SUM(COALESCE((
+        SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM cbr_exists_acl ea
+          WHERE ea.scope_id = s.id
+          LIMIT 1
+        ) THEN COALESCE((
+          SELECT n.value FROM cbr_numeric n
+          WHERE n.scope_id = s.id
+          LIMIT 1
+        ), 0) ELSE 0 END
+        FROM cbr_scope s
+        WHERE s.id = i.scope_id
+        LIMIT 1
+      ), 0)) AS total
+      FROM cbr_item i
+    expect:
+      rows: 1
+      data:
+        - {total: 1575}
+
+  - name: "nullable boolean scalar preserves NULL in value context"
+    sql: |
+      SELECT COUNT((
+        SELECT n.value = 7
+        FROM cbr_numeric n
+        WHERE n.scope_id = i.scope_id
+        LIMIT 1
+      )) AS present_values
+      FROM cbr_item i
+    expect:
+      rows: 1
+      data:
+        - {present_values: 450}
+
+  - name: "nullable boolean value context does not select a truth-only RecSet"
+    sql: |
+      EXPLAIN SELECT COUNT((
+        SELECT n.value = 7
+        FROM cbr_numeric n
+        WHERE n.scope_id = i.scope_id
+        LIMIT 1
+      )) AS present_values
+      FROM cbr_item i
+    expect:
+      rows: 1
+      not_contains:
+        - "recset_key_index"
+
+  - name: "begin transaction for query-scoped carrier test"
+    sql: "START TRANSACTION"
+    expect:
+      rows: 0
+
+  - name: "transaction carrier sees initial values"
+    sql: |
+      SELECT COUNT(*) AS permitted FROM cbr_item i
+      WHERE COALESCE((
+        SELECT n.value = 7 FROM cbr_numeric n
+        WHERE n.scope_id = i.scope_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - {permitted: 225}
+
+  - name: "mutate carrier input inside transaction"
+    sql: "UPDATE cbr_numeric SET value = 7 WHERE scope_id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "next query generation rebuilds carrier inside same transaction"
+    sql: |
+      SELECT COUNT(*) AS permitted FROM cbr_item i
+      WHERE COALESCE((
+        SELECT n.value = 7 FROM cbr_numeric n
+        WHERE n.scope_id = i.scope_id
+        LIMIT 1
+      ), FALSE)
+    expect:
+      rows: 1
+      data:
+        - {permitted: 450}
+
+  - name: "rollback query-scoped carrier test"
+    sql: "ROLLBACK"
+    expect:
+      rows: 0
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS cbr_global_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node_acl"
   - sql: "DROP TABLE IF EXISTS cbr_node"
   - sql: "DROP TABLE IF EXISTS cbr_singleton"
+  - sql: "DROP TABLE IF EXISTS cbr_numeric"
   - sql: "DROP TABLE IF EXISTS cbr_fallback_acl"
   - sql: "DROP TABLE IF EXISTS cbr_exists_acl"
   - sql: "DROP TABLE IF EXISTS cbr_item"

@@ -84,6 +84,41 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 	})
 }
 
+func TestExtractScanJoinInfoIncludesDynamicTablePlan(t *testing.T) {
+	dynamicTable := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("begin"),
+		nestedScanAst("dynamic_dependency", "acl", "driver_id"),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("table"),
+			scm.NewString("dynamic_dependency"),
+			scm.NewString("driver"),
+		}),
+	})
+	computor := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("scan"),
+		scm.NewNil(),
+		dynamicTable,
+		listAst(),
+		lambdaAst(nil, scm.NewBool(true)),
+		listAst(),
+		lambdaAst(nil, scm.NewInt(1)),
+		scm.NewSymbol("+"),
+		scm.NewInt(0),
+	})
+
+	refs := extractScanJoinInfo(computor)
+	found := false
+	for _, ref := range refs {
+		if ref.schema == "dynamic_dependency" && ref.table == "acl" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("dynamic table plan dependency missing from %#v", refs)
+	}
+}
+
 func TestComputeTriggersGuardRelevantSourceColumns(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-compute-trigger-*")
 	if err != nil {
