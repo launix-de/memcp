@@ -65,7 +65,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - '\n\t(if\n'
+        - '\n\t\t(if\n'
       result_not_contains:
         - '(optimize\n\t\t\t(if'
 

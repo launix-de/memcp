@@ -18919,61 +18919,26 @@ representations without depending on their printed form. */
 			nil)
 		_ nil)))
 
-/* Track literal session reads and writes independently. A key read by a plan
-may be hoisted only when that same execution cannot write it. Dynamic keys stay
-at their original evaluation point. */
-(define collect_physical_session_usage (lambda (expr usage)
+/* Physical operators share one transaction for the complete query. Keep
+ordinary session reads intact: the scan optimizer recognizes their lack of
+column dependencies and can lift invariant CASE dispatch out of row callbacks.
+Replacing them with lexical symbols here would hide that dependency fact. */
+(define rewrite_physical_transaction_reads (lambda (expr)
 	(begin
 		(define parts (physical_session_call_parts expr))
 		(if (not (nil? parts))
 			(begin
 				(define args (car parts))
-				(define marked (if (and (> (count args) 0) (string? (car args)))
-					(if (equal? (count args) 1)
-						(list (set_assoc (nth usage 0) (car args) true) (nth usage 1))
-						(list (nth usage 0) (set_assoc (nth usage 1) (car args) true)))
-					usage))
-				(reduce args (lambda (state arg)
-					(collect_physical_session_usage arg state)) marked))
-			(match expr
-				((symbol quote) _value) usage
-				((quote quote) _value) usage
-				(cons head tail) (reduce tail (lambda (state item)
-					(collect_physical_session_usage item state))
-					(collect_physical_session_usage head usage))
-				_ usage)))))
-
-(define physical_session_value_symbol (lambda (key)
-	(symbol (concat "__physical_session_value_" (fnv_hash key)))))
-
-(define safe_physical_session_read_keys (lambda (usage)
-	(filter (extract_assoc (nth usage 0) (lambda (key _value) key))
-		(lambda (key) (and (not (equal? key "__memcp_tx"))
-			(not (has_assoc? (nth usage 1) key)))))))
-
-/* Physical operators share one transaction and immutable session snapshot for
-a query execution. Resolve both at the physical boundary instead of repeating
-goroutine-local context lookups in scan callbacks. */
-(define rewrite_physical_session_reads (lambda (expr safe_keys)
-	(begin
-		(define parts (physical_session_call_parts expr))
-		(if (not (nil? parts))
-			(begin
-				(define args (car parts))
-				(if (and (equal? (count args) 1) (string? (car args)))
-					(if (equal? (car args) "__memcp_tx")
-						(physical_query_tx_symbol)
-						(if (contains? safe_keys (car args))
-							(physical_session_value_symbol (car args))
-							expr))
+				(if (and (equal? (count args) 1) (equal? (car args) "__memcp_tx"))
+					(physical_query_tx_symbol)
 					expr))
 			(match expr
 				((symbol quote) _value) expr
 				((quote quote) _value) expr
 				(cons head tail) (cons
-					(rewrite_physical_session_reads head safe_keys)
+					(rewrite_physical_transaction_reads head)
 					(map tail (lambda (item)
-						(rewrite_physical_session_reads item safe_keys))))
+						(rewrite_physical_transaction_reads item))))
 				_ expr)))))
 
 (define query_invariant_presence_memo_parts (lambda (expr)
@@ -19037,10 +19002,8 @@ lookups execute inside deeply nested row callbacks; resolving `(context
 though both handles are constant for the complete query generation. */
 (define with_physical_query_context (lambda (plan)
 	(begin
-		(define usage (collect_physical_session_usage plan (list '() '())))
-		(define safe_keys (safe_physical_session_read_keys usage))
-		(define rewritten (rewrite_physical_session_reads plan safe_keys))
-		(if (and (empty_list? safe_keys) (not (physical_plan_uses_query_scope? rewritten)))
+		(define rewritten (rewrite_physical_transaction_reads plan))
+		(if (not (physical_plan_uses_query_scope? rewritten))
 			rewritten
 			(cons (quote !begin) (merge (list
 				(list (list (quote define) (physical_query_session_symbol)
@@ -19049,9 +19012,6 @@ though both handles are constant for the complete query generation. */
 					(list (quote context) "query")))
 				(list (list (quote define) (physical_query_tx_symbol)
 					(list (physical_query_session_symbol) "__memcp_tx")))
-				(map safe_keys (lambda (key)
-					(list (quote define) (physical_session_value_symbol key)
-						(list (physical_query_session_symbol) key))))
 				(list rewritten))))))))
 
 (define emit_physical_queryplan (lambda (ir)
