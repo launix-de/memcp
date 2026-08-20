@@ -61,3 +61,47 @@ func TestDropTriggerDoesNotHoldSchemaLockWhileWaitingForTableDDL(t *testing.T) {
 		t.Fatal("dropTrigger did not finish after ddlMu was released")
 	}
 }
+
+func TestReadTableLockPublicationDoesNotWaitForShardReaders(t *testing.T) {
+	shard := &storageShard{}
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	acquired := make(chan func(), 1)
+	go func() {
+		acquired <- lockTablePublicationShards([]*storageShard{shard}, false)
+	}()
+
+	select {
+	case unlock := <-acquired:
+		unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("READ table lock publication waited for an existing shard reader")
+	}
+}
+
+func TestWriteTableLockPublicationWaitsForShardReaders(t *testing.T) {
+	shard := &storageShard{}
+	shard.mu.RLock()
+
+	acquired := make(chan func(), 1)
+	go func() {
+		acquired <- lockTablePublicationShards([]*storageShard{shard}, true)
+	}()
+
+	select {
+	case unlock := <-acquired:
+		unlock()
+		shard.mu.RUnlock()
+		t.Fatal("WRITE table lock publication passed an existing shard reader")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	shard.mu.RUnlock()
+	select {
+	case unlock := <-acquired:
+		unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("WRITE table lock publication did not continue after reader release")
+	}
+}

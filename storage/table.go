@@ -1011,10 +1011,7 @@ func tableLockQueryContext(ss *scm.SessionState) context.Context {
 // waitTableLock blocks until the table lock is compatible with the caller's intent.
 // isWrite=true means the caller wants to write (blocked by ANY lock from another session).
 // isWrite=false means the caller wants to read (blocked only by WRITE lock from another session).
-// Sets State to "Waiting for table lock" while blocking.
-// The query lifecycle clears the state again when the statement finishes; do
-// not eagerly clear it here or SHOW PROCESSLIST becomes racy and can miss a
-// blocked waiter that is still in the same request.
+// SHOW PROCESSLIST derives its waiting state from the active lock-wait count.
 // Panics if the owning session tries to write while holding a READ lock (MySQL semantics).
 func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	cond := t.getTableLockCond()
@@ -1030,7 +1027,6 @@ func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	if ss != nil {
 		ss.BeginLockWait()
 		defer ss.EndLockWait()
-		ss.SetState("Waiting for table lock")
 	}
 	var errMsg string
 	t.tableLockMu.Lock()

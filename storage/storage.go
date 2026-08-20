@@ -398,6 +398,31 @@ func isScanPseudoColName(name string) bool {
 	return isBatch
 }
 
+// lockTablePublicationShards closes the publication race with shard users.
+// A READ table lock only needs to drain writers, so shard read locks are both
+// sufficient and essential: waiting for sibling readers can deadlock when a
+// parallel query worker prepares a cache consumed by one of those readers.
+func lockTablePublicationShards(shards []*storageShard, write bool) func() {
+	if write {
+		for _, shard := range shards {
+			shard.mu.Lock()
+		}
+		return func() {
+			for _, shard := range shards {
+				shard.mu.Unlock()
+			}
+		}
+	}
+	for _, shard := range shards {
+		shard.mu.RLock()
+	}
+	return func() {
+		for _, shard := range shards {
+			shard.mu.RUnlock()
+		}
+	}
+}
+
 // lockTable acquires a user-level read or write lock on the named table.
 // The session's State is updated while waiting, and the unlock callback is
 // registered with the session so that ReleaseAllLocks() can free it later.
@@ -418,7 +443,6 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 	cond := t.getTableLockCond()
 	ss.BeginLockWait()
 	defer ss.EndLockWait()
-	ss.SetState("Waiting for table lock")
 	t.tableLockMu.Lock()
 	if t.tableLockOwner.Load() == ss {
 		t.tableLockMu.Unlock()
@@ -461,8 +485,8 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		}
 	}
 	t.tableLockMu.Unlock()
-	// Drain in-flight shard readers by acquiring each shard's write lock.
-	// We MUST publish the lock while still holding the last shard write lock
+	// Drain incompatible in-flight shard users: writers for a READ table lock,
+	// readers and writers for WRITE. We MUST publish while retaining these locks
 	// so that any new scan that does RLock -> tableLockState.Load() sees the
 	// lock before it can proceed past its own RLock.
 	acquired := false
@@ -478,9 +502,7 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		t.tableLockMu.Unlock()
 	}()
 	shards := t.ActiveShards()
-	for _, s := range shards {
-		s.mu.Lock()
-	}
+	unlockShards := lockTablePublicationShards(shards, write)
 	if write {
 		t.tableLockOwner.Store(ss)
 		t.tableLockState.Store(-1)
@@ -495,9 +517,7 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		cond.Broadcast()
 		t.tableLockMu.Unlock()
 	}
-	for _, s := range shards {
-		s.mu.Unlock()
-	}
+	unlockShards()
 	acquired = true
 	if write {
 		return t.unlockTableWrite
@@ -2324,10 +2344,7 @@ func Init(en scm.Env) {
 			tbl := TableFromScmer(a[1])
 			// Cache preparation can execute inside a shard worker. Like every scan
 			// operator, it receives transaction and session ownership explicitly.
-			var ss *scm.SessionState
-			if currentTx != nil {
-				ss = currentTx.SessionState
-			}
+			ss := SessionStateFromTx(currentTx)
 			initialized := tbl.initializeCache(ss, func() {
 				sources := mustScmerSlice(a[2], "source tables")
 				sourceTables := make([]*table, len(sources))

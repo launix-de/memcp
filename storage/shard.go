@@ -2155,7 +2155,7 @@ func (t *storageShard) Insert(columns []string, values [][]scm.Scmer, alreadyLoc
 
 // lockForMutation follows the table-lock-before-shard-lock order without a
 // TOCTOU window. Table-lock acquisition publishes tableLockState while holding
-// all shard write locks, so a lock that raced our first check is visible after
+// compatible locks on all shards, so a lock that raced our first check is visible after
 // we acquire t.mu. Never wait for that owner while retaining t.mu: a cache
 // initializer holding a READ table lock may need this shard to finish its
 // snapshot before it can release the table lock.

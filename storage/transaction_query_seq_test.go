@@ -40,3 +40,17 @@ func TestQuerySeqFromTxCachesOnlyAutocommitStatement(t *testing.T) {
 		}
 	})
 }
+
+func TestSessionStateFromTxFallsBackToQueryContext(t *testing.T) {
+	ss := &scm.SessionState{ID: 23}
+	txWithoutSession := NewTxContext(TxCursorStability)
+
+	scm.SetValues(map[string]any{"sessionStatePtr": ss}, func() {
+		if got := SessionStateFromTx(nil); got != ss {
+			t.Fatalf("nil transaction lost query session: got %p, want %p", got, ss)
+		}
+		if got := SessionStateFromTx(txWithoutSession); got != ss {
+			t.Fatalf("unbound transaction lost query session: got %p, want %p", got, ss)
+		}
+	})
+}

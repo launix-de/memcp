@@ -37,6 +37,23 @@ func TestSessionStateTouchUpdatesLastUsed(t *testing.T) {
 	}
 }
 
+func TestProcessListLockStateTracksActiveWaits(t *testing.T) {
+	ss := &SessionState{}
+	ss.SetState("executing")
+	if got := ss.processListState(); got != "executing" {
+		t.Fatalf("idle lock counter changed process state: got %q", got)
+	}
+
+	ss.BeginLockWait()
+	if got := ss.processListState(); got != "Waiting for table lock" {
+		t.Fatalf("active lock wait not reported: got %q", got)
+	}
+	ss.EndLockWait()
+	if got := ss.processListState(); got != "executing" {
+		t.Fatalf("completed lock wait remained visible: got %q", got)
+	}
+}
+
 func TestEvictHTTPSessionReleasesLocksAndKillsQuery(t *testing.T) {
 	ss := RegisterSession("u", "h", "db")
 	key := "sid"
