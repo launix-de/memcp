@@ -9583,9 +9583,10 @@ correlated to the current user) alongside the true per-outer-row key. Those
 are constant for the whole query execution and are not part of what makes a
 row-to-row carrier worth building; group_stage_session_domain_keys already
 identifies them for other group-stage lowering, so the same rows/columns
-carrier semantics apply here. Only the remaining, single non-session key is
-what must resolve to src's own unique key. */
-(define scalar_first_probe_keytable_key_index (lambda (stage src keys)
+carrier semantics apply here. */
+/* Locate the remaining, single non-session source key once; reusable scalar
+and RecSet carriers additionally verify its uniqueness below. */
+(define scalar_first_probe_row_key_index (lambda (stage src keys)
 	(begin
 		(define session_indices (filter
 			(map (group_stage_session_domain_keys stage) (lambda (expr) (group_key_expr_index keys expr)))
@@ -9596,13 +9597,24 @@ what must resolve to src's own unique key. */
 			(begin
 				(define idx (car row_indices))
 				(define col (direct_column_name_for_alias src (nth keys idx)))
-				(if (nil? col)
-					nil
-					(if (reduce (source_unique_key_sets src) (lambda (found key_cols)
-							(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
-							false)
-						idx
-						nil)))))))
+				(if (nil? col) nil idx))))))
+
+(define scalar_first_probe_keytable_key_index (lambda (stage src keys)
+	(begin
+		(define idx (scalar_first_probe_row_key_index stage src keys))
+		(if (nil? idx)
+			nil
+			(begin
+				(define col (direct_column_name_for_alias src (nth keys idx)))
+				(define primary_key (source_primary_key_columns src))
+				(define unique_keys (merge (list
+					(source_unique_key_sets src)
+					(if (empty_list? primary_key) '() (list primary_key)))))
+				(if (reduce unique_keys (lambda (found key_cols)
+						(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
+						false)
+					idx
+					nil))))))
 
 /* stage_direct_probe_cost_preferred? only weighs the two costs against each
 other when probe_work_rows is a known number; planner_direct_presence_probe_preferred?
@@ -9782,6 +9794,12 @@ membership set. */
 		(define dirs (nth parts 2))
 		(define offset_value (nth parts 3))
 		(define physical_max_rows (bounded_probe_physical_max_rows stage))
+		/* Callers with a more precise pre/post-limit estimate supply it directly.
+		Older lowering paths still provide a real fallback from their visible driver
+		sources instead of silently disabling every cost-based carrier with nil. */
+		(define effective_probe_work_rows (if (number? (planner_literal_value probe_work_rows))
+			probe_work_rows
+			(probe_context_row_count sources)))
 		(define probe_stages (stage_catalog_with_nested
 			(merge (list all_stages (list stage)))))
 		(define graph (stage_dependency_graph probe_stages))
@@ -9792,12 +9810,12 @@ membership set. */
 					(car lookup_keys) probe_stages)
 				1
 				nil)
-			(if (and (query_block? src) (scalar_first_probe_recset_eligible? graph stage src keys probe_work_rows requested_col))
+			(if (and (query_block? src) (scalar_first_probe_recset_eligible? graph stage src keys effective_probe_work_rows requested_col))
 				(lower_recset_scalar_first_probe_expr
 					probe_stages stage requested_col
 					(lower_column_expr_for_join sources default_alias
 						(nth lookup_keys (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys))))
-			(if (and (query_block? src) (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows))
+			(if (and (query_block? src) (scalar_first_probe_keytable_eligible? stage src keys effective_probe_work_rows))
 				(lower_keytable_scalar_first_probe_expr
 					probe_stages
 					stage
@@ -9813,12 +9831,12 @@ membership set. */
 					keys
 					(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
 					probe_work_rows)
-			(if (and (source_is_base_table? src) (scalar_first_probe_recset_eligible_base? graph stage src keys probe_work_rows requested_col))
+			(if (and (source_is_base_table? src) (scalar_first_probe_recset_eligible_base? graph stage src keys effective_probe_work_rows requested_col))
 				(lower_recset_scalar_first_probe_expr
 					probe_stages stage requested_col
 					(lower_column_expr_for_join sources default_alias
 						(nth lookup_keys (scalar_first_probe_keytable_key_index stage src keys))))
-			(if (and (source_is_base_table? src) (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows))
+			(if (and (source_is_base_table? src) (scalar_first_probe_keytable_eligible_base? stage src keys effective_probe_work_rows))
 				(lower_keytable_scalar_first_probe_expr
 					probe_stages
 					stage
@@ -15149,6 +15167,21 @@ get_column refs to the source) are excluded automatically too. */
 							(if (has_assoc? prelimit_keys key) keys (set_assoc keys key true)))
 						_ keys)) '()))))))
 
+/* A filter probe must retain its marker until scan lowering knows the number
+of pre-limit rows it will evaluate. Turning it into a bounded direct recipe
+here would incorrectly apply the output LIMIT to filter work. Projection-only
+probes remain recipes and still execute after root braking. */
+(define query_block_bounded_scalar_probe_recipe_entries (lambda (block entries)
+	(begin
+		(define prelimit_keys (scalar_query_probe_recipe_keys
+			(query_block_prelimit_scalar_query_probe_recipe_entries block)))
+		(filter entries (lambda (entry)
+			(match entry
+				'(stage requested_col)
+				(not (has_assoc? prelimit_keys
+					(scalar_query_probe_recipe_key stage requested_col)))
+				_ false))))))
+
 (define prepare_simple_query_block_physical_core_chosen (lambda (block)
 	(begin
 		(define raw_stage_lookup (query_block_stage_lookup block))
@@ -15163,7 +15196,7 @@ get_column refs to the source) are excluded automatically too. */
 			(begin
 				(define raw_probe_recipe_entries (query_block_scalar_query_probe_recipe_entries block))
 				(define probe_recipe_entries (if (query_block_bounded_scalar_probe_recipe_context? block)
-					raw_probe_recipe_entries
+					(query_block_bounded_scalar_probe_recipe_entries block raw_probe_recipe_entries)
 					'()))
 				(define bounded_probe_recipe_keys
 					(query_block_bounded_scalar_probe_recipe_keys block probe_recipe_entries))
@@ -15193,7 +15226,8 @@ get_column refs to the source) are excluded automatically too. */
 					(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
 				(define probe_recipe_entries
 					(if (query_block_bounded_scalar_probe_recipe_context? raw_prepared_block)
-						raw_probe_recipe_entries
+						(query_block_bounded_scalar_probe_recipe_entries
+							raw_prepared_block raw_probe_recipe_entries)
 						'()))
 				/* Bounded direct recipes and cost-selected RecSet recipes own their
 				stage preparation. Keep eager preparation for cheap direct probes, but
@@ -15966,9 +16000,10 @@ either bound a real row or supplied the synthetic NULL row. */
 				_ nil)))
 		nil)))
 
-(define lower_join_result_fields (lambda (all_sources default_alias fields)
+(define lower_join_result_fields (lambda (all_sources default_alias fields probe_work_rows)
 	(map_assoc fields (lambda (_title expr)
-		(lower_column_expr_for_join all_sources default_alias expr)))))
+		(lower_column_expr_for_join_in_context
+			all_sources default_alias expr probe_work_rows)))))
 
 (define recset_contains_callback_symbol (symbol "__recset_contains"))
 
@@ -16071,10 +16106,11 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			(source_join_exprs acceptance_sources))))
 		(define acceptance_probe (if (empty_list? acceptance_sources)
 			(list (quote optimize)
-				(lower_column_expr_for_join all_sources default_alias remaining_condition))
+				(lower_column_expr_for_join_in_context
+					all_sources default_alias remaining_condition acceptance_probe_work_rows))
 			(build_join_scan_reduce_using_recipe
 				schema all_sources acceptance_plan default_alias acceptance_needed_exprs remaining_condition true
-				'() 0 1 true nil nil stages
+				'() 0 1 true acceptance_probe_work_rows nil stages
 				(list (quote lambda) (list (quote _accepted) (quote _row)) true)
 				false
 				(list (quote lambda) (list (quote accepted) (quote shard_accepted))
@@ -16083,19 +16119,24 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(list (quote optimize)
-				(lower_column_expr_for_join all_sources default_alias effective_condition))))
+				(lower_column_expr_for_join_in_context
+					all_sources default_alias effective_condition acceptance_probe_work_rows))))
 		(define acceptance_cols (join_cols_for_alias all_sources default_alias alias acceptance_needed_exprs))
 		(define acceptance_expr (list (quote lambda)
 			(map acceptance_cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(list (quote optimize) acceptance_probe)))
-		(define row_expr (list (quote resultrow)
-			(cons (quote list) (lower_join_result_fields all_sources default_alias fields))))
 		(define offset (coalesceNil offset_value 0))
 		(define limit (coalesceNil limit_value -1))
+		(define projection_probe_work_rows (coalesceNil
+			(probe_limit_work_rows limit_value)
+			acceptance_probe_work_rows))
+		(define row_expr (list (quote resultrow)
+			(cons (quote list) (lower_join_result_fields
+				all_sources default_alias fields projection_probe_work_rows))))
 		(define mapcols (join_cols_for_alias all_sources default_alias alias needed_exprs))
 		(define projection (build_join_scan_pipeline_using_recipe
 			schema all_sources remaining_plan default_alias needed_exprs remaining_condition row_expr
-			remaining_order_items 0 -1 true nil nil stages
+			remaining_order_items 0 -1 true projection_probe_work_rows nil stages
 		))
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
@@ -16921,11 +16962,21 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 
 (define build_join_scan_rows (lambda (schema sources plan default_alias needed_exprs final_condition fields order_items offset_value limit_value stages)
 	(begin
+		(define driver_source (join_optimizer_source_by_alias sources
+			(join_optimizer_tree_first_alias plan)))
+		(define filter_probe_work_rows (planner_row_count_after_selectivity
+			driver_source sources default_alias final_condition nil))
+		(define projection_probe_work_rows (if (query_limit_active? offset_value limit_value)
+			(coalesceNil (probe_limit_work_rows limit_value) 0)
+			(if (probe_context_unique_point? sources default_alias final_condition)
+				1
+				filter_probe_work_rows)))
 		(define row_expr (list (quote resultrow)
-			(cons (quote list) (lower_join_result_fields sources default_alias fields))))
+			(cons (quote list) (lower_join_result_fields
+				sources default_alias fields projection_probe_work_rows))))
 		(build_join_scan_pipeline_using_recipe
 			schema sources plan default_alias needed_exprs final_condition row_expr
-			order_items offset_value limit_value true nil nil stages))))
+			order_items offset_value limit_value true filter_probe_work_rows nil stages))))
 
 (define lower_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr shard_reduce_expr)
 	(begin
