@@ -2962,7 +2962,7 @@ without separately proving two-valued semantics. */
 				(cons (quote $set) (map filtercols (lambda (col) (symbol (concat alias "." col)))))
 				(list (quote list)
 					(symbol "$set")
-					(list (quote optimize) (lower_column_expr_for_alias derived_src inner_where))))
+					(lower_column_expr_for_alias derived_src inner_where)))
 			(list (quote lambda) (list (quote acc) (quote mapped))
 				(list (quote if) (list (quote cadr) (quote mapped))
 					(list (quote begin)
@@ -6922,9 +6922,12 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(begin
 					(define alias (source_alias src))
 					(define filtercols (extract_columns_for_alias src condition))
-					(define filter_expr (list (quote lambda)
+					/* This callback is evaluated during costing, before the enclosing
+					physical plan reaches its one recursive optimization pass. Compile it
+					here; callbacks emitted into the final plan must remain unwrapped. */
+					(define filter_expr (optimize (list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
-						(list (quote optimize) (lower_column_expr_for_alias src condition))))
+						(lower_column_expr_for_alias src condition))))
 					(scan_selectivity_estimate
 						(session "__memcp_tx")
 						(table (source_schema src) (source_relation src))
@@ -10067,7 +10070,7 @@ partner. */
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-						(list (quote optimize) (lower_column_expr_for_alias src condition)))
+						(lower_column_expr_for_alias src condition))
 					(quoted_runtime_list '())
 					(quoted_runtime_list '())
 					0
@@ -10721,12 +10724,11 @@ both names therefore bind to the same parameter. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-				(list (quote optimize)
-					(list (quote and)
-						(lower_column_expr_for_alias_in_context src condition probe_work_rows)
-						(list (quote equal??)
-							(lower_column_expr_for_alias src key_expr)
-							(lower_column_expr_for_join sources default_alias probe)))))))))
+				(list (quote and)
+					(lower_column_expr_for_alias_in_context src condition probe_work_rows)
+					(list (quote equal??)
+						(lower_column_expr_for_alias src key_expr)
+						(lower_column_expr_for_join sources default_alias probe))))))))
 
 /* EXISTS is short-circuiting, so selective independent UNION branches remain
 one n-ary physical OR of bounded probes. This preserves the logical union tree
@@ -10853,7 +10855,7 @@ through to reach the base table -- src already is it. */
 				(list (quote table) cache_schema cache_relation)
 				(cons (quote list) (list "k0"))
 				(list (quote lambda) (list (quote __kt_k0))
-					(list (quote optimize) (list (quote equal??) (quote __kt_k0) resolved_lookup_key)))
+					(list (quote equal??) (quote __kt_k0) resolved_lookup_key))
 				(cons (quote list) '())
 				(cons (quote list) '())
 				0
@@ -11054,11 +11056,10 @@ choice table instead of adding another promotion path. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-				(list (quote optimize)
-					(cons (quote and)
-						(cons
-							(lower_column_expr_for_alias src condition)
-							(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+				(cons (quote and)
+					(cons
+						(lower_column_expr_for_alias src condition)
+						(scalar_first_probe_key_terms sources default_alias src keys lookup_keys))))
 			(cons (quote list) order_cols)
 			(cons (quote list) dirs)
 			0
@@ -11186,9 +11187,8 @@ choice table instead of adding another promotion path. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-				(list (quote optimize)
-					(cons (quote and)
-						(cons (lower_column_expr_for_alias src condition) key_terms))))
+				(cons (quote and)
+					(cons (lower_column_expr_for_alias src condition) key_terms)))
 			(cons (quote list) value_cols)
 			(list (quote lambda)
 				(map value_cols (lambda (col) (symbol (concat (source_alias src) "." col))))
@@ -11227,11 +11227,10 @@ choice table instead of adding another promotion path. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-				(list (quote optimize)
-					(cons (quote and)
-						(cons
-							(lower_column_expr_for_alias src condition)
-							(scalar_first_probe_key_terms sources default_alias src keys lookup_keys)))))
+				(cons (quote and)
+					(cons
+						(lower_column_expr_for_alias src condition)
+						(scalar_first_probe_key_terms sources default_alias src keys lookup_keys))))
 			'(list)
 			'(list)
 			0
@@ -11611,7 +11610,7 @@ retain the scalar's complete value, including SQL NULL. */
 		(define lookup_map_cols (extract_columns_for_join_alias sources default_alias lookup_alias expr))
 		(define filter_expr (list (quote lambda)
 			(map lookup_filter_cols (lambda (col) (symbol (concat lookup_alias "." col))))
-			(list (quote optimize) (lower_column_expr_for_join sources default_alias probe_condition))))
+			(lower_column_expr_for_join sources default_alias probe_condition)))
 		(define map_expr (list (quote lambda)
 			(map lookup_map_cols (lambda (col) (symbol (concat lookup_alias "." col))))
 			(lower_column_expr_for_join sources default_alias expr)))
@@ -11787,7 +11786,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat grouptbl "." col))))
-				(list (quote optimize) (lower_column_expr_for_alias group_src session_filter)))
+				(lower_column_expr_for_alias group_src session_filter))
 			(cons (quote list) ordercols)
 			(cons (quote list) (order_relations_for_source group_src replaced_order))
 			0
@@ -11816,7 +11815,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
-				(list (quote optimize) (lower_column_expr_for_alias src condition)))
+				(lower_column_expr_for_alias src condition))
 			(list (quote list))
 			(list (quote lambda) '() 1)
 			(quote +)
@@ -11854,7 +11853,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-				(list (quote optimize) lowered_condition))
+				lowered_condition)
 			(list (quote list))
 			(list (quote lambda) '() 1)
 			(quote +)
@@ -11897,7 +11896,7 @@ cache identity or a logical fallback. */
 				(cons (quote list) filtercols)
 				(list (quote lambda)
 					(map filtercols symbol)
-					(list (quote optimize) filter_condition)))))))
+					filter_condition))))))
 
 /* driver_membership_probe markers reach physical lowering through two
 routes: as a WHERE-term (stripped by driver_membership_for_source, built via
@@ -11943,9 +11942,8 @@ would lose nested-stage and join semantics. */
 							(cons (quote list) filtercols)
 							(list (quote lambda)
 								(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
-								(list (quote optimize)
-									(cons (quote and)
-										(cons (lower_column_expr_for_alias input_src condition) key_terms)))))))))))))
+								(cons (quote and)
+									(cons (lower_column_expr_for_alias input_src condition) key_terms))))))))))))
 
 (define lower_dml_driver_membership_probe_expr (lambda (sources default_alias fallback_schema stage _probe)
 	(begin
@@ -11967,7 +11965,7 @@ would lose nested-stage and join semantics. */
 			(cons (quote list) filter_key_names)
 			(list (quote lambda)
 				(map filter_key_names symbol)
-				(list (quote optimize) (if (empty_list? key_terms) true (cons (quote and) key_terms))))))))
+				(if (empty_list? key_terms) true (cons (quote and) key_terms)))))))
 
 (define direct_column_name_for_alias (lambda (src expr)
 	(match expr
@@ -12106,7 +12104,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
-						(list (quote optimize) (lower_column_expr_for_alias src condition))))
+						(lower_column_expr_for_alias src condition)))
 				(quoted_runtime_list (list source_col))
 				(source_table_expr target_src)
 				(quoted_runtime_list (list target_col))))
@@ -12183,7 +12181,7 @@ boolean-shaped one way or the other -- this just picks the matching test. */
 							(cons (quote list) filtercols)
 							(list (quote lambda)
 								(map filtercols symbol)
-								(list (quote optimize) filter_condition)))
+								filter_condition))
 						(quoted_runtime_list (nth parts 0))
 						(source_table_expr target_src)
 						(quoted_runtime_list (nth parts 1)))))))))
@@ -13040,10 +13038,9 @@ self-joins of the same base table still describe two distinct row roles. */
 						(cons (quote list) cols)
 						(list (quote lambda)
 							params
-							(list (quote optimize)
-								(combine_where_terms (map (produceN (count pairs)) (lambda (i)
-									(list (quote equal??) (nth params i) (nth (nth pairs i) 0))))
-									true))))))))))
+							(combine_where_terms (map (produceN (count pairs)) (lambda (i)
+								(list (quote equal??) (nth params i) (nth (nth pairs i) 0))))
+								true)))))))))
 
 (define runtime_cons_list_expr (lambda (exprs)
 	(if (empty_list? exprs)
@@ -13439,10 +13436,9 @@ ever-larger subtrees. */
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
-						(list (quote optimize)
-							(cons (quote and) (cons
-								(lower_column_expr_for_alias src condition)
-								(group_key_equality_terms alias key_names keys)))))
+						(cons (quote and) (cons
+							(lower_column_expr_for_alias src condition)
+							(group_key_equality_terms alias key_names keys))))
 					(quoted_runtime_list order_cols)
 					(cons (quote list) dirs)
 					0
@@ -13487,7 +13483,7 @@ ever-larger subtrees. */
 				(cons (quote list) filtercols)
 				(list (quote lambda)
 					(map filtercols (lambda (col) (symbol (concat alias "." col))))
-					(list (quote optimize) (lower_column_expr_for_alias src condition)))
+					(lower_column_expr_for_alias src condition))
 				(cons (quote list) (merge (list key_sortcols order_cols)))
 				(cons (quote list) (merge (list key_dirs dirs)))
 				0
@@ -13561,10 +13557,9 @@ ever-larger subtrees. */
 					(cons (quote list) filtercols)
 					(list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
-						(list (quote optimize)
-							(cons (quote and) (cons
-								(lower_column_expr_for_alias src condition)
-								(group_key_equality_terms alias key_names keys)))))
+						(cons (quote and) (cons
+							(lower_column_expr_for_alias src condition)
+							(group_key_equality_terms alias key_names keys))))
 					(cons (quote list) aggcols)
 					(list (quote lambda)
 						(map aggcols (lambda (col) (symbol (concat alias "." col))))
@@ -13613,9 +13608,8 @@ ever-larger subtrees. */
 					(list (quote lambda)
 						(extract_assoc row_fields (lambda (title _expr) (symbol title)))
 						(list (quote if)
-							(list (quote optimize)
-								(cons (quote and) (map (produceN (count key_names)) (lambda (i)
-									(list (quote equal?) (symbol (nth row_key_names i)) (list (quote outer) (symbol (nth key_names i))))))))
+							(cons (quote and) (map (produceN (count key_names)) (lambda (i)
+								(list (quote equal?) (symbol (nth row_key_names i)) (list (quote outer) (symbol (nth key_names i)))))))
 							(aggregate_map_value_expr ag (symbol value_col))
 							agg_neutral))
 					agg_reduce
@@ -13826,7 +13820,7 @@ ever-larger subtrees. */
 			(cons (quote list) filtercols)
 			(list (quote lambda)
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
-				(list (quote optimize) (lower_column_expr_for_alias src condition)))
+				(lower_column_expr_for_alias src condition))
 			(cons (quote list) mapcols)
 			(list (quote lambda)
 				(map mapcols (lambda (col) (symbol (concat alias "." col))))
@@ -16417,14 +16411,14 @@ get_column refs to the source) are excluded automatically too. */
 											(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 												(extract_columns_for_alias src expr)))))
 											(define scan_mapcols (merge_unique (list (without_col fieldcols col) mapcols)))
-											(define filter_expr (list (quote lambda)
-												(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias (source_alias src) filter_col)))
-												(list (quote optimize) (lower_column_expr_for_alias src filter_condition))))
+										(define filter_expr (list (quote lambda)
+											(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias (source_alias src) filter_col)))
+											(lower_column_expr_for_alias src filter_condition)))
 											(define row_expr (list (quote resultrow)
 												(cons (quote list) (lower_row_number_result_fields src col fields))))
-											(define continuation_expr (list (quote lambda) (list (quote __row_number))
-												(list (quote if)
-													(list (quote optimize) (lower_column_expr_for_alias src rewritten_condition))
+										(define continuation_expr (list (quote lambda) (list (quote __row_number))
+											(list (quote if)
+												(lower_column_expr_for_alias src rewritten_condition)
 													row_expr
 													nil)))
 											(define map_expr (list (quote lambda)
@@ -17347,10 +17341,10 @@ path. */
 					(list (quote scan_recset)
 						'(session "__memcp_tx")
 						(source_table_expr input_src)
-						(cons (quote list) filtercols)
-						(list (quote lambda)
-							(map filtercols (lambda (col) (symbol (concat alias "." col))))
-							(list (quote optimize) (lower_column_expr_for_alias input_src condition))))))))))
+					(cons (quote list) filtercols)
+					(list (quote lambda)
+						(map filtercols (lambda (col) (symbol (concat alias "." col))))
+						(lower_column_expr_for_alias input_src condition)))))))))
 
 (define membership_keyset_bindings (lambda (memberships)
 	(begin
@@ -17409,7 +17403,7 @@ path. */
 					(cons (quote list) cols)
 					(list (quote lambda)
 						(map cols (lambda (col) (scan_callback_symbol_for_alias (source_alias src) col)))
-						(list (quote optimize) (lower_column_expr_for_alias src branch)))))
+						(lower_column_expr_for_alias src branch))))
 			(begin
 				(define branch_bindings (filter (map markers (lambda (marker)
 					(membership_binding_for_marker bindings marker)))
@@ -17523,7 +17517,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 							(cons (quote list) base_cols)
 							(list (quote lambda)
 								(map base_cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-								(list (quote optimize) (lower_column_expr_for_alias src membership_formula_residual)))))
+								(lower_column_expr_for_alias src membership_formula_residual))))
 						(list (quote recset_difference)
 							(cons (quote list) (cons base_recset (nth membership_formula 2)))))
 					(if membership_formula_driver (nth membership_formula 1) nil)))
@@ -17561,7 +17555,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 						(coalesceNil membership_candidates source_table))))
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-					(list (quote optimize) (lower_column_expr_for_alias src filter_condition))))
+					(lower_column_expr_for_alias src filter_condition)))
 				(define map_expr (list (quote lambda)
 					(map mapcols (lambda (col) (symbol (concat alias "." col))))
 					(list (quote resultrow)
@@ -17825,9 +17819,8 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			(list remaining_condition)
 			(source_join_exprs acceptance_sources))))
 		(define acceptance_probe (if (empty_list? acceptance_sources)
-			(list (quote optimize)
-				(lower_column_expr_for_join_truth_context
-					all_sources default_alias remaining_condition acceptance_probe_work_rows))
+			(lower_column_expr_for_join_truth_context
+				all_sources default_alias remaining_condition acceptance_probe_work_rows)
 			(build_join_scan_reduce_using_recipe
 				schema all_sources acceptance_plan default_alias acceptance_needed_exprs remaining_condition true
 				'() 0 1 true acceptance_probe_work_rows nil stages
@@ -17840,13 +17833,12 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			(join_cols_for_alias all_sources default_alias alias (list effective_condition)))))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote optimize)
-				(lower_column_expr_for_join_truth_context
-					all_sources default_alias filter_condition acceptance_probe_work_rows))))
+			(lower_column_expr_for_join_truth_context
+				all_sources default_alias filter_condition acceptance_probe_work_rows)))
 		(define acceptance_cols (join_cols_for_alias all_sources default_alias alias acceptance_needed_exprs))
 		(define acceptance_expr (list (quote lambda)
 			(map acceptance_cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote optimize) acceptance_probe)))
+			acceptance_probe))
 		(define offset (coalesceNil offset_value 0))
 		(define limit (coalesceNil limit_value -1))
 		(define projection_probe_work_rows (coalesceNil
@@ -17935,9 +17927,9 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 				(define rewritten_row_expr (replace_lowered_row_number_symbol alias col row_expr))
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias alias filter_col)))
-					(list (quote optimize) (lower_column_expr_for_join_truth_context
+					(lower_column_expr_for_join_truth_context
 						all_sources default_alias filter_condition
-						(probe_work_context_rows_for_alias probe_context alias)))))
+						(probe_work_context_rows_for_alias probe_context alias))))
 				(define continuation_expr (list (quote lambda) (list (quote __row_number))
 					(continuation remaining_condition rewritten_row_expr '())))
 				(define map_expr (list (quote lambda)
@@ -18190,14 +18182,14 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 				(probe_work_context_rows_for_alias probe_context alias))))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote optimize) lowered_filter_condition)))
+			lowered_filter_condition))
 		(define continuation_expr (continuation remaining_condition row_expr remaining_order_items))
 		(define map_body (if (equal? post_outer_condition true)
 			continuation_expr
 			(list (quote if)
-				(list (quote optimize) (lower_column_expr_for_join_truth_context
+				(lower_column_expr_for_join_truth_context
 					all_sources default_alias post_outer_condition
-					(probe_work_context_rows_for_alias probe_context alias)))
+					(probe_work_context_rows_for_alias probe_context alias))
 				continuation_expr
 				(join_scan_skip_expr result_mode))))
 		(define map_expr (list (quote lambda)
@@ -18298,9 +18290,9 @@ ownership remain available until the physical scans are emitted. */
 				(if (equal? (coalesceNil remaining_condition true) true)
 					final_row_expr
 					(list (quote if)
-						(list (quote optimize) (lower_column_expr_for_join_truth_context
+						(lower_column_expr_for_join_truth_context
 							all_sources default_alias remaining_condition
-							(probe_work_context_default_rows probe_context)))
+							(probe_work_context_default_rows probe_context))
 						final_row_expr
 						(join_scan_skip_expr result_mode))))))
 		(if (nil? tree)
@@ -19096,7 +19088,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define mapcols (cons "$update" (merge_unique (list filtercols valuecols))))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (symbol (concat alias "." col))))
-			(list (quote optimize) (lower_column_expr_for_alias src cond))))
+			(lower_column_expr_for_alias src cond)))
 		(define update_values (if delete_mode
 			nil
 			(cons (quote list) (lower_dml_update_values src cols))))
@@ -19476,7 +19468,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define mapcols (merge_unique (list outputcols sort_input_cols)))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-			(list (quote optimize) (lower_column_expr_for_alias src filter_condition))))
+			(lower_column_expr_for_alias src filter_condition)))
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col) (symbol (concat alias "." col))))
 			(list (quote resultrow)
