@@ -767,8 +767,12 @@ func analyzeLeafInlineBody(expr Scmer, callee Symbol, paramCount int, refs []int
 	}
 	if head, ok := scmerSymbol(items[0]); ok {
 		switch head {
-		case callee, "lambda", "define", "set", "setN", "eval", "parser", "outer", "begin", "begin_mut", "!begin", "match", "match_mut":
+		case callee, "define", "set", "setN", "eval", "parser", "outer", "begin", "begin_mut", "!begin", "match", "match_mut":
 			return false
+		case "lambda":
+			// A nested lambda is an opaque constant for this substitution. It is
+			// safe only when it does not capture the surrounding Proc frame.
+			return !expressionContainsOuterReference(expr)
 		}
 	}
 	for _, item := range items {
@@ -787,7 +791,7 @@ func substituteLeafInlineParams(expr Scmer, args []Scmer) Scmer {
 		return args[int(expr.NthLocalVar())]
 	}
 	items, ok := scmerSlice(expr)
-	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") || scmerIsSymbol(items[0], "lambda") {
 		return expr
 	}
 	rewritten := make([]Scmer, len(items))
@@ -795,6 +799,51 @@ func substituteLeafInlineParams(expr Scmer, args []Scmer) Scmer {
 		rewritten[i] = substituteLeafInlineParams(item, args)
 	}
 	return NewSlice(rewritten)
+}
+
+func expressionContainsOuterReference(expr Scmer) bool {
+	var pending [maxLeafInlineNodes]Scmer
+	var seen [maxLeafInlineNodes]Scmer
+	pending[0] = expr
+	pendingCount := 1
+	seenCount := 0
+	for pendingCount > 0 {
+		pendingCount--
+		current := pending[pendingCount]
+		if stripped, ok := scmerStripSourceInfo(current); ok {
+			current = stripped
+		}
+		visited := false
+		for i := 0; i < seenCount; i++ {
+			if seen[i] == current {
+				visited = true
+				break
+			}
+		}
+		if visited {
+			continue
+		}
+		if seenCount >= len(seen) {
+			return true
+		}
+		seen[seenCount] = current
+		seenCount++
+		items, ok := scmerSlice(current)
+		if !ok || len(items) == 0 || items[0].SymbolEquals("quote") {
+			continue
+		}
+		if items[0].SymbolEquals("outer") {
+			return true
+		}
+		if len(items) > len(pending)-pendingCount {
+			return true
+		}
+		for _, item := range items {
+			pending[pendingCount] = item
+			pendingCount++
+		}
+	}
+	return false
 }
 
 func leafInlineBindingsStable(expr Scmer, source, target *Env) bool {
@@ -818,6 +867,9 @@ func leafInlineBindingsStable(expr Scmer, source, target *Env) bool {
 	items := expr.Slice()
 	if len(items) == 0 || scmerIsSymbol(items[0], "quote") {
 		return true
+	}
+	if scmerIsSymbol(items[0], "lambda") {
+		return source == target && !expressionContainsOuterReference(expr)
 	}
 	for _, item := range items {
 		if !leafInlineBindingsStable(item, source, target) {
@@ -847,12 +899,13 @@ func tryInlineLeafProc(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bo
 	if proc == nil || proc.En == nil {
 		return NewNil(), tiZero, false
 	}
+	args := v[1:]
 	params := proc.Params
 	if stripped, ok := scmerStripSourceInfo(params); ok {
 		params = stripped
 	}
 	paramItems, ok := scmerSlice(params)
-	if !ok || len(paramItems) != len(v)-1 || proc.NumVars != len(paramItems) {
+	if !ok || len(paramItems) != len(args) || proc.NumVars != len(paramItems) {
 		return NewNil(), tiZero, false
 	}
 	refs := make([]int, len(paramItems))
@@ -868,7 +921,7 @@ func tryInlineLeafProc(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bo
 			return NewNil(), tiZero, false
 		}
 	}
-	inlined := substituteLeafInlineParams(proc.Body, v[1:])
+	inlined := substituteLeafInlineParams(proc.Body, args)
 	if ome.inlineStack == nil {
 		ome.inlineStack = make(map[Symbol]bool)
 	}
