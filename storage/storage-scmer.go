@@ -313,7 +313,7 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 	s.minIntScale = math.MinInt8
 	if value.IsString() {
 		s.hasString = true
-		if len(value.String()) > 255 {
+		if len(value.String()) > maxInlineBlobBytes {
 			s.longStrings++
 		}
 	}

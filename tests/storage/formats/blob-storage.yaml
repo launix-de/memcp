@@ -1,3 +1,4 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
 # Blob storage and REPEAT() function tests
 
 metadata:
@@ -60,8 +61,8 @@ test_cases:
           payload: "world"
 
   # --- TEXT column with long strings (triggers OverlayBlob) ---
-  - name: "Insert long string (>255 bytes)"
-    sql: "INSERT INTO blob_test (id, payload) VALUES (3, REPEAT('A', 1000))"
+  - name: "Insert long string (>2 KiB)"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (3, REPEAT('A', 3000))"
     expect:
       affected_rows: 1
 
@@ -70,10 +71,10 @@ test_cases:
     expect:
       rows: 1
       data:
-        - len: 1000
+        - len: 3000
 
   - name: "Roundtrip: long string value check"
-    sql: "SELECT payload = REPEAT('A', 1000) AS ok FROM blob_test WHERE id = 3"
+    sql: "SELECT payload = REPEAT('A', 3000) AS ok FROM blob_test WHERE id = 3"
     expect:
       rows: 1
       data:
@@ -81,12 +82,12 @@ test_cases:
 
   # --- Dedup: same long string twice ---
   - name: "Insert duplicate long string"
-    sql: "INSERT INTO blob_test (id, payload) VALUES (4, REPEAT('A', 1000))"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (4, REPEAT('A', 3000))"
     expect:
       affected_rows: 1
 
   - name: "Both rows return same value"
-    sql: "SELECT id FROM blob_test WHERE payload = REPEAT('A', 1000) ORDER BY id"
+    sql: "SELECT id FROM blob_test WHERE payload = REPEAT('A', 3000) ORDER BY id"
     expect:
       rows: 2
       data:
@@ -108,7 +109,7 @@ test_cases:
 
   # --- Mixed short + long strings ---
   - name: "Insert another long string"
-    sql: "INSERT INTO blob_test (id, payload) VALUES (6, REPEAT('Z', 500))"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (6, REPEAT('Z', 2500))"
     expect:
       affected_rows: 1
 
@@ -134,7 +135,7 @@ test_cases:
 
   # --- UPDATE blob value ---
   - name: "Update short to long string"
-    sql: "UPDATE blob_test SET payload = REPEAT('U', 800) WHERE id = 1"
+    sql: "UPDATE blob_test SET payload = REPEAT('U', 2800) WHERE id = 1"
     expect:
       affected_rows: 1
 
@@ -143,7 +144,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - len: 800
+        - len: 2800
 
   # --- DELETE row with blob ---
   - name: "Delete row with long blob"
@@ -183,8 +184,8 @@ test_cases:
       data:
         - b: "/////w=="
 
-  - name: "Insert long binary blob (>255 bytes, triggers OverlayBlob)"
-    sql: "INSERT INTO blob_test (id, payload) VALUES (12, FROM_BASE64(REPEAT('AAAA', 100)))"
+  - name: "Insert long binary blob (>2 KiB, triggers OverlayBlob)"
+    sql: "INSERT INTO blob_test (id, payload) VALUES (12, FROM_BASE64(REPEAT('AAAA', 1000)))"
     expect:
       affected_rows: 1
 
@@ -193,10 +194,10 @@ test_cases:
     expect:
       rows: 1
       data:
-        - len: 300
+        - len: 3000
 
   - name: "Roundtrip long binary data"
-    sql: "SELECT TO_BASE64(payload) = REPEAT('AAAA', 100) AS ok FROM blob_test WHERE id = 12"
+    sql: "SELECT TO_BASE64(payload) = REPEAT('AAAA', 1000) AS ok FROM blob_test WHERE id = 12"
     expect:
       rows: 1
       data:
@@ -220,7 +221,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - len: 1000
+        - len: 3000
 
   - name: "After restart: short string intact"
     sql: "SELECT payload FROM blob_test WHERE id = 2"
@@ -237,7 +238,7 @@ test_cases:
         - b: "AAABAP8A/w=="
 
   - name: "After restart: long binary blob intact"
-    sql: "SELECT TO_BASE64(payload) = REPEAT('AAAA', 100) AS ok FROM blob_test WHERE id = 12"
+    sql: "SELECT TO_BASE64(payload) = REPEAT('AAAA', 1000) AS ok FROM blob_test WHERE id = 12"
     expect:
       rows: 1
       data:
@@ -254,7 +255,7 @@ test_cases:
       rows: 0
 
   - name: "Refcount: insert long string into rc1"
-    sql: "INSERT INTO blob_rc1 (id, payload) VALUES (1, REPEAT('R', 1000))"
+    sql: "INSERT INTO blob_rc1 (id, payload) VALUES (1, REPEAT('R', 3000))"
     expect:
       affected_rows: 1
 
@@ -264,7 +265,7 @@ test_cases:
       rows: 0
 
   - name: "Refcount: verify blob after restart"
-    sql: "SELECT payload = REPEAT('R', 1000) AS ok FROM blob_rc1 WHERE id = 1"
+    sql: "SELECT payload = REPEAT('R', 3000) AS ok FROM blob_rc1 WHERE id = 1"
     expect:
       rows: 1
       data:
@@ -295,12 +296,12 @@ test_cases:
       rows: 0
 
   - name: "Shared blob: insert long string in first"
-    sql: "INSERT INTO blob_shared1 (id, payload) VALUES (1, REPEAT('S', 1000))"
+    sql: "INSERT INTO blob_shared1 (id, payload) VALUES (1, REPEAT('S', 3000))"
     expect:
       affected_rows: 1
 
   - name: "Shared blob: insert same long string in second"
-    sql: "INSERT INTO blob_shared2 (id, payload) VALUES (1, REPEAT('S', 1000))"
+    sql: "INSERT INTO blob_shared2 (id, payload) VALUES (1, REPEAT('S', 3000))"
     expect:
       affected_rows: 1
 
@@ -312,8 +313,8 @@ test_cases:
   - name: "Shared blob: both tables survive concurrent rebuild"
     sql: |
       SELECT
-        (SELECT payload = REPEAT('S', 1000) FROM blob_shared1 WHERE id = 1) AS first_ok,
-        (SELECT payload = REPEAT('S', 1000) FROM blob_shared2 WHERE id = 1) AS second_ok
+        (SELECT payload = REPEAT('S', 3000) FROM blob_shared1 WHERE id = 1) AS first_ok,
+        (SELECT payload = REPEAT('S', 3000) FROM blob_shared2 WHERE id = 1) AS second_ok
     expect:
       rows: 1
       data:
@@ -326,7 +327,7 @@ test_cases:
       rows: 0
 
   - name: "Shared blob: second table still has blob"
-    sql: "SELECT payload = REPEAT('S', 1000) AS ok FROM blob_shared2 WHERE id = 1"
+    sql: "SELECT payload = REPEAT('S', 3000) AS ok FROM blob_shared2 WHERE id = 1"
     expect:
       rows: 1
       data:
@@ -348,7 +349,7 @@ test_cases:
       rows: 0
 
   - name: "RC persist: insert long blob"
-    sql: "INSERT INTO blob_rcpersist (id, payload) VALUES (1, REPEAT('P', 1000))"
+    sql: "INSERT INTO blob_rcpersist (id, payload) VALUES (1, REPEAT('P', 3000))"
     expect:
       affected_rows: 1
 
@@ -358,7 +359,7 @@ test_cases:
       rows: 0
 
   - name: "RC persist: after restart blob still readable"
-    sql: "SELECT payload = REPEAT('P', 1000) AS ok FROM blob_rcpersist WHERE id = 1"
+    sql: "SELECT payload = REPEAT('P', 3000) AS ok FROM blob_rcpersist WHERE id = 1"
     expect:
       rows: 1
       data:

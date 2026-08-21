@@ -96,9 +96,9 @@ func TestCleanNoOrphans(t *testing.T) {
 	tbl.CreateColumn("content", "TEXT", nil, nil)
 
 	insertLongRows(t, tbl, []string{
-		strings.Repeat("A", 800),
-		strings.Repeat("B", 800),
-		strings.Repeat("C", 800),
+		strings.Repeat("A", maxInlineBlobBytes+800),
+		strings.Repeat("B", maxInlineBlobBytes+800),
+		strings.Repeat("C", maxInlineBlobBytes+800),
 	})
 
 	db := GetDatabase("gcdb")
@@ -128,9 +128,9 @@ func TestCleanOrphanedBlob(t *testing.T) {
 	tbl.CreateColumn("content", "TEXT", nil, nil)
 
 	insertLongRows(t, tbl, []string{
-		strings.Repeat("X", 800),
-		strings.Repeat("Y", 800),
-		strings.Repeat("Z", 800),
+		strings.Repeat("X", maxInlineBlobBytes+800),
+		strings.Repeat("Y", maxInlineBlobBytes+800),
+		strings.Repeat("Z", maxInlineBlobBytes+800),
 	})
 
 	beforeBlobs := len(blobFiles(t, "gcdb"))
@@ -211,9 +211,9 @@ func TestCleanIdempotent(t *testing.T) {
 	tbl.CreateColumn("content", "TEXT", nil, nil)
 
 	insertLongRows(t, tbl, []string{
-		strings.Repeat("Q", 800),
-		strings.Repeat("R", 800),
-		strings.Repeat("S", 800),
+		strings.Repeat("Q", maxInlineBlobBytes+800),
+		strings.Repeat("R", maxInlineBlobBytes+800),
+		strings.Repeat("S", maxInlineBlobBytes+800),
 	})
 
 	db := GetDatabase("gcdb")
