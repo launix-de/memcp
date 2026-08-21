@@ -33,7 +33,7 @@ setup:
   - sql: "INSERT INTO cbr_scope VALUES (1, 1), (2, 0), (3, 0), (4, 0)"
   - sql: "SET @cbr_actor = 1"
   - sql: "INSERT INTO cbr_exists_acl VALUES (1, 2, TRUE)"
-  - sql: "INSERT INTO cbr_fallback_acl VALUES (1, 3, TRUE)"
+  - sql: "INSERT INTO cbr_fallback_acl VALUES (1, 3, TRUE), (2, NULL, TRUE)"
   - sql: "INSERT INTO cbr_singleton VALUES (1)"
   - sql: "INSERT INTO cbr_numeric VALUES (1, 1, 9), (2, 2, 7)"
   - scm: |
@@ -130,6 +130,82 @@ test_cases:
       result_occurrences:
         - text: "purpose exists"
           count: 2
+
+  - name: "NOT EXISTS uses an exact RecSet complement"
+    sql: |
+      EXPLAIN SELECT i.id
+      FROM cbr_item i
+      WHERE NOT EXISTS (
+        SELECT TRUE FROM cbr_exists_acl ea
+        WHERE ea.scope_id = i.scope_id AND ea.allowed = TRUE
+      )
+    expect:
+      rows: 1
+      result_contains:
+        - "recset_not"
+        - "recset_project_join"
+      result_not_contains:
+        - "$recset_contains"
+
+  - name: "selective filter and NOT EXISTS use exact RecSet difference"
+    sql: |
+      EXPLAIN SELECT i.id
+      FROM cbr_item i
+      WHERE i.id <= 700
+        AND NOT EXISTS (
+          SELECT TRUE FROM cbr_exists_acl ea
+          WHERE ea.scope_id = i.scope_id AND ea.allowed = TRUE
+        )
+    expect:
+      rows: 1
+      result_contains:
+        - "recset_difference"
+        - "recset_project_join"
+
+  - name: "RecSet NOT and difference preserve NOT EXISTS results"
+    sql: |
+      SELECT
+        SUM(NOT EXISTS (
+          SELECT TRUE FROM cbr_exists_acl ea
+          WHERE ea.scope_id = i.scope_id AND ea.allowed = TRUE
+        )) AS missing_exists,
+        SUM(EXISTS (
+          SELECT TRUE FROM cbr_exists_acl ea
+          WHERE ea.scope_id = i.scope_id AND ea.allowed = TRUE
+        ) AND NOT EXISTS (
+          SELECT TRUE FROM cbr_fallback_acl fa
+          WHERE fa.scope_id = i.scope_id AND fa.allowed = TRUE
+        )) AS exists_without_fallback
+      FROM cbr_item i
+    expect:
+      rows: 1
+      data:
+        - {missing_exists: 675, exists_without_fallback: 225}
+
+  - name: "nullable NOT IN is not lowered through RecSet complement"
+    sql: |
+      EXPLAIN SELECT i.id
+      FROM cbr_item i
+      WHERE i.scope_id NOT IN (
+        SELECT fa.scope_id FROM cbr_fallback_acl fa WHERE fa.allowed = TRUE
+      )
+    expect:
+      rows: 1
+      result_not_contains:
+        - "recset_not"
+        - "recset_difference"
+
+  - name: "nullable NOT IN keeps UNKNOWN rows out"
+    sql: |
+      SELECT COUNT(*) AS matched
+      FROM cbr_item i
+      WHERE i.scope_id NOT IN (
+        SELECT fa.scope_id FROM cbr_fallback_acl fa WHERE fa.allowed = TRUE
+      )
+    expect:
+      rows: 1
+      data:
+        - {matched: 0}
 
   - name: "query-invariant EXISTS is realized once per query"
     sql: |
