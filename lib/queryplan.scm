@@ -19638,6 +19638,28 @@ ordering run. Storage artifacts begin in build_queryplan. */
 				(merge (list decisions (physical_ordered_recset_decisions item)))) own))
 		_ '())))
 
+/* recset_project_join is adaptive only inside the physical operator: actual
+source-key and per-shard target cardinalities are available there, while the
+logical plan often has only a weak selectivity sample for text predicates.
+Expose that bounded cost decision rather than presenting the carrier as an
+opaque implementation detail in EXPLAIN PHYSICAL. */
+(define physical_recset_project_join_decisions (lambda (expr)
+	(match expr
+		(cons head tail) (begin
+			(define own (if (equal? (string head) "recset_project_join")
+				(list (list
+					(list "decision" "recset_project_join_access")
+					(list "chosen" "runtime_cost_minimum")
+					(list "reason" "actual_key_and_target_shard_cardinality")
+					(list "alternatives" (list
+						"indexed_key_probes"
+						"dense_numeric_membership_scan"
+						"dense_generic_membership_scan"))))
+				'()))
+			(reduce tail (lambda (decisions item)
+				(merge (list decisions (physical_recset_project_join_decisions item)))) own))
+		_ '())))
+
 (define explain_queryplan_physical (lambda (query)
 	(begin
 		(define planning_session (context "session"))
@@ -19650,7 +19672,8 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		(define optimized_plan (optimize plan))
 		(define decisions (merge (list
 			(planner_physical_explain_decisions accumulator)
-			(physical_ordered_recset_decisions optimized_plan))))
+			(physical_ordered_recset_decisions optimized_plan)
+			(physical_recset_project_join_decisions optimized_plan))))
 		(planning_session "__memcp_explain_physical" nil)
 		(list (quote resultrow)
 			(list (quote list)
