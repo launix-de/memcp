@@ -440,6 +440,34 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 (define dep_subquery_query (lambda (expr) (nth expr 3)))
 (define dep_subquery_outer_sources (lambda (expr) (nth expr 4)))
 
+/* A scalar subquery's projection is a value demand on its relational scope,
+not part of that scope's identity. Nested dependent stages use this identity as
+their parent handle, so independently written projections over the same FROM /
+WHERE / grouping / ordering backbone can share those dependencies before the
+parent stages are merged into a multi-output stage. */
+(define dependent_subquery_scope_backbone (lambda (kind subquery)
+	(begin
+		(define normalized (normalize_query_ast subquery))
+		(if (and (equal? kind (quote scalar)) (query_block? normalized))
+			(begin
+				(define backbone (make_query_block
+					(qb_schema normalized)
+					(qb_sources normalized)
+					'()
+					(qb_where normalized)
+					(qb_group normalized)
+					(qb_having normalized)
+					(qb_order normalized)
+					(qb_limit normalized)
+					(qb_offset normalized)
+					(qb_hidden normalized)
+					(qb_stages normalized)
+					(qb_facts normalized)))
+				(define alias_map (stage_semantic_alias_entries
+					(source_aliases (qb_sources normalized)) "__subquery_local_"))
+				(stage_semantic_canonical_node alias_map '() backbone))
+			normalized))))
+
 /* ------------------------------------------------------------------------- */
 /* Normalisation                                                              */
 
@@ -2742,10 +2770,14 @@ without separately proving two-valued semantics. */
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
 		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
+		(define output_index (if (>= (count args) 4) (nth args 3) 0))
 		(if (not (scalar_once_supported? inner))
 			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
 			true)
-		(define value_expr (query_block_first_expr inner))
+		(define value_exprs (extract_assoc (qb_fields inner) (lambda (_title expr) expr)))
+		(if (>= output_index (count value_exprs))
+			(neumann_fail "untangle_query" "scalar output index exceeds the bundled projection")
+			true)
 		(define analysis (analyze_query_correlations inner outer_sources
 			exists_correlation_pair (session_domain_pairs inner) true))
 		(define inner_src (qassoc_get analysis (quote inner_src) nil))
@@ -2762,13 +2794,14 @@ without separately proving two-valued semantics. */
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
-		(define value_for_inner (canonical_column_expr_for_alias inner_default
-			(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))
+		(define values_for_inner (map value_exprs (lambda (value_expr)
+			(canonical_column_expr_for_alias inner_default
+				(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))))
 		(define order_for_inner (map (coalesceNil (qb_order inner) '()) (lambda (item)
 			(match item '(expr dir) (list (canonical_column_expr_for_alias inner_default
 				(decorrelate_expr_with_pairs inner_default lookup_pairs expr)) dir)))))
-		(define ag (scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner)))
-		(define ags (list ag))
+		(define ags (dedupe_aggregates_by_col (map values_for_inner (lambda (value_for_inner)
+			(scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner))))))
 		(define stage_input (if (empty_list? (qb_stages inner))
 			inner_src
 			(make_query_block
@@ -2781,7 +2814,7 @@ without separately proving two-valued semantics. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-once:" (fnv_hash (string (list subquery keys outer_domain condition ag)))))
+		(define stage_id (concat "scalar-once:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2813,10 +2846,14 @@ without separately proving two-valued semantics. */
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+		(define output_exprs (map values_for_inner (lambda (value_for_inner)
+			(scalar_once_value_expr stage_input stage_alias
+				(scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner))))))
 		(list
-			(scalar_once_value_expr stage_input stage_alias ag)
+			(nth output_exprs output_index)
 			(list stage)
-			(list source)))))
+			(list source)
+			output_exprs))))
 
 (define make_limited_derived_stage_source (lambda (alias inner original_relation)
 	(begin
@@ -3101,10 +3138,14 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define outer_sources (nth args 0))
 		(define subquery (nth args 1))
 		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
+		(define output_index (if (>= (count args) 4) (nth args 3) 0))
 		(if (not (scalar_single_supported? inner))
 			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
 			true)
-		(define value_expr (query_block_first_expr inner))
+		(define value_exprs (extract_assoc (qb_fields inner) (lambda (_title expr) expr)))
+		(if (>= output_index (count value_exprs))
+			(neumann_fail "untangle_query" "scalar output index exceeds the bundled projection")
+			true)
 		(define analysis (analyze_query_correlations inner outer_sources
 			exists_correlation_pair (session_domain_pairs inner) true))
 		(define inner_src (qassoc_get analysis (quote inner_src) nil))
@@ -3118,11 +3159,13 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define outer_domain (correlation_domain lookup_pairs))
 		(define lookup_keys (correlation_lookup_keys lookup_pairs))
 		(define condition (combine_where_terms local_terms true))
-		(define value_for_inner (canonical_column_expr_for_alias inner_default
-			(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))
-		(define ags (scalar_single_aggregates value_for_inner))
-		(define value_ag (car ags))
-		(define count_ag (cadr ags))
+		(define values_for_inner (map value_exprs (lambda (value_expr)
+			(canonical_column_expr_for_alias inner_default
+				(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))))
+		(define value_ags (map values_for_inner (lambda (value_for_inner)
+			(car (scalar_single_aggregates value_for_inner)))))
+		(define count_ag aggregate_count_descriptor)
+		(define ags (dedupe_aggregates_by_col (merge (list value_ags (list count_ag)))))
 		(define stage_input (if (and (single_source? (qb_sources inner)) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
@@ -3167,10 +3210,13 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
+		(define output_exprs (map value_ags (lambda (output_ag)
+			(scalar_single_value_expr stage_input stage_alias output_ag count_ag))))
 		(list
-			(scalar_single_value_expr stage_input stage_alias value_ag count_ag)
+			(nth output_exprs output_index)
 			(list stage)
-			(list source)))))
+			(list source)
+			output_exprs))))
 
 (define window_aggregate_descriptor (lambda (fn args)
 	(match fn
@@ -3599,7 +3645,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define sources (merge_unique (map rewritten_args (lambda (item) (nth item 2)))))
 		(list expr stages sources))))
 
-(define untangle_scalar_subquery_with_stages (lambda (subquery outer_sources ctx)
+(define untangle_scalar_subquery_with_stages (lambda (subquery outer_sources ctx output_index)
 	(begin
 		(define normalized (normalize_query_ast subquery))
 		(define sub_ctx (make_uctx ctx (list (list (quote outer-sources) outer_sources))))
@@ -3611,8 +3657,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(make_grouped_scalar_top_rewrite inner subquery)
 				(if (empty_list? (extract_aggregates (query_block_first_expr inner)))
 					(if (scalar_once_supported? inner)
-						(make_scalar_once_stage_rewrite inner (list outer_sources subquery pending_info))
-						(make_scalar_single_stage_rewrite inner (list outer_sources subquery pending_info)))
+						(make_scalar_once_stage_rewrite inner (list outer_sources subquery pending_info output_index))
+						(make_scalar_single_stage_rewrite inner (list outer_sources subquery pending_info output_index)))
 					(make_scalar_aggregate_stage_rewrite inner (list outer_sources subquery pending_info))))))))
 
 (define untangle_exists_subquery_with_stages (lambda (subquery outer_sources ctx)
@@ -3798,11 +3844,11 @@ membership_truth rather than adding another physical lowering path. */
 		((symbol inner_select) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
 			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
-			(untangle_scalar_subquery_with_stages subquery outer_sources ctx))
+			(untangle_scalar_subquery_with_stages subquery outer_sources ctx 0))
 		((quote inner_select) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
 			(list (make_dependent_subquery_marker (quote scalar) nil subquery outer_sources) '() '())
-			(untangle_scalar_subquery_with_stages subquery outer_sources ctx))
+			(untangle_scalar_subquery_with_stages subquery outer_sources ctx 0))
 		((symbol inner_select_exists) subquery)
 		(if (btw2025_defer_subquery_rewrite? subquery outer_sources ctx)
 			(list (make_dependent_subquery_marker (quote exists) nil subquery outer_sources) '() '())
@@ -3896,6 +3942,152 @@ membership_truth rather than adding another physical lowering path. */
 		(cons title (cons (untangle_expr expr ctx) (untangle_fields rest ctx)))
 		_ '())))
 
+/* SQL must repeat a scalar subquery when callers need several values from the
+same correlated row. Preserve that syntax at the boundary, but represent the
+shared relational work once: equivalent scalar LIMIT 1 backbones become one
+logical stage with one aggregate output per demanded projection. Physical
+carrier selection remains a later, per-stage cost decision. */
+(define btw2025_scalar_bundle_candidate? (lambda (marker)
+	(and (dependent_subquery_marker? marker)
+		(and (equal? (dep_subquery_kind marker) (quote scalar))
+			(begin
+				(define subquery (normalize_query_ast (dep_subquery_query marker)))
+				(and (query_block? subquery)
+					(and (not (empty_list? (qb_sources subquery)))
+						(and (equal? (count (qb_fields subquery)) 2)
+						(and (equal? (qb_limit subquery) 1)
+							(empty_list? (extract_aggregates (query_block_first_expr subquery))))))))))))
+
+(define btw2025_scalar_bundle_key (lambda (marker)
+	(concat "scalar-bundle:"
+		(serialize (list
+		(dependent_subquery_scope_backbone (quote scalar) (dep_subquery_query marker))
+		(dep_subquery_outer_sources marker))))))
+
+(define btw2025_scalar_bundle_output_budget 16)
+
+(define btw2025_scalar_markers_in_expr (lambda (expr)
+	(match expr
+		((symbol dependent-subquery) _kind _probe _subquery _outer_sources)
+		(if (btw2025_scalar_bundle_candidate? expr) (list expr) '())
+		((quote dependent-subquery) _kind _probe _subquery _outer_sources)
+		(if (btw2025_scalar_bundle_candidate? expr) (list expr) '())
+		(cons _head tail) (merge (map tail btw2025_scalar_markers_in_expr))
+		_ '())))
+
+(define btw2025_scalar_bundle_groups (lambda (markers)
+	(reduce markers (lambda (groups marker)
+		(begin
+			(define key (btw2025_scalar_bundle_key marker))
+			(define entries (qassoc_get groups key '()))
+			(qassoc_set groups key
+				(if (contains? entries marker) entries (merge entries (list marker))))))
+		'())))
+
+(define btw2025_scalar_bundle_alias_map (lambda (target candidate)
+	(begin
+		(define target_aliases (source_aliases (qb_sources target)))
+		(define candidate_aliases (source_aliases (qb_sources candidate)))
+		(if (not (equal? (count target_aliases) (count candidate_aliases)))
+			(neumann_fail "untangle_query" "scalar bundle backbones expose different source arity")
+			(map (produceN (count candidate_aliases)) (lambda (i)
+				(list (nth candidate_aliases i) (nth target_aliases i))))))))
+
+(define btw2025_scalar_bundle_fields (lambda (markers)
+	(begin
+		(define target (normalize_query_ast (dep_subquery_query (car markers))))
+		(merge (mapIndex markers (lambda (i marker)
+			(begin
+				(define candidate (normalize_query_ast (dep_subquery_query marker)))
+				(list
+					(concat "__scalar_bundle_" i)
+					(rewrite_stage_graph_expr
+						(btw2025_scalar_bundle_alias_map target candidate)
+						'()
+						(query_block_first_expr candidate))))))))))
+
+(define btw2025_scalar_bundle_query (lambda (markers)
+	(begin
+		(define target (normalize_query_ast (dep_subquery_query (car markers))))
+		(make_query_block
+			(qb_schema target)
+			(qb_sources target)
+			(btw2025_scalar_bundle_fields markers)
+			(qb_where target)
+			(qb_group target)
+			(qb_having target)
+			(qb_order target)
+			(qb_limit target)
+			(qb_offset target)
+			(qb_hidden target)
+			(qb_stages target)
+			(qb_facts target)))))
+
+(define btw2025_scalar_bundle_marker_index (lambda (markers marker index)
+	(match markers
+		(cons current rest) (if (equal? current marker)
+			index
+			(btw2025_scalar_bundle_marker_index rest marker (+ index 1)))
+		_ 0)))
+
+(define btw2025_bundle_scalar_marker (lambda (marker groups)
+	(if (not (btw2025_scalar_bundle_candidate? marker))
+		marker
+		(begin
+			(define markers (qassoc_get groups (btw2025_scalar_bundle_key marker) '()))
+			/* Very wide demand sets are cheaper through the existing canonical
+			stage merger: it deduplicates equivalent outputs before recipe emission.
+			Keep bundling focused on the compact multi-column row lookups for which it
+			removes relational work without inflating the generated program. */
+			(if (or (<= (count markers) 1)
+				(> (count markers) btw2025_scalar_bundle_output_budget))
+				marker
+				(make_dependent_subquery_marker
+					(quote scalar-output)
+					(btw2025_scalar_bundle_marker_index markers marker 0)
+					(btw2025_scalar_bundle_query markers)
+					(dep_subquery_outer_sources marker)))))))
+
+(define btw2025_bundle_scalar_markers_in_expr (lambda (expr groups)
+	(match expr
+		((symbol dependent-subquery) _kind _probe _subquery _outer_sources)
+		(btw2025_bundle_scalar_marker expr groups)
+		((quote dependent-subquery) _kind _probe _subquery _outer_sources)
+		(btw2025_bundle_scalar_marker expr groups)
+		(cons head tail) (cons head
+			(map tail (lambda (item) (btw2025_bundle_scalar_markers_in_expr item groups))))
+		_ expr)))
+
+(define btw2025_bundle_scalar_markers_in_block (lambda (block)
+	(begin
+		(define marker_scope (list
+			(map (qb_sources block) source_join_expr)
+			(qb_fields block)
+			(qb_where block)
+			(qb_group block)
+			(qb_having block)
+			(qb_order block)
+			(qb_hidden block)))
+		(define groups (btw2025_scalar_bundle_groups
+			(btw2025_scalar_markers_in_expr marker_scope)))
+		(define rewrite (lambda (expr) (btw2025_bundle_scalar_markers_in_expr expr groups)))
+		(define rewritten_sources (map (qb_sources block) (lambda (src)
+			(source_with_join_expr src (rewrite (source_join_expr src))))))
+		(define rewritten_fields (rewrite (qb_fields block)))
+		(make_query_block
+			(qb_schema block)
+			rewritten_sources
+			rewritten_fields
+			(rewrite (qb_where block))
+			(rewrite (qb_group block))
+			(rewrite (qb_having block))
+			(rewrite (qb_order block))
+			(qb_limit block)
+			(qb_offset block)
+			(rewrite (qb_hidden block))
+			(qb_stages block)
+			(qb_facts block)))))
+
 (define btw2025_resolve_dependent_subquery (lambda (marker ctx)
 	(begin
 		(define kind (dep_subquery_kind marker))
@@ -3905,7 +4097,10 @@ membership_truth rather than adding another physical lowering path. */
 		(define parent (uctx_get ctx (quote btw2025-current-handle) nil))
 		(define parent_ancestors (uctx_get ctx (quote btw2025-ancestor-handles) '()))
 		(define current_ancestors (if (nil? parent) '() (cons parent parent_ancestors)))
-		(define current_handle (concat "djoin:" (fnv_hash (string (list kind subquery outer_sources)))))
+		(define current_handle (concat "djoin:" (fnv_hash (string (list
+			kind
+			(dependent_subquery_scope_backbone kind subquery)
+			outer_sources)))))
 		(define current_info (btw2025_pending_unnesting_info subquery outer_sources current_handle parent current_ancestors))
 		(define resolve_ctx (make_uctx ctx (list
 			(list (quote defer-subquery-rewrites) true)
@@ -3914,7 +4109,9 @@ membership_truth rather than adding another physical lowering path. */
 			(list (quote btw2025-current-info) current_info))))
 		(match kind
 			(symbol scalar)
-			(untangle_scalar_subquery_with_stages subquery outer_sources resolve_ctx)
+			(untangle_scalar_subquery_with_stages subquery outer_sources resolve_ctx 0)
+			(symbol scalar-output)
+			(untangle_scalar_subquery_with_stages subquery outer_sources resolve_ctx probe)
 			(symbol exists)
 			(untangle_exists_subquery_with_stages subquery outer_sources resolve_ctx)
 			(symbol in)
@@ -3953,8 +4150,23 @@ membership_truth rather than adding another physical lowering path. */
 
 (define btw2025_dependent_marker_key (lambda (expr)
 	(if (dependent_subquery_marker? expr)
-		(concat "dependent:" (fnv_hash (string expr)))
+		(if (equal? (dep_subquery_kind expr) (quote scalar-output))
+			(concat "dependent-bundle:" (fnv_hash (string (list
+				(dep_subquery_kind expr)
+				(dep_subquery_query expr)
+				(dep_subquery_outer_sources expr)))))
+			(concat "dependent:" (fnv_hash (string expr))))
 		nil)))
+
+(define btw2025_cached_dependent_rewrite (lambda (marker rewritten)
+	(if (and (equal? (dep_subquery_kind marker) (quote scalar-output))
+		(>= (count rewritten) 4))
+		(list
+			(nth (nth rewritten 3) (dep_subquery_probe marker))
+			(nth rewritten 1)
+			(nth rewritten 2)
+			(nth rewritten 3))
+		rewritten)))
 
 (define btw2025_decorrelate_exprs_using (lambda (exprs ctx resolved)
 	(match exprs
@@ -3968,7 +4180,7 @@ membership_truth rather than adding another physical lowering path. */
 	(begin
 		(define key (btw2025_dependent_marker_key expr))
 		(if (and (not (nil? key)) (has_assoc? resolved key))
-			(list (resolved key) resolved)
+			(list (btw2025_cached_dependent_rewrite expr (resolved key)) resolved)
 			(match expr
 				((symbol dependent-subquery) _kind _probe _subquery _outer_sources) (begin
 					(define rewritten (btw2025_resolve_dependent_subquery expr ctx))
@@ -4005,76 +4217,94 @@ membership_truth rather than adding another physical lowering path. */
 (define btw2025_decorrelate_fields_with_stages (lambda (fields ctx)
 	(btw2025_decorrelate_fields_with_stages_using fields ctx '())))
 
-(define btw2025_decorrelate_order_with_stages (lambda (order_items ctx)
+(define btw2025_decorrelate_order_with_stages_using (lambda (order_items ctx resolved)
 	(match (coalesceNil order_items '())
 		(cons item rest) (begin
 			(define rewritten_item (match item
 				'(expr dir) (begin
-					(define rewritten_expr (btw2025_decorrelate_expr_with_stages expr ctx))
-					(list (list (nth rewritten_expr 0) dir) (nth rewritten_expr 1) (nth rewritten_expr 2)))
-				_ (list item '() '())))
-			(define tail (btw2025_decorrelate_order_with_stages rest ctx))
+					(define current (btw2025_decorrelate_expr_using expr ctx resolved))
+					(define rewritten_expr (nth current 0))
+					(list (list (nth rewritten_expr 0) dir)
+						(nth rewritten_expr 1) (nth rewritten_expr 2) (nth current 1)))
+				_ (list item '() '() resolved)))
+			(define tail (btw2025_decorrelate_order_with_stages_using
+				rest ctx (nth rewritten_item 3)))
 			(list
 				(cons (nth rewritten_item 0) (nth tail 0))
 				(unique_stages_by_id (merge (list (nth rewritten_item 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten_item 2) (nth tail 2)))))
-		_ (list '() '() '()))))
+				(merge_unique (list (nth rewritten_item 2) (nth tail 2)))
+				(nth tail 3)))
+		_ (list '() '() '() resolved))))
 
-(define btw2025_decorrelate_expr_list_with_stages (lambda (exprs ctx)
+(define btw2025_decorrelate_expr_list_with_stages_using (lambda (exprs ctx resolved)
 	(match (coalesceNil exprs '())
 		(cons expr rest) (begin
-			(define rewritten (btw2025_decorrelate_expr_with_stages expr ctx))
-			(define tail (btw2025_decorrelate_expr_list_with_stages rest ctx))
+			(define current (btw2025_decorrelate_expr_using expr ctx resolved))
+			(define rewritten (nth current 0))
+			(define tail (btw2025_decorrelate_expr_list_with_stages_using rest ctx (nth current 1)))
 			(list
 				(cons (nth rewritten 0) (nth tail 0))
 				(unique_stages_by_id (merge (list (nth rewritten 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten 2) (nth tail 2)))))
-		_ (list '() '() '()))))
+				(merge_unique (list (nth rewritten 2) (nth tail 2)))
+				(nth tail 3)))
+		_ (list '() '() '() resolved))))
 
-(define btw2025_decorrelate_source_with_stages (lambda (src ctx)
+(define btw2025_decorrelate_source_with_stages_using (lambda (src ctx resolved)
 	(begin
-		(define rewritten_join (btw2025_decorrelate_expr_with_stages (source_join_expr src) ctx))
+		(define current (btw2025_decorrelate_expr_using (source_join_expr src) ctx resolved))
+		(define rewritten_join (nth current 0))
 		(list
 			(merge_unique (list (nth rewritten_join 2) (list (source_with_join_expr src (nth rewritten_join 0)))))
 			(nth rewritten_join 1)
-			'()))))
+			'()
+			(nth current 1)))))
 
-(define btw2025_decorrelate_sources_with_stages (lambda (sources ctx)
+(define btw2025_decorrelate_sources_with_stages_using (lambda (sources ctx resolved)
 	(match (coalesceNil sources '())
 		(cons src rest) (begin
-			(define rewritten_src (btw2025_decorrelate_source_with_stages src ctx))
-			(define tail (btw2025_decorrelate_sources_with_stages rest ctx))
+			(define rewritten_src (btw2025_decorrelate_source_with_stages_using src ctx resolved))
+			(define tail (btw2025_decorrelate_sources_with_stages_using rest ctx (nth rewritten_src 3)))
 			(list
 				(merge_unique (list (nth rewritten_src 0) (nth tail 0)))
 				(unique_stages_by_id (merge (list (nth rewritten_src 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten_src 2) (nth tail 2)))))
-		_ (list '() '() '()))))
+				(merge_unique (list (nth rewritten_src 2) (nth tail 2)))
+				(nth tail 3)))
+		_ (list '() '() '() resolved))))
 
 (define btw2025_decorrelate_query_block (lambda (block ctx)
 	(begin
-		(define source_result (btw2025_decorrelate_sources_with_stages (qb_sources block) ctx))
+		(define bundled (btw2025_bundle_scalar_markers_in_block block))
+		(define source_result (btw2025_decorrelate_sources_with_stages_using (qb_sources bundled) ctx '()))
 		(define sources (nth source_result 0))
 		(define source_stages (nth source_result 1))
 		(define source_stage_sources (nth source_result 2))
-		(define where_result (btw2025_decorrelate_expr_with_stages (qb_where block) ctx))
-		(define field_result (btw2025_decorrelate_fields_with_stages (qb_fields block) ctx))
-		(define group_result (btw2025_decorrelate_expr_list_with_stages (qb_group block) ctx))
-		(define having_result (btw2025_decorrelate_expr_with_stages (qb_having block) ctx))
-		(define order_result (btw2025_decorrelate_order_with_stages (qb_order block) ctx))
-		(define hidden_result (btw2025_decorrelate_fields_with_stages (qb_hidden block) ctx))
+		(define where_state (btw2025_decorrelate_expr_using
+			(qb_where bundled) ctx (nth source_result 3)))
+		(define where_result (nth where_state 0))
+		(define field_result (btw2025_decorrelate_fields_with_stages_using
+			(qb_fields bundled) ctx (nth where_state 1)))
+		(define group_result (btw2025_decorrelate_expr_list_with_stages_using
+			(qb_group bundled) ctx (nth field_result 3)))
+		(define having_state (btw2025_decorrelate_expr_using
+			(qb_having bundled) ctx (nth group_result 3)))
+		(define having_result (nth having_state 0))
+		(define order_result (btw2025_decorrelate_order_with_stages_using
+			(qb_order bundled) ctx (nth having_state 1)))
+		(define hidden_result (btw2025_decorrelate_fields_with_stages_using
+			(qb_hidden bundled) ctx (nth order_result 3)))
 		(make_query_block
-			(qb_schema block)
+			(qb_schema bundled)
 			(merge_unique (list sources source_stage_sources (nth where_result 2) (nth field_result 2) (nth group_result 2) (nth having_result 2) (nth order_result 2) (nth hidden_result 2)))
 			(nth field_result 0)
 			(nth where_result 0)
 			(nth group_result 0)
 			(nth having_result 0)
 			(nth order_result 0)
-			(qb_limit block)
-			(qb_offset block)
+			(qb_limit bundled)
+			(qb_offset bundled)
 			(nth hidden_result 0)
-			(unique_stages_by_id (merge (list (qb_stages block) source_stages (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1))))
-			(qb_facts block)))))
+			(unique_stages_by_id (merge (list (qb_stages bundled) source_stages (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1))))
+			(qb_facts bundled)))))
 
 (define field_expr_by_title (lambda (fields title ignorecase)
 	(match (coalesceNil fields '())
@@ -7925,7 +8155,7 @@ further out than its own domain for a value that isn't local to it or its
 declared lookup-keys. exists_recset_project_join_expr's stage_catalog is
 scoped to the discovering block's own stages and cannot resolve that, so
 those stages remain excluded rather than crashing during preparation. */
-(define stage_recset_domain_eligible? (lambda (graph stage)
+(define stage_recset_domain_eligible? (lambda (graph stage requested_col)
 	(if (not (group_stage? stage))
 		false
 		(begin
@@ -7934,16 +8164,16 @@ those stages remain excluded rather than crashing during preparation. */
 			(and
 				(not (stage_has_residual_outer_refs? stage))
 				(recset_probe_stage_shape? stage)
-				(stage_boolean_shaped? graph stage nil)
+				(stage_boolean_shaped? graph stage requested_col)
 				(not (empty_list? lookup_keys))
 				(equal? (count lookup_keys) (count (gs_keys stage)))
 				(recset_cache_domain_supported? input))))))
 
-(define recset_domain_stage_output_source? (lambda (stages src)
+(define recset_domain_stage_output_source? (lambda (stages src requested_col)
 	(and (stage_output_relation? (source_relation src))
 		(begin
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
-			(stage_recset_domain_eligible? (stage_dependency_graph stages) stage)))))
+			(stage_recset_domain_eligible? (stage_dependency_graph stages) stage requested_col)))))
 
 (define first_candidate_source (lambda (stages sources)
 	(reduce (coalesceNil sources '()) (lambda (found src)
@@ -8265,6 +8495,42 @@ boolean probe, matched against the specific logical output alias. */
 			(reduce tail (lambda (found item) (or found (condition_has_exists_recset_probe? alias item))) false))
 		_ false)))
 
+(define stage_output_column_for_alias (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(if (equal? tblvar alias) col nil)
+		((quote get_column) tblvar _tbl_ignorecase col _col_ignorecase)
+		(if (equal? tblvar alias) col nil)
+		(cons _head tail) (reduce tail (lambda (found item)
+			(if (not (nil? found)) found (stage_output_column_for_alias alias item))) nil)
+		_ nil)))
+
+(define exists_recset_probe_column (lambda (alias expr)
+	(if (exists_recset_probe_term? alias expr)
+		(stage_output_column_for_alias alias expr)
+		(match expr
+			(cons _head tail) (reduce tail (lambda (found item)
+				(if (not (nil? found)) found (exists_recset_probe_column alias item))) nil)
+			_ nil))))
+
+(define stage_with_primary_aggregate (lambda (stage requested_col)
+	(begin
+		(define selected (scalar_first_probe_aggregate stage requested_col))
+		(if (nil? selected)
+			stage
+			(make_group_stage
+				(gs_id stage)
+				(gs_input stage)
+				(gs_domain stage)
+				(gs_keys stage)
+				(cons selected (filter (gs_aggregates stage) (lambda (ag) (not (equal? ag selected)))))
+				(gs_having stage)
+				(gs_output stage)
+				(gs_order stage)
+				(gs_limit stage)
+				(gs_offset stage)
+				(gs_facts stage))))))
+
 (define rewrite_required_exists_recset_probe_refs (lambda (alias expr)
 	(if (exists_recset_probe_term? alias expr)
 		true
@@ -8274,7 +8540,9 @@ boolean probe, matched against the specific logical output alias. */
 
 (define rewrite_exists_recset_probe_refs (lambda (alias stage probe expr)
 	(if (exists_recset_probe_term? alias expr)
-		(logical_membership_probe_expr stage probe)
+		(logical_membership_probe_expr
+			(stage_with_primary_aggregate stage (stage_output_column_for_alias alias expr))
+			probe)
 		(match expr
 			(cons head tail) (cons head (map tail (lambda (item) (rewrite_exists_recset_probe_refs alias stage probe item))))
 			_ expr))))
@@ -8296,15 +8564,18 @@ boolean probe, matched against the specific logical output alias. */
 		(reduce (coalesceNil sources '()) (lambda (found src)
 			(if (not (nil? found))
 				found
-				(if (and (recset_domain_stage_output_source? stages src)
-					(begin
-						(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
-						(and (not (nil? (first_driver_lookup_key
-							stage
-							(without_source_alias sources (source_alias src)))))
-							(condition_has_exists_recset_probe? (source_alias src) condition))))
-					src
-					nil)))
+				(begin
+					(define requested_col (exists_recset_probe_column (source_alias src) condition))
+					(if (and (not (nil? requested_col))
+						(recset_domain_stage_output_source? stages src requested_col))
+						(begin
+							(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
+							(if (not (nil? (first_driver_lookup_key
+								stage
+								(without_source_alias sources (source_alias src)))))
+								src
+								nil))
+						nil))))
 			nil))))
 
 (define without_source_alias (lambda (sources alias)
