@@ -1013,6 +1013,26 @@ test_cases:
             - "__union_distinct_rows"
             - "__union_distinct_seen"
       - sql: |
+          EXPLAIN PHYSICAL
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 2
+        expect:
+          contains:
+            - "ordered_recset_iterator"
+            - "recset_contains_probe"
+            - "scan_order_recset_part"
+            - "base_table_scan_with_membership_filter"
+            - "source_is_base_table"
+            - "chosen"
+            - "rejected"
+      - sql: |
           EXPLAIN
           SELECT t.ID
           FROM (
@@ -1147,6 +1167,32 @@ test_cases:
             - "subscan_partition_limit"
             - ".grp:"
             - "touch_keytable"
+      - sql: |
+          EXPLAIN PHYSICAL
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "membership_carrier"
+            - "candidate_keyset"
+            - "driver_order_membership_probe"
+            - "candidate_rows"
+            - "driver_rows"
+            - "total_ns"
+            - "memory_bytes"
+            - "chosen"
+            - "rejected"
       - sql: |
           EXPLAIN
           SELECT t.ID

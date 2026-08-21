@@ -125,6 +125,46 @@ deduplicate identical conditions without mutable Scheme lists. */
 			(if chosen condition (list (quote not) condition)))
 		chosen)))
 
+/* EXPLAIN PHYSICAL installs this compile-local event sink. Physical lowering
+records only decisions it actually makes; ordinary compilation has no sink and
+therefore keeps the same plan and cache behavior. Numeric cost records retain
+their calibrated nanosecond/memory components so rejected alternatives can be
+compared without reverse-engineering the generated Scheme plan. */
+(define planner_physical_explain_accumulator (lambda ()
+	(try
+		(lambda () ((context "session") "__memcp_explain_physical"))
+		(lambda (_e) nil))))
+
+(define planner_record_physical_decision (lambda (decision)
+	(begin
+		(define accumulator (planner_physical_explain_accumulator))
+		(if (nil? accumulator)
+			decision
+			(begin
+				(define count (coalesceNil (accumulator "count") 0))
+				(accumulator (concat "decision:" count) decision)
+				(accumulator "count" (+ count 1))
+				decision)))))
+
+(define planner_physical_explain_decisions (lambda (accumulator)
+	(map (produceN (coalesceNil (accumulator "count") 0)) (lambda (idx)
+		(accumulator (concat "decision:" idx))))))
+
+(define planner_cost_explain (lambda (cost)
+	(list
+		(list "startup_ns" (qassoc_get cost (quote startup_ns) 0))
+		(list "row_ns" (qassoc_get cost (quote row_ns) 0))
+		(list "probe_ns" (qassoc_get cost (quote probe_ns) 0))
+		(list "batch_startup_ns" (qassoc_get cost (quote batch_startup_ns) 0))
+		(list "batch_row_ns" (qassoc_get cost (quote batch_row_ns) 0))
+		(list "build_ns" (qassoc_get cost (quote build_ns) 0))
+		(list "memory_bytes" (qassoc_get cost (quote memory_bytes) 0))
+		(list "compile_ns" (qassoc_get cost (quote compile_ns) 0))
+		(list "expected_rows" (qassoc_get cost (quote expected_rows) nil))
+		(list "confidence" (qassoc_get cost (quote confidence) nil))
+		(list "execution_ns" (qassoc_get cost (quote execution_ns) 0))
+		(list "total_ns" (qassoc_get cost (quote total_ns) 0)))))
+
 /* Runtime statistic expressions recur throughout dynamic-programming costs.
 Bind each unique expression once in the final guard instead of rereading the
 catalog for every comparison. The binding catalog is compile-local as well. */
@@ -7351,6 +7391,52 @@ in the canonicalization functions above. */
 		(membership_cost_options candidate_rows
 			(qassoc_get telemetry (quote membership_driver_rows) nil)))))
 
+(define record_membership_physical_choice (lambda (requirement strategy reason candidates)
+	(begin
+		(planner_record_physical_decision
+			(list
+				(list "decision" "membership_carrier")
+				(list "chosen" (string strategy))
+				(list "reason" (string reason))
+				(list "inputs" (list
+					(list "candidate_rows"
+						(if (qassoc_get requirement (quote membership_candidate_estimate_capped) false)
+							(qassoc_get requirement (quote membership_candidate_estimate_input) nil)
+							(qassoc_get requirement (quote membership_candidate_estimated_rows) nil)))
+					(list "candidate_input_rows" (qassoc_get requirement (quote membership_candidate_input_rows) nil))
+					(list "driver_rows" (qassoc_get requirement (quote membership_driver_rows) nil))
+					(list "selectivity_class" (string (qassoc_get requirement (quote membership_selectivity_class) nil)))
+					(list "estimate_capped" (qassoc_get requirement (quote membership_candidate_estimate_capped) false))
+					(list "reuse" (qassoc_get requirement (quote reuse) 1))))
+				(list "alternatives" (map candidates (lambda (candidate)
+					(list
+						(list "plan" (string (car candidate)))
+						(list "status" (if (equal? (car candidate) strategy) "chosen" "rejected"))
+						(list "reason" (if (equal? (car candidate) strategy) "lowest_total_ns" "higher_total_ns_or_memory_tiebreak"))
+						(list "cost" (planner_cost_explain (cadr candidate)))))))))
+		(if (qassoc_get requirement (quote membership_order_limit_driver) false)
+			(begin
+				(define recset_source (equal? strategy (quote candidate_keyset)))
+				(planner_record_physical_decision
+					(list
+						(list "decision" "ordered_recset_iterator")
+						(list "chosen" (if recset_source "scan_order_recset_part" "recset_contains_probe"))
+						(list "reason" (if recset_source "projected_recset_scan_source" "base_table_scan_with_membership_filter"))
+						(list "inputs" (list
+							(list "limit" (qassoc_get requirement (quote membership_order_limit) nil))
+							(list "candidate_rows" (qassoc_get requirement (quote membership_candidate_estimated_rows) nil))
+							(list "driver_rows" (qassoc_get requirement (quote membership_driver_rows) nil))))
+						(list "alternatives" (list
+							(list
+								(list "plan" "scan_order_recset_part")
+								(list "status" (if recset_source "chosen" "rejected"))
+								(list "reason" (if recset_source "projected_recset_scan_source" "source_is_base_table")))
+							(list
+								(list "plan" "recset_contains_probe")
+								(list "status" (if recset_source "rejected" "chosen"))
+								(list "reason" (if recset_source "direct_intersection_available" "membership_is_filter"))))))))
+			nil))))
+
 /* The reorder phase carries only an abstract membership requirement. Concrete
 keyset/probe names enter the IR here, at the physical preparation boundary. */
 (define query_block_with_physical_requirement_choices (lambda (block)
@@ -7360,15 +7446,16 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 			block
 			(begin
 				(define strategy (physical_candidate_membership_strategy requirement))
+				(define candidates (membership_cost_options_for_telemetry requirement))
+				(define reason (if (equal? strategy (quote candidate_keyset))
+					(quote projected_membership_cost)
+					(quote indexed_driver_probe_cost)))
+				(record_membership_physical_choice requirement strategy reason candidates)
 				(define physical_facts (merge (list
 					(list
 						(list (quote membership_plan_strategy) strategy)
-						(list (quote membership_cost_candidates)
-							(membership_cost_options_for_telemetry requirement))
-						(list (quote membership_cost_reason)
-							(if (equal? strategy (quote candidate_keyset))
-								(quote projected_membership_cost)
-								(quote indexed_driver_probe_cost))))
+						(list (quote membership_cost_candidates) candidates)
+						(list (quote membership_cost_reason) reason))
 					requirement
 					(qb_facts block))))
 				(make_query_block
@@ -10387,6 +10474,35 @@ membership set. */
 			(and (number? input_rows)
 				(begin
 					(define recset_cost (planner_recset_carrier_cost input_rows probe_rows))
+					(define direct_cost (planner_direct_presence_probe_cost probe_rows))
+					(define keytable_cost (planner_presence_carrier_cost input_rows probe_rows))
+					(define chosen (if (planner_cost_better? recset_cost direct_cost)
+						(if (planner_cost_better? recset_cost keytable_cost)
+							(quote recset_carrier)
+							(quote group_keytable))
+						(if (planner_cost_better? direct_cost keytable_cost)
+							(quote direct_subscan)
+							(quote group_keytable))))
+					(planner_record_physical_decision
+						(list
+							(list "decision" "scalar_presence_carrier")
+							(list "stage" (gs_id stage))
+							(list "chosen" (string chosen))
+							(list "reason" "lowest_total_ns")
+							(list "inputs" (list
+								(list "domain_rows" input_rows)
+								(list "probe_rows" probe_rows)))
+							(list "alternatives" (map
+								(list
+									(list (quote recset_carrier) recset_cost)
+									(list (quote group_keytable) keytable_cost)
+									(list (quote direct_subscan) direct_cost))
+								(lambda (candidate)
+									(list
+										(list "plan" (string (car candidate)))
+										(list "status" (if (equal? (car candidate) chosen) "chosen" "rejected"))
+										(list "reason" (if (equal? (car candidate) chosen) "lowest_total_ns" "higher_total_ns_or_memory_tiebreak"))
+										(list "cost" (planner_cost_explain (cadr candidate)))))))))
 					(and
 						(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
 						(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows)))))))))
@@ -19131,6 +19247,93 @@ ordering run. Storage artifacts begin in build_queryplan. */
 			(list (quote list)
 				"reorder"
 				(pretty_print reordered (settings "ExplainWidth")))))))
+
+(define physical_recset_source_expr? (lambda (expr)
+	(match expr
+		(cons head tail) (or
+			(equal? (string head) "scan_recset")
+			(equal? (string head) "filter_recset")
+			(equal? (string head) "recset_project_join")
+			(equal? (string head) "recset_union")
+			(equal? (string head) "recset_intersect")
+			(reduce tail (lambda (found item) (or found (physical_recset_source_expr? item))) false))
+		_ false)))
+
+(define physical_recset_contains_expr? (lambda (expr)
+	(match expr
+		(cons head tail) (or
+			(physical_recset_contains_expr? head)
+			(reduce tail (lambda (found item) (or found (physical_recset_contains_expr? item))) false))
+		_ (equal? (string expr) "$recset_contains"))))
+
+(define physical_ordered_recset_decision (lambda (scan_expr)
+	(begin
+		(define table_expr (nth scan_expr 2))
+		(define recset_source (physical_recset_source_expr? table_expr))
+		(define contains_probe (or
+			(physical_recset_contains_expr? (nth scan_expr 3))
+			(physical_recset_contains_expr? (nth scan_expr 4))))
+		(if (not (or recset_source contains_probe))
+			nil
+			(begin
+				(define chosen (if recset_source
+					(quote scan_order_recset_part)
+					(quote recset_contains_probe)))
+				(list
+					(list "decision" "ordered_recset_iterator")
+					(list "chosen" (string chosen))
+					(list "reason" (if recset_source
+						"recset_scan_source"
+						"base_table_scan_with_membership_filter"))
+					(list "inputs" (list
+						(list "source" (pretty_print table_expr (settings "ExplainWidth")))
+						(list "sort_columns" (pretty_print (nth scan_expr 5) (settings "ExplainWidth")))
+						(list "offset" (nth scan_expr 8))
+						(list "limit" (nth scan_expr 9))))
+					(list "alternatives" (list
+						(list
+							(list "plan" "scan_order_recset_part")
+							(list "status" (if recset_source "chosen" "rejected"))
+							(list "reason" (if recset_source "recset_scan_source" "source_is_base_table")))
+						(list
+							(list "plan" "recset_contains_probe")
+							(list "status" (if recset_source "rejected" "chosen"))
+							(list "reason" (if recset_source "direct_intersection_available" "membership_is_filter")))))))))))
+
+(define physical_ordered_recset_decisions (lambda (expr)
+	(match expr
+		(cons head tail) (begin
+			(define own (if (and
+				(equal? (string head) "scan_order")
+				(> (count expr) 9))
+				(begin
+					(define decision (physical_ordered_recset_decision expr))
+					(if (nil? decision) '() (list decision)))
+				'()))
+			(reduce tail (lambda (decisions item)
+				(merge (list decisions (physical_ordered_recset_decisions item)))) own))
+		_ '())))
+
+(define explain_queryplan_physical (lambda (query)
+	(begin
+		(define planning_session (context "session"))
+		(define accumulator (newsession))
+		(accumulator "count" 0)
+		(planning_session "__memcp_explain_physical" accumulator)
+		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
+		(define prepared (prepare_physical_queryplan reordered))
+		(define plan (emit_physical_queryplan prepared))
+		(define optimized_plan (optimize plan))
+		(define decisions (merge (list
+			(planner_physical_explain_decisions accumulator)
+			(physical_ordered_recset_decisions optimized_plan))))
+		(planning_session "__memcp_explain_physical" nil)
+		(list (quote resultrow)
+			(list (quote list)
+				"physical"
+				(string decisions)
+				"code"
+				(pretty_print optimized_plan (settings "ExplainWidth")))))))
 
 (define explain_queryplan_compile (lambda (query parse_started_ns sql_bytes)
 	(begin

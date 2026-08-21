@@ -467,6 +467,31 @@ test_cases:
           "ok"
           (error "recset_project_join output did not scan_order correctly")))
 
+  - name: "EXPLAIN PHYSICAL identifies ordered RecSet intersection"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT i.id
+      FROM recset_items i
+      WHERE EXISTS (
+        SELECT l.item_id
+        FROM recset_link l
+        WHERE l.tenant = 1 AND l.item_id = i.id
+        UNION ALL
+        SELECT l2.item_id
+        FROM recset_link l2
+        WHERE l2.tenant = 2 AND l2.item_id = i.id
+      )
+      ORDER BY i.id
+    expect:
+      rows: 1
+      result_contains:
+        - "ordered_recset_iterator"
+        - "scan_order_recset_part"
+        - "recset_contains_probe"
+        - "direct_intersection_available"
+        - "chosen"
+        - "rejected"
+
   - name: "recset key index provides immutable scalar lookup"
     scm: |
       (begin
