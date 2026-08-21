@@ -48,12 +48,14 @@ test_cases:
     scm: |
       (begin
         (define idcol (car (get_schema "memcp-tests" "rs_data")))
+        (define categorycol (nth (get_schema "memcp-tests" "rs_data") 2))
         (and
           (equal? (idcol "StatisticsKnown") false)
           (equal? (idcol "StatisticsConfidence") 0)
           (equal? (idcol "StatisticsSource") "unknown")
           (equal? (idcol "DistinctEstimateSource") "fallback_row_count")
-          (nil? (idcol "NullFraction"))))
+          (nil? (idcol "NullFraction"))
+          (nil? (idcol "AverageValueBytes"))))
     expect:
       data: [true]
 
@@ -715,7 +717,9 @@ test_cases:
           (equal? (idcol "DistinctEstimateSource") "rebuild")
           (equal? (idcol "NullFraction") 0)
           (equal? (idcol "MinEstimate") 0)
-          (equal? (idcol "MaxEstimate") 199)))
+          (equal? (idcol "MaxEstimate") 199)
+          (equal? (idcol "AverageValueBytes") 0)
+          (equal? (categorycol "AverageValueBytes") 4.75)))
     expect:
       data: [true]
 

@@ -566,6 +566,24 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric sentinel")
 	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage "72") false
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric string")
+	(assert (membership_estimated_matching_rows
+		(list
+			(list (quote rows) 512)
+			(list (quote sampled) 512)
+			(list (quote capped) true)
+			(list (quote population) (quote index_candidates))
+			(list (quote coverage) (quote lower_bound)))
+		100000 100000) 100000
+		"capped index candidates remain a lower bound instead of becoming 100% selectivity")
+	(assert (membership_estimated_matching_rows
+		(list
+			(list (quote rows) 128)
+			(list (quote sampled) 512)
+			(list (quote capped) true)
+			(list (quote population) (quote table_rows))
+			(list (quote coverage) (quote sampled)))
+		100000 100000) 25000
+		"capped table samples retain proportional selectivity extrapolation")
 	/* planner_recset_carrier_cost / scalar_first_probe_recset_cost_preferred?:
 	same "unknown stays unknown" discipline as the keytable check above, plus
 	the actual three-way comparison. A RecSet's build cost scales with

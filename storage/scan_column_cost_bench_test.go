@@ -62,9 +62,37 @@ func TestEstimateFilteredRowsReportsExaminedSample(t *testing.T) {
 	if len(shards) != 1 {
 		t.Fatalf("active shards = %d, want 1", len(shards))
 	}
-	matches, capped, sampled := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil)
-	if matches != 3 || !capped || sampled != 5 {
-		t.Fatalf("estimate = matches %d, capped %t, sampled %d; want 3, true, 5", matches, capped, sampled)
+	estimate := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil)
+	if estimate.rows != 3 || !estimate.capped || estimate.examined != 5 ||
+		estimate.population != "table_rows" || estimate.coverage != "sampled" {
+		t.Fatalf("estimate = %+v; want 3 sampled matches after 5 table rows", estimate)
+	}
+}
+
+func TestEstimateFilteredRowsMarksCappedIndexPopulationAsLowerBound(t *testing.T) {
+	tbl, cols := scanColumnCostTable(t, "estimate_index_population", 10)
+	condition := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("c0")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal?"), scm.NewSymbol("c0"), scm.NewInt(4),
+		}),
+		En: &scm.Globalenv,
+	})
+	shard := tbl.ActiveShards()[0]
+	bounds := extractBoundaries(cols[:1], condition)
+	lower, upperLast := indexFromBoundaries(bounds)
+	var buf [16]uint32
+	for range 2 {
+		shard.mu.RLock()
+		shard.iterateIndex(nil, bounds, lower, upperLast, len(shard.inserts), buf[:], 1, nil,
+			func([]uint32) bool { return true })
+		shard.mu.RUnlock()
+	}
+
+	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil)
+	if estimate.rows != 1 || !estimate.capped || estimate.examined != 1 ||
+		estimate.population != "index_candidates" || estimate.coverage != "lower_bound" {
+		t.Fatalf("estimate = %+v; want capped index lower bound", estimate)
 	}
 }
 
