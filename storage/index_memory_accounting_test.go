@@ -16,6 +16,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "sync"
 import "testing"
 
 import "github.com/google/btree"
@@ -98,5 +99,63 @@ func TestRemoveIndexChildrenInternalDropsSkipListRecords(t *testing.T) {
 	}
 	if cm.currentMemory != 64 {
 		t.Fatalf("currentMemory = %d, want 64", cm.currentMemory)
+	}
+}
+
+func TestLoadCachedSkipListUsesExactTermAndTracksReuse(t *testing.T) {
+	cache := &sync.Map{}
+	shortKey := skipListKey{pattern: "%car%", collation: "utf8_bin"}
+	longKey := skipListKey{pattern: "%carglass%", collation: "utf8_bin"}
+	short := &SkipList{}
+	cache.Store(shortKey, short)
+
+	if _, ok := loadCachedSkipList(cache, longKey); ok {
+		t.Fatal("a cached substring must not be reused for a different LIKE term")
+	}
+	if got := short.hitCount.Load(); got != 0 {
+		t.Fatalf("substring lookup changed hit count to %d, want 0", got)
+	}
+
+	first, ok := loadCachedSkipList(cache, shortKey)
+	if !ok || first != short {
+		t.Fatal("exact LIKE term was not loaded from cache")
+	}
+	firstUsed := short.lastUsed()
+	if firstUsed.IsZero() || short.hitCount.Load() != 1 {
+		t.Fatal("exact cache hit did not update per-term lifecycle")
+	}
+	if got := skipListLastUsed(&skipListCacheEntry{skipList: short}); !got.Equal(firstUsed) {
+		t.Fatalf("cache entry last-used = %v, want term timestamp %v", got, firstUsed)
+	}
+
+	loadCachedSkipList(cache, shortKey)
+	if short.lastUsed().Before(firstUsed) {
+		t.Fatal("repeated cache hit moved last-used timestamp backwards")
+	}
+	if got := skipListGetScore(&skipListCacheEntry{skipList: short}); got != 2 {
+		t.Fatalf("cache score = %v, want 2 exact uses", got)
+	}
+}
+
+func TestSkipListCleanupDoesNotDeleteReplacement(t *testing.T) {
+	cache := &sync.Map{}
+	key := skipListKey{pattern: "%needle%", collation: "utf8_bin"}
+	oldSkipList := &SkipList{}
+	replacement := &SkipList{}
+	cache.Store(key, replacement)
+	entry := &skipListCacheEntry{
+		index:     &StorageIndex{},
+		pattern:   key.pattern,
+		collation: key.collation,
+		cache:     cache,
+		skipList:  oldSkipList,
+	}
+
+	if !skipListCleanup(entry, new([numEvictableTypes]int64)) {
+		t.Fatal("skip-list cleanup unexpectedly failed")
+	}
+	got, ok := cache.Load(key)
+	if !ok || got != replacement {
+		t.Fatal("stale eviction removed a newer exact-term cache entry")
 	}
 }
