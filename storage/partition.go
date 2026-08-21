@@ -92,11 +92,18 @@ func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <
 	remainingWorkers.Store(int32(workers))
 	startWorker := gls.Go
 	if currentTx != nil {
+		ss := SessionStateFromTx(currentTx)
+		querySeq := scm.CurrentQuerySeq()
 		startWorker = func(worker func()) {
 			go func() {
-				withTxSession(currentTx, func() scm.Scmer {
-					worker()
-					return scm.NewNil()
+				scm.SetValues(map[string]any{
+					"sessionStatePtr": ss,
+					"querySeq":        querySeq,
+				}, func() {
+					withTxSession(currentTx, func() scm.Scmer {
+						worker()
+						return scm.NewNil()
+					})
 				})
 			}()
 		}

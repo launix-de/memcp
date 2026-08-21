@@ -7121,6 +7121,12 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(expr_contains_broad_text_match? head))
 		_ false)))
 
+(define expr_contains_text_match? (lambda (expr)
+	(match expr
+		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation) true
+		_ false)))
+
 (define stage_input_contains_broad_membership_filter? (lambda (input)
 	(if (union_block? input)
 		(reduce (union_branches input) (lambda (found branch)
@@ -18692,6 +18698,11 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 		(qassoc_get context (quote default) nil)
 		nil)))
 
+(define probe_work_context_driver_alias (lambda (context)
+	(if (probe_work_context? context)
+		(qassoc_get context (quote driver_alias) nil)
+		nil)))
+
 (define probe_work_context_rows_for_alias (lambda (context alias)
 	(if (probe_work_context? context)
 		(qassoc_get (qassoc_get context (quote by_alias) '()) alias
@@ -18760,8 +18771,67 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 			(physical_join_tree_probe_work tree sources)))
 		(list
 			(list (quote probe_work_context) true)
+			(list (quote driver_alias) (if (nil? tree) nil
+				(join_optimizer_tree_first_alias tree)))
 			(list (quote default) (coalesceNil (car work) default_rows))
 			(list (quote by_alias) (cadr work))))))
+
+/* A source-local text predicate is already a canonical logical predicate by
+the time it reaches this boundary. For a selective join driver, enumerate an
+exact RecSet carrier so expensive downstream ACL/join work runs only for the
+matching record IDs. This is a physical choice over the normalized predicate;
+it does not recover parser spelling or leak a scan into logical IR. */
+(define selective_text_filter_candidate (lambda (src all_sources default_alias condition)
+	(begin
+		(define alias (source_alias src))
+		(define aliases (source_aliases all_sources))
+		(define input_rows (planner_source_row_count src))
+		(if (or (not (number? input_rows)) (< input_rows 1024))
+			nil
+			(reduce (split_and_terms (coalesceNil condition true)) (lambda (best term)
+				(if (or (not (expr_contains_text_match? term))
+					(not (equal? (join_hypergraph_expr_aliases default_alias aliases term)
+						(list alias))))
+					best
+					(begin
+						(planner_record_session_value_guards term)
+						(define estimate (planner_source_filter_estimate src term 512))
+						(define rows (membership_estimated_matching_rows estimate input_rows nil))
+						(define candidate (if (and (number? rows) (<= (* rows 8) input_rows))
+							(list
+								(list (quote predicate) term)
+								(list (quote rows) rows)
+								(list (quote input_rows) input_rows)
+								(list (quote estimate) estimate))
+							nil))
+						(if (or (nil? candidate)
+							(and (not (nil? best))
+								(<= (qassoc_get best (quote rows) input_rows) rows)))
+							best candidate))))
+				nil)))))
+
+(define selective_text_filter_recset_expr (lambda (stages src candidate)
+	(begin
+		(define alias (source_alias src))
+		(define predicate (qassoc_get candidate (quote predicate) true))
+		(define cols (extract_columns_for_alias src predicate))
+		(list (quote scan_recset)
+			'(session "__memcp_tx")
+			(source_table_expr_using stages src)
+			(cons (quote list) cols)
+			(list (quote lambda)
+				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+				(lower_column_expr_for_alias src predicate))))))
+
+(define strip_selective_text_filter_candidate (lambda (condition candidate)
+	(if (nil? candidate)
+		condition
+		(begin
+			(define predicate (qassoc_get candidate (quote predicate) true))
+			(combine_where_terms
+				(filter (split_and_terms (coalesceNil condition true)) (lambda (term)
+					(not (equal? term predicate))))
+				true)))))
 
 (define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 	(begin
@@ -18818,21 +18888,47 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 		(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
+		(define text_filter_eligible (and
+			(not membership_driver)
+			(nil? row_number_stage_filter)
+			(> (count all_sources) 1)
+			(not (source_unique_point_condition? src effective_condition))
+			(equal? alias (probe_work_context_driver_alias probe_context))))
+		(define text_filter_candidate (if text_filter_eligible
+			(selective_text_filter_candidate src all_sources default_alias effective_condition)
+			nil))
+		(if (not (nil? text_filter_candidate))
+			(planner_record_physical_decision (list
+				(list "decision" "selective_text_filter_carrier")
+				(list "source" alias)
+				(list "chosen" "scan_recset")
+				(list "reason" "selective_exact_driver_predicate")
+				(list "inputs" (list
+					(list "estimated_rows" (qassoc_get text_filter_candidate (quote rows) nil))
+					(list "input_rows" (qassoc_get text_filter_candidate (quote input_rows) nil))
+					(list "density" (/ (qassoc_get text_filter_candidate (quote rows) 0)
+						(qassoc_get text_filter_candidate (quote input_rows) 1)))))))
+			nil)
+		(define residual_condition
+			(strip_selective_text_filter_candidate effective_condition text_filter_candidate))
 		(define membership_var (symbol "__membership_recset"))
 		(define membership_filter_expr (if membership_filter
 			(recset_contains_call_expr membership_var)
 			true))
-		(define filter_condition (combine_where membership_filter_expr effective_condition))
-		(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
+		(define filter_condition (combine_where membership_filter_expr residual_condition))
 		(define filtercols (merge_unique (list
 			(if membership_filter (list "$recset_contains") '())
-			(join_filter_cols_for_alias all_sources default_alias alias effective_condition))))
+			(join_filter_cols_for_alias all_sources default_alias alias residual_condition))))
 		(define recipe_mapcols (join_recipe_mapcols column_recipe alias))
 		(define raw_mapcols (if (nil? column_recipe)
 			(join_cols_for_alias all_sources default_alias alias needed_exprs)
 			recipe_mapcols))
 		(define mapcols raw_mapcols)
-		(define table_expr (if membership_driver membership_table_expr (source_table_expr_using stages src)))
+		(define table_expr (if membership_driver membership_table_expr
+			(if (nil? text_filter_candidate)
+				(source_table_expr_using stages src)
+				(selective_text_filter_recset_expr stages src text_filter_candidate))))
 		(define lowered_filter_condition (mark_outer_join_symbols
 			all_sources
 			alias

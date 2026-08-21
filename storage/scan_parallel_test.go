@@ -421,12 +421,15 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	tx := NewTxContext(TxCursorStability)
 	tx.autoCommit = true
 	tx.Session = scm.NewSession()
+	tx.SessionState = &scm.SessionState{ID: 91}
 	scm.Apply(tx.Session, scm.NewString("worker-session-test"), scm.NewBool(true))
 
 	var calls atomic.Int32
 	var inheritedContext atomic.Bool
 	var missingSession atomic.Bool
-	scm.SetValues(map[string]any{"scan-worker-test": true}, func() {
+	var missingSessionState atomic.Bool
+	var missingQuerySeq atomic.Bool
+	scm.SetValues(map[string]any{"scan-worker-test": true, "querySeq": uint64(37)}, func() {
 		done := tbl.iterateShardsParallel(tx, nil, func(s *storageShard, solo bool) {
 			calls.Add(1)
 			if _, ok := scm.GetGLSValue("scan-worker-test"); ok {
@@ -435,6 +438,12 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 			session := scm.Context(scm.NewString("session"))
 			if !scm.Apply(session, scm.NewString("worker-session-test")).Bool() {
 				missingSession.Store(true)
+			}
+			if scm.GetCurrentSessionState() != tx.SessionState {
+				missingSessionState.Store(true)
+			}
+			if scm.CurrentQuerySeq() != 37 {
+				missingQuerySeq.Store(true)
 			}
 		})
 		if done == nil {
@@ -451,6 +460,12 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	}
 	if missingSession.Load() {
 		t.Fatal("autocommit shard worker did not install the transaction session")
+	}
+	if missingSessionState.Load() {
+		t.Fatal("autocommit shard worker did not install the transaction session state")
+	}
+	if missingQuerySeq.Load() {
+		t.Fatal("autocommit shard worker did not install the statement query sequence")
 	}
 }
 
