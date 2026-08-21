@@ -7808,6 +7808,53 @@ those stages remain excluded rather than crashing during preparation. */
 									(join_optimizer_facts_without_aliases
 										(qb_facts physical_block) (list (source_alias candidate)))))))))))))
 
+(define candidate_stage_has_broad_text_filter? (lambda (stage)
+	(and (group_stage? stage)
+		(and (union_block? (gs_input stage))
+			(reduce (union_branches (gs_input stage)) (lambda (found branch)
+				(or found (and (query_block? branch)
+					(expr_contains_broad_text_match? (qb_where branch))))) false)))))
+
+(define physical_group_cache_candidate_source (lambda (stages sources)
+	(reduce (coalesceNil sources '()) (lambda (found src)
+		(if (not (nil? found))
+			found
+			(begin
+				(define stage (stage_for_group_cache_source stages src))
+				(if (and (group_stage? stage)
+					(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_candidate))
+						(candidate_stage_has_broad_text_filter? stage)))
+					src
+					nil)))) nil)))
+
+(define query_block_with_physical_group_cache_membership_using (lambda (stages block)
+	(begin
+		(define physical_block (query_block_with_physical_requirement_choices block))
+		(define sources (qb_sources physical_block))
+		(define candidate (physical_group_cache_candidate_source stages sources))
+		(if (or (not (membership_strategy? (qb_facts physical_block))) (nil? candidate))
+			physical_block
+			(begin
+				(define stage (stage_for_group_cache_source stages candidate))
+				(if (not (candidate_stage_recset_supported? stage))
+					physical_block
+					(begin
+						(define probe (car (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+						(make_query_block
+							(qb_schema physical_block)
+							(without_source_alias sources (source_alias candidate))
+							(qb_fields physical_block)
+							(combine_where (qb_where physical_block) (driver_membership_probe_expr stage probe))
+							(qb_group physical_block)
+							(qb_having physical_block)
+							(qb_order physical_block)
+							(qb_limit physical_block)
+							(qb_offset physical_block)
+							(qb_hidden physical_block)
+							(candidate_stage_without_source (qb_stages physical_block) (gs_id stage))
+							(join_optimizer_facts_without_aliases
+								(qb_facts physical_block) (list (source_alias candidate)))))))))))
+
 (define negated_term? (lambda (term)
 	(match term
 		((symbol not) _expr) true
@@ -15306,12 +15353,23 @@ get_column refs to the source) are excluded automatically too. */
 		(define tbl (group_stage_input_name stage))
 		(define alias (group_stage_input_alias stage))
 		(define query_input (or (query_block? src) (union_block? src)))
-		(define rewritten_src (if (query_block? src)
-			(query_block_with_presence_probes_using stage_lookup src)
+		/* Aggregate stages own their input query block. Apply the physical
+		membership choice here too; otherwise the top-level preparation pass never
+		reaches this nested block and eagerly materializes the candidate cache. */
+		(define membership_requirement (if (query_block? src)
+			(qassoc_get (qb_facts src) (quote membership_requirement) nil)
+			nil))
+		(define membership_src (if (and (query_block? src)
+			(and (not (nil? membership_requirement))
+				(qassoc_get membership_requirement (quote membership_candidate_estimate_capped) false)))
+			(query_block_with_physical_group_cache_membership_using stage_lookup src)
 			src))
-		(define rewrite_sources (if (query_block? src) (qb_sources src) '()))
+		(define rewritten_src (if (query_block? membership_src)
+			(query_block_with_presence_probes_using stage_lookup membership_src)
+			membership_src))
+		(define rewrite_sources (if (query_block? membership_src) (qb_sources membership_src) '()))
 		(define rewrite_default_alias (if (query_block? src)
-			(qassoc_get (qb_facts src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
+			(qassoc_get (qb_facts membership_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
 			nil))
 		(define presence_probe_sources_for_rewrite (if (query_block? src)
 			(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias)
