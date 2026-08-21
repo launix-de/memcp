@@ -12917,7 +12917,13 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(equal? (qassoc_get facts (quote purpose) nil) (quote in_candidate)))))
 			(if (nil? raw_expr) nil (list "candidate_keyset" raw_expr))
 			(begin
-				(define measured_estimate (planner_stage_filter_estimate (gs_input stage) 512))
+				/* Membership reorder already records this estimate in stage facts. Only
+				measure here for callers that reached physical lowering without those
+				facts; repeating a selective estimate may build an entire adaptive text
+				index even though the sample itself is capped. */
+				(define measured_estimate (if (nil? (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
+					(planner_stage_filter_estimate (gs_input stage) 512)
+					nil))
 				(define estimate_population (coalesceNil
 					(qassoc_get facts (quote membership_candidate_estimate_population) nil)
 					(planner_estimate_population measured_estimate)))
