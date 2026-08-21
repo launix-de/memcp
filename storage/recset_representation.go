@@ -736,6 +736,98 @@ func intersectSortedRanges(dst []uint32, lists [][]uint32) (uint32, bool) {
 	}
 }
 
+// subtractSortedRanges computes left \ right for two sorted, non-overlapping
+// range-pair lists. The output remains sorted and maximally coalesced because
+// subtraction can only split a left-hand interval at right-hand boundaries.
+func subtractSortedRanges(dst []uint32, left, right []uint32) (uint32, bool) {
+	var used uint32
+	rightPos := 0
+	appendRange := func(base, end uint32) bool {
+		if base >= end {
+			return true
+		}
+		if (used+1)*2 > uint32(len(dst)) {
+			return false
+		}
+		dst[used*2] = base
+		dst[used*2+1] = end - base
+		used++
+		return true
+	}
+	for leftPos := 0; leftPos < len(left); leftPos += 2 {
+		cursor := left[leftPos]
+		leftEnd := cursor + left[leftPos+1]
+		for rightPos < len(right) && right[rightPos]+right[rightPos+1] <= cursor {
+			rightPos += 2
+		}
+		for pos := rightPos; pos < len(right) && right[pos] < leftEnd; pos += 2 {
+			rightBase := right[pos]
+			rightEnd := rightBase + right[pos+1]
+			if rightBase > cursor && !appendRange(cursor, min(rightBase, leftEnd)) {
+				return used, true
+			}
+			if rightEnd > cursor {
+				cursor = rightEnd
+			}
+			if cursor >= leftEnd {
+				break
+			}
+		}
+		if !appendRange(cursor, leftEnd) {
+			return used, true
+		}
+	}
+	return used, false
+}
+
+// differenceRecSetShards computes left \ right without introducing a
+// persistent negative representation. Compact inputs stay compact; bitmap
+// materialization is reserved for an already-bitmap operand or range-budget
+// overflow.
+func differenceRecSetShards(shard *storageShard, left, right *recSetShard) recSetShard {
+	if left == nil || left.count == 0 {
+		return recSetShard{shard: shard, kind: recSetRanges}
+	}
+	universe := left.universe
+	if right == nil || right.count == 0 {
+		return cloneRecSetShardTo(shard, left)
+	}
+	data := make([]uint32, (universe+31)/32)
+
+	switch left.kind {
+	case recSetRanges:
+		if right.kind != recSetBitmap {
+			var rightRanges []uint32
+			if right.kind == recSetPositive {
+				rightRanges = make([]uint32, 2*len(right.listedValues()))
+				listAsRangePairs(rightRanges, right.listedValues())
+			} else {
+				rightRanges = right.listedRanges()
+			}
+			used, overflow := subtractSortedRanges(data, left.listedRanges(), rightRanges)
+			if !overflow {
+				return recSetShardFromRangePairs(shard, universe, data, used)
+			}
+		}
+	case recSetPositive:
+		used := uint32(0)
+		for _, id := range left.listedValues() {
+			if !right.contains(id) {
+				data[used] = id
+				used++
+			}
+		}
+		return recSetShardFromList(shard, universe, data, used)
+	}
+
+	leftCursor := recSetWordCursor{part: left}
+	rightCursor := recSetWordCursor{part: right}
+	for wordIndex := range data {
+		data[wordIndex] = leftCursor.word(uint32(wordIndex)) &^ rightCursor.word(uint32(wordIndex))
+	}
+	return recSetShardFromBitmap(shard, universe, data)
+}
+
 // --- Pairwise mixed-kind combine -------------------------------------------
 //
 // unionRecSetShards/intersectRecSetShards above have fast N-way paths for

@@ -795,6 +795,39 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_difference",
+		Desc: "returns the records from the first query-local recset which occur in none of the following same-table recsets",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			values := mustScmerSlice(a[0], "recsets")
+			recsets := make([]*recSet, 0, len(values))
+			for _, value := range values {
+				recsets = append(recsets, RecSetFromScmer(value))
+			}
+			return NewRecSetScmer(recSetDifference(recsets))
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "list", ParamName: "recsets"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "recset_not",
+		Desc: "returns the complement of a query-local recset relative to the currently visible rows of its base table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return NewRecSetScmer(recSetNot(RecSetFromScmer(a[0])))
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "recset", ParamName: "recset"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "recset"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_exists",
 		Desc: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {

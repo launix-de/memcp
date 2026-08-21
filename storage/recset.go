@@ -333,6 +333,82 @@ func recSetIntersect(items []*recSet) *recSet {
 	return result
 }
 
+// recSetDifference returns the records in the first RecSet which occur in none
+// of the following RecSets. All operands must belong to the same base table.
+func recSetDifference(items []*recSet) *recSet {
+	if len(items) == 0 || items[0] == nil || items[0].table == nil {
+		panic("recset_difference requires a non-empty list of recsets")
+	}
+	left := items[0]
+	for _, rs := range items[1:] {
+		if rs == nil || rs.table != left.table {
+			panic("recset_difference: all recsets must belong to the same table")
+		}
+	}
+	result := &recSet{tx: left.tx, table: left.table}
+	values := make(chan recSetBuildResult, len(left.shards))
+	done := runFanoutTasks(left.tx, len(left.shards), func(taskIndex int, _ bool) {
+		withTxSession(left.tx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			leftPart := &left.shards[taskIndex]
+			exclusions := make([]*recSetShard, 0, len(items)-1)
+			for _, rs := range items[1:] {
+				if part := rs.shardEntry(leftPart.shard); part != nil && part.count > 0 {
+					exclusions = append(exclusions, part)
+				}
+			}
+			var excluded recSetShard
+			if len(exclusions) > 0 {
+				excluded = unionRecSetShards(leftPart.shard, exclusions)
+			}
+			values <- recSetBuildResult{part: differenceRecSetShards(leftPart.shard, leftPart, &excluded)}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
+	}
+	close(values)
+
+	var buildErr scanError
+	for msg := range values {
+		if msg.err.r != nil {
+			if buildErr.r == nil {
+				buildErr = msg.err
+			}
+			continue
+		}
+		if msg.part.count > 0 {
+			result.count += msg.part.count
+			result.shards = append(result.shards, msg.part)
+		}
+	}
+	if buildErr.r != nil {
+		panic(buildErr)
+	}
+	sort.Slice(result.shards, func(i, j int) bool {
+		return result.shards[i].shard.uuid.String() < result.shards[j].shard.uuid.String()
+	})
+	return result
+}
+
+// recSetNot complements a RecSet against the currently visible rows of its
+// base table. Building that visible universe through the ordinary scan path is
+// essential: raw recid inversion would resurrect deleted or tx-invisible rows.
+func recSetNot(item *recSet) *recSet {
+	if item == nil || item.table == nil {
+		panic("recset_not requires a recset with a base table")
+	}
+	visible := item.table.scanRecSet(item.tx, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		return scm.NewBool(true)
+	}))
+	return recSetDifference([]*recSet{visible, item})
+}
+
 func recSetContainsClosure(shard *storageShard) *func(uint32, ...scm.Scmer) scm.Scmer {
 	var cachedRecSet *recSet
 	var cachedShard *recSetShard

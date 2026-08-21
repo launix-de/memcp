@@ -1791,26 +1791,26 @@ column type instead of borrowing a sibling dependency's shape. */
 			true
 			(match expr
 				(cons head tail)
-					(if (or (equal? head (quote and))
-						(or (equal? head (symbol "and"))
-							(or (equal? head (quote or)) (equal? head (symbol "or")))))
-						(reduce tail (lambda (shaped item)
-							(and shaped (boolean_typed_expr_shaped? graph stage item)))
-							true)
-						(if (or (equal? head (quote not))
-							(or (equal? head (symbol "not"))
-								(or (equal? head (quote sql_not)) (equal? head (symbol "sql_not")))))
-							(and (equal? (count tail) 1)
-								(boolean_typed_expr_shaped? graph stage (car tail)))
-							(if (or (equal? head (quote if)) (equal? head (symbol "if")))
-								(boolean_case_results_shaped? graph stage tail)
-								(if (or (equal? head (quote coalesceNil)) (equal? head (symbol "coalesceNil")))
-									(and (equal? (count tail) 2)
-										(and (or (equal?? (nth tail 1) false) (equal?? (nth tail 1) true))
-											(boolean_typed_expr_shaped? graph stage (car tail))))
-									(if (boolean_expr_comparison_head? head)
-										true
-										(boolean_stage_dependency_leaf? graph stage expr))))))
+				(if (or (equal? head (quote and))
+					(or (equal? head (symbol "and"))
+						(or (equal? head (quote or)) (equal? head (symbol "or")))))
+					(reduce tail (lambda (shaped item)
+						(and shaped (boolean_typed_expr_shaped? graph stage item)))
+						true)
+					(if (or (equal? head (quote not))
+						(or (equal? head (symbol "not"))
+							(or (equal? head (quote sql_not)) (equal? head (symbol "sql_not")))))
+						(and (equal? (count tail) 1)
+							(boolean_typed_expr_shaped? graph stage (car tail)))
+						(if (or (equal? head (quote if)) (equal? head (symbol "if")))
+							(boolean_case_results_shaped? graph stage tail)
+							(if (or (equal? head (quote coalesceNil)) (equal? head (symbol "coalesceNil")))
+								(and (equal? (count tail) 2)
+									(and (or (equal?? (nth tail 1) false) (equal?? (nth tail 1) true))
+										(boolean_typed_expr_shaped? graph stage (car tail))))
+								(if (boolean_expr_comparison_head? head)
+									true
+									(boolean_stage_dependency_leaf? graph stage expr))))))
 				_ false)))))
 
 /* Whether stage's own realized value is boolean-shaped, considering both the
@@ -1833,7 +1833,7 @@ validate the stage as a whole rather than a particular output column. */
 			(and (not (nil? ag))
 				(begin
 					(define value_expr (car (scalar_first_probe_parts ag)))
-				(boolean_typed_expr_shaped? graph stage value_expr)))))))
+					(boolean_typed_expr_shaped? graph stage value_expr)))))))
 
 (define driver_membership_boolean_passthrough? (lambda (graph stage expr)
 	(if (presence_bool_stage_output_expr? expr)
@@ -7949,8 +7949,8 @@ boolean probe, matched against the specific logical output alias. */
 					(begin
 						(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 						(and (not (nil? (first_driver_lookup_key
-								stage
-								(without_source_alias sources (source_alias src)))))
+							stage
+							(without_source_alias sources (source_alias src)))))
 							(condition_has_exists_recset_probe? (source_alias src) condition))))
 					src
 					nil)))
@@ -8696,13 +8696,13 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 						(cdr (split (gs_id stage) ":derived:"))
 						(qassoc_get (gs_facts stage) (quote btw2025_parent) nil))))
 					signature)
-			/* Alias-normalized interning is safe for base-table groups. Query-input
-			stages retain distinct correlation scopes until scope equivalence can
-			be proven independently of their canonical carrier name. */
-			(if (and (source_is_base_table? (gs_input stage))
-				(empty_list? (stage_semantic_outer_aliases stage)))
-				(stage_semantic_backbone_signature signature_index stage)
-				nil))))))
+				/* Alias-normalized interning is safe for base-table groups. Query-input
+				stages retain distinct correlation scopes until scope equivalence can
+				be proven independently of their canonical carrier name. */
+				(if (and (source_is_base_table? (gs_input stage))
+					(empty_list? (stage_semantic_outer_aliases stage)))
+					(stage_semantic_backbone_signature signature_index stage)
+					nil))))))
 
 (define normalize_stage_output_left_join_expr (lambda (alias expr)
 	(match expr
@@ -10426,8 +10426,8 @@ and RecSet carriers additionally verify its uniqueness below. */
 					(source_unique_key_sets src)
 					(if (empty_list? primary_key) '() (list primary_key)))))
 				(if (reduce unique_keys (lambda (found key_cols)
-						(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
-						false)
+					(or found (and (equal? (count key_cols) 1) (equal?? (car key_cols) col))))
+					false)
 					idx
 					nil))))))
 
@@ -10585,7 +10585,7 @@ membership set. */
 (define lower_recset_stage_prepare_once_expr (lambda (stage_catalog stage)
 	(list
 		(physical_query_session_symbol)
-			"get_or_compute_scoped"
+		"get_or_compute_scoped"
 		(physical_query_scope_symbol)
 		(stage_prepare_key stage)
 		(list (quote lambda) '()
@@ -10614,15 +10614,15 @@ membership set. */
 					(physical_query_scope_symbol)
 					lookup_key
 					(list (quote lambda) '()
-					(list (quote recset_key_index)
-						(list (quote session) "__memcp_tx")
-						(list (quote scan_recset)
+						(list (quote recset_key_index)
 							(list (quote session) "__memcp_tx")
-						(list (quote table) cache_schema cache_relation)
-						(quoted_runtime_list (list requested_col))
-						(list (quote lambda) (list (symbol requested_col))
-							(list (quote equal??) (symbol requested_col) true)))
-						(quoted_runtime_list (list "k0")))))
+							(list (quote scan_recset)
+								(list (quote session) "__memcp_tx")
+								(list (quote table) cache_schema cache_relation)
+								(quoted_runtime_list (list requested_col))
+								(list (quote lambda) (list (symbol requested_col))
+									(list (quote equal??) (symbol requested_col) true)))
+							(quoted_runtime_list (list "k0")))))
 				(list (quote list) resolved_lookup_key))))))
 
 /* Select one physical realization at the consumer which owns this probe.
@@ -10758,10 +10758,10 @@ choice table instead of adding another promotion path. */
 			(symbol recset) (begin
 				(define carrier_src (scalar_first_probe_carrier_source src))
 				(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
-			(lower_recset_scalar_first_probe_expr
-				probe_stages stage requested_col
-				(lower_column_expr_for_join sources default_alias
-					(nth lookup_keys key_index))))
+				(lower_recset_scalar_first_probe_expr
+					probe_stages stage requested_col
+					(lower_column_expr_for_join sources default_alias
+						(nth lookup_keys key_index))))
 			(symbol keytable) (begin
 				(define carrier_src (scalar_first_probe_carrier_source src))
 				(define key_index (scalar_first_probe_keytable_key_index stage carrier_src keys))
@@ -11609,6 +11609,47 @@ would lose nested-stage and join semantics. */
 		((quote driver_membership_probe) stage probe) (list stage probe)
 		_ nil)))
 
+/* EXISTS is two-valued, so a top-level NOT around its physical membership
+marker is an exact set complement. Do not recognize membership/NOT IN stages
+here: their UNKNOWN rows are in neither SQL truth set. */
+(define find_single_driver_membership_probe_term (lambda (expr)
+	(begin
+		(define direct (driver_membership_probe_term expr))
+		(if (not (nil? direct))
+			direct
+			(match expr
+				(cons _head tail) (begin
+					(define found (filter (map tail find_single_driver_membership_probe_term)
+						(lambda (item) (not (nil? item)))))
+					(if (single_source? found) (car found) nil))
+				_ nil)))))
+
+(define driver_membership_positive_guard_expr? (lambda (marker expr)
+	(if (equal? (driver_membership_probe_term expr) marker)
+		true
+		(if (driver_membership_nil_guard? (nth marker 1) expr)
+			true
+			(match expr
+				(cons head tail) (if (or (equal? head (quote and)) (equal? head (symbol "and")))
+					(reduce tail (lambda (valid item)
+						(and valid (driver_membership_positive_guard_expr? marker item))) true)
+					false)
+				_ false)))))
+
+(define negated_driver_membership_probe_term (lambda (expr)
+	(match expr
+		((symbol not) inner) (begin
+			(define marker (find_single_driver_membership_probe_term inner))
+			(if (and (not (nil? marker))
+				(and (presence_probe_stage? (car marker))
+					(driver_membership_positive_guard_expr? marker inner))) marker nil))
+		((quote not) inner) (begin
+			(define marker (find_single_driver_membership_probe_term inner))
+			(if (and (not (nil? marker))
+				(and (presence_probe_stage? (car marker))
+					(driver_membership_positive_guard_expr? marker inner))) marker nil))
+		_ nil)))
+
 (define driver_membership_nil_guard? (lambda (probe expr)
 	(match expr
 		((symbol not) ((symbol nil?) guarded)) (equal? guarded probe)
@@ -11643,6 +11684,28 @@ would lose nested-stage and join semantics. */
 					(and (not (equal? term marker_term))
 						(not (driver_membership_nil_guard? probe term)))))
 				true)))))
+
+(define driver_membership_formula_terms_for_source (lambda (src condition)
+	(filter (map (split_and_terms (coalesceNil condition true)) (lambda (term)
+		(begin
+			(define positive (driver_membership_probe_term term))
+			(define negative (negated_driver_membership_probe_term term))
+			(define marker (coalesceNil positive negative))
+			(if (or (nil? marker) (not (presence_probe_stage? (car marker))))
+				nil
+				(begin
+					(define probe_col (direct_column_name_for_alias src (nth marker 1)))
+					(if (nil? probe_col)
+						nil
+						(list (nth marker 0) (nth marker 1) probe_col term (not (nil? negative)))))))))
+		(lambda (item) (not (nil? item))))))
+
+(define strip_driver_membership_formula_terms (lambda (condition terms)
+	(combine_where_terms
+		(filter (split_and_terms (coalesceNil condition true)) (lambda (term)
+			(not (reduce terms (lambda (matched formula_term)
+				(or matched (equal? term (nth formula_term 3)))) false))))
+		true)))
 
 (define recset_project_join_branch_parts (lambda (branch)
 	(if (or (not (and (query_block? branch) (single_source? (qb_sources branch))))
@@ -15429,7 +15492,7 @@ get_column refs to the source) are excluded automatically too. */
 						(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages rewritten_src)
 						(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src)))
 				(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src))
-				rewritten_src))
+			rewritten_src))
 		(define direct_nested_stages (if (query_block? rewritten_src)
 			(merge_unique (list
 				(query_block_stages_to_prepare_using prepare_catalog rewritten_src)
@@ -16217,16 +16280,16 @@ get_column refs to the source) are excluded automatically too. */
 
 (define query_block_bounded_scalar_probe_recipe_keys (lambda (block entries)
 	(if (not (query_block_bounded_scalar_probe_recipe_context? block))
-			'()
-			(begin
-				(define prelimit_keys (scalar_query_probe_recipe_keys
-					(query_block_prelimit_scalar_query_probe_recipe_entries block)))
-				(reduce entries (lambda (keys entry)
-					(match entry
-						'(stage requested_col) (begin
-							(define key (scalar_query_probe_recipe_key stage requested_col))
-							(if (has_assoc? prelimit_keys key) keys (set_assoc keys key true)))
-						_ keys)) '()))))))
+		'()
+		(begin
+			(define prelimit_keys (scalar_query_probe_recipe_keys
+				(query_block_prelimit_scalar_query_probe_recipe_entries block)))
+			(reduce entries (lambda (keys entry)
+				(match entry
+					'(stage requested_col) (begin
+						(define key (scalar_query_probe_recipe_key stage requested_col))
+						(if (has_assoc? prelimit_keys key) keys (set_assoc keys key true)))
+					_ keys)) '()))))))
 
 /* A filter probe must retain its marker until scan lowering knows the number
 of pre-limit rows it will evaluate. Turning it into a bounded direct recipe
@@ -16693,6 +16756,41 @@ scan boundary only when the complete predicate implies it. */
 					binding
 					nil)))) nil)))
 
+/* Build an exact RecSet formula only when every membership marker in the
+predicate is a top-level AND term and at least one is a two-valued NOT EXISTS.
+This lets NOT EXISTS drive a complement and EXISTS ... AND NOT EXISTS drive a
+difference, while guarded OR branches keep the established residual-filter
+path. */
+(define driver_membership_recset_formula (lambda (src condition bindings)
+	(begin
+		(define terms (driver_membership_formula_terms_for_source src condition))
+		(define has_negative (reduce terms (lambda (found term)
+			(or found (nth term 4))) false))
+		(define term_bindings (map terms (lambda (term)
+			(membership_binding_for_marker bindings (list (nth term 0) (nth term 1))))))
+		(if (or (not has_negative)
+			(or (not (equal? (count terms) (count bindings)))
+				(reduce term_bindings (lambda (missing binding)
+					(or missing (nil? binding))) false)))
+			nil
+			(begin
+				(define positive_exprs (merge (map (produceN (count terms)) (lambda (i)
+					(if (nth (nth terms i) 4) '() (list (nth (nth term_bindings i) 2)))))))
+				(define negative_exprs (merge (map (produceN (count terms)) (lambda (i)
+					(if (nth (nth terms i) 4) (list (nth (nth term_bindings i) 2)) '())))))
+				(define negative_union (if (single_source? negative_exprs)
+					(car negative_exprs)
+					(list (quote recset_union) (cons (quote list) negative_exprs))))
+				(define formula (if (empty_list? positive_exprs)
+					(list (quote recset_not) negative_union)
+					(begin
+						(define positive_intersection (if (single_source? positive_exprs)
+							(car positive_exprs)
+							(list (quote recset_intersect) (cons (quote list) positive_exprs))))
+						(list (quote recset_difference)
+							(cons (quote list) (cons positive_intersection negative_exprs))))))
+				(list terms formula negative_exprs positive_exprs))))))
+
 (define membership_keyset_descriptor (lambda (membership)
 	(begin
 		(define stage (nth membership 0))
@@ -16858,6 +16956,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 			(begin
 				(define alias (source_alias src))
 				(define condition (combine_where (qb_where block) (source_join_expr src)))
+				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
 				(define order_items (coalesceNil (qb_order block) '()))
 				(define scan_order_supported (order_items_belong_to_source? src order_items))
 				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
@@ -16876,6 +16975,9 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 					'()
 					(membership_recset_bindings src memberships)))
 				(define bound_memberships (map membership_bindings (lambda (binding) (nth binding 0))))
+				(define membership_formula (if keyset_membership_probe
+					nil
+					(driver_membership_recset_formula src condition membership_bindings)))
 				/* A membership predicate which is implied by the whole WHERE clause is
 				eligible to become the scan driver. A branch-local predicate below OR is
 				not: its RecSet must remain a probe or rows accepted by sibling branches
@@ -16884,20 +16986,48 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				(define direct_membership (driver_membership_for_source src condition))
 				(define prefer_membership_filter (and scan_order_supported
 					(and bounded (broad_driver_order_membership_probe? (qb_facts block)))))
+				(define membership_formula_driver (and
+					(not (nil? membership_formula))
+					(not prefer_membership_filter)))
+				(define membership_formula_residual (if membership_formula_driver
+					(strip_driver_membership_formula_terms condition (car membership_formula))
+					condition))
+				/* If ordinary conjuncts already define a narrower exact base set,
+				subtract NOT EXISTS matches from that set instead of complementing the
+				whole visible table. This is both exact and the useful Difference case. */
+				(define membership_formula_difference_driver (and membership_formula_driver
+					(and (empty_list? (nth membership_formula 3))
+						(not (equal? membership_formula_residual true)))))
+				(define membership_formula_expr (if membership_formula_difference_driver
+					(begin
+						(define base_cols (extract_columns_for_alias src membership_formula_residual))
+						(define base_recset (list (quote scan_recset)
+							'(session "__memcp_tx")
+							source_table
+							(cons (quote list) base_cols)
+							(list (quote lambda)
+								(map base_cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+								(list (quote optimize) (lower_column_expr_for_alias src membership_formula_residual)))))
+						(list (quote recset_difference)
+							(cons (quote list) (cons base_recset (nth membership_formula 2)))))
+					(if membership_formula_driver (nth membership_formula 1) nil)))
 				(define membership_driver (and
-					(not (nil? direct_membership))
-					(and (not prefer_membership_filter)
-						(and (not (empty_list? membership_bindings))
-							(and (empty_list? (cdr membership_bindings))
-								(equal? direct_membership (car bound_memberships)))))))
+					(not membership_formula_driver)
+					(and (not (nil? direct_membership))
+						(and (not prefer_membership_filter)
+							(and (not (empty_list? membership_bindings))
+								(and (empty_list? (cdr membership_bindings))
+									(equal? direct_membership (car bound_memberships))))))))
 				(define membership_filter (and
-					(not membership_driver)
+					(not (or membership_driver membership_formula_driver))
 					(not (empty_list? membership_bindings))))
 				(define filter_condition (if use_membership_keysets
 					(replace_driver_membership_keyset_markers condition membership_keysets)
-					(if membership_driver
-						(strip_driver_membership_for_source src condition direct_membership)
-						(replace_driver_membership_markers src condition bound_memberships))))
+					(if membership_formula_driver
+						(if membership_formula_difference_driver true membership_formula_residual)
+						(if membership_driver
+							(strip_driver_membership_for_source src condition direct_membership)
+							(replace_driver_membership_markers src condition bound_memberships)))))
 				(define filtercols (merge_unique (list
 					(if membership_filter (list "$recset_contains") '())
 					(extract_columns_for_alias src filter_condition))))
@@ -16905,13 +17035,14 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 					(extract_columns_for_alias src expr)))))
 				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
 				(define mapcols fieldcols)
-				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
 				(define membership_candidates (if membership_filter
 					(membership_or_candidate_recset src source_table condition membership_bindings)
 					nil))
-				(define table_expr (if membership_driver
-					(nth (car membership_bindings) 2)
-					(coalesceNil membership_candidates source_table)))
+				(define table_expr (if membership_formula_driver
+					membership_formula_expr
+					(if membership_driver
+						(nth (car membership_bindings) 2)
+						(coalesceNil membership_candidates source_table))))
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(list (quote optimize) (lower_column_expr_for_alias src filter_condition))))
@@ -19084,8 +19215,8 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 
 (define physical_plan_uses_query_scope? (lambda (expr)
 	(if (or (equal? expr (physical_query_session_symbol))
-			(or (equal? expr (physical_query_scope_symbol))
-				(equal? expr (physical_query_tx_symbol))))
+		(or (equal? expr (physical_query_scope_symbol))
+			(equal? expr (physical_query_tx_symbol))))
 		true
 		(match expr
 			((symbol quote) _value) false
@@ -19322,6 +19453,8 @@ ordering run. Storage artifacts begin in build_queryplan. */
 			(equal? (string head) "recset_project_join")
 			(equal? (string head) "recset_union")
 			(equal? (string head) "recset_intersect")
+			(equal? (string head) "recset_difference")
+			(equal? (string head) "recset_not")
 			(reduce tail (lambda (found item) (or found (physical_recset_source_expr? item))) false))
 		_ false)))
 

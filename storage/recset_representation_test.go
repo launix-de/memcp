@@ -533,6 +533,40 @@ func TestCombineTwoRecSetShardsDispatchesOptimizedPath(t *testing.T) {
 	}
 }
 
+func TestDifferenceRecSetShardsAcrossRepresentations(t *testing.T) {
+	universe := uint32(2048)
+	rangesWant := wantFromRange(universe, [][2]uint32{{100, 700}, {1200, 400}})
+	positiveWant := wantFromRange(universe, [][2]uint32{{50, 1}, {100, 1}, {333, 1}, {1250, 1}, {1900, 1}})
+	bitmapWant := make([]bool, universe)
+	rng := rand.New(rand.NewSource(23))
+	for i := range bitmapWant {
+		bitmapWant[i] = rng.Intn(2) == 0
+	}
+
+	fixtures := []struct {
+		name string
+		part recSetShard
+		want []bool
+	}{
+		{"ranges", buildRecSetShard(rangesWant), rangesWant},
+		{"positive", buildRecSetShard(positiveWant), positiveWant},
+		{"bitmap", buildRecSetShard(bitmapWant), bitmapWant},
+	}
+	for _, left := range fixtures {
+		for _, right := range fixtures {
+			left, right := left, right
+			t.Run(left.name+"_minus_"+right.name, func(t *testing.T) {
+				want := make([]bool, universe)
+				for i := range want {
+					want[i] = left.want[i] && !right.want[i]
+				}
+				got := differenceRecSetShards(nil, &left.part, &right.part)
+				verifyRecSetShard(t, "difference", got, want)
+			})
+		}
+	}
+}
+
 // TestNewRecSetShardFromSortedIDs checks the project-join builder path
 // (pre-sorted external id list, not an ascending add() scan).
 func TestNewRecSetShardFromSortedIDs(t *testing.T) {
