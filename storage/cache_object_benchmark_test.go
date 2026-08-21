@@ -50,6 +50,7 @@ func BenchmarkCacheManagerAsyncSizeUpdate(b *testing.B) {
 func BenchmarkStorageIndexEvictionOffer(b *testing.B) {
 	idx := new(StorageIndex)
 	idx.skipListCacheBytes.Store(64 << 20)
+	idx.skipListPartialBytes.Store(32 << 20)
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -63,29 +64,42 @@ func BenchmarkStorageIndexEvictionOffer(b *testing.B) {
 
 func BenchmarkStorageIndexPartialEviction(b *testing.B) {
 	for _, childCount := range []int{1_000, 10_000, 100_000} {
-		b.Run(fmt.Sprintf("children-%d", childCount), func(b *testing.B) {
-			idx := new(StorageIndex)
-			cache := new(sync.Map)
-			var size int64
-			for child := 0; child < childCount; child++ {
-				key := skipListKey{pattern: fmt.Sprintf("%%term-%d%%", child), collation: "utf8_bin"}
-				skipList := new(SkipList)
-				cache.Store(key, skipList)
-				size += skipListEntrySize(key, skipList)
+		for _, hotEvery := range []int{0, 2} {
+			name := fmt.Sprintf("cold-%d", childCount)
+			if hotEvery > 0 {
+				name = fmt.Sprintf("half-hot-%d", childCount)
 			}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for iteration := 0; iteration < b.N; iteration++ {
-				idx.baseState.skipLists = []*sync.Map{cache}
-				idx.baseState.skipListBytes.Store(size)
-				idx.skipListCacheBytes.Store(size)
-				result := idx.evict(evictPartial, size+1024, new([numEvictableTypes]int64))
-				if !result.success || result.freedBytes != size {
-					b.Fatalf("partial result = %+v, want %d bytes", result, size)
+			b.Run(name, func(b *testing.B) {
+				b.ReportAllocs()
+				for iteration := 0; iteration < b.N; iteration++ {
+					b.StopTimer()
+					idx := new(StorageIndex)
+					cache := new(sync.Map)
+					idx.baseState.skipLists = []*sync.Map{cache}
+					var size int64
+					var coldSize int64
+					for child := 0; child < childCount; child++ {
+						key := skipListKey{pattern: fmt.Sprintf("%%term-%d%%", child), collation: "utf8_bin"}
+						skipList := new(SkipList)
+						childSize := attachTestSkipList(idx, &idx.baseState, cache, key, skipList)
+						size += childSize
+						if hotEvery > 0 && child%hotEvery == 0 {
+							skipList.recordUse()
+						} else {
+							coldSize += skipListEntrySize(key, skipList)
+						}
+					}
+					candidateBytes := idx.baseState.skipListPartialCandidateBytes
+					b.StartTimer()
+					result := idx.evict(evictPartial, size+1024, new([numEvictableTypes]int64))
+					expectedFreed := coldSize + candidateBytes
+					if !result.success || result.freedBytes != expectedFreed {
+						b.Fatalf("partial result = %+v, want %d bytes", result, expectedFreed)
+					}
 				}
-			}
-			b.ReportMetric(float64(childCount), "children/op")
-		})
+				b.ReportMetric(float64(childCount), "candidates/op")
+			})
+		}
 	}
 }
 

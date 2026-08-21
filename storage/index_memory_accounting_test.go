@@ -23,6 +23,12 @@ import "time"
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
 
+func attachTestSkipList(idx *StorageIndex, state *storageIndexState, cache *sync.Map, key skipListKey, skipList *SkipList) int64 {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	return idx.attachSkipListLocked(state, cache, 0, key, skipList)
+}
+
 func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	Init(scm.Globalenv)
 	dbname := "test_estimate_no_savings"
@@ -72,37 +78,108 @@ func TestStorageIndexComputeSizeCountsDeltaBtree(t *testing.T) {
 	}
 }
 
-func TestStorageIndexPartialEvictionOwnsSkipListChildren(t *testing.T) {
+func TestStorageIndexPartialEvictionDropsOnlySingleUseChildren(t *testing.T) {
 	idx := &StorageIndex{}
 	cache := new(sync.Map)
 	idx.baseState.active = true
 	idx.baseState.skipLists = []*sync.Map{cache}
-	key := skipListKey{pattern: "%needle%", collation: "utf8_bin"}
-	skipList := &SkipList{}
-	cache.Store(key, skipList)
-	childBytes := skipListEntrySize(key, skipList)
-	idx.baseState.skipListBytes.Store(childBytes)
-	idx.skipListCacheBytes.Store(childBytes)
+	coldKey := skipListKey{pattern: "%one-off%", collation: "utf8_bin"}
+	hotKey := skipListKey{pattern: "%paged%", collation: "utf8_bin"}
+	cold := &SkipList{}
+	hot := &SkipList{}
+	coldBytes := attachTestSkipList(idx, &idx.baseState, cache, coldKey, cold)
+	hotBytes := attachTestSkipList(idx, &idx.baseState, cache, hotKey, hot)
+	if _, ok := loadCachedSkipList(cache, hotKey); !ok {
+		t.Fatal("second exact use did not find hot child")
+	}
+	candidateBytes := idx.baseState.skipListPartialCandidateBytes
 
-	offer := idx.evictionOffer(childBytes + 1024)
-	if offer.partialBytes != childBytes || offer.fullBytes != childBytes+1024 {
-		t.Fatalf("offer = %+v, want partial=%d full=%d", offer, childBytes, childBytes+1024)
+	offer := idx.evictionOffer(coldBytes + hotBytes + 1024)
+	if offer.partialBytes != coldBytes+hotBytes || offer.fullBytes != coldBytes+hotBytes+1024 {
+		t.Fatalf("offer = %+v, want partial=%d full=%d", offer, coldBytes+hotBytes, coldBytes+hotBytes+1024)
 	}
 	result := idx.evict(evictPartial, offer.fullBytes, new([numEvictableTypes]int64))
-	if !result.success || result.fullyEvicted || result.freedBytes != childBytes {
+	expectedFreed := skipListEntrySize(coldKey, cold) + candidateBytes
+	if !result.success || result.fullyEvicted || result.freedBytes != expectedFreed {
 		t.Fatalf("partial result = %+v", result)
 	}
-	if idx.baseState.skipLists[0] == cache {
-		t.Fatal("partial eviction retained the published child map")
+	if _, ok := cache.Load(coldKey); ok {
+		t.Fatal("partial eviction retained one-use child")
 	}
-	if _, ok := idx.baseState.skipLists[0].Load(key); ok {
-		t.Fatal("replacement child map is not empty")
+	if got, ok := cache.Load(hotKey); !ok || got != hot {
+		t.Fatal("partial eviction removed repeatedly used child")
 	}
 	if !idx.baseState.active {
 		t.Fatal("partial eviction removed the parent index")
 	}
-	if got := idx.skipListCacheBytes.Load(); got != 0 {
-		t.Fatalf("child bytes = %d, want 0", got)
+	expectedRemaining := coldBytes + hotBytes - expectedFreed
+	if got := idx.skipListCacheBytes.Load(); got != expectedRemaining {
+		t.Fatalf("child bytes = %d, want hot bytes %d", got, expectedRemaining)
+	}
+	if got := idx.skipListPartialBytes.Load(); got != 0 {
+		t.Fatalf("partial candidate bytes = %d, want 0", got)
+	}
+}
+
+func TestStorageIndexPartialEvictionRetainsSecondUse(t *testing.T) {
+	idx := &StorageIndex{}
+	cache := new(sync.Map)
+	idx.baseState.skipLists = []*sync.Map{cache}
+	key := skipListKey{pattern: "%reused%", collation: "utf8_bin"}
+	skipList := &SkipList{}
+	bytes := attachTestSkipList(idx, &idx.baseState, cache, key, skipList)
+	if got := idx.evictionOffer(bytes).partialBytes; got != bytes {
+		t.Fatalf("first-use offer = %d, want %d", got, bytes)
+	}
+	loadCachedSkipList(cache, key)
+	candidateBytes := idx.baseState.skipListPartialCandidateBytes
+	if got := idx.evictionOffer(bytes).partialBytes; got != bytes {
+		t.Fatalf("pre-sampling offer = %d, want upper bound %d", got, bytes)
+	}
+	result := idx.evict(evictPartial, bytes, new([numEvictableTypes]int64))
+	if !result.success || result.fullyEvicted || result.freedBytes != candidateBytes {
+		t.Fatalf("partial eviction did not release hot admission metadata: %+v", result)
+	}
+	if _, ok := cache.Load(key); !ok {
+		t.Fatal("hot child disappeared")
+	}
+	if got := idx.skipListCacheBytes.Load(); got != bytes-candidateBytes {
+		t.Fatalf("child bytes = %d, want %d", got, bytes-candidateBytes)
+	}
+	if got := idx.skipListPartialBytes.Load(); got != 0 {
+		t.Fatalf("partial candidate bytes = %d, want 0", got)
+	}
+}
+
+func TestStorageIndexPromotionRacesPartialEvictionAccounting(t *testing.T) {
+	for iteration := 0; iteration < 1000; iteration++ {
+		idx := &StorageIndex{}
+		cache := new(sync.Map)
+		idx.baseState.skipLists = []*sync.Map{cache}
+		key := skipListKey{pattern: "%race%", collation: "utf8_bin"}
+		skipList := &SkipList{}
+		bytes := attachTestSkipList(idx, &idx.baseState, cache, key, skipList)
+		start := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			<-start
+			skipList.recordUse()
+			close(done)
+		}()
+		close(start)
+		idx.evict(evictPartial, bytes, new([numEvictableTypes]int64))
+		<-done
+		if got := idx.skipListPartialBytes.Load(); got != 0 {
+			t.Fatalf("iteration %d: partial candidate bytes = %d, want 0", iteration, got)
+		}
+		hotBytes := skipListEntrySize(key, skipList)
+		if got := idx.skipListCacheBytes.Load(); got != 0 && got != hotBytes {
+			t.Fatalf("iteration %d: total bytes = %d, want 0 or %d", iteration, got, hotBytes)
+		}
+		_, retained := cache.Load(key)
+		if retained != (idx.skipListCacheBytes.Load() == hotBytes) {
+			t.Fatalf("iteration %d: retained=%t disagrees with accounting", iteration, retained)
+		}
 	}
 }
 
@@ -141,22 +218,17 @@ func TestStorageIndexPartialEvictionKeepsActiveQueryReference(t *testing.T) {
 	cache := &sync.Map{}
 	key := skipListKey{pattern: "%needle%", collation: "utf8_bin"}
 	queryReference := &SkipList{}
-	cache.Store(key, queryReference)
 	idx := &StorageIndex{}
 	idx.baseState.active = true
 	idx.baseState.skipLists = []*sync.Map{cache}
-	idx.baseState.skipListBytes.Store(skipListEntrySize(key, queryReference))
-	idx.skipListCacheBytes.Store(skipListEntrySize(key, queryReference))
+	attachTestSkipList(idx, &idx.baseState, cache, key, queryReference)
 
 	result := idx.evict(evictPartial, 1024, new([numEvictableTypes]int64))
 	if !result.success {
 		t.Fatal("partial eviction failed")
 	}
-	if idx.baseState.skipLists[0] == cache {
-		t.Fatal("old cache remained published on the parent")
-	}
-	if got, ok := cache.Load(key); !ok || got != queryReference {
-		t.Fatal("active query's snapshotted map was invalidated")
+	if _, ok := cache.Load(key); ok {
+		t.Fatal("one-use child remained cached")
 	}
 	if queryReference.cursor().skip != queryReference {
 		t.Fatal("active query reference was invalidated")
@@ -174,7 +246,6 @@ func TestCacheManagerTracksOnlyTopLevelIndex(t *testing.T) {
 	idx.baseState.skipLists = []*sync.Map{cache}
 	key := skipListKey{pattern: "%needle%", collation: "utf8_bin"}
 	skipList := &SkipList{}
-	childBytes := skipListEntrySize(key, skipList)
 	const baseBytes = int64(1024)
 	manager.AddItemEx(
 		idx,
@@ -186,12 +257,8 @@ func TestCacheManagerTracksOnlyTopLevelIndex(t *testing.T) {
 		0,
 		0,
 	)
-	idx.mu.Lock()
-	cache.Store(key, skipList)
-	idx.baseState.skipListBytes.Store(childBytes)
-	idx.skipListCacheBytes.Store(childBytes)
+	childBytes := attachTestSkipList(idx, &idx.baseState, cache, key, skipList)
 	manager.UpdateSizeAsync(idx, childBytes)
-	idx.mu.Unlock()
 
 	before := manager.Stat()
 	if before.CountByType[TypeIndex] != 1 {
@@ -205,7 +272,7 @@ func TestCacheManagerTracksOnlyTopLevelIndex(t *testing.T) {
 	if after.CountByType[TypeIndex] != 1 || after.SizeByType[TypeIndex] != baseBytes {
 		t.Fatalf("after partial eviction: count=%d size=%d", after.CountByType[TypeIndex], after.SizeByType[TypeIndex])
 	}
-	if idx.baseState.skipLists[0] == cache {
-		t.Fatal("partial pressure eviction retained published child map")
+	if _, ok := cache.Load(key); ok {
+		t.Fatal("partial pressure eviction retained one-use child")
 	}
 }
