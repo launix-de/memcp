@@ -1006,6 +1006,8 @@ func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, caches []*sy
 	// choose a cheaper sub-item before dropping the whole index.
 	if sl != nil {
 		entry := &skipListCacheEntry{index: s, colIdx: colIdx, pattern: key.pattern, collation: key.collation, cache: cache, skipList: sl}
+		// The active query owns sl directly, so removing the cache recommendation
+		// cannot invalidate its cursor. Do not impose a wall-clock grace period.
 		GlobalCache.AddItemEx(entry, int64(sl.ComputeSize()), TypeIndex, skipListCleanup, skipListLastUsed, skipListGetScore, 0, likeSkipListMaxIdle)
 	}
 	return sl

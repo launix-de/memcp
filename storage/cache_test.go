@@ -60,3 +60,37 @@ func TestEvictExpiredRetriesFailedCleanup(t *testing.T) {
 		t.Fatalf("cleanup attempts = %d, want 2", attempts)
 	}
 }
+
+func TestEvictionHonorsOnlyExplicitMinimumLifetime(t *testing.T) {
+	newManager := func(minLifetime time.Duration) (*CacheManager, *int) {
+		pointer := new(int)
+		item := &softItem{
+			pointer:      pointer,
+			evictType:    TypeIndex,
+			heapIndex:    -1,
+			registeredAt: time.Now().UnixNano(),
+			minLifetime:  int64(minLifetime),
+			getLastUsed:  func(any) time.Time { return time.Time{} },
+			cleanup:      func(any, *[numEvictableTypes]int64) bool { return true },
+		}
+		cm := &CacheManager{
+			currentMemory: 1,
+			countByType:   [numEvictableTypes]int64{TypeIndex: 1},
+			itemMap:       map[any]*softItem{pointer: item},
+		}
+		heap.Push(&cm.h, item)
+		return cm, pointer
+	}
+
+	withoutMinimum, unpinned := newManager(0)
+	withoutMinimum.evict(1, 0, 0, nil)
+	if _, ok := withoutMinimum.itemMap[unpinned]; ok {
+		t.Fatal("zero minimum lifetime prevented immediate pressure eviction")
+	}
+
+	withMinimum, pinned := newManager(time.Minute)
+	withMinimum.evict(1, 0, 0, nil)
+	if _, ok := withMinimum.itemMap[pinned]; !ok {
+		t.Fatal("explicit minimum lifetime did not protect the item")
+	}
+}

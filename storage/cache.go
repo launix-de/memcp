@@ -56,9 +56,8 @@ const (
 //
 // Phase 1 (heap) pulls candidates by evictionScore (max-heap).
 // Phase 2 sorts candidates by dynamicScore = age * evictionScore - telemetry*1000.
-// The minLifetime guarantee (default 1s) protects items from premature eviction
-// during query execution. Keytables use touch_keytable to refresh lastAccessed
-// before each use, ensuring they survive cache pressure during query runtime.
+// Callers that need a minimum lifetime set it explicitly. Query-local cache
+// consumers should instead retain a Go reference for the duration of their use.
 //
 //	TempCol Shard Index TempKT CacheEntry StringDict
 var evictableWeights = [numEvictableTypes]int64{20, 1, 20, 2, 20, 20}
@@ -264,6 +263,7 @@ func (cm *CacheManager) AddItem(
 		getLastUsed:   getLastUsed,
 		getScore:      getScore,
 		heapIndex:     -1,
+		minLifetime:   int64(time.Second),
 	}
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{add: item, done: done}
@@ -271,7 +271,7 @@ func (cm *CacheManager) AddItem(
 }
 
 // AddItemEx is like AddItem but allows specifying per-item lifetimes.
-// minLifetime: minimum idle duration before this item is eligible for eviction (0 = default 1s).
+// minLifetime: minimum idle duration before this item is eligible for eviction (0 = none).
 // maxIdleTime: force-evict the item if it has been idle for longer than this (0 = no limit).
 func (cm *CacheManager) AddItemEx(
 	pointer any,
@@ -667,12 +667,8 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 		if lu := c.getLastUsed(c.pointer).UnixNano(); lu > lastActive {
 			lastActive = lu
 		}
-		minLT := c.minLifetime
-		if minLT == 0 {
-			minLT = int64(time.Second)
-		}
 		idleNanos := now.UnixNano() - lastActive
-		if idleNanos < minLT {
+		if idleNanos < c.minLifetime {
 			heap.Push(&cm.h, c)
 			continue
 		}
