@@ -180,7 +180,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (ir_hidden_fields simple_ir) '()) true "untangle_query keeps hidden/domain fields separate")
 	(assert (equal? (ir_context_get (ir_context_of simple_ir) 'compile-budget-ms nil) 1000) true "untangle_query carries compile budget in context")
 	(assert (equal? (join_reorder simple_ir) simple_ir) true "join_reorder is an IR-only phase")
-	(assert (equal? (logical_op (build_queryplan_term simple_select_ast)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
+	(define simple_physical_plan (build_queryplan_term simple_select_ast))
+	(assert (equal? (logical_op simple_physical_plan) '!begin) true "build_queryplan adds the physical query context boundary")
+	(assert (equal? (logical_op (nth simple_physical_plan 4)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
 	(assert (physical_relational_list_collector?
 		(list 'sort 'arbitrarily_renamed_rows (list 'lambda '(a b) true)))
 		true "physical plan guard rejects structurally sorted Scheme relations")
@@ -692,7 +694,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"exists_ok" (list 'inner_select_exists no_from_select_ast))
 		true nil nil nil nil nil))
 	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
-	(assert (equal? (serialize (build_queryplan_term scalar_no_from_ast))
+	(define scalar_no_from_plan (build_queryplan_term scalar_no_from_ast))
+	(assert (equal? (logical_op scalar_no_from_plan) '!begin) true "zero-domain subqueries retain the physical query context boundary")
+	(assert (equal? (serialize (nth scalar_no_from_plan 4))
 		"(resultrow '(\"x\" 8 \"in_ok\" (if (nil? 8) nil (if (nil? 8) nil (equal?? 8 8))) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
 	(define nested_catalog_stage (make_group_stage
 		"nested-catalog-stage"
@@ -2971,6 +2975,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define s1_keys (s1))
 	(assert (contains? s1_keys "x") true "session: lists key x")
 	(assert (contains? s1_keys "y") true "session: lists key y")
+	(define s1_compute_calls (newsession))
+	(define s1_scope_a (newsession))
+	(define s1_compute_values (parallelN 8 (lambda (i)
+		(s1 "get_or_compute_scoped" s1_scope_a "shared" (lambda () (begin
+			(s1_compute_calls (string i) true)
+			123))))))
+	(assert s1_compute_values '(123 123 123 123 123 123 123 123) "session: scoped compute shares producer value")
+	(assert (count (s1_compute_calls)) 1 "session: scoped compute runs one producer")
+	(define s1_scope_b (newsession))
+	(assert (s1 "get_or_compute_scoped" s1_scope_a "shared" (lambda () 7)) 123 "session: scoped compute reuses first scope")
+	(assert (s1 "get_or_compute_scoped" s1_scope_b "value" (lambda () 9)) 9 "session: scoped compute isolates scopes")
 	(assert (equal? (try (lambda () (s1 "a" "b" "c")) (lambda (e) "caught")) "caught") true "session: too many args panics")
 
 	/* deep callback signature validation */

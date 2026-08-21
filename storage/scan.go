@@ -889,9 +889,8 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		t.mu.RLock()
 		locked = true
 		// Table lock check must happen AFTER shard RLock to close the TOCTOU window:
-		// lockTable() publishes tableLockState while holding shard write locks, so
-		// any scan that gets past RLock sees a lock issued before it acquired the
-		// shard read lock.
+		// WRITE publication holds every shard write lock, so a scan that gets past
+		// RLock observes it. READ locks do not block ordinary scans.
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false

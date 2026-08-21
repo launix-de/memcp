@@ -712,11 +712,11 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 	}
 }
 
-// collectRebuiltColumnPlannerStatistics reads only freshly rebuilt, unpublished
-// shard generations while the caller owns the table rebuild critical section.
-// It must not be used for live shards because it intentionally takes no shard
-// locks. Cached readers keep this maintenance pass sequential and allocation
-// free per value.
+// collectRebuiltColumnPlannerStatistics reads freshly rebuilt shard generations.
+// A generation can already receive forwarded writes, or become live, before
+// statistics publication finishes. Lock each shard independently and never
+// call this helper while holding table.mu: mutation callbacks may need table
+// metadata while they own the shard lock.
 func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName string) *columnPlannerStatistics {
 	stats := &columnPlannerStatistics{
 		Confidence:  1,
@@ -731,35 +731,39 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 		if shard == nil {
 			continue
 		}
-		columnStorage := shard.columns[columnName]
-		if columnStorage == nil {
-			continue
-		}
-		if cap(buf) < int(shard.main_count) {
-			buf = make([]scm.Scmer, shard.main_count)
-		}
-		buf = buf[:shard.main_count]
-		reader := columnStorage.GetCachedReader()
-		reader.GetValueRange(0, shard.main_count, buf, 1)
-		for _, value := range buf {
-			rowCount++
-			if value.IsNil() {
-				stats.NullCount++
-				continue
+		func() {
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			columnStorage := shard.columns[columnName]
+			if columnStorage == nil {
+				return
 			}
-			if !hasValue {
-				stats.MinEstimate = value
-				stats.MaxEstimate = value
-				hasValue = true
-				continue
+			if cap(buf) < int(shard.main_count) {
+				buf = make([]scm.Scmer, shard.main_count)
 			}
-			if scm.Less(value, stats.MinEstimate) {
-				stats.MinEstimate = value
+			buf = buf[:shard.main_count]
+			reader := columnStorage.GetCachedReader()
+			reader.GetValueRange(0, shard.main_count, buf, 1)
+			for _, value := range buf {
+				rowCount++
+				if value.IsNil() {
+					stats.NullCount++
+					continue
+				}
+				if !hasValue {
+					stats.MinEstimate = value
+					stats.MaxEstimate = value
+					hasValue = true
+					continue
+				}
+				if scm.Less(value, stats.MinEstimate) {
+					stats.MinEstimate = value
+				}
+				if scm.Less(stats.MaxEstimate, value) {
+					stats.MaxEstimate = value
+				}
 			}
-			if scm.Less(stats.MaxEstimate, value) {
-				stats.MaxEstimate = value
-			}
-		}
+		}()
 	}
 	if rowCount > 0 {
 		stats.NullFraction = float64(stats.NullCount) / float64(rowCount)
@@ -1011,10 +1015,7 @@ func tableLockQueryContext(ss *scm.SessionState) context.Context {
 // waitTableLock blocks until the table lock is compatible with the caller's intent.
 // isWrite=true means the caller wants to write (blocked by ANY lock from another session).
 // isWrite=false means the caller wants to read (blocked only by WRITE lock from another session).
-// Sets State to "Waiting for table lock" while blocking.
-// The query lifecycle clears the state again when the statement finishes; do
-// not eagerly clear it here or SHOW PROCESSLIST becomes racy and can miss a
-// blocked waiter that is still in the same request.
+// SHOW PROCESSLIST derives its waiting state from the active lock-wait count.
 // Panics if the owning session tries to write while holding a READ lock (MySQL semantics).
 func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	cond := t.getTableLockCond()
@@ -1030,7 +1031,6 @@ func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
 	if ss != nil {
 		ss.BeginLockWait()
 		defer ss.EndLockWait()
-		ss.SetState("Waiting for table lock")
 	}
 	var errMsg string
 	t.tableLockMu.Lock()

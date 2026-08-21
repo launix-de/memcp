@@ -1,0 +1,223 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# A large driving relation must not leave a correlated compound boolean scalar
+# as an ordinary joined stage. The physical lowerer must see the scalar probe
+# and choose a bounded storage carrier for it.
+
+metadata:
+  version: "1.0"
+  description: "Compound correlated boolean predicates use scalable physical probes"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS bqm_unused_lookup"
+  - sql: "DROP TABLE IF EXISTS bqm_standort_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_mandant_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_document"
+  - sql: "DROP TABLE IF EXISTS bqm_standort"
+  - sql: |
+      CREATE TABLE bqm_standort (
+        id INT PRIMARY KEY,
+        direct_flag INT
+      )
+  - sql: |
+      CREATE TABLE bqm_document (
+        id INT PRIMARY KEY,
+        standort_id INT
+      )
+  - sql: |
+      CREATE TABLE bqm_mandant_assignment (
+        id INT PRIMARY KEY,
+        standort_id INT,
+        actor_id INT,
+        allowed BOOL
+      )
+  - sql: |
+      CREATE TABLE bqm_unused_lookup (
+        id INT UNIQUE,
+        label TEXT
+      )
+  - sql: |
+      CREATE TABLE bqm_standort_assignment (
+        id INT PRIMARY KEY,
+        standort_id INT,
+        actor_id INT,
+        allowed BOOL
+      )
+  - sql: "INSERT INTO bqm_standort VALUES (1, 1), (2, 0), (3, 0), (4, 0)"
+  - sql: "INSERT INTO bqm_unused_lookup VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four')"
+  - sql: "INSERT INTO bqm_mandant_assignment VALUES (1, 2, 7, TRUE)"
+  - sql: "INSERT INTO bqm_standort_assignment VALUES (1, 3, 7, TRUE)"
+  - sql: "SET @bqm_actor = 7"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "bqm_document") (list "id" "standort_id")
+          (map (produceN 5000) (lambda (i)
+            (list (+ i 1) (+ (mod i 4) 1)))))
+        (rebuild (table "memcp-tests" "bqm_document") true false)
+        (rebuild (table "memcp-tests" "bqm_standort") true false)
+        (rebuild (table "memcp-tests" "bqm_unused_lookup") true false)
+        (rebuild (table "memcp-tests" "bqm_mandant_assignment") true false)
+        (rebuild (table "memcp-tests" "bqm_standort_assignment") true false)
+        5000)
+
+test_cases:
+  - name: "outer count prunes unused derived and sorter lookups"
+    max_time: 3
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'bqm_unused_lookup'"
+    sql: |
+      SELECT COUNT(*) AS permitted_count, COUNT(counted._count) AS counted_count
+      FROM (
+        SELECT d.id, d.standort_id, 1 AS _count,
+          unused_ref.label AS unused_label,
+          unused_ref.can_view AS unused_acl
+        FROM bqm_document d
+        LEFT JOIN (
+          SELECT lookup_row.id, lookup_row.label,
+            COALESCE((
+              SELECT (unused_scope.direct_flag = 1)
+              FROM bqm_standort unused_scope
+              WHERE unused_scope.id = lookup_row.id
+              LIMIT 1
+            ), FALSE) AS can_view
+          FROM bqm_unused_lookup lookup_row
+        ) unused_ref
+          ON unused_ref.id = d.standort_id
+        WHERE COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM bqm_mandant_assignment ma
+              WHERE ma.standort_id = s.id
+                AND ma.actor_id = 7
+                AND ma.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT sa.allowed FROM bqm_standort_assignment sa
+              WHERE sa.standort_id = s.id
+                AND sa.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM bqm_standort s
+          WHERE s.id = d.standort_id
+          LIMIT 1
+        ), FALSE)
+      ) counted
+      LEFT JOIN bqm_unused_lookup unused_sorter
+        ON unused_sorter.id = counted.standort_id
+      WHERE TRUE
+    expect:
+      rows: 1
+      data:
+        - {permitted_count: 3750, counted_count: 3750}
+
+  - name: "outer count performs no unused lookup scans"
+    setup:
+      - scm: '(sleep 0.1)'
+    sql: |
+      SELECT COUNT(*) AS unused_lookup_scans
+      FROM system_statistic.scans
+      WHERE schema = 'memcp-tests'
+        AND `table` = 'bqm_unused_lookup'
+    expect:
+      rows: 1
+      data:
+        - {unused_lookup_scans: 0}
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
+
+  - name: "large filtered count keeps correlated scalar semantics"
+    max_time: 2
+    sql: |
+      SELECT COUNT(*) AS permitted_count FROM (
+        SELECT d.id
+        FROM bqm_document d
+        WHERE COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM bqm_mandant_assignment ma
+              WHERE ma.standort_id = s.id
+                AND ma.actor_id = 7
+                AND ma.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT sa.allowed FROM bqm_standort_assignment sa
+              WHERE sa.standort_id = s.id
+                AND sa.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM bqm_standort s
+          WHERE s.id = d.standort_id
+          LIMIT 1
+        ), FALSE) AND TRUE
+      ) counted
+    expect:
+      rows: 1
+      data:
+        - {permitted_count: 3750}
+
+  - name: "logical optimizer partitions both row-count forms before the compound scalar stage"
+    sql: |
+      EXPLAIN REORDER SELECT COUNT(*), COUNT(counted._count) FROM (
+        SELECT d.id, 1 AS _count FROM bqm_document d
+        WHERE COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM bqm_mandant_assignment ma
+              WHERE ma.standort_id = s.id AND ma.actor_id = @bqm_actor AND ma.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT sa.allowed FROM bqm_standort_assignment sa
+              WHERE sa.standort_id = s.id AND sa.actor_id = @bqm_actor
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1
+        ), FALSE) AND TRUE
+      ) counted
+    expect:
+      rows: 1
+      contains:
+        - "scalar_single"
+        - "aggregate_pushdown"
+        - "aggregate_partition"
+      not_contains:
+        - "scan_recset"
+        - "touch_keytable"
+
+  - name: "physical plan promotes the compound scalar to a bounded carrier"
+    sql: |
+      EXPLAIN SELECT COUNT(*), COUNT(counted._count) FROM (
+        SELECT d.id, 1 AS _count FROM bqm_document d
+        WHERE COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM bqm_mandant_assignment ma
+              WHERE ma.standort_id = s.id AND ma.actor_id = @bqm_actor AND ma.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT sa.allowed FROM bqm_standort_assignment sa
+              WHERE sa.standort_id = s.id AND sa.actor_id = @bqm_actor
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM bqm_standort s WHERE s.id = d.standort_id LIMIT 1
+        ), FALSE) AND TRUE
+      ) counted
+    expect:
+      rows: 1
+      contains:
+        - "recset_project_join"
+        - "recset_count"
+      not_contains:
+        - "recset_key_index"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS bqm_unused_lookup"
+  - sql: "DROP TABLE IF EXISTS bqm_standort_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_mandant_assignment"
+  - sql: "DROP TABLE IF EXISTS bqm_document"
+  - sql: "DROP TABLE IF EXISTS bqm_standort"

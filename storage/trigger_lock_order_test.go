@@ -61,3 +61,87 @@ func TestDropTriggerDoesNotHoldSchemaLockWhileWaitingForTableDDL(t *testing.T) {
 		t.Fatal("dropTrigger did not finish after ddlMu was released")
 	}
 }
+
+func TestReadTableLockPublicationDoesNotWaitForShardReaders(t *testing.T) {
+	shard := &storageShard{}
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	acquired := make(chan func(), 1)
+	go func() {
+		acquired <- lockTablePublicationShards([]*storageShard{shard}, false, false)
+	}()
+
+	select {
+	case unlock := <-acquired:
+		unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("READ table lock publication waited for an existing shard reader")
+	}
+}
+
+func TestSnapshotReadTableLockPublicationDoesNotDeadlockBehindQueuedWriter(t *testing.T) {
+	shard := &storageShard{}
+	shard.mu.RLock()
+
+	writerAcquired := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	go func() {
+		shard.mu.Lock()
+		close(writerAcquired)
+		<-releaseWriter
+		shard.mu.Unlock()
+	}()
+	// Give the writer time to queue. Go's RWMutex blocks later readers once a
+	// writer is waiting, which reproduces the cache-in-a-reader lock cycle.
+	time.Sleep(20 * time.Millisecond)
+
+	readPublished := make(chan func(), 1)
+	go func() {
+		readPublished <- lockTablePublicationShards([]*storageShard{shard}, false, true)
+	}()
+
+	var unlockPublication func()
+	blocked := false
+	select {
+	case unlockPublication = <-readPublished:
+	case <-time.After(100 * time.Millisecond):
+		blocked = true
+	}
+	shard.mu.RUnlock()
+	<-writerAcquired
+	close(releaseWriter)
+	if blocked {
+		unlockPublication = <-readPublished
+	}
+	unlockPublication()
+	if blocked {
+		t.Fatal("READ table lock publication deadlocked behind a queued shard writer")
+	}
+}
+
+func TestWriteTableLockPublicationWaitsForShardReaders(t *testing.T) {
+	shard := &storageShard{}
+	shard.mu.RLock()
+
+	acquired := make(chan func(), 1)
+	go func() {
+		acquired <- lockTablePublicationShards([]*storageShard{shard}, true, false)
+	}()
+
+	select {
+	case unlock := <-acquired:
+		unlock()
+		shard.mu.RUnlock()
+		t.Fatal("WRITE table lock publication passed an existing shard reader")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	shard.mu.RUnlock()
+	select {
+	case unlock := <-acquired:
+		unlock()
+	case <-time.After(2 * time.Second):
+		t.Fatal("WRITE table lock publication did not continue after reader release")
+	}
+}

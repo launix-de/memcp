@@ -161,6 +161,13 @@ func (s *SessionState) EndLockWait() {
 	}
 }
 
+func (s *SessionState) processListState() string {
+	if s.lockWaits.Load() > 0 {
+		return "Waiting for table lock"
+	}
+	return strPtr(&s.State)
+}
+
 // SetDB updates the current database name.
 func (s *SessionState) SetDB(db string) {
 	s.DB.Store(&db)
@@ -416,10 +423,7 @@ func init_processlist() {
 				if !full && len(info) > 100 {
 					info = info[:100]
 				}
-				state := strPtr(&s.State)
-				if state == "" && s.lockWaits.Load() > 0 {
-					state = "Waiting for table lock"
-				}
+				state := s.processListState()
 				result[i] = NewSlice([]Scmer{
 					NewString("Id"), NewInt(int64(s.ID)),
 					NewString("User"), NewString(s.User),

@@ -108,6 +108,25 @@ test_cases:
         - "(or"
         - "(not"
 
+  - name: "SQL truth literals and nested NOT preserve tautology folding"
+    sql: |
+      EXPLAIN SELECT ID FROM taut_parent p
+      WHERE EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+        OR (
+          NOT '0'
+          AND NOT '0'
+          AND NOT EXISTS (SELECT 1 FROM taut_child c WHERE c.parent_id = p.ID)
+        )
+    expect:
+      rows: 1
+      result_contains:
+        - "taut_parent"
+      result_not_contains:
+        - "taut_child"
+        - "touch_keytable"
+        - ".grp:"
+        - "recset_project_join"
+
   - name: "Non-tautological OR of two distinct correlated EXISTS checks is not folded"
     sql: |
       EXPLAIN SELECT ID FROM taut_parent p
@@ -139,8 +158,16 @@ test_cases:
           (equal? (boolean_fold_expr (list (quote or) col col)) col)
           (equal? (boolean_fold_expr (list (quote or) col (list (quote not) col))) true)
           (equal? (boolean_fold_expr (list (quote and) col (list (quote not) col))) false)
+          (equal? (boolean_fold_expr (list (quote or) col
+            (list (quote and) (list (quote sql_not) "0")
+              (list (quote sql_not) "0")
+              (list (quote sql_not) col))))
+            (list (quote or) col (list (quote sql_not) col)))
           (equal? (boolean_fold_expr (list (quote if) col true false)) col)
-          (equal? (boolean_fold_expr (list (quote if) col false true)) (list (quote not) col))))
+          (equal? (boolean_fold_expr (list (quote if) col false true)) (list (quote not) col))
+          (equal? (fold_boolean_stage_aggregate '() nil
+            (list (list (quote if) col 0 1) (quote +) 0))
+            (list (list (quote if) col 0 1) (quote +) 0))))
         (if (reduce checks (lambda (acc c) (and acc c)) true)
           true
           (error (concat "boolean_fold_expr rule mismatch: " (string checks)))))

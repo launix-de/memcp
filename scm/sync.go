@@ -18,11 +18,11 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import "sync"
-import "sync/atomic"
 import "time"
 import "unsafe"
 import "context"
 import "runtime"
+import "sync/atomic"
 import "github.com/jtolds/gls"
 
 // cachedMemStats provides a cached version of runtime.ReadMemStats.
@@ -194,9 +194,126 @@ func ApplyPromise(p Scmer, args []Scmer) Scmer {
 /* threadsafe session storage */
 
 type session struct {
-	Mu      sync.RWMutex
-	Map     map[string]Scmer
-	Handles map[Scmer]Scmer
+	Mu             sync.RWMutex
+	Map            map[string]Scmer
+	Handles        map[Scmer]Scmer
+	ScopedValues   map[sessionScopedKey]Scmer
+	ScopedFlights  map[sessionScopedKey]*sessionFlight
+	ScopedCleanup  map[Scmer]bool
+	ScopedCanceled map[Scmer]bool
+}
+
+type sessionScopedKey struct {
+	scope Scmer
+	key   string
+}
+
+type sessionFlight struct {
+	done       chan struct{}
+	value      Scmer
+	panicValue any
+	failed     bool
+}
+
+func sessionHasScopedFlight(sess *session, scope Scmer) bool {
+	for key := range sess.ScopedFlights {
+		if key.scope == scope {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionEnsureScopedCleanup(sess *session, scope Scmer) {
+	if sess.ScopedCleanup[scope] {
+		return
+	}
+	value, ok := GetGLSValue("context")
+	if !ok {
+		return
+	}
+	ctx, ok := value.(context.Context)
+	if !ok || ctx.Done() == nil {
+		return
+	}
+	sess.ScopedCleanup[scope] = true
+	context.AfterFunc(ctx, func() {
+		sess.Mu.Lock()
+		defer sess.Mu.Unlock()
+		sess.ScopedCanceled[scope] = true
+		for key := range sess.ScopedValues {
+			if key.scope == scope {
+				delete(sess.ScopedValues, key)
+			}
+		}
+		if !sessionHasScopedFlight(sess, scope) {
+			delete(sess.ScopedCleanup, scope)
+			delete(sess.ScopedCanceled, scope)
+		}
+	})
+}
+
+func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, producer Scmer) Scmer {
+	computeKey := sessionScopedKey{scope: scope, key: key}
+	sess.Mu.Lock()
+	if value, ok := sess.ScopedValues[computeKey]; ok {
+		sess.Mu.Unlock()
+		return value
+	}
+	if sess.ScopedValues == nil {
+		sess.ScopedValues = make(map[sessionScopedKey]Scmer)
+		sess.ScopedFlights = make(map[sessionScopedKey]*sessionFlight)
+		sess.ScopedCleanup = make(map[Scmer]bool)
+		sess.ScopedCanceled = make(map[Scmer]bool)
+	}
+	sessionEnsureScopedCleanup(sess, scope)
+	if flight := sess.ScopedFlights[computeKey]; flight != nil {
+		sess.Mu.Unlock()
+		ctx := context.Background()
+		if value, ok := GetGLSValue("context"); ok {
+			if current, ok := value.(context.Context); ok {
+				ctx = current
+			}
+		}
+		select {
+		case <-flight.done:
+			if flight.failed {
+				panic(flight.panicValue)
+			}
+			return flight.value
+		case <-ctx.Done():
+			panic(ctx.Err())
+		}
+	}
+	flight := &sessionFlight{done: make(chan struct{})}
+	sess.ScopedFlights[computeKey] = flight
+	sess.Mu.Unlock()
+
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				flight.panicValue = recovered
+				flight.failed = true
+			}
+		}()
+		flight.value = Apply(producer)
+	}()
+
+	sess.Mu.Lock()
+	delete(sess.ScopedFlights, computeKey)
+	if !flight.failed && !sess.ScopedCanceled[scope] {
+		sess.ScopedValues[computeKey] = flight.value
+	}
+	close(flight.done)
+	if sess.ScopedCanceled[scope] && !sessionHasScopedFlight(sess, scope) {
+		delete(sess.ScopedCleanup, scope)
+		delete(sess.ScopedCanceled, scope)
+	}
+	sess.Mu.Unlock()
+	if flight.failed {
+		panic(flight.panicValue)
+	}
+	return flight.value
 }
 
 // build this function into your SCM environment to offer http server capabilities
@@ -217,6 +334,11 @@ func NewSession(a ...Scmer) Scmer {
 				sess.Map[a[0].String()] = a[1]
 			}
 			return a[1]
+		case 4:
+			if a[0].String() != "get_or_compute_scoped" {
+				panic("session: unknown 4-argument operation")
+			}
+			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3])
 		case 1:
 			sess.Mu.RLock()
 			defer sess.Mu.RUnlock()
@@ -242,7 +364,7 @@ func NewSession(a ...Scmer) Scmer {
 			}
 			return NewSlice(keys)
 		default:
-			panic("wrong number of parameters provided to session: 0, 1 or 2 required")
+			panic("wrong number of parameters provided to session: 0, 1, 2, or 4 required")
 		}
 	})
 }
@@ -262,6 +384,8 @@ func Context(a ...Scmer) (result Scmer) {
 				panic("no session set")
 			}
 			return val.(Scmer)
+		case "query":
+			return NewInt(int64(CurrentQuerySeq()))
 		case "check":
 			ctxVal, ok := mgr.GetValue("context")
 			if !ok {
@@ -397,13 +521,15 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "newsession",
-		Desc: "Creates a new session which is a threadsafe key-value store represented as a function that can be either called as a getter (session key) or setter (session key value) or list all keys with (session). String-like keys use value semantics; custom handles use pointer identity without serialization.",
+		Desc: "Creates a new session which is a threadsafe key-value store. Besides get/set/list, get_or_compute_scoped shares concurrent computation by a query-local handle.",
 		Fn:   NewSession,
 		Type: &TypeDescriptor{
 			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
 				Params: []*TypeDescriptor{
-					{Kind: "any", ParamName: "key", ParamDesc: "key to get or set; custom handles retain identity", Optional: true},
-					{Kind: "any", ParamName: "value", ParamDesc: "value to store", Optional: true},
+					{Kind: "any", ParamName: "key_or_operation", ParamDesc: "key, or get_or_compute_scoped", Optional: true},
+					{Kind: "any", ParamName: "value_scope_or_key", ParamDesc: "value, scope, or compute key", Optional: true},
+					{Kind: "any", ParamName: "key_or_producer", ParamDesc: "scoped key or producer", Optional: true},
+					{Kind: "func", ParamName: "scoped_producer", ParamDesc: "producer for scoped computation", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
 				},
 				Return: &TypeDescriptor{Kind: "any"},
 			},

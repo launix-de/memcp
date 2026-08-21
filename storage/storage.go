@@ -398,12 +398,42 @@ func isScanPseudoColName(name string) bool {
 	return isBatch
 }
 
+// lockTablePublicationShards closes the publication race with shard users.
+// User-visible locks drain incompatible work before returning. Cache
+// initialization is different: its READ lock is immediately followed by a
+// complete snapshot scan, which serializes any writer already past the atomic
+// table-lock recheck. Taking a recursive shard RLock for that path can deadlock
+// behind a queued writer when initialization runs inside a parallel reader.
+func lockTablePublicationShards(shards []*storageShard, write bool, snapshotFollows bool) func() {
+	if !write && snapshotFollows {
+		return func() {}
+	}
+	if write {
+		for _, shard := range shards {
+			shard.mu.Lock()
+		}
+		return func() {
+			for _, shard := range shards {
+				shard.mu.Unlock()
+			}
+		}
+	}
+	for _, shard := range shards {
+		shard.mu.RLock()
+	}
+	return func() {
+		for _, shard := range shards {
+			shard.mu.RUnlock()
+		}
+	}
+}
+
 // lockTable acquires a user-level read or write lock on the named table.
 // The session's State is updated while waiting, and the unlock callback is
 // registered with the session so that ReleaseAllLocks() can free it later.
 // A run of FIFO-adjacent READ requests shares the lock. The first reader, or an
 // exclusive writer, drains in-flight shard readers before publishing the lock.
-func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) func() {
+func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss *scm.SessionState) func() {
 	if ss == nil {
 		panic("LOCK TABLES requires a query session")
 	}
@@ -418,7 +448,6 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 	cond := t.getTableLockCond()
 	ss.BeginLockWait()
 	defer ss.EndLockWait()
-	ss.SetState("Waiting for table lock")
 	t.tableLockMu.Lock()
 	if t.tableLockOwner.Load() == ss {
 		t.tableLockMu.Unlock()
@@ -461,10 +490,9 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		}
 	}
 	t.tableLockMu.Unlock()
-	// Drain in-flight shard readers by acquiring each shard's write lock.
-	// We MUST publish the lock while still holding the last shard write lock
-	// so that any new scan that does RLock -> tableLockState.Load() sees the
-	// lock before it can proceed past its own RLock.
+	// User locks drain incompatible shard users. Cache snapshot READ publication
+	// instead relies on lockForMutation's post-shard-lock recheck; an already-
+	// running writer is serialized by the initializer's immediately following scan.
 	acquired := false
 	defer func() {
 		if acquired {
@@ -478,9 +506,7 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		t.tableLockMu.Unlock()
 	}()
 	shards := t.ActiveShards()
-	for _, s := range shards {
-		s.mu.Lock()
-	}
+	unlockShards := lockTablePublicationShards(shards, write, snapshotFollows)
 	if write {
 		t.tableLockOwner.Store(ss)
 		t.tableLockState.Store(-1)
@@ -495,9 +521,7 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 		cond.Broadcast()
 		t.tableLockMu.Unlock()
 	}
-	for _, s := range shards {
-		s.mu.Unlock()
-	}
+	unlockShards()
 	acquired = true
 	if write {
 		return t.unlockTableWrite
@@ -519,7 +543,7 @@ func acquireTableLock(schema, name string, write bool, ss *scm.SessionState) fun
 }
 
 func lockTable(schema, name string, write bool, ss *scm.SessionState) {
-	unlock := acquireTableLock(schema, name, write, ss)
+	unlock := acquireTableLock(schema, name, write, false, ss)
 	if ss != nil {
 		ss.AddLock(unlock)
 	}
@@ -2324,10 +2348,7 @@ func Init(en scm.Env) {
 			tbl := TableFromScmer(a[1])
 			// Cache preparation can execute inside a shard worker. Like every scan
 			// operator, it receives transaction and session ownership explicitly.
-			var ss *scm.SessionState
-			if currentTx != nil {
-				ss = currentTx.SessionState
-			}
+			ss := SessionStateFromTx(currentTx)
 			initialized := tbl.initializeCache(ss, func() {
 				sources := mustScmerSlice(a[2], "source tables")
 				sourceTables := make([]*table, len(sources))
@@ -2347,7 +2368,7 @@ func Init(en scm.Env) {
 					}
 				}()
 				for _, source := range sourceTables {
-					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, ss))
+					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, ss))
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
