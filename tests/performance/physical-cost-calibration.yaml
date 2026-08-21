@@ -1,0 +1,123 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Input workload for `make costgen`. CI intentionally skips the repeated
+# measurements; ordinary EXPLAIN PHYSICAL CALIBRATE coverage lives in the
+# planner suites.
+
+metadata:
+  version: "1.0"
+  description: "Physical membership cost calibration workload"
+  isolated: true
+  ci: false
+  physical_calibration: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS pc_files_small"
+  - sql: "DROP TABLE IF EXISTS pc_docs_small"
+  - sql: "DROP TABLE IF EXISTS pc_files_large"
+  - sql: "DROP TABLE IF EXISTS pc_docs_large"
+  - sql: "CREATE TABLE pc_files_small (id INT PRIMARY KEY, filename VARCHAR(32), search VARCHAR(32))"
+  - sql: "CREATE TABLE pc_docs_small (id INT PRIMARY KEY, file_id INT, sort_key INT)"
+  - sql: "CREATE TABLE pc_files_large (id INT PRIMARY KEY, filename VARCHAR(32), search VARCHAR(32))"
+  - sql: "CREATE TABLE pc_docs_large (id INT PRIMARY KEY, file_id INT, sort_key INT)"
+  - scm: |
+      (begin
+        (define make_files (lambda (n)
+          (map (produceN n) (lambda (i)
+            (list i
+              (if (equal? (mod i 10) 0) "filename-hit" "filename-other")
+              (if (equal? (mod i 7) 0) "search-hit" "search-other"))))))
+        (define make_docs (lambda (n file_count)
+          (map (produceN n) (lambda (i) (list i (mod i file_count) i)))))
+        (insert (table "memcp-tests" "pc_files_small") '("id" "filename" "search") (make_files 1000))
+        (insert (table "memcp-tests" "pc_docs_small") '("id" "file_id" "sort_key") (make_docs 4000 1000))
+        (insert (table "memcp-tests" "pc_files_large") '("id" "filename" "search") (make_files 5000))
+        (insert (table "memcp-tests" "pc_docs_large") '("id" "file_id" "sort_key") (make_docs 20000 5000))
+        (rebuild))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS pc_files_small"
+  - sql: "DROP TABLE IF EXISTS pc_docs_small"
+  - sql: "DROP TABLE IF EXISTS pc_files_large"
+  - sql: "DROP TABLE IF EXISTS pc_docs_large"
+
+test_cases:
+  - name: "small broad UNION membership"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_small d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_small f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_small f WHERE f.search LIKE '%hit%'
+      )
+
+  - name: "large broad UNION membership"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_large d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_large f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_large f WHERE f.search LIKE '%hit%'
+      )
+
+  - name: "large high-selectivity UNION membership"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_large d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_large f WHERE f.filename LIKE '%other%'
+        UNION
+        SELECT f.id FROM pc_files_large f WHERE f.search LIKE '%other%'
+      )
+
+  - name: "large candidates with small driver"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_small d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_large f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_large f WHERE f.search LIKE '%hit%'
+      )
+
+  - name: "small candidates with large driver"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_large d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_small f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_small f WHERE f.search LIKE '%hit%'
+      )
+
+  - name: "selective membership below ordered limit one"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_large d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_large f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_large f WHERE f.search LIKE '%hit%'
+      )
+      ORDER BY d.sort_key
+      LIMIT 1

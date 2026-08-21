@@ -15,45 +15,40 @@ Copyright (C) 2026  Carl-Philip Hänsch
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-// costgen measures real storage-engine costs for the query planner's
-// physical-strategy cost model (the calibrated constants in
-// lib/queryplan.scm: planner_direct_presence_probe_cost,
-// planner_presence_carrier_cost, planner_recset_carrier_cost) and patches
-// them in place, the same way `make jitgen` regenerates JIT emitters from a
-// live analysis instead of hand-typed code.
-//
-// Why this exists: those three constants are calibrated, hand-typed magic
-// numbers with no way to tell whether they still reflect reality. A
-// storage-primitive perf change (e.g. the adaptive-index buildIndex fix in
-// PR #525) silently invalidates them. Re-run `make costgen` whenever a
-// storage-primitive perf change lands.
-//
-// Usage:
-//
-//	go run ./tools/costgen                # measure and print, don't modify
-//	go run ./tools/costgen -patch          # measure and patch lib/queryplan.scm
+// costgen discovers tagged YAML workloads, runs each forced physical
+// alternative, validates results/operators, solves a non-negative cost
+// equation system, and regenerates planner constants.
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
-// syncBuffer is a bytes.Buffer safe for one writer goroutine (the child
-// process's stdout/stderr pump) and one reader goroutine (the readiness
-// poller) at the same time.
+const (
+	beginMarker = "/* BEGIN GENERATED COST CONSTANTS."
+	endMarker   = "/* END GENERATED COST CONSTANTS */"
+	database    = "memcp-tests"
+)
+
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -71,73 +66,111 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-func logStep(format string, a ...interface{}) {
-	fmt.Fprintf(os.Stderr, "costgen: "+format+"\n", a...)
+type metadata struct {
+	PhysicalCalibration bool `yaml:"physical_calibration"`
 }
 
-const beginMarker = "/* BEGIN GENERATED COST CONSTANTS."
-const endMarker = "/* END GENERATED COST CONSTANTS */"
+type step struct {
+	SQL string `yaml:"sql"`
+	SCM string `yaml:"scm"`
+}
 
-// probeIterations is how many repeated scan_exists / point-read calls each
-// scenario performs. High enough to average out first-call warmup noise for
-// the carrier scenarios, small enough that the direct-probe scenario (which
-// intentionally has no reusable structure) still finishes quickly.
-const probeIterations = 400
+type testCase struct {
+	Name                string `yaml:"name"`
+	SQL                 string `yaml:"sql"`
+	SCM                 string `yaml:"scm"`
+	PhysicalCalibration bool   `yaml:"physical_calibration"`
+	Warmup              int    `yaml:"warmup"`
+	Repetitions         int    `yaml:"repetitions"`
+	Setup               []step `yaml:"setup"`
+}
 
-// bigRows is the driving-table size for the recset-carrier scenario. Chosen
-// to land solidly in the "adaptive index actually gets built" regime
-// (Settings.IndexThreshold default 5) while keeping the tool's own runtime
-// reasonable.
-const bigRows = 200000
+type suite struct {
+	Path      string
+	Metadata  metadata   `yaml:"metadata"`
+	Setup     []step     `yaml:"setup"`
+	Cleanup   []step     `yaml:"cleanup"`
+	TestCases []testCase `yaml:"test_cases"`
+}
+
+type calibrationRow struct {
+	DecisionID         string   `json:"decision_id"`
+	Decision           string   `json:"decision"`
+	Consumer           string   `json:"consumer"`
+	Plan               string   `json:"plan"`
+	OperatorFamily     string   `json:"operator_family"`
+	OperatorConsistent bool     `json:"operator_consistent"`
+	EstimatedNS        *float64 `json:"estimated_ns"`
+	ActualNS           float64  `json:"actual_ns"`
+	CandidateInputRows *float64 `json:"candidate_input_rows"`
+	CandidateRows      *float64 `json:"candidate_rows"`
+	DriverRows         *float64 `json:"driver_rows"`
+	ResultEqual        bool     `json:"result_equal"`
+}
+
+type observation struct {
+	caseName string
+	plan     string
+	y        float64
+	x        []float64
+}
+
+type constants struct {
+	startupNS             int64
+	candidateScanRowNS    int64
+	candidateRecsetRowNS  int64
+	driverCacheBuildRowNS int64
+	driverCacheProbeRowNS int64
+}
 
 func main() {
-	patch := false
-	for _, arg := range os.Args[1:] {
-		if arg == "-patch" {
-			patch = true
+	patch := flag.Bool("patch", false, "rewrite lib/queryplan.scm")
+	jsonl := flag.String("jsonl", "", "write raw measurements as JSONL")
+	flag.Parse()
+
+	root, err := repoRoot()
+	if err != nil {
+		fatal(err)
+	}
+	suites, err := discoverSuites(root)
+	if err != nil {
+		fatal(err)
+	}
+	if len(suites) == 0 {
+		fatal(errors.New("no tests/**/*.yaml suite has metadata.physical_calibration: true"))
+	}
+	server, err := startServer(root)
+	if err != nil {
+		fatal(err)
+	}
+	defer server.stop()
+
+	observations, raw, err := runSuites(server, suites)
+	if err != nil {
+		fatal(err)
+	}
+	if *jsonl != "" {
+		if err := writeJSONL(*jsonl, raw); err != nil {
+			fatal(err)
 		}
 	}
-
-	repoRoot, err := findRepoRoot()
+	c, err := solve(observations)
 	if err != nil {
 		fatal(err)
 	}
-
-	binPath, err := buildMemcp(repoRoot)
-	if err != nil {
-		fatal(fmt.Errorf("building memcp: %w", err))
-	}
-	defer os.Remove(binPath)
-
-	dataDir, err := os.MkdirTemp("", "costgen-data-*")
-	if err != nil {
+	if err := validateDecisionOrdering(observations, c); err != nil {
 		fatal(err)
 	}
-	defer os.RemoveAll(dataDir)
-
-	apiPort, err := freePort()
-	if err != nil {
-		fatal(err)
-	}
-	mysqlPort, err := freePort()
-	if err != nil {
-		fatal(err)
-	}
-
-	results, err := runBenchmark(binPath, dataDir, apiPort, mysqlPort)
-	if err != nil {
-		fatal(fmt.Errorf("running benchmark: %w", err))
-	}
-
-	c := computeConstants(results)
-	fmt.Println(c.describe())
-
-	if patch {
-		queryplanPath := filepath.Join(repoRoot, "lib", "queryplan.scm")
-		if err := patchQueryplan(queryplanPath, c); err != nil {
-			fatal(fmt.Errorf("patching %s: %w", queryplanPath, err))
+	fmt.Printf("membership startup:  %d ns\ncandidate scan:      %d ns/input-row\nrecset build:        %d ns/matching-row\ngroup-cache build:   %d ns/matching-row\ngroup-cache probe:   %d ns/driver-row\n",
+		c.startupNS, c.candidateScanRowNS, c.candidateRecsetRowNS,
+		c.driverCacheBuildRowNS, c.driverCacheProbeRowNS)
+	printDecisionOrdering(observations, c)
+	if *patch {
+		path := filepath.Join(root, "lib", "queryplan.scm")
+		if err := patchQueryplan(path, c); err != nil {
+			fatal(err)
 		}
-		fmt.Println("patched", queryplanPath)
+		fmt.Println("patched", path)
 	}
 }
 
@@ -146,7 +179,11 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-func findRepoRoot() (string, error) {
+func logStep(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "costgen: "+format+"\n", args...)
+}
+
+func repoRoot() (string, error) {
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", err
@@ -154,351 +191,499 @@ func findRepoRoot() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func buildMemcp(repoRoot string) (string, error) {
-	binPath := filepath.Join(os.TempDir(), fmt.Sprintf("costgen-memcp-%d", os.Getpid()))
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	cmd.Dir = repoRoot
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%w: %s", err, stderr.String())
-	}
-	return binPath, nil
-}
-
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port, nil
-}
-
-// benchResults holds the raw nanosecond/count measurements parsed out of the
-// benchmark script's final printed assoc list.
-type benchResults struct {
-	directNs      int64
-	directCalls   int64
-	ktBuildNs     int64
-	ktReadNs      int64
-	ktReadCalls   int64
-	recsetBuildNs int64
-	recsetProjNs  int64
-	bigRows       int64
-}
-
-func runBenchmark(binPath, dataDir string, apiPort, mysqlPort int) (*benchResults, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, binPath, "-data", dataDir,
-		fmt.Sprintf("--api-port=%d", apiPort),
-		fmt.Sprintf("--mysql-port=%d", mysqlPort),
-		"lib/main.scm")
-	cmd.Dir = mustRepoRootFromBin()
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	stdout := &syncBuffer{}
-	cmd.Stdout = stdout
-	cmd.Stderr = stdout
-
-	logStep("starting memcp (api=%d mysql=%d data=%s)", apiPort, mysqlPort, dataDir)
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	if err := waitForListening(stdout, apiPort, 20*time.Second); err != nil {
-		cmd.Process.Kill()
-		return nil, fmt.Errorf("server never became ready: %w\noutput so far:\n%s", err, stdout.String())
-	}
-	logStep("server ready, running SQL setup (%d big rows)", bigRows)
-
-	if err := setupData(mysqlPort); err != nil {
-		cmd.Process.Kill()
-		return nil, fmt.Errorf("SQL setup: %w", err)
-	}
-	logStep("SQL setup done, feeding benchmark script")
-
-	if _, err := io.WriteString(stdin, benchmarkScript()); err != nil {
-		cmd.Process.Kill()
-		return nil, err
-	}
-	stdin.Close()
-
-	logStep("waiting for the result line (not for a graceful shutdown, which can be slow)")
-	waitErrCh := make(chan error, 1)
-	go func() { waitErrCh <- cmd.Wait() }()
-
-	resultDeadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(resultDeadline) {
-		if resultLineFrom(stdout.String()) != "" {
-			break
+func discoverSuites(root string) ([]suite, error) {
+	var found []suite
+	err := filepath.WalkDir(filepath.Join(root, "tests"), func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		select {
-		case err := <-waitErrCh:
-			// process exited (or was context-killed) before printing a result
-			if err != nil {
-				return nil, fmt.Errorf("%w\noutput:\n%s", err, stdout.String())
-			}
-			return parseResults(stdout.String())
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	// Result line is in the buffer; stop waiting for shutdown/table-compression
-	// and kill the process outright.
-	cmd.Process.Kill()
-	<-waitErrCh
-	logStep("result line captured, process terminated")
-
-	return parseResults(stdout.String())
-}
-
-// mustRepoRootFromBin re-derives the repo root for the child process's
-// working directory (it needs to find lib/main.scm relative to cwd).
-func mustRepoRootFromBin() string {
-	root, err := findRepoRoot()
-	if err != nil {
-		fatal(err)
-	}
-	return root
-}
-
-func waitForListening(out *syncBuffer, apiPort int, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	needle := fmt.Sprintf(":%d", apiPort)
-	for time.Now().Before(deadline) {
-		if strings.Contains(out.String(), needle) {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
 			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var header struct {
+			Metadata metadata `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal(data, &header); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		if !header.Metadata.PhysicalCalibration {
+			return nil
+		}
+		var parsed suite
+		if err := yaml.Unmarshal(data, &parsed); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		parsed.Path = path
+		found = append(found, parsed)
+		return nil
+	})
+	sort.Slice(found, func(i, j int) bool { return found[i].Path < found[j].Path })
+	return found, err
+}
+
+type memcpServer struct {
+	baseURL string
+	binPath string
+	dataDir string
+	cmd     *exec.Cmd
+	out     *syncBuffer
+	cancel  context.CancelFunc
+}
+
+func startServer(root string) (*memcpServer, error) {
+	bin := filepath.Join(os.TempDir(), fmt.Sprintf("costgen-memcp-%d", os.Getpid()))
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("build memcp: %w: %s", err, output)
+	}
+	dataDir, err := os.MkdirTemp("", "costgen-data-*")
+	if err != nil {
+		return nil, err
+	}
+	port, err := freePort()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, bin, "-data", dataDir,
+		fmt.Sprintf("--api-port=%d", port), "--disable-mysql", "--no-repl", "lib/main.scm")
+	cmd.Dir = root
+	out := &syncBuffer{}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, err
+	}
+	server := &memcpServer{
+		baseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
+		binPath: bin,
+		dataDir: dataDir,
+		cmd:     cmd,
+		out:     out,
+		cancel:  cancel,
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(out.String(), fmt.Sprintf(":%d", port)) {
+			if _, err := server.execute("/sql/system", "CREATE DATABASE IF NOT EXISTS `"+database+"`", 30*time.Second); err != nil {
+				server.stop()
+				return nil, fmt.Errorf("create calibration database: %w", err)
+			}
+			return server, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("timed out waiting for %q in server output", needle)
+	server.stop()
+	return nil, fmt.Errorf("server did not become ready: %s", out.String())
 }
 
-func setupData(mysqlPort int) error {
-	var sb strings.Builder
-	sb.WriteString("DROP DATABASE IF EXISTS costgen;\n")
-	sb.WriteString("CREATE DATABASE costgen;\n")
-	sb.WriteString("USE costgen;\n")
-	sb.WriteString("CREATE TABLE side (id INT, flag INT);\n")
-	sb.WriteString("INSERT INTO side (id, flag) VALUES (1,1),(2,0),(3,1),(4,0),(5,1),(6,0),(7,1),(8,0),(9,1),(10,0);\n")
-	sb.WriteString("CREATE TABLE big (id INT, k INT);\n")
-	const batchSize = 2000
-	for start := 0; start < bigRows; start += batchSize {
-		end := start + batchSize
-		if end > bigRows {
-			end = bigRows
-		}
-		sb.WriteString("INSERT INTO big (id, k) VALUES ")
-		for i := start; i < end; i++ {
-			if i > start {
-				sb.WriteString(",")
-			}
-			fmt.Fprintf(&sb, "(%d,%d)", i, (i%10)+1)
-		}
-		sb.WriteString(";\n")
+func (s *memcpServer) stop() {
+	s.cancel()
+	if s.cmd.Process != nil {
+		_ = s.cmd.Process.Kill()
+		_, _ = s.cmd.Process.Wait()
 	}
+	_ = os.Remove(s.binPath)
+	_ = os.RemoveAll(s.dataDir)
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func freePort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
+}
+
+func (s *memcpServer) execute(endpoint, body string, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "mysql", "-h127.0.0.1", fmt.Sprintf("-P%d", mysqlPort), "-uroot", "-padmin")
-	cmd.Stdin = strings.NewReader(sb.String())
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w: %s", err, stderr.String())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+endpoint, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth("root", "admin")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	var output bytes.Buffer
+	if _, err := output.ReadFrom(response.Body); err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", response.StatusCode, output.String())
+	}
+	return output.Bytes(), nil
+}
+
+func (s *memcpServer) runStep(current step) error {
+	if current.SQL != "" {
+		_, err := s.execute("/sql/"+database, current.SQL, 10*time.Minute)
+		return err
+	}
+	if current.SCM != "" {
+		_, err := s.execute("/scm", current.SCM, 10*time.Minute)
+		return err
 	}
 	return nil
 }
 
-func benchmarkScript() string {
-	return fmt.Sprintf(`
-(define sess (newsession))
-(with_autocommit sess (lambda ()
-  (begin
-    (define tx (sess "__memcp_tx"))
-    (define keys (list 1 2 3 4 5 6 7 8 9 10))
-    (define iterations (produceN %d))
-
-    (define probe_once (lambda (k)
-      (scan_exists tx (table "costgen" "side") (list "id" "flag")
-        (lambda (id flag) (and (equal?? id k) (equal?? flag 1))))))
-
-    (define direct_t0 (nanotime))
-    (define direct_hits (reduce iterations (lambda (acc i)
-      (+ acc (if (probe_once (+ 1 (mod i 10))) 1 0))) 0))
-    (define direct_t1 (nanotime))
-
-    (createtable "costgen" ".grp:costgen_bench" (list (list "column" "k0" "int" '() '())) (list "engine" "cache") true)
-    (createcolumn (table "costgen" ".grp:costgen_bench") "flagval" "any" '() '() (list "k0")
-      (lambda (k0) (probe_once k0)))
-    (define kt_build_t0 (nanotime))
-    (reduce keys (lambda (_ k) (insert (table "costgen" ".grp:costgen_bench") (list "k0") (list (list k)))) nil)
-    /* Real compiler-generated keytables get bulk-populated with precomputed
-    values during their build pass (group_insert_batches), not lazily on first
-    read. Re-issuing createcolumn on the now-populated table forces the same
-    eager Compress() a fresh, unfiltered createcolumn call does -- this keeps
-    the timed read window measuring genuinely warm point-reads instead of
-    accidentally re-triggering per-row materialization mid-scan (the scan
-    condition below touches both k0 and flagval per row, so an unwarmed
-    lazy column would recompute flagval while scanning toward a match). */
-    (createcolumn (table "costgen" ".grp:costgen_bench") "flagval" "any" '() '() (list "k0")
-      (lambda (k0) (probe_once k0)))
-    (define kt_build_t1 (nanotime))
-
-    (define kt_read_t0 (nanotime))
-    (define kt_hits (reduce iterations (lambda (acc i)
-      (+ acc (if (scan_exists tx (table "costgen" ".grp:costgen_bench") (list "k0" "flagval")
-                   (lambda (k0 fv) (and (equal?? k0 (+ 1 (mod i 10))) (equal?? fv true)))) 1 0))) 0))
-    (define kt_read_t1 (nanotime))
-
-    (define recset_t0 (nanotime))
-    (define rs (scan_recset tx (table "costgen" "side") (list "id") (lambda (id) (probe_once id))))
-    (define recset_build_t1 (nanotime))
-    (define proj (recset_project_join tx rs (list "id") (table "costgen" "big") (list "k")))
-    (define recset_t1 (nanotime))
-    (define big_rows (recset_count proj))
-
-    (list
-      "direct_ns" (- direct_t1 direct_t0) "direct_calls" (count iterations) "direct_hits" direct_hits
-      "kt_build_ns" (- kt_build_t1 kt_build_t0)
-      "kt_read_ns" (- kt_read_t1 kt_read_t0) "kt_read_calls" (count iterations) "kt_hits" kt_hits
-      "recset_build_ns" (- recset_build_t1 recset_t0)
-      "recset_proj_ns" (- recset_t1 recset_build_t1)
-      "big_rows" big_rows)))))
-`, probeIterations)
-}
-
-var resultLineRe = regexp.MustCompile(`^\s*=\s*\((.*)\)\s*$`)
-var kvRe = regexp.MustCompile(`"([a-z_]+)"\s+(-?[0-9]+)`)
-var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-
-// resultLineFrom returns the last line in output that matches the
-// benchmark script's printed assoc list, or "" if none is present yet.
-func resultLineFrom(output string) string {
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-	var line string
-	for scanner.Scan() {
-		candidate := ansiRe.ReplaceAllString(scanner.Text(), "")
-		if resultLineRe.MatchString(candidate) {
-			line = candidate
+func runSuites(server *memcpServer, suites []suite) ([]observation, []calibrationRow, error) {
+	var observations []observation
+	var allRows []calibrationRow
+	for _, currentSuite := range suites {
+		logStep("suite %s", currentSuite.Path)
+		for _, setup := range currentSuite.Setup {
+			if err := server.runStep(setup); err != nil {
+				return nil, nil, fmt.Errorf("%s setup: %w", currentSuite.Path, err)
+			}
+		}
+		for _, test := range currentSuite.TestCases {
+			if !test.PhysicalCalibration {
+				continue
+			}
+			for _, setup := range test.Setup {
+				if err := server.runStep(setup); err != nil {
+					return nil, nil, fmt.Errorf("%s/%s setup: %w", currentSuite.Path, test.Name, err)
+				}
+			}
+			query := strings.TrimSpace(test.SQL)
+			if query == "" || test.SCM != "" {
+				return nil, nil, fmt.Errorf("%s/%s: calibration cases require SQL", currentSuite.Path, test.Name)
+			}
+			if !strings.HasPrefix(strings.ToUpper(query), "EXPLAIN PHYSICAL CALIBRATE") {
+				query = "EXPLAIN PHYSICAL CALIBRATE\n" + query
+			}
+			warmup, repetitions := test.Warmup, test.Repetitions
+			if repetitions <= 0 {
+				repetitions = 5
+			}
+			var runs [][]calibrationRow
+			for run := 0; run < warmup+repetitions; run++ {
+				payload, err := server.execute("/sql/"+database, query, 10*time.Minute)
+				if err != nil {
+					return nil, nil, fmt.Errorf("%s/%s: %w", currentSuite.Path, test.Name, err)
+				}
+				rows, err := decodeRows(payload)
+				if err != nil {
+					return nil, nil, fmt.Errorf("%s/%s: %w; response=%s", currentSuite.Path, test.Name, err, payload)
+				}
+				if err := validateRows(rows); err != nil {
+					return nil, nil, fmt.Errorf("%s/%s: %w", currentSuite.Path, test.Name, err)
+				}
+				if run >= warmup {
+					runs = append(runs, rows)
+					allRows = append(allRows, rows...)
+				}
+			}
+			medians, err := medianRows(runs)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%s/%s: %w", currentSuite.Path, test.Name, err)
+			}
+			for _, row := range medians {
+				features, err := rowFeatures(row)
+				if err != nil {
+					return nil, nil, fmt.Errorf("%s/%s: %w", currentSuite.Path, test.Name, err)
+				}
+				observations = append(observations, observation{caseName: test.Name, plan: row.Plan, y: row.ActualNS, x: features})
+			}
+		}
+		for _, cleanup := range currentSuite.Cleanup {
+			if err := server.runStep(cleanup); err != nil {
+				return nil, nil, fmt.Errorf("%s cleanup: %w", currentSuite.Path, err)
+			}
 		}
 	}
-	return line
+	return observations, allRows, nil
 }
 
-func parseResults(output string) (*benchResults, error) {
-	line := resultLineFrom(output)
-	if line == "" {
-		return nil, fmt.Errorf("no result line found in output:\n%s", output)
+func decodeRows(payload []byte) ([]calibrationRow, error) {
+	var rows []calibrationRow
+	if err := json.Unmarshal(payload, &rows); err == nil {
+		return rows, nil
 	}
-	values := map[string]int64{}
-	for _, m := range kvRe.FindAllStringSubmatch(line, -1) {
-		v, err := strconv.ParseInt(m[2], 10, 64)
-		if err != nil {
-			continue
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	for {
+		var row calibrationRow
+		if err := decoder.Decode(&row); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
 		}
-		values[m[1]] = v
+		rows = append(rows, row)
 	}
-	get := func(k string) int64 { return values[k] }
-	r := &benchResults{
-		directNs:      get("direct_ns"),
-		directCalls:   get("direct_calls"),
-		ktBuildNs:     get("kt_build_ns"),
-		ktReadNs:      get("kt_read_ns"),
-		ktReadCalls:   get("kt_read_calls"),
-		recsetBuildNs: get("recset_build_ns"),
-		recsetProjNs:  get("recset_proj_ns"),
-		bigRows:       get("big_rows"),
+	if len(rows) == 0 {
+		return nil, errors.New("empty calibration response")
 	}
-	if r.directCalls == 0 || r.ktReadCalls == 0 {
-		return nil, fmt.Errorf("incomplete result line: %s", line)
-	}
-	return r, nil
+	return rows, nil
 }
 
-// calibratedConstants mirrors the three planner_*_cost lambdas' numeric
-// literals in lib/queryplan.scm.
-type calibratedConstants struct {
-	directProbeNsPerRow int64
-	carrierStartupNs    int64
-	carrierBuildNsPerRow int64
-	recsetStartupNs     int64
-	recsetBuildNsPerRow int64
+func validateRows(rows []calibrationRow) error {
+	if len(rows) != 2 {
+		return fmt.Errorf("expected exactly two membership alternatives, got %d", len(rows))
+	}
+	seen := map[string]bool{}
+	for _, row := range rows {
+		if row.Decision != "membership_carrier" || row.DecisionID == "" {
+			return fmt.Errorf("unexpected or anonymous decision: %+v", row)
+		}
+		if !row.OperatorConsistent || row.OperatorFamily != row.Plan {
+			return fmt.Errorf("chosen/emitted mismatch for %s: chosen=%s emitted=%s", row.DecisionID, row.Plan, row.OperatorFamily)
+		}
+		if !row.ResultEqual {
+			return fmt.Errorf("forced alternative %s changed the result", row.Plan)
+		}
+		if row.CandidateInputRows == nil || row.CandidateRows == nil || row.DriverRows == nil || row.EstimatedNS == nil {
+			return fmt.Errorf("known-statistics row contains nil inputs: %+v", row)
+		}
+		if row.ActualNS <= 0 {
+			return fmt.Errorf("invalid actual_ns for %s", row.Plan)
+		}
+		seen[row.Plan] = true
+	}
+	if !seen["candidate_keyset"] || !seen["driver_order_membership_probe"] {
+		return fmt.Errorf("alternatives incomplete: %v", seen)
+	}
+	return nil
 }
 
-func computeConstants(r *benchResults) *calibratedConstants {
-	directPerCall := r.directNs / r.directCalls
-	ktReadPerCall := r.ktReadNs / r.ktReadCalls
-	recsetPerRow := r.recsetProjNs / max64(r.bigRows, 1)
-	return &calibratedConstants{
-		directProbeNsPerRow: directPerCall,
-		carrierStartupNs:    r.ktBuildNs,
-		carrierBuildNsPerRow: ktReadPerCall,
-		recsetStartupNs:     r.recsetBuildNs,
-		recsetBuildNsPerRow: recsetPerRow,
+func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
+	byPlan := map[string][]calibrationRow{}
+	for _, run := range runs {
+		for _, row := range run {
+			byPlan[row.Plan] = append(byPlan[row.Plan], row)
+		}
+	}
+	var result []calibrationRow
+	for _, plan := range []string{"candidate_keyset", "driver_order_membership_probe"} {
+		rows := byPlan[plan]
+		if len(rows) == 0 {
+			return nil, fmt.Errorf("no rows for %s", plan)
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].ActualNS < rows[j].ActualNS })
+		result = append(result, rows[len(rows)/2])
+	}
+	return result, nil
+}
+
+func rowFeatures(row calibrationRow) ([]float64, error) {
+	switch row.Plan {
+	case "candidate_keyset":
+		return []float64{*row.CandidateInputRows, *row.CandidateRows, 0, 0}, nil
+	case "driver_order_membership_probe":
+		return []float64{*row.CandidateInputRows, 0, *row.CandidateRows, *row.DriverRows}, nil
+	default:
+		return nil, fmt.Errorf("unsupported plan %q", row.Plan)
 	}
 }
 
-func max64(a, b int64) int64 {
-	if a > b {
-		return a
+// solve fits the physical work both alternatives actually perform:
+//
+//	candidate = candidate_input*scan + candidate_rows*recset_build
+//	driver    = candidate_input*scan + candidate_rows*cache_build + driver_rows*cache_probe
+//
+// Keeping candidate materialization in the driver equation prevents its cost
+// from being incorrectly absorbed into a workload-specific per-driver probe.
+// A shared startup is deliberately not fitted: it cancels from the plan
+// inequality and otherwise absorbs noise while making the row constants
+// underdetermined.
+// Non-negative coordinate descent
+// prevents noisy samples from generating impossible negative costs.
+func solve(rows []observation) (constants, error) {
+	if len(rows) < 5 {
+		return constants{}, fmt.Errorf("need at least five observations, got %d", len(rows))
 	}
-	return b
+	beta := []float64{1, 1, 1, 1}
+	for iteration := 0; iteration < 10000; iteration++ {
+		largestChange := 0.0
+		for column := range beta {
+			numerator, denominator := 0.0, 0.0
+			for _, row := range rows {
+				residual := row.y
+				for other, value := range beta {
+					if other != column {
+						residual -= row.x[other] * value
+					}
+				}
+				numerator += row.x[column] * residual
+				denominator += row.x[column] * row.x[column]
+			}
+			if denominator == 0 {
+				return constants{}, fmt.Errorf("cost equation column %d is not covered", column)
+			}
+			next := numerator / denominator
+			if next < 1 {
+				next = 1
+			}
+			change := next - beta[column]
+			if change < 0 {
+				change = -change
+			}
+			if change > largestChange {
+				largestChange = change
+			}
+			beta[column] = next
+		}
+		if largestChange < 0.001 {
+			break
+		}
+	}
+	return constants{
+		startupNS:             0,
+		candidateScanRowNS:    int64(math.Round(beta[0])),
+		candidateRecsetRowNS:  int64(math.Round(beta[1])),
+		driverCacheBuildRowNS: int64(math.Round(beta[2])),
+		driverCacheProbeRowNS: int64(math.Round(beta[3])),
+	}, nil
 }
 
-func (c *calibratedConstants) describe() string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "direct probe:    %6d ns/accepted-row (no reusable structure)\n", c.directProbeNsPerRow)
-	fmt.Fprintf(&sb, "keytable carrier: %6d ns startup + %6d ns/driving-row (point-read)\n", c.carrierStartupNs, c.carrierBuildNsPerRow)
-	fmt.Fprintf(&sb, "recset carrier:   %6d ns startup + %6d ns/driving-row (project-join)\n", c.recsetStartupNs, c.recsetBuildNsPerRow)
-	return sb.String()
+func estimatedNS(row observation, c constants) float64 {
+	beta := []float64{
+		float64(c.candidateScanRowNS),
+		float64(c.candidateRecsetRowNS),
+		float64(c.driverCacheBuildRowNS),
+		float64(c.driverCacheProbeRowNS),
+	}
+	total := 0.0
+	for i, value := range row.x {
+		total += value * beta[i]
+	}
+	return total
 }
 
-func patchQueryplan(path string, c *calibratedConstants) error {
+type decisionPair struct {
+	candidate observation
+	driver    observation
+}
+
+func decisionPairs(rows []observation) (map[string]decisionPair, error) {
+	pairs := make(map[string]decisionPair)
+	seen := make(map[string]map[string]bool)
+	for _, row := range rows {
+		pair := pairs[row.caseName]
+		if seen[row.caseName] == nil {
+			seen[row.caseName] = make(map[string]bool)
+		}
+		if seen[row.caseName][row.plan] {
+			return nil, fmt.Errorf("duplicate %s observation for %q", row.plan, row.caseName)
+		}
+		seen[row.caseName][row.plan] = true
+		switch row.plan {
+		case "candidate_keyset":
+			pair.candidate = row
+		case "driver_order_membership_probe":
+			pair.driver = row
+		default:
+			return nil, fmt.Errorf("unsupported plan %q", row.plan)
+		}
+		pairs[row.caseName] = pair
+	}
+	for name, plans := range seen {
+		if !plans["candidate_keyset"] || !plans["driver_order_membership_probe"] {
+			return nil, fmt.Errorf("incomplete alternative pair for %q", name)
+		}
+	}
+	return pairs, nil
+}
+
+func validateDecisionOrdering(rows []observation, c constants) error {
+	pairs, err := decisionPairs(rows)
+	if err != nil {
+		return err
+	}
+	for name, pair := range pairs {
+		actualCandidateWins := pair.candidate.y < pair.driver.y
+		estimatedCandidateWins := estimatedNS(pair.candidate, c) < estimatedNS(pair.driver, c)
+		if actualCandidateWins != estimatedCandidateWins {
+			return fmt.Errorf("calibrated inequality disagrees for %q: actual candidate=%0.fns driver=%0.fns, estimated candidate=%0.fns driver=%0.fns",
+				name, pair.candidate.y, pair.driver.y,
+				estimatedNS(pair.candidate, c), estimatedNS(pair.driver, c))
+		}
+	}
+	return nil
+}
+
+func printDecisionOrdering(rows []observation, c constants) {
+	pairs, err := decisionPairs(rows)
+	if err != nil {
+		return
+	}
+	names := make([]string, 0, len(pairs))
+	for name := range pairs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pair := pairs[name]
+		estimatedCandidate := estimatedNS(pair.candidate, c)
+		estimatedDriver := estimatedNS(pair.driver, c)
+		actualWinner := pair.driver.plan
+		if pair.candidate.y < pair.driver.y {
+			actualWinner = pair.candidate.plan
+		}
+		estimatedWinner := pair.driver.plan
+		if estimatedCandidate < estimatedDriver {
+			estimatedWinner = pair.candidate.plan
+		}
+		fmt.Printf("decision %-40s actual=%-30s driver-candidate=%+.3fms estimated=%-30s driver-candidate=%+.3fms\n",
+			name, actualWinner, (pair.driver.y-pair.candidate.y)/1e6,
+			estimatedWinner, (estimatedDriver-estimatedCandidate)/1e6)
+	}
+}
+
+func writeJSONL(path string, rows []calibrationRow) error {
+	var output bytes.Buffer
+	encoder := json.NewEncoder(&output)
+	for _, row := range rows {
+		if err := encoder.Encode(row); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, output.Bytes(), 0o644)
+}
+
+func patchQueryplan(path string, c constants) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	content := string(data)
-	beginIdx := strings.Index(content, beginMarker)
-	endIdx := strings.Index(content, endMarker)
-	if beginIdx < 0 || endIdx < 0 || endIdx < beginIdx {
-		return fmt.Errorf("could not find generated-cost-constants block markers")
+	begin := strings.Index(content, beginMarker)
+	end := strings.Index(content, endMarker)
+	if begin < 0 || end < begin {
+		return errors.New("generated cost constants block not found")
 	}
-	endIdx += len(endMarker)
-
+	end += len(endMarker)
 	block := fmt.Sprintf(`/* BEGIN GENERATED COST CONSTANTS. DO NEVER MANUALLY EDIT THIS SECTION. RUN make costgen TO UPDATE.
-Calibrated by tools/costgen against a live storage engine (see that tool for the exact
-benchmark scenarios). Re-run make costgen whenever a storage-primitive perf change lands
-(e.g. an adaptive-index build fix) so these numbers keep tracking reality instead of
-silently drifting stale.
-
-domain_rows is the stage's own (usually small) input table -- what a carrier is built
-FROM. probe_rows is the driving table's row/evaluation count -- how many times the
-built carrier is actually READ. A keytable's dominant cost is per read (row_ns,
-scaled by probe_rows); a RecSet's dominant cost is its one-pass build over the driving
-side (build_ns, also scaled by probe_rows -- recset_project_join visits it once
-regardless of domain size, which is why domain_rows barely matters there). */
+Calibrated by tools/costgen from tests/**/*.yaml workloads tagged with
+metadata.physical_calibration. Each observation is an executed, forced
+EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_direct_presence_probe_cost (lambda (probe_rows)
-	(planner_cost 0 0 (* probe_rows %d) 0 0 0 0 0 probe_rows 0.75)))
+	(planner_cost 0 0 (* probe_rows 48685) 0 0 0 0 0 probe_rows 0.75)))
 
 (define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
-	(planner_cost %d (* probe_rows %d) 0 0 0 0
+	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
 		(* domain_rows 8) 0 domain_rows 0.65)))
 
 (define planner_recset_carrier_cost (lambda (domain_rows probe_rows)
-	(planner_cost %d 0 0 0 0 (* probe_rows %d)
+	(planner_cost 365607 0 0 0 0 (* probe_rows 17681)
 		(* probe_rows 1) 0 probe_rows 0.6)))
-/* END GENERATED COST CONSTANTS */`,
-		c.directProbeNsPerRow,
-		c.carrierStartupNs, c.carrierBuildNsPerRow,
-		c.recsetStartupNs, c.recsetBuildNsPerRow)
 
-	newContent := content[:beginIdx] + block + content[endIdx:]
-	return os.WriteFile(path, []byte(newContent), 0644)
+(define planner_membership_startup_ns %d)
+(define planner_membership_candidate_scan_row_ns %d)
+(define planner_membership_recset_build_row_ns %d)
+(define planner_membership_group_cache_build_row_ns %d)
+(define planner_membership_group_cache_probe_row_ns %d)
+/* END GENERATED COST CONSTANTS */`, c.startupNS, c.candidateScanRowNS,
+		c.candidateRecsetRowNS, c.driverCacheBuildRowNS, c.driverCacheProbeRowNS)
+	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }
