@@ -18,6 +18,7 @@ package storage
 
 import "sync"
 import "testing"
+import "time"
 
 import "github.com/google/btree"
 import "github.com/launix-de/memcp/scm"
@@ -71,34 +72,37 @@ func TestStorageIndexComputeSizeCountsDeltaBtree(t *testing.T) {
 	}
 }
 
-func TestRemoveIndexChildrenInternalDropsSkipListRecords(t *testing.T) {
+func TestStorageIndexPartialEvictionOwnsSkipListChildren(t *testing.T) {
 	idx := &StorageIndex{}
-	other := &StorageIndex{}
-	entry := &skipListCacheEntry{index: idx, colIdx: 0, pattern: "%needle%"}
-	otherEntry := &skipListCacheEntry{index: other, colIdx: 0, pattern: "%needle%"}
-	cm := &CacheManager{
-		itemMap: map[any]*softItem{
-			entry:      {pointer: entry, size: 128, evictType: TypeIndex, heapIndex: -1},
-			otherEntry: {pointer: otherEntry, size: 64, evictType: TypeIndex, heapIndex: -1},
-		},
-		currentMemory: 192,
-		sizeByType:    [numEvictableTypes]int64{TypeIndex: 192},
-		countByType:   [numEvictableTypes]int64{TypeIndex: 2},
-	}
+	cache := new(sync.Map)
+	idx.baseState.active = true
+	idx.baseState.skipLists = []*sync.Map{cache}
+	key := skipListKey{pattern: "%needle%", collation: "utf8_bin"}
+	skipList := &SkipList{}
+	cache.Store(key, skipList)
+	childBytes := skipListEntrySize(key, skipList)
+	idx.baseState.skipListBytes.Store(childBytes)
+	idx.skipListCacheBytes.Store(childBytes)
 
-	var freed [numEvictableTypes]int64
-	cm.removeIndexChildrenInternal(idx, &freed)
-	if _, ok := cm.itemMap[entry]; ok {
-		t.Fatal("skip list cache entry for removed index is still registered")
+	offer := idx.evictionOffer(childBytes + 1024)
+	if offer.partialBytes != childBytes || offer.fullBytes != childBytes+1024 {
+		t.Fatalf("offer = %+v, want partial=%d full=%d", offer, childBytes, childBytes+1024)
 	}
-	if _, ok := cm.itemMap[otherEntry]; !ok {
-		t.Fatal("skip list cache entry for other index was removed")
+	result := idx.evict(evictPartial, offer.fullBytes, new([numEvictableTypes]int64))
+	if !result.success || result.fullyEvicted || result.freedBytes != childBytes {
+		t.Fatalf("partial result = %+v", result)
 	}
-	if freed[TypeIndex] != 128 {
-		t.Fatalf("freed index bytes = %d, want 128", freed[TypeIndex])
+	if idx.baseState.skipLists[0] == cache {
+		t.Fatal("partial eviction retained the published child map")
 	}
-	if cm.currentMemory != 64 {
-		t.Fatalf("currentMemory = %d, want 64", cm.currentMemory)
+	if _, ok := idx.baseState.skipLists[0].Load(key); ok {
+		t.Fatal("replacement child map is not empty")
+	}
+	if !idx.baseState.active {
+		t.Fatal("partial eviction removed the parent index")
+	}
+	if got := idx.skipListCacheBytes.Load(); got != 0 {
+		t.Fatalf("child bytes = %d, want 0", got)
 	}
 }
 
@@ -124,38 +128,84 @@ func TestLoadCachedSkipListUsesExactTermAndTracksReuse(t *testing.T) {
 	if firstUsed.IsZero() || short.hitCount.Load() != 1 {
 		t.Fatal("exact cache hit did not update per-term lifecycle")
 	}
-	if got := skipListLastUsed(&skipListCacheEntry{skipList: short}); !got.Equal(firstUsed) {
-		t.Fatalf("cache entry last-used = %v, want term timestamp %v", got, firstUsed)
-	}
-
 	loadCachedSkipList(cache, shortKey)
 	if short.lastUsed().Before(firstUsed) {
 		t.Fatal("repeated cache hit moved last-used timestamp backwards")
 	}
-	if got := skipListGetScore(&skipListCacheEntry{skipList: short}); got != 2 {
+	if got := short.cacheScore(); got != 2 {
 		t.Fatalf("cache score = %v, want 2 exact uses", got)
 	}
 }
 
-func TestSkipListCleanupDoesNotDeleteReplacement(t *testing.T) {
+func TestStorageIndexPartialEvictionKeepsActiveQueryReference(t *testing.T) {
 	cache := &sync.Map{}
 	key := skipListKey{pattern: "%needle%", collation: "utf8_bin"}
-	oldSkipList := &SkipList{}
-	replacement := &SkipList{}
-	cache.Store(key, replacement)
-	entry := &skipListCacheEntry{
-		index:     &StorageIndex{},
-		pattern:   key.pattern,
-		collation: key.collation,
-		cache:     cache,
-		skipList:  oldSkipList,
-	}
+	queryReference := &SkipList{}
+	cache.Store(key, queryReference)
+	idx := &StorageIndex{}
+	idx.baseState.active = true
+	idx.baseState.skipLists = []*sync.Map{cache}
+	idx.baseState.skipListBytes.Store(skipListEntrySize(key, queryReference))
+	idx.skipListCacheBytes.Store(skipListEntrySize(key, queryReference))
 
-	if !skipListCleanup(entry, new([numEvictableTypes]int64)) {
-		t.Fatal("skip-list cleanup unexpectedly failed")
+	result := idx.evict(evictPartial, 1024, new([numEvictableTypes]int64))
+	if !result.success {
+		t.Fatal("partial eviction failed")
 	}
-	got, ok := cache.Load(key)
-	if !ok || got != replacement {
-		t.Fatal("stale eviction removed a newer exact-term cache entry")
+	if idx.baseState.skipLists[0] == cache {
+		t.Fatal("old cache remained published on the parent")
+	}
+	if got, ok := cache.Load(key); !ok || got != queryReference {
+		t.Fatal("active query's snapshotted map was invalidated")
+	}
+	if queryReference.cursor().skip != queryReference {
+		t.Fatal("active query reference was invalidated")
+	}
+}
+
+func TestCacheManagerTracksOnlyTopLevelIndex(t *testing.T) {
+	manager := new(CacheManager)
+	manager.Init(0, 0)
+	defer manager.Stop()
+
+	cache := new(sync.Map)
+	idx := &StorageIndex{}
+	idx.baseState.active = true
+	idx.baseState.skipLists = []*sync.Map{cache}
+	key := skipListKey{pattern: "%needle%", collation: "utf8_bin"}
+	skipList := &SkipList{}
+	childBytes := skipListEntrySize(key, skipList)
+	const baseBytes = int64(1024)
+	manager.AddItemEx(
+		idx,
+		baseBytes,
+		TypeIndex,
+		func(any, *[numEvictableTypes]int64) bool { return true },
+		func(any) time.Time { return time.Time{} },
+		nil,
+		0,
+		0,
+	)
+	idx.mu.Lock()
+	cache.Store(key, skipList)
+	idx.baseState.skipListBytes.Store(childBytes)
+	idx.skipListCacheBytes.Store(childBytes)
+	manager.UpdateSizeAsync(idx, childBytes)
+	idx.mu.Unlock()
+
+	before := manager.Stat()
+	if before.CountByType[TypeIndex] != 1 {
+		t.Fatalf("global index records = %d, want one top-level object", before.CountByType[TypeIndex])
+	}
+	if before.SizeByType[TypeIndex] != baseBytes+childBytes {
+		t.Fatalf("top-level size = %d, want base+children %d", before.SizeByType[TypeIndex], baseBytes+childBytes)
+	}
+	manager.UpdateBudget(baseBytes, 0)
+	after := manager.Stat()
+	if after.CountByType[TypeIndex] != 1 || after.SizeByType[TypeIndex] != baseBytes {
+		t.Fatalf("after partial eviction: count=%d size=%d", after.CountByType[TypeIndex], after.SizeByType[TypeIndex])
+	}
+	if idx.baseState.skipLists[0] == cache {
+		t.Fatal("partial pressure eviction retained published child map")
 	}
 }

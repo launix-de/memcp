@@ -1405,15 +1405,15 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	for _, s := range tbl.Shards {
 		GlobalCache.removeInternal(s, freedByType)
 		for _, idx := range s.Indexes {
-			GlobalCache.removeIndexChildrenInternal(idx, freedByType)
 			GlobalCache.removeInternal(idx, freedByType)
+			idx.evict(evictFull, 0, freedByType)
 		}
 	}
 	for _, s := range tbl.PShards {
 		GlobalCache.removeInternal(s, freedByType)
 		for _, idx := range s.Indexes {
-			GlobalCache.removeIndexChildrenInternal(idx, freedByType)
 			GlobalCache.removeInternal(idx, freedByType)
+			idx.evict(evictFull, 0, freedByType)
 		}
 	}
 	for _, s := range tbl.Shards {

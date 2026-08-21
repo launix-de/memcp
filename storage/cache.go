@@ -65,36 +65,94 @@ var evictableWeights = [numEvictableTypes]int64{20, 1, 20, 2, 20, 20}
 var evictableNames = [numEvictableTypes]string{"TempColumn", "Shard", "Index", "TempKeytable", "CacheEntry", "StringDict"}
 
 type softItem struct {
-	pointer       any
-	size          int64
-	evictType     EvictableType
-	evictionScore int64 // = size * weight (static, max-heap key); higher = evicted sooner
-	cleanup       func(pointer any, freedByType *[numEvictableTypes]int64) bool
-	getLastUsed   func(pointer any) time.Time
-	getScore      func(pointer any) float64 // optional type-specific telemetry
-	heapIndex     int                       // position in heap (-1 if not in heap)
-	dynamicScore  float64                   // scratch field for Phase 2
-	registeredAt  int64                     // UnixNano; set once in addInternal as fallback for items whose lastAccessed starts at zero
-	minLifetime   int64                     // minimum idle nanos before eviction (0 = default 1s)
-	maxIdleTime   int64                     // force-evict if idle for this many nanos (0 = no limit)
+	pointer         any
+	size            int64
+	evictType       EvictableType
+	evictionScore   int64 // = size * weight (static, max-heap key); higher = evicted sooner
+	object          cacheObject
+	getLastUsed     func(pointer any) time.Time
+	getScore        func(pointer any) float64 // optional type-specific telemetry
+	heapIndex       int                       // position in heap (-1 if not in heap)
+	expiryIndex     int                       // position in expiryHeap (-1 if no expiry is registered)
+	estimatedExpiry int64                     // UnixNano; refreshed lazily when the deadline is reached
+	dynamicScore    float64                   // scratch field for Phase 2
+	registeredAt    int64                     // UnixNano; set once in addInternal as fallback for items whose lastAccessed starts at zero
+	minLifetime     int64                     // minimum idle nanos before eviction (0 = none)
+	maxIdleTime     int64                     // force-evict if idle for this many nanos (0 = no limit)
 }
 
-// expiryEntry is a lazy min-heap entry tracking when an item may expire.
-// Lazy: stale entries (where the item has been re-used or removed) are
-// discarded on pop rather than eagerly updated — O(log n) per expiry event.
-type expiryEntry struct {
-	estimatedExpiry int64 // unix nanos: when we expect this item to expire
-	pointer         any   // key into itemMap
+type evictionMode uint8
+
+const (
+	evictPartial evictionMode = iota
+	evictFull
+)
+
+// evictionOffer is a revalidated recommendation, not a promise. Concurrent
+// users may change an object between offer collection and execution.
+type evictionOffer struct {
+	partialBytes int64
+	fullBytes    int64
+}
+
+type evictionResult struct {
+	freedBytes   int64
+	fullyEvicted bool
+	success      bool
+}
+
+// cacheObject lets one top-level registration own and selectively shed its
+// internal caches. Implementations must never call public CacheManager methods:
+// eviction runs on the manager's single-owner goroutine.
+type cacheObject interface {
+	evictionOffer(currentSize int64) evictionOffer
+	evict(mode evictionMode, currentSize int64, freedByType *[numEvictableTypes]int64) evictionResult
+}
+
+// atomicCacheObject adapts existing all-or-nothing cleanup callbacks to the
+// same protocol. For atomic objects the partial and full alternatives coincide.
+type atomicCacheObject struct {
+	pointer any
+	cleanup func(pointer any, freedByType *[numEvictableTypes]int64) bool
+}
+
+func (o atomicCacheObject) evictionOffer(currentSize int64) evictionOffer {
+	return evictionOffer{partialBytes: currentSize, fullBytes: currentSize}
+}
+
+func (o atomicCacheObject) evict(_ evictionMode, currentSize int64, freedByType *[numEvictableTypes]int64) evictionResult {
+	if !o.cleanup(o.pointer, freedByType) {
+		return evictionResult{}
+	}
+	return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
 }
 
 // expiryHeap is a min-heap on estimatedExpiry (soonest expiry at top).
-type expiryHeap []expiryEntry
+// It stores the same softItem as the main heap so removal can eagerly unlink
+// expiry metadata and release the complete object graph immediately.
+type expiryHeap []*softItem
 
 func (h expiryHeap) Len() int           { return len(h) }
 func (h expiryHeap) Less(i, j int) bool { return h[i].estimatedExpiry < h[j].estimatedExpiry }
-func (h expiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *expiryHeap) Push(x any)        { *h = append(*h, x.(expiryEntry)) }
-func (h *expiryHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+func (h expiryHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].expiryIndex = i
+	h[j].expiryIndex = j
+}
+func (h *expiryHeap) Push(x any) {
+	item := x.(*softItem)
+	item.expiryIndex = len(*h)
+	*h = append(*h, item)
+}
+func (h *expiryHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil
+	item.expiryIndex = -1
+	*h = old[:n-1]
+	return item
+}
 
 // softItemHeap implements container/heap.Interface as a max-heap on evictionScore.
 type softItemHeap []*softItem
@@ -171,6 +229,8 @@ func systemMemInfo() (free, total int64) {
 // CacheManager manages memory-limited soft references with two-phase eviction.
 // Two budgets: persistedBudget (shards+indexes) and memoryBudget (total).
 type CacheManager struct {
+	// All metadata below is owned by run(). Query workers only publish lifecycle
+	// messages; cache-object children never become global registrations.
 	memoryBudget    int64 // total budget (default 50% of RAM)
 	persistedBudget int64 // budget for persisted shards+indexes (default 30% of RAM)
 	currentMemory   int64
@@ -185,6 +245,7 @@ type CacheManager struct {
 	itemMap map[any]*softItem
 
 	opChan  chan cacheOp
+	runDone chan struct{}
 	stopped atomic.Bool
 }
 
@@ -221,7 +282,9 @@ func (cm *CacheManager) Init(memoryBudget, persistedBudget int64) {
 	cm.persistedBudget = persistedBudget
 	cm.itemMap = make(map[any]*softItem)
 	cm.opChan = make(chan cacheOp, 1024)
+	cm.runDone = make(chan struct{})
 	heap.Init(&cm.h)
+	heap.Init(&cm.expH)
 	go cm.run()
 }
 
@@ -235,6 +298,27 @@ func (cm *CacheManager) Stop() {
 		return // already stopped
 	}
 	close(cm.opChan)
+	<-cm.runDone
+}
+
+func newSoftItem(pointer any, size int64, evictType EvictableType, cleanup func(any, *[numEvictableTypes]int64) bool, getLastUsed func(any) time.Time, getScore func(any) float64, minLifetime, maxIdleTime time.Duration) *softItem {
+	object := cacheObject(atomicCacheObject{pointer: pointer, cleanup: cleanup})
+	if topLevel, ok := pointer.(cacheObject); ok {
+		object = topLevel
+	}
+	return &softItem{
+		pointer:       pointer,
+		size:          size,
+		evictType:     evictType,
+		evictionScore: size * evictableWeights[evictType],
+		object:        object,
+		getLastUsed:   getLastUsed,
+		getScore:      getScore,
+		heapIndex:     -1,
+		expiryIndex:   -1,
+		minLifetime:   int64(minLifetime),
+		maxIdleTime:   int64(maxIdleTime),
+	}
 }
 
 // AddItem registers an evictable item. Triggers cleanup if over budget.
@@ -253,18 +337,7 @@ func (cm *CacheManager) AddItem(
 	if cm.stopped.Load() {
 		return
 	}
-	weight := evictableWeights[evictType]
-	item := &softItem{
-		pointer:       pointer,
-		size:          size,
-		evictType:     evictType,
-		evictionScore: size * weight,
-		cleanup:       cleanup,
-		getLastUsed:   getLastUsed,
-		getScore:      getScore,
-		heapIndex:     -1,
-		minLifetime:   int64(time.Second),
-	}
+	item := newSoftItem(pointer, size, evictType, cleanup, getLastUsed, getScore, time.Second, 0)
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{add: item, done: done}
 	<-done
@@ -285,19 +358,7 @@ func (cm *CacheManager) AddItemEx(
 	if cm.opChan == nil || cm.stopped.Load() {
 		return
 	}
-	weight := evictableWeights[evictType]
-	item := &softItem{
-		pointer:       pointer,
-		size:          size,
-		evictType:     evictType,
-		evictionScore: size * weight,
-		cleanup:       cleanup,
-		getLastUsed:   getLastUsed,
-		getScore:      getScore,
-		heapIndex:     -1,
-		minLifetime:   int64(minLifetime),
-		maxIdleTime:   int64(maxIdleTime),
-	}
+	item := newSoftItem(pointer, size, evictType, cleanup, getLastUsed, getScore, minLifetime, maxIdleTime)
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{add: item, done: done}
 	<-done
@@ -329,6 +390,17 @@ func (cm *CacheManager) UpdateSize(pointer any, delta int64) {
 	done := make(chan struct{})
 	cm.opChan <- cacheOp{updatePtr: pointer, updateDelta: delta, done: done}
 	<-done
+}
+
+// UpdateSizeAsync queues an ownership-local size change without waiting for
+// eviction. It is intended for callers that already hold storage locks. Such
+// objects serialize enqueue order with their own lock; the single manager then
+// applies the deltas in channel order and runs the normal pressure check.
+func (cm *CacheManager) UpdateSizeAsync(pointer any, delta int64) {
+	if delta == 0 || cm.opChan == nil || cm.stopped.Load() {
+		return
+	}
+	cm.opChan <- cacheOp{updatePtr: pointer, updateDelta: delta}
 }
 
 // UpdateBudget changes both memory budgets (e.g. when MaxRamPercent or MaxPersistPercent changes).
@@ -416,6 +488,7 @@ func (cm *CacheManager) runEvictionChecks(additionalSize int64) {
 
 // run is the single-threaded goroutine handling all operations.
 func (cm *CacheManager) run() {
+	defer close(cm.runDone)
 	expireTicker := time.NewTicker(time.Minute)
 	defer expireTicker.Stop()
 	for {
@@ -457,18 +530,14 @@ func (cm *CacheManager) run() {
 	}
 }
 
-// evictExpired removes items whose maxIdleTime has been exceeded.
-// Uses a lazy min-heap (expH): stale entries where the item has been re-used
-// or already removed are discarded on pop — O(k log n) total, no O(n) scan.
+// evictExpired removes items whose maxIdleTime has been exceeded. Cache hits
+// only update object-local timestamps; when a deadline is reached we either
+// evict or reinsert the item at its refreshed deadline.
 func (cm *CacheManager) evictExpired() {
 	nowNano := time.Now().UnixNano()
 	var freedByType [numEvictableTypes]int64
 	for cm.expH.Len() > 0 && cm.expH[0].estimatedExpiry <= nowNano {
-		entry := heap.Pop(&cm.expH).(expiryEntry)
-		item, ok := cm.itemMap[entry.pointer]
-		if !ok {
-			continue // lazily discard: item already removed
-		}
+		item := heap.Pop(&cm.expH).(*softItem)
 		// Recheck actual idle time — item may have been used since we estimated.
 		lastActive := item.registeredAt
 		if lu := item.getLastUsed(item.pointer).UnixNano(); lu > lastActive {
@@ -476,22 +545,25 @@ func (cm *CacheManager) evictExpired() {
 		}
 		actualExpiry := lastActive + item.maxIdleTime
 		if actualExpiry > nowNano {
-			// Item was used after our estimate; push back with the updated deadline.
-			heap.Push(&cm.expH, expiryEntry{actualExpiry, entry.pointer})
+			item.estimatedExpiry = actualExpiry
+			heap.Push(&cm.expH, item)
 			continue
 		}
-		if item.cleanup(item.pointer, &freedByType) {
+		result := item.object.evict(evictFull, item.size, &freedByType)
+		if result.success && result.fullyEvicted {
 			cm.removeInternal(item.pointer, &freedByType)
 		} else {
 			// Lock contention means the item is currently in use. Keep its expiry
 			// tracked so the next ticker can retry instead of leaking it forever.
-			heap.Push(&cm.expH, expiryEntry{nowNano + int64(time.Minute), entry.pointer})
+			item.estimatedExpiry = nowNano + int64(time.Minute)
+			heap.Push(&cm.expH, item)
 		}
 	}
 }
 
 // addInternal inserts a new softItem.
 func (cm *CacheManager) addInternal(item *softItem) {
+	item.registeredAt = time.Now().UnixNano()
 	if old, ok := cm.itemMap[item.pointer]; ok {
 		// re-registration: update in place
 		delta := item.size - old.size
@@ -501,16 +573,22 @@ func (cm *CacheManager) addInternal(item *softItem) {
 		cm.countByType[old.evictType]--
 		cm.sizeByType[item.evictType] += item.size
 		cm.countByType[item.evictType]++
-		// copy heap position
+		// Replace both heap nodes so neither heap retains the old registration.
 		item.heapIndex = old.heapIndex
 		if item.heapIndex >= 0 {
 			cm.h[item.heapIndex] = item
 			heap.Fix(&cm.h, item.heapIndex)
 		}
+		if old.expiryIndex >= 0 {
+			heap.Remove(&cm.expH, old.expiryIndex)
+		}
+		if item.maxIdleTime > 0 {
+			item.estimatedExpiry = time.Now().UnixNano() + item.maxIdleTime
+			heap.Push(&cm.expH, item)
+		}
 		cm.itemMap[item.pointer] = item
 		return
 	}
-	item.registeredAt = time.Now().UnixNano()
 	cm.itemMap[item.pointer] = item
 	cm.currentMemory += item.size
 	scm.AdjustMemStats(item.size)
@@ -518,7 +596,8 @@ func (cm *CacheManager) addInternal(item *softItem) {
 	cm.countByType[item.evictType]++
 	heap.Push(&cm.h, item)
 	if item.maxIdleTime > 0 {
-		heap.Push(&cm.expH, expiryEntry{item.registeredAt + item.maxIdleTime, item.pointer})
+		item.estimatedExpiry = item.registeredAt + item.maxIdleTime
+		heap.Push(&cm.expH, item)
 	}
 }
 
@@ -543,19 +622,10 @@ func (cm *CacheManager) removeInternal(pointer any, freedByType *[numEvictableTy
 	if item.heapIndex >= 0 {
 		heap.Remove(&cm.h, item.heapIndex)
 	}
-	delete(cm.itemMap, pointer)
-}
-
-// removeIndexChildrenInternal removes eviction records for soft sub-items owned
-// by an index. The parent index owns the actual references and is responsible
-// for clearing them; this only keeps CacheManager bookkeeping in sync when the
-// parent is evicted or deregistered.
-func (cm *CacheManager) removeIndexChildrenInternal(index *StorageIndex, freedByType *[numEvictableTypes]int64) {
-	for pointer := range cm.itemMap {
-		if entry, ok := pointer.(*skipListCacheEntry); ok && entry.index == index {
-			cm.removeInternal(pointer, freedByType)
-		}
+	if item.expiryIndex >= 0 {
+		heap.Remove(&cm.expH, item.expiryIndex)
 	}
+	delete(cm.itemMap, pointer)
 }
 
 // updateSizeInternal adjusts size and recomputes heap position.
@@ -563,6 +633,9 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 	item, ok := cm.itemMap[pointer]
 	if !ok {
 		return
+	}
+	if item.size+delta < 0 {
+		delta = -item.size
 	}
 	cm.currentMemory += delta
 	scm.AdjustMemStats(delta)
@@ -583,106 +656,147 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 // Telemetry is decayed by 0.9x at each rebuild, so it reflects recent usage rate.
 const telemetryWeight = 50.0
 
-// evict runs two-phase eviction to bring currentUsage below budget.
-// additionalSize accounts for an upcoming allocation that hasn't been tracked yet.
-// typeFilter restricts which types are eviction candidates (nil = all types).
+type evictionCandidate struct {
+	item  *softItem
+	offer evictionOffer
+}
+
+func (cm *CacheManager) usage(typeFilter func(EvictableType) bool) int64 {
+	if typeFilter == nil {
+		return cm.currentMemory
+	}
+	var result int64
+	for evictType, size := range cm.sizeByType {
+		if typeFilter(EvictableType(evictType)) {
+			result += size
+		}
+	}
+	return result
+}
+
+func (cm *CacheManager) applyEviction(candidate evictionCandidate, mode evictionMode, freedByType *[numEvictableTypes]int64) int64 {
+	item := candidate.item
+	if _, ok := cm.itemMap[item.pointer]; !ok {
+		return 0
+	}
+	before := cm.currentMemory
+	result := item.object.evict(mode, item.size, freedByType)
+	if !result.success {
+		return 0
+	}
+	if result.fullyEvicted {
+		cm.removeInternal(item.pointer, freedByType)
+		return before - cm.currentMemory
+	}
+	freed := result.freedBytes
+	if freed < 0 {
+		freed = 0
+	}
+	if freed > item.size {
+		freed = item.size
+	}
+	if freed == 0 {
+		return 0
+	}
+	cm.currentMemory -= freed
+	scm.AdjustMemStats(-freed)
+	cm.sizeByType[item.evictType] -= freed
+	freedByType[item.evictType] += freed
+	item.size -= freed
+	item.evictionScore = item.size * evictableWeights[item.evictType]
+	return before - cm.currentMemory
+}
+
+// evict uses bounded candidate batches. Each batch first collects immutable
+// offers, then applies partial alternatives greedily before full alternatives.
+// If actual reclamation is smaller than proposed, another top-k batch is read.
 func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFilter func(EvictableType) bool) {
 	if currentUsage+additionalSize <= budget {
 		return
 	}
-	needToFree := currentUsage + additionalSize - budget
-	freeTarget := needToFree + budget*25/100
-	candidateTarget := freeTarget * 2
-
-	// Phase 1: pull candidates from max-heap (largest evictionScore first)
-	var candidates []*softItem
+	targetBudget := budget - additionalSize
+	if targetBudget < 0 {
+		targetBudget = 0
+	}
+	var held []*softItem
 	var skipped []*softItem
-	var candidateSum int64
-	for candidateSum < candidateTarget && cm.h.Len() > 0 {
-		item := heap.Pop(&cm.h).(*softItem)
-		if typeFilter != nil && !typeFilter(item.evictType) {
-			skipped = append(skipped, item)
-			continue
-		}
-		candidates = append(candidates, item)
-		candidateSum += item.size
-	}
-	// push back items that didn't match the type filter
-	for _, s := range skipped {
-		heap.Push(&cm.h, s)
-	}
-
-	// Phase 2: remove candidates already freed by recursive side effects
-	alive := candidates[:0]
-	for _, c := range candidates {
-		if _, ok := cm.itemMap[c.pointer]; ok {
-			alive = append(alive, c)
-		}
-	}
-	candidates = alive
-
-	// Phase 2: dynamic scoring among candidates.
-	// dynamicScore = age * weight - telemetry * K
-	//   age: seconds since last access (higher = more stale)
-	//   weight: type-based eviction priority (higher = cheaper to rebuild)
-	//   telemetry: usage score, decayed at each rebuild (higher = more useful)
-	//   K: calibration constant balancing seconds vs usage score
-	// Size is NOT in Phase 2 — Phase 1 (heap) already selected by size*weight.
-	now := time.Now()
-	for _, c := range candidates {
-		age := now.Sub(c.getLastUsed(c.pointer)).Seconds()
-		telemetry := 0.0
-		if c.getScore != nil {
-			telemetry = c.getScore(c.pointer)
-		}
-		weight := float64(evictableWeights[c.evictType])
-		c.dynamicScore = age*weight - telemetry*telemetryWeight
-	}
-
-	// sort by dynamicScore (worst first)
-	hybridsort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].dynamicScore > candidates[j].dynamicScore
-	})
-
-	// evict all candidates, oldest first; stop once we are within budget
 	var freedByType [numEvictableTypes]int64
 	var totalFreed int64
-	for i := 0; i < len(candidates); i++ {
-		if cm.currentMemory <= budget {
-			// already within budget – push remaining survivors back
-			for ; i < len(candidates); i++ {
-				if _, ok := cm.itemMap[candidates[i].pointer]; ok {
-					heap.Push(&cm.h, candidates[i])
-				}
+
+	for cm.usage(typeFilter) > targetBudget && cm.h.Len() > 0 {
+		needToFree := cm.usage(typeFilter) - targetBudget
+		candidateTarget := needToFree * 2
+		if candidateTarget < 1 {
+			candidateTarget = 1
+		}
+		var candidates []evictionCandidate
+		var candidateSum int64
+		for candidateSum < candidateTarget && cm.h.Len() > 0 {
+			item := heap.Pop(&cm.h).(*softItem)
+			if typeFilter != nil && !typeFilter(item.evictType) {
+				skipped = append(skipped, item)
+				continue
 			}
+			candidates = append(candidates, evictionCandidate{item: item, offer: item.object.evictionOffer(item.size)})
+			candidateSum += item.size
+		}
+		if len(candidates) == 0 {
 			break
 		}
-		c := candidates[i]
-		// check again — previous cleanup in this loop may have freed this item recursively
-		if _, ok := cm.itemMap[c.pointer]; !ok {
-			continue
-		}
-		// guarantee minimum lifetime before eviction: use the later of registeredAt and getLastUsed
-		lastActive := c.registeredAt
-		if lu := c.getLastUsed(c.pointer).UnixNano(); lu > lastActive {
-			lastActive = lu
-		}
-		idleNanos := now.UnixNano() - lastActive
-		if idleNanos < c.minLifetime {
-			heap.Push(&cm.h, c)
-			continue
-		}
-		if !c.cleanup(c.pointer, &freedByType) {
-			// cleanup couldn't acquire lock; push back for later retry
-			heap.Push(&cm.h, c)
-			continue
-		}
-		// removeInternal handles bookkeeping + recursive accounting
-		cm.removeInternal(c.pointer, &freedByType)
-		totalFreed += c.size
-	}
 
-	// survivors already pushed back inside the loop above (early-exit branch)
+		now := time.Now()
+		for i := range candidates {
+			item := candidates[i].item
+			age := now.Sub(item.getLastUsed(item.pointer)).Seconds()
+			telemetry := 0.0
+			if item.getScore != nil {
+				telemetry = item.getScore(item.pointer)
+			}
+			item.dynamicScore = age*float64(evictableWeights[item.evictType]) - telemetry*telemetryWeight
+		}
+		hybridsort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].item.dynamicScore > candidates[j].item.dynamicScore
+		})
+
+		eligible := func(item *softItem) bool {
+			lastActive := item.registeredAt
+			if lu := item.getLastUsed(item.pointer).UnixNano(); lu > lastActive {
+				lastActive = lu
+			}
+			return now.UnixNano()-lastActive >= item.minLifetime
+		}
+		// Pass 1: prefer shedding object-owned caches while preserving parents.
+		for _, candidate := range candidates {
+			if cm.usage(typeFilter) <= targetBudget {
+				break
+			}
+			if candidate.offer.partialBytes <= 0 || !eligible(candidate.item) {
+				continue
+			}
+			totalFreed += cm.applyEviction(candidate, evictPartial, &freedByType)
+		}
+		// Pass 2: fully evict surviving parents if partial reclamation was insufficient.
+		for _, candidate := range candidates {
+			if cm.usage(typeFilter) <= targetBudget {
+				break
+			}
+			if candidate.offer.fullBytes <= 0 || !eligible(candidate.item) {
+				continue
+			}
+			totalFreed += cm.applyEviction(candidate, evictFull, &freedByType)
+		}
+		for _, candidate := range candidates {
+			if _, ok := cm.itemMap[candidate.item.pointer]; ok {
+				held = append(held, candidate.item)
+			}
+		}
+	}
+	for _, item := range held {
+		heap.Push(&cm.h, item)
+	}
+	for _, item := range skipped {
+		heap.Push(&cm.h, item)
+	}
 
 	// log summary
 	if totalFreed > 0 {
@@ -708,10 +822,8 @@ func (cs CacheStat) FormatStat() string {
 	if shardColsOnly < 0 {
 		shardColsOnly = 0
 	}
-	// Index sub-items, such as LIKE skip lists, may be registered separately so
-	// eviction can assign them their own weight and age. Those registrations are
-	// eviction records, not additional raw RAM copies, so aggregate RAM displays
-	// must avoid reading them as a second live allocation.
+	// Child caches are included in their top-level owner's size and count as one
+	// object. This keeps global cache metadata independent of child cardinality.
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("TotalBudget = %s\tPersistedBudget = %s\tTracked = %s\tPersisted = %s\n",

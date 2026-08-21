@@ -21,6 +21,7 @@ import "fmt"
 import "sort"
 import "sync"
 import "time"
+import "unsafe"
 import "strings"
 import "sync/atomic"
 
@@ -39,7 +40,8 @@ type storageIndexState struct {
 	active           bool
 	minVals          []scm.Scmer
 	maxVals          []scm.Scmer
-	skipLists        []*sync.Map // map[skipListKey]*SkipList; immutable values, lock-free reads
+	skipLists        []*sync.Map  // map[skipListKey]*SkipList; immutable values, lock-free reads
+	skipListBytes    atomic.Int64 // exact bytes owned by skipLists
 	precomputedDelta bool
 }
 
@@ -87,10 +89,14 @@ type StorageIndex struct {
 	Native       bool    // true when data is physically sorted by this index (zero-cost)
 	t            *storageShard
 	lastHit      atomic.Uint32 // last search position for sorted access pattern optimization
-	mu           sync.Mutex
-	sessionKeys  []string
-	baseState    storageIndexState
-	variants     map[string]*storageIndexState
+	// skipListCacheBytes is the exact memory owned by LIKE child caches. The
+	// CacheManager sees only this StorageIndex; child admission updates the
+	// parent's registered size while eviction remains local to the index.
+	skipListCacheBytes atomic.Int64
+	mu                 sync.Mutex
+	sessionKeys        []string
+	baseState          storageIndexState
+	variants           map[string]*storageIndexState
 }
 
 func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
@@ -254,8 +260,9 @@ func (idx *StorageIndex) stateForTx(tx *TxContext, create bool) *storageIndexSta
 
 func (idx *StorageIndex) markVariantsDirty() {
 	idx.mu.Lock()
-	defer idx.mu.Unlock()
+	var freed int64
 	for _, state := range idx.variants {
+		freed += idx.clearSkipListsLocked(state)
 		state.active = false
 		state.mainIndexes = StorageInt{}
 		state.deltaBtree = nil
@@ -264,6 +271,11 @@ func (idx *StorageIndex) markVariantsDirty() {
 		state.maxVals = nil
 		state.precomputedDelta = false
 	}
+	if freed > 0 {
+		idx.skipListCacheBytes.Add(-freed)
+		GlobalCache.UpdateSizeAsync(idx, -freed)
+	}
+	idx.mu.Unlock()
 }
 
 func (idx *StorageIndex) ComputeSize() uint {
@@ -279,13 +291,12 @@ func (idx *StorageIndex) ComputeSize() uint {
 			sz += state.mainIndexes.ComputeSize()
 		}
 		for _, colCache := range state.skipLists {
-			sz += 8
+			sz += uint(unsafe.Sizeof(sync.Map{}))
 			if colCache != nil {
 				colCache.Range(func(key, value any) bool {
 					k := key.(skipListKey)
 					sl := value.(*SkipList)
-					sz += uint(len(k.pattern)+len(k.collation)) + 24
-					sz += sl.ComputeSize()
+					sz += uint(skipListEntrySize(k, sl))
 					return true
 				})
 			}
@@ -293,6 +304,89 @@ func (idx *StorageIndex) ComputeSize() uint {
 		sz += idx.computeDeltaBtreeSize(state)
 	}
 	return sz
+}
+
+// BenchmarkLikeSkipListCacheAdmission measures ~137 bytes of sync.Map and
+// interface bookkeeping per entry on amd64. Round up so many tiny search terms
+// cannot evade the global byte budget through unaccounted metadata.
+const skipListMapEntryOverhead int64 = 144
+
+func skipListEntrySize(key skipListKey, skipList *SkipList) int64 {
+	return int64(len(key.pattern)+len(key.collation)) + skipListMapEntryOverhead + int64(skipList.ComputeSize())
+}
+
+func (idx *StorageIndex) ownsSkipListCacheLocked(cache *sync.Map) bool {
+	if cache == nil {
+		return false
+	}
+	states := []*storageIndexState{&idx.baseState}
+	for _, state := range idx.variants {
+		states = append(states, state)
+	}
+	for _, state := range states {
+		for _, candidate := range state.skipLists {
+			if candidate == cache {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// clearSkipListsLocked detaches all child caches of one index state in O(columns)
+// and returns their exact accounted bytes. Queries that already snapshotted an
+// old map keep it alive until their direct references leave scope.
+// The caller must hold idx.mu.
+func (idx *StorageIndex) clearSkipListsLocked(state *storageIndexState) int64 {
+	if state == nil {
+		return 0
+	}
+	freed := state.skipListBytes.Swap(0)
+	for i, cache := range state.skipLists {
+		if cache != nil {
+			state.skipLists[i] = new(sync.Map)
+		}
+	}
+	return freed
+}
+
+func (idx *StorageIndex) clearAllSkipListsLocked() int64 {
+	freed := idx.clearSkipListsLocked(&idx.baseState)
+	for _, state := range idx.variants {
+		freed += idx.clearSkipListsLocked(state)
+	}
+	if remaining := idx.skipListCacheBytes.Add(-freed); remaining < 0 {
+		// Defensive for states restored by older persistence/tests which predate
+		// explicit child accounting. All live admissions are serialized by mu.
+		idx.skipListCacheBytes.Store(0)
+	}
+	return freed
+}
+
+func (idx *StorageIndex) evictionOffer(currentSize int64) evictionOffer {
+	partial := idx.skipListCacheBytes.Load()
+	if partial < 0 {
+		partial = 0
+	}
+	if partial > currentSize {
+		partial = currentSize
+	}
+	return evictionOffer{partialBytes: partial, fullBytes: currentSize}
+}
+
+func (idx *StorageIndex) evict(mode evictionMode, currentSize int64, _ *[numEvictableTypes]int64) evictionResult {
+	if !idx.mu.TryLock() {
+		return evictionResult{}
+	}
+	defer idx.mu.Unlock()
+	if mode == evictPartial {
+		freed := idx.clearAllSkipListsLocked()
+		return evictionResult{freedBytes: freed, success: freed > 0}
+	}
+	idx.clearAllSkipListsLocked()
+	idx.baseState = storageIndexState{}
+	idx.variants = nil
+	return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
 }
 
 func (idx *StorageIndex) computeDeltaBtreeSize(state *storageIndexState) uint {
@@ -991,25 +1085,26 @@ func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, caches []*sy
 		return uint32(int64(state.mainIndexes.GetValueUInt(pos)) + state.mainIndexes.offset)
 	}
 	sl := s.ColMatchers[colIdx].BuildSkipList(key.pattern, key.collation, s.t.main_count, getRecid, colStorage)
-	// Cache immutable match sets. sync.Map keeps the read path non-blocking and
-	// LoadOrStore prevents concurrent first users from publishing duplicates.
+	// Slow-path publication is serialized with partial/full index eviction.
+	// Hits above remain lock-free; the active query retains sl directly even if
+	// the recommendation is removed immediately afterwards.
 	cache := caches[colIdx]
+	s.mu.Lock()
+	if !s.ownsSkipListCacheLocked(cache) {
+		s.mu.Unlock()
+		sl.recordUse()
+		return sl
+	}
 	actual, loaded := cache.LoadOrStore(key, sl)
 	sl = actual.(*SkipList)
 	sl.recordUse()
-	if loaded {
-		return sl
+	if !loaded {
+		delta := skipListEntrySize(key, sl)
+		state.skipListBytes.Add(delta)
+		s.skipListCacheBytes.Add(delta)
+		GlobalCache.UpdateSizeAsync(s, delta)
 	}
-	// Register skip lists as soft sub-items of the parent index. Their bytes
-	// are already included in StorageIndex.ComputeSize for total live-RAM
-	// reporting; the separate CacheManager entry exists only so eviction can
-	// choose a cheaper sub-item before dropping the whole index.
-	if sl != nil {
-		entry := &skipListCacheEntry{index: s, colIdx: colIdx, pattern: key.pattern, collation: key.collation, cache: cache, skipList: sl}
-		// The active query owns sl directly, so removing the cache recommendation
-		// cannot invalidate its cursor. Do not impose a wall-clock grace period.
-		GlobalCache.AddItemEx(entry, int64(sl.ComputeSize()), TypeIndex, skipListCleanup, skipListLastUsed, skipListGetScore, 0, likeSkipListMaxIdle)
-	}
+	s.mu.Unlock()
 	return sl
 }
 
@@ -1355,14 +1450,7 @@ start_scan:
 // Returns false if the index lock cannot be acquired (non-blocking).
 func indexCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	idx := ptr.(*StorageIndex)
-	if !idx.mu.TryLock() {
-		return false // index is in use, skip eviction
-	}
-	GlobalCache.removeIndexChildrenInternal(idx, freedByType)
-	idx.baseState = storageIndexState{}
-	idx.variants = nil
-	idx.mu.Unlock()
-	return true
+	return idx.evict(evictFull, 0, freedByType).success
 }
 
 func indexLastUsed(ptr any) time.Time {
@@ -1372,38 +1460,4 @@ func indexLastUsed(ptr any) time.Time {
 
 func indexGetScore(ptr any) float64 {
 	return ptr.(*StorageIndex).Savings
-}
-
-// Exact terms stay useful while a user pages through results, but one-off
-// searches should not retain their match sets for the lifetime of the shard.
-const likeSkipListMaxIdle = 30 * time.Minute
-
-// skipListCacheEntry wraps a single skip list for CacheManager eviction.
-type skipListCacheEntry struct {
-	index     *StorageIndex
-	colIdx    int
-	pattern   string
-	collation string
-	cache     *sync.Map
-	skipList  *SkipList
-}
-
-func skipListCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
-	e := ptr.(*skipListCacheEntry)
-	if !e.index.mu.TryLock() {
-		return false
-	}
-	defer e.index.mu.Unlock()
-	if e.cache != nil {
-		e.cache.CompareAndDelete(skipListKey{pattern: e.pattern, collation: e.collation}, e.skipList)
-	}
-	return true
-}
-
-func skipListLastUsed(ptr any) time.Time {
-	return ptr.(*skipListCacheEntry).skipList.lastUsed()
-}
-
-func skipListGetScore(ptr any) float64 {
-	return ptr.(*skipListCacheEntry).skipList.cacheScore()
 }
