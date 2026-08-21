@@ -23,6 +23,37 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+func TestProjectJoinNumericLookupMatchesIntegralStorageRepresentations(t *testing.T) {
+	keys := recSetProjectKeys{
+		width:  1,
+		values: []scm.Scmer{scm.NewInt(7), scm.NewInt(42)},
+	}
+	if !keys.buildNumericLookup() {
+		t.Fatal("integral keys should use the numeric lookup")
+	}
+	if !keys.contains([]scm.Scmer{scm.NewFloat(42)}) {
+		t.Fatal("StorageSeq float representation should match an integral source key")
+	}
+	if keys.contains([]scm.Scmer{scm.NewFloat(42.5)}) {
+		t.Fatal("non-integral float must not match an integral source key")
+	}
+}
+
+func TestProjectJoinPhysicalAccessUsesCostModel(t *testing.T) {
+	if !projectJoinDensePreferred(1, 1_000_000, true, false) {
+		t.Fatal("projection without a usable index must scan")
+	}
+	if projectJoinDensePreferred(10, 80_000, true, true) {
+		t.Fatal("a few indexed keys should use point probes")
+	}
+	if !projectJoinDensePreferred(100, 80_000, true, true) {
+		t.Fatal("a broad integral key set should use the numeric dense scan")
+	}
+	if projectJoinDensePreferred(100, 80_000, false, true) {
+		t.Fatal("generic tuple comparisons should retain indexed probes at this cardinality")
+	}
+}
+
 // buildRecSetShard drives a recSetShardBuilder over want (a boolean mask
 // indexed by recid, len(want)==universe) exactly the way every real caller
 // (recset.go's collectRecSet/projectJoinKeysPart, analyzer.go's
@@ -530,6 +561,40 @@ func TestCombineTwoRecSetShardsDispatchesOptimizedPath(t *testing.T) {
 				t.Errorf("%s: union kind = recSetBitmap, want ranges/positive (fallback path ran instead of the dedicated one)", tc.name)
 			}
 		})
+	}
+}
+
+func TestDifferenceRecSetShardsAcrossRepresentations(t *testing.T) {
+	universe := uint32(2048)
+	rangesWant := wantFromRange(universe, [][2]uint32{{100, 700}, {1200, 400}})
+	positiveWant := wantFromRange(universe, [][2]uint32{{50, 1}, {100, 1}, {333, 1}, {1250, 1}, {1900, 1}})
+	bitmapWant := make([]bool, universe)
+	rng := rand.New(rand.NewSource(23))
+	for i := range bitmapWant {
+		bitmapWant[i] = rng.Intn(2) == 0
+	}
+
+	fixtures := []struct {
+		name string
+		part recSetShard
+		want []bool
+	}{
+		{"ranges", buildRecSetShard(rangesWant), rangesWant},
+		{"positive", buildRecSetShard(positiveWant), positiveWant},
+		{"bitmap", buildRecSetShard(bitmapWant), bitmapWant},
+	}
+	for _, left := range fixtures {
+		for _, right := range fixtures {
+			left, right := left, right
+			t.Run(left.name+"_minus_"+right.name, func(t *testing.T) {
+				want := make([]bool, universe)
+				for i := range want {
+					want[i] = left.want[i] && !right.want[i]
+				}
+				got := differenceRecSetShards(nil, &left.part, &right.part)
+				verifyRecSetShard(t, "difference", got, want)
+			})
+		}
 	}
 }
 

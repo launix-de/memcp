@@ -1,0 +1,135 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Regression for a scalar-first-probe promoted through a top-level, FROM-less
+# query (a bare "SELECT EXISTS (...)" with no outer table). The compound
+# correlated scalar probe promotion (PR #535) rewrites the EXISTS's field
+# expression into a `(scalar_first_probe stage col ...)` IR marker, but the
+# zero-source lowering path (lower_zero_source_query_block ->
+# lower_scalar_marker_expr) previously had no case for that marker, so it was
+# never consumed and reached Eval verbatim, panicking with
+# "Unknown function: scalar_first_probe". Only triggered when the outermost
+# query itself has no FROM clause -- the same EXISTS(...) expression used as
+# a projected column of a query with a real FROM clause lowers correctly
+# because that path goes through the per-row scan projection lowering
+# instead. Pattern distilled from a "does inbox have unread mail" navbar
+# access check (outer EXISTS wrapping a scalar subselect that compares a
+# session variable, optionally with a further nested correlated EXISTS).
+
+metadata:
+  version: "1.0"
+  description: "Top-level FROM-less SELECT EXISTS(...) wrapping a scalar subselect that references a session variable"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS espn_share"
+  - sql: "DROP TABLE IF EXISTS espn_parent"
+  - sql: "CREATE TABLE espn_parent (id INT PRIMARY KEY, owner_id INT)"
+  - sql: "CREATE TABLE espn_share (id INT PRIMARY KEY AUTO_INCREMENT, parent_id INT, user_id INT)"
+  - sql: "INSERT INTO espn_parent VALUES (1, 10), (2, 20)"
+  - sql: "INSERT INTO espn_share (parent_id, user_id) VALUES (2, 99)"
+
+test_cases:
+
+  - name: "set session user with share access"
+    session_id: "sess_espn"
+    sql: "SET @session_user = 99"
+
+  - name: "minimal: bare SELECT EXISTS(...) with correlated scalar subselect comparing a session var"
+    session_id: "sess_espn"
+    sql: |
+      SELECT EXISTS (
+        SELECT TRUE FROM espn_parent k
+        WHERE
+          (SELECT z.owner_id = @session_user FROM espn_parent z WHERE z.id = k.id LIMIT 1)
+      ) AS has_access
+    expect:
+      rows: 1
+      data:
+        - has_access: 0
+
+  - name: "full shape: outer EXISTS, AND-wrapped CASE-projected scalar subselect, nested NOT EXISTS, session var used twice -- access via share"
+    session_id: "sess_espn"
+    sql: |
+      SELECT EXISTS (
+        SELECT TRUE FROM espn_parent k
+        WHERE TRUE AND (
+          (SELECT (CASE WHEN FALSE THEN TRUE ELSE
+             NOT ((z.owner_id <> @session_user) AND
+                  (NOT (EXISTS (SELECT TRUE FROM espn_share w
+                                WHERE w.parent_id = z.id AND w.user_id = @session_user LIMIT 1))))
+           END)
+           AND (CASE WHEN TRUE THEN TRUE ELSE FALSE END)
+           AND TRUE
+           FROM espn_parent z WHERE z.id = k.id LIMIT 1)
+        )
+      ) AS has_access
+    expect:
+      rows: 1
+      data:
+        - has_access: 1
+
+  - name: "switch session user to one with no owner match and no share"
+    session_id: "sess_espn"
+    sql: "SET @session_user = 77"
+
+  - name: "full shape: no owner match, no share -- no access"
+    session_id: "sess_espn"
+    sql: |
+      SELECT EXISTS (
+        SELECT TRUE FROM espn_parent k
+        WHERE TRUE AND (
+          (SELECT (CASE WHEN FALSE THEN TRUE ELSE
+             NOT ((z.owner_id <> @session_user) AND
+                  (NOT (EXISTS (SELECT TRUE FROM espn_share w
+                                WHERE w.parent_id = z.id AND w.user_id = @session_user LIMIT 1))))
+           END)
+           AND (CASE WHEN TRUE THEN TRUE ELSE FALSE END)
+           AND TRUE
+           FROM espn_parent z WHERE z.id = k.id LIMIT 1)
+        )
+      ) AS has_access
+    expect:
+      rows: 1
+      data:
+        - has_access: 0
+
+  - name: "switch session user to direct owner match"
+    session_id: "sess_espn"
+    sql: "SET @session_user = 10"
+
+  - name: "full shape: direct owner match -- access"
+    session_id: "sess_espn"
+    sql: |
+      SELECT EXISTS (
+        SELECT TRUE FROM espn_parent k
+        WHERE TRUE AND (
+          (SELECT (CASE WHEN FALSE THEN TRUE ELSE
+             NOT ((z.owner_id <> @session_user) AND
+                  (NOT (EXISTS (SELECT TRUE FROM espn_share w
+                                WHERE w.parent_id = z.id AND w.user_id = @session_user LIMIT 1))))
+           END)
+           AND (CASE WHEN TRUE THEN TRUE ELSE FALSE END)
+           AND TRUE
+           FROM espn_parent z WHERE z.id = k.id LIMIT 1)
+        )
+      ) AS has_access
+    expect:
+      rows: 1
+      data:
+        - has_access: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS espn_share"
+  - sql: "DROP TABLE IF EXISTS espn_parent"

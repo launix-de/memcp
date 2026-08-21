@@ -19,6 +19,7 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 package storage
 
 import "fmt"
+import "math"
 import "runtime/debug"
 import "sort"
 import "sync/atomic"
@@ -333,6 +334,82 @@ func recSetIntersect(items []*recSet) *recSet {
 	return result
 }
 
+// recSetDifference returns the records in the first RecSet which occur in none
+// of the following RecSets. All operands must belong to the same base table.
+func recSetDifference(items []*recSet) *recSet {
+	if len(items) == 0 || items[0] == nil || items[0].table == nil {
+		panic("recset_difference requires a non-empty list of recsets")
+	}
+	left := items[0]
+	for _, rs := range items[1:] {
+		if rs == nil || rs.table != left.table {
+			panic("recset_difference: all recsets must belong to the same table")
+		}
+	}
+	result := &recSet{tx: left.tx, table: left.table}
+	values := make(chan recSetBuildResult, len(left.shards))
+	done := runFanoutTasks(left.tx, len(left.shards), func(taskIndex int, _ bool) {
+		withTxSession(left.tx, func() scm.Scmer {
+			defer func() {
+				if rec := recover(); rec != nil {
+					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
+				}
+			}()
+			leftPart := &left.shards[taskIndex]
+			exclusions := make([]*recSetShard, 0, len(items)-1)
+			for _, rs := range items[1:] {
+				if part := rs.shardEntry(leftPart.shard); part != nil && part.count > 0 {
+					exclusions = append(exclusions, part)
+				}
+			}
+			var excluded recSetShard
+			if len(exclusions) > 0 {
+				excluded = unionRecSetShards(leftPart.shard, exclusions)
+			}
+			values <- recSetBuildResult{part: differenceRecSetShards(leftPart.shard, leftPart, &excluded)}
+			return scm.NewNil()
+		})
+	})
+	if done != nil {
+		<-done
+	}
+	close(values)
+
+	var buildErr scanError
+	for msg := range values {
+		if msg.err.r != nil {
+			if buildErr.r == nil {
+				buildErr = msg.err
+			}
+			continue
+		}
+		if msg.part.count > 0 {
+			result.count += msg.part.count
+			result.shards = append(result.shards, msg.part)
+		}
+	}
+	if buildErr.r != nil {
+		panic(buildErr)
+	}
+	sort.Slice(result.shards, func(i, j int) bool {
+		return result.shards[i].shard.uuid.String() < result.shards[j].shard.uuid.String()
+	})
+	return result
+}
+
+// recSetNot complements a RecSet against the currently visible rows of its
+// base table. Building that visible universe through the ordinary scan path is
+// essential: raw recid inversion would resurrect deleted or tx-invisible rows.
+func recSetNot(item *recSet) *recSet {
+	if item == nil || item.table == nil {
+		panic("recset_not requires a recset with a base table")
+	}
+	visible := item.table.scanRecSet(item.tx, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+		return scm.NewBool(true)
+	}))
+	return recSetDifference([]*recSet{visible, item})
+}
+
 func recSetContainsClosure(shard *storageShard) *func(uint32, ...scm.Scmer) scm.Scmer {
 	var cachedRecSet *recSet
 	var cachedShard *recSetShard
@@ -555,8 +632,9 @@ func (r *recSet) projectJoin(currentTx *TxContext, sourceKeyCols []string, targe
 }
 
 type recSetProjectKeys struct {
-	width  int
-	values []scm.Scmer
+	width         int
+	values        []scm.Scmer
+	numericValues map[int64]struct{}
 }
 
 func (k *recSetProjectKeys) count() int {
@@ -572,10 +650,86 @@ func (k *recSetProjectKeys) tuple(index int) []scm.Scmer {
 }
 
 func (k *recSetProjectKeys) contains(key []scm.Scmer) bool {
+	if k.numericValues != nil && len(key) == 1 {
+		if integer, ok := projectNumericInteger(key[0]); ok {
+			_, found := k.numericValues[integer]
+			return found
+		}
+	}
 	position := sort.Search(k.count(), func(i int) bool {
 		return compareProjectKey(k.tuple(i), key) >= 0
 	})
 	return position < k.count() && compareProjectKey(k.tuple(position), key) == 0
+}
+
+func projectNumericInteger(value scm.Scmer) (int64, bool) {
+	switch value.GetTag() {
+	case scm.TagInt:
+		return value.Int(), true
+	case scm.TagFloat:
+		number := value.Float()
+		integer := int64(number)
+		return integer, number == float64(integer)
+	default:
+		return 0, false
+	}
+}
+
+func (k *recSetProjectKeys) buildNumericLookup() bool {
+	if k.width != 1 {
+		return false
+	}
+	values := make(map[int64]struct{}, k.count())
+	for position := 0; position < k.count(); position++ {
+		value := k.tuple(position)[0]
+		integer, ok := projectNumericInteger(value)
+		if !ok {
+			return false
+		}
+		values[integer] = struct{}{}
+	}
+	k.numericValues = values
+	return true
+}
+
+// Rounded conservative constants from the production-shaped A/B fixture:
+// 105 keys projected through 22 indexed target shards took 24ms, while the
+// numeric dense path projected about 80k keys through 1.84m rows in 8ms. The
+// old generic binary-search scan took roughly 250ns per comparison. Keep the
+// units explicit so costgen can replace these constants without changing the
+// decision function when its projection calibration lands.
+const projectJoinIndexProbeNs = 10000.0
+const projectJoinNumericScanRowNs = 5.0
+const projectJoinGenericCompareNs = 250.0
+
+// projectJoinDensePreferred compares the two physical implementations using
+// the cardinalities known at execution time. An indexed projection performs
+// one point lookup per source key and shard. A dense projection visits each
+// target row once; homogeneous integral keys use the O(1) numeric lookup,
+// while generic tuples retain the sorted-key binary search.
+func projectJoinDensePreferred(keyCount, targetRows int, numeric bool, indexed bool) bool {
+	if !indexed {
+		return true
+	}
+	if keyCount == 0 || targetRows == 0 {
+		return false
+	}
+	indexCost := float64(keyCount) * projectJoinIndexProbeNs
+	if numeric {
+		return float64(targetRows)*projectJoinNumericScanRowNs <= indexCost
+	}
+	comparisons := math.Log2(float64(keyCount) + 1)
+	denseCost := float64(targetRows) * comparisons * projectJoinGenericCompareNs
+	return denseCost <= indexCost
+}
+
+func projectJoinNumericColumn(column ColumnStorage) bool {
+	switch column.(type) {
+	case *StorageInt, *StorageSeq:
+		return true
+	default:
+		return false
+	}
 }
 
 func compareProjectKey(left, right []scm.Scmer) int {
@@ -810,6 +964,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 		return result
 	}
 	querySeq := scm.CurrentQuerySeq()
+	numeric := keys.buildNumericLookup()
 	type targetPartResult struct {
 		part recSetShard
 		err  scanError
@@ -827,8 +982,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 			if ss != nil && ss.IsKilledSeq(querySeq) {
 				panic("query killed")
 			}
-			dense := uint(keys.count()*64) >= t.CountEstimate()
-			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss, dense)}
+			values <- targetPartResult{part: shard.projectJoinKeysPart(currentTx, targetKeyCols, keys, ss, numeric)}
 			return scm.NewNil()
 		})
 	})
@@ -884,16 +1038,10 @@ func (t *storageShard) hasEqualityIndexPrefix(cols []string) bool {
 	return false
 }
 
-func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, dense bool) recSetShard {
+func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool) recSetShard {
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
-	if !dense && !t.hasEqualityIndexPrefix(targetKeyCols) {
-		// Building a fresh index just for this one-off lookup would cost far
-		// more than scanning the shard directly -- fall back to the dense
-		// (linear scan) path instead of forcing an index build.
-		dense = true
-	}
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	targetReaders := make([]ColumnReader, len(targetKeyCols))
 	targetNeedsTxReader := make([]bool, len(targetKeyCols))
@@ -925,6 +1073,9 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 
 	maxInsertIndex := len(t.inserts)
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
+	numericDense := numeric && len(targetCols) == 1 && projectJoinNumericColumn(targetCols[0])
+	dense := projectJoinDensePreferred(keys.count(), int(visibleUpper), numericDense,
+		t.hasEqualityIndexPrefix(targetKeyCols))
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	if dense {
 		builder := newRecSetShardBuilder(t, visibleUpper, true, t.main_count)

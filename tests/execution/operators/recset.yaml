@@ -601,9 +601,47 @@ test_cases:
               (equal? (recset_count (recset_union (list full positive))) 4096)
               (equal? (recset_count (recset_intersect (list empty negative))) 0)
               (equal? (recset_count (recset_union (list empty positive))) 10)
-              (equal? (recset_count (recset_intersect (list full negative))) 4086))
+              (equal? (recset_count (recset_intersect (list full negative))) 4086)
+              (equal? (recset_count (recset_not positive)) 4086)
+              (equal? (recset_count (recset_difference (list negative even))) 2043)
+              (equal? (recset_count (recset_difference (list full positive even))) 2043))
           "ok"
           (error "adaptive recset algebra returned wrong cardinality")))
+
+  - name: "recset_not complements against visible same-table rows"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define tenant1 (scan_recset nil tbl
+          '("tenant")
+          (lambda (tenant) (equal? tenant 1))))
+        (define complement (recset_not tenant1))
+        (define sum_ids
+          (scan nil complement '() (lambda () true) '("id")
+            (lambda (id) id) (lambda (acc id) (+ acc id)) 0))
+        (if (and (equal? (recset_count complement) 2) (equal? sum_ids 7))
+          "ok"
+          (error "recset_not returned wrong row set")))
+
+  - name: "recset_difference subtracts every following operand"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "recset_items"))
+        (define full (scan_recset nil tbl '() (lambda () true)))
+        (define tenant1 (scan_recset nil tbl '("tenant") (lambda (tenant) (equal? tenant 1))))
+        (define active (scan_recset nil tbl '("active") (lambda (value) (equal? value 1))))
+        (define remaining (recset_difference (list full tenant1 active)))
+        (define sum_ids
+          (scan nil remaining '() (lambda () true) '("id")
+            (lambda (id) id) (lambda (acc id) (+ acc id)) 0))
+        (if (and (equal? (recset_count remaining) 1) (equal? sum_ids 4))
+          "ok"
+          (error "recset_difference returned wrong row set")))
+
+  - name: "recset_difference requires a left operand"
+    scm: "(recset_difference (list))"
+    expect:
+      error: true
 
   - name: "recset_union rejects recsets from different tables"
     scm: |
@@ -620,6 +658,15 @@ test_cases:
         (define left (scan_recset nil (table "memcp-tests" "recset_items") '() (lambda () true)))
         (define right (scan_recset nil (table "memcp-tests" "recset_other") '() (lambda () true)))
         (recset_intersect (list left right)))
+    expect:
+      error: true
+
+  - name: "recset_difference rejects recsets from different tables"
+    scm: |
+      (begin
+        (define left (scan_recset nil (table "memcp-tests" "recset_items") '() (lambda () true)))
+        (define right (scan_recset nil (table "memcp-tests" "recset_other") '() (lambda () true)))
+        (recset_difference (list left right)))
     expect:
       error: true
 
