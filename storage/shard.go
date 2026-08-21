@@ -776,10 +776,8 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
-		GlobalCache.removeIndexChildrenInternal(idx, freedByType)
 		GlobalCache.removeInternal(idx, freedByType)
-		idx.baseState = storageIndexState{}
-		idx.variants = nil
+		idx.evict(evictFull, 0, freedByType)
 	}
 	// release column storage (deregister compressed string dicts first)
 	for col := range s.columns {
@@ -806,10 +804,8 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
-		GlobalCache.removeIndexChildrenInternal(idx, freedByType)
 		GlobalCache.removeInternal(idx, freedByType)
-		idx.baseState = storageIndexState{}
-		idx.variants = nil
+		idx.evict(evictFull, 0, freedByType)
 	}
 	// clear in-memory data (no disk backing to flush to)
 	s.inserts = nil
