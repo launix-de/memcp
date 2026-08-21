@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
 # Circular query plan: SELECT t.* FROM (SELECT ... FROM main
 #   LEFT JOIN (SELECT ... complex subselects ... FROM ref) derived ON ...
 # ) t ORDER BY ... LIMIT
@@ -141,6 +143,21 @@ test_cases:
       rows: 1
       data:
         - cnt: 2
+
+  - name: "physical callbacks are optimized with the enclosing plan"
+    sql: |
+      EXPLAIN SELECT a.ID
+      FROM cqp_assign a
+      LEFT JOIN cqp_task t ON t.ID = a.task
+      WHERE a.task = 1 AND t.title LIKE '%u%'
+      ORDER BY a.ID
+      LIMIT 10
+    expect:
+      rows: 1
+      result_contains:
+        - "scan"
+      result_not_contains:
+        - "(optimize"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS cqp_task"
