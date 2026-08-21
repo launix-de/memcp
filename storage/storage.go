@@ -623,13 +623,15 @@ func Init(en scm.Env) {
 				limit = 1024
 			}
 			var rows int64
+			var sampled int64
 			capped := false
 			for _, shard := range t.ActiveShards() {
 				if shard == nil {
 					continue
 				}
-				shardRows, shardCapped := shard.EstimateFilteredRows(conditionCols, condition, limit-int(rows), currentTx)
+				shardRows, shardCapped, shardSampled := shard.EstimateFilteredRows(conditionCols, condition, limit-int(rows), currentTx)
 				rows += shardRows
+				sampled += shardSampled
 				if shardCapped || rows >= int64(limit) {
 					capped = true
 					break
@@ -639,6 +641,7 @@ func Init(en scm.Env) {
 			return scm.NewSlice([]scm.Scmer{
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(rows)}),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(capped)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(sampled)}),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
 			})
 		},

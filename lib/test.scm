@@ -547,7 +547,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(nth rebound_parent_ref 3)
 		(aggregate_col_name (car (gs_aggregates rebound_parent_stage))))
 		true "derived stage rebinding updates aggregate column handles")
-	/* scalar_first_probe_keytable_cost_preferred? safety: an unknown (non-number)
+/* scalar_first_probe_keytable_cost_preferred? safety: an unknown (non-number)
 	probe_work_rows must never be treated as "the carrier is cheaper". The shared
 	comparison (planner_direct_presence_probe_preferred?) only weighs the two
 	costs when both estimates are numbers; without a probe-count estimate, the
@@ -1763,7 +1763,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (once_fn 99) 3) true "once second call returns cached")
 	(assert (equal? (once_calls "n") 1) true "once executes only once")
 	/* a zero-arg once-wrapped builder returns a closure, not the closure's result;
-	   single-applying it to an argument just ignores that argument as noise */
+	single-applying it to an argument just ignores that argument as noise */
 	(define once_builder (once (lambda () (lambda (x) (equal? x 1)))))
 	(assert (nil? (apply once_builder (list 1))) false
 		"single-applying a zero-arg once-wrapper still returns a closure (non-nil/truthy), not the intended boolean result")
