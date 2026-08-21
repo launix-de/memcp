@@ -106,7 +106,7 @@ test_cases:
       INSERT INTO notlike_test (id, name) VALUES
         (1, 'Brand#23'), (2, 'Brand#45'), (3, 'Generic'),
         (4, 'Brand#12'), (5, 'NoName'), (6, 'Brand#99'),
-        (7, 'Special'), (8, 'Brand#23')
+        (7, 'Special'), (8, 'Brand#23'), (9, NULL)
 
   - name: "NOT LIKE basic"
     sql: "SELECT id FROM notlike_test WHERE name NOT LIKE 'Brand%' ORDER BY id"

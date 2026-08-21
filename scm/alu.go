@@ -25066,7 +25066,9 @@ func init_alu() {
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{{Kind: "any", ParamName: "value", ParamDesc: "SQL predicate value"}},
-			Return: &TypeDescriptor{Kind: "bool"},
+			// SQL NOT is nullable: UNKNOWN remains UNKNOWN. Advertising a concrete
+			// bool lets expression optimization replace it with two-valued `not`.
+			Return: &TypeDescriptor{Kind: "bool|nil"},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
