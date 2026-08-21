@@ -116,10 +116,11 @@ type observation struct {
 }
 
 type constants struct {
-	startupNS           int64
-	candidateScanRowNS  int64
-	candidateMatchRowNS int64
-	driverRowNS         int64
+	startupNS             int64
+	candidateScanRowNS    int64
+	candidateRecsetRowNS  int64
+	driverCacheBuildRowNS int64
+	driverCacheProbeRowNS int64
 }
 
 func main() {
@@ -157,8 +158,13 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("membership startup: %d ns\ncandidate scan:    %d ns/input-row\ncandidate build:   %d ns/matching-row\ndriver probe:      %d ns/row\n",
-		c.startupNS, c.candidateScanRowNS, c.candidateMatchRowNS, c.driverRowNS)
+	if err := validateDecisionOrdering(observations, c); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("membership startup:  %d ns\ncandidate scan:      %d ns/input-row\nrecset build:        %d ns/matching-row\ngroup-cache build:   %d ns/matching-row\ngroup-cache probe:   %d ns/driver-row\n",
+		c.startupNS, c.candidateScanRowNS, c.candidateRecsetRowNS,
+		c.driverCacheBuildRowNS, c.driverCacheProbeRowNS)
+	printDecisionOrdering(observations, c)
 	if *patch {
 		path := filepath.Join(root, "lib", "queryplan.scm")
 		if err := patchQueryplan(path, c); err != nil {
@@ -472,21 +478,29 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 func rowFeatures(row calibrationRow) ([]float64, error) {
 	switch row.Plan {
 	case "candidate_keyset":
-		return []float64{1, *row.CandidateInputRows, *row.CandidateRows, 0}, nil
+		return []float64{*row.CandidateInputRows, *row.CandidateRows, 0, 0}, nil
 	case "driver_order_membership_probe":
-		return []float64{1, 0, 0, *row.DriverRows}, nil
+		return []float64{*row.CandidateInputRows, 0, *row.CandidateRows, *row.DriverRows}, nil
 	default:
 		return nil, fmt.Errorf("unsupported plan %q", row.Plan)
 	}
 }
 
-// solve fits: actual_ns = startup + candidate_input_rows*scan_ns +
-// candidate_rows*build_ns OR startup + driver_rows*driver_probe_ns.
+// solve fits the physical work both alternatives actually perform:
+//
+//	candidate = candidate_input*scan + candidate_rows*recset_build
+//	driver    = candidate_input*scan + candidate_rows*cache_build + driver_rows*cache_probe
+//
+// Keeping candidate materialization in the driver equation prevents its cost
+// from being incorrectly absorbed into a workload-specific per-driver probe.
+// A shared startup is deliberately not fitted: it cancels from the plan
+// inequality and otherwise absorbs noise while making the row constants
+// underdetermined.
 // Non-negative coordinate descent
 // prevents noisy samples from generating impossible negative costs.
 func solve(rows []observation) (constants, error) {
-	if len(rows) < 4 {
-		return constants{}, fmt.Errorf("need at least four observations, got %d", len(rows))
+	if len(rows) < 5 {
+		return constants{}, fmt.Errorf("need at least five observations, got %d", len(rows))
 	}
 	beta := []float64{1, 1, 1, 1}
 	for iteration := 0; iteration < 10000; iteration++ {
@@ -524,11 +538,106 @@ func solve(rows []observation) (constants, error) {
 		}
 	}
 	return constants{
-		startupNS:           int64(math.Round(beta[0])),
-		candidateScanRowNS:  int64(math.Round(beta[1])),
-		candidateMatchRowNS: int64(math.Round(beta[2])),
-		driverRowNS:         int64(math.Round(beta[3])),
+		startupNS:             0,
+		candidateScanRowNS:    int64(math.Round(beta[0])),
+		candidateRecsetRowNS:  int64(math.Round(beta[1])),
+		driverCacheBuildRowNS: int64(math.Round(beta[2])),
+		driverCacheProbeRowNS: int64(math.Round(beta[3])),
 	}, nil
+}
+
+func estimatedNS(row observation, c constants) float64 {
+	beta := []float64{
+		float64(c.candidateScanRowNS),
+		float64(c.candidateRecsetRowNS),
+		float64(c.driverCacheBuildRowNS),
+		float64(c.driverCacheProbeRowNS),
+	}
+	total := 0.0
+	for i, value := range row.x {
+		total += value * beta[i]
+	}
+	return total
+}
+
+type decisionPair struct {
+	candidate observation
+	driver    observation
+}
+
+func decisionPairs(rows []observation) (map[string]decisionPair, error) {
+	pairs := make(map[string]decisionPair)
+	seen := make(map[string]map[string]bool)
+	for _, row := range rows {
+		pair := pairs[row.caseName]
+		if seen[row.caseName] == nil {
+			seen[row.caseName] = make(map[string]bool)
+		}
+		if seen[row.caseName][row.plan] {
+			return nil, fmt.Errorf("duplicate %s observation for %q", row.plan, row.caseName)
+		}
+		seen[row.caseName][row.plan] = true
+		switch row.plan {
+		case "candidate_keyset":
+			pair.candidate = row
+		case "driver_order_membership_probe":
+			pair.driver = row
+		default:
+			return nil, fmt.Errorf("unsupported plan %q", row.plan)
+		}
+		pairs[row.caseName] = pair
+	}
+	for name, plans := range seen {
+		if !plans["candidate_keyset"] || !plans["driver_order_membership_probe"] {
+			return nil, fmt.Errorf("incomplete alternative pair for %q", name)
+		}
+	}
+	return pairs, nil
+}
+
+func validateDecisionOrdering(rows []observation, c constants) error {
+	pairs, err := decisionPairs(rows)
+	if err != nil {
+		return err
+	}
+	for name, pair := range pairs {
+		actualCandidateWins := pair.candidate.y < pair.driver.y
+		estimatedCandidateWins := estimatedNS(pair.candidate, c) < estimatedNS(pair.driver, c)
+		if actualCandidateWins != estimatedCandidateWins {
+			return fmt.Errorf("calibrated inequality disagrees for %q: actual candidate=%0.fns driver=%0.fns, estimated candidate=%0.fns driver=%0.fns",
+				name, pair.candidate.y, pair.driver.y,
+				estimatedNS(pair.candidate, c), estimatedNS(pair.driver, c))
+		}
+	}
+	return nil
+}
+
+func printDecisionOrdering(rows []observation, c constants) {
+	pairs, err := decisionPairs(rows)
+	if err != nil {
+		return
+	}
+	names := make([]string, 0, len(pairs))
+	for name := range pairs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pair := pairs[name]
+		estimatedCandidate := estimatedNS(pair.candidate, c)
+		estimatedDriver := estimatedNS(pair.driver, c)
+		actualWinner := pair.driver.plan
+		if pair.candidate.y < pair.driver.y {
+			actualWinner = pair.candidate.plan
+		}
+		estimatedWinner := pair.driver.plan
+		if estimatedCandidate < estimatedDriver {
+			estimatedWinner = pair.candidate.plan
+		}
+		fmt.Printf("decision %-40s actual=%-30s driver-candidate=%+.3fms estimated=%-30s driver-candidate=%+.3fms\n",
+			name, actualWinner, (pair.driver.y-pair.candidate.y)/1e6,
+			estimatedWinner, (estimatedDriver-estimatedCandidate)/1e6)
+	}
 }
 
 func writeJSONL(path string, rows []calibrationRow) error {
@@ -571,8 +680,10 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 
 (define planner_membership_startup_ns %d)
 (define planner_membership_candidate_scan_row_ns %d)
-(define planner_membership_candidate_match_row_ns %d)
-(define planner_membership_driver_probe_row_ns %d)
-/* END GENERATED COST CONSTANTS */`, c.startupNS, c.candidateScanRowNS, c.candidateMatchRowNS, c.driverRowNS)
+(define planner_membership_recset_build_row_ns %d)
+(define planner_membership_group_cache_build_row_ns %d)
+(define planner_membership_group_cache_probe_row_ns %d)
+/* END GENERATED COST CONSTANTS */`, c.startupNS, c.candidateScanRowNS,
+		c.candidateRecsetRowNS, c.driverCacheBuildRowNS, c.driverCacheProbeRowNS)
 	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }

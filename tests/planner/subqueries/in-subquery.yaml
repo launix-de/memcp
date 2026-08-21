@@ -180,7 +180,7 @@ test_cases:
       result_not_contains:
         - "recset_project_join"
 
-  - name: "Broad membership below OR uses calibrated projected membership"
+  - name: "Broad membership below OR retains driver probing"
     sql: |
       EXPLAIN
       SELECT ID
@@ -196,9 +196,10 @@ test_cases:
     expect:
       result_contains:
         - "scan_order"
+      result_not_contains:
         - "recset_project_join"
 
-  - name: "Nested OR membership uses calibrated projection after a selective outer AND"
+  - name: "Nested OR membership uses driver probing after a selective outer AND"
     sql: |
       EXPLAIN
       SELECT ID
@@ -213,6 +214,7 @@ test_cases:
     expect:
       result_contains:
         - "scan_order"
+      result_not_contains:
         - "recset_project_join"
 
   - name: "Nested OR membership preserves sibling alternatives"
@@ -1004,7 +1006,8 @@ test_cases:
         expect:
           contains:
             - "recset_project_join"
-            - "$recset_contains"
+            - "recset_union"
+            - "scan_order"
             - "in_dv_doc"
           not_contains:
             - "touch_keytable"
@@ -1027,7 +1030,8 @@ test_cases:
             - "candidate_keyset"
             - "driver_order_membership_probe"
             - "recset_project_join"
-            - "$recset_contains"
+            - "recset_union"
+            - "scan_order"
             - "chosen"
             - "rejected"
       - sql: |

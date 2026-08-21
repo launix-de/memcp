@@ -12,14 +12,17 @@ package main
 import "testing"
 
 func TestSolvePhysicalCostEquation(t *testing.T) {
-	want := constants{startupNS: 1000, candidateScanRowNS: 5, candidateMatchRowNS: 20, driverRowNS: 80}
+	want := constants{
+		startupNS: 0, candidateScanRowNS: 5, candidateRecsetRowNS: 20,
+		driverCacheBuildRowNS: 30, driverCacheProbeRowNS: 80,
+	}
 	rows := []observation{
-		{x: []float64{1, 100, 10, 0}, y: 1000 + 100*5 + 10*20},
-		{x: []float64{1, 1000, 100, 0}, y: 1000 + 1000*5 + 100*20},
-		{x: []float64{1, 1000, 800, 0}, y: 1000 + 1000*5 + 800*20},
-		{x: []float64{1, 0, 0, 100}, y: 1000 + 100*80},
-		{x: []float64{1, 0, 0, 1000}, y: 1000 + 1000*80},
-		{x: []float64{1, 0, 0, 4000}, y: 1000 + 4000*80},
+		{caseName: "a", plan: "candidate_keyset", x: []float64{100, 10, 0, 0}, y: 100*5 + 10*20},
+		{caseName: "b", plan: "candidate_keyset", x: []float64{1000, 100, 0, 0}, y: 1000*5 + 100*20},
+		{caseName: "c", plan: "candidate_keyset", x: []float64{1000, 800, 0, 0}, y: 1000*5 + 800*20},
+		{caseName: "a", plan: "driver_order_membership_probe", x: []float64{100, 0, 10, 100}, y: 100*5 + 10*30 + 100*80},
+		{caseName: "b", plan: "driver_order_membership_probe", x: []float64{1000, 0, 100, 1000}, y: 1000*5 + 100*30 + 1000*80},
+		{caseName: "c", plan: "driver_order_membership_probe", x: []float64{1000, 0, 800, 4000}, y: 1000*5 + 800*30 + 4000*80},
 	}
 	got, err := solve(rows)
 	if err != nil {
@@ -27,6 +30,9 @@ func TestSolvePhysicalCostEquation(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("solve() = %+v, want %+v", got, want)
+	}
+	if err := validateDecisionOrdering(rows, got); err != nil {
+		t.Fatal(err)
 	}
 }
 
