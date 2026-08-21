@@ -950,18 +950,17 @@ type skipListKey struct {
 	collation string
 }
 
-func simpleContainsLiteral(pattern, collation string) (string, bool) {
-	if len(pattern) < 2 || pattern[0] != '%' || pattern[len(pattern)-1] != '%' {
-		return "", false
+func loadCachedSkipList(cache *sync.Map, key skipListKey) (*SkipList, bool) {
+	if cache == nil {
+		return nil, false
 	}
-	literal := pattern[1 : len(pattern)-1]
-	if strings.ContainsAny(literal, "%_") {
-		return "", false
+	cached, ok := cache.Load(key)
+	if !ok {
+		return nil, false
 	}
-	if strings.Contains(collation, "_ci") {
-		literal = strings.ToLower(literal)
-	}
-	return literal, true
+	skipList := cached.(*SkipList)
+	skipList.recordUse()
+	return skipList, true
 }
 
 // getOrBuildSkipList returns the cached exact match set for a non-sorted column,
@@ -969,9 +968,9 @@ func simpleContainsLiteral(pattern, collation string) (string, bool) {
 func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, caches []*sync.Map, colIdx int, bound columnboundaries) *SkipList {
 	key := skipListKey{pattern: bound.lower.String(), collation: strings.ToLower(bound.collation)}
 	// Fast path: check cache
-	if len(caches) > colIdx && caches[colIdx] != nil {
-		if cached, ok := caches[colIdx].Load(key); ok {
-			return cached.(*SkipList)
+	if len(caches) > colIdx {
+		if cached, ok := loadCachedSkipList(caches[colIdx], key); ok {
+			return cached
 		}
 	}
 	// Slow path: build and cache
@@ -991,37 +990,23 @@ func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, caches []*sy
 		}
 		return uint32(int64(state.mainIndexes.GetValueUInt(pos)) + state.mainIndexes.offset)
 	}
-	var candidate *SkipList
-	if literal, ok := simpleContainsLiteral(key.pattern, key.collation); ok && len(caches) > colIdx && caches[colIdx] != nil {
-		bestLength := -1
-		caches[colIdx].Range(func(candidateKey, candidateValue any) bool {
-			cachedKey := candidateKey.(skipListKey)
-			if cachedKey.collation != key.collation {
-				return true
-			}
-			cachedLiteral, simple := simpleContainsLiteral(cachedKey.pattern, cachedKey.collation)
-			if simple && len(cachedLiteral) > bestLength && strings.Contains(literal, cachedLiteral) {
-				candidate = candidateValue.(*SkipList)
-				bestLength = len(cachedLiteral)
-			}
-			return true
-		})
-	}
-	sl := s.ColMatchers[colIdx].BuildSkipList(key.pattern, key.collation, s.t.main_count, getRecid, colStorage, candidate)
+	sl := s.ColMatchers[colIdx].BuildSkipList(key.pattern, key.collation, s.t.main_count, getRecid, colStorage)
 	// Cache immutable match sets. sync.Map keeps the read path non-blocking and
 	// LoadOrStore prevents concurrent first users from publishing duplicates.
 	cache := caches[colIdx]
 	actual, loaded := cache.LoadOrStore(key, sl)
+	sl = actual.(*SkipList)
+	sl.recordUse()
 	if loaded {
-		return actual.(*SkipList)
+		return sl
 	}
 	// Register skip lists as soft sub-items of the parent index. Their bytes
 	// are already included in StorageIndex.ComputeSize for total live-RAM
 	// reporting; the separate CacheManager entry exists only so eviction can
 	// choose a cheaper sub-item before dropping the whole index.
 	if sl != nil {
-		entry := &skipListCacheEntry{index: s, colIdx: colIdx, pattern: key.pattern, collation: key.collation, cache: cache}
-		GlobalCache.AddItem(entry, int64(sl.ComputeSize()), TypeIndex, skipListCleanup, skipListLastUsed, skipListGetScore)
+		entry := &skipListCacheEntry{index: s, colIdx: colIdx, pattern: key.pattern, collation: key.collation, cache: cache, skipList: sl}
+		GlobalCache.AddItemEx(entry, int64(sl.ComputeSize()), TypeIndex, skipListCleanup, skipListLastUsed, skipListGetScore, 0, likeSkipListMaxIdle)
 	}
 	return sl
 }
@@ -1387,6 +1372,10 @@ func indexGetScore(ptr any) float64 {
 	return ptr.(*StorageIndex).Savings
 }
 
+// Exact terms stay useful while a user pages through results, but one-off
+// searches should not retain their match sets for the lifetime of the shard.
+const likeSkipListMaxIdle = 30 * time.Minute
+
 // skipListCacheEntry wraps a single skip list for CacheManager eviction.
 type skipListCacheEntry struct {
 	index     *StorageIndex
@@ -1394,6 +1383,7 @@ type skipListCacheEntry struct {
 	pattern   string
 	collation string
 	cache     *sync.Map
+	skipList  *SkipList
 }
 
 func skipListCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
@@ -1401,18 +1391,17 @@ func skipListCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if !e.index.mu.TryLock() {
 		return false
 	}
+	defer e.index.mu.Unlock()
 	if e.cache != nil {
-		e.cache.Delete(skipListKey{pattern: e.pattern, collation: e.collation})
+		e.cache.CompareAndDelete(skipListKey{pattern: e.pattern, collation: e.collation}, e.skipList)
 	}
-	e.index.mu.Unlock()
 	return true
 }
 
 func skipListLastUsed(ptr any) time.Time {
-	e := ptr.(*skipListCacheEntry)
-	return time.Unix(0, int64(atomic.LoadUint64(&e.index.t.lastAccessed)))
+	return ptr.(*skipListCacheEntry).skipList.lastUsed()
 }
 
 func skipListGetScore(ptr any) float64 {
-	return 1 // minimal telemetry protection; index has Savings (2+) so skip lists evicted first
+	return ptr.(*skipListCacheEntry).skipList.cacheScore()
 }

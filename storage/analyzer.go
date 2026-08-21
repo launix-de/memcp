@@ -16,9 +16,12 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "github.com/carli2/hybridsort"
-import "math/bits"
+import "time"
+import "unsafe"
 import "strings"
+import "math/bits"
+import "sync/atomic"
+import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
 func mustSymbolValue(v scm.Scmer) scm.Symbol {
@@ -56,12 +59,40 @@ type BoundaryMatcher interface {
 	// For sorted matchers this is a no-op. The pattern is the search value
 	// (e.g. the LIKE pattern). The result is stored on the StorageIndex.
 	// colStorage is the column's ColumnStorage for reading values.
-	BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage, candidate *SkipList) *SkipList
+	BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList
 }
 
 // SkipList holds an exact adaptive set of matching index positions.
 type SkipList struct {
-	matches recSetShard
+	matches      recSetShard
+	lastUsedNano atomic.Int64
+	hitCount     atomic.Uint64
+}
+
+func (s *SkipList) recordUse() {
+	if s == nil {
+		return
+	}
+	s.lastUsedNano.Store(time.Now().UnixNano())
+	s.hitCount.Add(1)
+}
+
+func (s *SkipList) lastUsed() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	return time.Unix(0, s.lastUsedNano.Load())
+}
+
+func (s *SkipList) cacheScore() float64 {
+	if s == nil {
+		return 0
+	}
+	hits := s.hitCount.Load()
+	if hits > 1024 {
+		hits = 1024
+	}
+	return float64(hits)
 }
 
 type skipListCursor struct {
@@ -141,7 +172,7 @@ func (s *SkipList) ComputeSize() uint {
 	if s == nil {
 		return 0
 	}
-	return uint(len(s.matches.data))*4 + 32
+	return uint(len(s.matches.data))*4 + uint(unsafe.Sizeof(*s))
 }
 
 // Built-in matcher singletons. Every columnboundaries.matcher points to one of these.
@@ -169,7 +200,7 @@ type equalMatcher struct{}
 func (m *equalMatcher) Kind() string      { return "equal" }
 func (m *equalMatcher) IsSorted() bool    { return true }
 func (m *equalMatcher) IsPointLike() bool { return true }
-func (m *equalMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage, _ *SkipList) *SkipList {
+func (m *equalMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
 	return nil // sorted: no skip list needed
 }
 
@@ -180,7 +211,7 @@ type rangeMatcher struct{}
 func (m *rangeMatcher) Kind() string      { return "range" }
 func (m *rangeMatcher) IsSorted() bool    { return true }
 func (m *rangeMatcher) IsPointLike() bool { return false }
-func (m *rangeMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage, _ *SkipList) *SkipList {
+func (m *rangeMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
 	return nil // sorted: no skip list needed
 }
 
@@ -191,12 +222,12 @@ type likeMatcher struct{}
 func (m *likeMatcher) Kind() string      { return "like" }
 func (m *likeMatcher) IsSorted() bool    { return false }
 func (m *likeMatcher) IsPointLike() bool { return true }
-func (m *likeMatcher) BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage, candidate *SkipList) *SkipList {
+func (m *likeMatcher) BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList {
 	if count == 0 || colStorage == nil {
 		return nil
 	}
 
-	builder := newRecSetShardBuilder(nil, count, candidate == nil, 0)
+	builder := newRecSetShardBuilder(nil, count, true, 0)
 	matches := func(pos uint32) bool {
 		recid := getRecid(pos)
 		v := colStorage.GetValue(recid)
@@ -206,12 +237,8 @@ func (m *likeMatcher) BuildSkipList(pattern, collation string, count uint32, get
 		builder.add(pos, matches(pos))
 		return true
 	}
-	if candidate != nil {
-		candidate.matches.forEachID(add)
-	} else {
-		for pos := uint32(0); pos < count; pos++ {
-			add(pos)
-		}
+	for pos := uint32(0); pos < count; pos++ {
+		add(pos)
 	}
 	sl := &SkipList{matches: builder.finish()}
 	return sl
@@ -224,7 +251,7 @@ type recSetMatcher struct{}
 func (m *recSetMatcher) Kind() string      { return "recset" }
 func (m *recSetMatcher) IsSorted() bool    { return false }
 func (m *recSetMatcher) IsPointLike() bool { return true }
-func (m *recSetMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage, _ *SkipList) *SkipList {
+func (m *recSetMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
 	return nil
 }
 

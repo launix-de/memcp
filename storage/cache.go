@@ -482,9 +482,11 @@ func (cm *CacheManager) evictExpired() {
 		}
 		if item.cleanup(item.pointer, &freedByType) {
 			cm.removeInternal(item.pointer, &freedByType)
+		} else {
+			// Lock contention means the item is currently in use. Keep its expiry
+			// tracked so the next ticker can retry instead of leaking it forever.
+			heap.Push(&cm.expH, expiryEntry{nowNano + int64(time.Minute), entry.pointer})
 		}
-		// If cleanup failed (lock contention), we don't retry — item will linger
-		// until the next ticker tick, which is acceptable.
 	}
 }
 
