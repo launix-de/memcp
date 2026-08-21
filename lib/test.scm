@@ -2604,6 +2604,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* strings.go: strlike with explicit collation */
 	(assert (strlike "Hello" "h%" "utf8_general_ci") true "strlike explicit ci collation")
 	(assert (strlike "Hello" "h%" "utf8_bin") false "strlike explicit bin collation is CS")
+	(assert (strlike "ABC 123 xyz" "%123%" "utf8_general_ci") true "strlike numeric ci pattern matches")
+	(assert (strlike "ABC 124 xyz" "%123%" "utf8_general_ci") false "strlike numeric ci pattern preserves misses")
 	/* strings.go: sql_substr edge cases */
 	(assert (equal? (sql_substr "hello" 0 3) "hel") true "sql_substr start=0 clamped")
 	(assert (equal? (sql_substr "hello" 4 10) "lo") true "sql_substr length exceeds remaining")

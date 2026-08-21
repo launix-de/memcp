@@ -21,6 +21,7 @@ import "fmt"
 import "html"
 import "sync"
 import "regexp"
+import "unicode"
 import "unsafe"
 import "net/url"
 import "strings"
@@ -196,11 +197,29 @@ func StrLikeFold(str, pattern string) bool {
 	return StrLike(strings.ToLower(str), strings.ToLower(pattern))
 }
 
+func likePatternNeedsCaseFold(pattern string) bool {
+	if strings.Contains(pattern, "_") {
+		return true
+	}
+	for _, r := range pattern {
+		if unicode.ToLower(r) != unicode.ToUpper(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // StrLikeCollation is the canonical LIKE implementation shared by the Scheme
 // builtin and storage match indexes. Keeping both paths here guarantees that an
 // exact cached match set has the same case semantics as residual evaluation.
 func StrLikeCollation(str, pattern, collation string) bool {
 	if strings.Contains(strings.ToLower(collation), "_ci") {
+		// Numeric and punctuation-only patterns cannot be affected by case
+		// folding. Avoid allocating and walking a potentially large text value.
+		// Keep '_' on the folded path because folding may change its byte width.
+		if !likePatternNeedsCaseFold(pattern) {
+			return StrLike(str, pattern)
+		}
 		return StrLikeFold(str, pattern)
 	}
 	return StrLike(str, pattern)
