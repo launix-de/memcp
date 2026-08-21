@@ -2512,7 +2512,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	return
 }
 
-func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext) (int64, bool) {
+func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext) (int64, bool, int64) {
 	if limit <= 0 {
 		limit = 1024
 	}
@@ -2527,7 +2527,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	if recsetFilter != nil {
 		recsetPart = recsetFilter.shardEntry(t)
 		if recsetPart == nil || recsetPart.count == 0 {
-			return 0, false
+			return 0, false, 0
 		}
 	}
 	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
@@ -2558,6 +2558,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
 	count := int64(0)
+	sampled := int64(0)
 	capped := false
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
@@ -2574,6 +2575,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 			} else if t.deletions.Get(uint(idx)) {
 				continue
 			}
+			sampled++
 			if idx < mainCount {
 				for i, c := range ccols {
 					if getter := conditionGetters[i]; getter != nil {
@@ -2608,7 +2610,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		return true
 	})
 
-	return count, capped
+	return count, capped, sampled
 }
 
 func (t *storageShard) getDelta(idx int, col string) scm.Scmer {

@@ -6479,16 +6479,35 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(gs_limit stage) (gs_offset stage)
 			(merge (list
 				(list
+					(list (quote membership_stage_id)
+						(qassoc_get facts (quote membership_stage_id) (gs_id stage)))
 					(list (quote physical_membership_requirement) true)
 					(list (quote membership_consumer) (qassoc_get facts (quote membership_consumer) (quote filter)))
 					(list (quote membership_candidate_input_rows) (qassoc_get facts (quote membership_candidate_input_rows) nil))
 					(list (quote membership_candidate_estimated_rows) (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
 					(list (quote membership_candidate_estimate_capped) (qassoc_get facts (quote membership_candidate_estimate_capped) false))
 					(list (quote membership_candidate_estimate_input) (qassoc_get facts (quote membership_candidate_estimate_input) nil))
+					(list (quote membership_candidate_estimate_sampled) (qassoc_get facts (quote membership_candidate_estimate_sampled) nil))
+					(list (quote membership_candidate_scan_invocations) (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
+					(list (quote membership_candidate_filter_columns) (qassoc_get facts (quote membership_candidate_filter_columns) 0))
+					(list (quote membership_candidate_map_columns) (qassoc_get facts (quote membership_candidate_map_columns) 1))
+					(list (quote membership_candidate_cache_map_columns) (qassoc_get facts (quote membership_candidate_cache_map_columns) 2))
+					(list (quote membership_candidate_expression_operations) (qassoc_get facts (quote membership_candidate_expression_operations) 0))
+					(list (quote membership_candidate_expression_depth) (qassoc_get facts (quote membership_candidate_expression_depth) 0))
+					(list (quote membership_candidate_filter_value_rows) (qassoc_get facts (quote membership_candidate_filter_value_rows) nil))
+					(list (quote membership_candidate_expression_operation_rows) (qassoc_get facts (quote membership_candidate_expression_operation_rows) nil))
 					(list (quote membership_driver_rows) (qassoc_get facts (quote membership_driver_rows) nil))
+					(list (quote membership_driver_input_rows) (qassoc_get facts (quote membership_driver_input_rows) nil))
+					(list (quote membership_driver_scan_invocations) (qassoc_get facts (quote membership_driver_scan_invocations) 1))
+					(list (quote membership_driver_filter_columns) (qassoc_get facts (quote membership_driver_filter_columns) 0))
+					(list (quote membership_driver_map_columns) (qassoc_get facts (quote membership_driver_map_columns) 0))
+					(list (quote membership_driver_expression_operations) (qassoc_get facts (quote membership_driver_expression_operations) 0))
+					(list (quote membership_driver_expression_depth) (qassoc_get facts (quote membership_driver_expression_depth) 0))
 					(list (quote membership_selectivity_class) (qassoc_get facts (quote membership_selectivity_class) (quote unknown)))
 					(list (quote membership_driver_alternative) (qassoc_get facts (quote membership_driver_alternative) false))
 					(list (quote membership_order_limit_driver) (qassoc_get facts (quote membership_order_limit_driver) false))
+					(list (quote membership_order_limit) (qassoc_get facts (quote membership_order_limit) nil))
+					(list (quote membership_order_offset) (qassoc_get facts (quote membership_order_offset) 0))
 					(list (quote reuse) (qassoc_get facts (quote reuse) 1)))
 				(gs_facts stage)))))))
 
@@ -6900,13 +6919,10 @@ source catalog. join_plan remains the single owner of physical join order. */
 (define planner_table_row_count (lambda (schema relation)
 	(try
 		(lambda ()
-			(define live_count (reduce (show schema true) (lambda (found row)
-				(if (not (nil? found))
-					found
-					(if (equal?? (row "name") relation)
-						(row "row_count")
-						nil)))
-				nil))
+			/* SHOW exposes shard-local row_count values. Physical choices need the
+			whole relation cardinality, which the storage table estimate already
+			aggregates across active shards. */
+			(define live_count (scan_estimate (table schema relation)))
 			(if (and (not (nil? live_count)) (> live_count 0))
 				live_count
 				(match (get_schema schema relation)
@@ -7241,6 +7257,8 @@ resulting tree in semantic order. */
 						(qassoc_get estimate (quote rows) nil)))))
 					(define input_rows (planner_add_estimates (map available (lambda (estimate)
 						(qassoc_get estimate (quote input) nil)))))
+					(define sampled_rows (planner_add_estimates (map available (lambda (estimate)
+						(qassoc_get estimate (quote sampled) nil)))))
 					(define capped (or (>= rows max_rows)
 						(reduce available (lambda (found estimate)
 							(or found (qassoc_get estimate (quote capped) false)))
@@ -7248,6 +7266,7 @@ resulting tree in semantic order. */
 					(list
 						(list (quote rows) rows)
 						(list (quote capped) capped)
+						(list (quote sampled) sampled_rows)
 						(list (quote input) input_rows)))))
 		(if (query_block? input)
 			(if (single_source? (qb_sources input))
@@ -7288,6 +7307,113 @@ resulting tree in semantic order. */
 			nil
 			(qassoc_get pushdown (quote estimated_driver_rows) nil)))))
 
+/* Physical costing needs the amount of scalar work, not a speculative copy of
+each alternative plan. This walker visits the already canonical expression
+once; get_column is a leaf because column reads are costed independently. */
+(define physical_expression_work_profile (lambda (expr)
+	(match expr
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(list (list (quote operations) 0) (list (quote depth) 0))
+		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
+		(list (list (quote operations) 0) (list (quote depth) 0))
+		(cons head tail) (begin
+			(define children (map tail physical_expression_work_profile))
+			(define own (if (symbol? head) 1 0))
+			(list
+				(list (quote operations) (+ own (reduce children (lambda (total child)
+					(+ total (qassoc_get child (quote operations) 0))) 0)))
+				(list (quote depth) (+ own (reduce children (lambda (depth child)
+					(max depth (qassoc_get child (quote depth) 0))) 0)))))
+		_ (list (list (quote operations) 0) (list (quote depth) 0)))))
+
+(define membership_source_work_profile (lambda (src condition map_expr)
+	(begin
+		(define input_rows (planner_source_row_count src))
+		(define filter_columns (extract_columns_for_alias src condition))
+		(define map_columns (extract_columns_for_alias src map_expr))
+		(define expression_work (physical_expression_work_profile condition))
+		(list
+			(list (quote scan_invocations) 1)
+			(list (quote input_rows) input_rows)
+			(list (quote filter_columns) (count filter_columns))
+			(list (quote map_columns) (count map_columns))
+			(list (quote expression_operations) (qassoc_get expression_work (quote operations) 0))
+			(list (quote expression_depth) (qassoc_get expression_work (quote depth) 0))
+			(list (quote filter_value_rows)
+				(if (number? input_rows) (* input_rows (count filter_columns)) nil))
+			(list (quote expression_operation_rows)
+				(if (number? input_rows)
+					(* input_rows (qassoc_get expression_work (quote operations) 0)) nil))))))
+
+(define membership_candidate_branch_work_profile (lambda (branch)
+	(if (and (query_block? branch) (single_real_source? (qb_sources branch)))
+		(begin
+			(define src (single_real_source (qb_sources branch)))
+			(membership_source_work_profile src
+				(combine_where (qb_where branch) (source_join_expr src))
+				(query_block_first_expr branch)))
+		nil)))
+
+(define membership_merge_candidate_work_profiles (lambda (profiles)
+	(reduce profiles (lambda (combined profile)
+		(if (nil? profile)
+			combined
+			(list
+				(list (quote scan_invocations) (+
+					(qassoc_get combined (quote scan_invocations) 0)
+					(qassoc_get profile (quote scan_invocations) 0)))
+				(list (quote input_rows) (+
+					(coalesceNil (qassoc_get combined (quote input_rows) nil) 0)
+					(coalesceNil (qassoc_get profile (quote input_rows) nil) 0)))
+				(list (quote filter_columns) (max
+					(qassoc_get combined (quote filter_columns) 0)
+					(qassoc_get profile (quote filter_columns) 0)))
+				(list (quote map_columns) (max
+					(qassoc_get combined (quote map_columns) 0)
+					(qassoc_get profile (quote map_columns) 0)))
+				(list (quote expression_operations) (max
+					(qassoc_get combined (quote expression_operations) 0)
+					(qassoc_get profile (quote expression_operations) 0)))
+				(list (quote expression_depth) (max
+					(qassoc_get combined (quote expression_depth) 0)
+					(qassoc_get profile (quote expression_depth) 0)))
+				(list (quote filter_value_rows) (+
+					(coalesceNil (qassoc_get combined (quote filter_value_rows) nil) 0)
+					(coalesceNil (qassoc_get profile (quote filter_value_rows) nil) 0)))
+				(list (quote expression_operation_rows) (+
+					(coalesceNil (qassoc_get combined (quote expression_operation_rows) nil) 0)
+					(coalesceNil (qassoc_get profile (quote expression_operation_rows) nil) 0))))))
+		'())))
+
+(define membership_candidate_work_profile (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(if (union_block? input)
+			(membership_merge_candidate_work_profiles
+				(map (union_branches input) membership_candidate_branch_work_profile))
+			(if (query_block? input)
+				(membership_candidate_branch_work_profile input)
+				(if (source_is_base_table? input)
+					(membership_source_work_profile input
+						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+						(gs_keys stage))
+					'()))))))
+
+(define membership_driver_work_profile (lambda (driver sources block)
+	(if (nil? driver)
+		'()
+		(begin
+			(define condition (membership_driver_local_filter driver sources block))
+			(define profile (membership_source_work_profile driver condition
+				(list (qb_fields block) (qb_group block) (qb_having block)
+					(qb_order block) (qb_hidden block))))
+			/* Stage rebinding may replace base get_column leaves before this point.
+			The output arity is still a cheap lower bound for values the scan mapper
+			must produce, and preserves the distinction between narrow and wide
+			consumers without constructing either physical alternative. */
+			(qassoc_set profile (quote map_columns)
+				(max (qassoc_get profile (quote map_columns) 0) (count (qb_fields block))))))))
+
 (define candidate_reorder_telemetry (lambda (stage sources block)
 	(begin
 		(define driver (reduce (coalesceNil sources '()) (lambda (found src)
@@ -7313,16 +7439,20 @@ resulting tree in semantic order. */
 		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
 		(define estimate_capped (qassoc_get candidate_estimate (quote capped) false))
 		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
+		(define estimate_sampled (qassoc_get candidate_estimate (quote sampled) nil))
 		(define estimate_ratio_broad (and
-			(and (not (nil? estimate_rows)) (and (not (nil? estimate_input)) (> estimate_input 0)))
-			(>= (* estimate_rows 4) estimate_input)))
+			(and (not (nil? estimate_rows)) (and (not (nil? estimate_sampled)) (> estimate_sampled 0)))
+			(>= (* estimate_rows 4) estimate_sampled)))
 		(define driver_alternative (membership_expr_has_driver_alternative? (qb_where block)))
 		(define class (if (or estimate_ratio_broad
 			(if driver_alternative (candidate_stage_broad? stage) false)) (quote broad) (quote selective)))
 		(define ordered_driver (if (nil? driver) false
 			(or (source_order_limit_driver? driver (qb_order block) (qb_limit block))
 				(source_row_number_limit_driver? (qb_stages block) driver))))
+		(define candidate_work (membership_candidate_work_profile stage))
+		(define driver_work (membership_driver_work_profile driver sources block))
 		(list
+			(list (quote membership_stage_id) (gs_id stage))
 			(list (quote membership_selectivity_class) class)
 			(list (quote membership_driver_rows) driver_rows)
 			(list (quote membership_driver_input_rows) driver_input_rows)
@@ -7332,9 +7462,30 @@ resulting tree in semantic order. */
 			(list (quote membership_candidate_estimated_rows) estimate_rows)
 			(list (quote membership_candidate_estimate_capped) estimate_capped)
 			(list (quote membership_candidate_estimate_input) estimate_input)
+			(list (quote membership_candidate_estimate_sampled) estimate_sampled)
 			(list (quote membership_candidate_probe_branches) candidate_probe_branches)
+			(list (quote membership_candidate_scan_invocations) (qassoc_get candidate_work (quote scan_invocations) candidate_probe_branches))
+			(list (quote membership_candidate_filter_columns) (qassoc_get candidate_work (quote filter_columns) 0))
+			(list (quote membership_candidate_map_columns) (qassoc_get candidate_work (quote map_columns) (count (gs_keys stage))))
+			(list (quote membership_candidate_cache_map_columns) (+ (count (gs_keys stage)) (count (gs_aggregates stage))))
+			(list (quote membership_candidate_expression_operations) (qassoc_get candidate_work (quote expression_operations) 0))
+			(list (quote membership_candidate_expression_depth) (qassoc_get candidate_work (quote expression_depth) 0))
+			(list (quote membership_candidate_filter_value_rows)
+				(coalesceNil (qassoc_get candidate_work (quote filter_value_rows) nil)
+					(if (number? candidate_rows)
+						(* candidate_rows (qassoc_get candidate_work (quote filter_columns) 0)) nil)))
+			(list (quote membership_candidate_expression_operation_rows)
+				(coalesceNil (qassoc_get candidate_work (quote expression_operation_rows) nil)
+					(if (number? candidate_rows)
+						(* candidate_rows (qassoc_get candidate_work (quote expression_operations) 0)) nil)))
+			(list (quote membership_driver_scan_invocations) (qassoc_get driver_work (quote scan_invocations) (if (nil? driver) 0 1)))
+			(list (quote membership_driver_filter_columns) (qassoc_get driver_work (quote filter_columns) 0))
+			(list (quote membership_driver_map_columns) (qassoc_get driver_work (quote map_columns) 0))
+			(list (quote membership_driver_expression_operations) (qassoc_get driver_work (quote expression_operations) 0))
+			(list (quote membership_driver_expression_depth) (qassoc_get driver_work (quote expression_depth) 0))
 			(list (quote membership_driver_alternative) driver_alternative)
 			(list (quote membership_order_limit) (qb_limit block))
+			(list (quote membership_order_offset) (coalesceNil (qb_offset block) 0))
 			(list (quote membership_order_limit_driver) ordered_driver)))))
 
 (define stage_reorder_telemetry (lambda (stage)
@@ -7474,6 +7625,22 @@ in the canonicalization functions above. */
 			(coalesceNil (qassoc_get estimate (quote input) nil) fallback)
 			(coalesceNil (qassoc_get estimate (quote rows) nil) fallback)))))
 
+/* A capped sample still carries measured selectivity: rows/input is the
+observed hit rate before the cap was reached. Extrapolate that rate over the
+known input instead of confusing sampled input rows with matching rows. The
+cap remains an uncertainty signal for guards and EXPLAIN. */
+(define membership_estimated_matching_rows (lambda (estimate input_rows fallback)
+	(if (nil? estimate)
+		fallback
+		(begin
+			(define rows (qassoc_get estimate (quote rows) nil))
+			(define sampled_input (qassoc_get estimate (quote sampled) nil))
+			(if (and (qassoc_get estimate (quote capped) false)
+				(and (number? input_rows)
+					(and (number? rows) (and (number? sampled_input) (> sampled_input 0)))))
+				(min input_rows (* input_rows (/ rows sampled_input)))
+				(coalesceNil rows fallback))))))
+
 (define membership_driver_filter (lambda (condition)
 	/* Only top-level conjuncts which do not contain membership are guaranteed
 	to restrict every evaluation of the membership formula. Predicates inside
@@ -7485,18 +7652,108 @@ in the canonicalization functions above. */
 			(not (expr_contains_membership_truth? term))))
 		true)))
 
-(define membership_projection_cost_preferred? (lambda (candidate_input_rows candidate_rows driver_rows)
+(define membership_work_value (lambda (work key fallback)
+	(coalesceNil (qassoc_get work key nil) fallback)))
+
+(define membership_candidate_filter_value_rows (lambda (candidate_input_rows work)
+	(membership_work_value work (quote membership_candidate_filter_value_rows)
+		(* candidate_input_rows
+			(membership_work_value work (quote membership_candidate_filter_columns) 0)))))
+
+(define membership_candidate_expression_operation_rows (lambda (candidate_input_rows work)
+	(membership_work_value work (quote membership_candidate_expression_operation_rows)
+		(* candidate_input_rows
+			(membership_work_value work (quote membership_candidate_expression_operations) 0)))))
+
+(define membership_projected_driver_rows (lambda (candidate_input_rows candidate_rows driver_rows work)
+	(begin
+		(define branches (max 1 (membership_work_value work (quote membership_candidate_probe_branches) 1)))
+		(define candidate_domain_rows (/ candidate_input_rows branches))
+		(if (> candidate_domain_rows 0)
+			(* driver_rows (min 1 (/ candidate_rows candidate_domain_rows)))
+			0))))
+
+(define membership_candidate_density (lambda (candidate_input_rows candidate_rows work)
+	(begin
+		(define branches (max 1 (membership_work_value work (quote membership_candidate_probe_branches) 1)))
+		(define candidate_domain_rows (/ candidate_input_rows branches))
+		(if (> candidate_domain_rows 0)
+			(min 1 (/ candidate_rows candidate_domain_rows))
+			0))))
+
+(define membership_driver_input_rows (lambda (driver_rows work)
+	(coalesceNil (membership_work_value work (quote membership_driver_input_rows) nil)
+		driver_rows)))
+
+/* An ordered scan can stop only after it has visited enough rows to obtain the
+requested number of membership hits. This estimate uses logical cardinalities
+and the already available predicate profile; it does not construct either
+physical alternative. */
+(define membership_expected_driver_rows_visited (lambda (candidate_input_rows candidate_rows driver_rows work)
+	(begin
+		(define driver_input_rows (membership_driver_input_rows driver_rows work))
+		(if (not (membership_work_value work (quote membership_order_limit_driver) false))
+			driver_rows
+			(begin
+				(define density (membership_candidate_density candidate_input_rows candidate_rows work))
+				(define requested_rows (+ driver_rows
+					(membership_work_value work (quote membership_order_offset) 0)))
+				(if (> density 0)
+					(min driver_input_rows (/ requested_rows density))
+					driver_input_rows))))))
+
+(define membership_common_scan_cost (lambda (candidate_input_rows candidate_rows driver_rows candidate_map_columns work)
+	(begin
+		(define scan_invocations (+
+			(membership_work_value work (quote membership_candidate_scan_invocations) 1)
+			(membership_work_value work (quote membership_driver_scan_invocations) 1)))
+		(define filter_value_rows (+
+			(membership_candidate_filter_value_rows candidate_input_rows work)
+			(* driver_rows (membership_work_value work (quote membership_driver_filter_columns) 0))))
+		(define map_value_rows (+
+			(* candidate_rows candidate_map_columns)
+			(* (membership_projected_driver_rows candidate_input_rows candidate_rows driver_rows work)
+				(membership_work_value work (quote membership_driver_map_columns) 0))))
+		(define expression_operation_rows (+
+			(membership_candidate_expression_operation_rows candidate_input_rows work)
+			(* driver_rows (membership_work_value work (quote membership_driver_expression_operations) 0))))
+		(planner_cost
+			(* scan_invocations planner_membership_scan_invocation_ns)
+			(+
+				(* (+ candidate_input_rows driver_rows) planner_membership_scan_row_ns)
+				(* filter_value_rows planner_membership_filter_column_row_ns)
+				(* map_value_rows planner_membership_map_column_row_ns)
+				(* expression_operation_rows planner_membership_expression_operation_row_ns))
+			0 0 0 0 0 0 driver_rows 0.75))))
+
+(define membership_projection_cost_preferred? (lambda (candidate_input_rows candidate_rows driver_rows work)
 	(if (or (nil? candidate_input_rows) (or (nil? candidate_rows) (nil? driver_rows)))
 		false
 		(planner_cost_better?
-			(membership_projection_cost candidate_input_rows candidate_rows)
-			(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows)))))
+			(membership_projection_cost candidate_input_rows candidate_rows driver_rows work)
+			(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows work)))))
 
-(define membership_projection_cost (lambda (candidate_input_rows candidate_rows)
-	(planner_cost planner_membership_startup_ns
-		(* candidate_input_rows planner_membership_candidate_scan_row_ns)
-		0 0 0 (* candidate_rows planner_membership_recset_build_row_ns)
-		(* candidate_rows 8) 0 candidate_rows 0.5)))
+(define membership_projection_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
+	(begin
+		/* FK projection must visit the target relation even when the downstream
+		ordered consumer accepts only a small LIMIT window. */
+		(define projection_rows (membership_driver_input_rows driver_rows work))
+		(define projected_rows (membership_projected_driver_rows
+			candidate_input_rows candidate_rows projection_rows work))
+		(define base_cost (planner_cost_add
+			(membership_common_scan_cost candidate_input_rows candidate_rows projection_rows
+				(membership_work_value work (quote membership_candidate_map_columns) 1) work)
+			(planner_cost planner_membership_recset_startup_ns 0 (* driver_rows planner_membership_recset_probe_row_ns)
+				0 0 (* (+ candidate_rows projected_rows) planner_membership_recset_build_row_ns)
+				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
+			projection_rows 0.65))
+		(if (equal? (membership_work_value work (quote membership_consumer) (quote filter))
+			(quote aggregate))
+			(planner_cost_add base_cost
+				(planner_cost 0 (* projection_rows planner_membership_recset_aggregate_row_ns)
+					0 0 0 0 0 0 projection_rows 0.65)
+				projection_rows 0.65)
+			base_cost))))
 
 (define membership_cached_driver_probe_cost (lambda (driver_rows)
 	(planner_cost 0 0 (* driver_rows 54) 0 0 0 0 0 driver_rows 0.5)))
@@ -7509,28 +7766,48 @@ in the canonicalization functions above. */
 		candidate-key index calibrated below. */
 		(planner_direct_presence_probe_cost probes))))
 
-(define membership_ordered_driver_probe_cost (lambda (candidate_input_rows candidate_rows driver_rows)
-	(planner_cost planner_membership_startup_ns
-		(* candidate_input_rows planner_membership_candidate_scan_row_ns)
-		(* driver_rows planner_membership_group_cache_probe_row_ns)
-		0 0 (* candidate_rows planner_membership_group_cache_build_row_ns)
-		(* candidate_rows 8) 0 (+ candidate_rows driver_rows) 0.5)))
+(define membership_ordered_driver_probe_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
+	(begin
+		(define visited_rows (membership_expected_driver_rows_visited
+			candidate_input_rows candidate_rows driver_rows work))
+		(define driver_input_rows (membership_driver_input_rows driver_rows work))
+		(define base_cost (planner_cost_add
+			(membership_common_scan_cost candidate_input_rows candidate_rows visited_rows
+				(membership_work_value work (quote membership_candidate_cache_map_columns) 2) work)
+			(planner_cost planner_membership_group_cache_startup_ns 0 (* visited_rows planner_membership_group_cache_probe_row_ns)
+				0 0 (* candidate_rows planner_membership_group_cache_build_row_ns)
+				(* candidate_rows 8) 0 (+ candidate_rows visited_rows) 0.65)
+			visited_rows 0.65))
+		(if (and (membership_work_value work (quote membership_order_limit_driver) false)
+			(not (membership_work_value work (quote membership_driver_alternative) false)))
+			(planner_cost_add base_cost
+				(planner_cost 0
+					(* (/ (* driver_input_rows driver_input_rows) 1000000)
+						planner_membership_ordered_driver_input_row_ns)
+					0 0 0 0 0 0 driver_input_rows 0.65)
+				visited_rows 0.65)
+			base_cost))))
 
-(define membership_cost_options (lambda (candidate_input_rows candidate_rows driver_rows probe_branches driver_strategy)
+(define membership_cost_options (lambda (candidate_input_rows candidate_rows driver_rows probe_branches driver_strategy work)
 	(if (or (nil? candidate_input_rows) (or (nil? candidate_rows) (nil? driver_rows)))
 		'()
 		(list
-			(list (quote candidate_keyset) (membership_projection_cost candidate_input_rows candidate_rows))
+			(list (quote candidate_keyset) (membership_projection_cost candidate_input_rows candidate_rows driver_rows work))
 			(list driver_strategy
 				(if (equal? driver_strategy (quote driver_order_membership_probe))
-					(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows)
+					(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows work)
 					(membership_driver_probe_cost driver_rows probe_branches)))))))
 
 (define membership_cost_options_for_telemetry (lambda (telemetry)
 	(begin
-		(define candidate_rows (if (qassoc_get telemetry (quote membership_candidate_estimate_capped) false)
-			(qassoc_get telemetry (quote membership_candidate_estimate_input) nil)
-			(qassoc_get telemetry (quote membership_candidate_estimated_rows) nil)))
+		(define candidate_rows (membership_estimated_matching_rows
+			(list
+				(list (quote rows) (qassoc_get telemetry (quote membership_candidate_estimated_rows) nil))
+				(list (quote input) (qassoc_get telemetry (quote membership_candidate_estimate_input) nil))
+				(list (quote sampled) (qassoc_get telemetry (quote membership_candidate_estimate_sampled) nil))
+				(list (quote capped) (qassoc_get telemetry (quote membership_candidate_estimate_capped) false)))
+			(qassoc_get telemetry (quote membership_candidate_input_rows) nil)
+			(qassoc_get telemetry (quote membership_candidate_input_rows) nil)))
 		(define driver_strategy (membership_driver_strategy_for_telemetry telemetry))
 		(define driver_rows (qassoc_get telemetry (quote membership_driver_rows) nil))
 		(define costed_driver_rows (if (equal? driver_strategy (quote driver_order_membership_probe))
@@ -7542,27 +7819,51 @@ in the canonicalization functions above. */
 			candidate_rows
 			costed_driver_rows
 			(qassoc_get telemetry (quote membership_candidate_probe_branches) 1)
-			driver_strategy))))
+			driver_strategy
+			telemetry))))
 
 (define record_membership_physical_choice (lambda (requirement strategy reason candidates)
 	(begin
 		(planner_record_physical_decision
 			(list
+				(list "decision_id" (concat "membership_carrier:"
+					(qassoc_get requirement (quote membership_stage_id) "unknown")))
 				(list "decision" "membership_carrier")
+				(list "stage" (qassoc_get requirement (quote membership_stage_id) nil))
+				(list "consumer" (string
+					(qassoc_get requirement (quote membership_consumer) (quote filter))))
 				(list "chosen" (string strategy))
 				(list "reason" (string reason))
 				(list "inputs" (list
-					(list "candidate_rows"
-						(if (qassoc_get requirement (quote membership_candidate_estimate_capped) false)
-							(qassoc_get requirement (quote membership_candidate_estimate_input) nil)
-							(qassoc_get requirement (quote membership_candidate_estimated_rows) nil)))
+					(list "candidate_rows" (membership_estimated_matching_rows
+						(list
+							(list (quote rows) (qassoc_get requirement (quote membership_candidate_estimated_rows) nil))
+							(list (quote input) (qassoc_get requirement (quote membership_candidate_estimate_input) nil))
+							(list (quote sampled) (qassoc_get requirement (quote membership_candidate_estimate_sampled) nil))
+							(list (quote capped) (qassoc_get requirement (quote membership_candidate_estimate_capped) false)))
+						(qassoc_get requirement (quote membership_candidate_input_rows) nil)
+						(qassoc_get requirement (quote membership_candidate_input_rows) nil)))
 					(list "candidate_input_rows" (qassoc_get requirement (quote membership_candidate_input_rows) nil))
 					(list "driver_rows" (qassoc_get requirement (quote membership_driver_rows) nil))
 					(list "driver_input_rows" (qassoc_get requirement (quote membership_driver_input_rows) nil))
 					(list "driver_estimate_capped" (qassoc_get requirement (quote membership_driver_estimate_capped) false))
 					(list "selectivity_class" (string (qassoc_get requirement (quote membership_selectivity_class) nil)))
 					(list "estimate_capped" (qassoc_get requirement (quote membership_candidate_estimate_capped) false))
+					(list "estimate_sampled_rows" (qassoc_get requirement (quote membership_candidate_estimate_sampled) nil))
 					(list "probe_branches" (qassoc_get requirement (quote membership_candidate_probe_branches) 1))
+					(list "candidate_scan_invocations" (qassoc_get requirement (quote membership_candidate_scan_invocations) 1))
+					(list "candidate_filter_columns" (qassoc_get requirement (quote membership_candidate_filter_columns) 0))
+					(list "candidate_map_columns" (qassoc_get requirement (quote membership_candidate_map_columns) 1))
+					(list "candidate_cache_map_columns" (qassoc_get requirement (quote membership_candidate_cache_map_columns) 2))
+					(list "candidate_expression_operations" (qassoc_get requirement (quote membership_candidate_expression_operations) 0))
+					(list "candidate_expression_depth" (qassoc_get requirement (quote membership_candidate_expression_depth) 0))
+					(list "candidate_filter_value_rows" (qassoc_get requirement (quote membership_candidate_filter_value_rows) nil))
+					(list "candidate_expression_operation_rows" (qassoc_get requirement (quote membership_candidate_expression_operation_rows) nil))
+					(list "driver_scan_invocations" (qassoc_get requirement (quote membership_driver_scan_invocations) 1))
+					(list "driver_filter_columns" (qassoc_get requirement (quote membership_driver_filter_columns) 0))
+					(list "driver_map_columns" (qassoc_get requirement (quote membership_driver_map_columns) 0))
+					(list "driver_expression_operations" (qassoc_get requirement (quote membership_driver_expression_operations) 0))
+					(list "driver_expression_depth" (qassoc_get requirement (quote membership_driver_expression_depth) 0))
 					(list "reuse" (qassoc_get requirement (quote reuse) 1))))
 				(list "alternatives" (map candidates (lambda (candidate)
 					(list
@@ -7605,7 +7906,9 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(define reason (if (equal? strategy (quote candidate_keyset))
 					(quote projected_membership_cost)
 					(quote indexed_driver_probe_cost)))
-				(record_membership_physical_choice requirement strategy reason candidates)
+				(if (equal? strategy (quote candidate_keyset))
+					nil
+					(record_membership_physical_choice requirement strategy reason candidates))
 				(define physical_facts (merge (list
 					(list
 						(list (quote membership_plan_strategy) strategy)
@@ -7631,13 +7934,13 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 (define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
 	(begin
 		(define input (gs_input stage))
+		(define base_sources (filter (qb_sources block) source_is_base_table?))
 		/* Projection from the canonical group cache currently guarantees a
 		direct key map only for base-table membership stages. Derived inputs keep
 		the same primitive and use indexed existence probing until their cache-key
 		lineage is represented explicitly. A canonical simple UNION is also valid
 		for the driver probe because each branch lowers independently against the
 		current lookup key; this does not project or materialize the UNION. */
-		(define base_sources (filter (qb_sources block) source_is_base_table?))
 		(if (or
 			(or (not (source_is_base_table? input)) (not (single_source? base_sources)))
 			(not (empty_list? (group_stage_session_domain_keys stage))))
@@ -7649,7 +7952,8 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(define capped (if (nil? candidate_estimate) false
 					(qassoc_get candidate_estimate (quote capped) false)))
 				(define candidate_total_rows (planner_source_row_count input))
-				(define candidate_rows (membership_estimated_work_rows candidate_estimate candidate_total_rows))
+				(define candidate_rows (membership_estimated_matching_rows
+					candidate_estimate candidate_total_rows candidate_total_rows))
 				(define driver (car base_sources))
 				(define driver_total_rows (planner_source_row_count driver))
 				(define driver_estimate (planner_source_filter_estimate driver
@@ -7685,7 +7989,7 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(define alternatives (list "candidate_keyset" "driver_order_membership_probe"))
 				(define normal_choice (if broad_driver
 					"driver_order_membership_probe"
-					(if (membership_projection_cost_preferred? candidate_total_rows candidate_rows driver_rows)
+					(if (membership_projection_cost_preferred? candidate_total_rows candidate_rows driver_rows (gs_facts stage))
 						"candidate_keyset"
 						"driver_order_membership_probe")))
 				(define normal_projection (equal? normal_choice projected_choice))
@@ -7693,10 +7997,10 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(define chosen_projection (equal? chosen_choice projected_choice))
 				(define forced_choice (planner_physical_override decision_id))
 				(define candidate_cost (if (number? candidate_rows)
-					(membership_projection_cost candidate_total_rows candidate_rows)
+					(membership_projection_cost candidate_total_rows candidate_rows driver_rows (gs_facts stage))
 					nil))
 				(define driver_cost (if (number? driver_rows)
-					(membership_ordered_driver_probe_cost candidate_total_rows candidate_rows driver_rows)
+					(membership_ordered_driver_probe_cost candidate_total_rows candidate_rows driver_rows (gs_facts stage))
 					nil))
 				(planner_record_physical_decision
 					(list
@@ -7715,10 +8019,32 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 							(list "candidate_input_rows" candidate_total_rows)
 							(list "candidate_matching_rows" (if (nil? candidate_estimate) nil (qassoc_get candidate_estimate (quote rows) nil)))
 							(list "candidate_rows" candidate_rows)
+							(list "candidate_density" (membership_candidate_density
+								candidate_total_rows candidate_rows (gs_facts stage)))
+							(list "projected_driver_rows"
+								(membership_projected_driver_rows candidate_total_rows candidate_rows driver_total_rows (gs_facts stage)))
 							(list "driver_input_rows" driver_total_rows)
 							(list "driver_rows" driver_rows)
+							(list "expected_driver_rows_visited" (membership_expected_driver_rows_visited
+								candidate_total_rows candidate_rows driver_rows (gs_facts stage)))
+							(list "limit" (qb_limit block))
+							(list "offset" (coalesceNil (qb_offset block) 0))
 							(list "estimate_capped" capped)
+							(list "estimate_sampled_rows" (qassoc_get candidate_estimate (quote sampled) nil))
 							(list "selectivity_class" (if capped "unknown_or_broad" (string (qassoc_get (gs_facts stage) (quote selectivity_class) (quote unknown)))))
+							(list "candidate_scan_invocations" (qassoc_get (gs_facts stage) (quote membership_candidate_scan_invocations) 1))
+							(list "candidate_filter_columns" (qassoc_get (gs_facts stage) (quote membership_candidate_filter_columns) 0))
+							(list "candidate_map_columns" (qassoc_get (gs_facts stage) (quote membership_candidate_map_columns) 1))
+							(list "candidate_cache_map_columns" (qassoc_get (gs_facts stage) (quote membership_candidate_cache_map_columns) 2))
+							(list "candidate_expression_operations" (qassoc_get (gs_facts stage) (quote membership_candidate_expression_operations) 0))
+							(list "candidate_expression_depth" (qassoc_get (gs_facts stage) (quote membership_candidate_expression_depth) 0))
+							(list "candidate_filter_value_rows" (qassoc_get (gs_facts stage) (quote membership_candidate_filter_value_rows) nil))
+							(list "candidate_expression_operation_rows" (qassoc_get (gs_facts stage) (quote membership_candidate_expression_operation_rows) nil))
+							(list "driver_scan_invocations" (qassoc_get (gs_facts stage) (quote membership_driver_scan_invocations) 1))
+							(list "driver_filter_columns" (qassoc_get (gs_facts stage) (quote membership_driver_filter_columns) 0))
+							(list "driver_map_columns" (qassoc_get (gs_facts stage) (quote membership_driver_map_columns) 0))
+							(list "driver_expression_operations" (qassoc_get (gs_facts stage) (quote membership_driver_expression_operations) 0))
+							(list "driver_expression_depth" (qassoc_get (gs_facts stage) (quote membership_driver_expression_depth) 0))
 							(list "reuse" (qassoc_get (gs_facts stage) (quote reuse) 1))))
 						(list "alternatives" (list
 							(list
@@ -8378,13 +8704,16 @@ boolean probe, matched against the specific logical output alias. */
 								(define rewritten_sources (rewrite_scalar_first_probe_sources_using
 									(qb_stages block) sources probe_sources default_alias))
 								(define driver_sources (without_source_alias rewritten_sources (source_alias exists_src)))
-								(define probe (first_driver_lookup_key stage driver_sources))
+								(define candidate_telemetry (candidate_reorder_telemetry stage driver_sources block))
+								(define costed_stage (group_stage_with_facts stage
+									(merge (list candidate_telemetry (gs_facts stage)))))
+								(define probe (first_driver_lookup_key costed_stage driver_sources))
 								(define rewrite_consumer (lambda (expr)
 									(rewrite_scalar_first_probe_expr
 										(qb_stages block) probe_sources default_alias expr)))
 								(define base_where (rewrite_exists_recset_probe_refs
 									(source_alias exists_src)
-									stage
+									costed_stage
 									probe
 									(qb_where block)))
 								(hybrid_reorder_query_block_using stage_catalog
@@ -8402,7 +8731,7 @@ boolean probe, matched against the specific logical output alias. */
 										(candidate_stage_without_source (qb_stages block) stage_id)
 										(merge (list
 											(query_block_reorder_telemetry block)
-											(candidate_reorder_telemetry stage driver_sources block)
+											candidate_telemetry
 											(list (list (quote membership_requirement) (list
 												(list (quote access) (quote membership))
 												(list (quote reuse) 1))))
@@ -8426,7 +8755,12 @@ boolean probe, matched against the specific logical output alias. */
 								(qb_limit block)
 								(qb_offset block)
 								(qb_hidden block)
-								(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage)))
+								(map (qb_stages block) (lambda (current_stage)
+									(join_reorder_stage_using stage_catalog
+										(if (equal? (gs_id current_stage) (gs_id stage))
+											(group_stage_with_facts current_stage
+												(merge (list candidate_telemetry (gs_facts current_stage))))
+											current_stage))))
 								(qb_facts block))
 							facts))))))))
 
@@ -12234,6 +12568,9 @@ That makes the recorded and forced choice identical to the executable plan. */
 	(begin
 		(define stage (nth membership 0))
 		(define facts (gs_facts stage))
+		(define cost_facts (if (equal? consumer (quote aggregate))
+			(qassoc_set facts (quote membership_consumer) (quote aggregate))
+			facts))
 		(define raw_expr (recset_project_join_expr_for_membership_raw src membership))
 		(if (or (nil? raw_expr)
 			(not (or
@@ -12241,17 +12578,27 @@ That makes the recorded and forced choice identical to the executable plan. */
 				(equal? (qassoc_get facts (quote purpose) nil) (quote in_candidate)))))
 			raw_expr
 			(begin
-				(define capped (qassoc_get facts (quote membership_candidate_estimate_capped) false))
 				(define measured_estimate (planner_stage_filter_estimate (gs_input stage) 512))
+				(define capped (or
+					(qassoc_get facts (quote membership_candidate_estimate_capped) false)
+					(qassoc_get measured_estimate (quote capped) false)))
 				(define candidate_input_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_input_rows) nil)
 					(planner_stage_input_rows (gs_input stage))))
 				(define candidate_matching_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_estimated_rows) nil)
 					(qassoc_get measured_estimate (quote rows) nil)))
-				(define candidate_rows (if capped
-					(coalesceNil (qassoc_get facts (quote membership_candidate_estimate_input) nil) candidate_input_rows)
-					candidate_matching_rows))
+				(define candidate_rows (membership_estimated_matching_rows
+					(list
+						(list (quote rows) candidate_matching_rows)
+						(list (quote input) (coalesceNil
+							(qassoc_get facts (quote membership_candidate_estimate_input) nil)
+							(qassoc_get measured_estimate (quote input) nil)))
+						(list (quote sampled) (coalesceNil
+							(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
+							(qassoc_get measured_estimate (quote sampled) nil)))
+						(list (quote capped) capped))
+					candidate_input_rows candidate_input_rows))
 				/* Ordered LIMIT consumes only its local window before downstream
 				operators. Cost this edge with that workload instead of a global
 				driver cardinality; it is the relevant side of the plan inequality. */
@@ -12271,16 +12618,16 @@ That makes the recorded and forced choice identical to the executable plan. */
 				(define normal_choice (if guarded_broad_order_driver
 					"driver_order_membership_probe"
 					(if known
-						(if (membership_projection_cost_preferred? candidate_input_rows candidate_rows driver_rows)
+						(if (membership_projection_cost_preferred? candidate_input_rows candidate_rows driver_rows cost_facts)
 							"candidate_keyset"
 							"driver_order_membership_probe")
 						(if owns_requirement "driver_order_membership_probe" "candidate_keyset"))))
 				(define alternatives (list "candidate_keyset" "driver_order_membership_probe"))
 				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
 				(define forced (planner_physical_override decision_id))
-				(define candidate_cost (if known (membership_projection_cost candidate_input_rows candidate_rows) nil))
+				(define candidate_cost (if known (membership_projection_cost candidate_input_rows candidate_rows driver_rows cost_facts) nil))
 				(define driver_cost (if known
-					(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows)
+					(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows cost_facts)
 					nil))
 				(planner_record_physical_decision
 					(list
@@ -12301,11 +12648,37 @@ That makes the recorded and forced choice identical to the executable plan. */
 							(list "candidate_input_rows" candidate_input_rows)
 							(list "candidate_matching_rows" candidate_matching_rows)
 							(list "candidate_rows" candidate_rows)
+							(list "candidate_density" (membership_candidate_density
+								candidate_input_rows candidate_rows facts))
+							(list "projected_driver_rows"
+								(membership_projected_driver_rows candidate_input_rows candidate_rows
+									(membership_driver_input_rows driver_rows facts) facts))
 							(list "driver_input_rows" (planner_source_row_count src))
 							(list "driver_rows" driver_rows)
+							(list "expected_driver_rows_visited" (membership_expected_driver_rows_visited
+								candidate_input_rows candidate_rows driver_rows facts))
 							(list "probe_rows" driver_rows)
+							(list "limit" (qassoc_get facts (quote membership_order_limit) nil))
+							(list "offset" (qassoc_get facts (quote membership_order_offset) 0))
 							(list "estimate_capped" capped)
+							(list "estimate_sampled_rows" (coalesceNil
+								(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
+								(qassoc_get measured_estimate (quote sampled) nil)))
+							(list "probe_branches" (qassoc_get facts (quote membership_candidate_probe_branches) 1))
 							(list "selectivity_class" (string (qassoc_get facts (quote membership_selectivity_class) (quote unknown))))
+							(list "candidate_scan_invocations" (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
+							(list "candidate_filter_columns" (qassoc_get facts (quote membership_candidate_filter_columns) 0))
+							(list "candidate_map_columns" (qassoc_get facts (quote membership_candidate_map_columns) 1))
+							(list "candidate_cache_map_columns" (qassoc_get facts (quote membership_candidate_cache_map_columns) 2))
+							(list "candidate_expression_operations" (qassoc_get facts (quote membership_candidate_expression_operations) 0))
+							(list "candidate_expression_depth" (qassoc_get facts (quote membership_candidate_expression_depth) 0))
+							(list "candidate_filter_value_rows" (qassoc_get facts (quote membership_candidate_filter_value_rows) nil))
+							(list "candidate_expression_operation_rows" (qassoc_get facts (quote membership_candidate_expression_operation_rows) nil))
+							(list "driver_scan_invocations" (qassoc_get facts (quote membership_driver_scan_invocations) 1))
+							(list "driver_filter_columns" (qassoc_get facts (quote membership_driver_filter_columns) 0))
+							(list "driver_map_columns" (qassoc_get facts (quote membership_driver_map_columns) 0))
+							(list "driver_expression_operations" (qassoc_get facts (quote membership_driver_expression_operations) 0))
+							(list "driver_expression_depth" (qassoc_get facts (quote membership_driver_expression_depth) 0))
 							(list "reuse" (qassoc_get facts (quote reuse) 1))))
 						(list "alternatives" (list
 							(list
@@ -14826,11 +15199,19 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 	(planner_cost 365607 0 0 0 0 (* probe_rows 17681)
 		(* probe_rows 1) 0 probe_rows 0.6)))
 
-(define planner_membership_startup_ns 0)
-(define planner_membership_candidate_scan_row_ns 1)
-(define planner_membership_recset_build_row_ns 15115)
-(define planner_membership_group_cache_build_row_ns 75342)
-(define planner_membership_group_cache_probe_row_ns 134910)
+(define planner_membership_scan_invocation_ns 1)
+(define planner_membership_scan_row_ns 178)
+(define planner_membership_filter_column_row_ns 1)
+(define planner_membership_map_column_row_ns 28)
+(define planner_membership_expression_operation_row_ns 98)
+(define planner_membership_recset_startup_ns 1)
+(define planner_membership_recset_build_row_ns 1)
+(define planner_membership_recset_probe_row_ns 1)
+(define planner_membership_recset_aggregate_row_ns 132)
+(define planner_membership_group_cache_startup_ns 17538872)
+(define planner_membership_group_cache_build_row_ns 11590)
+(define planner_membership_group_cache_probe_row_ns 132886)
+(define planner_membership_ordered_driver_input_row_ns 255)
 /* END GENERATED COST CONSTANTS */
 
 (define planner_direct_presence_probe_preferred? (lambda (probe_rows input_rows)
@@ -18139,7 +18520,14 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 			default_alias final_condition offset_value limit_value))
 		(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
 			nil
-			(recset_project_join_expr_for_membership src membership)))
+			(recset_project_join_expr_for_membership_using src membership
+				(if (join_scan_reduce? result_mode) (quote aggregate)
+					(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter)))
+				(and (not (empty_list? current_order_items))
+					(query_limit_active? offset_value limit_value))
+				(if (and (not (empty_list? current_order_items))
+					(query_limit_active? offset_value limit_value))
+					(probe_limit_work_rows limit_value) nil))))
 		(if (expr_contains_driver_membership? condition)
 			(planner_record_physical_decision (list
 				(list "decision" "join_leaf_membership_consumer")
@@ -20168,7 +20556,7 @@ potentially large calibrated SELECT result. */
 								nil)))
 					(list (quote define) (quote __calibration_started_ns) (list (quote nanotime)))
 					plan
-					(list (quote define) (quote __calibration_actual_ns)
+					(list (quote define) (quote __calibration_whole_query_execution_ns)
 						(list (quote -) (list (quote nanotime)) (quote __calibration_started_ns)))
 					(list (quote define) (quote __calibration_rows) (list (quote __calibration_capture) "count"))
 					(list (quote define) (quote __calibration_hash) (list (quote __calibration_capture) "hash"))
@@ -20191,10 +20579,31 @@ potentially large calibrated SELECT result. */
 							"operator_family" operator_family
 							"operator_consistent" consistent
 							"estimated_ns" estimated_ns
-							"actual_ns" (quote __calibration_actual_ns)
+							"whole_query_execution_ns" (quote __calibration_whole_query_execution_ns)
+							"operator_ns" nil
 							"candidate_input_rows" (physical_calibration_input decision "candidate_input_rows")
 							"candidate_rows" (physical_calibration_input decision "candidate_rows")
+							"candidate_density" (physical_calibration_input decision "candidate_density")
+							"projected_driver_rows" (physical_calibration_input decision "projected_driver_rows")
+							"driver_input_rows" (physical_calibration_input decision "driver_input_rows")
 							"driver_rows" (physical_calibration_input decision "driver_rows")
+							"expected_driver_rows_visited" (physical_calibration_input decision "expected_driver_rows_visited")
+							"limit" (physical_calibration_input decision "limit")
+							"offset" (physical_calibration_input decision "offset")
+							"probe_branches" (physical_calibration_input decision "probe_branches")
+							"candidate_scan_invocations" (physical_calibration_input decision "candidate_scan_invocations")
+							"candidate_filter_columns" (physical_calibration_input decision "candidate_filter_columns")
+							"candidate_map_columns" (physical_calibration_input decision "candidate_map_columns")
+							"candidate_cache_map_columns" (physical_calibration_input decision "candidate_cache_map_columns")
+							"candidate_expression_operations" (physical_calibration_input decision "candidate_expression_operations")
+							"candidate_expression_depth" (physical_calibration_input decision "candidate_expression_depth")
+							"candidate_filter_value_rows" (physical_calibration_input decision "candidate_filter_value_rows")
+							"candidate_expression_operation_rows" (physical_calibration_input decision "candidate_expression_operation_rows")
+							"driver_scan_invocations" (physical_calibration_input decision "driver_scan_invocations")
+							"driver_filter_columns" (physical_calibration_input decision "driver_filter_columns")
+							"driver_map_columns" (physical_calibration_input decision "driver_map_columns")
+							"driver_expression_operations" (physical_calibration_input decision "driver_expression_operations")
+							"driver_expression_depth" (physical_calibration_input decision "driver_expression_depth")
 							"rows" (quote __calibration_rows)
 							"result_hash" (quote __calibration_hash)
 							"result_equal" (quote __calibration_equal)))))
@@ -20219,23 +20628,85 @@ potentially large calibrated SELECT result. */
 					(nth compilation 2)
 					suite_var)))))))
 
+(define physical_membership_decision_calibratable? (lambda (decision)
+	(if (not (equal? (qassoc_get decision "decision" nil) "membership_carrier"))
+		true
+		(begin
+			(define inputs (qassoc_get decision "inputs" '()))
+			(and (not (nil? (qassoc_get decision "decision_id" nil)))
+				(and (> (count (qassoc_get decision "alternatives" '())) 1)
+					(and (number? (qassoc_get inputs "candidate_input_rows" nil))
+						(and (number? (qassoc_get inputs "candidate_rows" nil))
+							(and (number? (qassoc_get inputs "driver_input_rows" nil))
+								(number? (qassoc_get inputs "driver_rows" nil)))))))))))
+
+(define explain_queryplan_physical_calibrate_discover (lambda (query)
+	(begin
+		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
+		(define compilation (compile_physical_explain_variant reordered nil))
+		(define decisions (filter (nth compilation 1) (lambda (decision)
+			(and (physical_membership_decision_calibratable? decision)
+				(equal? (qassoc_get decision "decision" nil) "membership_carrier")))))
+		(if (empty_list? decisions)
+			(list (quote resultrow) (list (quote list)
+				"error" "no calibratable physical decision"))
+			(cons (quote !begin) (map decisions (lambda (decision)
+				(list (quote resultrow) (list (quote list)
+					"decision_id" (qassoc_get decision "decision_id" nil)
+					"decision" (qassoc_get decision "decision" nil)
+					"alternatives" (cons (quote list)
+						(map (qassoc_get decision "alternatives" '()) (lambda (alternative)
+							(qassoc_get alternative "plan" nil))))
+					"estimated_ns" (cons (quote list)
+						(map (qassoc_get decision "alternatives" '()) (lambda (alternative)
+							(qassoc_get (qassoc_get alternative "cost" '()) "total_ns" nil)))))))))))))
+
+(define explain_queryplan_physical_calibrate_variant (lambda (query decision_id variant)
+	(begin
+		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
+		(define compilation (compile_physical_explain_variant reordered
+			(list (list decision_id variant))))
+		(define decision (physical_decision_by_id (nth compilation 1) decision_id))
+		(define alternative (if (nil? decision) nil
+			(physical_decision_alternative decision variant)))
+		(if (or (nil? decision) (nil? alternative))
+			(list (quote resultrow) (list (quote list)
+				"error" "unknown physical calibration decision or variant"))
+			(begin
+				(define suite_var (quote __physical_calibration_variant_suite))
+				(list (quote !begin)
+					(list (quote define) suite_var (list (quote newsession)))
+					(physical_calibration_runtime_plan
+						(nth compilation 0)
+						decision
+						variant
+						(qassoc_get (qassoc_get alternative "cost" '()) "total_ns" nil)
+						(nth compilation 2)
+						suite_var)))))))
+
 (define explain_queryplan_physical_calibrate (lambda (query)
 	(begin
 		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
 		(define default_compilation (compile_physical_explain_variant reordered nil))
+		(define uncalibratable (filter (nth default_compilation 1) (lambda (decision)
+			(not (physical_membership_decision_calibratable? decision)))))
 		(define decisions (filter (nth default_compilation 1) (lambda (decision)
 			(and (not (nil? (qassoc_get decision "decision_id" nil)))
 				(> (count (qassoc_get decision "alternatives" '())) 1)))))
-		(if (empty_list? decisions)
+		(if (not (empty_list? uncalibratable))
 			(list (quote resultrow) (list (quote list)
-				"error" "no calibratable physical decision"))
-			(begin
-				(define suite_var (quote __physical_calibration_suite))
-				(define variants (merge (map decisions (lambda (decision)
-					(physical_calibration_variants_for_decision reordered decision suite_var)))))
-				(cons (quote !begin) (cons
-					(list (quote define) suite_var (list (quote newsession)))
-					variants)))))))
+				"error" "uncalibratable physical membership decision"
+				"decision" (string (car uncalibratable))))
+			(if (empty_list? decisions)
+				(list (quote resultrow) (list (quote list)
+					"error" "no calibratable physical decision"))
+				(begin
+					(define suite_var (quote __physical_calibration_suite))
+					(define variants (merge (map decisions (lambda (decision)
+						(physical_calibration_variants_for_decision reordered decision suite_var)))))
+					(cons (quote !begin) (cons
+						(list (quote define) suite_var (list (quote newsession)))
+						variants))))))))
 
 (define explain_queryplan_physical (lambda (query)
 	(begin

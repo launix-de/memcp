@@ -1542,6 +1542,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy)))
 		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s)))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query sql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy)))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id sql_string) (define variant sql_string) (define query sql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant))
 		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query sql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy)))
 		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query sql_select)) (explain_queryplan_physical (sql_expand_views query policy)))
 		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy))) (settings "ExplainWidth")))))
