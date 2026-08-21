@@ -71,7 +71,7 @@ setup:
         true)
 
 test_cases:
-  - name: "Selective IN branches under OR retain the ordered driver"
+  - name: "Selective IN branches under OR use projected membership recsets"
     sql: |
       EXPLAIN
       SELECT ID
