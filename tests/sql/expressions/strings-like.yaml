@@ -1,3 +1,10 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
 # LIKE operator and patterns
 
 metadata:
@@ -118,6 +125,45 @@ test_cases:
         - id: 3
         - id: 5
         - id: 7
+
+  - name: "Prefix NOT applies after qualified collated LIKE"
+    sql: |
+      SELECT id
+      FROM notlike_test AS item
+      WHERE NOT (item.name) COLLATE utf8mb4_unicode_ci LIKE 'Brand%'
+      ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - id: 3
+        - id: 5
+        - id: 7
+
+  - name: "Prefix NOT LIKE preserves UNKNOWN"
+    sql: |
+      SELECT NOT (value) COLLATE utf8mb4_unicode_ci LIKE 'Brand%' AS matches
+      FROM (SELECT NULL AS value) AS nullable_value
+    expect:
+      rows: 1
+      data:
+        - matches: null
+
+  - name: "Prefix NOT binds below predicates and above boolean operators"
+    sql: |
+      SELECT
+        NOT 2 = 1 AS comparison_result,
+        NOT 4 BETWEEN 1 AND 3 AS between_result,
+        NOT 4 IN (1, 2, 3) AS in_result,
+        NOT 0 AND 0 AS and_result,
+        NOT 0 OR 0 AS or_result
+    expect:
+      rows: 1
+      data:
+        - comparison_result: true
+          between_result: true
+          in_result: true
+          and_result: false
+          or_result: true
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS like_qualified"

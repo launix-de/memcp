@@ -129,6 +129,13 @@ test_cases:
       data:
         - id: 2
 
+  - name: "Prefix NOT applies after LIKE"
+    sql: "SELECT id FROM psql_data WHERE NOT name LIKE '%li%' ORDER BY id"
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
   - name: "NOT ILIKE is case-insensitive"
     sql: "SELECT id FROM psql_data WHERE name NOT ILIKE '%ALICE%' ORDER BY id"
     expect:
@@ -136,6 +143,31 @@ test_cases:
       data:
         - id: 2
         - id: 3
+
+  - name: "Prefix NOT applies after ILIKE"
+    sql: "SELECT id FROM psql_data WHERE NOT name ILIKE '%ALICE%' ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - id: 2
+        - id: 3
+
+  - name: "Prefix NOT follows PostgreSQL predicate precedence"
+    sql: |
+      SELECT
+        NOT 2 = 1 AS comparison_result,
+        NOT 4 BETWEEN 1 AND 3 AS between_result,
+        NOT 4 IN (1, 2, 3) AS in_result,
+        NOT FALSE AND FALSE AS and_result,
+        NOT FALSE OR FALSE AS or_result
+    expect:
+      rows: 1
+      data:
+        - comparison_result: true
+          between_result: true
+          in_result: true
+          and_result: false
+          or_result: true
 
   # === Derived-table column alias lists ===
   - name: "Derived table exposes explicit column aliases"

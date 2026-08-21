@@ -638,6 +638,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 
 	(define sql_expression2 (parser (or
+		/* Prefix NOT binds less tightly than comparison predicates but more tightly
+		than AND/OR. Parsing its operand at this level makes `NOT value LIKE ...`
+		mean `NOT (value LIKE ...)`, as required by MySQL, while retaining the
+		dedicated correlated-subquery marker for NOT EXISTS. */
+		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
+		(parser '((atom "NOT" true) (define expr sql_expression2)) '('sql_not expr))
 		(parser '((atom "MATCH" true) "(" (define cols (+ sql_expression ",")) ")" (atom "AGAINST" true) "(" (define needle sql_expression) (? (atom "IN" true) (atom "NATURAL" true) (atom "LANGUAGE" true) (atom "MODE" true)) ")")
 			(begin
 				(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
@@ -702,9 +708,6 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 
 	(define sql_expression5 (parser (or
-		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
-		/* NOT has lower precedence than IS NULL: NOT expr IS NULL == NOT (expr IS NULL) */
-		(parser '((atom "NOT" true) (define expr sql_expression5)) '('sql_not expr))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr sql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))

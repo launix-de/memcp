@@ -193,6 +193,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 
 	(define psql_expression2 (parser (or
+		/* SQL prefix NOT binds below comparison predicates and above AND/OR. */
+		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
+		(parser '((atom "NOT" true) (define expr psql_expression2)) '('sql_not expr))
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") '('inner_select_in a sub))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
@@ -252,8 +255,6 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 
 	(define psql_expression5 (parser (or
-		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
-		(parser '((atom "NOT" true) (define expr psql_expression6)) '('sql_not expr))
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr psql_expression6)) '((quote -) 0 expr))
 		(parser '((define expr psql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
