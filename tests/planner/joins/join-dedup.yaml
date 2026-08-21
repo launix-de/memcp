@@ -1,9 +1,7 @@
 # Copyright (C) 2026 Carl-Philip Haensch
 # Scalar subquery deduplication (join-merge optimization)
-# When two or more scalar subqueries reference the same table with the same
-# condition and field, the inner scan should be performed only once per outer row.
-# When condition is the same but fields differ, each subquery still scans independently
-# (Phase 2 optimization, not yet implemented).
+# Equivalent scalar relational backbones share one logical stage, including
+# nested correlated dependencies, while exposing every requested value column.
 
 metadata:
   version: "1.0"
@@ -12,6 +10,7 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS jd_item"
   - sql: "DROP TABLE IF EXISTS jd_ref"
+  - sql: "DROP TABLE IF EXISTS jd_permission"
   - sql: |
       CREATE TABLE jd_item (id INT, ref_id INT)
   - sql: |
@@ -22,6 +21,10 @@ setup:
       INSERT INTO jd_ref (id, label, score) VALUES
         (10, 'Alpha', 100), (20, 'Beta', 200), (30, NULL, 300),
         (40, NULL, 400), (40, 'duplicate', 401)
+  - sql: |
+      CREATE TABLE jd_permission (ref_id INT, allowed INT)
+  - sql: |
+      INSERT INTO jd_permission (ref_id, allowed) VALUES (10, 1), (20, 0)
 
 test_cases:
 
@@ -153,6 +156,136 @@ test_cases:
           c2: Beta
           sc: 200
 
+  - name: "Nested correlated scalar projections share their relational stage"
+    max_compile_metrics:
+      group_stages: 2
+    sql: |
+      SELECT id,
+        (SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM jd_permission
+          WHERE jd_permission.ref_id = jd_ref.id AND allowed = 1
+          LIMIT 1
+        ) THEN label ELSE NULL END
+        FROM jd_ref WHERE jd_ref.id = jd_item.ref_id LIMIT 1) AS lbl,
+        (SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM jd_permission
+          WHERE jd_permission.ref_id = jd_ref.id AND allowed = 1
+          LIMIT 1
+        ) THEN score ELSE NULL END
+        FROM jd_ref WHERE jd_ref.id = jd_item.ref_id LIMIT 1) AS sc
+      FROM jd_item
+      ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          lbl: Alpha
+          sc: 100
+        - id: 2
+          lbl: null
+          sc: null
+        - id: 3
+          lbl: Alpha
+          sc: 100
+        - id: 4
+          lbl: null
+          sc: null
+
+  - name: "Nested correlated stage is shared between WHERE and SELECT"
+    max_compile_metrics:
+      group_stages: 2
+    sql: |
+      SELECT id,
+        (SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM jd_permission
+          WHERE jd_permission.ref_id = jd_ref.id AND allowed = 1
+          LIMIT 1
+        ) THEN label ELSE NULL END
+        FROM jd_ref WHERE jd_ref.id = jd_item.ref_id LIMIT 1) AS lbl
+      FROM jd_item
+      WHERE COALESCE((
+        SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM jd_permission
+          WHERE jd_permission.ref_id = jd_ref.id AND allowed = 1
+          LIMIT 1
+        ) THEN score ELSE NULL END
+        FROM jd_ref WHERE jd_ref.id = jd_item.ref_id LIMIT 1
+      ), 0) > 0
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          lbl: Alpha
+        - id: 3
+          lbl: Alpha
+
+  - name: "Alpha-renamed scalar projections preserve their values"
+    sql: |
+      SELECT id,
+        (SELECT label FROM jd_ref AS label_ref
+         WHERE label_ref.id = jd_item.ref_id LIMIT 1) AS lbl,
+        (SELECT score FROM jd_ref AS score_ref
+         WHERE score_ref.id = jd_item.ref_id LIMIT 1) AS sc
+      FROM jd_item
+      ORDER BY id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          lbl: Alpha
+          sc: 100
+        - id: 2
+          lbl: Beta
+          sc: 200
+        - id: 3
+          lbl: Alpha
+          sc: 100
+        - id: 4
+          lbl: null
+          sc: null
+
+  - name: "Different nested filters retain independent semantics"
+    max_compile_metrics:
+      group_stages: 3
+    sql: |
+      SELECT id,
+        (SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM jd_permission
+          WHERE jd_permission.ref_id = jd_ref.id AND allowed = 1
+          LIMIT 1
+        ) THEN label ELSE NULL END
+        FROM jd_ref WHERE jd_ref.id = jd_item.ref_id LIMIT 1) AS allowed_label,
+        (SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM jd_permission
+          WHERE jd_permission.ref_id = jd_ref.id AND allowed = 0
+          LIMIT 1
+        ) THEN score ELSE NULL END
+        FROM jd_ref WHERE jd_ref.id = jd_item.ref_id LIMIT 1) AS denied_score
+      FROM jd_item
+      WHERE id <= 2
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          allowed_label: Alpha
+          denied_score: null
+        - id: 2
+          allowed_label: null
+          denied_score: 200
+
+  - name: "Different ordering backbones select independent rows"
+    sql: |
+      SELECT
+        (SELECT label FROM jd_ref WHERE jd_ref.id = 40 ORDER BY score ASC LIMIT 1) AS first_label,
+        (SELECT score FROM jd_ref WHERE jd_ref.id = 40 ORDER BY score DESC LIMIT 1) AS last_score
+    expect:
+      rows: 1
+      data:
+        - first_label: null
+          last_score: 401
+
   # Non-correlated duplicate subquery (no outer ref): also should deduplicate
   - name: "Non-correlated identical scalar subqueries"
     sql: |
@@ -260,5 +393,6 @@ test_cases:
           c2: null
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS jd_permission"
   - sql: "DROP TABLE IF EXISTS jd_item"
   - sql: "DROP TABLE IF EXISTS jd_ref"
