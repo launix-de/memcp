@@ -180,7 +180,7 @@ test_cases:
       result_not_contains:
         - "recset_project_join"
 
-  - name: "Broad membership below OR retains driver probing"
+  - name: "Broad membership below OR uses calibrated projected membership"
     sql: |
       EXPLAIN
       SELECT ID
@@ -196,10 +196,9 @@ test_cases:
     expect:
       result_contains:
         - "scan_order"
-      result_not_contains:
         - "recset_project_join"
 
-  - name: "Nested OR membership uses driver probing after a selective outer AND"
+  - name: "Nested OR membership uses calibrated projection after a selective outer AND"
     sql: |
       EXPLAIN
       SELECT ID
@@ -214,7 +213,6 @@ test_cases:
     expect:
       result_contains:
         - "scan_order"
-      result_not_contains:
         - "recset_project_join"
 
   - name: "Nested OR membership preserves sibling alternatives"
@@ -1025,11 +1023,11 @@ test_cases:
           LIMIT 2
         expect:
           contains:
-            - "ordered_recset_iterator"
-            - "recset_contains_probe"
-            - "scan_order_recset_part"
-            - "base_table_scan_with_membership_filter"
-            - "source_is_base_table"
+            - "membership_carrier"
+            - "candidate_keyset"
+            - "driver_order_membership_probe"
+            - "recset_project_join"
+            - "$recset_contains"
             - "chosen"
             - "rejected"
       - sql: |
@@ -1217,6 +1215,32 @@ test_cases:
             - "$break"
             - ".grp:in_dv_file"
             - "touch_keytable"
+      - sql: |
+          EXPLAIN PHYSICAL CALIBRATE
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          rows: 2
+          contains:
+            - "candidate_keyset"
+            - "driver_order_membership_probe"
+            - "operator_consistent"
+            - "estimated_ns"
+            - "actual_ns"
+            - "candidate_rows"
+            - "driver_rows"
+            - "result_equal"
 
   - name: "IN UNION after derived ACL EXISTS keeps rows and lowers probes"
     fail_comment: "planner must not leak driver_membership_probe into final code or drop rows"
