@@ -2544,7 +2544,7 @@ the auto-index chooses the concrete access path on both tables. */
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr)
 	(begin
 		(define stage (nth membership 0))
 		/* Some late RecSet consumers are introduced after reorder telemetry was
@@ -2630,20 +2630,46 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define batch_cost (if (and allow_ordered_batch known)
 					(ordered_batch_accept_cost batch_cost_facts)
 					nil))
-				(define base_choice (if guarded_broad_order_driver
+				(define prefiltered_driver_rows
+					(qassoc_get facts (quote membership_driver_rows) nil))
+				(define prefiltered_driver_var (symbol "__prefiltered_membership_recset"))
+				(define prefiltered_body (if (nil? prefiltered_driver_expr)
+					nil
+					(batch_membership_expr src membership prefiltered_driver_var)))
+				(define prefiltered_expr (if (nil? prefiltered_body)
+					nil
+					(list
+						(list (quote lambda) (list prefiltered_driver_var) prefiltered_body)
+						prefiltered_driver_expr)))
+				(define prefiltered_eligible (and
+					(not (nil? prefiltered_expr))
+					(and (number? prefiltered_driver_rows)
+						(and (number? source_rows) (< prefiltered_driver_rows source_rows)))))
+				(define prefiltered_cost (if (and prefiltered_eligible (number? candidate_rows))
+					(membership_prefiltered_candidate_cost
+						candidate_input_rows candidate_rows prefiltered_driver_rows cost_facts)
+					nil))
+				(define cost_choices (filter (list
+					(if (nil? candidate_cost) nil (list "candidate_keyset" candidate_cost))
+					(if (nil? driver_cost) nil (list "driver_order_membership_probe" driver_cost))
+					(if (nil? batch_cost) nil (list "ordered_batch_accept" batch_cost))
+					(if (nil? prefiltered_cost) nil
+						(list "prefiltered_candidate_keyset" prefiltered_cost)))
+					(lambda (choice) (not (nil? choice)))))
+				(define cost_choice (if (empty_list? cost_choices)
+					nil
+					(reduce (cdr cost_choices) (lambda (best choice)
+						(if (planner_cost_better? (cadr choice) (cadr best)) choice best))
+						(car cost_choices))))
+				(define normal_choice (if guarded_broad_order_driver
 					"driver_order_membership_probe"
-					(if known
-						(if (membership_projection_cost_preferred? candidate_input_rows candidate_rows driver_rows cost_facts)
-							"candidate_keyset"
-							"driver_order_membership_probe")
-						(if owns_requirement "driver_order_membership_probe" "candidate_keyset"))))
-				(define batch_wins (and (not (nil? batch_cost))
-					(and (planner_cost_better? batch_cost candidate_cost)
-						(planner_cost_better? batch_cost driver_cost))))
-				(define normal_choice (if batch_wins "ordered_batch_accept" base_choice))
-				(define alternatives (if allow_ordered_batch
-					(list "candidate_keyset" "driver_order_membership_probe" "ordered_batch_accept")
-					(list "candidate_keyset" "driver_order_membership_probe")))
+					(if (nil? cost_choice)
+						(if owns_requirement "driver_order_membership_probe" "candidate_keyset")
+						(car cost_choice))))
+				(define alternatives (merge (list
+					(list "candidate_keyset" "driver_order_membership_probe")
+					(if allow_ordered_batch (list "ordered_batch_accept") '())
+					(if prefiltered_eligible (list "prefiltered_candidate_keyset") '()))))
 				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
 				(define forced (planner_physical_override decision_id))
 				(planner_record_physical_decision
@@ -2658,11 +2684,10 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						(list "selection" (if (nil? forced) (if known "cost" "fallback") "forced"))
 						(list "normally_chosen" normal_choice)
 						(list "reason" (if (not (nil? forced)) "calibration_override"
-							(if batch_wins "batch_filter_implementation_lowest_total_ns"
-								(if guarded_broad_order_driver "guarded_broad_order_limit_driver"
-									(if known (if capped "capped_estimate_uses_input_lower_bound" "lowest_total_ns")
-										(if owns_requirement "unknown_statistics_driver_fallback"
-											"unknown_statistics_projection_fallback"))))))
+							(if guarded_broad_order_driver "guarded_broad_order_limit_driver"
+								(if known (if capped "capped_estimate_uses_input_lower_bound" "lowest_total_ns")
+									(if owns_requirement "unknown_statistics_driver_fallback"
+										"unknown_statistics_projection_fallback")))))
 						(list "inputs" (list
 							(list "candidate_input_rows" candidate_input_rows)
 							(list "candidate_matching_rows" candidate_matching_rows)
@@ -2674,6 +2699,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(membership_driver_input_rows driver_rows facts) facts))
 							(list "driver_input_rows" source_rows)
 							(list "driver_rows" driver_rows)
+							(list "prefiltered_driver_rows" prefiltered_driver_rows)
 							(list "expected_driver_rows_visited" (membership_expected_driver_rows_visited
 								candidate_input_rows candidate_rows driver_rows facts))
 							(list "probe_rows" driver_rows)
@@ -2720,15 +2746,23 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(list "status" (if (equal? chosen "ordered_batch_accept") "chosen" "rejected"))
 									(list "reason" (if (equal? chosen "ordered_batch_accept") "selected" "higher_total_ns_or_forced_alternative"))
 									(list "cost" (if (nil? batch_cost) '() (planner_cost_explain batch_cost))))
+								nil)
+							(if prefiltered_eligible
+								(list
+									(list "plan" "prefiltered_candidate_keyset")
+									(list "status" (if (equal? chosen "prefiltered_candidate_keyset") "chosen" "rejected"))
+									(list "reason" (if (equal? chosen "prefiltered_candidate_keyset") "selected" "higher_total_ns_or_forced_alternative"))
+									(list "cost" (planner_cost_explain prefiltered_cost)))
 								nil)) (lambda (alternative) (not (nil? alternative)))))))
-				(list chosen raw_expr))))))
+				(list chosen (if (equal? chosen "prefiltered_candidate_keyset")
+					prefiltered_expr raw_expr)))))))
 
 /* General expression callers preserve the established contract: only a
 candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
-			src membership consumer driver_rows_override allow_ordered_batch))
+			src membership consumer driver_rows_override allow_ordered_batch nil))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
 			nil))))

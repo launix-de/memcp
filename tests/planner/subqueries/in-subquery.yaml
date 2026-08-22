@@ -2489,7 +2489,107 @@ test_cases:
           "tenant:description": "Tenant Eight"
           "tenant:canView": true
 
+  - name: "Selective driver predicates restrict broad membership candidates"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_prefilter_doc"
+      - sql: "DROP TABLE IF EXISTS in_prefilter_file"
+      - sql: "CREATE TABLE in_prefilter_file (ID INT PRIMARY KEY, filename VARCHAR(64), search VARCHAR(128))"
+      - sql: "CREATE TABLE in_prefilter_doc (ID INT PRIMARY KEY, file_id INT, tenant INT, sort_key INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "in_prefilter_file") '("ID" "filename" "search")
+              (map (produceN 20000) (lambda (i)
+                (list (+ i 1) (concat "asset-" i) (concat "broad needle text " i)))))
+            (insert (table "memcp-tests" "in_prefilter_doc") '("ID" "file_id" "tenant" "sort_key")
+              (map (produceN 20000) (lambda (i)
+                (list (+ i 1) (+ i 1) (if (>= i 19900) 7 9) i))))
+            (rebuild)
+            true)
+    steps:
+      - sql: |
+          EXPLAIN PHYSICAL
+          SELECT d.ID
+          FROM in_prefilter_doc d
+          WHERE d.tenant = 7
+            AND d.file_id IN (
+              SELECT f.ID FROM in_prefilter_file f WHERE f.filename LIKE '%missing%'
+              UNION
+              SELECT f.ID FROM in_prefilter_file f WHERE f.search LIKE '%needle%'
+            )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          rows: 1
+          contains:
+            - "membership_carrier"
+            - "prefiltered_candidate_keyset"
+            - "chosen prefiltered_candidate_keyset"
+      - sql: |
+          EXPLAIN
+          SELECT d.ID
+          FROM in_prefilter_doc d
+          WHERE d.tenant = 7
+            AND d.file_id IN (
+              SELECT f.ID FROM in_prefilter_file f WHERE f.filename LIKE '%missing%'
+              UNION
+              SELECT f.ID FROM in_prefilter_file f WHERE f.search LIKE '%needle%'
+            )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          contains:
+            - "recset_project_join"
+            - "recset_intersect"
+            - "scan_order"
+      - sql: |
+          EXPLAIN PHYSICAL CALIBRATE
+          SELECT d.ID
+          FROM in_prefilter_doc d
+          WHERE d.tenant = 7
+            AND d.file_id IN (
+              SELECT f.ID FROM in_prefilter_file f WHERE f.filename LIKE '%missing%'
+              UNION
+              SELECT f.ID FROM in_prefilter_file f WHERE f.search LIKE '%needle%'
+            )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          rows: 4
+          contains:
+            - "prefiltered_candidate_keyset"
+            - "operator_consistent"
+            - "result_equal"
+          not_contains:
+            - '"operator_consistent": false'
+            - '"result_equal": false'
+      - sql: |
+          SELECT d.ID
+          FROM in_prefilter_doc d
+          WHERE d.tenant = 7
+            AND d.file_id IN (
+              SELECT f.ID FROM in_prefilter_file f WHERE f.filename LIKE '%missing%'
+              UNION
+              SELECT f.ID FROM in_prefilter_file f WHERE f.search LIKE '%needle%'
+            )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          rows: 10
+          data:
+            - ID: 19901
+            - ID: 19902
+            - ID: 19903
+            - ID: 19904
+            - ID: 19905
+            - ID: 19906
+            - ID: 19907
+            - ID: 19908
+            - ID: 19909
+            - ID: 19910
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS in_prefilter_doc"
+  - sql: "DROP TABLE IF EXISTS in_prefilter_file"
   - sql: "DROP TABLE IF EXISTS membership_broad_key"
   - sql: "DROP TABLE IF EXISTS membership_narrow_key_b"
   - sql: "DROP TABLE IF EXISTS membership_narrow_key_a"

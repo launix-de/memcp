@@ -2565,6 +2565,29 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 								(cons (quote list) (cons local_batch membership_exprs)))))
 					locally_filtered))))))
 
+/* Produce the exact driver subset shared by a prefiltered membership tree.
+Every remaining top-level conjunct is evaluated once while building the driver
+RecSet; membership edges retain their own physical operators. */
+(define prefiltered_driver_recset_expr_for_membership (lambda (src source_table condition membership)
+	(begin
+		(define residual_condition (strip_driver_membership_for_source src condition membership))
+		(define driver_condition (combine_where_terms
+			(filter (split_and_terms (coalesceNil residual_condition true)) (lambda (term)
+				(not (expr_contains_driver_membership? term))))
+			true))
+		(if (equal? driver_condition true)
+			nil
+			(begin
+				(define alias (source_alias src))
+				(define cols (extract_columns_for_alias src driver_condition))
+				(list (quote scan_recset)
+					'(session "__memcp_tx")
+					source_table
+					(cons (quote list) cols)
+					(list (quote lambda)
+						(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+						(lower_column_expr_for_alias src driver_condition))))))))
+
 (define ordered_batch_count_estimate (lambda (first_batch visited_rows)
 	(if (or (not (number? first_batch)) (or (<= first_batch 0) (not (number? visited_rows))))
 		1
@@ -2681,7 +2704,8 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 						(define override (planner_physical_override
 							(concat "membership_carrier:" (gs_id (nth membership 0)))))
 						(or forced (or (equal? override "candidate_keyset")
-							(equal? override "ordered_batch_accept"))))) false))
+							(or (equal? override "ordered_batch_accept")
+								(equal? override "prefiltered_candidate_keyset")))))) false))
 				(define prefer_membership_filter (and scan_order_supported
 					(and bounded
 						(and (not forced_candidate_membership)
@@ -2696,14 +2720,17 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 								(if bounded (quote order_limit) (quote filter))
 								(if (and scan_order_supported bounded)
 									(probe_limit_work_rows (qb_limit block)) nil)
-								allow_ordered_batch_binding))
+								allow_ordered_batch_binding
+								(prefiltered_driver_recset_expr_for_membership
+									src source_table condition membership)))
 							(if (nil? plan) nil (list membership plan)))))
 						(lambda (entry) (not (nil? entry))))))
 				(define membership_bindings (filter (map membership_plans (lambda (entry)
 					(begin
 						(define membership (nth entry 0))
 						(define plan (nth entry 1))
-						(if (equal? (car plan) "candidate_keyset")
+						(if (or (equal? (car plan) "candidate_keyset")
+							(equal? (car plan) "prefiltered_candidate_keyset"))
 							(list membership (membership_recset_var src membership) (cadr plan))
 							nil))))
 					(lambda (binding) (not (nil? binding)))))
@@ -3045,18 +3072,22 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 				(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter))
 				(if (query_limit_active? offset_value limit_value)
 					(probe_limit_work_rows limit_value) nil)
-				false)))
+				false
+				(prefiltered_driver_recset_expr_for_membership
+					src (source_table_expr_using stages src) condition membership))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define membership_table_expr (if (and
 			(not (nil? membership_plan))
-			(equal? membership_strategy "candidate_keyset"))
+			(or (equal? membership_strategy "candidate_keyset")
+				(equal? membership_strategy "prefiltered_candidate_keyset")))
 			(cadr membership_plan)
 			nil))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
-		/* The node-local physical choice is final. A candidate keyset becomes the
-		ordered carrier; a driver-probe choice leaves the marker in the base-table
-		filter so its established direct probe lowering remains in charge. */
+		/* The node-local physical choice is final. A full or driver-prefiltered
+		candidate keyset becomes the ordered carrier; a driver-probe choice leaves
+		the marker in the base-table filter so its established direct probe lowering
+		remains in charge. */
 		(define filter_condition effective_condition)
 		/* Acceptance runs before OFFSET/LIMIT and therefore contains only joins
 		which can reject a driver row. Projection-only nullable lookups belong to
@@ -3553,11 +3584,14 @@ this lowering boundary. */
 				(if (and (not (empty_list? current_order_items))
 					(query_limit_active? offset_value limit_value))
 					(probe_limit_work_rows limit_value) nil)
-				false)))
+				false
+				(prefiltered_driver_recset_expr_for_membership
+					src (source_table_expr_using stages src) condition membership))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define membership_table_expr (if (and
 			(not (nil? membership_plan))
-			(equal? membership_strategy "candidate_keyset"))
+			(or (equal? membership_strategy "candidate_keyset")
+				(equal? membership_strategy "prefiltered_candidate_keyset")))
 			(cadr membership_plan)
 			nil))
 		(if (expr_contains_driver_membership? condition)
@@ -5509,17 +5543,31 @@ ordering run. Storage artifacts begin in build_queryplan. */
 				(or found (physical_expr_has_head? item target))) false))
 		_ false)))
 
+(define physical_prefiltered_membership_expr? (lambda (expr)
+	(match expr
+		((symbol scan_recset) _tx source _cols _filter)
+		(or (physical_expr_has_head? source (quote recset_project_join))
+			(physical_prefiltered_membership_expr? source))
+		((quote scan_recset) _tx source _cols _filter)
+		(or (physical_expr_has_head? source (quote recset_project_join))
+			(physical_prefiltered_membership_expr? source))
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (physical_prefiltered_membership_expr? item))) false)
+		_ false)))
+
 (define physical_membership_operator_family (lambda (plan)
 	(if (physical_expr_has_head? plan (quote scan_order_batch_accept))
 		"ordered_batch_accept"
-		(if (physical_expr_has_head? plan (quote recset_project_join))
-			"candidate_keyset"
-			/* A forced membership variant reaches this function only after
-			require_physical_scan_relations has rejected every surviving logical
-			marker. Without a projected RecSet its emitted carrier is therefore the
-			driver-side probe family, independent of the concrete group-cache/index
-			primitive selected inside that family. */
-			"driver_order_membership_probe"))))
+		(if (physical_prefiltered_membership_expr? plan)
+			"prefiltered_candidate_keyset"
+			(if (physical_expr_has_head? plan (quote recset_project_join))
+				"candidate_keyset"
+				/* A forced membership variant reaches this function only after
+				require_physical_scan_relations has rejected every surviving logical
+				marker. Without a projected RecSet its emitted carrier is therefore the
+				driver-side probe family, independent of the concrete group-cache/index
+				primitive selected inside that family. */
+				"driver_order_membership_probe")))))
 
 (define physical_operator_family_for_decision (lambda (plan decision)
 	(begin

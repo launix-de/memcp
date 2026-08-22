@@ -2385,6 +2385,7 @@ either physical alternative or sampling the table again. */
 			(list (quote membership_stage_id) (gs_id stage))
 			(list (quote membership_selectivity_class) class)
 			(list (quote membership_driver_rows) driver_rows)
+			(list (quote membership_local_filter_rows) driver_rows)
 			(list (quote membership_driver_input_rows) driver_input_rows)
 			(list (quote membership_driver_estimate_capped)
 				(qassoc_get driver_estimate (quote capped) false))
@@ -2633,7 +2634,13 @@ physical alternative. */
 		(if (not (membership_work_value work (quote membership_order_limit_driver) false))
 			driver_rows
 			(begin
-				(define density (membership_candidate_density candidate_input_rows candidate_rows work))
+				(define local_filter_rows
+					(membership_work_value work (quote membership_local_filter_rows) driver_input_rows))
+				(define local_filter_density (if (> driver_input_rows 0)
+					(min 1 (/ local_filter_rows driver_input_rows)) 0))
+				(define density (*
+					(membership_candidate_density candidate_input_rows candidate_rows work)
+					local_filter_density))
 				(define requested_rows (+ driver_rows
 					(membership_work_value work (quote membership_order_offset) 0)))
 				(if (> density 0)
@@ -2701,6 +2708,58 @@ physical alternative. */
 					0 0 0 0 0 0 projection_rows 0.65)
 				projection_rows 0.65)
 			base_cost))))
+
+/* A selective, source-local driver predicate can restrict both sides of the
+membership edge before an expensive candidate predicate runs. The emitted
+tree scans the driver once, projects its exact RecSet to the candidate source,
+filters only that subset, projects matches back, and intersects with the
+original driver RecSet. Cost it entirely from the same calibrated scan,
+expression, and RecSet components used by the other membership carriers. */
+(define membership_prefiltered_candidate_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
+	(begin
+		(define driver_input_rows (membership_driver_input_rows driver_rows work))
+		(define branches (max 1
+			(membership_work_value work (quote membership_candidate_probe_branches) 1)))
+		(define candidate_domain_rows (/ candidate_input_rows branches))
+		(define projected_candidate_rows (min driver_rows candidate_domain_rows))
+		(define candidate_work_rows (* projected_candidate_rows branches))
+		(define candidate_density (membership_candidate_density
+			candidate_input_rows candidate_rows work))
+		(define candidate_match_rows (* candidate_work_rows candidate_density))
+		(define candidate_fraction (if (> candidate_input_rows 0)
+			(min 1 (/ candidate_work_rows candidate_input_rows)) 0))
+		(define projection_rows (+
+			(* driver_rows 2)
+			candidate_work_rows
+			candidate_match_rows))
+		(planner_cost
+			(* (+
+				(membership_work_value work (quote membership_driver_scan_invocations) 1)
+				(membership_work_value work (quote membership_candidate_scan_invocations) branches))
+				planner_membership_scan_invocation_ns)
+			(+
+				(* (+ driver_input_rows candidate_work_rows projection_rows)
+					planner_membership_scan_row_ns)
+				(* driver_input_rows
+					(membership_work_value work (quote membership_driver_filter_columns) 0)
+					planner_membership_filter_column_row_ns)
+				(* driver_input_rows
+					(membership_work_value work (quote membership_driver_expression_operations) 0)
+					planner_membership_expression_operation_row_ns)
+				(* candidate_work_rows
+					(membership_work_value work (quote membership_candidate_filter_columns) 0)
+					planner_membership_filter_column_row_ns)
+				(* candidate_work_rows
+					(membership_work_value work (quote membership_candidate_expression_operations) 0)
+					planner_membership_expression_operation_row_ns)
+				(* (membership_work_value work (quote membership_candidate_broad_text_match_rows) 0)
+					candidate_fraction planner_membership_broad_text_match_row_ns)
+				(* (membership_work_value work (quote membership_candidate_broad_text_match_bytes) 0)
+					candidate_fraction planner_membership_broad_text_match_byte_ns))
+			0 0 0
+			(* projection_rows planner_membership_recset_build_row_ns)
+			(* projection_rows 8)
+			0 driver_rows 0.65))))
 
 (define membership_driver_probe_cost (lambda (driver_rows probe_branches)
 	(begin
@@ -2981,7 +3040,7 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 					(and (equal? (gs_id (nth batch_membership 0)) (gs_id stage))
 						(ordered_batch_stage_supported? stage))))
 				/* Batch eligibility only preserves the abstract membership marker.
-				The consuming tree edge below owns the single three-way physical
+				The consuming tree edge below owns the node-local physical
 				decision once its driver cardinality is known. */
 				(if batch_supported
 					true

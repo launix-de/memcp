@@ -585,6 +585,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list (quote coverage) (quote sampled)))
 		100000 100000) 25000
 		"capped table samples retain proportional selectivity extrapolation")
+	(assert (membership_expected_driver_rows_visited
+		40000 1000 10
+		(list
+			(list (quote membership_candidate_probe_branches) 2)
+			(list (quote membership_driver_input_rows) 20000)
+			(list (quote membership_local_filter_rows) 100)
+			(list (quote membership_order_limit_driver) true)))
+		20000
+		"ordered membership costing combines local driver and membership selectivity")
 	(assert (physical_text_scan_operation?
 		(list (quote strlike) "value" "%selective-term%" "utf8mb4_general_ci")) true
 		"text scan work is byte-sensitive even when the predicate is selective")
@@ -593,7 +602,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"non-text comparisons do not acquire text scan work")
 	/* planner_recset_carrier_cost / scalar_first_probe_recset_cost_preferred?:
 	same "unknown stays unknown" discipline as the keytable check above, plus
-	the actual three-way comparison. A RecSet's build cost scales with
+	the carrier cost comparison. A RecSet's build cost scales with
 	probe_rows (recset_project_join visits the driving side once, however
 	large it is); a keytable's dominant cost is its per-driving-row read
 	(row_ns, also scaled by probe_rows). For a large probe_rows count RecSet's
