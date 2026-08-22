@@ -58,7 +58,7 @@ test_cases:
         (if (not (equal? (get_assoc after "covered") 1)) (fail "node not covered after eval"))
         true)
 
-  - name: "SourceInfo coverage ignores parser grammar construction"
+  - name: "SourceInfo coverage marks parser grammar nodes"
     scm: |
       (begin
         (define fail (lambda (msg) (error (concat "source coverage parser syntax: " msg))))
