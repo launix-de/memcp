@@ -71,7 +71,8 @@ type columnPlannerStatistics struct {
 // lock-free access. Its JSON methods use atomic operations too, so concurrent
 // schema persistence cannot race query compilation.
 type atomicPlannerRowEstimate struct {
-	value atomic.Uint64
+	value   atomic.Uint64
+	present atomic.Bool
 }
 
 func (estimate *atomicPlannerRowEstimate) MarshalJSON() ([]byte, error) {
@@ -84,6 +85,7 @@ func (estimate *atomicPlannerRowEstimate) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	estimate.value.Store(value)
+	estimate.present.Store(true)
 	return nil
 }
 
@@ -1123,6 +1125,32 @@ func (t *table) CountEstimate() uint {
 	return uint(t.PlannerRowEstimate.value.Load())
 }
 
+// initializeLegacyPlannerRowEstimate migrates schemas written before the
+// planner_row_estimate field existed. It runs once while the database is still
+// loading, touches one persisted column per shard to recover the authoritative
+// row count, and keeps every subsequent compiler lookup O(1).
+func (t *table) initializeLegacyPlannerRowEstimate() {
+	if t.PlannerRowEstimate.present.Load() && t.PlannerRowEstimate.value.Load() > 0 {
+		return
+	}
+	var rows int64
+	for _, shard := range t.ActiveShards() {
+		if shard == nil {
+			continue
+		}
+		func() {
+			release := shard.GetRead()
+			defer release()
+			rows += shard.statsSnapshot().rowCount()
+		}()
+	}
+	if rows < 0 {
+		rows = 0
+	}
+	t.PlannerRowEstimate.value.Store(uint64(rows))
+	t.PlannerRowEstimate.present.Store(true)
+}
+
 // adjustPlannerRows advances the approximate cardinality after one DML batch.
 // Only the two-entry snapshot root is replaced; the immutable hashed column
 // catalog is reused. This keeps maintenance O(1) per batch and avoids forcing
@@ -1341,7 +1369,7 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		distinctEstimates[i] = distinctEstimate
 		plannerStatistics[i] = c.PlannerStats.Load()
 		result[i] = c.show(keyType, distinctEstimate, rowEstimate, plannerStatistics[i])
-		plannerStatsValue := plannerColumnStatisticsValue(distinctEstimate, plannerStatistics[i])
+		plannerStatsValue := plannerColumnStatisticsValue(distinctEstimate, plannerStatistics[i], c.Typ)
 		plannerColumns.Set(scm.NewString(c.Name), plannerStatsValue, nil)
 		if folded := foldIdentifier(c.Name); folded != c.Name {
 			plannerColumns.Set(scm.NewString(folded), plannerStatsValue, nil)
@@ -1443,7 +1471,7 @@ func (t *table) PlannerStatistics() scm.Scmer {
 	}
 }
 
-func plannerColumnStatisticsValue(distinctEstimate uint64, stats *columnPlannerStatistics) scm.Scmer {
+func plannerColumnStatisticsValue(distinctEstimate uint64, stats *columnPlannerStatistics, rawType string) scm.Scmer {
 	known := stats != nil
 	confidence := float64(0)
 	source := "unknown"
@@ -1471,6 +1499,7 @@ func plannerColumnStatisticsValue(distinctEstimate uint64, stats *columnPlannerS
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("null_fraction"), nullFraction}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("min"), minEstimate}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("max"), maxEstimate}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("raw_type"), scm.NewString(rawType)}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("average_value_bytes"), averageValueBytes}),
 	})
 }

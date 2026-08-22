@@ -7125,6 +7125,12 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(expr_contains_broad_text_match? head))
 		_ false)))
 
+(define expr_contains_text_match? (lambda (expr)
+	(match expr
+		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation) true
+		_ false)))
+
 (define stage_input_contains_broad_membership_filter? (lambda (input)
 	(if (union_block? input)
 		(reduce (union_branches input) (lambda (found branch)
@@ -7234,6 +7240,7 @@ source itself has no known row count (not a base table). */
 			(list (quote null_fraction) nil)
 			(list (quote min) nil)
 			(list (quote max) nil)
+			(list (quote raw_type) nil)
 			(list (quote average_value_bytes) nil))
 		(try
 			(lambda ()
@@ -7256,13 +7263,27 @@ source itself has no known row count (not a base table). */
 				(list (quote distinct) nil)
 				(list (quote distinct_confidence) 0)
 				(list (quote distinct_source) (quote unknown))
-				(list (quote average_value_bytes) nil))))))))
+				(list (quote raw_type) nil)
+				(list (quote average_value_bytes) nil)))))))
 
 (define planner_column_distinct_estimate (lambda (src column)
 	(qassoc_get (planner_column_statistics src column) (quote distinct) nil)))
 
 (define planner_column_average_value_bytes (lambda (src column)
-	(qassoc_get (planner_column_statistics src column) (quote average_value_bytes) nil)))
+	(begin
+		(define statistics (planner_column_statistics src column))
+		(define measured (qassoc_get statistics (quote average_value_bytes) nil))
+		(if (not (nil? measured))
+			measured
+			/* Persisted generations created before planner statistics existed do
+			not expose an average width until their next REBUILD. An unbounded text
+			column must not look free in that interval: its scan still has to load
+			and decode every value. This conservative width is an ordinary cost
+			input, so all physical alternatives remain selected by the same model. */
+			(if (contains? '("text" "bytea" "blob")
+				(toLower (string (qassoc_get statistics (quote raw_type) ""))))
+				4096
+				0)))))
 
 (define planner_group_distinct_estimate (lambda (src keys row_count)
 	(reduce keys (lambda (estimate key)
@@ -7577,17 +7598,18 @@ resulting tree in semantic order. */
 /* Physical costing needs the amount of scalar work, not a speculative copy of
 each alternative plan. This walker visits the already canonical expression
 once; get_column is a leaf because column reads are costed independently. */
-(define physical_broad_text_match_operation? (lambda (expr)
+(define physical_text_scan_operation? (lambda (expr)
 	(match expr
-		((symbol strlike) _value pattern _collation) (planner_broad_like_expr? pattern)
-		((quote strlike) _value pattern _collation) (planner_broad_like_expr? pattern)
-		((symbol strlike_cs) _value pattern _collation) (planner_broad_like_expr? pattern)
-		((quote strlike_cs) _value pattern _collation) (planner_broad_like_expr? pattern)
+		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation) true
+		((symbol strlike_cs) _value _pattern _collation) true
+		((quote strlike_cs) _value _pattern _collation) true
 		_ false)))
 
-/* REBUILD already walks and decodes every base value. Its exact average byte
-width lets costing distinguish short labels from large text documents without
-building either physical alternative or sampling the table again. */
+/* Every text predicate must decode its input regardless of result selectivity.
+REBUILD already walks every base value, so its exact average byte width lets
+costing distinguish short labels from large text documents without building
+either physical alternative or sampling the table again. */
 (define physical_expression_work_profile (lambda (src expr)
 	(match expr
 		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
@@ -7605,11 +7627,11 @@ building either physical alternative or sampling the table again. */
 				(list (quote depth) (+ own (reduce children (lambda (depth child)
 					(max depth (qassoc_get child (quote depth) 0))) 0)))
 				(list (quote broad_text_matches) (+
-					(if (physical_broad_text_match_operation? expr) 1 0)
+					(if (physical_text_scan_operation? expr) 1 0)
 					(reduce children (lambda (total child)
 						(+ total (qassoc_get child (quote broad_text_matches) 0))) 0)))
 				(list (quote broad_text_average_bytes) (+
-					(if (physical_broad_text_match_operation? expr)
+					(if (physical_text_scan_operation? expr)
 						(reduce (extract_columns_for_alias src (car tail)) (lambda (total column)
 							(+ total (coalesceNil (planner_column_average_value_bytes src column) 0))) 0)
 						0)
@@ -12982,11 +13004,10 @@ the auto-index chooses the concrete access path on both tables. */
 					(exists_recset_project_join_expr src stage)
 					nil))))))
 
-/* A membership requirement becomes physical only here. Returning nil keeps
-the marker in the filter, whose ordinary lowering emits the driver-side
-scan_exists/keytable path. Returning the expression emits the RecSet carrier.
-That makes the recorded and forced choice identical to the executable plan. */
-(define recset_project_join_expr_for_membership_using (lambda (src membership consumer ordered_filter driver_rows_override)
+/* Cost one physical tree edge once and return (strategy RecSet-expression).
+Consumers decide whether that RecSet is their scan carrier or a membership
+filter; they must not reconstruct the choice from enclosing block facts. */
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override)
 	(begin
 		(define stage (nth membership 0))
 		/* Some late RecSet consumers are introduced after reorder telemetry was
@@ -13001,7 +13022,7 @@ That makes the recorded and forced choice identical to the executable plan. */
 			(not (or
 				(equal? (qassoc_get facts (quote purpose) nil) (quote in_membership))
 				(equal? (qassoc_get facts (quote purpose) nil) (quote in_candidate)))))
-			raw_expr
+			(if (nil? raw_expr) nil (list "candidate_keyset" raw_expr))
 			(begin
 				(define measured_estimate (planner_stage_filter_estimate (gs_input stage) 512))
 				(define estimate_population (coalesceNil
@@ -13129,29 +13150,20 @@ That makes the recorded and forced choice identical to the executable plan. */
 								(list "status" (if (equal? chosen "driver_order_membership_probe") "chosen" "rejected"))
 								(list "reason" (if (equal? chosen "driver_order_membership_probe") "selected" "higher_total_ns_or_forced_alternative"))
 								(list "cost" (if (nil? driver_cost) '() (planner_cost_explain driver_cost))))))))
-				(if (and (equal? chosen "candidate_keyset") ordered_filter)
-					(planner_record_physical_decision
-						(list
-							(list "decision" "ordered_recset_iterator")
-							(list "chosen" "recset_contains_probe")
-							(list "reason" "base_table_scan_with_membership_filter")
-							(list "inputs" (list
-								(list "candidate_rows" candidate_rows)
-								(list "driver_rows" driver_rows)))
-							(list "alternatives" (list
-								(list
-									(list "plan" "scan_order_recset_part")
-									(list "status" "rejected")
-									(list "reason" "source_is_base_table"))
-								(list
-									(list "plan" "recset_contains_probe")
-									(list "status" "chosen")
-									(list "reason" "base_table_scan_with_membership_filter"))))))
-					nil)
-				(if (equal? chosen "candidate_keyset") raw_expr nil))))))
+				(list chosen raw_expr))))))
+
+/* General expression callers preserve the established contract: only a
+candidate-keyset choice replaces the marker with a projected RecSet carrier. */
+(define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override)
+	(begin
+		(define plan (recset_project_join_plan_for_membership_using
+			src membership consumer driver_rows_override))
+		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
+			(cadr plan)
+			nil))))
 
 (define recset_project_join_expr_for_membership (lambda (src membership)
-	(recset_project_join_expr_for_membership_using src membership nil false nil)))
+	(recset_project_join_expr_for_membership_using src membership nil nil)))
 
 (define lower_scalar_marker_expr (lambda (expr)
 	(match expr
@@ -18019,16 +18031,16 @@ scan boundary only when the complete predicate implies it. */
 						(replace_driver_membership_markers src item memberships))))
 					_ expr))))))
 
-(define membership_recset_bindings_using (lambda (src memberships consumer ordered_filter driver_rows_override)
+(define membership_recset_bindings_using (lambda (src memberships consumer driver_rows_override)
 	(filter (map memberships (lambda (membership)
 		(begin
 			(define expr (recset_project_join_expr_for_membership_using
-				src membership consumer ordered_filter driver_rows_override))
+				src membership consumer driver_rows_override))
 			(if (nil? expr) nil (list membership (membership_recset_var src membership) expr)))))
 		(lambda (binding) (not (nil? binding))))))
 
 (define membership_recset_bindings (lambda (src memberships)
-	(membership_recset_bindings_using src memberships nil false nil)))
+	(membership_recset_bindings_using src memberships nil nil)))
 
 (define wrap_membership_recset_bindings (lambda (bindings body)
 	(if (empty_list? bindings)
@@ -18304,7 +18316,6 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 					'()
 					(membership_recset_bindings_using src memberships
 						(if bounded (quote order_limit) (quote filter))
-						(and scan_order_supported bounded)
 						(if (and scan_order_supported bounded)
 							(probe_limit_work_rows (qb_limit block)) nil))))
 				(define bound_memberships (map membership_bindings (lambda (binding) (nth binding 0))))
@@ -18607,25 +18618,23 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 		(define driver_order_items (nth order_parts 0))
 		(define remaining_order_items (nth order_parts 1))
 		(define membership (driver_membership_for_source src condition))
-		(define membership_table_expr (if (nil? membership) nil
-			(recset_project_join_expr_for_membership_using src membership
+		(define membership_plan (if (nil? membership) nil
+			(recset_project_join_plan_for_membership_using src membership
 				(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter))
-				(and (not (empty_list? driver_order_items))
-					(query_limit_active? offset_value limit_value))
 				(if (query_limit_active? offset_value limit_value)
 					(probe_limit_work_rows limit_value) nil))))
+		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
+		(define membership_table_expr (if (and
+			(not (nil? membership_plan))
+			(equal? membership_strategy "candidate_keyset"))
+			(cadr membership_plan)
+			nil))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
-		/* A broad membership set cannot narrow an ordered driver. Keep the base
-		table as the order carrier and probe the RecSet in the filter so scan_order
-		can use its native Top-K braking instead of sorting the projected domain. */
-		(define membership_filter (and
-			(not (nil? membership_table_expr))
-			(broad_driver_order_membership_probe? facts)))
-		(define membership_var (symbol "__ordered_membership_recset"))
-		(define filter_condition (combine_where
-			(if membership_filter (recset_contains_call_expr membership_var) true)
-			effective_condition))
+		/* The node-local physical choice is final. A candidate keyset becomes the
+		ordered carrier; a driver-probe choice leaves the marker in the base-table
+		filter so its established direct probe lowering remains in charge. */
+		(define filter_condition effective_condition)
 		/* Acceptance runs before OFFSET/LIMIT and therefore contains only joins
 		which can reject a driver row. Projection-only nullable lookups belong to
 		the map callback after the native window and must not be probed twice. */
@@ -18650,7 +18659,6 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 				(list (quote lambda) (list (quote accepted) (quote shard_accepted))
 					(list (quote or) (quote accepted) (quote shard_accepted))))))
 		(define filtercols (merge_unique (list
-			(if membership_filter (list "$recset_contains") '())
 			(join_cols_for_alias all_sources default_alias alias (list effective_condition)))))
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
@@ -18678,9 +18686,7 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			projection))
 		(define scan_expr (list (quote scan_order)
 			'(session "__memcp_tx")
-			(if membership_filter
-				(source_table_expr_using stages src)
-				(coalesceNil membership_table_expr (source_table_expr_using stages src)))
+			(coalesceNil membership_table_expr (source_table_expr_using stages src))
 			(cons (quote list) filtercols)
 			filter_expr
 			(cons (quote list) (scan_order_sort_columns_for_join_driver
@@ -18691,11 +18697,7 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			map_expr nil nil false nil
 			(cons (quote list) acceptance_cols)
 			acceptance_expr))
-		(if membership_filter
-			(list
-				(list (quote lambda) (list membership_var) scan_expr)
-				membership_table_expr)
-			scan_expr))))
+		scan_expr)))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -18861,6 +18863,11 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 		(qassoc_get context (quote default) nil)
 		nil)))
 
+(define probe_work_context_driver_alias (lambda (context)
+	(if (probe_work_context? context)
+		(qassoc_get context (quote driver_alias) nil)
+		nil)))
+
 (define probe_work_context_rows_for_alias (lambda (context alias)
 	(if (probe_work_context? context)
 		(qassoc_get (qassoc_get context (quote by_alias) '()) alias
@@ -18929,8 +18936,167 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 			(physical_join_tree_probe_work tree sources)))
 		(list
 			(list (quote probe_work_context) true)
+			(list (quote driver_alias) (if (nil? tree) nil
+				(join_optimizer_tree_first_alias tree)))
 			(list (quote default) (coalesceNil (car work) default_rows))
 			(list (quote by_alias) (cadr work))))))
+
+/* A source-local text predicate is already a canonical logical predicate by
+the time it reaches this boundary. For a selective join driver, enumerate an
+exact RecSet carrier so expensive downstream ACL/join work runs only for the
+matching record IDs. This is a physical choice over the normalized predicate;
+it does not recover parser spelling or leak a scan into logical IR. */
+(define selective_text_filter_candidate (lambda (src all_sources default_alias condition)
+	(begin
+		(define alias (source_alias src))
+		(define aliases (source_aliases all_sources))
+		(define input_rows (planner_source_row_count src))
+		(if (or (not (number? input_rows)) (< input_rows 1024))
+			nil
+			(reduce (split_and_terms (coalesceNil condition true)) (lambda (best term)
+				(if (or (not (expr_contains_text_match? term))
+					(not (equal? (join_hypergraph_expr_aliases default_alias aliases term)
+						(list alias))))
+					best
+					(begin
+						(planner_record_session_value_guards term)
+						(define estimate (planner_source_filter_estimate src term 512))
+						(define rows (membership_estimated_matching_rows estimate input_rows nil))
+						(define work (membership_source_work_profile src term true))
+						(define candidate (if (number? rows)
+							(list
+								(list (quote predicate) term)
+								(list (quote rows) rows)
+								(list (quote input_rows) input_rows)
+								(list (quote work) work)
+								(list (quote estimate) estimate))
+							nil))
+						(if (or (nil? candidate)
+							(and (not (nil? best))
+								(<= (qassoc_get best (quote rows) input_rows) rows)))
+							best candidate))))
+				nil)))))
+
+/* The text predicate itself is common work. The carrier decision determines
+whether the downstream join continuation is entered for every driver row or
+only for exact matches after a parallel RecSet-producing pass. Reuse the
+calibrated physical primitives; do not hide another selectivity threshold in
+this lowering boundary. */
+(define selective_text_filter_scan_cost (lambda (src candidate)
+	(begin
+		(define input_rows (qassoc_get candidate (quote input_rows) 0))
+		(define work (qassoc_get candidate (quote work) '()))
+		(planner_cost
+			(* (qassoc_get work (quote scan_invocations) 1)
+				planner_membership_scan_invocation_ns)
+			(+
+				(* input_rows planner_membership_scan_row_ns)
+				(* (qassoc_get work (quote filter_value_rows) 0)
+					planner_membership_filter_column_row_ns)
+				(* (qassoc_get work (quote expression_operation_rows) 0)
+					planner_membership_expression_operation_row_ns)
+				(* (qassoc_get work (quote broad_text_match_rows) 0)
+					planner_membership_broad_text_match_row_ns)
+				(* (qassoc_get work (quote broad_text_match_bytes) 0)
+					planner_membership_broad_text_match_byte_ns))
+			0 0 0 0 0 0 input_rows 0.75))))
+
+(define selective_text_filter_base_cost (lambda (src candidate)
+	(begin
+		(define input_rows (qassoc_get candidate (quote input_rows) 0))
+		(planner_cost_add
+			(selective_text_filter_scan_cost src candidate)
+			(planner_join_work_cost input_rows 0.65)
+			(qassoc_get candidate (quote rows) input_rows) 0.65))))
+
+(define selective_text_filter_recset_cost (lambda (src candidate)
+	(begin
+		(define input_rows (qassoc_get candidate (quote input_rows) 0))
+		(define rows (qassoc_get candidate (quote rows) input_rows))
+		(planner_cost_add
+			(planner_cost_add
+				(selective_text_filter_scan_cost src candidate)
+				(planner_cost planner_membership_recset_startup_ns
+					(* rows planner_membership_scan_row_ns) 0 0 0
+					(* rows planner_membership_recset_build_row_ns)
+					(* rows 8) 0 rows 0.65)
+				rows 0.65)
+			(planner_join_work_cost rows 0.65)
+			rows 0.65))))
+
+(define choose_selective_text_filter_carrier (lambda (src candidate)
+	(if (nil? candidate)
+		(list "fused_base_scan" nil)
+		(begin
+			(define alias (source_alias src))
+			(define decision_id (concat "selective_text_filter_carrier:" alias))
+			(define recset_cost (selective_text_filter_recset_cost src candidate))
+			(define base_cost (selective_text_filter_base_cost src candidate))
+			(define work (qassoc_get candidate (quote work) '()))
+			(define normal_choice (if (planner_cost_better? recset_cost base_cost)
+				"scan_recset" "fused_base_scan"))
+			(define alternatives (list "scan_recset" "fused_base_scan"))
+			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
+			(define forced (planner_physical_override decision_id))
+			(planner_record_physical_decision (list
+				(list "decision_id" decision_id)
+				(list "decision" "selective_text_filter_carrier")
+				(list "decision_site" "join_scan_leaf")
+				(list "source" alias)
+				(list "chosen" chosen)
+				(list "normally_chosen" normal_choice)
+				(list "selection" (if (nil? forced) "cost" "forced"))
+				(list "reason" (if (nil? forced) "lowest_total_ns" "calibration_override"))
+				(list "inputs" (list
+					(list "candidate_rows" (qassoc_get candidate (quote rows) nil))
+					(list "candidate_input_rows" (qassoc_get candidate (quote input_rows) nil))
+					(list "candidate_scan_invocations" (qassoc_get work (quote scan_invocations) 1))
+					(list "candidate_filter_columns" (qassoc_get work (quote filter_columns) 0))
+					(list "candidate_expression_operations" (qassoc_get work (quote expression_operations) 0))
+					(list "candidate_expression_depth" (qassoc_get work (quote expression_depth) 0))
+					(list "candidate_broad_text_match_rows" (qassoc_get work (quote broad_text_match_rows) 0))
+					(list "candidate_broad_text_match_bytes" (qassoc_get work (quote broad_text_match_bytes) 0))
+					(list "candidate_filter_value_rows" (qassoc_get work (quote filter_value_rows) 0))
+					(list "candidate_expression_operation_rows" (qassoc_get work (quote expression_operation_rows) 0))
+					(list "driver_rows" (qassoc_get candidate (quote rows) nil))
+					(list "driver_input_rows" (qassoc_get candidate (quote input_rows) nil))
+					(list "density" (/ (qassoc_get candidate (quote rows) 0)
+						(qassoc_get candidate (quote input_rows) 1)))))
+				(list "alternatives" (list
+					(list
+						(list "plan" "scan_recset")
+						(list "status" (if (equal? chosen "scan_recset") "chosen" "rejected"))
+						(list "reason" (if (equal? chosen "scan_recset") "selected" "higher_total_ns_or_forced_alternative"))
+						(list "cost" (planner_cost_explain recset_cost)))
+					(list
+						(list "plan" "fused_base_scan")
+						(list "status" (if (equal? chosen "fused_base_scan") "chosen" "rejected"))
+						(list "reason" (if (equal? chosen "fused_base_scan") "selected" "higher_total_ns_or_forced_alternative"))
+						(list "cost" (planner_cost_explain base_cost)))))))
+			(list chosen candidate)))))
+
+(define selective_text_filter_recset_expr (lambda (stages src candidate)
+	(begin
+		(define alias (source_alias src))
+		(define predicate (qassoc_get candidate (quote predicate) true))
+		(define cols (extract_columns_for_alias src predicate))
+		(list (quote scan_recset)
+			'(session "__memcp_tx")
+			(source_table_expr_using stages src)
+			(cons (quote list) cols)
+			(list (quote lambda)
+				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+				(lower_column_expr_for_alias src predicate))))))
+
+(define strip_selective_text_filter_candidate (lambda (condition candidate)
+	(if (nil? candidate)
+		condition
+		(begin
+			(define predicate (qassoc_get candidate (quote predicate) true))
+			(combine_where_terms
+				(filter (split_and_terms (coalesceNil condition true)) (lambda (term)
+					(not (equal? term predicate))))
+				true)))))
 
 (define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context continuation outer_scan)
 	(begin
@@ -18958,16 +19124,20 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 		(define delay_limit_after_join (ordered_join_limit_requires_complete_rows?
 			(join_optimizer_sources_for_order all_sources (cons alias future_aliases))
 			default_alias final_condition offset_value limit_value))
-		(define membership_table_expr (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
+		(define membership_plan (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
 			nil
-			(recset_project_join_expr_for_membership_using src membership
+			(recset_project_join_plan_for_membership_using src membership
 				(if (join_scan_reduce? result_mode) (quote aggregate)
 					(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter)))
-				(and (not (empty_list? current_order_items))
-					(query_limit_active? offset_value limit_value))
 				(if (and (not (empty_list? current_order_items))
 					(query_limit_active? offset_value limit_value))
 					(probe_limit_work_rows limit_value) nil))))
+		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
+		(define membership_table_expr (if (and
+			(not (nil? membership_plan))
+			(equal? membership_strategy "candidate_keyset"))
+			(cadr membership_plan)
+			nil))
 		(if (expr_contains_driver_membership? condition)
 			(planner_record_physical_decision (list
 				(list "decision" "join_leaf_membership_consumer")
@@ -18983,25 +19153,57 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 					(list "limit_delayed" delay_limit_after_join)
 					(list "projection_built" (not (nil? membership_table_expr)))))))
 			nil)
-		(define membership_driver (and (not (nil? membership_table_expr)) (empty_list? future_aliases)))
-		(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
 		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
+		/* A candidate-keyset choice makes the projected row positions this leaf's
+		scan carrier even when later join leaves are continuations. A driver-probe
+		choice leaves the logical marker in the established direct probe path. The
+		row-number pipeline still owns a base-table carrier, so it consumes a chosen
+		candidate RecSet as a membership filter until it accepts an explicit source. */
+		(define membership_driver (and
+			(not (nil? membership_table_expr))
+			(nil? row_number_stage_filter)))
+		(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
+		(define text_filter_eligible (and
+			(not membership_driver)
+			(nil? row_number_stage_filter)
+			(> (count all_sources) 1)
+			(equal? alias (probe_work_context_driver_alias probe_context))))
+		(define text_filter_candidate_before_point_check (if text_filter_eligible
+			(selective_text_filter_candidate src all_sources default_alias effective_condition)
+			nil))
+		/* Most join leaves have no text predicate. Avoid walking their full
+		condition a second time to prove point access before the cheap candidate
+		classifier has established that this decision is relevant at all. */
+		(define text_filter_candidate (if (and
+			(not (nil? text_filter_candidate_before_point_check))
+			(source_unique_point_condition? src effective_condition))
+			nil
+			text_filter_candidate_before_point_check))
+		(define text_filter_plan (choose_selective_text_filter_carrier src text_filter_candidate))
+		(define text_filter_recset (and (not (nil? text_filter_candidate))
+			(equal? (car text_filter_plan) "scan_recset")))
+		(define residual_condition
+			(strip_selective_text_filter_candidate effective_condition
+				(if text_filter_recset text_filter_candidate nil)))
 		(define membership_var (symbol "__membership_recset"))
 		(define membership_filter_expr (if membership_filter
 			(recset_contains_call_expr membership_var)
 			true))
-		(define filter_condition (combine_where membership_filter_expr effective_condition))
-		(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
+		(define filter_condition (combine_where membership_filter_expr residual_condition))
 		(define filtercols (merge_unique (list
 			(if membership_filter (list "$recset_contains") '())
-			(join_filter_cols_for_alias all_sources default_alias alias effective_condition))))
+			(join_filter_cols_for_alias all_sources default_alias alias residual_condition))))
 		(define recipe_mapcols (join_recipe_mapcols column_recipe alias))
 		(define raw_mapcols (if (nil? column_recipe)
 			(join_cols_for_alias all_sources default_alias alias needed_exprs)
 			recipe_mapcols))
 		(define mapcols raw_mapcols)
-		(define table_expr (if membership_driver membership_table_expr (source_table_expr_using stages src)))
+		(define table_expr (if membership_driver membership_table_expr
+			(if (not text_filter_recset)
+				(source_table_expr_using stages src)
+				(selective_text_filter_recset_expr stages src text_filter_candidate))))
 		(define lowered_filter_condition (mark_outer_join_symbols
 			all_sources
 			alias
@@ -21075,25 +21277,33 @@ potentially large calibrated SELECT result. */
 					(nth compilation 2)
 					suite_var)))))))
 
-(define physical_membership_decision_calibratable? (lambda (decision)
-	(if (not (equal? (qassoc_get decision "decision" nil) "membership_carrier"))
-		true
-		(begin
-			(define inputs (qassoc_get decision "inputs" '()))
-			(and (not (nil? (qassoc_get decision "decision_id" nil)))
-				(and (> (count (qassoc_get decision "alternatives" '())) 1)
-					(and (number? (qassoc_get inputs "candidate_input_rows" nil))
-						(and (number? (qassoc_get inputs "candidate_rows" nil))
-							(and (number? (qassoc_get inputs "driver_input_rows" nil))
-								(number? (qassoc_get inputs "driver_rows" nil)))))))))))
+(define physical_decision_has_costed_alternatives? (lambda (decision)
+	(begin
+		(define alternatives (qassoc_get decision "alternatives" '()))
+		(and (not (nil? (qassoc_get decision "decision_id" nil)))
+			(and (> (count alternatives) 1)
+				(reduce alternatives (lambda (valid alternative)
+					(and valid (number? (qassoc_get
+						(qassoc_get alternative "cost" '()) "total_ns" nil)))) true))))))
+
+(define physical_decision_calibratable? (lambda (decision)
+	(if (not (physical_decision_has_costed_alternatives? decision))
+		false
+		(if (not (equal? (qassoc_get decision "decision" nil) "membership_carrier"))
+			true
+			(begin
+				(define inputs (qassoc_get decision "inputs" '()))
+				(and (number? (qassoc_get inputs "candidate_input_rows" nil))
+					(and (number? (qassoc_get inputs "candidate_rows" nil))
+						(and (number? (qassoc_get inputs "driver_input_rows" nil))
+							(number? (qassoc_get inputs "driver_rows" nil))))))))))
 
 (define explain_queryplan_physical_calibrate_discover (lambda (query)
 	(begin
 		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
 		(define compilation (compile_physical_explain_variant reordered nil))
 		(define decisions (filter (nth compilation 1) (lambda (decision)
-			(and (physical_membership_decision_calibratable? decision)
-				(equal? (qassoc_get decision "decision" nil) "membership_carrier")))))
+			(physical_decision_calibratable? decision))))
 		(if (empty_list? decisions)
 			(list (quote resultrow) (list (quote list)
 				"error" "no calibratable physical decision"))
@@ -21136,10 +21346,10 @@ potentially large calibrated SELECT result. */
 		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
 		(define default_compilation (compile_physical_explain_variant reordered nil))
 		(define uncalibratable (filter (nth default_compilation 1) (lambda (decision)
-			(not (physical_membership_decision_calibratable? decision)))))
+			(and (equal? (qassoc_get decision "decision" nil) "membership_carrier")
+				(not (physical_decision_calibratable? decision))))))
 		(define decisions (filter (nth default_compilation 1) (lambda (decision)
-			(and (not (nil? (qassoc_get decision "decision_id" nil)))
-				(> (count (qassoc_get decision "alternatives" '())) 1)))))
+			(physical_decision_calibratable? decision))))
 		(if (not (empty_list? uncalibratable))
 			(list (quote resultrow) (list (quote list)
 				"error" "uncalibratable physical membership decision"

@@ -1260,6 +1260,107 @@ test_cases:
             - "consumer"
             - "aggregate"
 
+  - name: "Selective ordered membership keeps its node-local RecSet carrier"
+    fail_comment: "a selective candidate_keyset choice must reach scan_order as its RecSet source"
+    setup:
+      - sql: "DROP TABLE IF EXISTS in_ordered_carrier_doc"
+      - sql: "DROP TABLE IF EXISTS in_ordered_carrier_file"
+      - sql: "DROP TABLE IF EXISTS in_ordered_carrier_acl"
+      - sql: "DROP TABLE IF EXISTS in_ordered_carrier_owner"
+      - sql: |
+          CREATE TABLE in_ordered_carrier_file (
+            ID INT PRIMARY KEY,
+            filename VARCHAR(64),
+            search VARCHAR(128)
+          )
+      - sql: |
+          CREATE TABLE in_ordered_carrier_doc (
+            ID INT PRIMARY KEY,
+            file_id INT,
+            tenant INT,
+            owner INT,
+            sort_key INT
+          )
+      - sql: "CREATE TABLE in_ordered_carrier_acl (ID INT PRIMARY KEY, usr INT, tenant INT)"
+      - sql: "CREATE TABLE in_ordered_carrier_owner (ID INT PRIMARY KEY, name VARCHAR(64))"
+      - sql: "INSERT INTO in_ordered_carrier_file VALUES (1, 'cold.pdf', 'cold')"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 1, CONCAT('cold-', ID + 1, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 2, CONCAT('cold-', ID + 2, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 4, CONCAT('cold-', ID + 4, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 8, CONCAT('cold-', ID + 8, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 16, CONCAT('cold-', ID + 16, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 32, CONCAT('cold-', ID + 32, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 64, CONCAT('cold-', ID + 64, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 128, CONCAT('cold-', ID + 128, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 256, CONCAT('cold-', ID + 256, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_file SELECT ID + 512, CONCAT('cold-', ID + 512, '.pdf'), 'cold' FROM in_ordered_carrier_file"
+      - sql: "UPDATE in_ordered_carrier_file SET filename = 'rare-target.pdf' WHERE ID = 1024"
+      - sql: "INSERT INTO in_ordered_carrier_doc SELECT ID, ID, 1, 1, 1025 - ID FROM in_ordered_carrier_file"
+      - sql: "INSERT INTO in_ordered_carrier_acl VALUES (1, 105, 1)"
+      - sql: "INSERT INTO in_ordered_carrier_owner VALUES (1, 'Ada')"
+    steps:
+      - sql: |
+          SELECT wrapped.ID, wrapped.owner_name
+          FROM (
+            SELECT visible.ID, visible.file_id, visible.sort_key, owner.name AS owner_name
+            FROM (
+              SELECT d.ID, d.file_id, d.owner, d.sort_key
+              FROM in_ordered_carrier_doc d
+              WHERE EXISTS (
+                SELECT TRUE FROM in_ordered_carrier_acl acl
+                WHERE acl.usr = 105 AND acl.tenant = d.tenant
+                LIMIT 1
+              )
+            ) visible
+            LEFT JOIN in_ordered_carrier_owner owner ON owner.ID = visible.owner
+          ) wrapped
+          WHERE wrapped.file_id IN (
+            SELECT f.ID FROM in_ordered_carrier_file f WHERE f.filename LIKE '%rare-target%'
+            UNION
+            SELECT f.ID FROM in_ordered_carrier_file f WHERE f.search LIKE '%rare-target%'
+          )
+          ORDER BY wrapped.sort_key
+          LIMIT 72
+        expect:
+          rows: 1
+          data:
+            - ID: 1024
+              owner_name: "Ada"
+      - sql: |
+          EXPLAIN PHYSICAL
+          SELECT wrapped.ID, wrapped.owner_name
+          FROM (
+            SELECT visible.ID, visible.file_id, visible.sort_key, owner.name AS owner_name
+            FROM (
+              SELECT d.ID, d.file_id, d.owner, d.sort_key
+              FROM in_ordered_carrier_doc d
+              WHERE EXISTS (
+                SELECT TRUE FROM in_ordered_carrier_acl acl
+                WHERE acl.usr = 105 AND acl.tenant = d.tenant
+                LIMIT 1
+              )
+            ) visible
+            LEFT JOIN in_ordered_carrier_owner owner ON owner.ID = visible.owner
+          ) wrapped
+          WHERE wrapped.file_id IN (
+            SELECT f.ID FROM in_ordered_carrier_file f WHERE f.filename LIKE '%rare-target%'
+            UNION
+            SELECT f.ID FROM in_ordered_carrier_file f WHERE f.search LIKE '%rare-target%'
+          )
+          ORDER BY wrapped.sort_key
+          LIMIT 72
+        expect:
+          contains:
+            - "chosen candidate_keyset"
+            - "chosen scan_order_recset_part"
+            - "recset_scan_source"
+            - "recset_project_join"
+          not_contains:
+            - "chosen recset_contains_probe"
+            - "base_table_scan_with_membership_filter"
+            - "source_is_base_table"
+            - "$recset_contains"
+
   - name: "IN UNION after derived ACL EXISTS keeps rows and lowers probes"
     fail_comment: "planner must not leak driver_membership_probe into final code or drop rows"
     setup:

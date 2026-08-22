@@ -522,6 +522,7 @@ func (db *database) ensureLoaded() {
 			t.ShardMode = ShardModeFree
 		}
 		t.publishTopologyLocked()
+		t.initializeLegacyPlannerRowEstimate()
 		t.publishShowColumnsSnapshot()
 	}
 	// FK enforcement triggers are serializable Procs and persist with the table JSON.
