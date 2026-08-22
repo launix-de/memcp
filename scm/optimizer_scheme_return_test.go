@@ -140,6 +140,87 @@ func TestSchemeReturnHintsPreserveNestedMutRewrite(t *testing.T) {
 	}
 }
 
+func TestOptimizeInlinesHelperWithCaptureFreeNestedLambda(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("nested lambda inline test", `(define filter_owned (lambda (values)
+		(filter values (lambda (x) (> x 1)))))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (a b c)
+		(filter_owned (list a b c)))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if strings.Contains(serialized, "filter_owned") {
+		t.Fatalf("helper with capture-free nested lambda was not inlined: %s", serialized)
+	}
+	if !strings.Contains(serialized, "!list") && !strings.Contains(serialized, "filter_mut") {
+		t.Fatalf("inlined helper did not reuse or stack-allocate its input: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, env), NewInt(0), NewInt(2), NewInt(3)); !Equal(got, NewSlice([]Scmer{NewInt(2), NewInt(3)})) {
+		t.Fatalf("inlined helper returned %s", String(got))
+	}
+}
+
+func TestInlinedNestedLambdaHelperDoesNotMutateBorrowedParameter(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("nested lambda inline test", `(define filter_borrowed (lambda (values)
+		(filter values (lambda (x) (> x 1)))))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (values) (filter_borrowed values))`)
+	if serialized := serializedTestExpr(t, env, optimized); strings.Contains(serialized, "filter_mut") {
+		t.Fatalf("borrowed helper parameter selected filter_mut: %s", serialized)
+	}
+	shared := NewSlice([]Scmer{NewInt(0), NewInt(2), NewInt(3)})
+	if got := Apply(Eval(optimized, env), shared); !Equal(got, NewSlice([]Scmer{NewInt(2), NewInt(3)})) {
+		t.Fatalf("borrowed helper returned %s", String(got))
+	}
+	if !Equal(shared, NewSlice([]Scmer{NewInt(0), NewInt(2), NewInt(3)})) {
+		t.Fatalf("borrowed helper mutated its input: %s", String(shared))
+	}
+}
+
+func TestOptimizeKeepsNestedLambdaHelperWithOuterCapture(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("nested lambda inline test", `(define add_offset (lambda (offset values)
+		(map values (lambda (value) (+ value offset)))))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (values) (add_offset 2 values))`)
+	if serialized := serializedTestExpr(t, env, optimized); !strings.Contains(serialized, "add_offset") {
+		t.Fatalf("helper with nested outer capture was inlined: %s", serialized)
+	}
+	got := Apply(Eval(optimized, env), NewSlice([]Scmer{NewInt(1), NewInt(3)}))
+	if !Equal(got, NewSlice([]Scmer{NewInt(3), NewInt(5)})) {
+		t.Fatalf("capturing helper returned %s", String(got))
+	}
+}
+
+func TestOptimizeKeepsNestedLambdaHelperFromDifferentEnvironment(t *testing.T) {
+	source := newOptimizerTestEnv()
+	EvalAll("nested lambda inline test", `(define nested_captured_value 7)`, source)
+	EvalAll("nested lambda inline test", `(define nested_captured_helper (lambda (values)
+		(map values (lambda (value) (+ value nested_captured_value)))))`, source)
+
+	target := newOptimizerTestEnv()
+	target.Vars[Symbol("nested_captured_value")] = NewInt(9)
+	target.Vars[Symbol("nested_captured_helper")] = source.Vars[Symbol("nested_captured_helper")]
+	optimized := optimizeTestSource(t, target, `(lambda (values) (nested_captured_helper values))`)
+	if serialized := serializedTestExpr(t, target, optimized); !strings.Contains(serialized, "nested_captured_helper") {
+		t.Fatalf("nested helper from a different environment was inlined: %s", serialized)
+	}
+	got := Apply(Eval(optimized, target), NewSlice([]Scmer{NewInt(1)}))
+	if !Equal(got, NewSlice([]Scmer{NewInt(8)})) {
+		t.Fatalf("nested helper used target capture: %s", String(got))
+	}
+}
+
+func TestNestedLambdaCaptureAnalysisHandlesCycles(t *testing.T) {
+	items := make([]Scmer, 2)
+	cycle := NewSlice(items)
+	items[0] = NewSymbol("lambda")
+	items[1] = cycle
+	if expressionContainsOuterReference(cycle) {
+		t.Fatal("capture analysis treated a small capture-free cycle as an outer reference")
+	}
+}
+
 func TestOptimizeInlinesSingleUseLeafProc(t *testing.T) {
 	env := newOptimizerTestEnv()
 	EvalAll("leaf inline test", `(define leaf_second (lambda (values) (nth values 1)))`, env)
@@ -209,6 +290,23 @@ func BenchmarkSchemeHelperOwnedReturnAppend(b *testing.B) {
 	env := newOptimizerTestEnv()
 	EvalAll("optimizer return benchmark", `(define benchmark_filtered (lambda (a b c d) (filter (list a b c d) (lambda (x) (> x 1)))))`, env)
 	optimized := optimizeTestSource(b, env, `(lambda (a b c d e) (append (benchmark_filtered a b c d) e))`)
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	args := []Scmer{NewInt(0), NewInt(2), NewInt(3), NewInt(4), NewInt(5)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := fn(args...)
+		if len(result.Slice()) != 4 {
+			b.Fatal("unexpected result length")
+		}
+	}
+}
+
+func BenchmarkOptimizeInlinedNestedLambdaHelper(b *testing.B) {
+	env := newOptimizerTestEnv()
+	EvalAll("nested lambda inline benchmark", `(define benchmark_filter_owned (lambda (values) (filter values (lambda (x) (> x 1)))))`, env)
+	optimized := optimizeTestSource(b, env, `(lambda (a b c d e)
+		(append (benchmark_filter_owned (list a b c d)) e))`)
 	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
 	args := []Scmer{NewInt(0), NewInt(2), NewInt(3), NewInt(4), NewInt(5)}
 	b.ReportAllocs()
