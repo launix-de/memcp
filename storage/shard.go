@@ -2512,7 +2512,15 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	return
 }
 
-func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext) (int64, bool, int64) {
+type filteredRowEstimate struct {
+	rows       int64
+	capped     bool
+	examined   int64
+	population string
+	coverage   string
+}
+
+func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition scm.Scmer, limit int, currentTx *TxContext) filteredRowEstimate {
 	if limit <= 0 {
 		limit = 1024
 	}
@@ -2527,7 +2535,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	if recsetFilter != nil {
 		recsetPart = recsetFilter.shardEntry(t)
 		if recsetPart == nil || recsetPart.count == 0 {
-			return 0, false, 0
+			return filteredRowEstimate{population: "recset_candidates", coverage: "exact"}
 		}
 	}
 	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
@@ -2560,10 +2568,13 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	count := int64(0)
 	sampled := int64(0)
 	capped := false
+	indexRestricted := false
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	var buf [256]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 0, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 0, func(_ *StorageIndex, active bool) {
+		indexRestricted = active && len(lower) > 0
+	}, func(batch []uint32) bool {
 		for _, idx := range batch {
 			if recsetPart != nil && !recsetPart.contains(idx) {
 				continue
@@ -2610,7 +2621,27 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		return true
 	})
 
-	return count, capped, sampled
+	population := "table_rows"
+	if recsetPart != nil {
+		population = "recset_candidates"
+	} else if indexRestricted {
+		population = "index_candidates"
+	}
+	coverage := "exact"
+	if capped {
+		if population == "table_rows" {
+			coverage = "sampled"
+		} else {
+			coverage = "lower_bound"
+		}
+	}
+	return filteredRowEstimate{
+		rows:       count,
+		capped:     capped,
+		examined:   sampled,
+		population: population,
+		coverage:   coverage,
+	}
 }
 
 func (t *storageShard) getDelta(idx int, col string) scm.Scmer {

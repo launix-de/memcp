@@ -67,6 +67,18 @@ func TestShowColumnsReusesImmutableSnapshot(t *testing.T) {
 	}
 }
 
+func TestFreshBaseColumnIsNotMarkedComputed(t *testing.T) {
+	db := &database{Name: "fresh-column-statistics"}
+	tbl := &table{schema: db}
+	column, ok := tbl.createColumnLocked("value", "TEXT", nil, nil)
+	if !ok {
+		t.Fatal("createColumnLocked rejected a fresh column")
+	}
+	if !column.Computor.IsNil() || !column.ComputorFilter.IsNil() {
+		t.Fatal("fresh base column contains a non-nil computed expression")
+	}
+}
+
 func TestShowColumnsPublishesReplacementSnapshot(t *testing.T) {
 	tbl := showColumnsTestTable(1)
 	before := tbl.ShowColumns()
