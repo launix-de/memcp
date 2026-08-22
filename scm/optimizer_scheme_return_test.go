@@ -18,7 +18,9 @@ package scm
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -59,6 +61,106 @@ func TestSchemeHelperReturnLengthPropagates(t *testing.T) {
 	optimized := optimizeTestSource(t, env, `(count (fresh_pair_len 1 2))`)
 	if !optimized.IsInt() || optimized.Int() != 2 {
 		t.Fatalf("expected exact helper return length to fold count, got %s", serializedTestExpr(t, env, optimized))
+	}
+}
+
+func TestSchemeHelperReturnMetadataBelongsToBoundProc(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("optimizer return test", `(define proc_owned_pair (lambda () (list 1 2)))`, env)
+
+	bound := env.FindRead(Symbol("proc_owned_pair")).Vars[Symbol("proc_owned_pair")]
+	if bound.GetTag() != tagProc {
+		t.Fatalf("expected procedure binding, got %s", String(bound))
+	}
+	proc := bound.Proc()
+	if proc.OptimizerMeta == nil || proc.OptimizerMeta.Return.Kind() != KindList || proc.OptimizerMeta.Return.Length() != 2 {
+		t.Fatalf("return metadata is not attached to procedure: %#v", proc.OptimizerMeta)
+	}
+}
+
+func TestSchemeHelperReturnMetadataPreservesStructuredTypes(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("optimizer return test", `(define structured_pair (lambda (number text) (list (+ number 1) (concat text "x"))))`, env)
+
+	proc := env.FindRead(Symbol("structured_pair")).Vars[Symbol("structured_pair")].Proc()
+	if proc.OptimizerMeta == nil || proc.OptimizerMeta.Return.Extra == nil {
+		t.Fatal("structured return metadata is missing")
+	}
+	keys := proc.OptimizerMeta.Return.Extra.Keys
+	if keys["0"] == nil || keys["0"].Kind != "number" || keys["1"] == nil || keys["1"].Kind != "string" {
+		t.Fatalf("structured return metadata lost element types: %#v", keys)
+	}
+}
+
+func TestConcurrentSchemeReturnInferenceDoesNotMutateEnvironment(t *testing.T) {
+	env := newOptimizerTestEnv()
+	expr := NewSlice([]Scmer{
+		NewSymbol("define"),
+		NewSymbol("concurrent_pair"),
+		NewSlice([]Scmer{
+			NewSymbol("lambda"),
+			NewSlice([]Scmer{NewSymbol("a"), NewSymbol("b")}),
+			NewSlice([]Scmer{NewSymbol("list"), NewSymbol("a"), NewSymbol("b")}),
+		}),
+	})
+	callExpr := NewSlice([]Scmer{
+		NewSymbol("append"),
+		NewSlice([]Scmer{NewSymbol("concurrent_pair"), NewInt(1), NewInt(2)}),
+		NewInt(3),
+	})
+
+	errors := make(chan error, 16)
+	var wg sync.WaitGroup
+	for worker := 0; worker < 16; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			workerEnv := &Env{Vars: make(Vars), Outer: env}
+			for iteration := 0; iteration < 100; iteration++ {
+				optimized := Optimize(CloneOptimizerExpression(expr), env, nil)
+				Eval(optimized, workerEnv)
+				proc := workerEnv.Vars[Symbol("concurrent_pair")].Proc()
+				if proc == nil || proc.OptimizerMeta == nil || proc.OptimizerMeta.Return.Length() != 2 {
+					errors <- fmt.Errorf("iteration %d lost return metadata", iteration)
+					return
+				}
+				call := Optimize(CloneOptimizerExpression(callExpr), workerEnv, nil)
+				if !strings.Contains(String(call), "append_mut") {
+					errors <- fmt.Errorf("iteration %d lost transfer rewrite: %s", iteration, String(call))
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
+	}
+}
+
+func TestSchemeHelperReturnMetadataSurvivesReoptimizationAndProcCopies(t *testing.T) {
+	env := newOptimizerTestEnv()
+	definition := optimizeTestSource(t, env, `(define copied_pair (lambda () (list 1 2)))`)
+	definition = Optimize(CloneOptimizerExpression(definition), env, nil)
+	Eval(definition, env)
+
+	bound := env.Vars[Symbol("copied_pair")]
+	closed := CloseProcedure(bound)
+	if bound.Proc().OptimizerMeta == nil || closed.Proc().OptimizerMeta != bound.Proc().OptimizerMeta {
+		t.Fatal("procedure copy did not preserve optimizer metadata identity")
+	}
+}
+
+func TestProcComputeSizeIncludesOptimizerMetadata(t *testing.T) {
+	plain := NewProcStruct(Proc{Params: NewSlice(nil), Body: NewNil()})
+	typed := *plain.Proc()
+	typed.OptimizerMeta = &ProcOptimizerMeta{Return: TypeInfoFromTD(&TypeDescriptor{
+		Kind: "list",
+		Keys: map[string]*TypeDescriptor{"0": {Kind: "int"}},
+	})}
+	if ComputeSize(NewProcStruct(typed)) <= ComputeSize(plain) {
+		t.Fatal("procedure size does not include optimizer metadata")
 	}
 }
 

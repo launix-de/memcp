@@ -83,11 +83,6 @@ type TypeDescriptor struct {
 	// data. Numbered parameters stay in their existing stack slots and constants
 	// stay immediate until an operation actually needs to materialize them.
 	JITVirtualArgs bool
-	// Specialized variants keyed by param-ownership bitmask.
-	// Built on-demand by the optimizer when a call site provides owned args.
-	// TODO: deoptimization — if the global function is redefined, all callsites
-	// referencing cached variants must be invalidated (reset to the original code).
-	Variants map[uint64]Scmer
 }
 
 // OptimizerContext is an exported wrapper so packages like storage can use

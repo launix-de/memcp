@@ -558,6 +558,37 @@ func copyTypeDescriptor(td *TypeDescriptor) *TypeDescriptor {
 	return &result
 }
 
+func cloneTypeDescriptor(td *TypeDescriptor, cloned map[*TypeDescriptor]*TypeDescriptor) *TypeDescriptor {
+	if td == nil {
+		return nil
+	}
+	if result, exists := cloned[td]; exists {
+		return result
+	}
+	result := *td
+	cloned[td] = &result
+	if len(td.Params) > 0 {
+		result.Params = make([]*TypeDescriptor, len(td.Params))
+		for i, param := range td.Params {
+			result.Params[i] = cloneTypeDescriptor(param, cloned)
+		}
+	}
+	result.Return = cloneTypeDescriptor(td.Return, cloned)
+	if len(td.Keys) > 0 {
+		result.Keys = make(map[string]*TypeDescriptor, len(td.Keys))
+		for key, child := range td.Keys {
+			result.Keys[key] = cloneTypeDescriptor(child, cloned)
+		}
+	}
+	result.Element = cloneTypeDescriptor(td.Element, cloned)
+	return &result
+}
+
+func immutableTypeInfo(info TypeInfo) TypeInfo {
+	info.Extra = cloneTypeDescriptor(info.Extra, make(map[*TypeDescriptor]*TypeDescriptor))
+	return info
+}
+
 func callbackParameterType(td *TypeDescriptor) *TypeDescriptor {
 	if td == nil {
 		return nil
@@ -1653,10 +1684,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 
 	switch {
 	case headOk && (headSym == Symbol("set") || headSym == Symbol("define")) && len(v) == 3:
-		var definedSym Symbol
 		var hasDefinedSym bool
 		if sym, ok := scmerSymbol(v[1]); ok {
-			definedSym, hasDefinedSym = sym, true
+			hasDefinedSym = true
 			for _, black := range ome.setBlacklist {
 				if black == sym {
 					if useResult {
@@ -1667,9 +1697,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
 				v[1] = repl
-			}
-			if ome.lambdaDepth == 0 && ome.beginDepth == 0 {
-				env.deleteOptimizerHint(sym)
 			}
 		}
 		if v[1].IsNthLocalVar() {
@@ -1684,7 +1711,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				rhs = stripped
 			}
 			if items, ok := scmerSlice(rhs); ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda") && returnType.Kind() != KindAny {
-				env.setOptimizerHint(definedSym, returnType.WithoutConst())
+				procReturn := immutableTypeInfo(returnType.WithoutConst())
+				v[2] = NewSlice([]Scmer{
+					NewSymbol("optimizer_proc_return"),
+					v[2],
+					NewAny(optimizerProcReturnTemplate{Return: procReturn}),
+				})
 			}
 		}
 	case headOk && (headSym == Symbol("match") || headSym == Symbol("match_mut")):

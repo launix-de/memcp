@@ -2405,7 +2405,7 @@ func jitAutoImportSyntaxSafe(expr Scmer) bool {
 	switch name {
 	case "quote":
 		return true
-	case "lambda", "begin", "begin_mut", "!begin", "set", "define", "setN", "!list", "!!list", "eval", "parallel":
+	case "lambda", "optimizer_proc_return", "begin", "begin_mut", "!begin", "set", "define", "setN", "!list", "!!list", "eval", "parallel":
 		return false
 	case "match", "match_mut":
 		return false

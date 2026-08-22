@@ -3593,19 +3593,22 @@ the logical lookup still carries an alias which no longer exists. */
 									(join_optimizer_facts_without_aliases
 										(qb_facts physical_block) (list (source_alias candidate)))))))))))))
 /* The other probe shape a group-stage-output alias can appear as: a plain or
-COALESCE-wrapped bare boolean passthrough (no ">0" count-encoding), the shape
-`COALESCE((SELECT bool_expr ...) ...)` compiles into for a scalar_single
-boolean probe, matched against the specific logical output alias. */
+COALESCE-false-wrapped bare boolean passthrough (no ">0" count-encoding), the
+shape `COALESCE((SELECT bool_expr ...), FALSE)` compiles into for a
+scalar_single boolean probe, matched against the specific logical output
+alias. A TRUE fallback is deliberately excluded: positive membership cannot
+distinguish a matching FALSE row from the empty scalar domain, while SQL
+requires COALESCE(NULL, TRUE) to preserve the latter. */
 (define stage_output_boolean_probe_term? (lambda (alias term)
 	(match term
 		((symbol coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((symbol coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((quote coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((quote coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
 		(equal? tblvar alias)
 		((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
@@ -3635,11 +3638,7 @@ boolean probe, matched against the specific logical output alias. */
 			_ false))))
 
 (define condition_has_exists_recset_probe? (lambda (alias condition)
-	(match condition
-		(cons head tail) (or
-			(exists_recset_probe_term? alias condition)
-			(reduce tail (lambda (found item) (or found (condition_has_exists_recset_probe? alias item))) false))
-		_ false)))
+	(not (nil? (exists_recset_probe_column alias condition)))))
 
 (define stage_output_column_for_alias (lambda (alias expr)
 	(match expr
@@ -3651,12 +3650,26 @@ boolean probe, matched against the specific logical output alias. */
 			(if (not (nil? found)) found (stage_output_column_for_alias alias item))) nil)
 		_ nil)))
 
+(define exists_recset_truth_container_head? (lambda (head)
+	(or (equal? head (quote and))
+		(or (equal? head (symbol "and"))
+			(or (equal? head (quote or))
+				(or (equal? head (symbol "or"))
+					(or (equal? head (quote not))
+						(or (equal? head (symbol "not"))
+							(or (equal? head (quote if))
+								(or (equal? head (symbol "if"))
+									(or (equal? head (quote optimize))
+										(equal? head (symbol "optimize")))))))))))))
+
 (define exists_recset_probe_column (lambda (alias expr)
 	(if (exists_recset_probe_term? alias expr)
 		(stage_output_column_for_alias alias expr)
 		(match expr
-			(cons _head tail) (reduce tail (lambda (found item)
-				(if (not (nil? found)) found (exists_recset_probe_column alias item))) nil)
+			(cons head tail) (if (exists_recset_truth_container_head? head)
+				(reduce tail (lambda (found item)
+					(if (not (nil? found)) found (exists_recset_probe_column alias item))) nil)
+				nil)
 			_ nil))))
 
 (define stage_with_primary_aggregate (lambda (stage requested_col)
@@ -4221,6 +4234,28 @@ which output was renamed. */
 		(merge (map sources (lambda (src)
 			(stage_output_aggregate_fold_map_for_source original_index folded_index src)))))))
 
+/* Rewriting a dependency column can in turn rename an aggregate which reads
+that column. Propagate those positional interface renames through the stage DAG
+until both producers and all consumers agree. */
+(define propagate_stage_output_aggregate_columns (lambda (block original_stages rewritten_stages)
+	(begin
+		(define aggregate_col_map (stage_output_aggregate_fold_map
+			block original_stages rewritten_stages))
+		(if (empty_list? aggregate_col_map)
+			(list block rewritten_stages)
+			(begin
+				(define next_stages (rewrite_stage_graph_stages
+					aggregate_col_map '() rewritten_stages))
+				(define block_with_stages (make_query_block
+					(qb_schema block) (qb_sources block) (qb_fields block)
+					(qb_where block) (qb_group block) (qb_having block)
+					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
+					next_stages (qb_facts block)))
+				(define next_block (rewrite_stage_graph_expr
+					aggregate_col_map '() block_with_stages))
+				(propagate_stage_output_aggregate_columns
+					next_block rewritten_stages next_stages))))))
+
 (define fold_boolean_tautologies_ir (lambda (ir)
 	(begin
 		(define root (ir_root ir))
@@ -4230,24 +4265,16 @@ which output was renamed. */
 				(define graph (stage_dependency_graph (qb_stages root)))
 				(define folded_stages (map (qb_stages root) (lambda (stage)
 					(fold_boolean_tautologies_stage graph stage))))
-				(define aggregate_col_map (stage_output_aggregate_fold_map
-					root (qb_stages root) folded_stages))
-				/* Most queries contain no foldable stage aggregate. Avoid copying the
-				whole stage graph when every aggregate keeps its canonical column. */
-				(define rewritten_stages (if (empty_list? aggregate_col_map)
-					folded_stages
-					(rewrite_stage_graph_stages aggregate_col_map '() folded_stages)))
 				(define folded_block (make_query_block
 					(qb_schema root) (qb_sources root) (qb_fields root)
 					(boolean_fold_maybe_expr (qb_where root))
 					(qb_group root)
 					(boolean_fold_maybe_expr (qb_having root))
 					(qb_order root) (qb_limit root) (qb_offset root) (qb_hidden root)
-					rewritten_stages (qb_facts root)))
-				(define rewritten_block (if (empty_list? aggregate_col_map)
-					folded_block
-					(rewrite_stage_graph_expr aggregate_col_map '() folded_block)))
-				(make_ir (ir_kind ir) rewritten_block rewritten_stages
+					folded_stages (qb_facts root)))
+				(define propagated (propagate_stage_output_aggregate_columns
+					folded_block (qb_stages root) folded_stages))
+				(make_ir (ir_kind ir) (nth propagated 0) (nth propagated 1)
 					(ir_context_of ir) (ir_return ir)))))))
 
 (define normalize_stage_dependencies (lambda (ir)
