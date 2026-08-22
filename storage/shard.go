@@ -1515,6 +1515,8 @@ type ShardMapReducer struct {
 	mainGetters     []mapArgGetter
 	deltaGetters    []mapArgGetter
 	mainCols        []ColumnStorage        // direct main storage access (nil for $update/$invalidate/$increment cols)
+	mainBulkReaders []ColumnReader         // physical map columns gathered once per Stream main-record run
+	mainBulkValues  []scm.Scmer            // reusable row-major buffer for every physical map column
 	colNames        []string               // column names for delta getDelta access
 	isUpdate        []bool                 // true for $update columns
 	isInvalidate    []bool                 // true for $invalidate: columns
@@ -1577,6 +1579,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		mainGetters:      make([]mapArgGetter, len(cols)),
 		deltaGetters:     make([]mapArgGetter, len(cols)),
 		mainCols:         make([]ColumnStorage, len(cols)),
+		mainBulkReaders:  make([]ColumnReader, len(cols)),
 		colNames:         cols,
 		args:             make([]scm.Scmer, len(cols)),
 		reduceArgs:       make([]scm.Scmer, 2),
@@ -1806,6 +1809,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		}
 		mainCol := mr.mainCols[i]
 		mainReader := newCachedColumnReaderTx(mainCol, mr.currentTx)
+		mr.mainBulkReaders[i] = mainReader
 		colName := mr.colNames[i]
 		mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
 			return mainReader.GetValue(id)
@@ -1827,6 +1831,36 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		}
 	}
 	return mr
+}
+
+func (m *ShardMapReducer) prefetchMainColumns(recids []uint32) {
+	width := len(m.mainBulkReaders)
+	if width == 0 {
+		return
+	}
+	hasReader := false
+	for _, reader := range m.mainBulkReaders {
+		if reader != nil {
+			hasReader = true
+			break
+		}
+	}
+	if !hasReader {
+		m.mainBulkValues = m.mainBulkValues[:0]
+		return
+	}
+	needed := len(recids) * width
+	if cap(m.mainBulkValues) < needed {
+		m.mainBulkValues = make([]scm.Scmer, needed)
+	} else {
+		m.mainBulkValues = m.mainBulkValues[:needed]
+	}
+	for i, reader := range m.mainBulkReaders {
+		if reader == nil {
+			continue
+		}
+		reader.GetValueMulti(recids, m.mainBulkValues[i:], width)
+	}
 }
 
 func withTxSession(currentTx *TxContext, fn func() scm.Scmer) scm.Scmer {
@@ -1885,7 +1919,12 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 	// not for the whole batch. This allows nested read scans (e.g. EXISTS
 	// inside UPDATE on the same table) to acquire RLock between rows.
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
-	for _, id := range recids {
+	if !needsPerRowLock && !m.hasUpdateCol && !m.hasIncrementCol && !m.hasSetCol {
+		m.prefetchMainColumns(recids)
+	}
+	bulkWidth := len(m.mainBulkReaders)
+	hasBulkValues := bulkWidth > 0 && len(m.mainBulkValues) == len(recids)*bulkWidth
+	for rowIndex, id := range recids {
 		func() {
 			effectiveID := id
 			rowLocked := false
@@ -1913,7 +1952,11 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				}
 			}
 			for i, getter := range m.mainGetters {
-				m.args[i] = getter(effectiveID, 0)
+				if hasBulkValues && m.mainBulkReaders[i] != nil {
+					m.args[i] = m.mainBulkValues[rowIndex*bulkWidth+i]
+				} else {
+					m.args[i] = getter(effectiveID, 0)
+				}
 			}
 			// Release write lock before mapFn: allows nested scans on same shard.
 			// $update closures will re-acquire the lock when called.
@@ -1930,6 +1973,11 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 
 func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
 	needsPerRowLock := (m.hasUpdateCol || m.hasIncrementCol || m.hasSetCol) && !m.shardWriteLocked
+	if !needsPerRowLock && !m.hasUpdateCol && !m.hasIncrementCol && !m.hasSetCol {
+		m.prefetchMainColumns(recids)
+	}
+	bulkWidth := len(m.mainBulkReaders)
+	hasBulkValues := bulkWidth > 0 && len(m.mainBulkValues) == len(recids)*bulkWidth
 	for rowidx, id := range recids {
 		func() {
 			effectiveID := id
@@ -1958,7 +2006,11 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 				}
 			}
 			for i, getter := range m.mainGetters {
-				m.args[i] = getter(effectiveID, batchid)
+				if hasBulkValues && m.mainBulkReaders[i] != nil {
+					m.args[i] = m.mainBulkValues[rowidx*bulkWidth+i]
+				} else {
+					m.args[i] = getter(effectiveID, batchid)
+				}
 			}
 			if needsPerRowLock {
 				m.shard.exitWriteOwner()

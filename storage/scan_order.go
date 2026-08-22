@@ -144,6 +144,7 @@ func skipPartition(q *globalqueue, qx *shardqueue, pk []scm.Scmer, n int) {
 type shardqueue struct {
 	shard           *storageShard
 	items           []uint32 // TODO: refactor to chan, so we can block generating too much entries
+	universe        uint32   // visible recid upper bound captured by the shard scan
 	candidateCount  int64
 	err             scanError
 	scols           []func(uint32) scm.Scmer // sort criteria column reader
@@ -195,7 +196,7 @@ func (s *shardqueue) Less(i, j int) bool {
 		} // else: go to next level
 		// otherwise: move on to c++
 	}
-	return false // equal is not less
+	return s.items[i] < s.items[j]
 }
 func (s *shardqueue) Swap(i, j int) {
 	s.items[i], s.items[j] = s.items[j], s.items[i]
@@ -268,7 +269,19 @@ func (s *globalqueue) Less(i, j int) bool {
 		} // else: go to next level
 		// otherwise: move on to c++
 	}
-	return false // equal is not less
+	// SQL leaves peer ordering unspecified, but adaptive batch windows need the
+	// same physical order on every continuation. Shard UUID plus recid supplies
+	// that internal total order without reading or sorting another column. This
+	// also makes the empty-ORDER path repeatable while retaining greedy scans.
+	if s.q[i].tableIdx != s.q[j].tableIdx {
+		return s.q[i].tableIdx < s.q[j].tableIdx
+	}
+	for k := range s.q[i].shard.uuid {
+		if s.q[i].shard.uuid[k] != s.q[j].shard.uuid[k] {
+			return s.q[i].shard.uuid[k] < s.q[j].shard.uuid[k]
+		}
+	}
+	return s.q[i].items[0] < s.q[j].items[0]
 }
 func (s *globalqueue) Swap(i, j int) {
 	s.q[i], s.q[j] = s.q[j], s.q[i]
@@ -326,6 +339,10 @@ type scanOrderTableSpec struct {
 	callback        scm.Scmer
 	postOrderCols   []string
 	postOrderFilter scm.Scmer
+	// recordVisitor is an internal sink used by scan_order_batch_accept. When
+	// present, globally ordered record IDs are delivered directly instead of
+	// being mapped. The visitor must consume the slice before returning.
+	recordVisitor func(*shardqueue, []uint32)
 	// perTableOffset / perTableLimit: -1 disables per-table limiting for this
 	// table; otherwise the first `perTableOffset` rows (in merge order) are
 	// skipped and at most `perTableLimit` rows are emitted from this table.
@@ -333,6 +350,14 @@ type scanOrderTableSpec struct {
 	// merge direction (shared sortdirs). Callers must enforce this.
 	perTableOffset int
 	perTableLimit  int
+}
+
+func streamScanOrderItems(spec *scanOrderTableSpec, queue *shardqueue, acc scm.Scmer, recids []uint32) (scm.Scmer, bool) {
+	if spec.recordVisitor != nil {
+		spec.recordVisitor(queue, recids)
+		return acc, false
+	}
+	return streamOrBreak(queue.mapper, acc, recids)
 }
 
 func (s *scanOrderTableSpec) backingTable() *table {
@@ -755,8 +780,10 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	hadValue := false
 	// initialize MapReducers per shard (each shard uses its table's callbackCols/callback)
 	for _, sq := range q.q {
-		sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, aggregate, false, 0, nil, currentTx)
 		spec := &tables[sq.tableIdx]
+		if spec.recordVisitor == nil {
+			sq.mapper = sq.shard.OpenMapReducer(sq.callbackCols, sq.callback, aggregate, false, 0, nil, currentTx)
+		}
 		if !spec.postOrderFilter.IsNil() {
 			sq.postOrderMapper = sq.shard.OpenMapReducer(
 				spec.postOrderCols,
@@ -806,7 +833,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		if prevPK == nil || !pkEqual(prevPK, curPK) {
 			// Flush buffer before partition switch
 			if bufN > 0 && bufShard != nil {
-				akkumulator, breakCaught = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
+				akkumulator, breakCaught = streamScanOrderItems(&tables[bufShard.tableIdx], bufShard, akkumulator, buf[:bufN])
 				hadValue = true
 				bufN = 0
 				if breakCaught {
@@ -881,7 +908,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 		// If shard changed, flush the buffer to the previous shard's mapper
 		if bufShard != nil && bufShard != qx {
-			akkumulator, breakCaught = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
+			akkumulator, breakCaught = streamScanOrderItems(&tables[bufShard.tableIdx], bufShard, akkumulator, buf[:bufN])
 			hadValue = true
 			bufN = 0
 			if breakCaught {
@@ -896,7 +923,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 		// Flush if buffer full
 		if bufN == len(buf) {
-			akkumulator, breakCaught = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
+			akkumulator, breakCaught = streamScanOrderItems(&tables[bufShard.tableIdx], bufShard, akkumulator, buf[:bufN])
 			hadValue = true
 			bufN = 0
 			if breakCaught {
@@ -913,7 +940,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	}
 	// Flush remaining buffer
 	if !breakCaught && bufN > 0 && bufShard != nil {
-		akkumulator, _ = streamOrBreak(bufShard.mapper, akkumulator, buf[:bufN])
+		akkumulator, _ = streamScanOrderItems(&tables[bufShard.tableIdx], bufShard, akkumulator, buf[:bufN])
 		hadValue = true
 	}
 	if !hadValue && isOuter && len(tables) > 0 {
@@ -1183,7 +1210,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	// scan loop in read lock
 	var maxInsertIndex int
 	var visibleUpper uint32
-	resultAlreadySorted := false
+	resultAlreadySorted := len(sortcols) == 0
 	func() {
 		shardLocked := false
 		if !skipShardReadLock {
@@ -1207,6 +1234,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// remember current insert status (so don't scan things that are inserted during map)
 		maxInsertIndex = len(t.inserts)
 		visibleUpper = t.main_count + uint32(maxInsertIndex)
+		result.universe = visibleUpper
 
 		// iterate over items (indexed)
 		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
@@ -1222,7 +1250,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		var survivedBuf, mainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
 		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, func(index *StorageIndex, active bool) {
-			resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
+			if len(sortcols) > 0 {
+				resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
+			}
 		}, func(batch []uint32) bool {
 			result.candidateCount += int64(len(batch))
 
@@ -1367,7 +1397,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				return false
 			}
 		}
-		return itemPos[a] < itemPos[b]
+		return a < b
 	}
 	// TODO: find conditions when exactly we don't need to sort anymore.
 	// The sort can be skipped when ALL of these hold:

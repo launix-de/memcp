@@ -1090,6 +1090,68 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_order_batch_accept",
+		Desc: "incrementally scans a table or existing RecSet in scan_order order and applies a RecSet batch filter before OFFSET/LIMIT and map/reduce. The first candidate RecSet contains offset+limit rows; if too few rows are accepted, subsequent disjoint batches contain twice as many candidates until the accepted limit is satisfied or the input is exhausted. batchFilter is called as (batchFilter input_recset) and must return an exact subset RecSet of the same base table and transaction. A simple batchFilter may call (scan_recset tx input_recset filterColumns realFilter); complex filters may project input_recset to another table, apply search/ACL scans and project the result back to the input table. The returned RecSet is used only as a membership mask against the already ordered candidate vector, so output order is preserved without scanning the unordered RecSet again. For non-unique ORDER BY values, include an explicit unique tie-breaker. sortcols/sortdirs may both be empty; that path greedily collects candidates without sorting. limitPartitionCols is present for scan_order signature compatibility and currently must be 0",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			currentTx := scmerToTxContext(a[0])
+			tableArg := a[1]
+			batchFilter := a[2]
+			sortcolsVals := mustScmerSlice(a[3], "sortcols")
+			sortdirsVals := mustScmerSlice(a[4], "sortdirs")
+			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortdirsVals))
+			for i, dir := range sortdirsVals {
+				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
+			}
+			limitPartitionCols := scm.ToInt(a[5])
+			offset := scm.ToInt(a[6])
+			limit := scm.ToInt(a[7])
+			mapcols := scmerSliceToStrings(mustScmerSlice(a[8], "mapColumns"))
+			callback := a[9]
+			aggregate := scm.NewNil()
+			if len(a) > 10 {
+				aggregate = a[10]
+			}
+			neutral := scm.NewNil()
+			if len(a) > 11 {
+				neutral = a[11]
+			}
+			isOuter := len(a) > 12 && scm.ToBool(a[12])
+			notFoundValue := neutral
+			if len(a) > 13 {
+				notFoundValue = a[13]
+			}
+			source := scanOrderTableSpec{}
+			if tableArg.IsCustom(TagRecSet) {
+				source.recset = RecSetFromScmer(tableArg)
+			} else {
+				source.table = TableFromScmer(tableArg)
+			}
+			return scanOrderBatchAccept(currentTx, source, batchFilter, sortcolsVals, sortdirs,
+				limitPartitionCols, offset, limit, mapcols, callback, aggregate, neutral, isOuter, notFoundValue)
+		},
+		Type: &scm.TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context used consistently by the candidate scan and every batch filter operation; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table|recset", ParamName: "table_or_recset", ParamDesc: "base table or complete existing query-local RecSet from which ordered candidate batches are drawn"},
+				{Kind: "func", ParamName: "batchFilter", ParamDesc: "function (lambda (input_recset) accepted_recset). It may naively narrow input_recset with scan_recset, or run arbitrary RecSet projections/search/ACL operations and project back. It must return a same-table, same-transaction subset of input_recset", Params: []*scm.TypeDescriptor{{Kind: "recset", ParamName: "input_recset"}}, Return: &scm.TypeDescriptor{Kind: "recset"}},
+				{Kind: "list", ParamName: "sortcols", ParamDesc: "same as scan_order: columns or computed sort functions. Include a unique tie-breaker for a total repeatable order; use an empty list for greedy unsorted collection"},
+				{Kind: "list", ParamName: "sortdirs", ParamDesc: "same as scan_order: one relation per sort column (<, > or collate relation); must also be empty when sortcols is empty"},
+				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "reserved for scan_order signature compatibility; currently must be 0"},
+				{Kind: "number", ParamName: "offset", ParamDesc: "number of batch-filter-accepted rows to skip; it is not the number of driver candidates already examined"},
+				{Kind: "number", ParamName: "limit", ParamDesc: "finite maximum number of accepted rows passed to map; the initial candidate batch size is offset+limit and doubles for every subsequent batch"},
+				{Kind: "list", ParamName: "mapColumns", ParamDesc: scanOrderMapColumnsDesc},
+				{Kind: "func", ParamName: "map", ParamDesc: "same map callback contract as scan_order; accepted record IDs are passed to its shard mapper in batches", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", ParamName: "reduce", ParamDesc: "optional serial reducer over mapped accepted rows, with the same accumulator contract as scan_order", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc"}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "optional neutral element for reduce; defaults to nil", Optional: true},
+				{Kind: "bool", ParamName: "isOuter", ParamDesc: "optional scan_order-compatible outer behavior: map one NULL row when no accepted row reaches map", Optional: true},
+				{Kind: "any", ParamName: "notFoundValue", ParamDesc: "optional result when no accepted row reaches map and isOuter is false; defaults to neutral", Optional: true},
+			},
+			Return:   &scm.TypeDescriptor{Kind: "any"},
+			Optimize: optimizeScanOrderBatchAccept,
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order",
 		Desc: "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
