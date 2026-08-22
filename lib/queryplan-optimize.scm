@@ -3534,19 +3534,22 @@ the logical lookup still carries an alias which no longer exists. */
 									(join_optimizer_facts_without_aliases
 										(qb_facts physical_block) (list (source_alias candidate)))))))))))))
 /* The other probe shape a group-stage-output alias can appear as: a plain or
-COALESCE-wrapped bare boolean passthrough (no ">0" count-encoding), the shape
-`COALESCE((SELECT bool_expr ...) ...)` compiles into for a scalar_single
-boolean probe, matched against the specific logical output alias. */
+COALESCE-false-wrapped bare boolean passthrough (no ">0" count-encoding), the
+shape `COALESCE((SELECT bool_expr ...), FALSE)` compiles into for a
+scalar_single boolean probe, matched against the specific logical output
+alias. A TRUE fallback is deliberately excluded: positive membership cannot
+distinguish a matching FALSE row from the empty scalar domain, while SQL
+requires COALESCE(NULL, TRUE) to preserve the latter. */
 (define stage_output_boolean_probe_term? (lambda (alias term)
 	(match term
 		((symbol coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((symbol coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((quote coalesceNil) ((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((quote coalesceNil) ((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase) _default)
-		(and (equal? tblvar alias) (or (equal?? _default false) (equal?? _default true)))
+		(and (equal? tblvar alias) (equal?? _default false))
 		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
 		(equal? tblvar alias)
 		((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
@@ -3576,11 +3579,7 @@ boolean probe, matched against the specific logical output alias. */
 			_ false))))
 
 (define condition_has_exists_recset_probe? (lambda (alias condition)
-	(match condition
-		(cons head tail) (or
-			(exists_recset_probe_term? alias condition)
-			(reduce tail (lambda (found item) (or found (condition_has_exists_recset_probe? alias item))) false))
-		_ false)))
+	(not (nil? (exists_recset_probe_column alias condition)))))
 
 (define stage_output_column_for_alias (lambda (alias expr)
 	(match expr
@@ -3592,12 +3591,26 @@ boolean probe, matched against the specific logical output alias. */
 			(if (not (nil? found)) found (stage_output_column_for_alias alias item))) nil)
 		_ nil)))
 
+(define exists_recset_truth_container_head? (lambda (head)
+	(or (equal? head (quote and))
+		(or (equal? head (symbol "and"))
+			(or (equal? head (quote or))
+				(or (equal? head (symbol "or"))
+					(or (equal? head (quote not))
+						(or (equal? head (symbol "not"))
+							(or (equal? head (quote if))
+								(or (equal? head (symbol "if"))
+									(or (equal? head (quote optimize))
+										(equal? head (symbol "optimize")))))))))))))
+
 (define exists_recset_probe_column (lambda (alias expr)
 	(if (exists_recset_probe_term? alias expr)
 		(stage_output_column_for_alias alias expr)
 		(match expr
-			(cons _head tail) (reduce tail (lambda (found item)
-				(if (not (nil? found)) found (exists_recset_probe_column alias item))) nil)
+			(cons head tail) (if (exists_recset_truth_container_head? head)
+				(reduce tail (lambda (found item)
+					(if (not (nil? found)) found (exists_recset_probe_column alias item))) nil)
+				nil)
 			_ nil))))
 
 (define stage_with_primary_aggregate (lambda (stage requested_col)

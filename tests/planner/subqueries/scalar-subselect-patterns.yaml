@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
 metadata:
   version: "1.0"
   description: "Scalar subselect patterns: derived tables, CASE WHEN, badge queries, permission checks"
@@ -226,6 +228,54 @@ test_cases:
       rows: 1
       data:
         - color: invoice
+
+  - name: "COALESCE true preserves an empty correlated scalar domain in truth context"
+    sql: |
+      SELECT sq_doc.ID
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+        AND COALESCE(
+          (SELECT TRUE
+           FROM sq_cat
+           WHERE sq_cat.ID = sq_doc.boxid + 1000
+           LIMIT 1),
+          TRUE)
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+
+  - name: "COALESCE false rejects an empty correlated scalar domain in truth context"
+    sql: |
+      SELECT sq_doc.ID
+      FROM sq_doc
+      WHERE sq_doc.ID = 1
+        AND COALESCE(
+          (SELECT TRUE
+           FROM sq_cat
+           WHERE sq_cat.ID = sq_doc.boxid + 1000
+           LIMIT 1),
+          FALSE)
+    expect:
+      rows: 0
+
+  - name: "COALESCE true preserves nullable scalar lookup keys"
+    sql: |
+      SELECT child.ID
+      FROM sq_cat AS child
+      WHERE COALESCE(
+        (SELECT TRUE
+         FROM sq_cat AS parent
+         WHERE parent.ID = child.parent
+         LIMIT 1),
+        TRUE)
+      ORDER BY child.ID
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+        - ID: 2
+        - ID: 3
 
   - name: "NOT IS NULL wrapper around scalar subselect"
     sql: |

@@ -19,6 +19,7 @@ package scm
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -60,6 +61,45 @@ func TestSchemeHelperReturnLengthPropagates(t *testing.T) {
 	if !optimized.IsInt() || optimized.Int() != 2 {
 		t.Fatalf("expected exact helper return length to fold count, got %s", serializedTestExpr(t, env, optimized))
 	}
+}
+
+func TestSchemeHelperReturnMetadataBelongsToBoundProc(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("optimizer return test", `(define proc_owned_pair (lambda () (list 1 2)))`, env)
+
+	bound := env.FindRead(Symbol("proc_owned_pair")).Vars[Symbol("proc_owned_pair")]
+	if bound.GetTag() != tagProc {
+		t.Fatalf("expected procedure binding, got %s", String(bound))
+	}
+	proc := bound.Proc()
+	if !proc.HasOptimizerReturn || proc.OptimizerReturn.Kind() != KindList || proc.OptimizerReturn.Length() != 2 {
+		t.Fatalf("return metadata is not attached to procedure: %#v", proc.OptimizerReturn)
+	}
+}
+
+func TestConcurrentSchemeReturnInferenceDoesNotMutateEnvironment(t *testing.T) {
+	env := newOptimizerTestEnv()
+	expr := NewSlice([]Scmer{
+		NewSymbol("define"),
+		NewSymbol("concurrent_pair"),
+		NewSlice([]Scmer{
+			NewSymbol("lambda"),
+			NewSlice([]Scmer{NewSymbol("a"), NewSymbol("b")}),
+			NewSlice([]Scmer{NewSymbol("list"), NewSymbol("a"), NewSymbol("b")}),
+		}),
+	})
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 16; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for iteration := 0; iteration < 100; iteration++ {
+				Optimize(CloneOptimizerExpression(expr), env, nil)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestSchemeHelperReturnHintFollowsEnvironmentChain(t *testing.T) {

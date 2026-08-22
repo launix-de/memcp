@@ -287,6 +287,22 @@ restart:
 					return NewScmParser(NewParser(list[1], list[2], NewNil(), en, true))
 				}
 				return NewScmParser(NewParser(list[1], NewNil(), NewNil(), en, false))
+			case "optimizer_proc_return":
+				if len(list) != 5 {
+					panic("optimizer_proc_return expects procedure, kind, flags and length")
+				}
+				value := Eval(list[1], en)
+				if value.GetTag() != tagProc {
+					return value
+				}
+				proc := *value.Proc()
+				proc.OptimizerReturn = TypeInfo{
+					kind:   uint8(ToInt(list[2])),
+					flags:  uint8(ToInt(list[3])),
+					length: int(ToInt(list[4])),
+				}
+				proc.HasOptimizerReturn = true
+				return NewProcStruct(proc)
 			case "lambda":
 				params := list[1]
 				if params.IsSourceInfo() {
@@ -804,6 +820,12 @@ type Proc struct {
 	// original body remains attached so storage scan callbacks can later be
 	// specialized and recompiled against concrete column/storage types.
 	Compiled *JITEntryPoint
+	// OptimizerReturn belongs to this concrete procedure value. Keeping the
+	// metadata on the Proc makes lexical shadowing and redefinition follow the
+	// actual binding and avoids a mutable, process-wide optimizer side table.
+	// Keep optimizer-only fields after the runtime/JIT-facing Proc layout.
+	OptimizerReturn    TypeInfo
+	HasOptimizerReturn bool
 }
 
 // CloseProcedure snapshots explicit captures of a procedure without retaining
@@ -906,11 +928,10 @@ type NthLocalVar uint8 // equals to (var i)
 
 type Vars map[Symbol]Scmer
 type Env struct {
-	Vars           Vars
-	VarsNumbered   []Scmer // <- for the optimizer
-	Outer          *Env
-	Nodefine       bool // define will write to Outer
-	optimizerHints map[Symbol]TypeInfo
+	Vars         Vars
+	VarsNumbered []Scmer // <- for the optimizer
+	Outer        *Env
+	Nodefine     bool // define will write to Outer
 }
 
 func (e *Env) definitionTarget() *Env {
@@ -925,30 +946,15 @@ func (e *Env) definitionTarget() *Env {
 
 func (e *Env) optimizerProcHint(s Symbol) (TypeInfo, bool) {
 	binding := e.FindRead(s)
-	if binding == nil || binding.optimizerHints == nil {
+	if binding == nil {
 		return tiZero, false
 	}
 	bound, exists := binding.Vars[s]
 	if !exists || bound.GetTag() != tagProc {
 		return tiZero, false
 	}
-	ti, ok := binding.optimizerHints[s]
-	return ti, ok
-}
-
-func (e *Env) setOptimizerHint(s Symbol, ti TypeInfo) {
-	target := e.definitionTarget()
-	if target.optimizerHints == nil {
-		target.optimizerHints = make(map[Symbol]TypeInfo)
-	}
-	target.optimizerHints[s] = ti
-}
-
-func (e *Env) deleteOptimizerHint(s Symbol) {
-	target := e.definitionTarget()
-	if target.optimizerHints != nil {
-		delete(target.optimizerHints, s)
-	}
+	proc := bound.Proc()
+	return proc.OptimizerReturn, proc.HasOptimizerReturn
 }
 
 func (e *Env) FindRead(s Symbol) *Env {
@@ -1005,7 +1011,6 @@ func init() {
 		nil,
 		nil,
 		false,
-		nil,
 	}
 
 	// system

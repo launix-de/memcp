@@ -1653,10 +1653,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 
 	switch {
 	case headOk && (headSym == Symbol("set") || headSym == Symbol("define")) && len(v) == 3:
-		var definedSym Symbol
 		var hasDefinedSym bool
 		if sym, ok := scmerSymbol(v[1]); ok {
-			definedSym, hasDefinedSym = sym, true
+			hasDefinedSym = true
 			for _, black := range ome.setBlacklist {
 				if black == sym {
 					if useResult {
@@ -1667,9 +1666,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
 				v[1] = repl
-			}
-			if ome.lambdaDepth == 0 && ome.beginDepth == 0 {
-				env.deleteOptimizerHint(sym)
 			}
 		}
 		if v[1].IsNthLocalVar() {
@@ -1684,7 +1680,14 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				rhs = stripped
 			}
 			if items, ok := scmerSlice(rhs); ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda") && returnType.Kind() != KindAny {
-				env.setOptimizerHint(definedSym, returnType.WithoutConst())
+				procReturn := returnType.WithoutConst()
+				v[2] = NewSlice([]Scmer{
+					NewSymbol("optimizer_proc_return"),
+					v[2],
+					NewInt(int64(procReturn.kind)),
+					NewInt(int64(procReturn.flags)),
+					NewInt(int64(procReturn.length)),
+				})
 			}
 		}
 	case headOk && (headSym == Symbol("match") || headSym == Symbol("match_mut")):
