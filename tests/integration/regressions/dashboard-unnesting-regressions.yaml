@@ -36,6 +36,8 @@ setup:
         (1, 1, 10, 1),
         (2, 1, 20, 5),
         (3, 2, 10, 9)
+  - scm: '(rebuild (table "memcp-tests" "u3_main") true true)'
+  - scm: '(rebuild (table "memcp-tests" "u3_dyn") true true)'
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS u3_dyn"
@@ -48,6 +50,29 @@ test_cases:
         '() (lambda () true)
         '("username") (lambda (u) u)
         (lambda (a b) b) "")
+
+  - name: "boolean expression head is not a subquery marker"
+    fail_comment: "symbol marker detection must not compare TRUE equal to inner_select"
+    scm: |
+      (if (expr_contains_subquery? (list true (quote payload)))
+        (error "boolean TRUE was classified as a subquery marker")
+        true)
+
+  - name: "membership requirement with boolean stage passes unnest invariant"
+    fail_comment: "a decorrelated group-stage embedded for physical membership costing is not parser syntax"
+    scm: |
+      (begin
+        (define requirement (list
+          (quote membership_requirement_probe)
+          (list true (quote aggregate-payload) nil)
+          (list (quote get_column) "m" false "ID" false)))
+        (require_unnested_node "regression"
+          (make_query_block
+            "memcp-tests"
+            (list (list "m" "memcp-tests" "u3_main" false nil))
+            (list "ID" (list (quote get_column) "m" false "ID" false))
+            requirement
+            '() nil '() nil nil '() '() '())))
 
   - name: "set session variables for duplicate-helper regression"
     session_id: "u3_sess"
@@ -134,3 +159,78 @@ test_cases:
             (SELECT (u.ID = @fop_user) FROM u3_main u WHERE u.ID = u3_main.ID LIMIT 1) AS p2
           FROM u3_main
           WHERE ID = 1
+
+  - name: "wide derived projection decorrelates every scalar output"
+    fail_comment: "a parameterized wide projection must not leave dependent-subquery markers behind"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT m.ID, m.archive,
+          (SELECT d.v0 + 1 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v01,
+          (SELECT d.v0 + 2 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v02,
+          (SELECT d.v0 + 3 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v03,
+          (SELECT d.v0 + 4 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v04,
+          (SELECT d.v0 + 5 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v05,
+          (SELECT d.v0 + 6 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v06,
+          (SELECT d.v0 + 7 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v07,
+          (SELECT d.v0 + 8 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v08,
+          (SELECT d.v0 + 9 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v09,
+          (SELECT d.v0 + 10 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v10,
+          (SELECT d.v0 + 11 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v11,
+          (SELECT d.v0 + 12 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v12,
+          (SELECT d.v0 + 13 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v13,
+          (SELECT d.v0 + 14 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v14,
+          (SELECT d.v0 + 15 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v15,
+          (SELECT d.v0 + 16 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v16,
+          (SELECT d.v0 + 17 FROM u3_dyn d WHERE d.`dynamic:parent` = m.ID ORDER BY d.`dynamic:time` DESC LIMIT 1) AS v17
+        FROM u3_main m
+      ) t
+      WHERE t.archive IN (0)
+      ORDER BY t.ID
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 2
+
+  - name: "nested literal TRUE scalar in WHERE is fully decorrelated"
+    fail_comment: "nested dependent stages with a boolean payload must reach build_queryplan as joins"
+    sql: |
+      SELECT m.ID
+      FROM u3_main m
+      WHERE COALESCE((
+        SELECT COALESCE((
+          SELECT TRUE
+          FROM u3_main owner
+          WHERE owner.ID = d.`dynamic:parent`
+          LIMIT 1
+        ), FALSE)
+        FROM u3_dyn d
+        WHERE d.`dynamic:parent` = m.ID
+        LIMIT 1
+      ), TRUE)
+      ORDER BY m.ID
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+        - ID: 2
+
+  - name: "ORDER LIMIT membership probe accepts decorrelated boolean stage"
+    fail_comment: "membership_requirement_probe metadata must not be rescanned as parser subquery syntax"
+    sql: |
+      SELECT m.ID
+      FROM u3_main m
+      WHERE m.archive IN (0)
+        AND m.ID IS NOT NULL
+        AND COALESCE((
+          SELECT TRUE
+          FROM u3_dyn d
+          WHERE d.`dynamic:parent` = m.ID
+          LIMIT 1
+        ), FALSE)
+      ORDER BY m.ID
+      LIMIT 72 OFFSET 0
+    expect:
+      rows: 2
+      data:
+        - ID: 1
+        - ID: 2
