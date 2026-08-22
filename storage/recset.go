@@ -1844,7 +1844,12 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
+	result.universe = visibleUpper
 	result.items = make([]uint32, 0, part.count)
+	maxItems := -1
+	if len(sortcols) == 0 && limit >= 0 && limitPartitionCols == 0 {
+		maxItems = offset + limit
+	}
 	colBufs := make([][]scm.Scmer, len(conditionCols))
 	t.forEachVisibleRun(part, visibleUpper, acidMode, currentTx, func(base, count uint32) bool {
 		end := base + count
@@ -1884,6 +1889,9 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 				}
 				if scm.ToBool(conditionFn(cdataset...)) {
 					result.items = append(result.items, idx)
+					if maxItems >= 0 && len(result.items) >= maxItems {
+						return false
+					}
 				}
 			}
 		}
@@ -1901,15 +1909,14 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 			}
 			if scm.ToBool(conditionFn(cdataset...)) {
 				result.items = append(result.items, idx)
+				if maxItems >= 0 && len(result.items) >= maxItems {
+					return false
+				}
 			}
 		}
 		return true
 	})
 
-	itemPos := make(map[uint32]int, len(result.items))
-	for i, idx := range result.items {
-		itemPos[idx] = i
-	}
 	lessByID := func(a, b uint32) bool {
 		cmpCount := len(result.scols)
 		if len(result.sortdirs) < cmpCount {
@@ -1925,7 +1932,7 @@ func (t *storageShard) scan_order_recset_part(part *recSetShard, conditionCols [
 				return false
 			}
 		}
-		return itemPos[a] < itemPos[b]
+		return a < b
 	}
 	if len(sortcols) > 0 {
 		if limit >= 0 && limitPartitionCols == 0 {
