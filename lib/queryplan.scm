@@ -519,7 +519,7 @@ parent stages are merged into a multi-output stage. */
 /* Subquery detection and zero-domain rewrites                                */
 
 (define subquery_head? (lambda (head)
-	(if (contains? (list
+	(if (and (symbol? head) (contains? (list
 		(quote inner_select)
 		(quote inner_select_in)
 		(quote inner_select_exists)
@@ -527,7 +527,7 @@ parent stages are merged into a multi-output stage. */
 		(quote neumann_exists)
 		(quote neumann_in)
 		(quote dependent-subquery)
-		(quote exists_probe)) head)
+		(quote exists_probe)) head))
 		true
 		(match head
 			((quote quote) sym) (subquery_head? sym)
