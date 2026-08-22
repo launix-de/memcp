@@ -16,9 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
-import "math/rand"
+import "unsafe"
 import "reflect"
 import "testing"
+import "math/rand"
 
 import "github.com/launix-de/memcp/scm"
 
@@ -151,6 +152,31 @@ func TestLikeIndexThreeStageBindingReusesCache(t *testing.T) {
 	}
 	if after := hook.ComputeSize(); after != before {
 		t.Fatalf("binding changed reusable hook size from %d to %d", before, after)
+	}
+}
+
+func TestLikeIndexLeavesDeltaRowsForResidualFilter(t *testing.T) {
+	values := []string{"Casino", "plain", "CASINO", "needle"}
+	reader := ColumnReaderFunc(func(recid uint32) scm.Scmer { return scm.NewString(values[recid]) })
+	hook := LikeMatcher.Deploy(IndexDeployContext{MainCount: uint32(len(values)), Column: reader}, true)
+	matcher := hook.Bind(scm.NewString("%missing%"))
+	if got := matcher([]uint32{0, 1, 2, 3, 4, 5}); !reflect.DeepEqual(got, []uint32{4, 5}) {
+		t.Fatalf("matcher dropped or admitted wrong rows: %v, want delta rows [4 5]", got)
+	}
+}
+
+func TestLikeIndexComputeSizeIncludesCompleteHashTable(t *testing.T) {
+	values := []string{"Casino", "plain", "CASINO", "needle"}
+	reader := ColumnReaderFunc(func(recid uint32) scm.Scmer { return scm.NewString(values[recid]) })
+	index := buildBigramIndex(uint32(len(values)), reader)
+	want := uint(unsafe.Sizeof(*index)) + uint(index.bytes+index.grams.ComputeSize())
+	if got := index.ComputeSize(); got != want {
+		t.Fatalf("ComputeSize = %d, want exact owned size %d", got, want)
+	}
+	minimumPayload := uint(unsafe.Sizeof(*index)) + uint(index.bytes) +
+		uint(index.grams.count)*uint(unsafe.Sizeof(uint64(0))+unsafe.Sizeof(compressedRecSet{}))
+	if index.ComputeSize() <= minimumPayload {
+		t.Fatalf("ComputeSize %d omits empty hash buckets or occupancy bitmap", index.ComputeSize())
 	}
 }
 

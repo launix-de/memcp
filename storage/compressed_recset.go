@@ -166,7 +166,9 @@ func encodeRANSBitmap(words []uint32, universe, ones uint32) *compressedRANSBitm
 		}
 		state = (state/frequency)*256 + state%frequency + start
 	}
-	return &compressedRANSBitmap{universe: universe, ones: ones, freqOne: uint16(freqOne), state: state, data: encoded}
+	data := make([]byte, len(encoded))
+	copy(data, encoded)
+	return &compressedRANSBitmap{universe: universe, ones: ones, freqOne: uint16(freqOne), state: state, data: data}
 }
 
 func (s *compressedRANSBitmap) AndMut(dst *recSetShard) {
@@ -230,19 +232,21 @@ func compressRecSetBitmap(words []uint32, universe uint32) compressedRecSet {
 		lengths = append(lengths, runEnd-runBase)
 	}
 
-	raw := &compressedBitmap{universe: universe, words: append([]uint32(nil), words...)}
-	best := compressedRecSet{set: raw, count: count, bytes: uint32(unsafe.Sizeof(*raw)) + uint32(len(raw.words))*4}
+	rawWords := make([]uint32, len(words))
+	copy(rawWords, words)
+	raw := &compressedBitmap{universe: universe, words: rawWords}
+	best := compressedRecSet{set: raw, count: count, bytes: uint32(unsafe.Sizeof(*raw)) + uint32(cap(raw.words))*4}
 	positive := &compressedPositive{universe: universe, values: packUint32s(ids)}
-	if size := uint32(unsafe.Sizeof(*positive)) + uint32(len(positive.values.data))*8; size < best.bytes {
+	if size := uint32(unsafe.Sizeof(*positive)) + uint32(cap(positive.values.data))*8; size < best.bytes {
 		best = compressedRecSet{set: positive, count: count, bytes: size}
 	}
 	ranges := &compressedRanges{universe: universe, count: count, bases: packUint32s(bases), lengths: packUint32s(lengths)}
-	if size := uint32(unsafe.Sizeof(*ranges)) + uint32(len(ranges.bases.data)+len(ranges.lengths.data))*8; size < best.bytes {
+	if size := uint32(unsafe.Sizeof(*ranges)) + uint32(cap(ranges.bases.data)+cap(ranges.lengths.data))*8; size < best.bytes {
 		best = compressedRecSet{set: ranges, count: count, bytes: size}
 	}
 	if universe > 0 && count > 0 && count < universe {
 		rans := encodeRANSBitmap(words, universe, count)
-		if size := uint32(unsafe.Sizeof(*rans)) + uint32(len(rans.data)); size < best.bytes {
+		if size := uint32(unsafe.Sizeof(*rans)) + uint32(cap(rans.data)); size < best.bytes {
 			best = compressedRecSet{set: rans, count: count, bytes: size}
 		}
 	}

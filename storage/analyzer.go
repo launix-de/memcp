@@ -315,6 +315,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		params = p.Params.Slice()
 	}
 	resolveParamName := func(node scm.Scmer) (string, bool) {
+		node = node.WithoutSourceInfo()
 		if node.IsSymbol() {
 			name := node.String()
 			for i, sym := range params {
@@ -385,6 +386,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
 	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
+		v = v.WithoutSourceInfo()
 		if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() || v.IsCustom(TagRecSet) {
 			return v, true
 		}
@@ -410,6 +412,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		return scm.NewNil(), false
 	}
 	funcIs := func(head scm.Scmer, name string) bool {
+		head = head.WithoutSourceInfo()
 		if head.SymbolEquals(name) {
 			return true
 		}
@@ -427,10 +430,10 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	// AND: merge children (intersect). OR: widen children (union).
 	var traverseCondition func(scm.Scmer) boundaries
 	traverseCondition = func(node scm.Scmer) boundaries {
-		if !node.IsSlice() {
+		v, ok := scmerSlice(node)
+		if !ok {
 			return nil
 		}
-		v := node.Slice()
 		if len(v) == 0 {
 			return nil
 		}

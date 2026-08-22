@@ -20,6 +20,7 @@ import "sort"
 import "unsafe"
 import "strings"
 import "unicode"
+import "unicode/utf8"
 
 import "github.com/launix-de/memcp/scm"
 
@@ -72,11 +73,83 @@ func (m *likeMatcher) Deploy(ctx IndexDeployContext, persistent bool) IndexHook 
 
 type bigramIndex struct {
 	universe uint32
-	grams    map[uint64]compressedRecSet
-	bytes    uint64
+	grams    bigramTable
+	bytes    uint64 // owned compressed posting storage
 }
 
-func (s *bigramIndex) ComputeSize() uint { return uint(s.bytes) }
+// bigramTable is an immutable open-addressed hash table. Unlike Go's map, all
+// persistent bucket storage is visible to ComputeSize and can be accounted for
+// exactly according to the storage package's owned-memory convention.
+type bigramTable struct {
+	keys     []uint64
+	values   []compressedRecSet
+	occupied []uint64
+	count    uint32
+}
+
+func newBigramTable(count int) bigramTable {
+	capacity := 1
+	for capacity*3/4 < count {
+		capacity <<= 1
+	}
+	return bigramTable{
+		keys:     make([]uint64, capacity),
+		values:   make([]compressedRecSet, capacity),
+		occupied: make([]uint64, (capacity+63)/64),
+	}
+}
+
+func bigramHash(key uint64) uint64 {
+	key ^= key >> 30
+	key *= 0xbf58476d1ce4e5b9
+	key ^= key >> 27
+	key *= 0x94d049bb133111eb
+	return key ^ (key >> 31)
+}
+
+func (t *bigramTable) insert(key uint64, value compressedRecSet) {
+	mask := uint64(len(t.keys) - 1)
+	for slot := bigramHash(key) & mask; ; slot = (slot + 1) & mask {
+		word, bit := slot>>6, uint(slot&63)
+		if t.occupied[word]&(uint64(1)<<bit) == 0 {
+			t.occupied[word] |= uint64(1) << bit
+			t.keys[slot] = key
+			t.values[slot] = value
+			t.count++
+			return
+		}
+		if t.keys[slot] == key {
+			t.values[slot] = value
+			return
+		}
+	}
+}
+
+func (t *bigramTable) get(key uint64) (compressedRecSet, bool) {
+	if len(t.keys) == 0 {
+		return compressedRecSet{}, false
+	}
+	mask := uint64(len(t.keys) - 1)
+	for slot := bigramHash(key) & mask; ; slot = (slot + 1) & mask {
+		word, bit := slot>>6, uint(slot&63)
+		if t.occupied[word]&(uint64(1)<<bit) == 0 {
+			return compressedRecSet{}, false
+		}
+		if t.keys[slot] == key {
+			return t.values[slot], true
+		}
+	}
+}
+
+func (t *bigramTable) ComputeSize() uint64 {
+	return uint64(cap(t.keys))*uint64(unsafe.Sizeof(uint64(0))) +
+		uint64(cap(t.values))*uint64(unsafe.Sizeof(compressedRecSet{})) +
+		uint64(cap(t.occupied))*uint64(unsafe.Sizeof(uint64(0)))
+}
+
+func (s *bigramIndex) ComputeSize() uint {
+	return uint(unsafe.Sizeof(*s)) + uint(s.bytes+s.grams.ComputeSize())
+}
 
 func (s *bigramIndex) Bind(lower scm.Scmer) IndexRowMatcher {
 	keys := patternBigrams(lower.String())
@@ -102,8 +175,7 @@ func bigramKey(left, right rune) uint64 {
 }
 
 func patternBigrams(pattern string) []uint64 {
-	seen := make(map[uint64]struct{})
-	result := make([]uint64, 0, len(pattern)/2)
+	result := make([]uint64, 0, max(0, utf8.RuneCountInString(pattern)-1))
 	var previous rune
 	havePrevious := false
 	for _, current := range pattern {
@@ -113,8 +185,7 @@ func patternBigrams(pattern string) []uint64 {
 		}
 		if havePrevious {
 			key := bigramKey(previous, current)
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
+			if !containsBigram(result, key) {
 				result = append(result, key)
 			}
 		}
@@ -124,8 +195,17 @@ func patternBigrams(pattern string) []uint64 {
 	return result
 }
 
+func containsBigram(keys []uint64, key uint64) bool {
+	for _, candidate := range keys {
+		if candidate == key {
+			return true
+		}
+	}
+	return false
+}
+
 func buildBigramIndex(count uint32, reader ColumnReader) *bigramIndex {
-	index := &bigramIndex{universe: count, grams: make(map[uint64]compressedRecSet)}
+	index := &bigramIndex{universe: count}
 	const readBatch = 1024
 	values := make([]scm.Scmer, readBatch)
 	wordCount := (count + 31) / 32
@@ -159,19 +239,19 @@ func buildBigramIndex(count uint32, reader ColumnReader) *bigramIndex {
 			values[offset] = scm.NewNil()
 		}
 	}
+	index.grams = newBigramTable(len(temporary))
 	for key, words := range temporary {
 		compressed := compressRecSetBitmap(words, count)
 		index.bytes += uint64(compressed.bytes)
-		index.grams[key] = compressed
+		index.grams.insert(key, compressed)
 	}
-	index.bytes += uint64(len(index.grams)) * uint64(unsafe.Sizeof(uint64(0))+unsafe.Sizeof(compressedRecSet{}))
 	return index
 }
 
 func (s *bigramIndex) candidates(keys []uint64) recSetShard {
 	sets := make([]compressedRecSet, 0, len(keys))
 	for _, key := range keys {
-		set, exists := s.grams[key]
+		set, exists := s.grams.get(key)
 		if !exists {
 			return recSetShard{kind: recSetRanges, universe: s.universe}
 		}

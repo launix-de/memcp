@@ -418,6 +418,13 @@ const (
 // currently visible row. A few slots remain for stale index entries left by
 // updates; iterateIndex still visits further batches when necessary.
 func (t *table) scanBufferSize(boundaries boundaries) int {
+	if t.hasBoundUniquePoint(boundaries) {
+		return uniquePointScanBufferSize
+	}
+	return defaultScanBufferSize
+}
+
+func (t *table) hasBoundUniquePoint(boundaries boundaries) bool {
 	for _, unique := range t.Unique {
 		covered := true
 		for _, col := range unique.Cols {
@@ -438,10 +445,10 @@ func (t *table) scanBufferSize(boundaries boundaries) int {
 			}
 		}
 		if covered && len(unique.Cols) > 0 {
-			return uniquePointScanBufferSize
+			return true
 		}
 	}
-	return defaultScanBufferSize
+	return false
 }
 
 func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {

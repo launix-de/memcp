@@ -189,6 +189,10 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
 			for j, mc := range s.ColMapCols[i] {
+				if isScanPseudoColName(mc) {
+					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
+					continue
+				}
 				cs := s.t.getColumnStorageRLocked(mc)
 				mapColReaders[j] = newCachedColumnReaderTx(cs, tx)
 				if proxy, ok := cs.(*StorageComputeProxy); ok {
@@ -375,6 +379,10 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 		fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[colIdx])
 		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
 		for i, mc := range s.ColMapCols[colIdx] {
+			if isScanPseudoColName(mc) {
+				vals[i] = scm.NewNil()
+				continue
+			}
 			cs := s.t.getColumnStorageOrPanic(mc)
 			if proxy, ok := cs.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 				vals[i] = s.t.ColumnReaderTx(tx, mc)(recid)
@@ -506,6 +514,21 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		*exactMain = false
 	}
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
+	// A complete unique point prefix yields at most one live row. Building or
+	// retaining a full-column candidate hook cannot narrow that driver further;
+	// leave the suffix to the mandatory residual predicate.
+	if t.t.hasBoundUniquePoint(cols) {
+		sortedEnd := 0
+		for sortedEnd < len(cols) && cols[sortedEnd].matcher.IsSorted() {
+			sortedEnd++
+		}
+		if sortedEnd < len(cols) {
+			cols = cols[:sortedEnd]
+			if len(lower) > sortedEnd {
+				lower = lower[:sortedEnd]
+			}
+		}
+	}
 
 	// indexFromBoundaries may shorten lower when more than one range column is
 	// present because an ordered index can use only one range suffix. Read the
@@ -634,8 +657,10 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 			index.ColMapCols[i] = cols[i].mapCols  // nil for raw columns
 			index.ColMapFn[i] = cols[i].mapFn      // IsNil() for raw columns
 			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
-			index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
-			index.ColOrderFast[i] = scm.OrderRelationLess(index.ColOrder[i])
+			if cols[i].matcher.IsSorted() {
+				index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
+				index.ColOrderFast[i] = scm.OrderRelationLess(index.ColOrder[i])
+			}
 		}
 		index.Savings = 0.0            // count how many cost we wasted so we decide when to build the index
 		index.baseState.active = false // tell the engine that index has to be built first
@@ -994,6 +1019,9 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		if len(s.sessionKeys) > 0 {
 			values := make([]scm.Scmer, len(s.Cols))
 			for colIdx := range s.Cols {
+				if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+					continue
+				}
 				values[colIdx] = s.getDeltaColValueTx(tx, recid, data, colIdx)
 			}
 			state.precomputedDelta = true
