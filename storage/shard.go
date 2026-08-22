@@ -2590,15 +2590,8 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	cNeedsTxReader := make([]bool, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	bounds := extractBoundaries(conditionCols, condition)
-	bounds, recsetFilter := splitRecSetBoundary(bounds, t.t)
-	var recsetPart *recSetShard
-	if recsetFilter != nil {
-		recsetPart = recsetFilter.shardEntry(t)
-		if recsetPart == nil || recsetPart.count == 0 {
-			return filteredRowEstimate{population: "recset_candidates", coverage: "exact"}
-		}
-	}
-	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
+	lower, upperLast := indexFromBoundaries(bounds)
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(bounds, lower, t.t, conditionCols, condition)
 	for i, col := range conditionCols {
 		if col == "$recset_contains" {
 			fnptr := recSetContainsClosure(t)
@@ -2617,7 +2610,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		}
 	}
 
-	lower, upperLast := indexFromBoundaries(bounds)
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	t.mu.RLock()
@@ -2636,9 +2628,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		indexRestricted = active && len(lower) > 0
 	}, func(batch []uint32) bool {
 		for _, idx := range batch {
-			if recsetPart != nil && !recsetPart.contains(idx) {
-				continue
-			}
 			if acidMode {
 				if !currentTx.IsVisible(t, idx) {
 					continue
@@ -2682,9 +2671,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	})
 
 	population := "table_rows"
-	if recsetPart != nil {
-		population = "recset_candidates"
-	} else if indexRestricted {
+	if indexRestricted {
 		population = "index_candidates"
 	}
 	coverage := "exact"

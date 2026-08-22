@@ -55,7 +55,7 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	}
 }
 
-func TestStorageIndexComputeSizeCountsDeltaBtreeAndBigrams(t *testing.T) {
+func TestStorageIndexComputeSizeCountsDeltaBtreeAndHooks(t *testing.T) {
 	idx := &StorageIndex{}
 	state := &idx.baseState
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
@@ -63,10 +63,10 @@ func TestStorageIndexComputeSizeCountsDeltaBtreeAndBigrams(t *testing.T) {
 	})
 	state.deltaBtree.ReplaceOrInsert(indexPair{itemid: 1, data: []scm.Scmer{scm.NewInt(1)}})
 	state.deltaBtree.ReplaceOrInsert(indexPair{itemid: 2, data: []scm.Scmer{scm.NewInt(2)}})
-	state.likeBigramBytes.Store(4096)
+	state.indexHookBytes.Store(4096)
 
 	baseOnly := uint(24 * 8)
 	if got := idx.ComputeSize(); got <= baseOnly+4096 {
-		t.Fatalf("ComputeSize() = %d, want larger than base plus bigrams %d", got, baseOnly+4096)
+		t.Fatalf("ComputeSize() = %d, want larger than base plus hooks %d", got, baseOnly+4096)
 	}
 }

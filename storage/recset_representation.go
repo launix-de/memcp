@@ -134,7 +134,7 @@ const maxSingletonRuns = 3
 // breakAt forces the ranges phase to close a run the moment recid reaches
 // it (see recSetShardBuilder.breakAt) — pass a shard's main_count so ranges
 // never straddle the main/delta boundary, or 0 to disable (no meaningful
-// main/delta split, e.g. the SkipList builder in analyzer.go).
+// main/delta split, e.g. a query-local candidate-set builder).
 func newRecSetShardBuilder(shard *storageShard, universe uint32, allowFull bool, breakAt uint32) *recSetShardBuilder {
 	builder := &recSetShardBuilder{
 		shard:    shard,

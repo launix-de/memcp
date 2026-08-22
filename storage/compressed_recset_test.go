@@ -94,14 +94,14 @@ func TestRANSBitmapRoundTrip(t *testing.T) {
 
 func TestLikePatternBigrams(t *testing.T) {
 	want := []uint64{
-		likeBigramKey('C', 'a'),
-		likeBigramKey('a', 's'),
-		likeBigramKey('n', 'o'),
+		bigramKey('C', 'a'),
+		bigramKey('a', 's'),
+		bigramKey('n', 'o'),
 	}
-	if got := likePatternBigrams("%CaS_no%"); !reflect.DeepEqual(got, want) {
+	if got := patternBigrams("%CaS_no%"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("bigrams = %v, want %v", got, want)
 	}
-	if got := likePatternBigrams("%x%"); len(got) != 0 {
+	if got := patternBigrams("%x%"); len(got) != 0 {
 		t.Fatalf("single-rune pattern produced bigrams: %v", got)
 	}
 }
@@ -109,16 +109,13 @@ func TestLikePatternBigrams(t *testing.T) {
 func TestLikeBigramIndexCandidatesAreSafeSuperset(t *testing.T) {
 	values := []string{"Casino", "CASINO", "Cas-no", "basic", "needle", ""}
 	reader := ColumnReaderFunc(func(recid uint32) scm.Scmer { return scm.NewString(values[recid]) })
-	index := buildLikeBigramIndex(uint32(len(values)), func(position uint32) uint32 { return position }, reader)
+	index := buildBigramIndex(uint32(len(values)), reader)
 
 	check := func(pattern string, want []uint32) {
 		t.Helper()
-		candidate := index.candidates(pattern)
-		if candidate == nil {
-			t.Fatalf("%q unexpectedly has no usable bigram", pattern)
-		}
+		candidate := index.candidates(patternBigrams(pattern))
 		got := make([]uint32, 0)
-		candidate.matches.forEachRange(func(base, count uint32) bool {
+		candidate.forEachRange(func(base, count uint32) bool {
 			for position := base; position < base+count; position++ {
 				got = append(got, position)
 			}
@@ -131,4 +128,45 @@ func TestLikeBigramIndexCandidatesAreSafeSuperset(t *testing.T) {
 	check("%casino%", []uint32{0, 1})
 	check("%needle%", []uint32{4})
 	check("%missing%", []uint32{})
+}
+
+func TestLikeIndexThreeStageBindingReusesCache(t *testing.T) {
+	values := []string{"Casino", "plain", "CASINO", "needle"}
+	reader := ColumnReaderFunc(func(recid uint32) scm.Scmer { return scm.NewString(values[recid]) })
+	hook := LikeMatcher.Deploy(IndexDeployContext{MainCount: uint32(len(values)), Column: reader}, true)
+	if hook == nil {
+		t.Fatal("LIKE analyzer did not deploy its shard-local hook")
+	}
+	before := hook.ComputeSize()
+	casino := hook.Bind(scm.NewString("%casino%"))
+	needle := hook.Bind(scm.NewString("%needle%"))
+	if casino == nil || needle == nil {
+		t.Fatal("LIKE hook did not bind both query-local row matchers")
+	}
+	if got := casino([]uint32{0, 1, 2, 3}); !reflect.DeepEqual(got, []uint32{0, 2}) {
+		t.Fatalf("casino matcher = %v, want [0 2]", got)
+	}
+	if got := needle([]uint32{3, 2, 1, 0}); !reflect.DeepEqual(got, []uint32{3}) {
+		t.Fatalf("needle matcher = %v, want [3]", got)
+	}
+	if after := hook.ComputeSize(); after != before {
+		t.Fatalf("binding changed reusable hook size from %d to %d", before, after)
+	}
+}
+
+func TestIndexRowMatcherAllocatesNothingPerBatch(t *testing.T) {
+	values := []string{"Casino", "plain", "CASINO", "needle"}
+	reader := ColumnReaderFunc(func(recid uint32) scm.Scmer { return scm.NewString(values[recid]) })
+	hook := LikeMatcher.Deploy(IndexDeployContext{MainCount: uint32(len(values)), Column: reader}, true)
+	matcher := hook.Bind(scm.NewString("%casino%"))
+	var batch [4]uint32
+	allocs := testing.AllocsPerRun(100, func() {
+		batch = [4]uint32{0, 1, 2, 3}
+		if got := matcher(batch[:]); len(got) != 2 {
+			t.Fatalf("matcher returned %d rows, want 2", len(got))
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("IndexRowMatcher allocations per batch = %v, want 0", allocs)
+	}
 }

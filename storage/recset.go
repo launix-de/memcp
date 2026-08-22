@@ -449,7 +449,6 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	boundaries := extractBoundaries(conditionCols, condition)
-	boundaries, recsetFilter := splitRecSetBoundary(boundaries, t)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	result := &recSet{tx: currentTx, table: t}
@@ -468,7 +467,7 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 				panic("query killed")
 			}
 			values <- recSetBuildResult{
-				part: shard.collectRecSet(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, recsetFilter),
+				part: shard.collectRecSet(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss),
 			}
 			return scm.NewNil()
 		})
@@ -498,19 +497,12 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 	return result
 }
 
-func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) recSetShard {
+func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
-	var recsetPart *recSetShard
-	if recsetFilter != nil {
-		recsetPart = recsetFilter.shardEntry(t)
-		if recsetPart == nil || recsetPart.count == 0 {
-			return recSetShard{shard: t}
-		}
-	}
-	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
@@ -557,14 +549,11 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	maxInsertIndex := len(t.inserts)
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
-	completeTraversal := len(boundaries) == 0 && recsetFilter == nil
+	completeTraversal := len(boundaries) == 0
 	singleExactLike := len(boundaries) == 1 && singleLikeBoundaryCoversCondition(conditionCols, condition, boundaries[0])
 	exactLikeMain := false
 	builder := newRecSetShardBuilder(t, visibleUpper, completeTraversal, t.main_count)
 	evaluate := func(idx uint32) bool {
-		if recsetPart != nil && !recsetPart.contains(idx) {
-			return false
-		}
 		if idx >= visibleUpper {
 			return false
 		}

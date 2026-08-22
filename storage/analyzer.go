@@ -16,11 +16,6 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "unsafe"
-import "strings"
-import "math/bits"
-import "sort"
-import "unicode"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
@@ -31,17 +26,39 @@ func mustSymbolValue(v scm.Scmer) scm.Symbol {
 	panic("expected symbol")
 }
 
-// BoundaryMatcher is the plugin interface for index column types.
-// Three singletons (Equal, Range, Like) are created at startup.
-// Zero per-query allocation — the singletons are stored on columnboundaries
-// and on StorageIndex.ColMatchers as type markers.
-//
-// To add a new index-aware operation:
-//  1. Implement BoundaryMatcher.
-//  2. Add a singleton to boundaryMatchers below.
-//  3. Add detection logic in extractBoundaries (hardcoded for now).
-//     Future: generalize via TryMatch method for user-defined matchers.
-type BoundaryMatcher interface {
+// IndexRowMatcher is bound once per index run. It mutates and may shorten the
+// caller-owned RecID batch without allocating. The scan owns LIMIT and stop.
+type IndexRowMatcher func([]uint32) []uint32
+
+// IndexHook is shard-bound and reusable. Custom indexes keep their
+// complete query-independent cache behind this public interface.
+type IndexHook interface {
+	Bind(lower scm.Scmer) IndexRowMatcher
+	ComputeSize() uint
+}
+
+// IndexDeployContext is passed while binding an analyzer to one shard. External
+// custom indexes can use the public batch reader without accessing shard state.
+type IndexDeployContext struct {
+	MainCount uint32
+	Column    ColumnReader
+	shard     *storageShard
+}
+
+// IndexAnalyzeContext exposes the existing lambda resolver to registered
+// analyzers without exposing optimizer internals.
+type IndexAnalyzeContext interface {
+	ResolveParameter(scm.Scmer) (string, bool)
+	ResolveColumn(scm.Scmer) (string, bool)
+	ExtractConstant(scm.Scmer) (scm.Scmer, bool)
+	FunctionIs(scm.Scmer, string) bool
+}
+
+// IndexAnalyzer is the allocation-free global analyzer singleton stored
+// directly on every boundary and StorageIndex column.
+type IndexAnalyzer interface {
+	Analyze(IndexAnalyzeContext, scm.Scmer) (IndexBoundary, bool)
+
 	// Kind returns a short identifier (e.g. "equal", "range", "like").
 	// Used for index deduplication: same column + same kind = same index.
 	Kind() string
@@ -53,111 +70,29 @@ type BoundaryMatcher interface {
 	// IsPointLike reports whether this column is a point lookup for index ordering.
 	// Equal and Like: true (sorted before range). Range: false.
 	IsPointLike() bool
-}
 
-// SkipList holds an adaptive set of candidate index positions. The scan layer
-// retains the residual predicate unless the caller separately proves exactness.
-type SkipList struct {
-	matches recSetShard
-}
-
-type skipListCursor struct {
-	skip    *SkipList
-	listPos int
-}
-
-func (s *SkipList) cursor() skipListCursor {
-	return skipListCursor{skip: s}
-}
-
-func (c *skipListCursor) NextBlock(pos uint32) (uint32, uint32, bool) {
-	if c.skip == nil {
-		return 0, 0, false
-	}
-	set := &c.skip.matches
-	if pos >= set.universe || set.count == 0 {
-		return 0, 0, false
-	}
-	switch set.kind {
-	case recSetRanges:
-		// A "full" set (everything matches) is just one pair covering
-		// [0,universe) here — no separate case needed; if pos lands inside
-		// that pair, it's trimmed to start at pos below, same as it would
-		// for any other range.
-		ranges := set.listedRanges()
-		for c.listPos < len(ranges) && ranges[c.listPos]+ranges[c.listPos+1] <= pos {
-			c.listPos += 2
-		}
-		if c.listPos >= len(ranges) {
-			return 0, 0, false
-		}
-		base, count := ranges[c.listPos], ranges[c.listPos+1]
-		if base < pos {
-			count -= pos - base
-			base = pos
-		}
-		return base, count, true
-	case recSetPositive:
-		values := set.listedValues()
-		for c.listPos < len(values) && values[c.listPos] < pos {
-			c.listPos++
-		}
-		if c.listPos == len(values) {
-			return 0, 0, false
-		}
-		start := values[c.listPos]
-		end := start + 1
-		c.listPos++
-		for c.listPos < len(values) && values[c.listPos] == end {
-			end++
-			c.listPos++
-		}
-		return start, end - start, true
-	case recSetBitmap:
-		wordIndex := pos >> 5
-		word := set.data[wordIndex] & (^uint32(0) << (pos & 31))
-		for word == 0 {
-			wordIndex++
-			if int(wordIndex) >= len(set.data) {
-				return 0, 0, false
-			}
-			word = set.data[wordIndex]
-		}
-		start := (wordIndex << 5) + uint32(bits.TrailingZeros32(word))
-		end := start + 1
-		for end < set.universe && set.contains(end) {
-			end++
-		}
-		return start, end - start, true
-	default:
-		return 0, 0, false
-	}
-}
-
-func (s *SkipList) ComputeSize() uint {
-	if s == nil {
-		return 0
-	}
-	return uint(len(s.matches.data))*4 + uint(unsafe.Sizeof(*s))
+	// Deploy binds this analyzer to a shard. persistent is false for a
+	// cold fallback run; expensive indexes may return nil until autoindex build.
+	Deploy(IndexDeployContext, bool) IndexHook
 }
 
 // Built-in matcher singletons. Every columnboundaries.matcher points to one of these.
 // Created once at startup, never reallocated.
-//
-// TODO: future matcher types to add:
-//   - RegexMatcher: IsSorted=false, same SkipList architecture as LIKE, different match fn
-//   - InMatcher: IsSorted=false, SkipList from sorted ID list
-//   - VectorDistanceMatcher: IsSorted=false, ORDER BY vector_distance(col, query)
-//     (query varies per query → cluster-based SkipList, not sort-order based)
 var (
-	EqualMatcher  BoundaryMatcher = &equalMatcher{}
-	RangeMatcher  BoundaryMatcher = &rangeMatcher{}
-	LikeMatcher   BoundaryMatcher = &likeMatcher{}
-	RecSetMatcher BoundaryMatcher = &recSetMatcher{}
+	EqualMatcher  IndexAnalyzer = &equalMatcher{}
+	RangeMatcher  IndexAnalyzer = &rangeMatcher{}
+	LikeMatcher   IndexAnalyzer = &likeMatcher{}
+	RecSetMatcher IndexAnalyzer = &recSetMatcher{}
 )
 
 // boundaryMatchers lists all known matcher types.
-var boundaryMatchers = []BoundaryMatcher{EqualMatcher, RangeMatcher, LikeMatcher, RecSetMatcher}
+var boundaryMatchers = []IndexAnalyzer{EqualMatcher, RangeMatcher, LikeMatcher, RecSetMatcher}
+
+// RegisterIndexAnalyzer installs a custom analyzer. Registration is intended
+// for package initialization, before queries start.
+func RegisterIndexAnalyzer(analyzer IndexAnalyzer) {
+	boundaryMatchers = append(boundaryMatchers, analyzer)
+}
 
 // --- Equal ---
 
@@ -166,6 +101,10 @@ type equalMatcher struct{}
 func (m *equalMatcher) Kind() string      { return "equal" }
 func (m *equalMatcher) IsSorted() bool    { return true }
 func (m *equalMatcher) IsPointLike() bool { return true }
+func (m *equalMatcher) Analyze(IndexAnalyzeContext, scm.Scmer) (IndexBoundary, bool) {
+	return IndexBoundary{}, false
+}
+func (m *equalMatcher) Deploy(IndexDeployContext, bool) IndexHook { return nil }
 
 // --- Range ---
 
@@ -174,137 +113,14 @@ type rangeMatcher struct{}
 func (m *rangeMatcher) Kind() string      { return "range" }
 func (m *rangeMatcher) IsSorted() bool    { return true }
 func (m *rangeMatcher) IsPointLike() bool { return false }
-
-// --- LIKE ---
-
-type likeMatcher struct{}
-
-func (m *likeMatcher) Kind() string      { return "like" }
-func (m *likeMatcher) IsSorted() bool    { return false }
-func (m *likeMatcher) IsPointLike() bool { return true }
-
-type likeBigramIndex struct {
-	universe uint32
-	grams    map[uint64]compressedRecSet
-	bytes    uint64
+func (m *rangeMatcher) Analyze(IndexAnalyzeContext, scm.Scmer) (IndexBoundary, bool) {
+	return IndexBoundary{}, false
 }
-
-func likeBigramKey(left, right rune) uint64 {
-	return uint64(uint32(unicode.ToLower(left)))<<32 | uint64(uint32(unicode.ToLower(right)))
-}
-
-func likePatternBigrams(pattern string) []uint64 {
-	seen := make(map[uint64]struct{})
-	result := make([]uint64, 0, len(pattern)/2)
-	var previous rune
-	havePrevious := false
-	for _, current := range pattern {
-		if current == '%' || current == '_' {
-			havePrevious = false
-			continue
-		}
-		if havePrevious {
-			key := likeBigramKey(previous, current)
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
-				result = append(result, key)
-			}
-		}
-		previous = current
-		havePrevious = true
-	}
-	return result
-}
-
-func buildLikeBigramIndex(count uint32, getRecid func(uint32) uint32, reader ColumnReader) *likeBigramIndex {
-	index := &likeBigramIndex{universe: count, grams: make(map[uint64]compressedRecSet)}
-	if count == 0 || reader == nil {
-		return index
-	}
-
-	const likeReadBatch = 1024
-	recordIDs := make([]uint32, likeReadBatch)
-	values := make([]scm.Scmer, likeReadBatch)
-	wordCount := (count + 31) / 32
-	temporary := make(map[uint64][]uint32)
-	for base := uint32(0); base < count; base += likeReadBatch {
-		batchCount := uint32(likeReadBatch)
-		if remaining := count - base; remaining < batchCount {
-			batchCount = remaining
-		}
-		for offset := uint32(0); offset < batchCount; offset++ {
-			recordIDs[offset] = getRecid(base + offset)
-		}
-		reader.GetValueMulti(recordIDs[:batchCount], values[:batchCount], 1)
-		for offset := uint32(0); offset < batchCount; offset++ {
-			value := values[offset]
-			if !value.IsString() {
-				continue
-			}
-			position := base + offset
-			var previous rune
-			havePrevious := false
-			for _, current := range value.String() {
-				if havePrevious {
-					key := likeBigramKey(previous, current)
-					words := temporary[key]
-					if words == nil {
-						words = make([]uint32, wordCount)
-						temporary[key] = words
-					}
-					words[position>>5] |= uint32(1) << (position & 31)
-				}
-				previous = current
-				havePrevious = true
-			}
-			values[offset] = scm.NewNil()
-		}
-	}
-
-	for key, words := range temporary {
-		compressed := compressRecSetBitmap(words, count)
-		index.bytes += uint64(compressed.bytes)
-		index.grams[key] = compressed
-	}
-	index.bytes += uint64(len(index.grams)) * uint64(unsafe.Sizeof(uint64(0))+unsafe.Sizeof(compressedRecSet{}))
-	return index
-}
-
-func (s *likeBigramIndex) candidates(pattern string) *SkipList {
-	keys := likePatternBigrams(pattern)
-	if len(keys) == 0 {
-		return nil
-	}
-	sets := make([]compressedRecSet, 0, len(keys))
-	for _, key := range keys {
-		set, exists := s.grams[key]
-		if !exists {
-			return &SkipList{matches: recSetShard{kind: recSetRanges, universe: s.universe}}
-		}
-		sets = append(sets, set)
-	}
-	sort.Slice(sets, func(i, j int) bool { return sets[i].count < sets[j].count })
-	result := recSetShardFromSingleFullRange(nil, s.universe)
-	for _, set := range sets {
-		set.set.AndMut(&result)
-		if result.count == 0 {
-			break
-		}
-	}
-	return &SkipList{matches: result}
-}
-
-// --- RecSet ---
-
-type recSetMatcher struct{}
-
-func (m *recSetMatcher) Kind() string      { return "recset" }
-func (m *recSetMatcher) IsSorted() bool    { return false }
-func (m *recSetMatcher) IsPointLike() bool { return true }
+func (m *rangeMatcher) Deploy(IndexDeployContext, bool) IndexHook { return nil }
 
 type columnboundaries struct {
 	col              string
-	matcher          BoundaryMatcher // always set: EqualMatcher, RangeMatcher, LikeMatcher, ...
+	matcher          IndexAnalyzer // always set: EqualMatcher, RangeMatcher, LikeMatcher, ...
 	lower            scm.Scmer
 	lowerInclusive   bool
 	upper            scm.Scmer
@@ -325,6 +141,36 @@ type columnboundaries struct {
 }
 
 type boundaries []columnboundaries
+
+// IndexBoundary is the public boundary value returned by custom analyzers. Its
+// storage stays equal to the internal boundary representation.
+type IndexBoundary = columnboundaries
+
+func NewIndexBoundary(column string, analyzer IndexAnalyzer, binding scm.Scmer, collation string) IndexBoundary {
+	return columnboundaries{col: column, matcher: analyzer, lower: binding, upper: binding, lowerInclusive: true, upperInclusive: true, collation: collation}
+}
+
+func (b columnboundaries) ColumnName() string { return b.col }
+func (b columnboundaries) Binding() scm.Scmer { return b.lower }
+func (b columnboundaries) Collation() string  { return b.collation }
+
+type indexAnalyzeContext struct {
+	resolveParameter func(scm.Scmer) (string, bool)
+	resolveColumn    func(scm.Scmer) (string, bool)
+	extractConstant  func(scm.Scmer) (scm.Scmer, bool)
+	functionIs       func(scm.Scmer, string) bool
+}
+
+func (c *indexAnalyzeContext) ResolveParameter(v scm.Scmer) (string, bool) {
+	return c.resolveParameter(v)
+}
+func (c *indexAnalyzeContext) ResolveColumn(v scm.Scmer) (string, bool) { return c.resolveColumn(v) }
+func (c *indexAnalyzeContext) ExtractConstant(v scm.Scmer) (scm.Scmer, bool) {
+	return c.extractConstant(v)
+}
+func (c *indexAnalyzeContext) FunctionIs(v scm.Scmer, name string) bool {
+	return c.functionIs(v, name)
+}
 
 // boundaryValueEqual compares boundary values in index-order semantics.
 // Do not use scm.Equal here: it intentionally applies SQL-ish truthy/nil
@@ -347,8 +193,10 @@ func boundaryIsUnboundedOrder(b columnboundaries) bool {
 func addConstraint(in boundaries, b2 columnboundaries) boundaries {
 	for i, b := range in {
 		if b.col == b2.col {
-			if matcherKindEqual(b.matcher, RecSetMatcher) || matcherKindEqual(b2.matcher, RecSetMatcher) {
-				return in
+			// Non-ordering indexes are independent candidate filters. Preserve
+			// every one so different custom indexes can be stacked in one scan.
+			if !b.matcher.IsSorted() || !b2.matcher.IsSorted() {
+				return append(in, b2)
 			}
 			// matcher promotion: more selective matcher wins (equal > like > range)
 			if b2.matcher.IsPointLike() && !b.matcher.IsPointLike() {
@@ -561,6 +409,19 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		}
 		return scm.NewNil(), false
 	}
+	funcIs := func(head scm.Scmer, name string) bool {
+		if head.SymbolEquals(name) {
+			return true
+		}
+		d := scm.DeclarationForValue(head)
+		return d != nil && d.Name == name
+	}
+	analyzeContext := &indexAnalyzeContext{
+		resolveParameter: resolveParamName,
+		resolveColumn:    resolveColVar,
+		extractConstant:  extractConstant,
+		functionIs:       funcIs,
+	}
 	// traverseCondition returns boundaries for a single AST node.
 	// nil means "unknown node, no bounds extractable".
 	// AND: merge children (intersect). OR: widen children (union).
@@ -573,21 +434,12 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		if len(v) == 0 {
 			return nil
 		}
-		// funcIs checks if head represents the named function.
-		// Works for both unoptimized (symbol) and optimizer-resolved (tagFunc) forms.
-		funcIs := func(head scm.Scmer, name string) bool {
-			if head.SymbolEquals(name) {
-				return true
-			}
-			d := scm.DeclarationForValue(head)
-			return d != nil && d.Name == name
-		}
 		if funcIs(v[0], "optimize") && len(v) == 2 {
 			return traverseCondition(v[1])
 		}
-		if col, ok := resolveParamName(v[0]); ok && col == "$recset_contains" && len(v) == 2 {
-			if rs, ok := extractConstant(v[1]); ok && rs.IsCustom(TagRecSet) {
-				return boundaries{columnboundaries{col: col, matcher: RecSetMatcher, lower: rs, lowerInclusive: true, upper: rs, upperInclusive: true}}
+		for _, analyzer := range boundaryMatchers {
+			if boundary, ok := analyzer.Analyze(analyzeContext, node); ok {
+				return boundaries{boundary}
 			}
 		}
 		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
@@ -774,32 +626,6 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 			}
 			return nil
-		} else if funcIs(v[0], "strlike") && len(v) >= 3 {
-			// LIKE: (strlike col "pattern" collation)
-			if col, ok := resolveColVar(v[1]); ok {
-				if pat, ok := extractConstant(v[2]); ok && pat.IsString() {
-					collation := "utf8mb4_general_ci"
-					if len(v) >= 4 {
-						coll, constant := extractConstant(v[3])
-						if !constant || !coll.IsString() {
-							return nil
-						}
-						collation = strings.ToLower(coll.String())
-					}
-					pattern := pat.String()
-					idx := strings.IndexAny(pattern, "%_")
-					if idx > 0 && !strings.Contains(collation, "_ci") {
-						// prefix-anchored LIKE "foo%" → range boundary
-						prefix := pattern[:idx]
-						upperBytes := []byte(prefix)
-						upperBytes[len(upperBytes)-1]++
-						return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewString(prefix), lowerInclusive: true, upper: scm.NewString(string(upperBytes)), upperInclusive: false}}
-					}
-					// non-prefix LIKE "%foo%" → matcher boundary
-					return boundaries{columnboundaries{col: col, matcher: LikeMatcher, lower: pat, upper: pat, collation: collation}}
-				}
-			}
-			return nil
 		} else if v[0].SymbolEquals("and") {
 			var result boundaries
 			for i := 1; i < len(v); i++ {
@@ -841,7 +667,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 					}
 				}
 				for _, cb := range result {
-					if matcherKindEqual(cb.matcher, RecSetMatcher) {
+					if !cb.matcher.IsSorted() {
 						return nil
 					}
 				}
@@ -862,17 +688,15 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	}
 	cols := traverseCondition(p.Body)
 
-	// Keep transient RecSet boundaries in a prefix so scans can remove them by
-	// slicing. Sort real columns point-like (equal + like) first, then range,
-	// alphabetically within each group. LIKE columns are treated as point-like because
-	// the index sort treats them like any other column; the LIKE pattern is a query-level
-	// overlay that filters via rowWithinBounds, not via sort order.
+	// Sort physical index boundaries first and candidate matchers last. The
+	// latter consume the ordered RecID batches without participating in the
+	// index key or binary-search prefix.
 	if len(cols) > 1 {
 		hybridsort.Slice(cols, func(i, j int) bool {
-			iRecSet := matcherKindEqual(cols[i].matcher, RecSetMatcher)
-			jRecSet := matcherKindEqual(cols[j].matcher, RecSetMatcher)
-			if iRecSet != jRecSet {
-				return iRecSet
+			iSorted := cols[i].matcher.IsSorted()
+			jSorted := cols[j].matcher.IsSorted()
+			if iSorted != jSorted {
+				return iSorted
 			}
 			iPoint := boundaryIsPoint(cols[i])
 			jPoint := boundaryIsPoint(cols[j])
@@ -940,21 +764,6 @@ func singleLikeBoundaryCoversCondition(conditionCols []string, condition scm.Scm
 	return false
 }
 
-func splitRecSetBoundary(b boundaries, backingTable *table) (boundaries, *recSet) {
-	var rs *recSet
-	prefixLen := 0
-	for prefixLen < len(b) && matcherKindEqual(b[prefixLen].matcher, RecSetMatcher) {
-		if rs == nil && b[prefixLen].lower.IsCustom(TagRecSet) {
-			candidate := RecSetFromScmer(b[prefixLen].lower)
-			if candidate != nil && candidate.table == backingTable {
-				rs = candidate
-			}
-		}
-		prefixLen++
-	}
-	return b[prefixLen:], rs
-}
-
 func hasBatchBoundaries(bounds boundaries) bool {
 	for _, b := range bounds {
 		if b.lowerBatch || b.upperBatch {
@@ -987,6 +796,11 @@ func reorderByFrequency(bounds boundaries, t *table) {
 		t.bumpColFreq(b.col)
 	}
 	hybridsort.SliceStable(bounds, func(i, j int) bool {
+		iSorted := bounds[i].matcher.IsSorted()
+		jSorted := bounds[j].matcher.IsSorted()
+		if iSorted != jSorted {
+			return iSorted
+		}
 		iEq := boundaryIsPoint(bounds[i])
 		jEq := boundaryIsPoint(bounds[j])
 		if iEq != jEq {
@@ -1283,38 +1097,35 @@ func scmerStructEqual(a, b scm.Scmer) bool {
 
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
-		// A non-sorted matcher after an exact sorted prefix is cheaper as a
-		// residual predicate: the prefix has already reduced the candidate set.
-		// Keep matcher-backed access for scans which have no exact sorted prefix.
-		hasExactPrefix := false
-		for i, col := range cols {
-			if col.matcher.IsSorted() && col.matcher.IsPointLike() {
-				hasExactPrefix = true
-				continue
-			}
-			if hasExactPrefix && !col.matcher.IsSorted() {
-				cols = cols[:i]
+		sortedEnd := 0
+		for sortedEnd < len(cols) && cols[sortedEnd].matcher.IsSorted() {
+			sortedEnd++
+		}
+		usableSorted := sortedEnd
+		for usableSorted >= 2 {
+			if !boundaryIsPoint(cols[usableSorted-2]) &&
+				!(boundaryIsUnboundedOrder(cols[usableSorted-2]) && boundaryIsUnboundedOrder(cols[usableSorted-1])) {
+				usableSorted--
+			} else {
 				break
 			}
 		}
-		//fmt.Println("conditions:", cols)
-		// build up lower and upper bounds of index
-		for {
-			if len(cols) >= 2 && !boundaryIsPoint(cols[len(cols)-2]) &&
-				!(boundaryIsUnboundedOrder(cols[len(cols)-2]) && boundaryIsUnboundedOrder(cols[len(cols)-1])) {
-				// remove last col -> we cant have two ranged cols
-				cols = cols[:len(cols)-1]
-			} else {
-				break // finished -> pure index
-			}
+		// Hooks form a usable suffix only when no physical boundary between the
+		// retained prefix and that suffix had to be dropped.
+		effectiveLen := usableSorted
+		if usableSorted == sortedEnd {
+			effectiveLen = len(cols)
 		}
-		// find out boundaries
-		lower = make([]scm.Scmer, len(cols))
-		for i, v := range cols {
+		if effectiveLen == 0 {
+			return nil, scm.NewNil()
+		}
+		lower = make([]scm.Scmer, effectiveLen)
+		for i, v := range cols[:effectiveLen] {
 			lower[i] = v.lower
 		}
-		upperLast = cols[len(cols)-1].upper
-		//fmt.Println(cols, lower, upperLast) // debug output if we found the right boundaries
+		if usableSorted > 0 {
+			upperLast = cols[usableSorted-1].upper
+		}
 	}
 	return
 }

@@ -100,7 +100,7 @@ test_cases:
         - vorname: "Nikolaus"
           nachname: "Meyer"
 
-  - name: "Exact point probes keep LIKE as a residual filter"
+  - name: "Exact point probes stack the LIKE row matcher"
     scm: |
       (begin
         (define tbl (table "memcp-tests" "ft_customers"))
@@ -115,15 +115,15 @@ test_cases:
         (reduce (produceN 8) (lambda (ok i)
           (begin (probe (+ 1 i)) ok)) true)
         (define indexes ((show "memcp-tests" "ft_customers" 0 true) "indexes"))
-        (define bad (reduce indexes (lambda (found index)
+        (define found_combined (reduce indexes (lambda (found index)
           (begin
             (define cols (get_assoc index "cols"))
             (or found (and
               (strlike cols "%id(equal)%" "utf8mb4_bin")
               (strlike cols "%vorname(like)%" "utf8mb4_bin"))))) false))
-        (if bad
-          (error "point lookup built a full-table LIKE matcher index")
-          true))
+        (if found_combined
+          true
+          (error "point lookup did not retain the LIKE row matcher")))
 
   # --- Incremental search pattern ---
   - name: "Incremental search step 1"

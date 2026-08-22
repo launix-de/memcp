@@ -39,8 +39,8 @@ type storageIndexState struct {
 	active           bool
 	minVals          []scm.Scmer
 	maxVals          []scm.Scmer
-	likeBigrams      []*likeBigramIndex
-	likeBigramBytes  atomic.Int64
+	indexHooks       []IndexHook
+	indexHookBytes   atomic.Int64
 	precomputedDelta bool
 }
 
@@ -70,9 +70,9 @@ type StorageIndex struct {
 	Cols []string // sort equal-cols alphabetically, so similar conditions are canonical
 	// ColMapCols[i] and ColMapFn[i] are set for computed index columns (col starts with ".").
 	// Both are nil for raw columns.
-	ColMapCols  [][]string        // per-column source col names; nil entry means raw column
-	ColMapFn    []scm.Scmer       // per-column compute fn; IsNil() entry means raw column
-	ColMatchers []BoundaryMatcher // per-column matcher (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
+	ColMapCols  [][]string      // per-column source col names; nil entry means raw column
+	ColMapFn    []scm.Scmer     // per-column compute fn; IsNil() entry means raw column
+	ColMatchers []IndexAnalyzer // per-column analyzer (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
 	// ColOrder is the immutable per-column strict relation used by build, delta
 	// merge, lookup, and ordered scans. Each callback owns collation, direction,
 	// and NULL placement; storage must not infer or wrap those semantics.
@@ -182,6 +182,9 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 	getters := make([]colGetter, len(s.Cols))
 	sessionKeys := make([]string, 0)
 	for i, col := range s.Cols {
+		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() && isScanPseudoColName(col) {
+			continue
+		}
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
@@ -206,7 +209,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 }
 
 // matcherKindEqual checks if two matchers have the same kind for index deduplication.
-func matcherKindEqual(a, b BoundaryMatcher) bool {
+func matcherKindEqual(a, b IndexAnalyzer) bool {
 	return a.Kind() == b.Kind()
 }
 
@@ -255,19 +258,19 @@ func (idx *StorageIndex) stateForTx(tx *TxContext, create bool) *storageIndexSta
 
 func (idx *StorageIndex) markVariantsDirty() {
 	idx.mu.Lock()
-	var freedBigrams int64
+	var freedHooks int64
 	for _, state := range idx.variants {
 		state.active = false
 		state.mainIndexes = StorageInt{}
 		state.deltaBtree = nil
-		state.likeBigrams = nil
-		freedBigrams += state.likeBigramBytes.Swap(0)
+		state.indexHooks = nil
+		freedHooks += state.indexHookBytes.Swap(0)
 		state.minVals = nil
 		state.maxVals = nil
 		state.precomputedDelta = false
 	}
-	if freedBigrams > 0 {
-		GlobalCache.UpdateSizeAsync(idx, -freedBigrams)
+	if freedHooks > 0 {
+		GlobalCache.UpdateSizeAsync(idx, -freedHooks)
 	}
 	idx.mu.Unlock()
 }
@@ -284,7 +287,7 @@ func (idx *StorageIndex) ComputeSize() uint {
 		if !idx.Native {
 			sz += state.mainIndexes.ComputeSize()
 		}
-		sz += uint(state.likeBigramBytes.Load())
+		sz += uint(state.indexHookBytes.Load())
 		sz += idx.computeDeltaBtreeSize(state)
 	}
 	return sz
@@ -392,6 +395,12 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 // Non-sorted columns (LIKE etc.) are skipped — handled by block-level skipping
 // in iterate(); the scan layer applies the full condition afterwards.
 func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
+	lastSorted := -1
+	for i := 0; i < cmpCols; i++ {
+		if len(s.ColMatchers) <= i || s.ColMatchers[i].IsSorted() {
+			lastSorted = i
+		}
+	}
 	for i := 0; i < cmpCols; i++ {
 		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
 			continue // non-sorted: block-skip handles this, scan() filters exact
@@ -400,7 +409,7 @@ func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []s
 		if i < len(bounds) && boundaryIsUnboundedOrder(bounds[i]) {
 			continue // unbounded ORDER BY suffix, not a SQL range predicate
 		}
-		if i == cmpCols-1 {
+		if i == lastSorted {
 			if !upperLast.IsNil() {
 				if upperInclusive {
 					if s.compareAt(i, upperLast, v) < 0 {
@@ -484,8 +493,12 @@ func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, b
 	if len(lower) == 0 {
 		return true, true
 	}
-	last := cols[len(lower)-1]
-	return last.lowerInclusive, last.upperInclusive
+	for i := len(lower) - 1; i >= 0; i-- {
+		if cols[i].matcher.IsSorted() {
+			return cols[i].lowerInclusive, cols[i].upperInclusive
+		}
+	}
+	return true, true
 }
 
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
@@ -572,7 +585,14 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		if threshold <= 0 {
 			threshold = 5
 		}
-		if int(t.main_count)+maxInsertIndex < threshold {
+		hasRowMatcher := false
+		for i := 0; i < len(lower); i++ {
+			if !cols[i].matcher.IsSorted() {
+				hasRowMatcher = true
+				break
+			}
+		}
+		if int(t.main_count)+maxInsertIndex < threshold && !hasRowMatcher {
 			t.indexMutex.Unlock()
 			// inline full scan (same as the len(lower)==0 path below)
 			bufN := 0
@@ -605,7 +625,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		index.Cols = make([]string, len(lower))
 		index.ColMapCols = make([][]string, len(lower))
 		index.ColMapFn = make([]scm.Scmer, len(lower))
-		index.ColMatchers = make([]BoundaryMatcher, len(lower))
+		index.ColMatchers = make([]IndexAnalyzer, len(lower))
 		index.ColOrder = make([]func(...scm.Scmer) scm.Scmer, len(lower))
 		index.ColOrderMeta = make([]string, len(lower))
 		index.ColOrderFast = make([]func(scm.Scmer, scm.Scmer) bool, len(lower))
@@ -906,25 +926,40 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		}
 	}
 
-	// LIKE is a query overlay rather than a sort key. Build the complete
-	// shard-local bigram series once, in index-position space, so every later
-	// pattern can cheaply form a safe candidate intersection. Computed LIKE
-	// columns keep the residual full scan until they gain a batch reader.
-	state.likeBigrams = make([]*likeBigramIndex, len(s.Cols))
-	var likeBigramBytes int64
-	getRecid := func(position uint32) uint32 {
-		if s.Native {
-			return position
+	// Deploy query-independent, shard-local custom indexes once. Their concrete
+	// caches remain hidden behind IndexHook; the scan only sees bound matchers.
+	state.indexHooks = make([]IndexHook, len(s.ColMatchers))
+	var indexHookBytes int64
+	for colIdx, analyzer := range s.ColMatchers {
+		if analyzer == nil || analyzer.IsSorted() {
+			continue
 		}
-		return uint32(int64(state.mainIndexes.GetValueUInt(position)) + state.mainIndexes.offset)
-	}
-	for colIdx, matcher := range s.ColMatchers {
-		if matcherKindEqual(matcher, LikeMatcher) && colIdx < len(cols) && cols[colIdx].raw != nil {
-			state.likeBigrams[colIdx] = buildLikeBigramIndex(s.t.main_count, getRecid, cols[colIdx].raw)
-			likeBigramBytes += int64(state.likeBigrams[colIdx].bytes)
+		// Repeated predicates of the same index kind bind independently but
+		// share their shard-local cache.
+		for previous := 0; previous < colIdx; previous++ {
+			if s.Cols[previous] == s.Cols[colIdx] && matcherKindEqual(s.ColMatchers[previous], analyzer) {
+				state.indexHooks[colIdx] = state.indexHooks[previous]
+				break
+			}
+		}
+		if state.indexHooks[colIdx] != nil {
+			continue
+		}
+		var reader ColumnReader
+		if colIdx < len(cols) {
+			reader = cols[colIdx].raw
+		}
+		hook := analyzer.Deploy(IndexDeployContext{
+			MainCount: s.t.main_count,
+			Column:    reader,
+			shard:     s.t,
+		}, true)
+		state.indexHooks[colIdx] = hook
+		if hook != nil {
+			indexHookBytes += int64(hook.ComputeSize())
 		}
 	}
-	state.likeBigramBytes.Store(likeBigramBytes)
+	state.indexHookBytes.Store(indexHookBytes)
 	// (previously: else: Native index comment)
 
 	// delta storage — comparator uses getDeltaColValue so computed columns work;
@@ -971,14 +1006,55 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	state.active = true // mark as ready
 }
 
-func (s *StorageIndex) candidateSkipList(bigrams []*likeBigramIndex, colIdx int, bound columnboundaries) *SkipList {
-	if matcherKindEqual(s.ColMatchers[colIdx], LikeMatcher) {
-		if colIdx >= len(bigrams) || bigrams[colIdx] == nil {
-			return nil
+// bindRowMatchers binds every non-ordering boundary once for this index run.
+// The returned callback applies the resulting functions in place to every
+// batch; no allocation or lock is added to the per-batch path.
+func (s *StorageIndex) bindRowMatchers(bounds boundaries, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool, callback func([]uint32) bool) func([]uint32) bool {
+	matchers := make([]IndexRowMatcher, 0, len(bounds))
+	for colIdx, bound := range bounds {
+		if bound.matcher == nil || bound.matcher.IsSorted() {
+			continue
 		}
-		return bigrams[colIdx].candidates(bound.lower.String())
+		var hook IndexHook
+		if persistent && colIdx < len(hooks) {
+			hook = hooks[colIdx]
+		} else {
+			var reader ColumnReader
+			if colIdx < len(cols) {
+				reader = cols[colIdx].raw
+			}
+			hook = bound.matcher.Deploy(IndexDeployContext{
+				MainCount: s.t.main_count,
+				Column:    reader,
+				shard:     s.t,
+			}, false)
+		}
+		if hook == nil {
+			continue
+		}
+		matcher := hook.Bind(bound.lower)
+		if matcher != nil {
+			matchers = append(matchers, matcher)
+		}
 	}
-	return nil
+	if len(matchers) == 0 {
+		return callback
+	}
+	// Candidate matchers never replace the original predicate. This is
+	// required for approximate indexes such as n-grams and harmless for exact
+	// matchers such as RecSet membership.
+	if exactMain != nil {
+		*exactMain = false
+	}
+	return func(ids []uint32) bool {
+		for _, matcher := range matchers {
+			ids = matcher(ids)
+			if len(ids) == 0 {
+				return true
+			}
+		}
+		return callback(ids)
+	}
 }
 
 // iterate over index using a caller-provided buffer for batching
@@ -1004,6 +1080,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 			if selected != nil {
 				selected(s, false)
 			}
+			callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 			s.fullScan(maxInsertIndex, buf, callback)
 			return
 		} else {
@@ -1015,6 +1092,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 				if selected != nil {
 					selected(s, false)
 				}
+				callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 				s.fullScan(maxInsertIndex, buf, callback)
 				return
 			}
@@ -1038,6 +1116,7 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
+		callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
@@ -1047,6 +1126,7 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
+		callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
@@ -1055,7 +1135,7 @@ start_scan:
 	// inserts from modifying deltaBtree. The index mutex protects against
 	// eviction only; the btree data is stable under RLock.
 	snapDeltaBtree := state.deltaBtree
-	snapLikeBigrams := state.likeBigrams
+	snapIndexHooks := state.indexHooks
 	isNative := s.Native
 	s.mu.Unlock()
 	if selected != nil {
@@ -1074,27 +1154,7 @@ start_scan:
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
 
-	// Look up or build skip lists for non-sorted columns.
-	// Stack-allocated array, zero heap allocation on cache hit.
-	var skipListPtrs [8]*SkipList
-	var skipCursors [8]skipListCursor
-	skipCount := 0
-	for i := 0; i < cmpCols && i < len(bounds) && skipCount < 8; i++ {
-		if !bounds[i].matcher.IsSorted() {
-			skipList := s.candidateSkipList(snapLikeBigrams, i, bounds[i])
-			if skipList == nil {
-				continue
-			}
-			skipListPtrs[skipCount] = skipList
-			skipCursors[skipCount] = skipListPtrs[skipCount].cursor()
-			skipCount++
-		}
-	}
-	// Bigram sets are safe supersets only. The scan layer must always retain
-	// and execute the original LIKE predicate for exact SQL semantics.
-	if exactMain != nil && skipCount > 0 {
-		*exactMain = false
-	}
+	callback = s.bindRowMatchers(bounds, cols, snapIndexHooks, true, exactMain, callback)
 	// Find the leading physical sort key. Non-sorted matchers such as LIKE are
 	// deliberately present in the logical boundary list but do not participate
 	// in buildIndex ordering and must never be used for binary search.
@@ -1145,58 +1205,24 @@ start_scan:
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
 	// LIKE columns don't have lower/upper semantics, so skip this optimization.
-	lastHasMatcher := len(bounds) >= cmpCols && !bounds[cmpCols-1].matcher.IsSorted()
-	if !lowerInclusive && !lastHasMatcher && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
+	lastSorted := -1
+	for i := 0; i < cmpCols && i < len(bounds); i++ {
+		if bounds[i].matcher.IsSorted() {
+			lastSorted = i
+		}
+	}
+	if !lowerInclusive && lastSorted >= 0 && !lower[lastSorted].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
-			if s.compareAt(cmpCols-1, cols[cmpCols-1].get(recid), lower[cmpCols-1]) != 0 {
+			if s.compareAt(lastSorted, cols[lastSorted].get(recid), lower[lastSorted]) != 0 {
 				break
 			}
 			mainIdx++
 		}
 	}
 
-	// Block-end tracking for skip lists (stack-allocated).
-	var blockEnds [8]uint32
-
-	// advanceToNextBlock jumps mainIdx forward to the next position covered
-	// by ALL skip lists. Returns false if no more blocks exist.
-	advanceToNextBlock := func() bool {
-		if skipCount == 0 {
-			return uint32(mainIdx) < s.t.main_count
-		}
-		for {
-			if uint32(mainIdx) >= s.t.main_count {
-				return false
-			}
-			pos := uint32(mainIdx)
-			allOk := true
-			for si := 0; si < skipCount; si++ {
-				if pos < blockEnds[si] {
-					continue // still inside current block
-				}
-				start, length, ok := skipCursors[si].NextBlock(pos)
-				if !ok {
-					return false // no more blocks
-				}
-				blockEnds[si] = start + length
-				if start > pos {
-					mainIdx = int(start)
-					allOk = false
-					break
-				}
-			}
-			if allOk {
-				return true
-			}
-		}
-	}
-
 	nextMain := func() (uint32, bool) {
 		for {
-			if !advanceToNextBlock() {
-				return 0, false
-			}
 			if uint32(mainIdx) >= s.t.main_count {
 				return 0, false
 			}
