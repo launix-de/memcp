@@ -189,9 +189,7 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 	}
 	switch syntax.GetTag() {
 	case tagSourceInfo:
-		sourceInfo := syntax.SourceInfo()
-		sourceInfo.coverage = true
-		return parseSyntax(sourceInfo.value, en, ome, ignoreResult)
+		return parseSyntax(syntax.SourceInfo().value, en, ome, ignoreResult)
 	case tagFastDict:
 		fd := syntax.FastDict()
 		if fd == nil {

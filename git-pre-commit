@@ -72,6 +72,12 @@ if [ "${MEMCP_COVERAGE:-}" = "1" ]; then
     mkdir -p "$GOCOVERDIR"
     echo "📊 Coverage mode enabled (GOCOVERDIR=$GOCOVERDIR)"
 fi
+if [ "${MEMCP_SCM_COVERAGE:-}" = "1" ]; then
+    scm_coverdir="${MEMCP_SCM_COVERDIR:-/tmp/memcp-scm-coverage}"
+    rm -rf "$scm_coverdir"
+    mkdir -p "$scm_coverdir"
+    echo "📊 Scheme interpreter coverage enabled (report directory: $scm_coverdir)"
+fi
 if ! go build $build_flags -o memcp; then
     echo "❌ Build failed, commit aborted"
     exit 1
@@ -435,11 +441,12 @@ run_one() {
 }
 
 print_scm_coverage_report() {
-  if [ "${MEMCP_COVERAGE:-}" != "1" ]; then
+  if [ "${MEMCP_SCM_COVERAGE:-}" != "1" ]; then
     return
   fi
   echo ""
-  echo "📊 Generating SCM coverage report..."
+  echo "📊 Generating SCM interpreter coverage report..."
+  echo "   Process-local snapshot; MemCP restarts reset these counters."
   if ! wait_for_sql_ready 15 1; then
     echo "   ⚠️  MemCP is not SQL-ready; SCM coverage unavailable"
     return
@@ -451,11 +458,7 @@ print_scm_coverage_report() {
     return
   fi
   local scm_coverage_file
-  if [ -n "${GOCOVERDIR:-}" ] && [ -d "$GOCOVERDIR" ]; then
-    scm_coverage_file="$GOCOVERDIR/scm-coverage.json"
-  else
-    scm_coverage_file="$tmpdir/scm-coverage.json"
-  fi
+  scm_coverage_file="$scm_coverdir/scm-coverage.json"
   printf '%s\n' "$scm_coverage_json" > "$scm_coverage_file"
   python3 - "$scm_coverage_file" <<'PY'
 import json
@@ -480,7 +483,7 @@ report = assoc_to_dict(report)
 total = int(report.get("total", 0) or 0)
 covered = int(report.get("covered", 0) or 0)
 percent = float(report.get("percent", 100.0) or 0.0)
-print(f"   total: {covered}/{total} source nodes covered ({percent:.1f}%)")
+print(f"   total: {covered}/{total} source forms executed by the interpreter ({percent:.1f}%)")
 
 files = report.get("files", [])
 gaps = [
@@ -506,9 +509,7 @@ else:
             + suffix
         )
 PY
-  if [ -n "${GOCOVERDIR:-}" ] && [ -d "$GOCOVERDIR" ]; then
-    echo "   Full report: $GOCOVERDIR/scm-coverage.json"
-  fi
+  echo "   Full report: $scm_coverage_file"
 }
 
 if [ "$fail_fast_mode" -eq 1 ]; then

@@ -22,16 +22,27 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 var schemeStringUnescaper = strings.NewReplacer("\\\"", "\"", "\\\\", "\\", "\\n", "\n", "\\r", "\r", "\\t", "\t", "\\0", "\x00")
 
 type SourceInfo struct {
-	source   string
-	line     int
-	col      int
-	value    Scmer
-	coverage bool
+	source string
+	line   int
+	col    int
+	value  Scmer
+	// Only evalWithSourceInfo may mark this flag. Static consumers such as the
+	// optimizer may inspect or unwrap SourceInfo, but that is not execution.
+	coverage uint32
+}
+
+func (source_info *SourceInfo) markInterpreted() {
+	atomic.StoreUint32(&source_info.coverage, 1)
+}
+
+func (source_info *SourceInfo) wasInterpreted() bool {
+	return atomic.LoadUint32(&source_info.coverage) != 0
 }
 
 func (source_info SourceInfo) String() string {

@@ -1040,7 +1040,8 @@ func readConfigFile(path string) ([]string, error) {
 }
 
 func main() {
-	fmt.Print(`memcp Copyright (C) 2023 - 2025   Carl-Philip Hänsch
+	scm.SettingsTrackSourceCoverage = os.Getenv("MEMCP_SCM_COVERAGE") == "1"
+	fmt.Print(`memcp Copyright (C) 2023 - 2026   Carl-Philip Hänsch
     This program comes with ABSOLUTELY NO WARRANTY;
     This is free software, and you are welcome to redistribute it
     under certain conditions;

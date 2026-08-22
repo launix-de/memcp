@@ -28,6 +28,10 @@ import "time"
 
 var SettingsHaveGoodBacktraces bool
 
+// SettingsTrackSourceCoverage preserves source wrappers until interpreter
+// execution. It never marks the wrappers as covered itself.
+var SettingsTrackSourceCoverage bool
+
 func procBodyUsesNamedParam(body Scmer, named map[Symbol]struct{}) bool {
 	if len(named) == 0 {
 		return false
@@ -963,13 +967,10 @@ func requiredNumberedSlots(expr Scmer) int {
 
 func scmerStripSourceInfo(v Scmer) (Scmer, bool) {
 	if v.IsSourceInfo() {
-		si := v.SourceInfo()
-		si.coverage = true
-		return si.value, true
+		return v.SourceInfo().value, true
 	}
 	if v.GetTag() == tagAny {
 		if si, ok := v.Any().(SourceInfo); ok {
-			si.coverage = true
 			return si.value, true
 		}
 	}
@@ -1072,7 +1073,14 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		return optimizeList(val.Slice(), env, ome, useResult)
 	case tagSourceInfo:
 		siPtr := val.SourceInfo()
-		siPtr.coverage = true
+		if SettingsTrackSourceCoverage {
+			result, ti := OptimizeEx(siPtr.value, env, ome, useResult)
+			if ti.Const() {
+				return result, ti
+			}
+			siPtr.value = result
+			return val, ti.WithoutTransfer()
+		}
 		if SettingsHaveGoodBacktraces {
 			result, ti := OptimizeEx(siPtr.value, env, ome, useResult)
 			if ti.Const() {
@@ -1086,7 +1094,6 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 	case tagAny:
 		payload := val.Any()
 		if pv, ok := payload.(SourceInfo); ok {
-			pv.coverage = true
 			if SettingsHaveGoodBacktraces {
 				result, ti := OptimizeEx(pv.value, env, ome, useResult)
 				if ti.Const() {
@@ -2449,12 +2456,9 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 
 func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
 	if val.IsSourceInfo() {
-		sourceInfo := val.SourceInfo()
-		sourceInfo.coverage = true
-		val = sourceInfo.value
+		val = val.SourceInfo().value
 	} else if val.GetTag() == tagAny {
 		if sourceInfo, ok := val.Any().(SourceInfo); ok {
-			sourceInfo.coverage = true
 			val = sourceInfo.value
 		}
 	}
