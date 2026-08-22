@@ -7240,6 +7240,7 @@ source itself has no known row count (not a base table). */
 			(list (quote null_fraction) nil)
 			(list (quote min) nil)
 			(list (quote max) nil)
+			(list (quote raw_type) nil)
 			(list (quote average_value_bytes) nil))
 		(try
 			(lambda ()
@@ -7262,13 +7263,27 @@ source itself has no known row count (not a base table). */
 				(list (quote distinct) nil)
 				(list (quote distinct_confidence) 0)
 				(list (quote distinct_source) (quote unknown))
-				(list (quote average_value_bytes) nil))))))))
+				(list (quote raw_type) nil)
+				(list (quote average_value_bytes) nil)))))))
 
 (define planner_column_distinct_estimate (lambda (src column)
 	(qassoc_get (planner_column_statistics src column) (quote distinct) nil)))
 
 (define planner_column_average_value_bytes (lambda (src column)
-	(qassoc_get (planner_column_statistics src column) (quote average_value_bytes) nil)))
+	(begin
+		(define statistics (planner_column_statistics src column))
+		(define measured (qassoc_get statistics (quote average_value_bytes) nil))
+		(if (not (nil? measured))
+			measured
+			/* Persisted generations created before planner statistics existed do
+			not expose an average width until their next REBUILD. An unbounded text
+			column must not look free in that interval: its scan still has to load
+			and decode every value. This conservative width is an ordinary cost
+			input, so all physical alternatives remain selected by the same model. */
+			(if (contains? '("text" "bytea" "blob")
+				(toLower (string (qassoc_get statistics (quote raw_type) ""))))
+				4096
+				0)))))
 
 (define planner_group_distinct_estimate (lambda (src keys row_count)
 	(reduce keys (lambda (estimate key)
@@ -7583,17 +7598,18 @@ resulting tree in semantic order. */
 /* Physical costing needs the amount of scalar work, not a speculative copy of
 each alternative plan. This walker visits the already canonical expression
 once; get_column is a leaf because column reads are costed independently. */
-(define physical_broad_text_match_operation? (lambda (expr)
+(define physical_text_scan_operation? (lambda (expr)
 	(match expr
-		((symbol strlike) _value pattern _collation) (planner_broad_like_expr? pattern)
-		((quote strlike) _value pattern _collation) (planner_broad_like_expr? pattern)
-		((symbol strlike_cs) _value pattern _collation) (planner_broad_like_expr? pattern)
-		((quote strlike_cs) _value pattern _collation) (planner_broad_like_expr? pattern)
+		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation) true
+		((symbol strlike_cs) _value _pattern _collation) true
+		((quote strlike_cs) _value _pattern _collation) true
 		_ false)))
 
-/* REBUILD already walks and decodes every base value. Its exact average byte
-width lets costing distinguish short labels from large text documents without
-building either physical alternative or sampling the table again. */
+/* Every text predicate must decode its input regardless of result selectivity.
+REBUILD already walks every base value, so its exact average byte width lets
+costing distinguish short labels from large text documents without building
+either physical alternative or sampling the table again. */
 (define physical_expression_work_profile (lambda (src expr)
 	(match expr
 		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
@@ -7611,11 +7627,11 @@ building either physical alternative or sampling the table again. */
 				(list (quote depth) (+ own (reduce children (lambda (depth child)
 					(max depth (qassoc_get child (quote depth) 0))) 0)))
 				(list (quote broad_text_matches) (+
-					(if (physical_broad_text_match_operation? expr) 1 0)
+					(if (physical_text_scan_operation? expr) 1 0)
 					(reduce children (lambda (total child)
 						(+ total (qassoc_get child (quote broad_text_matches) 0))) 0)))
 				(list (quote broad_text_average_bytes) (+
-					(if (physical_broad_text_match_operation? expr)
+					(if (physical_text_scan_operation? expr)
 						(reduce (extract_columns_for_alias src (car tail)) (lambda (total column)
 							(+ total (coalesceNil (planner_column_average_value_bytes src column) 0))) 0)
 						0)
@@ -18946,11 +18962,13 @@ it does not recover parser spelling or leak a scan into logical IR. */
 						(planner_record_session_value_guards term)
 						(define estimate (planner_source_filter_estimate src term 512))
 						(define rows (membership_estimated_matching_rows estimate input_rows nil))
+						(define work (membership_source_work_profile src term true))
 						(define candidate (if (number? rows)
 							(list
 								(list (quote predicate) term)
 								(list (quote rows) rows)
 								(list (quote input_rows) input_rows)
+								(list (quote work) work)
 								(list (quote estimate) estimate))
 							nil))
 						(if (or (nil? candidate)
@@ -18967,8 +18985,7 @@ this lowering boundary. */
 (define selective_text_filter_scan_cost (lambda (src candidate)
 	(begin
 		(define input_rows (qassoc_get candidate (quote input_rows) 0))
-		(define predicate (qassoc_get candidate (quote predicate) true))
-		(define work (membership_source_work_profile src predicate true))
+		(define work (qassoc_get candidate (quote work) '()))
 		(planner_cost
 			(* (qassoc_get work (quote scan_invocations) 1)
 				planner_membership_scan_invocation_ns)
@@ -19015,6 +19032,7 @@ this lowering boundary. */
 			(define decision_id (concat "selective_text_filter_carrier:" alias))
 			(define recset_cost (selective_text_filter_recset_cost src candidate))
 			(define base_cost (selective_text_filter_base_cost src candidate))
+			(define work (qassoc_get candidate (quote work) '()))
 			(define normal_choice (if (planner_cost_better? recset_cost base_cost)
 				"scan_recset" "fused_base_scan"))
 			(define alternatives (list "scan_recset" "fused_base_scan"))
@@ -19032,6 +19050,14 @@ this lowering boundary. */
 				(list "inputs" (list
 					(list "candidate_rows" (qassoc_get candidate (quote rows) nil))
 					(list "candidate_input_rows" (qassoc_get candidate (quote input_rows) nil))
+					(list "candidate_scan_invocations" (qassoc_get work (quote scan_invocations) 1))
+					(list "candidate_filter_columns" (qassoc_get work (quote filter_columns) 0))
+					(list "candidate_expression_operations" (qassoc_get work (quote expression_operations) 0))
+					(list "candidate_expression_depth" (qassoc_get work (quote expression_depth) 0))
+					(list "candidate_broad_text_match_rows" (qassoc_get work (quote broad_text_match_rows) 0))
+					(list "candidate_broad_text_match_bytes" (qassoc_get work (quote broad_text_match_bytes) 0))
+					(list "candidate_filter_value_rows" (qassoc_get work (quote filter_value_rows) 0))
+					(list "candidate_expression_operation_rows" (qassoc_get work (quote expression_operation_rows) 0))
 					(list "driver_rows" (qassoc_get candidate (quote rows) nil))
 					(list "driver_input_rows" (qassoc_get candidate (quote input_rows) nil))
 					(list "density" (/ (qassoc_get candidate (quote rows) 0)

@@ -107,6 +107,25 @@ func TestCountEstimateIsLockFreeAndPersisted(t *testing.T) {
 	shard.mu.Unlock()
 }
 
+func TestLegacyPlannerRowEstimateIsInitializedFromShards(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	// The first release containing planner_row_estimate could persist a zero
+	// for an existing table before its lazy shards had been counted.
+	tbl.PlannerRowEstimate.present.Store(true)
+	shard := &storageShard{t: tbl, main_count: 9, srState: WRITE}
+	tbl.Shards = []*storageShard{shard}
+	tbl.publishTopologyLocked()
+
+	tbl.initializeLegacyPlannerRowEstimate()
+
+	if !tbl.PlannerRowEstimate.present.Load() {
+		t.Fatal("legacy planner estimate was not marked initialized")
+	}
+	if got := tbl.CountEstimate(); got != 9 {
+		t.Fatalf("legacy CountEstimate() = %d, want 9", got)
+	}
+}
+
 func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	tbl := showColumnsTestTable(2)
 	tbl.Columns[1].Name = "MixedCase"
@@ -136,6 +155,17 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	}
 	if got := scm.ToInt(columnStats.Slice()[3].Slice()[1]); got != 17 {
 		t.Fatalf("planner distinct estimate = %d, want 17", got)
+	}
+	rawType := ""
+	for _, property := range columnStats.Slice() {
+		pair := property.Slice()
+		if len(pair) == 2 && scm.String(pair[0]) == "raw_type" {
+			rawType = scm.String(pair[1])
+			break
+		}
+	}
+	if rawType != "VARCHAR" {
+		t.Fatalf("planner raw type = %q, want VARCHAR", rawType)
 	}
 	if tbl.PlannerStatistics().FastDict() != root {
 		t.Fatal("planner statistics rebuilt an already-published snapshot")

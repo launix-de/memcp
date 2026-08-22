@@ -584,6 +584,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list (quote coverage) (quote sampled)))
 		100000 100000) 25000
 		"capped table samples retain proportional selectivity extrapolation")
+	(assert (physical_text_scan_operation?
+		(list (quote strlike) "value" "%selective-term%" "utf8mb4_general_ci")) true
+		"text scan work is byte-sensitive even when the predicate is selective")
+	(assert (physical_text_scan_operation?
+		(list (quote equal??) "value" "other")) false
+		"non-text comparisons do not acquire text scan work")
 	/* planner_recset_carrier_cost / scalar_first_probe_recset_cost_preferred?:
 	same "unknown stays unknown" discipline as the keytable check above, plus
 	the actual three-way comparison. A RecSet's build cost scales with

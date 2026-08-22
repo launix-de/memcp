@@ -464,6 +464,7 @@ test_cases:
         - 'chosen scan_recset'
         - 'candidate_rows 8'
         - 'candidate_input_rows 2048'
+        - 'broad_text_match_bytes'
 
   - name: "Selective text carrier exposes both calibrated physical variants"
     sql: |
