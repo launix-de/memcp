@@ -19169,11 +19169,18 @@ this lowering boundary. */
 			(not membership_driver)
 			(nil? row_number_stage_filter)
 			(> (count all_sources) 1)
-			(not (source_unique_point_condition? src effective_condition))
 			(equal? alias (probe_work_context_driver_alias probe_context))))
-		(define text_filter_candidate (if text_filter_eligible
+		(define text_filter_candidate_before_point_check (if text_filter_eligible
 			(selective_text_filter_candidate src all_sources default_alias effective_condition)
 			nil))
+		/* Most join leaves have no text predicate. Avoid walking their full
+		condition a second time to prove point access before the cheap candidate
+		classifier has established that this decision is relevant at all. */
+		(define text_filter_candidate (if (and
+			(not (nil? text_filter_candidate_before_point_check))
+			(source_unique_point_condition? src effective_condition))
+			nil
+			text_filter_candidate_before_point_check))
 		(define text_filter_plan (choose_selective_text_filter_carrier src text_filter_candidate))
 		(define text_filter_recset (and (not (nil? text_filter_candidate))
 			(equal? (car text_filter_plan) "scan_recset")))
