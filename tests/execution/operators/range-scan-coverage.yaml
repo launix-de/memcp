@@ -18,6 +18,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_dim"
   - sql: "DROP TABLE IF EXISTS perf_tiny"
+  - sql: "DROP TABLE IF EXISTS selective_text_driver"
+  - sql: "DROP TABLE IF EXISTS selective_text_dim"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
   - sql: "DROP TABLE IF EXISTS stats_contract_child"
@@ -422,6 +424,80 @@ test_cases:
     sql: "INSERT INTO perf_tiny VALUES (1, 1)"
     expect:
       affected_rows: 1
+
+  - name: "Create selective text RecSet driver"
+    sql: "CREATE TABLE selective_text_driver (id INT PRIMARY KEY, dim_id INT, search VARCHAR(40))"
+    expect:
+      rows: 0
+
+  - name: "Create selective text RecSet dimension"
+    sql: "CREATE TABLE selective_text_dim (id INT PRIMARY KEY, label VARCHAR(20))"
+    expect:
+      rows: 0
+
+  - name: "Insert selective text RecSet fixture"
+    scm: |
+      (begin
+        (insert (table "memcp-tests" "selective_text_dim") '("id" "label")
+          (map (produceN 4) (lambda (i)
+            (list i (nth '("zero" "one" "two" "three") i)))))
+        (insert (table "memcp-tests" "selective_text_driver") '("id" "dim_id" "search")
+          (map (produceN 2048) (lambda (i)
+            (list i (mod i 4)
+              (if (< i 8) (concat "asset-needle-" i) (concat "asset-other-" i))))))
+        (rebuild)
+        2048)
+
+  - name: "Selective local text filter becomes an exact RecSet carrier"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT f.id, d.label
+      FROM selective_text_driver f
+      LEFT JOIN selective_text_dim d ON d.id = f.dim_id
+      WHERE f.search LIKE '%needle%'
+      ORDER BY f.id
+      LIMIT 4
+    expect:
+      rows: 1
+      result_contains:
+        - 'selective_text_filter_carrier'
+        - 'chosen scan_recset'
+        - 'estimated_rows 8'
+        - 'input_rows 2048'
+
+  - name: "Selective local text RecSet carrier preserves joined rows"
+    sql: |
+      SELECT f.id, d.label
+      FROM selective_text_driver f
+      LEFT JOIN selective_text_dim d ON d.id = f.dim_id
+      WHERE f.search LIKE '%needle%'
+      ORDER BY f.id
+      LIMIT 4
+    expect:
+      rows: 4
+      data:
+        - id: 0
+          label: "zero"
+        - id: 1
+          label: "one"
+        - id: 2
+          label: "two"
+        - id: 3
+          label: "three"
+
+  - name: "Broad local text filter stays fused into the driver scan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT f.id, d.label
+      FROM selective_text_driver f
+      LEFT JOIN selective_text_dim d ON d.id = f.dim_id
+      WHERE f.search LIKE '%asset%'
+      ORDER BY f.id
+      LIMIT 4
+    expect:
+      rows: 1
+      result_not_contains:
+        - 'selective_text_filter_carrier'
 
   - name: "EXPLAIN IR swaps to selective driver"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
@@ -929,6 +1005,8 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_dim"
   - sql: "DROP TABLE IF EXISTS perf_tiny"
+  - sql: "DROP TABLE IF EXISTS selective_text_driver"
+  - sql: "DROP TABLE IF EXISTS selective_text_dim"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
   - sql: "DROP TABLE IF EXISTS stats_contract_child"
