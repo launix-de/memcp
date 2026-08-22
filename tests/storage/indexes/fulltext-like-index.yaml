@@ -168,7 +168,7 @@ test_cases:
     expect:
       rows: 0
 
-  - name: "Insert 65000 rows (needle-in-a-haystack)"
+  - name: "Insert 30000 rows (needle-in-a-haystack)"
     setup:
       - scm: |
           (begin
@@ -246,10 +246,10 @@ test_cases:
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
-  - name: "LIKE aggregate cache remains reachable"
+  - name: "LIKE speedup >= 3x"
     sql: |
       SELECT full_ns, cache_ns,
-        CASE WHEN full_ns > 0 AND cache_ns > 0 THEN 'ok' ELSE 'FAIL' END AS result
+        CASE WHEN full_ns > 0 AND cache_ns > 0 AND cache_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
           SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN exec_ns ELSE 0 END) AS full_ns,
@@ -422,10 +422,10 @@ test_cases:
     sql: "SELECT 1 AS ok"
     expect: { rows: 1 }
 
-  - name: "LIKE+Range aggregate cache remains reachable"
+  - name: "LIKE+Range speedup >= 3x"
     sql: |
       SELECT full_ns, cache_ns,
-        CASE WHEN full_ns > 0 AND cache_ns > 0 THEN 'ok' ELSE 'FAIL' END AS result
+        CASE WHEN full_ns > 0 AND cache_ns > 0 AND cache_ns * 3 <= full_ns * 2 THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
           SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN exec_ns ELSE 0 END) AS full_ns,
@@ -576,7 +576,7 @@ test_cases:
   # Keep matching values below the lexical position of the LIKE pattern. A
   # binary search on a non-sorted matcher used to start after these records,
   # so only warm scans lost rows while SQL-level aggregate tests stayed green.
-  - name: "Create LIKE candidate table"
+  - name: "Create exact match-set table"
     sql: |
       CREATE TABLE `ft_matchset` (
         id INT PRIMARY KEY,
@@ -585,7 +585,7 @@ test_cases:
       )
     expect: { rows: 0 }
 
-  - name: "Insert LIKE candidate data"
+  - name: "Insert exact match-set data"
     scm: |
       (begin
         (set rows (map (produceN 30000) (lambda (i)
@@ -598,11 +598,11 @@ test_cases:
         (rebuild)
         30000)
 
-  - name: "LIKE candidate fixture is visible through SQL"
+  - name: "Exact match-set fixture is visible through SQL"
     sql: "SELECT COUNT(*) AS cnt FROM ft_matchset WHERE tag LIKE '%zzzz%'"
     expect: { rows: 1, data: [{ cnt: 30000 }] }
 
-  - name: "LIKE residual remains exact through index warmup"
+  - name: "LIKE match set remains exact through warmup"
     scm: |
       (begin
         (set tbl (table "memcp-tests" "ft_matchset"))
@@ -618,7 +618,7 @@ test_cases:
           true
           (error (concat "LIKE match-set counts: " first ", " built ", " warm))))
 
-  - name: "LIKE residual keeps collation semantics exact"
+  - name: "LIKE match sets keep collation semantics separate"
     scm: |
       (begin
         (set tbl (table "memcp-tests" "ft_matchset"))
@@ -634,7 +634,7 @@ test_cases:
           true
           (error (concat "LIKE collation counts: " binary-count ", " ci-count))))
 
-  - name: "Bigram candidates still evaluate delta rows"
+  - name: "Cached LIKE match sets still evaluate delta rows"
     setup:
       - sql: "INSERT INTO ft_matchset (id, name, tag) VALUES (30000, 'klaus-delta', 'delta')"
     scm: |
