@@ -2099,6 +2099,77 @@ func (s *StorageInt) GetValueUInt(i uint32) uint64 {
 	return uint64(v) >> (64 - uint(s.bitsize)) // shift right without sign
 }
 
+// GetValuesUInt32Range decodes consecutive, non-NULL integers without Scmer
+// boxing. Composite storage types use this for internal uint32 vectors. The
+// caller guarantees that all decoded values fit uint32.
+func (s *StorageInt) GetValuesUInt32Range(recid uint32, count uint32, target []uint32, stride int) {
+	if count == 0 {
+		return
+	}
+	if s.hasNull {
+		panic("StorageInt: UInt32 extraction does not support NULL")
+	}
+	if stride <= 0 {
+		stride = 1
+	}
+	bitsize := uint(s.bitsize)
+	bitpos := uint(recid) * bitsize
+	chunkIdx := bitpos / 64
+	bitOff := bitpos % 64
+	targetIndex := 0
+	for range count {
+		value := s.chunk[chunkIdx] << bitOff
+		if bitOff+bitsize > 64 {
+			value |= s.chunk[chunkIdx+1] >> (64 - bitOff)
+		}
+		target[targetIndex] = uint32(int64(value>>(64-bitsize)) + s.offset)
+		targetIndex += stride
+		bitOff += bitsize
+		if bitOff >= 64 {
+			bitOff -= 64
+			chunkIdx++
+		}
+	}
+}
+
+// GetValuesUInt32Multi is the arbitrary-position counterpart to
+// GetValuesUInt32Range. Adjacent IDs retain the rolling bit cursor.
+func (s *StorageInt) GetValuesUInt32Multi(recids []uint32, target []uint32, stride int) {
+	if len(recids) == 0 {
+		return
+	}
+	if s.hasNull {
+		panic("StorageInt: UInt32 extraction does not support NULL")
+	}
+	if stride <= 0 {
+		stride = 1
+	}
+	bitsize := uint(s.bitsize)
+	var chunkIdx, bitOff uint
+	var previous uint32
+	havePosition := false
+	targetIndex := 0
+	for _, recid := range recids {
+		if !havePosition || recid != previous+1 {
+			bitpos := uint(recid) * bitsize
+			chunkIdx = bitpos / 64
+			bitOff = bitpos % 64
+		}
+		value := s.chunk[chunkIdx] << bitOff
+		if bitOff+bitsize > 64 {
+			value |= s.chunk[chunkIdx+1] >> (64 - bitOff)
+		}
+		target[targetIndex] = uint32(int64(value>>(64-bitsize)) + s.offset)
+		targetIndex += stride
+		previous, havePosition = recid, true
+		bitOff += bitsize
+		if bitOff >= 64 {
+			bitOff -= 64
+			chunkIdx++
+		}
+	}
+}
+
 // GetValueRange decodes count consecutive bit-packed values starting at
 // recid. Unlike calling GetValueUInt in a loop, it keeps a running
 // chunk/bit-offset cursor and advances it by bitsize each step instead of
@@ -2236,6 +2307,33 @@ func (s *StorageInt) prepare() {
 	s.offset = int64(1<<63 - 1)
 	s.max = -s.offset - 1
 	s.hasNull = false
+}
+
+// initValuesUInt32 initializes the normal StorageInt bit layout when a
+// composite storage already knows its exact non-NULL uint32 range.
+func (s *StorageInt) initValuesUInt32(count uint32, minimum, maximum uint32) {
+	*s = StorageInt{offset: int64(minimum), max: int64(maximum), count: uint64(count)}
+	s.bitsize = uint8(bits.Len32(maximum - minimum))
+	if s.bitsize == 0 {
+		s.bitsize = 1
+	}
+	if count > 0 {
+		s.chunk = make([]uint64, ((uint(count)-1)*uint(s.bitsize)+65)/64+1)
+	}
+}
+
+// buildValueUInt32 stores one value in an initValuesUInt32 backing without
+// constructing a Scmer.
+func (s *StorageInt) buildValueUInt32(i uint32, value uint32) {
+	if i >= uint32(s.count) || int64(value) < s.offset || int64(value) > s.max {
+		panic("StorageInt: uint32 value outside initialized range")
+	}
+	bitpos := uint(i) * uint(s.bitsize)
+	packed := uint64(int64(value)-s.offset) << (64 - uint(s.bitsize))
+	s.chunk[bitpos/64] |= packed >> (bitpos % 64)
+	if bitpos%64+uint(s.bitsize) > 64 {
+		s.chunk[bitpos/64+1] |= packed << (64 - bitpos%64)
+	}
 }
 func (s *StorageInt) scan(i uint32, value scm.Scmer) {
 	// storage is so simple, dont need scan
