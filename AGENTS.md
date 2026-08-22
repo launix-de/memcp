@@ -4,14 +4,14 @@
 - `main.go`: entrypoint and CLI flags.
 - `scm/`: Scheme runtime (REPL, HTTP/MySQL servers, builtins).
 - `storage/`: core storage engine (tables, shards, indexes, persistence).
-- `lib/`: Scheme modules; SQL parsers and planner live here (`lib/sql-parser.scm`, `lib/psql-parser.scm`, `lib/queryplan.scm`); `lib/main.scm` bootstraps the API.
+- `lib/`: Scheme modules; SQL parsers and planner live here (`lib/sql-parser.scm`, `lib/psql-parser.scm`, `lib/queryplan.scm`, `lib/queryplan-*.scm`); `lib/main.scm` bootstraps the API.
 - `tests/`: SQL YAML suites organized by the taxonomy in `tests/README.md`.
 - `run_sql_tests.py`: test runner (HTTP-based); starts `memcp` when needed.
 - `docs/`: generated API/reference docs.
 - if you work on files, update/add the copyright notice's current year
 
 ## Query Planner Invariants
-- Before changing SQL parsing, `lib/queryplan.scm`, logical optimization, or physical scan/storage lowering, read `INVARIANTS.md`.
+- Before changing SQL parsing, `lib/queryplan.scm`, `lib/queryplan-*.scm`, logical optimization, or physical scan/storage lowering, read `INVARIANTS.md`.
 - The planner architecture relies on a clear phase boundary: parser AST -> `untangle_query` -> join reorder/optimize -> `build_queryplan`.
 - Logical planning must keep the combined operator model (`query-block`, `group-stage`, `union-block`) and must not leak physical artifacts such as `scan`, `.grp:*`, ORC columns, RecSets, or temp tables before physical lowering.
 - Do not add scalar/correlated subquery fallback paths. Unsupported logical shapes must fail explicitly until they are decorrelated correctly.
@@ -105,7 +105,7 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - Log replay and rebuild mutate shard state and must hold `t.mu.Lock()` for their critical sections. They must not take table locks inside shard locks to avoid cycles.
 - When adding new storage fields, document the locking discipline and update this section.
 
-### Scheme AST and Codegen Quoting (lib/queryplan.scm)
+### Scheme AST and Codegen Quoting (lib/queryplan.scm and lib/queryplan-*.scm)
 - Build AST as data: most builder blocks use a single leading quote `'(...)` so nested lists are data, not executed at construction.
 - Lambdas: embed as `'((quote lambda) (param-list) body)` where:
   - `param-list`: a list of (quoted) or 'quoted symbols. Follow existing patterns like `(map cols (lambda (col) (symbol (concat tblvar "." col))))` rather than constructing `(cons 'list ...)` for params.

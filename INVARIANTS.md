@@ -20,8 +20,9 @@ Branches may improve the implementation, add physical operators, or change
 internal helper encodings, but they must preserve the semantic and phase
 boundaries described here.
 
-These invariants apply especially to `lib/queryplan.scm`, `lib/sql-parser.scm`,
-`lib/psql-parser.scm`, and physical scan/storage lowering code.
+These invariants apply especially to the `lib/queryplan-*.scm` modules loaded
+by `lib/queryplan.scm`, `lib/sql-parser.scm`, `lib/psql-parser.scm`, and physical
+scan/storage lowering code.
 
 ## Planner Pipeline
 
@@ -691,11 +692,11 @@ elsewhere.
 
 ## Planner Source Layout
 
-Source files should follow the planner phases rather than feature history. A
-future split of `lib/queryplan.scm` should keep one-way dependencies in pipeline
-order: shared logical IR, decorrelation and logical rewrites, reorder/cost facts,
-physical lowering, then parser-facing adapters. Logical modules must not import
-or call physical lowering modules.
+Source files follow the planner phases rather than feature history.
+`lib/queryplan.scm` imports them in one-way pipeline order: shared logical IR,
+decorrelation and logical rewrites, reorder/cost facts, physical lowering, then
+parser-facing adapters. Logical modules must not import or call physical
+lowering modules.
 
 Do not combine a large mechanical file move with a semantic planner fix. Move
 stable phase ranges in a dedicated refactoring PR so review can distinguish
