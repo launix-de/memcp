@@ -55,7 +55,7 @@ func sourceCoverageReport(a ...Scmer) Scmer {
 			continue
 		}
 		key := sourceCoveragePoint{source: si.source, line: si.line, col: si.col}
-		points[key] = points[key] || si.coverage
+		points[key] = points[key] || si.wasInterpreted()
 	}
 
 	stats := map[string]*fileStats{}
