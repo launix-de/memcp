@@ -61,7 +61,7 @@ test_cases:
           payload: "world"
 
   # --- Medium TEXT remains inline below the 2 KiB boundary ---
-  - name: "Insert medium inline string"
+  - name: "Insert long string (>255 bytes)"
     sql: "INSERT INTO blob_test (id, payload) VALUES (3, REPEAT('A', 1000))"
     expect:
       affected_rows: 1
@@ -184,7 +184,7 @@ test_cases:
       data:
         - b: "/////w=="
 
-  - name: "Insert medium inline binary value"
+  - name: "Insert long binary blob (>255 bytes, triggers OverlayBlob)"
     sql: "INSERT INTO blob_test (id, payload) VALUES (12, FROM_BASE64(REPEAT('AAAA', 100)))"
     expect:
       affected_rows: 1
