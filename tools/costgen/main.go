@@ -196,7 +196,7 @@ type constants struct {
 }
 
 func main() {
-	patch := flag.Bool("patch", false, "rewrite lib/queryplan.scm")
+	patch := flag.Bool("patch", false, "rewrite lib/queryplan-physical-expr.scm")
 	jsonl := flag.String("jsonl", "", "write raw measurements as JSONL")
 	flag.Parse()
 
@@ -211,7 +211,7 @@ func main() {
 	if len(suites) == 0 {
 		fatal(errors.New("no tests/**/*.yaml suite has metadata.physical_calibration: true"))
 	}
-	queryplanPath := filepath.Join(root, "lib", "queryplan.scm")
+	queryplanPath := filepath.Join(root, "lib", "queryplan-physical-expr.scm")
 	currentConstants, err := readCurrentConstants(queryplanPath)
 	if err != nil {
 		fatal(err)
