@@ -421,7 +421,7 @@ test_cases:
         - "chosen driver_filter_join_probe"
 
   - name: "selective driver filter probes membership only on its subset"
-    max_time: 1.25
+    max_time: 1
     sql: |
       SELECT COUNT(*) AS total
       FROM bqm_document d
