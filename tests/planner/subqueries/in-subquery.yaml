@@ -744,6 +744,8 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS in_dv_doc"
       - sql: "DROP TABLE IF EXISTS in_dv_file"
       - sql: "DROP TABLE IF EXISTS in_dv_acl"
+      - sql: "DROP TABLE IF EXISTS in_batch_doc"
+      - sql: "DROP TABLE IF EXISTS in_batch_file"
       - sql: |
           CREATE TABLE in_dv_file (
             ID INT PRIMARY KEY,
@@ -763,6 +765,8 @@ test_cases:
             tenant INT,
             allowed INT
           )
+      - sql: "CREATE TABLE in_batch_file (ID INT PRIMARY KEY, flag INT)"
+      - sql: "CREATE TABLE in_batch_doc (ID INT PRIMARY KEY, file_id INT, sort_key INT)"
       - sql: |
           INSERT INTO in_dv_file (ID, filename, search) VALUES
           (10, 'invoice-hit.pdf', 'other'),
@@ -785,6 +789,15 @@ test_cases:
           INSERT INTO in_dv_acl (ID, tenant, allowed) VALUES
           (1, 1, 1),
           (2, 2, 0)
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "in_batch_file") '("ID" "flag")
+              (map (produceN 8000) (lambda (i)
+                (list (+ i 1) 1))))
+            (insert (table "memcp-tests" "in_batch_doc") '("ID" "file_id" "sort_key")
+              (map (produceN 10000) (lambda (i)
+                (list (+ i 1) (if (< i 8000) (+ i 1) (- i 7999)) (- 10000 i)))))
+            true)
     steps:
       - sql: |
           SELECT d.ID
@@ -992,6 +1005,20 @@ test_cases:
       - sql: |
           EXPLAIN
           SELECT d.ID
+          FROM in_batch_doc d
+          WHERE d.file_id IN (
+            SELECT f.ID FROM in_batch_file f WHERE f.flag = 0
+            UNION
+            SELECT f.ID FROM in_batch_file f WHERE f.flag = 1
+          )
+          ORDER BY d.sort_key
+          LIMIT 5
+        expect:
+          contains:
+            - "scan_order_batch_accept"
+      - sql: |
+          EXPLAIN
+          SELECT d.ID
           FROM in_dv_doc d
           WHERE d.file_id IN (
             SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
@@ -1026,6 +1053,7 @@ test_cases:
             - "membership_carrier"
             - "candidate_keyset"
             - "driver_order_membership_probe"
+            - "ordered_batch_accept"
             - "recset_project_join"
             - "recset_union"
             - "scan_order"
@@ -1043,11 +1071,10 @@ test_cases:
           ORDER BY d.sort_key
           LIMIT 2
         expect:
-          rows: 2
+          rows: 1
           contains:
             - "membership_carrier"
             - "ordered_batch_accept"
-            - "scan_order_batch_accept"
       - sql: |
           EXPLAIN PHYSICAL CALIBRATE
           SELECT d.ID
@@ -1060,11 +1087,11 @@ test_cases:
           ORDER BY d.sort_key
           LIMIT 2 OFFSET 1
         expect:
-          rows: 4
+          rows: 3
           contains:
+            - "candidate_keyset"
+            - "driver_order_membership_probe"
             - "ordered_batch_accept"
-            - "scan_order"
-            - "scan_order_batch_accept"
             - "operator_consistent"
             - "result_equal"
           not_contains:

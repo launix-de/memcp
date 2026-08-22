@@ -2317,16 +2317,16 @@ scan boundary only when the complete predicate implies it. */
 						(replace_driver_membership_markers src item memberships))))
 					_ expr))))))
 
-(define membership_recset_bindings_using (lambda (src memberships consumer driver_rows_override)
+(define membership_recset_bindings_using (lambda (src memberships consumer driver_rows_override allow_ordered_batch)
 	(filter (map memberships (lambda (membership)
 		(begin
 			(define expr (recset_project_join_expr_for_membership_using
-				src membership consumer driver_rows_override))
+				src membership consumer driver_rows_override allow_ordered_batch))
 			(if (nil? expr) nil (list membership (membership_recset_var src membership) expr)))))
 		(lambda (binding) (not (nil? binding))))))
 
 (define membership_recset_bindings (lambda (src memberships)
-	(membership_recset_bindings_using src memberships nil nil)))
+	(membership_recset_bindings_using src memberships nil nil false)))
 
 (define wrap_membership_recset_bindings (lambda (bindings body)
 	(if (empty_list? bindings)
@@ -2555,6 +2555,120 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 					nil
 					(list (quote recset_union) (cons (quote list) candidates))))))))
 
+(define ordered_batch_membership_terms (lambda (src condition)
+	(filter (map (split_and_terms (coalesceNil condition true)) (lambda (term)
+		(begin
+			(define marker (driver_membership_probe_term term))
+			(if (nil? marker)
+				nil
+				(begin
+					(define target_col (direct_column_name_for_alias src (nth marker 1)))
+					(if (nil? target_col)
+						nil
+						(list (nth marker 0) (nth marker 1) target_col term)))))))
+		(lambda (membership) (not (nil? membership))))))
+
+(define ordered_batch_filter_expr (lambda (src condition memberships)
+	(begin
+		(define input_batch (symbol "__ordered_input_batch"))
+		(define local_batch (symbol "__ordered_local_batch"))
+		(define residual (reduce memberships (lambda (remaining membership)
+			(strip_driver_membership_for_source src remaining membership)) condition))
+		(define residual_cols (extract_columns_for_alias src residual))
+		(define locally_filtered (if (equal? residual true)
+			input_batch
+			(list (quote scan_recset)
+				'(session "__memcp_tx")
+				input_batch
+				(cons (quote list) residual_cols)
+				(list (quote lambda)
+					(map residual_cols (lambda (col)
+						(scan_callback_symbol_for_alias (source_alias src) col)))
+					(lower_column_expr_for_alias src residual)))))
+		(define membership_exprs (map memberships (lambda (membership)
+			(batch_membership_expr src membership local_batch))))
+		(if (reduce membership_exprs (lambda (unsupported expr)
+			(or unsupported (nil? expr))) false)
+			nil
+			(list (quote lambda) (list input_batch)
+				(list
+					(list (quote lambda) (list local_batch)
+						(if (empty_list? membership_exprs)
+							local_batch
+							(list (quote recset_intersect)
+								(cons (quote list) (cons local_batch membership_exprs)))))
+					locally_filtered))))))
+
+(define ordered_batch_count_estimate (lambda (first_batch visited_rows)
+	(if (or (not (number? first_batch)) (or (<= first_batch 0) (not (number? visited_rows))))
+		1
+		(if (<= visited_rows first_batch)
+			1
+			(+ 1 (ordered_batch_count_estimate (* first_batch 2) (- visited_rows first_batch)))))))
+
+(define ordered_batch_accept_cost (lambda (facts)
+	(begin
+		(define candidate_input_rows (qassoc_get facts (quote membership_candidate_input_rows) nil))
+		(define candidate_rows (membership_estimated_matching_rows
+			(list
+				(list (quote rows) (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
+				(list (quote input) (qassoc_get facts (quote membership_candidate_estimate_input) nil))
+				(list (quote sampled) (qassoc_get facts (quote membership_candidate_estimate_sampled) nil))
+				(list (quote capped) (qassoc_get facts (quote membership_candidate_estimate_capped) false))
+				(list (quote population) (qassoc_get facts (quote membership_candidate_estimate_population) (quote table_rows)))
+				(list (quote coverage) (qassoc_get facts (quote membership_candidate_estimate_coverage) (quote sampled))))
+			candidate_input_rows candidate_input_rows))
+		(define driver_rows (qassoc_get facts (quote membership_driver_rows) nil))
+		(define driver_input_rows (membership_driver_input_rows driver_rows facts))
+		(define visited_rows (membership_expected_driver_rows_visited
+			candidate_input_rows candidate_rows driver_rows facts))
+		(define first_batch (+
+			(coalesceNil (qassoc_get facts (quote membership_order_offset) nil) 0)
+			(coalesceNil (qassoc_get facts (quote membership_order_limit) nil) 0)))
+		(define batches (ordered_batch_count_estimate first_batch visited_rows))
+		(define probe_branches (max 1
+			(qassoc_get facts (quote membership_candidate_probe_branches) 1)))
+		(define candidate_scan_invocations (max 1
+			(qassoc_get facts (quote membership_candidate_scan_invocations) probe_branches)))
+		(define driver_scan_invocations (max 1
+			(qassoc_get facts (quote membership_driver_scan_invocations) 1)))
+		(define candidate_fraction (if (and (number? driver_input_rows) (> driver_input_rows 0))
+			(min 1 (/ visited_rows driver_input_rows)) 1))
+		/* Disjoint driver batches may contain the same foreign-key value. In the
+		absence of key-frequency statistics, charge every batch for its projected
+		fraction instead of assuming candidate source rows are globally disjoint. */
+		(define candidate_repeat_fraction (min batches (* candidate_fraction batches)))
+		(define candidate_work_rows (* candidate_input_rows candidate_repeat_fraction))
+		(define candidate_match_rows (* candidate_rows candidate_repeat_fraction))
+		(define projection_rows (* probe_branches
+			(+ (* visited_rows 2) candidate_work_rows candidate_match_rows)))
+		(define broad_text_rows (*
+			(qassoc_get facts (quote membership_candidate_broad_text_match_rows) 0)
+			candidate_repeat_fraction))
+		(define broad_text_bytes (*
+			(qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0)
+			candidate_repeat_fraction))
+		(planner_cost
+			(+ planner_ordered_batch_accept_startup_ns
+				(* (+ driver_scan_invocations (* batches candidate_scan_invocations))
+					planner_membership_scan_invocation_ns))
+			(+
+				(* (+ visited_rows candidate_work_rows projection_rows)
+					planner_membership_scan_row_ns)
+				(* candidate_work_rows
+					(qassoc_get facts (quote membership_candidate_filter_columns) 0)
+					planner_membership_filter_column_row_ns)
+				(* candidate_work_rows
+					(qassoc_get facts (quote membership_candidate_expression_operations) 0)
+					planner_membership_expression_operation_row_ns)
+				(* broad_text_rows planner_membership_broad_text_match_row_ns)
+				(* broad_text_bytes planner_membership_broad_text_match_byte_ns))
+			0 0 0
+			(* projection_rows
+				planner_membership_recset_build_row_ns)
+			(* projection_rows 8)
+			0 visited_rows 0.55))))
+
 (define lower_single_source_query_block (lambda (block)
 	(begin
 		(define src (car (qb_sources block)))
@@ -2589,21 +2703,44 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 					'()))
 				(define use_membership_keysets (and keyset_membership_probe
 					(equal? (count membership_keysets) (count memberships))))
+				(define allow_ordered_batch_binding (and scan_order_supported
+					(and bounded
+						(and (equal? (count memberships) 1)
+							(and (not (membership_expr_has_driver_alternative? condition))
+								(and (or (empty_list? order_items)
+									(not (empty_list? (source_primary_key_columns src))))
+									(ordered_batch_stage_supported? (nth (car memberships) 0))))))))
 				(define forced_candidate_membership (reduce memberships (lambda (forced membership)
-					(or forced (equal?
-						(planner_physical_override (concat "membership_carrier:" (gs_id (nth membership 0))))
-						"candidate_keyset"))) false))
+					(begin
+						(define override (planner_physical_override
+							(concat "membership_carrier:" (gs_id (nth membership 0)))))
+						(or forced (or (equal? override "candidate_keyset")
+							(equal? override "ordered_batch_accept"))))) false))
 				(define prefer_membership_filter (and scan_order_supported
 					(and bounded
 						(and (not forced_candidate_membership)
 							(and (qassoc_get (qb_facts block) (quote membership_driver_alternative) false)
 								(membership_estimate_broad? (qb_facts block)))))))
-				(define membership_bindings (if (or keyset_membership_probe prefer_membership_filter)
+				(define membership_plans (if (or keyset_membership_probe prefer_membership_filter)
 					'()
-					(membership_recset_bindings_using src memberships
-						(if bounded (quote order_limit) (quote filter))
-						(if (and scan_order_supported bounded)
-							(probe_limit_work_rows (qb_limit block)) nil))))
+					(filter (map memberships (lambda (membership)
+						(begin
+							(define plan (recset_project_join_plan_for_membership_using
+								src membership
+								(if bounded (quote order_limit) (quote filter))
+								(if (and scan_order_supported bounded)
+									(probe_limit_work_rows (qb_limit block)) nil)
+								allow_ordered_batch_binding))
+							(if (nil? plan) nil (list membership plan)))))
+						(lambda (entry) (not (nil? entry))))))
+				(define membership_bindings (filter (map membership_plans (lambda (entry)
+					(begin
+						(define membership (nth entry 0))
+						(define plan (nth entry 1))
+						(if (equal? (car plan) "candidate_keyset")
+							(list membership (membership_recset_var src membership) (cadr plan))
+							nil))))
+					(lambda (binding) (not (nil? binding)))))
 				(define bound_memberships (map membership_bindings (lambda (binding) (nth binding 0))))
 				(define membership_formula (if keyset_membership_probe
 					nil
@@ -2662,6 +2799,15 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 					(extract_columns_for_alias src expr)))))
 				(define ordercols (if (empty_list? order_items) '() (scan_order_sort_columns_for_alias src order_items)))
+				(define batch_tiebreaker_cols (if (empty_list? order_items)
+					'()
+					(filter (source_primary_key_columns src)
+						(lambda (col) (not (contains? ordercols col))))))
+				(define batch_ordercols (merge (list ordercols batch_tiebreaker_cols)))
+				(define batch_orderdirs (merge (list
+					(if (empty_list? order_items) '() (order_relations_for_source src order_items))
+					(map batch_tiebreaker_cols (lambda (col)
+						(canonical_order_relation < (source_column_order_collation src col)))))))
 				(define mapcols fieldcols)
 				(define membership_candidates (if membership_filter
 					(membership_or_candidate_recset src source_table condition membership_bindings)
@@ -2674,6 +2820,15 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(lower_column_expr_for_alias src filter_condition)))
+				(define remaining_memberships (driver_memberships_for_source src filter_condition))
+				(define remaining_batch_memberships (ordered_batch_membership_terms src filter_condition))
+				(define batch_filter (if (and (equal? table_expr source_table)
+					(equal? (count remaining_memberships) (count remaining_batch_memberships)))
+					(ordered_batch_filter_expr src filter_condition remaining_batch_memberships)
+					nil))
+				(define use_batch_accept (and (not (nil? batch_filter))
+					(reduce membership_plans (lambda (chosen entry)
+						(or chosen (equal? (car (nth entry 1)) "ordered_batch_accept"))) false)))
 				(define map_expr (list (quote lambda)
 					(map mapcols (lambda (col) (symbol (concat alias "." col))))
 					(list (quote resultrow)
@@ -2693,21 +2848,36 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 						(source_outer? src))
 					(if scan_order_supported
 						(begin
-							(define scan_expr (list (quote scan_order)
-								'(session "__memcp_tx")
-								table_expr
-								(cons (quote list) filtercols)
-								filter_expr
-								(cons (quote list) ordercols)
-								(cons (quote list) (if (empty_list? order_items) '() (order_relations_for_source src order_items)))
-								0
-								(coalesceNil (qb_offset block) 0)
-								(coalesceNil (qb_limit block) -1)
-								(cons (quote list) mapcols)
-								map_expr
-								nil
-								nil
-								(source_outer? src)))
+							(define scan_expr (if use_batch_accept
+								(list (quote scan_order_batch_accept)
+									'(session "__memcp_tx")
+									table_expr
+									batch_filter
+									(cons (quote list) batch_ordercols)
+									(cons (quote list) batch_orderdirs)
+									0
+									(coalesceNil (qb_offset block) 0)
+									(coalesceNil (qb_limit block) -1)
+									(cons (quote list) mapcols)
+									map_expr
+									nil
+									nil
+									(source_outer? src))
+								(list (quote scan_order)
+									'(session "__memcp_tx")
+									table_expr
+									(cons (quote list) filtercols)
+									filter_expr
+									(cons (quote list) ordercols)
+									(cons (quote list) (if (empty_list? order_items) '() (order_relations_for_source src order_items)))
+									0
+									(coalesceNil (qb_offset block) 0)
+									(coalesceNil (qb_limit block) -1)
+									(cons (quote list) mapcols)
+									map_expr
+									nil
+									nil
+									(source_outer? src))))
 							scan_expr)
 						(neumann_fail "build_queryplan" "single-source ORDER BY requires a storage carrier"))))
 				(if use_membership_keysets
@@ -2908,7 +3078,8 @@ stream before its native OFFSET/LIMIT counters; projection only sees the window.
 			(recset_project_join_plan_for_membership_using src membership
 				(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter))
 				(if (query_limit_active? offset_value limit_value)
-					(probe_limit_work_rows limit_value) nil))))
+					(probe_limit_work_rows limit_value) nil)
+				false)))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define membership_table_expr (if (and
 			(not (nil? membership_plan))
@@ -3238,7 +3409,12 @@ it does not recover parser spelling or leak a scan into logical IR. */
 						(list alias))))
 					best
 					(begin
-						(planner_record_session_value_guards term)
+						(reduce (query_expr_session_reads term) (lambda (_ expr)
+							(begin
+								(define value (planner_literal_value expr))
+								(planner_record_guard_condition
+									(list (quote equal?) expr
+										(if (list? value) (list (quote quote) value) value))))) nil)
 						(define estimate (planner_source_filter_estimate src term 512))
 						(define rows (membership_estimated_matching_rows estimate input_rows nil))
 						(define work (membership_source_work_profile src term true))
@@ -3410,7 +3586,8 @@ this lowering boundary. */
 					(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter)))
 				(if (and (not (empty_list? current_order_items))
 					(query_limit_active? offset_value limit_value))
-					(probe_limit_work_rows limit_value) nil))))
+					(probe_limit_work_rows limit_value) nil)
+				false)))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define membership_table_expr (if (and
 			(not (nil? membership_plan))
@@ -5378,14 +5555,23 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		_ false)))
 
 (define physical_membership_operator_family (lambda (plan)
-	(if (physical_expr_has_head? plan (quote recset_project_join))
-		"candidate_keyset"
-		/* A forced membership variant reaches this function only after
-		require_physical_scan_relations has rejected every surviving logical
-		marker. Without a projected RecSet its emitted carrier is therefore the
-		driver-side probe family, independent of the concrete group-cache/index
-		primitive selected inside that family. */
-		"driver_order_membership_probe")))
+	(if (physical_expr_has_head? plan (quote scan_order_batch_accept))
+		"ordered_batch_accept"
+		(if (physical_expr_has_head? plan (quote recset_project_join))
+			"candidate_keyset"
+			/* A forced membership variant reaches this function only after
+			require_physical_scan_relations has rejected every surviving logical
+			marker. Without a projected RecSet its emitted carrier is therefore the
+			driver-side probe family, independent of the concrete group-cache/index
+			primitive selected inside that family. */
+			"driver_order_membership_probe"))))
+
+(define physical_operator_family_for_decision (lambda (plan decision)
+	(begin
+		(define kind (qassoc_get decision "decision" nil))
+		(if (equal? kind "membership_carrier")
+			(physical_membership_operator_family plan)
+			"unknown"))))
 
 /* recset_project_join is adaptive only inside the physical operator: actual
 source-key and per-shard target cardinalities are available there, while the
@@ -5453,11 +5639,10 @@ potentially large calibrated SELECT result. */
 (define physical_calibration_runtime_plan (lambda (plan decision variant estimated_ns operator_family suite_var)
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" "unknown"))
-		(define expected_family (if (equal? (qassoc_get decision "decision" nil) "membership_carrier")
-			variant
-			operator_family))
-		(define consistent (or (not (equal? (qassoc_get decision "decision" nil) "membership_carrier"))
-			(equal? operator_family expected_family)))
+		(define decision_kind (qassoc_get decision "decision" nil))
+		(define expected_family (if (equal? decision_kind "membership_carrier")
+			variant operator_family))
+		(define consistent (equal? operator_family expected_family))
 		(define baseline_hash_key (concat "hash:" decision_id))
 		(define baseline_count_key (concat "count:" decision_id))
 		(define shared_suite (equal? suite_var (quote __physical_calibration_suite)))
@@ -5554,7 +5739,8 @@ potentially large calibrated SELECT result. */
 					variant_decision
 					variant
 					(qassoc_get variant_cost "total_ns" nil)
-					(nth compilation 2)
+					(physical_operator_family_for_decision
+						(nth compilation 0) variant_decision)
 					suite_var)))))))
 
 (define physical_decision_has_costed_alternatives? (lambda (decision)
@@ -5577,6 +5763,7 @@ potentially large calibrated SELECT result. */
 					(and (number? (qassoc_get inputs "candidate_rows" nil))
 						(and (number? (qassoc_get inputs "driver_input_rows" nil))
 							(number? (qassoc_get inputs "driver_rows" nil))))))))))
+
 
 (define explain_queryplan_physical_calibrate_discover (lambda (query)
 	(begin
@@ -5618,7 +5805,7 @@ potentially large calibrated SELECT result. */
 						decision
 						variant
 						(qassoc_get (qassoc_get alternative "cost" '()) "total_ns" nil)
-						(nth compilation 2)
+						(physical_operator_family_for_decision (nth compilation 0) decision)
 						suite_var)))))))
 
 (define explain_queryplan_physical_calibrate (lambda (query)

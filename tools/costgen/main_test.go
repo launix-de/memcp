@@ -80,10 +80,10 @@ func TestRowFeaturesKeepsBroadTextRowsAndBytesSeparate(t *testing.T) {
 func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 	value := func(v float64) *float64 { return &v }
 	row := calibrationRow{
-		Plan: "scan_order_batch_accept", Consumer: "order_limit",
+		Plan: "ordered_batch_accept", Consumer: "order_limit",
 		CandidateInputRows: value(1000), CandidateRows: value(50), ProjectedDriverRows: value(50),
 		DriverInputRows: value(1000), DriverRows: value(100), ExpectedDriverRowsVisited: value(100),
-		Limit: value(10), Offset: value(0), CandidateScanInvocations: value(1),
+		Limit: value(10), Offset: value(0), ProbeBranches: value(2), CandidateScanInvocations: value(2),
 		CandidateFilterColumns: value(2), CandidateMapColumns: value(1), CandidateCacheMapColumns: value(2),
 		CandidateExpressionOperations: value(3), CandidateBroadTextMatchRows: value(1000),
 		CandidateBroadTextMatchBytes: value(8192000), DriverScanInvocations: value(1),
@@ -93,29 +93,59 @@ func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if features[0] != 4 || features[1] != 300 || features[2] != 200 ||
-		features[4] != 300 || features[6] != 250 {
+	if features[0] != 9 || features[1] != 1740 || features[2] != 800 ||
+		features[4] != 1200 || features[6] != 1240 {
 		t.Fatalf("adaptive features = %v", features)
 	}
-	if features[13] != 100 || features[14] != 819200 {
-		t.Fatalf("fractional broad text features = (%v, %v), want (100, 819200)",
+	if features[13] != 400 || features[14] != 3276800 {
+		t.Fatalf("repeated broad text features = (%v, %v), want (400, 3276800)",
 			features[13], features[14])
+	}
+	if features[15] != 1 {
+		t.Fatalf("ordered batch startup feature = %v, want 1", features[15])
+	}
+}
+
+func TestFitOrderedBatchStartupUsesExactBatchObservations(t *testing.T) {
+	features := make([]float64, 16)
+	features[15] = 1
+	value, ok := fitOrderedBatchStartup([]observation{
+		{plan: "ordered_batch_accept", y: 42000, x: features},
+	}, constants{})
+	if !ok || value != 42000 {
+		t.Fatalf("ordered batch startup = (%d, %v), want (42000, true)", value, ok)
 	}
 }
 
 func TestMedianRowsAcceptsOrderedBatchPlans(t *testing.T) {
 	runs := [][]calibrationRow{
-		{{Plan: "scan_order", WholeQueryExecutionNS: 30}, {Plan: "scan_order_batch_accept", WholeQueryExecutionNS: 20}},
-		{{Plan: "scan_order", WholeQueryExecutionNS: 10}, {Plan: "scan_order_batch_accept", WholeQueryExecutionNS: 40}},
-		{{Plan: "scan_order", WholeQueryExecutionNS: 20}, {Plan: "scan_order_batch_accept", WholeQueryExecutionNS: 30}},
+		{{Plan: "driver_order_membership_probe", WholeQueryExecutionNS: 30}, {Plan: "ordered_batch_accept", WholeQueryExecutionNS: 20}},
+		{{Plan: "driver_order_membership_probe", WholeQueryExecutionNS: 10}, {Plan: "ordered_batch_accept", WholeQueryExecutionNS: 40}},
+		{{Plan: "driver_order_membership_probe", WholeQueryExecutionNS: 20}, {Plan: "ordered_batch_accept", WholeQueryExecutionNS: 30}},
 	}
 	rows, err := medianRows(runs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 || rows[0].Plan != "scan_order" || rows[0].WholeQueryExecutionNS != 20 ||
-		rows[1].Plan != "scan_order_batch_accept" || rows[1].WholeQueryExecutionNS != 30 {
+	if len(rows) != 2 || rows[0].Plan != "driver_order_membership_probe" || rows[0].WholeQueryExecutionNS != 20 ||
+		rows[1].Plan != "ordered_batch_accept" || rows[1].WholeQueryExecutionNS != 30 {
 		t.Fatalf("unexpected medians: %+v", rows)
+	}
+}
+
+func TestValidateDecisionOrderingIncludesOrderedBatch(t *testing.T) {
+	features := func(first float64) []float64 {
+		values := make([]float64, 15)
+		values[0] = first
+		return values
+	}
+	rows := []observation{
+		{caseName: "three-way", plan: "candidate_keyset", y: 10, x: features(1)},
+		{caseName: "three-way", plan: "driver_order_membership_probe", y: 20, x: features(2)},
+		{caseName: "three-way", plan: "ordered_batch_accept", y: 5, x: features(100)},
+	}
+	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
+		t.Fatal("three-way validation accepted an incorrectly ranked ordered batch plan")
 	}
 }
 

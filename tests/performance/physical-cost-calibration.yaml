@@ -331,7 +331,7 @@ test_cases:
 
   - name: "production-scale adaptive ordered batch filter"
     physical_calibration: true
-    calibration_decision: "ordered_batch_accept"
+    calibration_decision: "membership_carrier"
     calibration_holdout: true
     race: true
     race_grace: 0.5
