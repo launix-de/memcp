@@ -568,9 +568,6 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 	(query_block_with_full_stage_catalog_using block
 		(stage_catalog_with_nested (query_block_stage_catalog block)))))
 
-(define stage_ids (lambda (stages)
-	(map (coalesceNil stages '()) gs_id)))
-
 (define stages_without_ids (lambda (stages ids)
 	(filter (coalesceNil stages '()) (lambda (stage)
 		(not (contains? ids (gs_id stage)))))))
@@ -724,9 +721,6 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 			'()
 			(query_block_facts_with_stage_catalog rewritten available_stages)))))
 
-(define query_block_without_stages_after_prepare (lambda (block)
-	(query_block_without_stages_after_prepare_using (qb_stages block) block)))
-
 (define group_stage_with_eager_prepared_metadata (lambda (stage)
 	(if (not (group_stage? stage))
 		stage
@@ -818,9 +812,6 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 (define query_block_with_prepared_sources_using (lambda (stages block)
 	(query_block_with_prepared_sources_using_graph
 		stages (stage_dependency_graph stages) block)))
-
-(define query_block_with_prepared_sources (lambda (block)
-	(query_block_with_prepared_sources_using (qb_stages block) block)))
 
 (define group_stage_final_block (lambda (stage extra_sources)
 	(begin
@@ -1395,9 +1386,6 @@ get_column refs to the source) are excluded automatically too. */
 			(if (window_stage? stage)
 				(lower_window_stage_prepare stage)
 				(neumann_fail "build_queryplan" "unknown logical stage"))))))
-(define lower_stage_prepare (lambda (stage)
-	(lower_stage_prepare_using (list stage) (list stage) stage)))
-
 (define nested_stage_catalog (lambda (stage)
 	(begin
 		(define input (if (group_stage? stage) (gs_input stage) nil))
@@ -1761,19 +1749,6 @@ get_column refs to the source) are excluded automatically too. */
 		(or found (row_number_stage_consumed_by_source? stage src)))
 		false)))
 
-(define expr_contains_driver_membership? (lambda (expr)
-	(match expr
-		((symbol driver_membership_probe) _stage _probe) true
-		((quote driver_membership_probe) _stage _probe) true
-		((symbol driver_membership_subscan_probe) _stage _probe) true
-		((quote driver_membership_subscan_probe) _stage _probe) true
-		(cons head tail) (or
-			(expr_contains_driver_membership? head)
-			(reduce tail (lambda (found item)
-				(or found (expr_contains_driver_membership? item)))
-				false))
-		_ false)))
-
 (define stage_consumed_by_probe_source? (lambda (stage stages sources default_alias limit_value driver_condition)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(or found
@@ -1802,9 +1777,6 @@ get_column refs to the source) are excluded automatically too. */
 
 (define stage_ids_for_sources_with_closure (lambda (stages sources)
 	(map (stages_consumed_by_sources_with_closure stages sources) gs_id)))
-
-(define stage_ids_for_sources_with_closure_using_graph (lambda (dependency_graph stages sources)
-	(map (stages_consumed_by_sources_with_closure_using_graph dependency_graph stages sources) gs_id)))
 
 (define prelimit_sources_for (lambda (sources default_alias where_expr order_items)
 	(begin
@@ -1885,9 +1857,6 @@ get_column refs to the source) are excluded automatically too. */
 				(stage_direct_prepare_semantic_candidate? consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)))))
 		direct)))
 
-(define query_block_stages_to_prepare_base (lambda (block)
-	(query_block_stages_to_prepare_base_using (qb_stages block) block)))
-
 (define selected_group_cache_keys (lambda (stages)
 	(reduce (coalesceNil stages '()) (lambda (keys stage)
 		(if (and (group_stage? stage) (source_is_base_table? (gs_input stage)))
@@ -1923,9 +1892,6 @@ get_column refs to the source) are excluded automatically too. */
 				(or
 					(not late_projection)
 					(stage_id_in? stage prelimit_stage_ids))))))))
-
-(define query_block_stages_to_prepare (lambda (block)
-	(query_block_stages_to_prepare_using (qb_stages block) block)))
 
 (define query_block_bounded_scalar_probe_recipe_context? (lambda (block)
 	(begin
@@ -5408,17 +5374,6 @@ ordering run. Storage artifacts begin in build_queryplan. */
 
 (define build_queryplan_term (lambda (query)
 	(neumann_compile_pipeline query)))
-
-(define build_queryplan_term_with_sink (lambda (query sink_mode)
-	(neumann_compile_ir_pipeline
-		(ir_with_return (decorrelate_logical_query query) sink_mode))))
-
-(define build_queryplan_term_from_logical (lambda (logical_ir)
-	(neumann_compile_ir_pipeline logical_ir)))
-
-(define build_queryplan_term_from_logical_with_sink (lambda (logical_ir sink_mode)
-	(neumann_compile_ir_pipeline
-		(ir_with_return logical_ir sink_mode))))
 
 (define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset)
 	(begin

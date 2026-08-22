@@ -337,7 +337,6 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 		reducefn
 		reduceinit)))
 
-(define os_id (lambda (node) (nth node 1)))
 (define os_source (lambda (node) (nth node 2)))
 (define os_column (lambda (node) (nth node 3)))
 (define os_sortcols (lambda (node) (nth node 4)))
@@ -406,7 +405,6 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 		context
 		(coalesceNil return_mode (quote rows)))))
 
-(define neumann_ir? (lambda (ir) (equal? (logical_op ir) (quote neumann-ir))))
 (define ir_kind (lambda (ir) (nth ir 1)))
 (define ir_root (lambda (ir) (nth ir 2)))
 (define ir_stages (lambda (ir) (nth ir 3)))
@@ -1216,13 +1214,8 @@ then matched without repeated deep comparisons. */
 (define btw2025_info_handle (lambda (info) (nth info 1)))
 (define btw2025_info_parent (lambda (info) (nth info 2)))
 (define btw2025_info_ancestors (lambda (info) (nth info 3)))
-(define btw2025_info_outer_refs (lambda (info) (nth info 4)))
-(define btw2025_info_domain (lambda (info) (nth info 5)))
 (define btw2025_info_accessing (lambda (info) (nth info 6)))
 (define btw2025_info_accessing_after_simple (lambda (info) (nth info 7)))
-(define btw2025_info_cclasses (lambda (info) (nth info 8)))
-(define btw2025_info_repr (lambda (info) (nth info 9)))
-
 (define group_keys_for_correlations (lambda (inner_default pairs explicit_group_keys)
 	(begin
 		(define corr_keys (correlation_inner_keys inner_default pairs))
@@ -1454,9 +1447,6 @@ physical membership probe. */
 (define source_is_stage_output? (lambda (src)
 	(stage_output_relation? (source_relation src))))
 
-(define source_is_not_stage_output? (lambda (src)
-	(not (source_is_stage_output? src))))
-
 (define scalar_source_shape_supported? (lambda (sources)
 	(match (coalesceNil sources '())
 		(cons base helpers)
@@ -1626,11 +1616,6 @@ physical membership probe. */
 			(or found (expr_refs_one_of_aliases? item aliases)))
 			false)
 		_ false)))
-
-(define query_block_base_aliases (lambda (block)
-	(map
-		(filter (qb_sources block) (lambda (src) (not (source_is_stage_output? src))))
-		source_alias)))
 
 (define scalar_first_query_stage_output_key? (lambda (stage)
 	(and (query_block? (gs_input stage))
@@ -4198,9 +4183,6 @@ carrier selection remains a later, per-stage cost decision. */
 				(nth tail 3)))
 		_ (list '() '() '() resolved))))
 
-(define btw2025_decorrelate_fields_with_stages (lambda (fields ctx)
-	(btw2025_decorrelate_fields_with_stages_using fields ctx '())))
-
 (define btw2025_decorrelate_order_with_stages_using (lambda (order_items ctx resolved)
 	(match (coalesceNil order_items '())
 		(cons item rest) (begin
@@ -4980,21 +4962,6 @@ source alias is the stable identity consumed by all later planner phases. */
 	(build_and_terms (merge (list
 		(split_and_terms (coalesceNil seed true))
 		(merge (map (coalesceNil terms '()) (lambda (term) (split_and_terms (coalesceNil term true))))))))))
-
-(define untangle_source (lambda (src ctx)
-	(begin
-		(define relation (normalize_query_ast (source_relation src)))
-		(if (or (query_block? relation) (union_block? relation))
-			(neumann_fail "untangle_query" "FROM-subquery flattening must be implemented inside query-block, not left as source")
-			(list
-				(source_alias src)
-				(source_schema src)
-				relation
-				(source_outer? src)
-				(untangle_expr (source_join_expr src) ctx))))))
-
-(define untangle_sources (lambda (sources ctx)
-	(map (coalesceNil sources '()) (lambda (src) (untangle_source src ctx)))))
 
 (define untangle_source_join_expr_with_stages (lambda (src outer_sources ctx)
 	(match (source_join_expr src)
