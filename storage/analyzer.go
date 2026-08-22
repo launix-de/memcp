@@ -16,11 +16,11 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
-import "time"
 import "unsafe"
 import "strings"
 import "math/bits"
-import "sync/atomic"
+import "sort"
+import "unicode"
 import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
@@ -53,46 +53,12 @@ type BoundaryMatcher interface {
 	// IsPointLike reports whether this column is a point lookup for index ordering.
 	// Equal and Like: true (sorted before range). Range: false.
 	IsPointLike() bool
-
-	// BuildSkipList is called once during buildIndex to create the skip list
-	// for this column. Only meaningful for non-sorted matchers (LIKE etc.).
-	// For sorted matchers this is a no-op. The pattern is the search value
-	// (e.g. the LIKE pattern). The result is stored on the StorageIndex.
-	// colStorage is the column's ColumnStorage for reading values.
-	BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList
 }
 
-// SkipList holds an exact adaptive set of matching index positions.
+// SkipList holds an adaptive set of candidate index positions. The scan layer
+// retains the residual predicate unless the caller separately proves exactness.
 type SkipList struct {
-	matches      recSetShard
-	lastUsedNano atomic.Int64
-	hitCount     atomic.Uint64
-}
-
-func (s *SkipList) recordUse() {
-	if s == nil {
-		return
-	}
-	s.lastUsedNano.Store(time.Now().UnixNano())
-	s.hitCount.Add(1)
-}
-
-func (s *SkipList) lastUsed() time.Time {
-	if s == nil {
-		return time.Time{}
-	}
-	return time.Unix(0, s.lastUsedNano.Load())
-}
-
-func (s *SkipList) cacheScore() float64 {
-	if s == nil {
-		return 0
-	}
-	hits := s.hitCount.Load()
-	if hits > 1024 {
-		hits = 1024
-	}
-	return float64(hits)
+	matches recSetShard
 }
 
 type skipListCursor struct {
@@ -200,9 +166,6 @@ type equalMatcher struct{}
 func (m *equalMatcher) Kind() string      { return "equal" }
 func (m *equalMatcher) IsSorted() bool    { return true }
 func (m *equalMatcher) IsPointLike() bool { return true }
-func (m *equalMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
-	return nil // sorted: no skip list needed
-}
 
 // --- Range ---
 
@@ -211,9 +174,6 @@ type rangeMatcher struct{}
 func (m *rangeMatcher) Kind() string      { return "range" }
 func (m *rangeMatcher) IsSorted() bool    { return true }
 func (m *rangeMatcher) IsPointLike() bool { return false }
-func (m *rangeMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
-	return nil // sorted: no skip list needed
-}
 
 // --- LIKE ---
 
@@ -222,26 +182,116 @@ type likeMatcher struct{}
 func (m *likeMatcher) Kind() string      { return "like" }
 func (m *likeMatcher) IsSorted() bool    { return false }
 func (m *likeMatcher) IsPointLike() bool { return true }
-func (m *likeMatcher) BuildSkipList(pattern, collation string, count uint32, getRecid func(uint32) uint32, colStorage ColumnStorage) *SkipList {
-	if count == 0 || colStorage == nil {
-		return nil
+
+type likeBigramIndex struct {
+	universe uint32
+	grams    map[uint64]compressedRecSet
+	bytes    uint64
+}
+
+func likeBigramKey(left, right rune) uint64 {
+	return uint64(uint32(unicode.ToLower(left)))<<32 | uint64(uint32(unicode.ToLower(right)))
+}
+
+func likePatternBigrams(pattern string) []uint64 {
+	seen := make(map[uint64]struct{})
+	result := make([]uint64, 0, len(pattern)/2)
+	var previous rune
+	havePrevious := false
+	for _, current := range pattern {
+		if current == '%' || current == '_' {
+			havePrevious = false
+			continue
+		}
+		if havePrevious {
+			key := likeBigramKey(previous, current)
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				result = append(result, key)
+			}
+		}
+		previous = current
+		havePrevious = true
+	}
+	return result
+}
+
+func buildLikeBigramIndex(count uint32, getRecid func(uint32) uint32, reader ColumnReader) *likeBigramIndex {
+	index := &likeBigramIndex{universe: count, grams: make(map[uint64]compressedRecSet)}
+	if count == 0 || reader == nil {
+		return index
 	}
 
-	builder := newRecSetShardBuilder(nil, count, true, 0)
-	matches := func(pos uint32) bool {
-		recid := getRecid(pos)
-		v := colStorage.GetValue(recid)
-		return v.IsString() && scm.StrLikeCollation(v.String(), pattern, collation)
+	const likeReadBatch = 1024
+	recordIDs := make([]uint32, likeReadBatch)
+	values := make([]scm.Scmer, likeReadBatch)
+	wordCount := (count + 31) / 32
+	temporary := make(map[uint64][]uint32)
+	for base := uint32(0); base < count; base += likeReadBatch {
+		batchCount := uint32(likeReadBatch)
+		if remaining := count - base; remaining < batchCount {
+			batchCount = remaining
+		}
+		for offset := uint32(0); offset < batchCount; offset++ {
+			recordIDs[offset] = getRecid(base + offset)
+		}
+		reader.GetValueMulti(recordIDs[:batchCount], values[:batchCount], 1)
+		for offset := uint32(0); offset < batchCount; offset++ {
+			value := values[offset]
+			if !value.IsString() {
+				continue
+			}
+			position := base + offset
+			var previous rune
+			havePrevious := false
+			for _, current := range value.String() {
+				if havePrevious {
+					key := likeBigramKey(previous, current)
+					words := temporary[key]
+					if words == nil {
+						words = make([]uint32, wordCount)
+						temporary[key] = words
+					}
+					words[position>>5] |= uint32(1) << (position & 31)
+				}
+				previous = current
+				havePrevious = true
+			}
+			values[offset] = scm.NewNil()
+		}
 	}
-	add := func(pos uint32) bool {
-		builder.add(pos, matches(pos))
-		return true
+
+	for key, words := range temporary {
+		compressed := compressRecSetBitmap(words, count)
+		index.bytes += uint64(compressed.bytes)
+		index.grams[key] = compressed
 	}
-	for pos := uint32(0); pos < count; pos++ {
-		add(pos)
+	index.bytes += uint64(len(index.grams)) * uint64(unsafe.Sizeof(uint64(0))+unsafe.Sizeof(compressedRecSet{}))
+	return index
+}
+
+func (s *likeBigramIndex) candidates(pattern string) *SkipList {
+	keys := likePatternBigrams(pattern)
+	if len(keys) == 0 {
+		return nil
 	}
-	sl := &SkipList{matches: builder.finish()}
-	return sl
+	sets := make([]compressedRecSet, 0, len(keys))
+	for _, key := range keys {
+		set, exists := s.grams[key]
+		if !exists {
+			return &SkipList{matches: recSetShard{kind: recSetRanges, universe: s.universe}}
+		}
+		sets = append(sets, set)
+	}
+	sort.Slice(sets, func(i, j int) bool { return sets[i].count < sets[j].count })
+	result := recSetShardFromSingleFullRange(nil, s.universe)
+	for _, set := range sets {
+		set.set.AndMut(&result)
+		if result.count == 0 {
+			break
+		}
+	}
+	return &SkipList{matches: result}
 }
 
 // --- RecSet ---
@@ -251,9 +301,6 @@ type recSetMatcher struct{}
 func (m *recSetMatcher) Kind() string      { return "recset" }
 func (m *recSetMatcher) IsSorted() bool    { return false }
 func (m *recSetMatcher) IsPointLike() bool { return true }
-func (m *recSetMatcher) BuildSkipList(_, _ string, _ uint32, _ func(uint32) uint32, _ ColumnStorage) *SkipList {
-	return nil
-}
 
 type columnboundaries struct {
 	col              string
@@ -1237,9 +1284,8 @@ func scmerStructEqual(a, b scm.Scmer) bool {
 func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
 		// A non-sorted matcher after an exact sorted prefix is cheaper as a
-		// residual predicate: the prefix has already reduced the candidate set,
-		// while building a matcher skip list would scan the complete shard. Keep
-		// matcher-backed access for scans which have no exact sorted prefix.
+		// residual predicate: the prefix has already reduced the candidate set.
+		// Keep matcher-backed access for scans which have no exact sorted prefix.
 		hasExactPrefix := false
 		for i, col := range cols {
 			if col.matcher.IsSorted() && col.matcher.IsPointLike() {

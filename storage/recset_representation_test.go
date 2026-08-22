@@ -56,8 +56,8 @@ func TestProjectJoinPhysicalAccessUsesCostModel(t *testing.T) {
 
 // buildRecSetShard drives a recSetShardBuilder over want (a boolean mask
 // indexed by recid, len(want)==universe) exactly the way every real caller
-// (recset.go's collectRecSet/projectJoinKeysPart, analyzer.go's
-// BuildSkipList) does: one straight ascending add() call per recid. Every
+// (including recset.go's collectRecSet/projectJoinKeysPart) does: one straight
+// ascending add() call per recid. Every
 // escalation is self-contained inside the builder (see its doc comment), so
 // unlike an earlier version of this harness, there is nothing to watch for
 // or replay here — mirroring that a real caller's filter predicate is never
@@ -476,6 +476,31 @@ func TestRecSetShardUnionIntersectThreeWay(t *testing.T) {
 	verifyRecSetShard(t, "3way-union", gotUnion, wantUnion)
 	gotIntersect := intersectRecSetShards(nil, []*recSetShard{&partA, &partB, &partC})
 	verifyRecSetShard(t, "3way-intersect", gotIntersect, wantIntersect)
+}
+
+func TestRecSetShardMutableIntersection(t *testing.T) {
+	leftWant := make([]bool, 257)
+	rightWant := make([]bool, 257)
+	thirdWant := make([]bool, 257)
+	for i := range leftWant {
+		leftWant[i] = i%2 == 0
+		rightWant[i] = i%3 == 0
+		thirdWant[i] = i >= 40 && i < 190
+	}
+	left := buildRecSetShard(leftWant)
+	right := buildRecSetShard(rightWant)
+	third := buildRecSetShard(thirdWant)
+
+	mutable := cloneRecSetShardMutable(nil, &left)
+	intersectRecSetShardMut(&mutable, &right)
+	intersectRecSetShardMut(&mutable, &third)
+
+	want := make([]bool, len(leftWant))
+	for i := range want {
+		want[i] = leftWant[i] && rightWant[i] && thirdWant[i]
+	}
+	verifyRecSetShard(t, "mutable intersection", mutable, want)
+	verifyRecSetShard(t, "immutable source", left, leftWant)
 }
 
 // TestCombineTwoRecSetShardsDispatchesOptimizedPath proves the dedicated
@@ -931,4 +956,44 @@ func BenchmarkRecSetShardCombine(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkRecSetShardRepeatedIntersection(b *testing.B) {
+	const universe = uint32(1_000_000)
+	parts := make([]recSetShard, 4)
+	for partIndex, divisor := range []int{101, 103, 107, 109} {
+		want := make([]bool, universe)
+		for recid := range want {
+			want[recid] = (recid+partIndex)%divisor == 0
+		}
+		parts[partIndex] = buildRecSetShard(want)
+		if parts[partIndex].kind != recSetPositive {
+			b.Fatalf("fixture %d is %v, want positive", partIndex, parts[partIndex].kind)
+		}
+	}
+	partPointers := []*recSetShard{&parts[0], &parts[1], &parts[2], &parts[3]}
+
+	b.Run("ImmutableIntermediates", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = recSetIntersectPairwise(partPointers)
+		}
+	})
+	b.Run("MutableScratch", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			result := cloneRecSetShardMutable(nil, partPointers[0])
+			for _, part := range partPointers[1:] {
+				intersectRecSetShardMut(&result, part)
+			}
+		}
+	})
+}
+
+func recSetIntersectPairwise(parts []*recSetShard) recSetShard {
+	result := cloneRecSetShardTo(nil, parts[0])
+	for _, part := range parts[1:] {
+		result = intersectRecSetShards(nil, []*recSetShard{&result, part})
+	}
+	return result
 }

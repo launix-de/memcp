@@ -21,7 +21,6 @@ import "fmt"
 import "sort"
 import "sync"
 import "time"
-import "unsafe"
 import "strings"
 import "sync/atomic"
 
@@ -34,28 +33,15 @@ type indexPair struct {
 	data   []scm.Scmer
 }
 
-type skipListPartialCandidate struct {
-	key      skipListKey
-	skipList *SkipList
-}
-
 type storageIndexState struct {
-	mainIndexes   StorageInt
-	deltaBtree    *btree.BTreeG[indexPair]
-	active        bool
-	minVals       []scm.Scmer
-	maxVals       []scm.Scmer
-	skipLists     []*sync.Map  // map[skipListKey]*SkipList; immutable values, lock-free reads
-	skipListBytes atomic.Int64 // exact bytes owned by skipLists
-	// partialCandidates contains admissions since the last partial eviction.
-	// Usage is sampled only when pressure arrives, keeping cache hits lock-free
-	// and avoiding permanent per-child eviction metadata.
-	skipListPartialCandidates [][]skipListPartialCandidate
-	// Protected by StorageIndex.mu. Capacity, rather than length, is accounted
-	// so append growth cannot hide unused backing-array memory from the budget.
-	skipListPartialCandidateBytes int64
-	skipListPartialBytes          atomic.Int64
-	precomputedDelta              bool
+	mainIndexes      StorageInt
+	deltaBtree       *btree.BTreeG[indexPair]
+	active           bool
+	minVals          []scm.Scmer
+	maxVals          []scm.Scmer
+	likeBigrams      []*likeBigramIndex
+	likeBigramBytes  atomic.Int64
+	precomputedDelta bool
 }
 
 // (no op) numeric helper removed; collations now use golang.org/x/text/collate for ordering
@@ -102,17 +88,10 @@ type StorageIndex struct {
 	Native       bool    // true when data is physically sorted by this index (zero-cost)
 	t            *storageShard
 	lastHit      atomic.Uint32 // last search position for sorted access pattern optimization
-	// skipListCacheBytes is the exact memory owned by LIKE child caches. The
-	// CacheManager sees only this StorageIndex; child admission updates the
-	// parent's registered size while eviction remains local to the index.
-	skipListCacheBytes atomic.Int64
-	// skipListPartialBytes is the O(1) upper bound offered for partial eviction.
-	// The exact reclaimable amount is sampled from child hit counts on pressure.
-	skipListPartialBytes atomic.Int64
-	mu                   sync.Mutex
-	sessionKeys          []string
-	baseState            storageIndexState
-	variants             map[string]*storageIndexState
+	mu           sync.Mutex
+	sessionKeys  []string
+	baseState    storageIndexState
+	variants     map[string]*storageIndexState
 }
 
 func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
@@ -276,24 +255,19 @@ func (idx *StorageIndex) stateForTx(tx *TxContext, create bool) *storageIndexSta
 
 func (idx *StorageIndex) markVariantsDirty() {
 	idx.mu.Lock()
-	var freed int64
-	var freedPartial int64
+	var freedBigrams int64
 	for _, state := range idx.variants {
-		stateFreed, stateFreedPartial := idx.clearSkipListsLocked(state)
-		freed += stateFreed
-		freedPartial += stateFreedPartial
 		state.active = false
 		state.mainIndexes = StorageInt{}
 		state.deltaBtree = nil
-		state.skipLists = nil
+		state.likeBigrams = nil
+		freedBigrams += state.likeBigramBytes.Swap(0)
 		state.minVals = nil
 		state.maxVals = nil
 		state.precomputedDelta = false
 	}
-	if freed > 0 {
-		idx.skipListCacheBytes.Add(-freed)
-		idx.skipListPartialBytes.Add(-freedPartial)
-		GlobalCache.UpdateSizeAsync(idx, -freed)
+	if freedBigrams > 0 {
+		GlobalCache.UpdateSizeAsync(idx, -freedBigrams)
 	}
 	idx.mu.Unlock()
 }
@@ -310,163 +284,14 @@ func (idx *StorageIndex) ComputeSize() uint {
 		if !idx.Native {
 			sz += state.mainIndexes.ComputeSize()
 		}
-		for _, colCache := range state.skipLists {
-			sz += uint(unsafe.Sizeof(sync.Map{}))
-			if colCache != nil {
-				colCache.Range(func(key, value any) bool {
-					k := key.(skipListKey)
-					sl := value.(*SkipList)
-					sz += uint(skipListEntrySize(k, sl))
-					return true
-				})
-			}
-		}
+		sz += uint(state.likeBigramBytes.Load())
 		sz += idx.computeDeltaBtreeSize(state)
 	}
 	return sz
 }
 
-// BenchmarkLikeSkipListCacheAdmission measures ~137 bytes of sync.Map and
-// interface bookkeeping per entry on amd64. Round up so many tiny search terms
-// cannot evade the global byte budget through unaccounted metadata.
-const skipListMapEntryOverhead int64 = 144
-const skipListPartialCandidateSize int64 = int64(unsafe.Sizeof(skipListPartialCandidate{}))
-
-func skipListEntrySize(key skipListKey, skipList *SkipList) int64 {
-	return int64(len(key.pattern)+len(key.collation)) + skipListMapEntryOverhead + int64(skipList.ComputeSize())
-}
-
-func (idx *StorageIndex) ownsSkipListCacheLocked(cache *sync.Map) bool {
-	if cache == nil {
-		return false
-	}
-	states := []*storageIndexState{&idx.baseState}
-	for _, state := range idx.variants {
-		states = append(states, state)
-	}
-	for _, state := range states {
-		for _, candidate := range state.skipLists {
-			if candidate == cache {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// clearSkipListsLocked detaches all child caches of one index state in O(columns)
-// and returns their exact accounted bytes. Queries that already snapshotted an
-// old map keep it alive until their direct references leave scope.
-// The caller must hold idx.mu.
-func (idx *StorageIndex) clearSkipListsLocked(state *storageIndexState) (int64, int64) {
-	if state == nil {
-		return 0, 0
-	}
-	freed := state.skipListBytes.Swap(0)
-	freedPartial := state.skipListPartialBytes.Swap(0)
-	state.skipListPartialCandidates = nil
-	state.skipListPartialCandidateBytes = 0
-	for i, cache := range state.skipLists {
-		if cache != nil {
-			state.skipLists[i] = new(sync.Map)
-		}
-	}
-	return freed, freedPartial
-}
-
-func (idx *StorageIndex) clearAllSkipListsLocked() int64 {
-	freed, freedPartial := idx.clearSkipListsLocked(&idx.baseState)
-	for _, state := range idx.variants {
-		stateFreed, stateFreedPartial := idx.clearSkipListsLocked(state)
-		freed += stateFreed
-		freedPartial += stateFreedPartial
-	}
-	if remaining := idx.skipListCacheBytes.Add(-freed); remaining < 0 {
-		// Defensive for states restored by older persistence/tests which predate
-		// explicit child accounting. All live admissions are serialized by mu.
-		idx.skipListCacheBytes.Store(0)
-	}
-	if remaining := idx.skipListPartialBytes.Add(-freedPartial); remaining < 0 {
-		idx.skipListPartialBytes.Store(0)
-	}
-	return freed
-}
-
-// attachSkipListLocked publishes one newly built child after accounting and
-// lifecycle metadata are complete. The caller must hold idx.mu.
-func (idx *StorageIndex) attachSkipListLocked(state *storageIndexState, cache *sync.Map, colIdx int, key skipListKey, skipList *SkipList) int64 {
-	skipList.recordUse()
-	entryBytes := skipListEntrySize(key, skipList)
-	if len(state.skipListPartialCandidates) < len(state.skipLists) {
-		candidates := make([][]skipListPartialCandidate, len(state.skipLists))
-		copy(candidates, state.skipListPartialCandidates)
-		state.skipListPartialCandidates = candidates
-	}
-	candidates := state.skipListPartialCandidates[colIdx]
-	oldCapacity := cap(candidates)
-	candidates = append(candidates, skipListPartialCandidate{
-		key:      key,
-		skipList: skipList,
-	})
-	state.skipListPartialCandidates[colIdx] = candidates
-	candidateBytes := int64(cap(candidates)-oldCapacity) * skipListPartialCandidateSize
-	state.skipListPartialCandidateBytes += candidateBytes
-	bytes := entryBytes + candidateBytes
-	state.skipListBytes.Add(bytes)
-	state.skipListPartialBytes.Add(bytes)
-	idx.skipListCacheBytes.Add(bytes)
-	idx.skipListPartialBytes.Add(bytes)
-	cache.Store(key, skipList)
-	return bytes
-}
-
-// evictColdSkipListsLocked removes only children which have not reached a
-// second exact use. Hit counts are recommendations: a query which races with
-// removal keeps its direct pointer and remains correct. The caller holds idx.mu.
-func (idx *StorageIndex) evictColdSkipListsLocked(state *storageIndexState) int64 {
-	if state == nil {
-		return 0
-	}
-	freed := state.skipListPartialCandidateBytes
-	for colIdx, candidates := range state.skipListPartialCandidates {
-		cache := state.skipLists[colIdx]
-		for _, candidate := range candidates {
-			skipList := candidate.skipList
-			if skipList.hitCount.Load() <= 1 && cache.CompareAndDelete(candidate.key, skipList) {
-				freed += skipListEntrySize(candidate.key, skipList)
-			}
-		}
-	}
-	partialBytes := state.skipListPartialBytes.Swap(0)
-	state.skipListPartialCandidates = nil
-	state.skipListPartialCandidateBytes = 0
-	if freed > 0 {
-		state.skipListBytes.Add(-freed)
-		idx.skipListCacheBytes.Add(-freed)
-	}
-	if partialBytes > 0 {
-		idx.skipListPartialBytes.Add(-partialBytes)
-	}
-	return freed
-}
-
-func (idx *StorageIndex) evictColdSkipListsAllStatesLocked() int64 {
-	freed := idx.evictColdSkipListsLocked(&idx.baseState)
-	for _, state := range idx.variants {
-		freed += idx.evictColdSkipListsLocked(state)
-	}
-	return freed
-}
-
 func (idx *StorageIndex) evictionOffer(currentSize int64) evictionOffer {
-	partial := idx.skipListPartialBytes.Load()
-	if partial < 0 {
-		partial = 0
-	}
-	if partial > currentSize {
-		partial = currentSize
-	}
-	return evictionOffer{partialBytes: partial, fullBytes: currentSize}
+	return evictionOffer{fullBytes: currentSize}
 }
 
 func (idx *StorageIndex) evict(mode evictionMode, currentSize int64, _ *[numEvictableTypes]int64) evictionResult {
@@ -475,10 +300,8 @@ func (idx *StorageIndex) evict(mode evictionMode, currentSize int64, _ *[numEvic
 	}
 	defer idx.mu.Unlock()
 	if mode == evictPartial {
-		freed := idx.evictColdSkipListsAllStatesLocked()
-		return evictionResult{freedBytes: freed, success: freed > 0}
+		return evictionResult{}
 	}
-	idx.clearAllSkipListsLocked()
 	idx.baseState = storageIndexState{}
 	idx.variants = nil
 	return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
@@ -985,12 +808,6 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
 func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx *TxContext) {
-	if state.skipLists == nil {
-		state.skipLists = make([]*sync.Map, len(s.Cols))
-		for i := range state.skipLists {
-			state.skipLists[i] = new(sync.Map)
-		}
-	}
 	if !s.Native {
 		// main storage: build sort-order index
 		tmp := make([]uint32, s.t.main_count)
@@ -1088,6 +905,26 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			state.maxVals[i] = g.get(s.t.main_count - 1)
 		}
 	}
+
+	// LIKE is a query overlay rather than a sort key. Build the complete
+	// shard-local bigram series once, in index-position space, so every later
+	// pattern can cheaply form a safe candidate intersection. Computed LIKE
+	// columns keep the residual full scan until they gain a batch reader.
+	state.likeBigrams = make([]*likeBigramIndex, len(s.Cols))
+	var likeBigramBytes int64
+	getRecid := func(position uint32) uint32 {
+		if s.Native {
+			return position
+		}
+		return uint32(int64(state.mainIndexes.GetValueUInt(position)) + state.mainIndexes.offset)
+	}
+	for colIdx, matcher := range s.ColMatchers {
+		if matcherKindEqual(matcher, LikeMatcher) && colIdx < len(cols) && cols[colIdx].raw != nil {
+			state.likeBigrams[colIdx] = buildLikeBigramIndex(s.t.main_count, getRecid, cols[colIdx].raw)
+			likeBigramBytes += int64(state.likeBigrams[colIdx].bytes)
+		}
+	}
+	state.likeBigramBytes.Store(likeBigramBytes)
 	// (previously: else: Native index comment)
 
 	// delta storage — comparator uses getDeltaColValue so computed columns work;
@@ -1134,75 +971,14 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	state.active = true // mark as ready
 }
 
-type skipListKey struct {
-	pattern   string
-	collation string
-}
-
-func loadCachedSkipList(cache *sync.Map, key skipListKey) (*SkipList, bool) {
-	if cache == nil {
-		return nil, false
-	}
-	cached, ok := cache.Load(key)
-	if !ok {
-		return nil, false
-	}
-	skipList := cached.(*SkipList)
-	skipList.recordUse()
-	return skipList, true
-}
-
-// getOrBuildSkipList returns the cached exact match set for a non-sorted column,
-// building it on first access. The caller must hold s.t.mu.RLock for column access.
-func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, caches []*sync.Map, colIdx int, bound columnboundaries) *SkipList {
-	key := skipListKey{pattern: bound.lower.String(), collation: strings.ToLower(bound.collation)}
-	// Fast path: check cache
-	if len(caches) > colIdx {
-		if cached, ok := loadCachedSkipList(caches[colIdx], key); ok {
-			return cached
+func (s *StorageIndex) candidateSkipList(bigrams []*likeBigramIndex, colIdx int, bound columnboundaries) *SkipList {
+	if matcherKindEqual(s.ColMatchers[colIdx], LikeMatcher) {
+		if colIdx >= len(bigrams) || bigrams[colIdx] == nil {
+			return nil
 		}
+		return bigrams[colIdx].candidates(bound.lower.String())
 	}
-	// Slow path: build and cache
-	if len(s.sessionKeys) > 0 {
-		return nil
-	}
-	if colIdx >= len(s.ColMatchers) || s.ColMatchers[colIdx] == nil {
-		return nil
-	}
-	colStorage := s.t.getColumnStorageRLocked(s.Cols[colIdx])
-	if colStorage == nil {
-		return nil
-	}
-	getRecid := func(pos uint32) uint32 {
-		if s.Native {
-			return pos
-		}
-		return uint32(int64(state.mainIndexes.GetValueUInt(pos)) + state.mainIndexes.offset)
-	}
-	sl := s.ColMatchers[colIdx].BuildSkipList(key.pattern, key.collation, s.t.main_count, getRecid, colStorage)
-	// Slow-path publication is serialized with partial/full index eviction.
-	// Hits above remain lock-free; the active query retains sl directly even if
-	// the recommendation is removed immediately afterwards.
-	cache := caches[colIdx]
-	s.mu.Lock()
-	if !s.ownsSkipListCacheLocked(cache) {
-		s.mu.Unlock()
-		sl.recordUse()
-		return sl
-	}
-	// Admissions are serialized by s.mu. Recheck after the potentially
-	// expensive build so accounting can be completed before publication and a
-	// lock-free reader can never observe a half-attached cache child.
-	if actual, loaded := cache.Load(key); loaded {
-		sl = actual.(*SkipList)
-		sl.recordUse()
-		s.mu.Unlock()
-		return sl
-	}
-	delta := s.attachSkipListLocked(state, cache, colIdx, key, sl)
-	GlobalCache.UpdateSizeAsync(s, delta)
-	s.mu.Unlock()
-	return sl
+	return nil
 }
 
 // iterate over index using a caller-provided buffer for batching
@@ -1279,7 +1055,7 @@ start_scan:
 	// inserts from modifying deltaBtree. The index mutex protects against
 	// eviction only; the btree data is stable under RLock.
 	snapDeltaBtree := state.deltaBtree
-	snapSkipLists := state.skipLists
+	snapLikeBigrams := state.likeBigrams
 	isNative := s.Native
 	s.mu.Unlock()
 	if selected != nil {
@@ -1305,19 +1081,19 @@ start_scan:
 	skipCount := 0
 	for i := 0; i < cmpCols && i < len(bounds) && skipCount < 8; i++ {
 		if !bounds[i].matcher.IsSorted() {
-			skipListPtrs[skipCount] = s.getOrBuildSkipList(state, snapSkipLists, i, bounds[i])
+			skipList := s.candidateSkipList(snapLikeBigrams, i, bounds[i])
+			if skipList == nil {
+				continue
+			}
+			skipListPtrs[skipCount] = skipList
 			skipCursors[skipCount] = skipListPtrs[skipCount].cursor()
 			skipCount++
 		}
 	}
+	// Bigram sets are safe supersets only. The scan layer must always retain
+	// and execute the original LIKE predicate for exact SQL semantics.
 	if exactMain != nil && skipCount > 0 {
-		*exactMain = true
-		for i := 0; i < skipCount; i++ {
-			if skipListPtrs[i] == nil {
-				*exactMain = false
-				break
-			}
-		}
+		*exactMain = false
 	}
 	// Find the leading physical sort key. Non-sorted matchers such as LIKE are
 	// deliberately present in the logical boundary list but do not participate
