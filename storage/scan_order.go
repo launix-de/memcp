@@ -367,7 +367,7 @@ func (s *scanOrderTableSpec) backingTable() *table {
 	return s.table
 }
 
-// extendBoundariesWithSortCols appends sort columns and their order relations
+// extendBoundariesWithSortCols inserts sort columns before candidate matchers
 // when all existing filter boundaries are point lookups. The relation callback
 // is the complete ordering contract, including collation, direction and NULLs.
 func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (boundaries, bool) {
@@ -383,6 +383,18 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	if !allEq || !canAppendSortPrefix {
 		return b, false
 	}
+	insertSortedBoundary := func(bound columnboundaries) {
+		at := len(b)
+		for i := range b {
+			if !b[i].matcher.IsSorted() {
+				at = i
+				break
+			}
+		}
+		b = append(b, columnboundaries{})
+		copy(b[at+1:], b[at:])
+		b[at] = bound
+	}
 	for i, scol := range sortcols {
 		if sortdirs[i] == nil {
 			return original, false
@@ -392,13 +404,13 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 			col := scol.String()
 			already := false
 			for _, bi := range b {
-				if bi.col == col {
+				if bi.col == col && bi.matcher.IsSorted() {
 					already = true
 					break
 				}
 			}
 			if !already {
-				b = append(b, columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
+				insertSortedBoundary(columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
 			}
 			continue
 		}
@@ -435,13 +447,13 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 		}
 		already := false
 		for _, bi := range b {
-			if bi.col == canon {
+			if bi.col == canon && bi.matcher.IsSorted() {
 				already = true
 				break
 			}
 		}
 		if !already {
-			b = append(b, columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta, mapCols: mc, mapFn: mf})
+			insertSortedBoundary(columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta, mapCols: mc, mapFn: mf})
 		}
 	}
 	return b, len(sortcols) > 0
@@ -548,6 +560,29 @@ func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 	return walk(p.Body)
 }
 
+func recSetHooksCoverCondition(bounds boundaries, lower []scm.Scmer, backingTable *table, conditionCols []string, condition scm.Scmer) bool {
+	want := recSetBoundaryCallCount(conditionCols, condition)
+	if want == 0 {
+		return false
+	}
+	covered := 0
+	for i := 0; i < len(lower) && i < len(bounds); i++ {
+		bound := bounds[i]
+		if !matcherKindEqual(bound.matcher, RecSetMatcher) {
+			continue
+		}
+		if !bound.lower.IsCustom(TagRecSet) {
+			return false
+		}
+		set := RecSetFromScmer(bound.lower)
+		if set == nil || set.table != backingTable {
+			return false
+		}
+		covered++
+	}
+	return covered == want
+}
+
 // scanOrderMulti performs an ordered scan across one or more tables, merging
 // results from all tables' shards into a single globally sorted stream.
 // Each table has its own filter, sort columns and map function, but sort
@@ -607,7 +642,6 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		// Boundary analysis per table
 		analyzeStart := time.Now()
 		bounds := extractBoundaries(spec.conditionCols, spec.condition)
-		bounds, recsetBoundary := splitRecSetBoundary(bounds, t)
 		reorderByFrequency(bounds, t)
 		bounds, _ = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
 		lower, upperLast := indexFromBoundaries(bounds)
@@ -637,7 +671,6 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		tableBounds := bounds
 		tableIdx := ti
 		shardLimit := shardTotalLimit
-		recsetFilter := recsetBoundary
 
 		if spec.recset != nil {
 			if len(sortcols) > 0 {
@@ -721,7 +754,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss, recsetFilter)
+				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
@@ -1016,7 +1049,6 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	bounds := extractBoundaries(conditionCols, condition)
-	bounds, recsetFilter := splitRecSetBoundary(bounds, t)
 	reorderByFrequency(bounds, t)
 	lower, upperLast := indexFromBoundaries(bounds)
 
@@ -1043,7 +1075,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		recid, present := shard.scanFirstRecord(bounds, lower, upperLast, conditionCols, condition, currentTx, ss, nil, recsetFilter)
+		recid, present := shard.scanFirstRecord(bounds, lower, upperLast, conditionCols, condition, currentTx, ss, nil)
 		if !present {
 			return
 		}
@@ -1106,21 +1138,13 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
-	var recsetPart *recSetShard
-	if recsetFilter != nil {
-		recsetPart = recsetFilter.shardEntry(t)
-		if recsetPart == nil || recsetPart.count == 0 {
-			result.items = nil
-			return
-		}
-	}
-	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 
 	// prepare filter function
@@ -1260,9 +1284,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			// producing the ordered surviving-id list without touching column data.
 			survived := survivedBuf[:0]
 			for _, idx := range batch {
-				if recsetPart != nil && !recsetPart.contains(idx) {
-					continue
-				}
 				if idx >= visibleUpper {
 					continue
 				}

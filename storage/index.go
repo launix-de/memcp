@@ -21,7 +21,6 @@ import "fmt"
 import "sort"
 import "sync"
 import "time"
-import "unsafe"
 import "strings"
 import "sync/atomic"
 
@@ -34,28 +33,15 @@ type indexPair struct {
 	data   []scm.Scmer
 }
 
-type skipListPartialCandidate struct {
-	key      skipListKey
-	skipList *SkipList
-}
-
 type storageIndexState struct {
-	mainIndexes   StorageInt
-	deltaBtree    *btree.BTreeG[indexPair]
-	active        bool
-	minVals       []scm.Scmer
-	maxVals       []scm.Scmer
-	skipLists     []*sync.Map  // map[skipListKey]*SkipList; immutable values, lock-free reads
-	skipListBytes atomic.Int64 // exact bytes owned by skipLists
-	// partialCandidates contains admissions since the last partial eviction.
-	// Usage is sampled only when pressure arrives, keeping cache hits lock-free
-	// and avoiding permanent per-child eviction metadata.
-	skipListPartialCandidates [][]skipListPartialCandidate
-	// Protected by StorageIndex.mu. Capacity, rather than length, is accounted
-	// so append growth cannot hide unused backing-array memory from the budget.
-	skipListPartialCandidateBytes int64
-	skipListPartialBytes          atomic.Int64
-	precomputedDelta              bool
+	mainIndexes      StorageInt
+	deltaBtree       *btree.BTreeG[indexPair]
+	active           bool
+	minVals          []scm.Scmer
+	maxVals          []scm.Scmer
+	indexHooks       []IndexHook
+	indexHookBytes   atomic.Int64
+	precomputedDelta bool
 }
 
 // (no op) numeric helper removed; collations now use golang.org/x/text/collate for ordering
@@ -84,9 +70,9 @@ type StorageIndex struct {
 	Cols []string // sort equal-cols alphabetically, so similar conditions are canonical
 	// ColMapCols[i] and ColMapFn[i] are set for computed index columns (col starts with ".").
 	// Both are nil for raw columns.
-	ColMapCols  [][]string        // per-column source col names; nil entry means raw column
-	ColMapFn    []scm.Scmer       // per-column compute fn; IsNil() entry means raw column
-	ColMatchers []BoundaryMatcher // per-column matcher (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
+	ColMapCols  [][]string      // per-column source col names; nil entry means raw column
+	ColMapFn    []scm.Scmer     // per-column compute fn; IsNil() entry means raw column
+	ColMatchers []IndexAnalyzer // per-column analyzer (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
 	// ColOrder is the immutable per-column strict relation used by build, delta
 	// merge, lookup, and ordered scans. Each callback owns collation, direction,
 	// and NULL placement; storage must not infer or wrap those semantics.
@@ -102,17 +88,10 @@ type StorageIndex struct {
 	Native       bool    // true when data is physically sorted by this index (zero-cost)
 	t            *storageShard
 	lastHit      atomic.Uint32 // last search position for sorted access pattern optimization
-	// skipListCacheBytes is the exact memory owned by LIKE child caches. The
-	// CacheManager sees only this StorageIndex; child admission updates the
-	// parent's registered size while eviction remains local to the index.
-	skipListCacheBytes atomic.Int64
-	// skipListPartialBytes is the O(1) upper bound offered for partial eviction.
-	// The exact reclaimable amount is sampled from child hit counts on pressure.
-	skipListPartialBytes atomic.Int64
-	mu                   sync.Mutex
-	sessionKeys          []string
-	baseState            storageIndexState
-	variants             map[string]*storageIndexState
+	mu           sync.Mutex
+	sessionKeys  []string
+	baseState    storageIndexState
+	variants     map[string]*storageIndexState
 }
 
 func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
@@ -203,10 +182,17 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 	getters := make([]colGetter, len(s.Cols))
 	sessionKeys := make([]string, 0)
 	for i, col := range s.Cols {
+		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() && isScanPseudoColName(col) {
+			continue
+		}
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
 			// computed column: read mapCols and apply mapFn
 			mapColReaders := make([]ColumnReader, len(s.ColMapCols[i]))
 			for j, mc := range s.ColMapCols[i] {
+				if isScanPseudoColName(mc) {
+					mapColReaders[j] = ColumnReaderFunc(func(uint32) scm.Scmer { return scm.NewNil() })
+					continue
+				}
 				cs := s.t.getColumnStorageRLocked(mc)
 				mapColReaders[j] = newCachedColumnReaderTx(cs, tx)
 				if proxy, ok := cs.(*StorageComputeProxy); ok {
@@ -227,7 +213,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 }
 
 // matcherKindEqual checks if two matchers have the same kind for index deduplication.
-func matcherKindEqual(a, b BoundaryMatcher) bool {
+func matcherKindEqual(a, b IndexAnalyzer) bool {
 	return a.Kind() == b.Kind()
 }
 
@@ -276,24 +262,19 @@ func (idx *StorageIndex) stateForTx(tx *TxContext, create bool) *storageIndexSta
 
 func (idx *StorageIndex) markVariantsDirty() {
 	idx.mu.Lock()
-	var freed int64
-	var freedPartial int64
+	var freedHooks int64
 	for _, state := range idx.variants {
-		stateFreed, stateFreedPartial := idx.clearSkipListsLocked(state)
-		freed += stateFreed
-		freedPartial += stateFreedPartial
 		state.active = false
 		state.mainIndexes = StorageInt{}
 		state.deltaBtree = nil
-		state.skipLists = nil
+		state.indexHooks = nil
+		freedHooks += state.indexHookBytes.Swap(0)
 		state.minVals = nil
 		state.maxVals = nil
 		state.precomputedDelta = false
 	}
-	if freed > 0 {
-		idx.skipListCacheBytes.Add(-freed)
-		idx.skipListPartialBytes.Add(-freedPartial)
-		GlobalCache.UpdateSizeAsync(idx, -freed)
+	if freedHooks > 0 {
+		GlobalCache.UpdateSizeAsync(idx, -freedHooks)
 	}
 	idx.mu.Unlock()
 }
@@ -310,163 +291,14 @@ func (idx *StorageIndex) ComputeSize() uint {
 		if !idx.Native {
 			sz += state.mainIndexes.ComputeSize()
 		}
-		for _, colCache := range state.skipLists {
-			sz += uint(unsafe.Sizeof(sync.Map{}))
-			if colCache != nil {
-				colCache.Range(func(key, value any) bool {
-					k := key.(skipListKey)
-					sl := value.(*SkipList)
-					sz += uint(skipListEntrySize(k, sl))
-					return true
-				})
-			}
-		}
+		sz += uint(state.indexHookBytes.Load())
 		sz += idx.computeDeltaBtreeSize(state)
 	}
 	return sz
 }
 
-// BenchmarkLikeSkipListCacheAdmission measures ~137 bytes of sync.Map and
-// interface bookkeeping per entry on amd64. Round up so many tiny search terms
-// cannot evade the global byte budget through unaccounted metadata.
-const skipListMapEntryOverhead int64 = 144
-const skipListPartialCandidateSize int64 = int64(unsafe.Sizeof(skipListPartialCandidate{}))
-
-func skipListEntrySize(key skipListKey, skipList *SkipList) int64 {
-	return int64(len(key.pattern)+len(key.collation)) + skipListMapEntryOverhead + int64(skipList.ComputeSize())
-}
-
-func (idx *StorageIndex) ownsSkipListCacheLocked(cache *sync.Map) bool {
-	if cache == nil {
-		return false
-	}
-	states := []*storageIndexState{&idx.baseState}
-	for _, state := range idx.variants {
-		states = append(states, state)
-	}
-	for _, state := range states {
-		for _, candidate := range state.skipLists {
-			if candidate == cache {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// clearSkipListsLocked detaches all child caches of one index state in O(columns)
-// and returns their exact accounted bytes. Queries that already snapshotted an
-// old map keep it alive until their direct references leave scope.
-// The caller must hold idx.mu.
-func (idx *StorageIndex) clearSkipListsLocked(state *storageIndexState) (int64, int64) {
-	if state == nil {
-		return 0, 0
-	}
-	freed := state.skipListBytes.Swap(0)
-	freedPartial := state.skipListPartialBytes.Swap(0)
-	state.skipListPartialCandidates = nil
-	state.skipListPartialCandidateBytes = 0
-	for i, cache := range state.skipLists {
-		if cache != nil {
-			state.skipLists[i] = new(sync.Map)
-		}
-	}
-	return freed, freedPartial
-}
-
-func (idx *StorageIndex) clearAllSkipListsLocked() int64 {
-	freed, freedPartial := idx.clearSkipListsLocked(&idx.baseState)
-	for _, state := range idx.variants {
-		stateFreed, stateFreedPartial := idx.clearSkipListsLocked(state)
-		freed += stateFreed
-		freedPartial += stateFreedPartial
-	}
-	if remaining := idx.skipListCacheBytes.Add(-freed); remaining < 0 {
-		// Defensive for states restored by older persistence/tests which predate
-		// explicit child accounting. All live admissions are serialized by mu.
-		idx.skipListCacheBytes.Store(0)
-	}
-	if remaining := idx.skipListPartialBytes.Add(-freedPartial); remaining < 0 {
-		idx.skipListPartialBytes.Store(0)
-	}
-	return freed
-}
-
-// attachSkipListLocked publishes one newly built child after accounting and
-// lifecycle metadata are complete. The caller must hold idx.mu.
-func (idx *StorageIndex) attachSkipListLocked(state *storageIndexState, cache *sync.Map, colIdx int, key skipListKey, skipList *SkipList) int64 {
-	skipList.recordUse()
-	entryBytes := skipListEntrySize(key, skipList)
-	if len(state.skipListPartialCandidates) < len(state.skipLists) {
-		candidates := make([][]skipListPartialCandidate, len(state.skipLists))
-		copy(candidates, state.skipListPartialCandidates)
-		state.skipListPartialCandidates = candidates
-	}
-	candidates := state.skipListPartialCandidates[colIdx]
-	oldCapacity := cap(candidates)
-	candidates = append(candidates, skipListPartialCandidate{
-		key:      key,
-		skipList: skipList,
-	})
-	state.skipListPartialCandidates[colIdx] = candidates
-	candidateBytes := int64(cap(candidates)-oldCapacity) * skipListPartialCandidateSize
-	state.skipListPartialCandidateBytes += candidateBytes
-	bytes := entryBytes + candidateBytes
-	state.skipListBytes.Add(bytes)
-	state.skipListPartialBytes.Add(bytes)
-	idx.skipListCacheBytes.Add(bytes)
-	idx.skipListPartialBytes.Add(bytes)
-	cache.Store(key, skipList)
-	return bytes
-}
-
-// evictColdSkipListsLocked removes only children which have not reached a
-// second exact use. Hit counts are recommendations: a query which races with
-// removal keeps its direct pointer and remains correct. The caller holds idx.mu.
-func (idx *StorageIndex) evictColdSkipListsLocked(state *storageIndexState) int64 {
-	if state == nil {
-		return 0
-	}
-	freed := state.skipListPartialCandidateBytes
-	for colIdx, candidates := range state.skipListPartialCandidates {
-		cache := state.skipLists[colIdx]
-		for _, candidate := range candidates {
-			skipList := candidate.skipList
-			if skipList.hitCount.Load() <= 1 && cache.CompareAndDelete(candidate.key, skipList) {
-				freed += skipListEntrySize(candidate.key, skipList)
-			}
-		}
-	}
-	partialBytes := state.skipListPartialBytes.Swap(0)
-	state.skipListPartialCandidates = nil
-	state.skipListPartialCandidateBytes = 0
-	if freed > 0 {
-		state.skipListBytes.Add(-freed)
-		idx.skipListCacheBytes.Add(-freed)
-	}
-	if partialBytes > 0 {
-		idx.skipListPartialBytes.Add(-partialBytes)
-	}
-	return freed
-}
-
-func (idx *StorageIndex) evictColdSkipListsAllStatesLocked() int64 {
-	freed := idx.evictColdSkipListsLocked(&idx.baseState)
-	for _, state := range idx.variants {
-		freed += idx.evictColdSkipListsLocked(state)
-	}
-	return freed
-}
-
 func (idx *StorageIndex) evictionOffer(currentSize int64) evictionOffer {
-	partial := idx.skipListPartialBytes.Load()
-	if partial < 0 {
-		partial = 0
-	}
-	if partial > currentSize {
-		partial = currentSize
-	}
-	return evictionOffer{partialBytes: partial, fullBytes: currentSize}
+	return evictionOffer{fullBytes: currentSize}
 }
 
 func (idx *StorageIndex) evict(mode evictionMode, currentSize int64, _ *[numEvictableTypes]int64) evictionResult {
@@ -475,10 +307,8 @@ func (idx *StorageIndex) evict(mode evictionMode, currentSize int64, _ *[numEvic
 	}
 	defer idx.mu.Unlock()
 	if mode == evictPartial {
-		freed := idx.evictColdSkipListsAllStatesLocked()
-		return evictionResult{freedBytes: freed, success: freed > 0}
+		return evictionResult{}
 	}
-	idx.clearAllSkipListsLocked()
 	idx.baseState = storageIndexState{}
 	idx.variants = nil
 	return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
@@ -549,6 +379,10 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 		fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[colIdx])
 		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
 		for i, mc := range s.ColMapCols[colIdx] {
+			if isScanPseudoColName(mc) {
+				vals[i] = scm.NewNil()
+				continue
+			}
 			cs := s.t.getColumnStorageOrPanic(mc)
 			if proxy, ok := cs.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 				vals[i] = s.t.ColumnReaderTx(tx, mc)(recid)
@@ -569,6 +403,12 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 // Non-sorted columns (LIKE etc.) are skipped — handled by block-level skipping
 // in iterate(); the scan layer applies the full condition afterwards.
 func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
+	lastSorted := -1
+	for i := 0; i < cmpCols; i++ {
+		if len(s.ColMatchers) <= i || s.ColMatchers[i].IsSorted() {
+			lastSorted = i
+		}
+	}
 	for i := 0; i < cmpCols; i++ {
 		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
 			continue // non-sorted: block-skip handles this, scan() filters exact
@@ -577,7 +417,7 @@ func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []s
 		if i < len(bounds) && boundaryIsUnboundedOrder(bounds[i]) {
 			continue // unbounded ORDER BY suffix, not a SQL range predicate
 		}
-		if i == cmpCols-1 {
+		if i == lastSorted {
 			if !upperLast.IsNil() {
 				if upperInclusive {
 					if s.compareAt(i, upperLast, v) < 0 {
@@ -661,8 +501,12 @@ func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, b
 	if len(lower) == 0 {
 		return true, true
 	}
-	last := cols[len(lower)-1]
-	return last.lowerInclusive, last.upperInclusive
+	for i := len(lower) - 1; i >= 0; i-- {
+		if cols[i].matcher.IsSorted() {
+			return cols[i].lowerInclusive, cols[i].upperInclusive
+		}
+	}
+	return true, true
 }
 
 func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
@@ -670,6 +514,21 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		*exactMain = false
 	}
 	// cols is already sorted by 1st rank: equality before range; 2nd rank alphabet
+	// A complete unique point prefix yields at most one live row. Building or
+	// retaining a full-column candidate hook cannot narrow that driver further;
+	// leave the suffix to the mandatory residual predicate.
+	if t.t.hasBoundUniquePoint(cols) {
+		sortedEnd := 0
+		for sortedEnd < len(cols) && cols[sortedEnd].matcher.IsSorted() {
+			sortedEnd++
+		}
+		if sortedEnd < len(cols) {
+			cols = cols[:sortedEnd]
+			if len(lower) > sortedEnd {
+				lower = lower[:sortedEnd]
+			}
+		}
+	}
 
 	// indexFromBoundaries may shorten lower when more than one range column is
 	// present because an ordered index can use only one range suffix. Read the
@@ -749,7 +608,14 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		if threshold <= 0 {
 			threshold = 5
 		}
-		if int(t.main_count)+maxInsertIndex < threshold {
+		hasRowMatcher := false
+		for i := 0; i < len(lower); i++ {
+			if !cols[i].matcher.IsSorted() {
+				hasRowMatcher = true
+				break
+			}
+		}
+		if int(t.main_count)+maxInsertIndex < threshold && !hasRowMatcher {
 			t.indexMutex.Unlock()
 			// inline full scan (same as the len(lower)==0 path below)
 			bufN := 0
@@ -782,7 +648,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		index.Cols = make([]string, len(lower))
 		index.ColMapCols = make([][]string, len(lower))
 		index.ColMapFn = make([]scm.Scmer, len(lower))
-		index.ColMatchers = make([]BoundaryMatcher, len(lower))
+		index.ColMatchers = make([]IndexAnalyzer, len(lower))
 		index.ColOrder = make([]func(...scm.Scmer) scm.Scmer, len(lower))
 		index.ColOrderMeta = make([]string, len(lower))
 		index.ColOrderFast = make([]func(scm.Scmer, scm.Scmer) bool, len(lower))
@@ -791,8 +657,10 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 			index.ColMapCols[i] = cols[i].mapCols  // nil for raw columns
 			index.ColMapFn[i] = cols[i].mapFn      // IsNil() for raw columns
 			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
-			index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
-			index.ColOrderFast[i] = scm.OrderRelationLess(index.ColOrder[i])
+			if cols[i].matcher.IsSorted() {
+				index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
+				index.ColOrderFast[i] = scm.OrderRelationLess(index.ColOrder[i])
+			}
 		}
 		index.Savings = 0.0            // count how many cost we wasted so we decide when to build the index
 		index.baseState.active = false // tell the engine that index has to be built first
@@ -985,12 +853,6 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
 func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx *TxContext) {
-	if state.skipLists == nil {
-		state.skipLists = make([]*sync.Map, len(s.Cols))
-		for i := range state.skipLists {
-			state.skipLists[i] = new(sync.Map)
-		}
-	}
 	if !s.Native {
 		// main storage: build sort-order index
 		tmp := make([]uint32, s.t.main_count)
@@ -1088,6 +950,41 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			state.maxVals[i] = g.get(s.t.main_count - 1)
 		}
 	}
+
+	// Deploy query-independent, shard-local custom indexes once. Their concrete
+	// caches remain hidden behind IndexHook; the scan only sees bound matchers.
+	state.indexHooks = make([]IndexHook, len(s.ColMatchers))
+	var indexHookBytes int64
+	for colIdx, analyzer := range s.ColMatchers {
+		if analyzer == nil || analyzer.IsSorted() {
+			continue
+		}
+		// Repeated predicates of the same index kind bind independently but
+		// share their shard-local cache.
+		for previous := 0; previous < colIdx; previous++ {
+			if s.Cols[previous] == s.Cols[colIdx] && matcherKindEqual(s.ColMatchers[previous], analyzer) {
+				state.indexHooks[colIdx] = state.indexHooks[previous]
+				break
+			}
+		}
+		if state.indexHooks[colIdx] != nil {
+			continue
+		}
+		var reader ColumnReader
+		if colIdx < len(cols) {
+			reader = cols[colIdx].raw
+		}
+		hook := analyzer.Deploy(IndexDeployContext{
+			MainCount: s.t.main_count,
+			Column:    reader,
+			shard:     s.t,
+		}, true)
+		state.indexHooks[colIdx] = hook
+		if hook != nil {
+			indexHookBytes += int64(hook.ComputeSize())
+		}
+	}
+	state.indexHookBytes.Store(indexHookBytes)
 	// (previously: else: Native index comment)
 
 	// delta storage — comparator uses getDeltaColValue so computed columns work;
@@ -1122,6 +1019,9 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		if len(s.sessionKeys) > 0 {
 			values := make([]scm.Scmer, len(s.Cols))
 			for colIdx := range s.Cols {
+				if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+					continue
+				}
 				values[colIdx] = s.getDeltaColValueTx(tx, recid, data, colIdx)
 			}
 			state.precomputedDelta = true
@@ -1134,75 +1034,55 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	state.active = true // mark as ready
 }
 
-type skipListKey struct {
-	pattern   string
-	collation string
-}
-
-func loadCachedSkipList(cache *sync.Map, key skipListKey) (*SkipList, bool) {
-	if cache == nil {
-		return nil, false
-	}
-	cached, ok := cache.Load(key)
-	if !ok {
-		return nil, false
-	}
-	skipList := cached.(*SkipList)
-	skipList.recordUse()
-	return skipList, true
-}
-
-// getOrBuildSkipList returns the cached exact match set for a non-sorted column,
-// building it on first access. The caller must hold s.t.mu.RLock for column access.
-func (s *StorageIndex) getOrBuildSkipList(state *storageIndexState, caches []*sync.Map, colIdx int, bound columnboundaries) *SkipList {
-	key := skipListKey{pattern: bound.lower.String(), collation: strings.ToLower(bound.collation)}
-	// Fast path: check cache
-	if len(caches) > colIdx {
-		if cached, ok := loadCachedSkipList(caches[colIdx], key); ok {
-			return cached
+// bindRowMatchers binds every non-ordering boundary once for this index run.
+// The returned callback applies the resulting functions in place to every
+// batch; no allocation or lock is added to the per-batch path.
+func (s *StorageIndex) bindRowMatchers(bounds boundaries, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool, callback func([]uint32) bool) func([]uint32) bool {
+	matchers := make([]IndexRowMatcher, 0, len(bounds))
+	for colIdx, bound := range bounds {
+		if bound.matcher == nil || bound.matcher.IsSorted() {
+			continue
+		}
+		var hook IndexHook
+		if persistent && colIdx < len(hooks) {
+			hook = hooks[colIdx]
+		} else {
+			var reader ColumnReader
+			if colIdx < len(cols) {
+				reader = cols[colIdx].raw
+			}
+			hook = bound.matcher.Deploy(IndexDeployContext{
+				MainCount: s.t.main_count,
+				Column:    reader,
+				shard:     s.t,
+			}, false)
+		}
+		if hook == nil {
+			continue
+		}
+		matcher := hook.Bind(bound.lower)
+		if matcher != nil {
+			matchers = append(matchers, matcher)
 		}
 	}
-	// Slow path: build and cache
-	if len(s.sessionKeys) > 0 {
-		return nil
+	if len(matchers) == 0 {
+		return callback
 	}
-	if colIdx >= len(s.ColMatchers) || s.ColMatchers[colIdx] == nil {
-		return nil
+	// Candidate matchers never replace the original predicate. This is
+	// required for approximate indexes such as n-grams and harmless for exact
+	// matchers such as RecSet membership.
+	if exactMain != nil {
+		*exactMain = false
 	}
-	colStorage := s.t.getColumnStorageRLocked(s.Cols[colIdx])
-	if colStorage == nil {
-		return nil
-	}
-	getRecid := func(pos uint32) uint32 {
-		if s.Native {
-			return pos
+	return func(ids []uint32) bool {
+		for _, matcher := range matchers {
+			ids = matcher(ids)
+			if len(ids) == 0 {
+				return true
+			}
 		}
-		return uint32(int64(state.mainIndexes.GetValueUInt(pos)) + state.mainIndexes.offset)
+		return callback(ids)
 	}
-	sl := s.ColMatchers[colIdx].BuildSkipList(key.pattern, key.collation, s.t.main_count, getRecid, colStorage)
-	// Slow-path publication is serialized with partial/full index eviction.
-	// Hits above remain lock-free; the active query retains sl directly even if
-	// the recommendation is removed immediately afterwards.
-	cache := caches[colIdx]
-	s.mu.Lock()
-	if !s.ownsSkipListCacheLocked(cache) {
-		s.mu.Unlock()
-		sl.recordUse()
-		return sl
-	}
-	// Admissions are serialized by s.mu. Recheck after the potentially
-	// expensive build so accounting can be completed before publication and a
-	// lock-free reader can never observe a half-attached cache child.
-	if actual, loaded := cache.Load(key); loaded {
-		sl = actual.(*SkipList)
-		sl.recordUse()
-		s.mu.Unlock()
-		return sl
-	}
-	delta := s.attachSkipListLocked(state, cache, colIdx, key, sl)
-	GlobalCache.UpdateSizeAsync(s, delta)
-	s.mu.Unlock()
-	return sl
 }
 
 // iterate over index using a caller-provided buffer for batching
@@ -1228,6 +1108,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 			if selected != nil {
 				selected(s, false)
 			}
+			callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 			s.fullScan(maxInsertIndex, buf, callback)
 			return
 		} else {
@@ -1239,6 +1120,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 				if selected != nil {
 					selected(s, false)
 				}
+				callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 				s.fullScan(maxInsertIndex, buf, callback)
 				return
 			}
@@ -1262,6 +1144,7 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
+		callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
@@ -1271,6 +1154,7 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
+		callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
 		s.fullScan(maxInsertIndex, buf, callback)
 		return
 	}
@@ -1279,7 +1163,7 @@ start_scan:
 	// inserts from modifying deltaBtree. The index mutex protects against
 	// eviction only; the btree data is stable under RLock.
 	snapDeltaBtree := state.deltaBtree
-	snapSkipLists := state.skipLists
+	snapIndexHooks := state.indexHooks
 	isNative := s.Native
 	s.mu.Unlock()
 	if selected != nil {
@@ -1298,27 +1182,7 @@ start_scan:
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
 
-	// Look up or build skip lists for non-sorted columns.
-	// Stack-allocated array, zero heap allocation on cache hit.
-	var skipListPtrs [8]*SkipList
-	var skipCursors [8]skipListCursor
-	skipCount := 0
-	for i := 0; i < cmpCols && i < len(bounds) && skipCount < 8; i++ {
-		if !bounds[i].matcher.IsSorted() {
-			skipListPtrs[skipCount] = s.getOrBuildSkipList(state, snapSkipLists, i, bounds[i])
-			skipCursors[skipCount] = skipListPtrs[skipCount].cursor()
-			skipCount++
-		}
-	}
-	if exactMain != nil && skipCount > 0 {
-		*exactMain = true
-		for i := 0; i < skipCount; i++ {
-			if skipListPtrs[i] == nil {
-				*exactMain = false
-				break
-			}
-		}
-	}
+	callback = s.bindRowMatchers(bounds, cols, snapIndexHooks, true, exactMain, callback)
 	// Find the leading physical sort key. Non-sorted matchers such as LIKE are
 	// deliberately present in the logical boundary list but do not participate
 	// in buildIndex ordering and must never be used for binary search.
@@ -1369,58 +1233,24 @@ start_scan:
 	s.lastHit.Store(uint32(mainIdx))
 	// skip past equal values when lower bound is exclusive (col > 5)
 	// LIKE columns don't have lower/upper semantics, so skip this optimization.
-	lastHasMatcher := len(bounds) >= cmpCols && !bounds[cmpCols-1].matcher.IsSorted()
-	if !lowerInclusive && !lastHasMatcher && cmpCols > 0 && !lower[cmpCols-1].IsNil() {
+	lastSorted := -1
+	for i := 0; i < cmpCols && i < len(bounds); i++ {
+		if bounds[i].matcher.IsSorted() {
+			lastSorted = i
+		}
+	}
+	if !lowerInclusive && lastSorted >= 0 && !lower[lastSorted].IsNil() {
 		for uint32(mainIdx) < s.t.main_count {
 			recid := getRecid(mainIdx)
-			if s.compareAt(cmpCols-1, cols[cmpCols-1].get(recid), lower[cmpCols-1]) != 0 {
+			if s.compareAt(lastSorted, cols[lastSorted].get(recid), lower[lastSorted]) != 0 {
 				break
 			}
 			mainIdx++
 		}
 	}
 
-	// Block-end tracking for skip lists (stack-allocated).
-	var blockEnds [8]uint32
-
-	// advanceToNextBlock jumps mainIdx forward to the next position covered
-	// by ALL skip lists. Returns false if no more blocks exist.
-	advanceToNextBlock := func() bool {
-		if skipCount == 0 {
-			return uint32(mainIdx) < s.t.main_count
-		}
-		for {
-			if uint32(mainIdx) >= s.t.main_count {
-				return false
-			}
-			pos := uint32(mainIdx)
-			allOk := true
-			for si := 0; si < skipCount; si++ {
-				if pos < blockEnds[si] {
-					continue // still inside current block
-				}
-				start, length, ok := skipCursors[si].NextBlock(pos)
-				if !ok {
-					return false // no more blocks
-				}
-				blockEnds[si] = start + length
-				if start > pos {
-					mainIdx = int(start)
-					allOk = false
-					break
-				}
-			}
-			if allOk {
-				return true
-			}
-		}
-	}
-
 	nextMain := func() (uint32, bool) {
 		for {
-			if !advanceToNextBlock() {
-				return 0, false
-			}
 			if uint32(mainIdx) >= s.t.main_count {
 				return 0, false
 			}

@@ -418,6 +418,13 @@ const (
 // currently visible row. A few slots remain for stale index entries left by
 // updates; iterateIndex still visits further batches when necessary.
 func (t *table) scanBufferSize(boundaries boundaries) int {
+	if t.hasBoundUniquePoint(boundaries) {
+		return uniquePointScanBufferSize
+	}
+	return defaultScanBufferSize
+}
+
+func (t *table) hasBoundUniquePoint(boundaries boundaries) bool {
 	for _, unique := range t.Unique {
 		covered := true
 		for _, col := range unique.Cols {
@@ -438,10 +445,10 @@ func (t *table) scanBufferSize(boundaries boundaries) int {
 			}
 		}
 		if covered && len(unique.Cols) > 0 {
-			return uniquePointScanBufferSize
+			return true
 		}
 	}
-	return defaultScanBufferSize
+	return false
 }
 
 func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
@@ -449,7 +456,6 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 	querySeq := scm.CurrentQuerySeq()
 	touchTempColumns(t, conditionCols, nil)
 	boundaries := extractBoundaries(conditionCols, condition)
-	boundaries, recsetFilter := splitRecSetBoundary(boundaries, t)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	for _, b := range boundaries {
@@ -473,7 +479,7 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		if s.scanExists(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, &found, recsetFilter) {
+		if s.scanExists(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, &found) {
 			found.Store(true)
 			values <- scanResult{outCount: 1}
 			return
@@ -533,7 +539,6 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	analyzeStart := time.Now()
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
-	boundaries, recsetFilter := splitRecSetBoundary(boundaries, t)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	if Settings.ScanDebugging {
@@ -567,7 +572,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
+		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
 		values <- scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount}
 	})
 	if done != nil {
@@ -672,12 +677,12 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	return akkumulator
 }
 
-func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool, recsetFilter *recSet) bool {
-	_, found := t.scanFirstRecord(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, stop, recsetFilter)
+func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
+	_, found := t.scanFirstRecord(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, stop)
 	return found
 }
 
-func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool, recsetFilter *recSet) (uint32, bool) {
+func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) (uint32, bool) {
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -686,14 +691,7 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
-	var recsetPart *recSetShard
-	if recsetFilter != nil {
-		recsetPart = recsetFilter.shardEntry(t)
-		if recsetPart == nil || recsetPart.count == 0 {
-			return 0, false
-		}
-	}
-	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
@@ -749,9 +747,6 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 			return false
 		}
 		for _, idx := range batch {
-			if recsetPart != nil && !recsetPart.contains(idx) {
-				continue
-			}
 			if idx >= visibleUpper {
 				continue
 			}
@@ -797,9 +792,9 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	return foundID, found
 }
 
-func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64, int64) {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
 	if stride > 0 {
-		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, recsetFilter)
+		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
 	}
 	akkumulator := neutral
 	var outCount int64
@@ -846,14 +841,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
 	t.ensureMainCount(skipShardReadLock)
-	var recsetPart *recSetShard
-	if recsetFilter != nil {
-		recsetPart = recsetFilter.shardEntry(t)
-		if recsetPart == nil || recsetPart.count == 0 {
-			return neutral, 0, 0
-		}
-	}
-	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
 	// condition column readers
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -922,9 +910,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		outN := 0
 		for _, idx := range batch {
 			effectiveIdx := idx
-			if recsetPart != nil && !recsetPart.contains(effectiveIdx) {
-				continue
-			}
 			if effectiveIdx >= visibleUpper {
 				continue
 			}
@@ -1054,7 +1039,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	return akkumulator, outCount, candidateCount
 }
 
-func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, recsetFilter *recSet) (scm.Scmer, int64, int64) {
+func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
 	akkumulator := neutral
 	var outCount int64
 	var candidateCount int64
@@ -1096,14 +1081,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
 	t.ensureMainCount(skipShardReadLock)
-	var recsetPart *recSetShard
-	if recsetFilter != nil {
-		recsetPart = recsetFilter.shardEntry(t)
-		if recsetPart == nil || recsetPart.count == 0 {
-			return neutral, 0, 0
-		}
-	}
-	recsetBoundaryCoversCondition := recsetPart != nil && recSetBoundaryCallCount(conditionCols, condition) == 1
+	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
@@ -1182,9 +1160,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			outN := 0
 			for _, idx := range batch {
 				effectiveIdx := idx
-				if recsetPart != nil && !recsetPart.contains(effectiveIdx) {
-					continue
-				}
 				if effectiveIdx >= visibleUpper {
 					continue
 				}

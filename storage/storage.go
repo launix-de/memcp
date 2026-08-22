@@ -302,6 +302,7 @@ var storages = map[uint8]reflect.Type{
 }
 
 func scmerSlice(v scm.Scmer) ([]scm.Scmer, bool) {
+	v = v.WithoutSourceInfo()
 	if v.IsSlice() {
 		return v.Slice(), true
 	}

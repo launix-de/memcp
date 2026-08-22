@@ -134,7 +134,7 @@ const maxSingletonRuns = 3
 // breakAt forces the ranges phase to close a run the moment recid reaches
 // it (see recSetShardBuilder.breakAt) — pass a shard's main_count so ranges
 // never straddle the main/delta boundary, or 0 to disable (no meaningful
-// main/delta split, e.g. the SkipList builder in analyzer.go).
+// main/delta split, e.g. a query-local candidate-set builder).
 func newRecSetShardBuilder(shard *storageShard, universe uint32, allowFull bool, breakAt uint32) *recSetShardBuilder {
 	builder := &recSetShardBuilder{
 		shard:    shard,
@@ -571,6 +571,95 @@ func cloneRecSetShardTo(shard *storageShard, part *recSetShard) recSetShard {
 	clone := *part
 	clone.shard = shard
 	return clone
+}
+
+// cloneRecSetShardMutable returns an independently owned copy which may be
+// narrowed in place. Ordinary RecSet clones intentionally share their
+// immutable data; callers of intersectRecSetShardMut need the stronger
+// ownership guarantee because immutable index sets must never be modified.
+func cloneRecSetShardMutable(shard *storageShard, part *recSetShard) recSetShard {
+	if part == nil {
+		return recSetShard{shard: shard, kind: recSetRanges}
+	}
+	clone := *part
+	clone.shard = shard
+	clone.data = append([]uint32(nil), part.data...)
+	return clone
+}
+
+// intersectRecSetShardMut narrows dst in place. It is intended for scratch
+// RecSets assembled from several immutable index sets: cloning the smallest
+// input once and repeatedly applying this operation avoids allocating one
+// intermediate RecSet per gram. dst must be exclusively owned by the caller.
+func intersectRecSetShardMut(dst *recSetShard, other *recSetShard) {
+	if dst == nil || dst.count == 0 {
+		return
+	}
+	if other == nil || other.count == 0 {
+		dst.kind = recSetRanges
+		dst.data = nil
+		dst.used = 0
+		dst.count = 0
+		return
+	}
+	if dst.universe != other.universe {
+		panic("recset mutable intersection: universe mismatch")
+	}
+
+	if dst.kind == recSetPositive {
+		values := dst.listedValues()
+		kept := 0
+		if other.kind == recSetPositive {
+			otherValues := other.listedValues()
+			leftPos, rightPos := 0, 0
+			for leftPos < len(values) && rightPos < len(otherValues) {
+				switch {
+				case values[leftPos] < otherValues[rightPos]:
+					leftPos++
+				case values[leftPos] > otherValues[rightPos]:
+					rightPos++
+				default:
+					values[kept] = values[leftPos]
+					kept++
+					leftPos++
+					rightPos++
+				}
+			}
+		} else {
+			for _, recid := range values {
+				if other.contains(recid) {
+					values[kept] = recid
+					kept++
+				}
+			}
+		}
+		dst.used = uint32(kept)
+		dst.data = dst.data[:kept]
+		dst.count = int64(kept)
+		return
+	}
+
+	// A range may split into more ranges than its compact backing slice can
+	// hold. Convert it once to a bitmap; subsequent intersections then reuse
+	// that allocation. Bitmap destinations can be ANDed word by word directly.
+	if dst.kind == recSetRanges {
+		bitmap := make([]uint32, (dst.universe+31)/32)
+		cursor := recSetWordCursor{part: dst}
+		for wordIndex := range bitmap {
+			bitmap[wordIndex] = cursor.word(uint32(wordIndex))
+		}
+		dst.kind = recSetBitmap
+		dst.data = bitmap
+		dst.used = 0
+	}
+
+	cursor := recSetWordCursor{part: other}
+	var count int64
+	for wordIndex := range dst.data {
+		dst.data[wordIndex] &= cursor.word(uint32(wordIndex))
+		count += int64(bits.OnesCount32(dst.data[wordIndex]))
+	}
+	dst.count = count
 }
 
 func recSetShardFromSingleFullRange(shard *storageShard, universe uint32) recSetShard {

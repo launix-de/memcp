@@ -265,7 +265,7 @@ func TestMatcherIsSorted(t *testing.T) {
 
 // TestRowWithinBoundsEqual verifies sorted (equal) column matching via lower/upper.
 func TestRowWithinBoundsEqual(t *testing.T) {
-	idx := &StorageIndex{Cols: []string{"id"}, ColMatchers: []BoundaryMatcher{EqualMatcher}}
+	idx := &StorageIndex{Cols: []string{"id"}, ColMatchers: []IndexAnalyzer{EqualMatcher}}
 	lower := []scm.Scmer{scm.NewInt(5)}
 
 	inRange, _ := idx.rowWithinBounds(boundaries{}, 1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(5) })
@@ -283,7 +283,7 @@ func TestRowWithinBoundsEqual(t *testing.T) {
 
 // TestRowWithinBoundsLike verifies that LIKE columns are skipped in rowWithinBounds.
 func TestRowWithinBoundsLike(t *testing.T) {
-	idx := &StorageIndex{Cols: []string{"name"}, ColMatchers: []BoundaryMatcher{LikeMatcher}}
+	idx := &StorageIndex{Cols: []string{"name"}, ColMatchers: []IndexAnalyzer{LikeMatcher}}
 	lower := []scm.Scmer{scm.NewString("%Klaus%")}
 
 	// rowWithinBounds skips non-sorted columns entirely

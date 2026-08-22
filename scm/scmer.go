@@ -946,6 +946,15 @@ func (s Scmer) SourceInfo() *SourceInfo {
 	return (*SourceInfo)(unsafe.Pointer(s.ptr))
 }
 
+// WithoutSourceInfo returns the value wrapped by parser source locations.
+// Static consumers use it to inspect syntax without marking it as executed.
+func (s Scmer) WithoutSourceInfo() Scmer {
+	for s.IsSourceInfo() {
+		s = s.SourceInfo().value
+	}
+	return s
+}
+
 func (s Scmer) IsRegex() bool {
 	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
 		return false

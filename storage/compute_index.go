@@ -290,6 +290,15 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 	if !origParams.IsSlice() {
 		return nil, scm.NewNil()
 	}
+	params := origParams.Slice()
+	for i, col := range conditionCols {
+		if isScanPseudoColName(col) && computedExprUsesParameter(formulaExpr, params, i) {
+			// Pseudo columns are bound per scan run and cannot become persistent
+			// computed index inputs. Their own analyzer remains available as a
+			// row matcher boundary.
+			return nil, scm.NewNil()
+		}
+	}
 	// De-optimize any !list special forms back to plain (list ...) so the lambda
 	// does not depend on VarsNumbered slots beyond its params.
 	formulaExpr = scm.DeoptimizeExpr(formulaExpr)
@@ -328,4 +337,25 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 	}
 	// mapCols = all conditionCols (lambda takes all params in order)
 	return conditionCols, result
+}
+
+func computedExprUsesParameter(expr scm.Scmer, params []scm.Scmer, index int) bool {
+	expr = expr.WithoutSourceInfo()
+	if expr.IsNthLocalVar() {
+		return int(expr.NthLocalVar()) == index
+	}
+	if expr.IsSymbol() && index < len(params) {
+		param := params[index].WithoutSourceInfo()
+		return param.IsSymbol() && expr.String() == param.String()
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 || scanSymbolIs(items[0], "quote") {
+		return false
+	}
+	for _, item := range items {
+		if computedExprUsesParameter(item, params, index) {
+			return true
+		}
+	}
+	return false
 }
