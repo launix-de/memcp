@@ -1,10 +1,48 @@
+/*
+Copyright (C) 2026  Carl-Philip Hänsch
+
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation, either version 3 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
 package storage
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestStorageIntUInt32BuildAndBatchExtraction(t *testing.T) {
+	values := []uint32{1000, 1001, 1007, 1031, 1032, 1063, 1064, 1099, 1100, 1127, 1128}
+	var storage StorageInt
+	storage.initValuesUInt32(uint32(len(values)), values[0], values[len(values)-1])
+	for index, value := range values {
+		storage.buildValueUInt32(uint32(index), value)
+	}
+
+	rangeTarget := make([]uint32, 9)
+	storage.GetValuesUInt32Range(2, 4, rangeTarget[1:], 2)
+	if want := []uint32{0, 1007, 0, 1031, 0, 1032, 0, 1063, 0}; !reflect.DeepEqual(rangeTarget, want) {
+		t.Fatalf("UInt32 range = %v, want %v", rangeTarget, want)
+	}
+
+	multiTarget := make([]uint32, 8)
+	storage.GetValuesUInt32Multi([]uint32{0, 1, 5, 9}, multiTarget, 2)
+	if want := []uint32{1000, 0, 1001, 0, 1063, 0, 1127, 0}; !reflect.DeepEqual(multiTarget, want) {
+		t.Fatalf("UInt32 multi = %v, want %v", multiTarget, want)
+	}
+}
 
 // buildStorageInt builds a StorageInt via the standard prepare/scan/init/build/finish pipeline.
 func buildStorageInt(values []scm.Scmer) *StorageInt {
