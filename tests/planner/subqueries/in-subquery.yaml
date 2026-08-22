@@ -1246,6 +1246,46 @@ test_cases:
             - "driver_rows"
             - "result_equal"
       - sql: |
+          EXPLAIN PHYSICAL CALIBRATE DISCOVER
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          rows: 1
+          contains:
+            - "decision_id"
+            - "alternatives"
+            - "estimated_ns"
+      - sql: |
+          EXPLAIN PHYSICAL CALIBRATE VARIANT 'missing-decision' 'missing-variant'
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.tenant, d.sort_key
+            FROM in_dv_doc d
+            JOIN in_dv_acl a ON a.tenant = d.tenant AND a.allowed = 1
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 10
+        expect:
+          rows: 1
+          contains:
+            - "unknown physical calibration decision or variant"
+      - sql: |
           EXPLAIN PHYSICAL
           SELECT COUNT(*)
           FROM in_dv_doc d
