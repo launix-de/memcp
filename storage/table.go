@@ -58,12 +58,33 @@ type dataset []scm.Scmer
 // columnPlannerStatistics is an immutable rebuild-generation snapshot. The
 // pointer is published atomically so query compilation never needs shard locks.
 type columnPlannerStatistics struct {
-	Confidence   float64
-	Source       string
-	NullCount    uint64
-	NullFraction float64
-	MinEstimate  scm.Scmer
-	MaxEstimate  scm.Scmer
+	Confidence        float64
+	Source            string
+	NullCount         uint64
+	NullFraction      float64
+	AverageValueBytes float64
+	MinEstimate       scm.Scmer
+	MaxEstimate       scm.Scmer
+}
+
+// atomicPlannerRowEstimate persists the last rebuild estimate while retaining
+// lock-free access. Its JSON methods use atomic operations too, so concurrent
+// schema persistence cannot race query compilation.
+type atomicPlannerRowEstimate struct {
+	value atomic.Uint64
+}
+
+func (estimate *atomicPlannerRowEstimate) MarshalJSON() ([]byte, error) {
+	return json.Marshal(estimate.value.Load())
+}
+
+func (estimate *atomicPlannerRowEstimate) UnmarshalJSON(data []byte) error {
+	var value uint64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	estimate.value.Store(value)
+	return nil
 }
 
 type column struct {
@@ -450,6 +471,10 @@ type table struct {
 	// load it without locking; metadata writers replace the complete snapshot.
 	showColumnsSnapshot atomic.Pointer[tableShowColumnsSnapshot]
 	columnNamesSnapshot atomic.Pointer[tableColumnNamesSnapshot]
+	// plannerRowEstimate is deliberately approximate. Rebuild/statistics
+	// publication replaces it atomically; query compilation must never load a
+	// cold shard or take a shard read lock merely to obtain a row estimate.
+	PlannerRowEstimate atomicPlannerRowEstimate `json:"planner_row_estimate"`
 
 	// storage: ShardMode controls which shard set is the read/write target
 	ShardMode   ShardMode
@@ -693,6 +718,7 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 		stats.rowCount += shardStats.rowCount()
 		stats.sizeBytes += int64(shardStats.size)
 	}
+	t.PlannerRowEstimate.value.Store(uint64(stats.rowCount))
 	for {
 		current := t.showColumnsSnapshot.Load()
 		if current == nil {
@@ -704,9 +730,10 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 			}
 			continue
 		}
-		replacement := *current
+		replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount))
 		replacement.statistics = stats
-		if t.showColumnsSnapshot.CompareAndSwap(current, &replacement) {
+		if t.showColumnsSnapshot.CompareAndSwap(current, replacement) {
+			t.columnNamesSnapshot.Store(replacement.columnNames)
 			return
 		}
 	}
@@ -725,6 +752,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 		MaxEstimate: scm.NewNil(),
 	}
 	var rowCount uint64
+	var valueBytes uint64
 	var hasValue bool
 	var buf []scm.Scmer
 	for _, shard := range shards {
@@ -750,6 +778,9 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 					stats.NullCount++
 					continue
 				}
+				if value.IsString() || value.IsCString() || value.IsBString() {
+					valueBytes += uint64(len(value.String()))
+				}
 				if !hasValue {
 					stats.MinEstimate = value
 					stats.MaxEstimate = value
@@ -767,6 +798,7 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 	}
 	if rowCount > 0 {
 		stats.NullFraction = float64(stats.NullCount) / float64(rowCount)
+		stats.AverageValueBytes = float64(valueBytes) / float64(rowCount)
 	}
 	return stats
 }
@@ -1083,18 +1115,71 @@ func (t *table) Count() (result uint) {
 	return
 }
 
-// CountEstimate returns the exact table-wide visible-row estimate. It is O(the
-// number of shards), not O(rows); summing matters because the final shard is
-// commonly partial and first-shard extrapolation can be wrong by orders of
-// magnitude after repartitioning.
-func (t *table) CountEstimate() (result uint) {
+// CountEstimate returns the last atomically published table-wide estimate.
+// It is O(1), non-blocking, and never acquires concurrency rights or causes a
+// lazy shard load. Statistics are refreshed by rebuild/collection; staleness is
+// preferable to adding locks or storage I/O to the query compiler hot path.
+func (t *table) CountEstimate() uint {
+	return uint(t.PlannerRowEstimate.value.Load())
+}
+
+// adjustPlannerRows advances the approximate cardinality after one DML batch.
+// Only the two-entry snapshot root is replaced; the immutable hashed column
+// catalog is reused. This keeps maintenance O(1) per batch and avoids forcing
+// the next compiler through shard state.
+func (t *table) adjustPlannerRows(delta int64) {
+	if delta == 0 {
+		return
+	}
+	var rowEstimate uint64
+	for {
+		oldEstimate := t.PlannerRowEstimate.value.Load()
+		if delta > 0 {
+			rowEstimate = oldEstimate + uint64(delta)
+		} else if decrement := uint64(-delta); decrement < oldEstimate {
+			rowEstimate = oldEstimate - decrement
+		} else {
+			rowEstimate = 0
+		}
+		if t.PlannerRowEstimate.value.CompareAndSwap(oldEstimate, rowEstimate) {
+			break
+		}
+	}
+	for {
+		current := t.showColumnsSnapshot.Load()
+		if current == nil || current.plannerValue.IsNil() {
+			return
+		}
+		columns, ok := current.plannerValue.FastDict().Get(scm.NewString("columns"))
+		if !ok {
+			return
+		}
+		plannerRoot := scm.NewFastDictValue(2)
+		plannerRoot.Set(scm.NewString("row_count"), scm.NewInt(int64(rowEstimate)), nil)
+		plannerRoot.Set(scm.NewString("columns"), columns, nil)
+		replacement := *current
+		replacement.plannerValue = scm.NewFastDict(plannerRoot)
+		replacement.rowEstimate = uint(rowEstimate)
+		if t.showColumnsSnapshot.CompareAndSwap(current, &replacement) {
+			return
+		}
+	}
+}
+
+// CountExact returns the current visible row count. It may load shards and is
+// reserved for correctness-sensitive execution paths, never query planning.
+func (t *table) CountExact() (result uint) {
 	for _, shard := range t.ActiveShards() {
 		if shard == nil {
 			continue
 		}
-		unlock := shard.GetRead()
-		result += uint(shard.Count())
-		unlock()
+		func() {
+			unlock := shard.GetRead()
+			defer unlock()
+			shard.mu.RLock()
+			defer shard.mu.RUnlock()
+			result += uint(shard.Count())
+		}()
 	}
 	return result
 }
@@ -1192,12 +1277,17 @@ func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
 }
 
 type tableShowColumnsSnapshot struct {
-	value             scm.Scmer
-	rowEstimate       uint
+	value        scm.Scmer
+	plannerValue scm.Scmer
+	rowEstimate  uint
+	columns      *tableShowColumnsMetadata
+	columnNames  *tableColumnNamesSnapshot
+	statistics   *tableStatisticsSnapshot
+}
+
+type tableShowColumnsMetadata struct {
 	distinctEstimates []uint64
 	plannerStatistics []*columnPlannerStatistics
-	columnNames       *tableColumnNamesSnapshot
-	statistics        *tableStatisticsSnapshot
 }
 
 type tableColumnNamesSnapshot struct {
@@ -1225,27 +1315,9 @@ func foldIdentifier(name string) string {
 	return strings.ToLower(name)
 }
 
-func (t *table) showColumnsSnapshotMatches(snapshot *tableShowColumnsSnapshot, rowEstimate uint) bool {
-	if snapshot == nil || snapshot.rowEstimate != rowEstimate || len(snapshot.distinctEstimates) != len(t.Columns) || len(snapshot.plannerStatistics) != len(t.Columns) {
-		return false
-	}
-	for i, c := range t.Columns {
-		distinctEstimate := atomic.LoadUint64(&c.DistinctEstimate)
-		if distinctEstimate == 0 {
-			distinctEstimate = uint64(rowEstimate)
-		}
-		if snapshot.distinctEstimates[i] != distinctEstimate {
-			return false
-		}
-		if snapshot.plannerStatistics[i] != c.PlannerStats.Load() {
-			return false
-		}
-	}
-	return true
-}
-
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnapshot {
 	result := make([]scm.Scmer, len(t.Columns))
+	plannerColumns := scm.NewFastDictValue(len(t.Columns))
 	distinctEstimates := make([]uint64, len(t.Columns))
 	plannerStatistics := make([]*columnPlannerStatistics, len(t.Columns))
 	columnNames := t.buildColumnNamesSnapshot()
@@ -1269,13 +1341,24 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		distinctEstimates[i] = distinctEstimate
 		plannerStatistics[i] = c.PlannerStats.Load()
 		result[i] = c.show(keyType, distinctEstimate, rowEstimate, plannerStatistics[i])
+		plannerStatsValue := plannerColumnStatisticsValue(distinctEstimate, plannerStatistics[i])
+		plannerColumns.Set(scm.NewString(c.Name), plannerStatsValue, nil)
+		if folded := foldIdentifier(c.Name); folded != c.Name {
+			plannerColumns.Set(scm.NewString(folded), plannerStatsValue, nil)
+		}
 	}
+	plannerRoot := scm.NewFastDictValue(2)
+	plannerRoot.Set(scm.NewString("row_count"), scm.NewInt(int64(rowEstimate)), nil)
+	plannerRoot.Set(scm.NewString("columns"), scm.NewFastDict(plannerColumns), nil)
 	snapshot := &tableShowColumnsSnapshot{
-		value:             scm.NewSlice(result),
-		rowEstimate:       rowEstimate,
-		distinctEstimates: distinctEstimates,
-		plannerStatistics: plannerStatistics,
-		columnNames:       columnNames,
+		value:        scm.NewSlice(result),
+		plannerValue: scm.NewFastDict(plannerRoot),
+		rowEstimate:  rowEstimate,
+		columns: &tableShowColumnsMetadata{
+			distinctEstimates: distinctEstimates,
+			plannerStatistics: plannerStatistics,
+		},
+		columnNames: columnNames,
 	}
 	if current := t.showColumnsSnapshot.Load(); current != nil {
 		snapshot.statistics = current.statistics
@@ -1337,12 +1420,59 @@ func (t *table) ShowColumns() scm.Scmer {
 	if t == nil {
 		return scm.NewNil()
 	}
-	rowEstimate := t.CountEstimate()
 	snapshot := t.showColumnsSnapshot.Load()
-	if t.showColumnsSnapshotMatches(snapshot, rowEstimate) {
+	if snapshot != nil {
 		return snapshot.value
 	}
 	return t.publishShowColumnsSnapshot()
+}
+
+// PlannerStatistics returns one immutable, atomically published catalog value.
+// The compiler can retain this value for its complete planning scope and use
+// hashed column lookup without revisiting SHOW metadata.
+func (t *table) PlannerStatistics() scm.Scmer {
+	if t == nil {
+		return scm.NewNil()
+	}
+	for {
+		snapshot := t.showColumnsSnapshot.Load()
+		if snapshot != nil {
+			return snapshot.plannerValue
+		}
+		t.publishShowColumnsSnapshot()
+	}
+}
+
+func plannerColumnStatisticsValue(distinctEstimate uint64, stats *columnPlannerStatistics) scm.Scmer {
+	known := stats != nil
+	confidence := float64(0)
+	source := "unknown"
+	distinctSource := "fallback_row_count"
+	nullFraction := scm.NewNil()
+	minEstimate := scm.NewNil()
+	maxEstimate := scm.NewNil()
+	averageValueBytes := scm.NewNil()
+	if stats != nil {
+		confidence = stats.Confidence
+		source = stats.Source
+		distinctSource = "rebuild"
+		nullFraction = scm.NewFloat(stats.NullFraction)
+		minEstimate = stats.MinEstimate
+		maxEstimate = stats.MaxEstimate
+		averageValueBytes = scm.NewFloat(stats.AverageValueBytes)
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("known"), scm.NewBool(known)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("confidence"), scm.NewFloat(confidence)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("source"), scm.NewSymbol(source)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("distinct"), scm.NewInt(int64(distinctEstimate))}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("distinct_confidence"), scm.NewFloat(confidence)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("distinct_source"), scm.NewSymbol(distinctSource)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("null_fraction"), nullFraction}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("min"), minEstimate}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("max"), maxEstimate}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("average_value_bytes"), averageValueBytes}),
+	})
 }
 
 func (c *column) Show(keyType string, t *table) scm.Scmer {
@@ -1378,12 +1508,14 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 	nullFraction := scm.NewNil()
 	minEstimate := scm.NewNil()
 	maxEstimate := scm.NewNil()
+	averageValueBytes := scm.NewNil()
 	if statisticsKnown {
 		statisticsConfidence = plannerStats.Confidence
 		statisticsSource = plannerStats.Source
 		nullFraction = scm.NewFloat(plannerStats.NullFraction)
 		minEstimate = plannerStats.MinEstimate
 		maxEstimate = plannerStats.MaxEstimate
+		averageValueBytes = scm.NewFloat(plannerStats.AverageValueBytes)
 	}
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewString("Field"), scm.NewString(c.Name),
@@ -1411,6 +1543,7 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("NullFraction"), nullFraction,
 		scm.NewString("MinEstimate"), minEstimate,
 		scm.NewString("MaxEstimate"), maxEstimate,
+		scm.NewString("AverageValueBytes"), averageValueBytes,
 	})
 }
 
@@ -1640,6 +1773,11 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 	}
 
 	var c column
+	// Scmer's Go zero value is not Scheme nil. Base columns must be explicitly
+	// non-computed immediately after DDL; otherwise rebuild statistics are
+	// skipped until a schema reload happens to normalize this field.
+	c.Computor = scm.NewNil()
+	c.ComputorFilter = scm.NewNil()
 	c.Name = name
 	c.Typ = typ
 	c.Typdimensions = typdimensions
@@ -1941,6 +2079,7 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 
 func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
 	result := 0
+	inserted := 0
 	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE
 	// FK checks are enforced via auto-generated system triggers (see createforeignkey)
 
@@ -2045,6 +2184,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
 					shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore)
 					result += len(chunk)
+					inserted += len(chunk)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if !onCollision.IsNil() {
 						// Evaluate onCollision and add to affected rows per MySQL semantics
@@ -2074,6 +2214,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// physically insert (no unique constraints)
 				shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore)
 				result += len(chunk)
+				inserted += len(chunk)
 			}
 			release()
 		}
@@ -2108,6 +2249,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					// physically insert
 					s.Insert(columns, values, false, onFirstInsertId, isIgnore)
 					result += len(values)
+					inserted += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
 					if !onCollision.IsNil() {
 						// Evaluate onCollision and add to affected rows per MySQL semantics
@@ -2134,6 +2276,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// physically insert (parallel)
 				s.Insert(columns, values, false, onFirstInsertId, isIgnore)
 				result += len(values)
+				inserted += len(values)
 			}
 		}
 
@@ -2160,6 +2303,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 	}
 
 insertDone:
+	t.adjustPlannerRows(int64(inserted))
 	return result
 }
 

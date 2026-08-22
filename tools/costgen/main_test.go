@@ -56,6 +56,27 @@ func TestValidateRowsRejectsDecisionPlanMismatch(t *testing.T) {
 	}
 }
 
+func TestRowFeaturesKeepsBroadTextRowsAndBytesSeparate(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Plan: "candidate_keyset", Consumer: "order_limit",
+		CandidateInputRows: value(100), CandidateRows: value(10), ProjectedDriverRows: value(20),
+		DriverInputRows: value(1000), DriverRows: value(5), ExpectedDriverRowsVisited: value(50),
+		CandidateScanInvocations: value(1), CandidateFilterColumns: value(1),
+		CandidateMapColumns: value(1), CandidateCacheMapColumns: value(2),
+		CandidateExpressionOperations: value(1), CandidateBroadTextMatchRows: value(100),
+		CandidateBroadTextMatchBytes: value(819200), DriverScanInvocations: value(1),
+		DriverFilterColumns: value(0), DriverMapColumns: value(1), DriverExpressionOperations: value(0),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[13] != 100 || features[14] != 819200 {
+		t.Fatalf("broad text features = (%v, %v), want (100, 819200)", features[13], features[14])
+	}
+}
+
 func TestRaceCalibrationVariantsCancelsSlowerPlan(t *testing.T) {
 	const decisionID = "membership_carrier:test"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

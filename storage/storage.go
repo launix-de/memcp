@@ -611,6 +611,19 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics",
+		Desc: "return the immutable O(1) planner-statistics snapshot for a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return TableFromScmer(a[0]).PlannerStatistics()
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", ParamName: "table"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_selectivity_estimate",
 		Desc: "bounded estimate of visible rows matching a table filter; stops at max_rows and does not log scan telemetry",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -625,14 +638,22 @@ func Init(en scm.Env) {
 			var rows int64
 			var sampled int64
 			capped := false
+			population := "table_rows"
+			coverage := "exact"
 			for _, shard := range t.ActiveShards() {
 				if shard == nil {
 					continue
 				}
-				shardRows, shardCapped, shardSampled := shard.EstimateFilteredRows(conditionCols, condition, limit-int(rows), currentTx)
-				rows += shardRows
-				sampled += shardSampled
-				if shardCapped || rows >= int64(limit) {
+				estimate := shard.EstimateFilteredRows(conditionCols, condition, limit-int(rows), currentTx)
+				rows += estimate.rows
+				sampled += estimate.examined
+				if estimate.population != "table_rows" {
+					population = estimate.population
+				}
+				if estimate.coverage != "exact" {
+					coverage = estimate.coverage
+				}
+				if estimate.capped || rows >= int64(limit) {
 					capped = true
 					break
 				}
@@ -643,6 +664,8 @@ func Init(en scm.Env) {
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(capped)}),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(sampled)}),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol(population)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(coverage)}),
 			})
 		},
 		Type: &scm.TypeDescriptor{
@@ -661,7 +684,7 @@ func Init(en scm.Env) {
 		Desc: "returns true if a table currently has no rows",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			return scm.NewBool(t.CountEstimate() == 0)
+			return scm.NewBool(t.CountExact() == 0)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{

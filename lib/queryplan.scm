@@ -3955,14 +3955,14 @@ carrier selection remains a later, per-stage cost decision. */
 				(and (query_block? subquery)
 					(and (not (empty_list? (qb_sources subquery)))
 						(and (equal? (count (qb_fields subquery)) 2)
-						(and (equal? (qb_limit subquery) 1)
-							(empty_list? (extract_aggregates (query_block_first_expr subquery))))))))))))
+							(and (equal? (qb_limit subquery) 1)
+								(empty_list? (extract_aggregates (query_block_first_expr subquery))))))))))))
 
 (define btw2025_scalar_bundle_key (lambda (marker)
 	(concat "scalar-bundle:"
 		(serialize (list
-		(dependent_subquery_scope_backbone (quote scalar) (dep_subquery_query marker))
-		(dep_subquery_outer_sources marker))))))
+			(dependent_subquery_scope_backbone (quote scalar) (dep_subquery_query marker))
+			(dep_subquery_outer_sources marker))))))
 
 (define btw2025_scalar_bundle_output_budget 16)
 
@@ -6718,12 +6718,16 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(list (quote membership_candidate_estimate_capped) (qassoc_get facts (quote membership_candidate_estimate_capped) false))
 					(list (quote membership_candidate_estimate_input) (qassoc_get facts (quote membership_candidate_estimate_input) nil))
 					(list (quote membership_candidate_estimate_sampled) (qassoc_get facts (quote membership_candidate_estimate_sampled) nil))
+					(list (quote membership_candidate_estimate_population) (qassoc_get facts (quote membership_candidate_estimate_population) (quote table_rows)))
+					(list (quote membership_candidate_estimate_coverage) (qassoc_get facts (quote membership_candidate_estimate_coverage) (quote sampled)))
 					(list (quote membership_candidate_scan_invocations) (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
 					(list (quote membership_candidate_filter_columns) (qassoc_get facts (quote membership_candidate_filter_columns) 0))
 					(list (quote membership_candidate_map_columns) (qassoc_get facts (quote membership_candidate_map_columns) 1))
 					(list (quote membership_candidate_cache_map_columns) (qassoc_get facts (quote membership_candidate_cache_map_columns) 2))
 					(list (quote membership_candidate_expression_operations) (qassoc_get facts (quote membership_candidate_expression_operations) 0))
 					(list (quote membership_candidate_expression_depth) (qassoc_get facts (quote membership_candidate_expression_depth) 0))
+					(list (quote membership_candidate_broad_text_match_rows) (qassoc_get facts (quote membership_candidate_broad_text_match_rows) 0))
+					(list (quote membership_candidate_broad_text_match_bytes) (qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0))
 					(list (quote membership_candidate_filter_value_rows) (qassoc_get facts (quote membership_candidate_filter_value_rows) nil))
 					(list (quote membership_candidate_expression_operation_rows) (qassoc_get facts (quote membership_candidate_expression_operation_rows) nil))
 					(list (quote membership_driver_rows) (qassoc_get facts (quote membership_driver_rows) nil))
@@ -7146,19 +7150,25 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(not (nil? (extract_row_number_filter src (os_column stage) (source_join_expr src))))))))
 		false)))
 
-(define planner_table_row_count (lambda (schema relation)
+(define planner_table_statistics (lambda (schema relation)
 	(try
 		(lambda ()
-			/* SHOW exposes shard-local row_count values. Physical choices need the
-			whole relation cardinality, which the storage table estimate already
-			aggregates across active shards. */
-			(define live_count (scan_estimate (table schema relation)))
-			(if (and (not (nil? live_count)) (> live_count 0))
-				live_count
-				(match (get_schema schema relation)
-					(cons col _rest) (col "RowEstimate")
-					_ live_count)))
+			(begin
+				(define cache (session "__memcp_queryplan_statistics"))
+				(define key (concat schema "." relation))
+				(define cached (if (nil? cache) nil (cache key)))
+				(if (nil? cached)
+					(begin
+						(define snapshot (table_planner_statistics (table schema relation)))
+						(if (nil? cache) nil (cache key snapshot))
+						snapshot)
+					cached)))
 		(lambda (_e) nil))))
+
+(define planner_table_row_count (lambda (schema relation)
+	(begin
+		(define stats (planner_table_statistics schema relation))
+		(if (nil? stats) nil (stats "row_count")))))
 
 (define planner_source_filter_estimate (lambda (src condition max_rows)
 	(if (not (source_is_base_table? src))
@@ -7223,36 +7233,36 @@ source itself has no known row count (not a base table). */
 			(list (quote distinct_source) (quote unknown))
 			(list (quote null_fraction) nil)
 			(list (quote min) nil)
-			(list (quote max) nil))
+			(list (quote max) nil)
+			(list (quote average_value_bytes) nil))
 		(try
 			(lambda ()
-				(reduce (get_schema (source_schema src) (source_relation src)) (lambda (found row)
-					(if (not (nil? found))
-						found
-						(if (equal?? (row "Field") column)
-							(list
-								(list (quote known) (row "StatisticsKnown"))
-								(list (quote confidence) (row "StatisticsConfidence"))
-								(list (quote source) (symbol (row "StatisticsSource")))
-								(list (quote distinct) (row "DistinctEstimate"))
-								(list (quote distinct_confidence)
-									(if (row "StatisticsKnown") (row "StatisticsConfidence") 0))
-								(list (quote distinct_source) (symbol (row "DistinctEstimateSource")))
-								(list (quote null_fraction) (row "NullFraction"))
-								(list (quote min) (row "MinEstimate"))
-								(list (quote max) (row "MaxEstimate")))
-							nil)))
-					nil))
+				(begin
+					(define stats (planner_table_statistics (source_schema src) (source_relation src)))
+					(define columns (if (nil? stats) nil (stats "columns")))
+					(define column_stats (if (nil? columns) nil (columns column)))
+					/* The immutable column catalog deliberately does not get rebuilt
+					for every INSERT/DELETE. Resolve its row-count fallback against
+					the current two-entry table snapshot in constant time instead. */
+					(if (or (nil? column_stats)
+						(not (equal? (qassoc_get column_stats (quote distinct_source) (quote unknown))
+							(quote fallback_row_count))))
+						column_stats
+						(qassoc_set column_stats (quote distinct) (stats "row_count")))))
 			(lambda (_e) (list
 				(list (quote known) false)
 				(list (quote confidence) 0)
 				(list (quote source) (quote unknown))
 				(list (quote distinct) nil)
 				(list (quote distinct_confidence) 0)
-				(list (quote distinct_source) (quote unknown))))))))
+				(list (quote distinct_source) (quote unknown))
+				(list (quote average_value_bytes) nil))))))))
 
 (define planner_column_distinct_estimate (lambda (src column)
 	(qassoc_get (planner_column_statistics src column) (quote distinct) nil)))
+
+(define planner_column_average_value_bytes (lambda (src column)
+	(qassoc_get (planner_column_statistics src column) (quote average_value_bytes) nil)))
 
 (define planner_group_distinct_estimate (lambda (src keys row_count)
 	(reduce keys (lambda (estimate key)
@@ -7462,6 +7472,31 @@ resulting tree in semantic order. */
 		(if (nil? value) acc (+ acc value)))
 		0)))
 
+(define planner_estimate_population (lambda (estimate)
+	(qassoc_get estimate (quote population) (quote table_rows))))
+
+(define planner_estimate_coverage (lambda (estimate)
+	(qassoc_get estimate (quote coverage)
+		(if (qassoc_get estimate (quote capped) false) (quote sampled) (quote exact)))))
+
+(define planner_merge_estimate_population (lambda (estimates)
+	(if (reduce estimates (lambda (found estimate)
+		(or found (equal? (planner_estimate_population estimate) (quote index_candidates)))) false)
+		(quote index_candidates)
+		(if (reduce estimates (lambda (found estimate)
+			(or found (equal? (planner_estimate_population estimate) (quote recset_candidates)))) false)
+			(quote recset_candidates)
+			(quote table_rows)))))
+
+(define planner_merge_estimate_coverage (lambda (estimates)
+	(if (reduce estimates (lambda (found estimate)
+		(or found (equal? (planner_estimate_coverage estimate) (quote lower_bound)))) false)
+		(quote lower_bound)
+		(if (reduce estimates (lambda (found estimate)
+			(or found (equal? (planner_estimate_coverage estimate) (quote sampled)))) false)
+			(quote sampled)
+			(quote exact)))))
+
 (define planner_query_block_input_rows (lambda (block)
 	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
 
@@ -7497,7 +7532,9 @@ resulting tree in semantic order. */
 						(list (quote rows) rows)
 						(list (quote capped) capped)
 						(list (quote sampled) sampled_rows)
-						(list (quote input) input_rows)))))
+						(list (quote input) input_rows)
+						(list (quote population) (planner_merge_estimate_population available))
+						(list (quote coverage) (planner_merge_estimate_coverage available))))))
 		(if (query_block? input)
 			(if (single_source? (qb_sources input))
 				(begin
@@ -7540,28 +7577,54 @@ resulting tree in semantic order. */
 /* Physical costing needs the amount of scalar work, not a speculative copy of
 each alternative plan. This walker visits the already canonical expression
 once; get_column is a leaf because column reads are costed independently. */
-(define physical_expression_work_profile (lambda (expr)
+(define physical_broad_text_match_operation? (lambda (expr)
+	(match expr
+		((symbol strlike) _value pattern _collation) (planner_broad_like_expr? pattern)
+		((quote strlike) _value pattern _collation) (planner_broad_like_expr? pattern)
+		((symbol strlike_cs) _value pattern _collation) (planner_broad_like_expr? pattern)
+		((quote strlike_cs) _value pattern _collation) (planner_broad_like_expr? pattern)
+		_ false)))
+
+/* REBUILD already walks and decodes every base value. Its exact average byte
+width lets costing distinguish short labels from large text documents without
+building either physical alternative or sampling the table again. */
+(define physical_expression_work_profile (lambda (src expr)
 	(match expr
 		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
-		(list (list (quote operations) 0) (list (quote depth) 0))
+		(list (list (quote operations) 0) (list (quote depth) 0)
+			(list (quote broad_text_matches) 0) (list (quote broad_text_average_bytes) 0))
 		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
-		(list (list (quote operations) 0) (list (quote depth) 0))
+		(list (list (quote operations) 0) (list (quote depth) 0)
+			(list (quote broad_text_matches) 0) (list (quote broad_text_average_bytes) 0))
 		(cons head tail) (begin
-			(define children (map tail physical_expression_work_profile))
+			(define children (map tail (lambda (child) (physical_expression_work_profile src child))))
 			(define own (if (symbol? head) 1 0))
 			(list
 				(list (quote operations) (+ own (reduce children (lambda (total child)
 					(+ total (qassoc_get child (quote operations) 0))) 0)))
 				(list (quote depth) (+ own (reduce children (lambda (depth child)
-					(max depth (qassoc_get child (quote depth) 0))) 0)))))
-		_ (list (list (quote operations) 0) (list (quote depth) 0)))))
+					(max depth (qassoc_get child (quote depth) 0))) 0)))
+				(list (quote broad_text_matches) (+
+					(if (physical_broad_text_match_operation? expr) 1 0)
+					(reduce children (lambda (total child)
+						(+ total (qassoc_get child (quote broad_text_matches) 0))) 0)))
+				(list (quote broad_text_average_bytes) (+
+					(if (physical_broad_text_match_operation? expr)
+						(reduce (extract_columns_for_alias src (car tail)) (lambda (total column)
+							(+ total (coalesceNil (planner_column_average_value_bytes src column) 0))) 0)
+						0)
+					(reduce children (lambda (total child)
+						(+ total (qassoc_get child (quote broad_text_average_bytes) 0))) 0)))))
+		_ (list (list (quote operations) 0) (list (quote depth) 0)
+			(list (quote broad_text_matches) 0) (list (quote broad_text_average_bytes) 0)))))
 
 (define membership_source_work_profile (lambda (src condition map_expr)
 	(begin
 		(define input_rows (planner_source_row_count src))
 		(define filter_columns (extract_columns_for_alias src condition))
 		(define map_columns (extract_columns_for_alias src map_expr))
-		(define expression_work (physical_expression_work_profile condition))
+		(define expression_work (physical_expression_work_profile src condition))
+		(define broad_text_average_bytes (qassoc_get expression_work (quote broad_text_average_bytes) 0))
 		(list
 			(list (quote scan_invocations) 1)
 			(list (quote input_rows) input_rows)
@@ -7569,6 +7632,11 @@ once; get_column is a leaf because column reads are costed independently. */
 			(list (quote map_columns) (count map_columns))
 			(list (quote expression_operations) (qassoc_get expression_work (quote operations) 0))
 			(list (quote expression_depth) (qassoc_get expression_work (quote depth) 0))
+			(list (quote broad_text_match_rows)
+				(if (number? input_rows)
+					(* input_rows (qassoc_get expression_work (quote broad_text_matches) 0)) nil))
+			(list (quote broad_text_match_bytes)
+				(if (number? input_rows) (* input_rows broad_text_average_bytes) nil))
 			(list (quote filter_value_rows)
 				(if (number? input_rows) (* input_rows (count filter_columns)) nil))
 			(list (quote expression_operation_rows)
@@ -7607,6 +7675,12 @@ once; get_column is a leaf because column reads are costed independently. */
 				(list (quote expression_depth) (max
 					(qassoc_get combined (quote expression_depth) 0)
 					(qassoc_get profile (quote expression_depth) 0)))
+				(list (quote broad_text_match_rows) (+
+					(coalesceNil (qassoc_get combined (quote broad_text_match_rows) nil) 0)
+					(coalesceNil (qassoc_get profile (quote broad_text_match_rows) nil) 0)))
+				(list (quote broad_text_match_bytes) (+
+					(coalesceNil (qassoc_get combined (quote broad_text_match_bytes) nil) 0)
+					(coalesceNil (qassoc_get profile (quote broad_text_match_bytes) nil) 0)))
 				(list (quote filter_value_rows) (+
 					(coalesceNil (qassoc_get combined (quote filter_value_rows) nil) 0)
 					(coalesceNil (qassoc_get profile (quote filter_value_rows) nil) 0)))
@@ -7628,6 +7702,20 @@ once; get_column is a leaf because column reads are costed independently. */
 						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
 						(gs_keys stage))
 					'()))))))
+
+(define membership_candidate_work_facts (lambda (stage)
+	(begin
+		(define work (membership_candidate_work_profile stage))
+		(list
+			(list (quote membership_candidate_scan_invocations) (qassoc_get work (quote scan_invocations) 1))
+			(list (quote membership_candidate_filter_columns) (qassoc_get work (quote filter_columns) 0))
+			(list (quote membership_candidate_map_columns) (qassoc_get work (quote map_columns) (count (gs_keys stage))))
+			(list (quote membership_candidate_expression_operations) (qassoc_get work (quote expression_operations) 0))
+			(list (quote membership_candidate_expression_depth) (qassoc_get work (quote expression_depth) 0))
+			(list (quote membership_candidate_broad_text_match_rows) (qassoc_get work (quote broad_text_match_rows) 0))
+			(list (quote membership_candidate_broad_text_match_bytes) (qassoc_get work (quote broad_text_match_bytes) 0))
+			(list (quote membership_candidate_filter_value_rows) (qassoc_get work (quote filter_value_rows) nil))
+			(list (quote membership_candidate_expression_operation_rows) (qassoc_get work (quote expression_operation_rows) nil))))))
 
 (define membership_driver_work_profile (lambda (driver sources block)
 	(if (nil? driver)
@@ -7670,6 +7758,8 @@ once; get_column is a leaf because column reads are costed independently. */
 		(define estimate_capped (qassoc_get candidate_estimate (quote capped) false))
 		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
 		(define estimate_sampled (qassoc_get candidate_estimate (quote sampled) nil))
+		(define estimate_population (planner_estimate_population candidate_estimate))
+		(define estimate_coverage (planner_estimate_coverage candidate_estimate))
 		(define estimate_ratio_broad (and
 			(and (not (nil? estimate_rows)) (and (not (nil? estimate_sampled)) (> estimate_sampled 0)))
 			(>= (* estimate_rows 4) estimate_sampled)))
@@ -7679,6 +7769,8 @@ once; get_column is a leaf because column reads are costed independently. */
 		(define ordered_driver (if (nil? driver) false
 			(or (source_order_limit_driver? driver (qb_order block) (qb_limit block))
 				(source_row_number_limit_driver? (qb_stages block) driver))))
+		(define consumer (if (query_block_has_aggregates? block) (quote aggregate)
+			(if ordered_driver (quote order_limit) (quote filter))))
 		(define candidate_work (membership_candidate_work_profile stage))
 		(define driver_work (membership_driver_work_profile driver sources block))
 		(list
@@ -7693,6 +7785,8 @@ once; get_column is a leaf because column reads are costed independently. */
 			(list (quote membership_candidate_estimate_capped) estimate_capped)
 			(list (quote membership_candidate_estimate_input) estimate_input)
 			(list (quote membership_candidate_estimate_sampled) estimate_sampled)
+			(list (quote membership_candidate_estimate_population) estimate_population)
+			(list (quote membership_candidate_estimate_coverage) estimate_coverage)
 			(list (quote membership_candidate_probe_branches) candidate_probe_branches)
 			(list (quote membership_candidate_scan_invocations) (qassoc_get candidate_work (quote scan_invocations) candidate_probe_branches))
 			(list (quote membership_candidate_filter_columns) (qassoc_get candidate_work (quote filter_columns) 0))
@@ -7700,6 +7794,8 @@ once; get_column is a leaf because column reads are costed independently. */
 			(list (quote membership_candidate_cache_map_columns) (+ (count (gs_keys stage)) (count (gs_aggregates stage))))
 			(list (quote membership_candidate_expression_operations) (qassoc_get candidate_work (quote expression_operations) 0))
 			(list (quote membership_candidate_expression_depth) (qassoc_get candidate_work (quote expression_depth) 0))
+			(list (quote membership_candidate_broad_text_match_rows) (qassoc_get candidate_work (quote broad_text_match_rows) 0))
+			(list (quote membership_candidate_broad_text_match_bytes) (qassoc_get candidate_work (quote broad_text_match_bytes) 0))
 			(list (quote membership_candidate_filter_value_rows)
 				(coalesceNil (qassoc_get candidate_work (quote filter_value_rows) nil)
 					(if (number? candidate_rows)
@@ -7716,7 +7812,8 @@ once; get_column is a leaf because column reads are costed independently. */
 			(list (quote membership_driver_alternative) driver_alternative)
 			(list (quote membership_order_limit) (qb_limit block))
 			(list (quote membership_order_offset) (coalesceNil (qb_offset block) 0))
-			(list (quote membership_order_limit_driver) ordered_driver)))))
+			(list (quote membership_order_limit_driver) ordered_driver)
+			(list (quote membership_consumer) consumer)))))
 
 (define stage_reorder_telemetry (lambda (stage)
 	(list
@@ -7855,10 +7952,11 @@ in the canonicalization functions above. */
 			(coalesceNil (qassoc_get estimate (quote input) nil) fallback)
 			(coalesceNil (qassoc_get estimate (quote rows) nil) fallback)))))
 
-/* A capped sample still carries measured selectivity: rows/input is the
-observed hit rate before the cap was reached. Extrapolate that rate over the
-known input instead of confusing sampled input rows with matching rows. The
-cap remains an uncertainty signal for guards and EXPLAIN. */
+/* Only rows examined independently of the predicate's access index form a
+selectivity sample. Once an index or RecSet has restricted the iterator,
+sampled means "index candidates examined", not "table rows sampled". A capped
+restricted estimate is therefore merely a lower bound and must not be
+extrapolated as though the iterator were an unbiased table sample. */
 (define membership_estimated_matching_rows (lambda (estimate input_rows fallback)
 	(if (nil? estimate)
 		fallback
@@ -7868,7 +7966,9 @@ cap remains an uncertainty signal for guards and EXPLAIN. */
 			(if (and (qassoc_get estimate (quote capped) false)
 				(and (number? input_rows)
 					(and (number? rows) (and (number? sampled_input) (> sampled_input 0)))))
-				(min input_rows (* input_rows (/ rows sampled_input)))
+				(if (equal? (planner_estimate_coverage estimate) (quote lower_bound))
+					(coalesceNil fallback input_rows)
+					(min input_rows (* input_rows (/ rows sampled_input))))
 				(coalesceNil rows fallback))))))
 
 (define membership_driver_filter (lambda (condition)
@@ -7971,8 +8071,17 @@ physical alternative. */
 		(define projected_rows (membership_projected_driver_rows
 			candidate_input_rows candidate_rows projection_rows work))
 		(define base_cost (planner_cost_add
-			(membership_common_scan_cost candidate_input_rows candidate_rows projection_rows
-				(membership_work_value work (quote membership_candidate_map_columns) 1) work)
+			(planner_cost_add
+				(membership_common_scan_cost candidate_input_rows candidate_rows projection_rows
+					(membership_work_value work (quote membership_candidate_map_columns) 1) work)
+				(planner_cost 0
+					(+
+						(* (membership_work_value work (quote membership_candidate_broad_text_match_rows) 0)
+							planner_membership_broad_text_match_row_ns)
+						(* (membership_work_value work (quote membership_candidate_broad_text_match_bytes) 0)
+							planner_membership_broad_text_match_byte_ns))
+					0 0 0 0 0 0 candidate_input_rows 0.55)
+				candidate_input_rows 0.55)
 			(planner_cost planner_membership_recset_startup_ns 0 (* driver_rows planner_membership_recset_probe_row_ns)
 				0 0 (* (+ candidate_rows projected_rows) planner_membership_recset_build_row_ns)
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
@@ -8035,7 +8144,9 @@ physical alternative. */
 				(list (quote rows) (qassoc_get telemetry (quote membership_candidate_estimated_rows) nil))
 				(list (quote input) (qassoc_get telemetry (quote membership_candidate_estimate_input) nil))
 				(list (quote sampled) (qassoc_get telemetry (quote membership_candidate_estimate_sampled) nil))
-				(list (quote capped) (qassoc_get telemetry (quote membership_candidate_estimate_capped) false)))
+				(list (quote capped) (qassoc_get telemetry (quote membership_candidate_estimate_capped) false))
+				(list (quote population) (qassoc_get telemetry (quote membership_candidate_estimate_population) (quote table_rows)))
+				(list (quote coverage) (qassoc_get telemetry (quote membership_candidate_estimate_coverage) (quote sampled))))
 			(qassoc_get telemetry (quote membership_candidate_input_rows) nil)
 			(qassoc_get telemetry (quote membership_candidate_input_rows) nil)))
 		(define driver_strategy (membership_driver_strategy_for_telemetry telemetry))
@@ -8054,32 +8165,59 @@ physical alternative. */
 
 (define record_membership_physical_choice (lambda (requirement strategy reason candidates)
 	(begin
+		(define decision_id (concat "membership_carrier:"
+			(qassoc_get requirement (quote membership_stage_id) "unknown")))
+		(define alternatives (map candidates (lambda (candidate) (string (car candidate)))))
+		(define forced (planner_physical_override decision_id))
+		(define chosen (planner_physical_choice decision_id (string strategy) alternatives))
+		(define candidate_input_rows (qassoc_get requirement (quote membership_candidate_input_rows) nil))
+		(define candidate_rows (membership_estimated_matching_rows
+			(list
+				(list (quote rows) (qassoc_get requirement (quote membership_candidate_estimated_rows) nil))
+				(list (quote input) (qassoc_get requirement (quote membership_candidate_estimate_input) nil))
+				(list (quote sampled) (qassoc_get requirement (quote membership_candidate_estimate_sampled) nil))
+				(list (quote capped) (qassoc_get requirement (quote membership_candidate_estimate_capped) false))
+				(list (quote population) (qassoc_get requirement (quote membership_candidate_estimate_population) (quote table_rows)))
+				(list (quote coverage) (qassoc_get requirement (quote membership_candidate_estimate_coverage) (quote sampled))))
+			candidate_input_rows candidate_input_rows))
+		(define driver_input_rows (qassoc_get requirement (quote membership_driver_input_rows) nil))
+		(define driver_rows (if (qassoc_get requirement (quote membership_order_limit_driver) false)
+			(coalesceNil (probe_limit_work_rows (qassoc_get requirement (quote membership_order_limit) nil))
+				(qassoc_get requirement (quote membership_driver_rows) nil))
+			(qassoc_get requirement (quote membership_driver_rows) nil)))
 		(planner_record_physical_decision
 			(list
-				(list "decision_id" (concat "membership_carrier:"
-					(qassoc_get requirement (quote membership_stage_id) "unknown")))
+				(list "decision_id" decision_id)
 				(list "decision" "membership_carrier")
+				(list "decision_site" "physical_requirement")
 				(list "stage" (qassoc_get requirement (quote membership_stage_id) nil))
 				(list "consumer" (string
 					(qassoc_get requirement (quote membership_consumer) (quote filter))))
-				(list "chosen" (string strategy))
-				(list "reason" (string reason))
+				(list "chosen" chosen)
+				(list "normally_chosen" (string strategy))
+				(list "selection" (if (nil? forced) "cost" "forced"))
+				(list "reason" (if (nil? forced) (string reason) "calibration_override"))
 				(list "inputs" (list
-					(list "candidate_rows" (membership_estimated_matching_rows
-						(list
-							(list (quote rows) (qassoc_get requirement (quote membership_candidate_estimated_rows) nil))
-							(list (quote input) (qassoc_get requirement (quote membership_candidate_estimate_input) nil))
-							(list (quote sampled) (qassoc_get requirement (quote membership_candidate_estimate_sampled) nil))
-							(list (quote capped) (qassoc_get requirement (quote membership_candidate_estimate_capped) false)))
-						(qassoc_get requirement (quote membership_candidate_input_rows) nil)
-						(qassoc_get requirement (quote membership_candidate_input_rows) nil)))
-					(list "candidate_input_rows" (qassoc_get requirement (quote membership_candidate_input_rows) nil))
-					(list "driver_rows" (qassoc_get requirement (quote membership_driver_rows) nil))
-					(list "driver_input_rows" (qassoc_get requirement (quote membership_driver_input_rows) nil))
+					(list "candidate_rows" candidate_rows)
+					(list "candidate_input_rows" candidate_input_rows)
+					(list "candidate_density" (if (and (number? candidate_input_rows) (number? candidate_rows))
+						(membership_candidate_density candidate_input_rows candidate_rows requirement) nil))
+					(list "projected_driver_rows" (if (and (number? candidate_input_rows)
+						(and (number? candidate_rows) (number? driver_input_rows)))
+						(membership_projected_driver_rows candidate_input_rows candidate_rows driver_input_rows requirement) nil))
+					(list "driver_rows" driver_rows)
+					(list "driver_input_rows" driver_input_rows)
+					(list "expected_driver_rows_visited" (if (and (number? candidate_input_rows)
+						(and (number? candidate_rows) (number? driver_rows)))
+						(membership_expected_driver_rows_visited candidate_input_rows candidate_rows driver_rows requirement) nil))
+					(list "limit" (qassoc_get requirement (quote membership_order_limit) nil))
+					(list "offset" (qassoc_get requirement (quote membership_order_offset) 0))
 					(list "driver_estimate_capped" (qassoc_get requirement (quote membership_driver_estimate_capped) false))
 					(list "selectivity_class" (string (qassoc_get requirement (quote membership_selectivity_class) nil)))
 					(list "estimate_capped" (qassoc_get requirement (quote membership_candidate_estimate_capped) false))
 					(list "estimate_sampled_rows" (qassoc_get requirement (quote membership_candidate_estimate_sampled) nil))
+					(list "estimate_population" (string (qassoc_get requirement (quote membership_candidate_estimate_population) (quote table_rows))))
+					(list "estimate_coverage" (string (qassoc_get requirement (quote membership_candidate_estimate_coverage) (quote sampled))))
 					(list "probe_branches" (qassoc_get requirement (quote membership_candidate_probe_branches) 1))
 					(list "candidate_scan_invocations" (qassoc_get requirement (quote membership_candidate_scan_invocations) 1))
 					(list "candidate_filter_columns" (qassoc_get requirement (quote membership_candidate_filter_columns) 0))
@@ -8087,6 +8225,8 @@ physical alternative. */
 					(list "candidate_cache_map_columns" (qassoc_get requirement (quote membership_candidate_cache_map_columns) 2))
 					(list "candidate_expression_operations" (qassoc_get requirement (quote membership_candidate_expression_operations) 0))
 					(list "candidate_expression_depth" (qassoc_get requirement (quote membership_candidate_expression_depth) 0))
+					(list "candidate_broad_text_match_rows" (qassoc_get requirement (quote membership_candidate_broad_text_match_rows) 0))
+					(list "candidate_broad_text_match_bytes" (qassoc_get requirement (quote membership_candidate_broad_text_match_bytes) 0))
 					(list "candidate_filter_value_rows" (qassoc_get requirement (quote membership_candidate_filter_value_rows) nil))
 					(list "candidate_expression_operation_rows" (qassoc_get requirement (quote membership_candidate_expression_operation_rows) nil))
 					(list "driver_scan_invocations" (qassoc_get requirement (quote membership_driver_scan_invocations) 1))
@@ -8098,12 +8238,12 @@ physical alternative. */
 				(list "alternatives" (map candidates (lambda (candidate)
 					(list
 						(list "plan" (string (car candidate)))
-						(list "status" (if (equal? (car candidate) strategy) "chosen" "rejected"))
-						(list "reason" (if (equal? (car candidate) strategy) "lowest_total_ns" "higher_total_ns_or_memory_tiebreak"))
+						(list "status" (if (equal? (string (car candidate)) chosen) "chosen" "rejected"))
+						(list "reason" (if (equal? (string (car candidate)) chosen) "selected" "higher_total_ns_or_forced_alternative"))
 						(list "cost" (planner_cost_explain (cadr candidate)))))))))
 		(if (qassoc_get requirement (quote membership_order_limit_driver) false)
 			(begin
-				(define recset_source (equal? strategy (quote candidate_keyset)))
+				(define recset_source (equal? chosen "candidate_keyset"))
 				(planner_record_physical_decision
 					(list
 						(list "decision" "ordered_recset_iterator")
@@ -8149,7 +8289,12 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(make_query_block
 					(qb_schema block) (qb_sources block) (qb_fields block) (qb_where block)
 					(qb_group block) (qb_having block) (qb_order block) (qb_limit block)
-					(qb_offset block) (qb_hidden block) (qb_stages block) physical_facts))))))
+					(qb_offset block) (qb_hidden block)
+					(map (qb_stages block) (lambda (stage)
+						(if (equal? (gs_id stage) (qassoc_get requirement (quote membership_stage_id) nil))
+							(group_stage_with_facts stage (merge (list requirement (gs_facts stage))))
+							stage)))
+					physical_facts))))))
 
 (define membership_broad_driver_probe_preferred? (lambda (block stage)
 	(begin
@@ -8164,6 +8309,7 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 (define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
 	(begin
 		(define input (gs_input stage))
+		(define stage_facts (merge (list (membership_candidate_work_facts stage) (gs_facts stage))))
 		(define base_sources (filter (qb_sources block) source_is_base_table?))
 		/* Projection from the canonical group cache currently guarantees a
 		direct key map only for base-table membership stages. Derived inputs keep
@@ -8177,7 +8323,7 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 			false
 			(begin
 				(define candidate_estimate (planner_source_filter_estimate input
-					(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
+					(coalesceNil (qassoc_get stage_facts (quote condition) true) true)
 					512))
 				(define capped (if (nil? candidate_estimate) false
 					(qassoc_get candidate_estimate (quote capped) false)))
@@ -8219,7 +8365,7 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(define alternatives (list "candidate_keyset" "driver_order_membership_probe"))
 				(define normal_choice (if broad_driver
 					"driver_order_membership_probe"
-					(if (membership_projection_cost_preferred? candidate_total_rows candidate_rows driver_rows (gs_facts stage))
+					(if (membership_projection_cost_preferred? candidate_total_rows candidate_rows driver_rows stage_facts)
 						"candidate_keyset"
 						"driver_order_membership_probe")))
 				(define normal_projection (equal? normal_choice projected_choice))
@@ -8227,15 +8373,16 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(define chosen_projection (equal? chosen_choice projected_choice))
 				(define forced_choice (planner_physical_override decision_id))
 				(define candidate_cost (if (number? candidate_rows)
-					(membership_projection_cost candidate_total_rows candidate_rows driver_rows (gs_facts stage))
+					(membership_projection_cost candidate_total_rows candidate_rows driver_rows stage_facts)
 					nil))
 				(define driver_cost (if (number? driver_rows)
-					(membership_ordered_driver_probe_cost candidate_total_rows candidate_rows driver_rows (gs_facts stage))
+					(membership_ordered_driver_probe_cost candidate_total_rows candidate_rows driver_rows stage_facts)
 					nil))
 				(planner_record_physical_decision
 					(list
 						(list "decision_id" decision_id)
 						(list "decision" "membership_carrier")
+						(list "decision_site" "truth_projection")
 						(list "stage" (gs_id stage))
 						(list "consumer" (if (query_block_has_aggregates? block) "aggregate" (if (query_limit_active? (qb_offset block) (qb_limit block)) "order_limit" "filter")))
 						(list "chosen" chosen_choice)
@@ -8250,32 +8397,36 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 							(list "candidate_matching_rows" (if (nil? candidate_estimate) nil (qassoc_get candidate_estimate (quote rows) nil)))
 							(list "candidate_rows" candidate_rows)
 							(list "candidate_density" (membership_candidate_density
-								candidate_total_rows candidate_rows (gs_facts stage)))
+								candidate_total_rows candidate_rows stage_facts))
 							(list "projected_driver_rows"
-								(membership_projected_driver_rows candidate_total_rows candidate_rows driver_total_rows (gs_facts stage)))
+								(membership_projected_driver_rows candidate_total_rows candidate_rows driver_total_rows stage_facts))
 							(list "driver_input_rows" driver_total_rows)
 							(list "driver_rows" driver_rows)
 							(list "expected_driver_rows_visited" (membership_expected_driver_rows_visited
-								candidate_total_rows candidate_rows driver_rows (gs_facts stage)))
+								candidate_total_rows candidate_rows driver_rows stage_facts))
 							(list "limit" (qb_limit block))
 							(list "offset" (coalesceNil (qb_offset block) 0))
 							(list "estimate_capped" capped)
 							(list "estimate_sampled_rows" (qassoc_get candidate_estimate (quote sampled) nil))
-							(list "selectivity_class" (if capped "unknown_or_broad" (string (qassoc_get (gs_facts stage) (quote selectivity_class) (quote unknown)))))
-							(list "candidate_scan_invocations" (qassoc_get (gs_facts stage) (quote membership_candidate_scan_invocations) 1))
-							(list "candidate_filter_columns" (qassoc_get (gs_facts stage) (quote membership_candidate_filter_columns) 0))
-							(list "candidate_map_columns" (qassoc_get (gs_facts stage) (quote membership_candidate_map_columns) 1))
-							(list "candidate_cache_map_columns" (qassoc_get (gs_facts stage) (quote membership_candidate_cache_map_columns) 2))
-							(list "candidate_expression_operations" (qassoc_get (gs_facts stage) (quote membership_candidate_expression_operations) 0))
-							(list "candidate_expression_depth" (qassoc_get (gs_facts stage) (quote membership_candidate_expression_depth) 0))
-							(list "candidate_filter_value_rows" (qassoc_get (gs_facts stage) (quote membership_candidate_filter_value_rows) nil))
-							(list "candidate_expression_operation_rows" (qassoc_get (gs_facts stage) (quote membership_candidate_expression_operation_rows) nil))
-							(list "driver_scan_invocations" (qassoc_get (gs_facts stage) (quote membership_driver_scan_invocations) 1))
-							(list "driver_filter_columns" (qassoc_get (gs_facts stage) (quote membership_driver_filter_columns) 0))
-							(list "driver_map_columns" (qassoc_get (gs_facts stage) (quote membership_driver_map_columns) 0))
-							(list "driver_expression_operations" (qassoc_get (gs_facts stage) (quote membership_driver_expression_operations) 0))
-							(list "driver_expression_depth" (qassoc_get (gs_facts stage) (quote membership_driver_expression_depth) 0))
-							(list "reuse" (qassoc_get (gs_facts stage) (quote reuse) 1))))
+							(list "estimate_population" (string (planner_estimate_population candidate_estimate)))
+							(list "estimate_coverage" (string (planner_estimate_coverage candidate_estimate)))
+							(list "selectivity_class" (if capped "unknown_or_broad" (string (qassoc_get stage_facts (quote selectivity_class) (quote unknown)))))
+							(list "candidate_scan_invocations" (qassoc_get stage_facts (quote membership_candidate_scan_invocations) 1))
+							(list "candidate_filter_columns" (qassoc_get stage_facts (quote membership_candidate_filter_columns) 0))
+							(list "candidate_map_columns" (qassoc_get stage_facts (quote membership_candidate_map_columns) 1))
+							(list "candidate_cache_map_columns" (qassoc_get stage_facts (quote membership_candidate_cache_map_columns) 2))
+							(list "candidate_expression_operations" (qassoc_get stage_facts (quote membership_candidate_expression_operations) 0))
+							(list "candidate_expression_depth" (qassoc_get stage_facts (quote membership_candidate_expression_depth) 0))
+							(list "candidate_broad_text_match_rows" (qassoc_get stage_facts (quote membership_candidate_broad_text_match_rows) 0))
+							(list "candidate_broad_text_match_bytes" (qassoc_get stage_facts (quote membership_candidate_broad_text_match_bytes) 0))
+							(list "candidate_filter_value_rows" (qassoc_get stage_facts (quote membership_candidate_filter_value_rows) nil))
+							(list "candidate_expression_operation_rows" (qassoc_get stage_facts (quote membership_candidate_expression_operation_rows) nil))
+							(list "driver_scan_invocations" (qassoc_get stage_facts (quote membership_driver_scan_invocations) 1))
+							(list "driver_filter_columns" (qassoc_get stage_facts (quote membership_driver_filter_columns) 0))
+							(list "driver_map_columns" (qassoc_get stage_facts (quote membership_driver_map_columns) 0))
+							(list "driver_expression_operations" (qassoc_get stage_facts (quote membership_driver_expression_operations) 0))
+							(list "driver_expression_depth" (qassoc_get stage_facts (quote membership_driver_expression_depth) 0))
+							(list "reuse" (qassoc_get stage_facts (quote reuse) 1))))
 						(list "alternatives" (list
 							(list
 								(list "plan" "candidate_keyset")
@@ -12838,7 +12989,10 @@ That makes the recorded and forced choice identical to the executable plan. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer ordered_filter driver_rows_override)
 	(begin
 		(define stage (nth membership 0))
-		(define facts (gs_facts stage))
+		/* Some late RecSet consumers are introduced after reorder telemetry was
+		attached. Reconstruct only the candidate's scalar work from the existing
+		logical stage; this is one formula walk, never an alternative plan build. */
+		(define facts (merge (list (membership_candidate_work_facts stage) (gs_facts stage))))
 		(define cost_facts (if (equal? consumer (quote aggregate))
 			(qassoc_set facts (quote membership_consumer) (quote aggregate))
 			facts))
@@ -12850,6 +13004,12 @@ That makes the recorded and forced choice identical to the executable plan. */
 			raw_expr
 			(begin
 				(define measured_estimate (planner_stage_filter_estimate (gs_input stage) 512))
+				(define estimate_population (coalesceNil
+					(qassoc_get facts (quote membership_candidate_estimate_population) nil)
+					(planner_estimate_population measured_estimate)))
+				(define estimate_coverage (coalesceNil
+					(qassoc_get facts (quote membership_candidate_estimate_coverage) nil)
+					(planner_estimate_coverage measured_estimate)))
 				(define capped (or
 					(qassoc_get facts (quote membership_candidate_estimate_capped) false)
 					(qassoc_get measured_estimate (quote capped) false)))
@@ -12868,7 +13028,9 @@ That makes the recorded and forced choice identical to the executable plan. */
 						(list (quote sampled) (coalesceNil
 							(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
 							(qassoc_get measured_estimate (quote sampled) nil)))
-						(list (quote capped) capped))
+						(list (quote capped) capped)
+						(list (quote population) estimate_population)
+						(list (quote coverage) estimate_coverage))
 					candidate_input_rows candidate_input_rows))
 				/* Ordered LIMIT consumes only its local window before downstream
 				operators. Cost this edge with that workload instead of a global
@@ -12904,6 +13066,7 @@ That makes the recorded and forced choice identical to the executable plan. */
 					(list
 						(list "decision_id" decision_id)
 						(list "decision" "membership_carrier")
+						(list "decision_site" "recset_lowering")
 						(list "stage" (gs_id stage))
 						(list "consumer" (string (coalesceNil consumer
 							(qassoc_get facts (quote membership_consumer) (quote filter)))))
@@ -12935,6 +13098,8 @@ That makes the recorded and forced choice identical to the executable plan. */
 							(list "estimate_sampled_rows" (coalesceNil
 								(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
 								(qassoc_get measured_estimate (quote sampled) nil)))
+							(list "estimate_population" (string estimate_population))
+							(list "estimate_coverage" (string estimate_coverage))
 							(list "probe_branches" (qassoc_get facts (quote membership_candidate_probe_branches) 1))
 							(list "selectivity_class" (string (qassoc_get facts (quote membership_selectivity_class) (quote unknown))))
 							(list "candidate_scan_invocations" (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
@@ -12943,6 +13108,8 @@ That makes the recorded and forced choice identical to the executable plan. */
 							(list "candidate_cache_map_columns" (qassoc_get facts (quote membership_candidate_cache_map_columns) 2))
 							(list "candidate_expression_operations" (qassoc_get facts (quote membership_candidate_expression_operations) 0))
 							(list "candidate_expression_depth" (qassoc_get facts (quote membership_candidate_expression_depth) 0))
+							(list "candidate_broad_text_match_rows" (qassoc_get facts (quote membership_candidate_broad_text_match_rows) 0))
+							(list "candidate_broad_text_match_bytes" (qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0))
 							(list "candidate_filter_value_rows" (qassoc_get facts (quote membership_candidate_filter_value_rows) nil))
 							(list "candidate_expression_operation_rows" (qassoc_get facts (quote membership_candidate_expression_operation_rows) nil))
 							(list "driver_scan_invocations" (qassoc_get facts (quote membership_driver_scan_invocations) 1))
@@ -15475,10 +15642,12 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_filter_column_row_ns 1)
 (define planner_membership_map_column_row_ns 28)
 (define planner_membership_expression_operation_row_ns 98)
+(define planner_membership_broad_text_match_row_ns 1)
+(define planner_membership_broad_text_match_byte_ns 4)
 (define planner_membership_recset_startup_ns 1)
 (define planner_membership_recset_build_row_ns 1)
 (define planner_membership_recset_probe_row_ns 1)
-(define planner_membership_recset_aggregate_row_ns 132)
+(define planner_membership_recset_aggregate_row_ns 215)
 (define planner_membership_group_cache_startup_ns 17538872)
 (define planner_membership_group_cache_build_row_ns 11590)
 (define planner_membership_group_cache_probe_row_ns 132886)
@@ -17063,14 +17232,14 @@ get_column refs to the source) are excluded automatically too. */
 											(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
 												(extract_columns_for_alias src expr)))))
 											(define scan_mapcols (merge_unique (list (without_col fieldcols col) mapcols)))
-										(define filter_expr (list (quote lambda)
-											(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias (source_alias src) filter_col)))
-											(lower_column_expr_for_alias src filter_condition)))
+											(define filter_expr (list (quote lambda)
+												(map filtercols (lambda (filter_col) (scan_callback_symbol_for_alias (source_alias src) filter_col)))
+												(lower_column_expr_for_alias src filter_condition)))
 											(define row_expr (list (quote resultrow)
 												(cons (quote list) (lower_row_number_result_fields src col fields))))
-										(define continuation_expr (list (quote lambda) (list (quote __row_number))
-											(list (quote if)
-												(lower_column_expr_for_alias src rewritten_condition)
+											(define continuation_expr (list (quote lambda) (list (quote __row_number))
+												(list (quote if)
+													(lower_column_expr_for_alias src rewritten_condition)
 													row_expr
 													nil)))
 											(define map_expr (list (quote lambda)
@@ -17993,10 +18162,10 @@ path. */
 					(list (quote scan_recset)
 						'(session "__memcp_tx")
 						(source_table_expr input_src)
-					(cons (quote list) filtercols)
-					(list (quote lambda)
-						(map filtercols (lambda (col) (symbol (concat alias "." col))))
-						(lower_column_expr_for_alias input_src condition)))))))))
+						(cons (quote list) filtercols)
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat alias "." col))))
+							(lower_column_expr_for_alias input_src condition)))))))))
 
 (define membership_keyset_bindings (lambda (memberships)
 	(begin
@@ -20809,6 +20978,7 @@ potentially large calibrated SELECT result. */
 			(equal? operator_family expected_family)))
 		(define baseline_hash_key (concat "hash:" decision_id))
 		(define baseline_count_key (concat "count:" decision_id))
+		(define shared_suite (equal? suite_var (quote __physical_calibration_suite)))
 		(list
 			(list (quote lambda) (list (quote __calibration_emit))
 				(list (quote !begin)
@@ -20852,9 +21022,13 @@ potentially large calibrated SELECT result. */
 							"estimated_ns" estimated_ns
 							"whole_query_execution_ns" (quote __calibration_whole_query_execution_ns)
 							"operator_ns" nil
+							"measurement_scope" (if shared_suite "shared_sequential_diagnostic" "isolated_variant_request")
+							"fit_eligible" (not shared_suite)
 							"candidate_input_rows" (physical_calibration_input decision "candidate_input_rows")
 							"candidate_rows" (physical_calibration_input decision "candidate_rows")
 							"candidate_density" (physical_calibration_input decision "candidate_density")
+							"estimate_population" (physical_calibration_input decision "estimate_population")
+							"estimate_coverage" (physical_calibration_input decision "estimate_coverage")
 							"projected_driver_rows" (physical_calibration_input decision "projected_driver_rows")
 							"driver_input_rows" (physical_calibration_input decision "driver_input_rows")
 							"driver_rows" (physical_calibration_input decision "driver_rows")
@@ -20868,6 +21042,8 @@ potentially large calibrated SELECT result. */
 							"candidate_cache_map_columns" (physical_calibration_input decision "candidate_cache_map_columns")
 							"candidate_expression_operations" (physical_calibration_input decision "candidate_expression_operations")
 							"candidate_expression_depth" (physical_calibration_input decision "candidate_expression_depth")
+							"candidate_broad_text_match_rows" (physical_calibration_input decision "candidate_broad_text_match_rows")
+							"candidate_broad_text_match_bytes" (physical_calibration_input decision "candidate_broad_text_match_bytes")
 							"candidate_filter_value_rows" (physical_calibration_input decision "candidate_filter_value_rows")
 							"candidate_expression_operation_rows" (physical_calibration_input decision "candidate_expression_operation_rows")
 							"driver_scan_invocations" (physical_calibration_input decision "driver_scan_invocations")

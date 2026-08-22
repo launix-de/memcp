@@ -154,6 +154,7 @@ functional planner return value. */
 		(planning_session "__memcp_queryplan_guard_bindings" (newsession))
 		(planning_session "__memcp_queryplan_guarded_session_keys" (newsession))
 		(planning_session "__memcp_queryplan_observed_session_keys" (newsession))
+		(planning_session "__memcp_queryplan_statistics" (newsession))
 		planning_session)))
 
 (define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
