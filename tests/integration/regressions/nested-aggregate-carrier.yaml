@@ -1,0 +1,99 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Nested aggregate projections retain every physical carrier initializer"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nac_team_item"
+  - sql: "DROP TABLE IF EXISTS nac_ticket"
+  - sql: "DROP TABLE IF EXISTS nac_state"
+  - sql: "DROP TABLE IF EXISTS nac_actor"
+  - sql: "CREATE TABLE nac_actor (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nac_state (id INT PRIMARY KEY, final BOOL)"
+  - sql: |
+      CREATE TABLE nac_ticket (
+        id INT PRIMARY KEY,
+        state INT,
+        assigned INT,
+        assigned_team INT,
+        creator INT
+      )
+  - sql: "CREATE TABLE nac_team_item (id INT PRIMARY KEY, list_id INT, actor_id INT)"
+  - sql: "INSERT INTO nac_actor VALUES (1)"
+  - sql: |
+      INSERT INTO nac_state VALUES
+        (1, TRUE), (2, FALSE), (3, FALSE),
+        (4, FALSE), (5, FALSE), (6, FALSE)
+  - scm: '(settings "ShardSize" 2)'
+  - sql: |
+      INSERT INTO nac_ticket VALUES
+        (1, 5, NULL, NULL, 1),
+        (2, 5, NULL, NULL, 1),
+        (5, 4, NULL, NULL, 1)
+  - scm: '(settings "ShardSize" 60000)'
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nac_team_item"
+  - sql: "DROP TABLE IF EXISTS nac_ticket"
+  - sql: "DROP TABLE IF EXISTS nac_state"
+  - sql: "DROP TABLE IF EXISTS nac_actor"
+
+test_cases:
+  - name: "parallel-shard nested scalar aggregate owns its intermediate"
+    fail_comment: "a carrier used below the scalar aggregate was scanned before its query-local table existed"
+    sql: |
+      SELECT (
+        SELECT SUM((
+          SELECT 1
+          FROM nac_state aggregate_state
+          WHERE aggregate_state.id = ticket.state
+            AND NOT aggregate_state.final
+          LIMIT 1
+        ))
+        FROM nac_ticket ticket
+        WHERE TRUE
+          AND NOT ((
+            SELECT filter_state.final
+            FROM nac_state filter_state
+            WHERE filter_state.id = ticket.state
+            LIMIT 1
+          ))
+          AND (
+            (SELECT actor.id = 1
+             FROM nac_actor actor
+             WHERE actor.id = ticket.assigned
+             LIMIT 1)
+            OR EXISTS (
+              SELECT TRUE
+              FROM nac_team_item team_item
+              WHERE team_item.list_id = ticket.assigned_team
+                AND (SELECT member.id = 1
+                     FROM nac_actor member
+                     WHERE member.id = team_item.actor_id
+                     LIMIT 1)
+              LIMIT 1
+            )
+          )
+        LIMIT 1
+      ) AS assigned_count
+      FROM nac_actor
+      WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - {assigned_count: null}

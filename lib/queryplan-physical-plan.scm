@@ -3690,8 +3690,7 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 		(define lowered_values (map (merge (list value_exprs order_values)) (lambda (expr)
 			(lower_column_expr_for_join_in_context
 				scan_sources default_alias expr probe_work_rows))))
-		(define table_key (concat "__join_order_intermediate:" (uuid)))
-		(define table_name (list (quote session) table_key))
+		(define table_name (symbol (concat "__join_order_intermediate_" (uuid))))
 		(define table_expr (list (quote table) (qb_schema block) table_name))
 		/* Keep a logically implied membership as the scan source while filling
 		the storage carrier. Other joins retain their established base-table scan
@@ -3704,18 +3703,20 @@ scan_order can build the appropriate auto-index and apply OFFSET/LIMIT. */
 			'() 0 -1 allow_membership_carrier probe_work_rows nil stage_catalog))
 		(define scan_plan_expr (scan_builder table_expr value_names order_names))
 		(define drop_plan (list (quote droptable) (qb_schema block) table_name true))
-		(list (quote !begin)
-			(list (quote session) table_key (list (quote concat) ".join-order:" (list (quote uuid))))
-			(list (quote createtable) (qb_schema block) table_name
-				(join_order_intermediate_columns column_names)
-				(quoted_runtime_list '("engine" "memory")) true)
-			(list
-				(list (quote lambda) (list (quote __intermediate_result))
-					(list (quote !begin) drop_plan (quote __intermediate_result)))
-				(list (quote try)
-					(list (quote lambda) '() (list (quote !begin) fill_plan scan_plan_expr))
-					(list (quote lambda) (list (quote __intermediate_error))
-						(list (quote !begin) drop_plan (list (quote error) (quote __intermediate_error))))))))))
+		(list
+			(list (quote lambda) (list table_name)
+				(list (quote !begin)
+					(list (quote createtable) (qb_schema block) table_name
+						(join_order_intermediate_columns column_names)
+						(quoted_runtime_list '("engine" "memory")) true)
+					(list
+						(list (quote lambda) (list (quote __intermediate_result))
+							(list (quote !begin) drop_plan (quote __intermediate_result)))
+						(list (quote try)
+							(list (quote lambda) '() (list (quote !begin) fill_plan scan_plan_expr))
+							(list (quote lambda) (list (quote __intermediate_error))
+								(list (quote !begin) drop_plan (list (quote error) (quote __intermediate_error))))))))
+			(list (quote concat) ".join-order:" (list (quote uuid)))))))
 
 (define lower_join_order_through_intermediate (lambda (block fields scan_sources scan_plan default_alias needed_exprs final_condition order_items stage_catalog)
 	(begin
