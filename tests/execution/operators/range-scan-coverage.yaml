@@ -462,8 +462,25 @@ test_cases:
       result_contains:
         - 'selective_text_filter_carrier'
         - 'chosen scan_recset'
-        - 'estimated_rows 8'
-        - 'input_rows 2048'
+        - 'candidate_rows 8'
+        - 'candidate_input_rows 2048'
+
+  - name: "Selective text carrier exposes both calibrated physical variants"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT f.id, d.label
+      FROM selective_text_driver f
+      LEFT JOIN selective_text_dim d ON d.id = f.dim_id
+      WHERE f.search LIKE '%needle%'
+      ORDER BY f.id
+      LIMIT 4
+    expect:
+      rows: 2
+      contains:
+        - 'selective_text_filter_carrier'
+        - 'scan_recset'
+        - 'fused_base_scan'
+        - 'result_equal'
 
   - name: "Selective local text RecSet carrier preserves joined rows"
     sql: |
@@ -496,8 +513,9 @@ test_cases:
       LIMIT 4
     expect:
       rows: 1
-      result_not_contains:
+      result_contains:
         - 'selective_text_filter_carrier'
+        - 'chosen fused_base_scan'
 
   - name: "EXPLAIN IR swaps to selective driver"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
