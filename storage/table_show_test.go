@@ -17,9 +17,11 @@ Copyright (C) 2026  Carl-Philip Haensch
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -67,6 +69,131 @@ func TestShowColumnsReusesImmutableSnapshot(t *testing.T) {
 	}
 }
 
+func TestCountEstimateIsLockFreeAndPersisted(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	tbl.PlannerRowEstimate.value.Store(73)
+
+	encoded, err := json.Marshal(tbl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored table
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.CountEstimate(); got != 73 {
+		t.Fatalf("restored CountEstimate() = %d, want 73", got)
+	}
+
+	// An estimate read must not consult shard state, even while it is exclusively
+	// locked by a writer. This guards the compiler hot path against regressions
+	// to GetRead/lazy loading.
+	shard := &storageShard{t: tbl}
+	tbl.Shards = []*storageShard{shard}
+	tbl.mu.Lock()
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	shard.mu.Lock()
+	done := make(chan uint, 1)
+	go func() { done <- tbl.CountEstimate() }()
+	select {
+	case got := <-done:
+		if got != 73 {
+			t.Fatalf("CountEstimate() = %d, want 73", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CountEstimate blocked on the shard lock")
+	}
+	shard.mu.Unlock()
+}
+
+func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
+	tbl := showColumnsTestTable(2)
+	tbl.Columns[1].Name = "MixedCase"
+	tbl.PlannerRowEstimate.value.Store(91)
+	tbl.Columns[1].PlannerStats.Store(&columnPlannerStatistics{
+		Confidence:        1,
+		Source:            "rebuild",
+		AverageValueBytes: 12.5,
+		MinEstimate:       scm.NewString("a"),
+		MaxEstimate:       scm.NewString("z"),
+	})
+	atomic.StoreUint64(&tbl.Columns[1].DistinctEstimate, 17)
+	tbl.publishShowColumnsSnapshot()
+
+	root := tbl.PlannerStatistics().FastDict()
+	rowCount, ok := root.Get(scm.NewString("row_count"))
+	if !ok || rowCount.Int() != 91 {
+		t.Fatalf("planner row_count = %v, %t; want 91, true", rowCount, ok)
+	}
+	columnsValue, ok := root.Get(scm.NewString("columns"))
+	if !ok {
+		t.Fatal("planner snapshot has no columns index")
+	}
+	columnStats, ok := columnsValue.FastDict().Get(scm.NewString("mixedcase"))
+	if !ok {
+		t.Fatal("case-folded planner column lookup missed MixedCase")
+	}
+	if got := scm.ToInt(columnStats.Slice()[3].Slice()[1]); got != 17 {
+		t.Fatalf("planner distinct estimate = %d, want 17", got)
+	}
+	if tbl.PlannerStatistics().FastDict() != root {
+		t.Fatal("planner statistics rebuilt an already-published snapshot")
+	}
+
+	tbl.adjustPlannerRows(9)
+	updatedRoot := tbl.PlannerStatistics().FastDict()
+	updatedRows, _ := updatedRoot.Get(scm.NewString("row_count"))
+	if updatedRows.Int() != 100 {
+		t.Fatalf("planner row_count after insert batch = %d, want 100", updatedRows.Int())
+	}
+	updatedColumns, _ := updatedRoot.Get(scm.NewString("columns"))
+	if updatedColumns.FastDict() != columnsValue.FastDict() {
+		t.Fatal("row-count update rebuilt the immutable column catalog")
+	}
+
+	mapper := &ShardMapReducer{shard: &storageShard{t: tbl}, deletedRows: 4}
+	mapper.FlushSideEffects()
+	if got := tbl.CountEstimate(); got != 96 {
+		t.Fatalf("CountEstimate() after delete batch = %d, want 96", got)
+	}
+	tbl.adjustPlannerRows(-200)
+	if got := tbl.CountEstimate(); got != 0 {
+		t.Fatalf("saturated CountEstimate() = %d, want 0", got)
+	}
+}
+
+func BenchmarkPlannerStatisticsLookup(b *testing.B) {
+	tbl := showColumnsTestTable(256)
+	tbl.PlannerRowEstimate.value.Store(1_000_000)
+	tbl.publishShowColumnsSnapshot()
+	target := scm.NewString("column_255")
+	plannerColumns, _ := tbl.PlannerStatistics().FastDict().Get(scm.NewString("columns"))
+	showColumns := tbl.ShowColumns().Slice()
+
+	b.Run("published_hash", func(b *testing.B) {
+		for range b.N {
+			if _, ok := plannerColumns.FastDict().Get(target); !ok {
+				b.Fatal("planner column disappeared")
+			}
+		}
+	})
+	b.Run("legacy_show_linear", func(b *testing.B) {
+		for range b.N {
+			found := false
+			for _, row := range showColumns {
+				if scm.String(showColumnProperty(row, "Field")) == "column_255" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				b.Fatal("SHOW column disappeared")
+			}
+		}
+	})
+}
+
 func TestFreshBaseColumnIsNotMarkedComputed(t *testing.T) {
 	db := &database{Name: "fresh-column-statistics"}
 	tbl := &table{schema: db}
@@ -94,10 +221,11 @@ func TestShowColumnsPublishesReplacementSnapshot(t *testing.T) {
 	}
 }
 
-func TestShowColumnsRefreshesChangedStatistics(t *testing.T) {
+func TestShowColumnsUsesExplicitStatisticsPublication(t *testing.T) {
 	tbl := showColumnsTestTable(1)
 	before := tbl.ShowColumns()
 	atomic.StoreUint64(&tbl.Columns[0].DistinctEstimate, 17)
+	tbl.publishShowColumnsSnapshot()
 	after := tbl.ShowColumns()
 
 	if &before.Slice()[0] == &after.Slice()[0] {

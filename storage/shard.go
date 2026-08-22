@@ -954,7 +954,7 @@ func (t *storageShard) resolveVisiblePrimaryRecidLocked(staleRecid uint32) (uint
 }
 
 func (t *storageShard) UpdateFunction(idx uint32, withTrigger bool, alreadyLocked bool, currentTx *TxContext) func(...scm.Scmer) scm.Scmer {
-	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, currentTx)
+	return t.UpdateFunctionBatch(idx, withTrigger, alreadyLocked, nil, nil, currentTx)
 }
 
 // sameUpdateValue keeps Scheme's useful numeric/coercive equality while
@@ -971,7 +971,7 @@ func isRuntimeComputedColumn(colDesc *column) bool {
 	return len(colDesc.OrcSortCols) > 0 || !colDesc.Computor.IsNil() || len(colDesc.ComputorInputCols) > 0
 }
 
-func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, currentTx *TxContext) func(...scm.Scmer) scm.Scmer {
+func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, alreadyLocked bool, batch *triggerBatch, deletedRows *uint64, currentTx *TxContext) func(...scm.Scmer) scm.Scmer {
 	// returns a callback with which you can delete or update an item
 	return func(a ...scm.Scmer) scm.Scmer {
 		//fmt.Println("update/delete", a)
@@ -1432,6 +1432,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}
 		}
 		if result {
+			if len(a) == 0 && deletedRows != nil {
+				*deletedRows++
+			}
 			// Dual-write: forward DELETE to PShards during repartition
 			if t.t.repartitionDualWriteActive.Load() && t.t.isRepartitionSource(t) {
 				t.t.dualWriteDelete(t, idx, currentTx)
@@ -1538,6 +1541,7 @@ type ShardMapReducer struct {
 	reduceFn       func(...scm.Scmer) scm.Scmer
 	mapScmer       scm.Scmer     // original Scmer for network serialization
 	deleteBatch    *triggerBatch // when set, DELETE triggers are batched instead of per-row
+	deletedRows    uint64        // applied DELETEs, published once when the mapper flushes
 	// Batched side effects: collected during scan, flushed after lock release.
 	// $increment calls are aggregated per (proxy, recid) → one update per unique target.
 	incrementBatch  map[*StorageComputeProxy]map[uint32]scm.Scmer // proxy → recid → accumulated delta
@@ -1798,7 +1802,7 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		}
 		if needsMutationMetadata && mr.isUpdate[i] {
 			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch, mr.currentTx))
+				return scm.NewFunc(mr.shard.UpdateFunctionBatch(id, true, mr.shardWriteLocked, mr.deleteBatch, &mr.deletedRows, mr.currentTx))
 			}
 			mr.mainGetters[i] = getter
 			mr.deltaGetters[i] = getter
@@ -2086,6 +2090,10 @@ func (m *ShardMapReducer) FlushSideEffects() {
 	if m.deleteBatch != nil {
 		m.deleteBatch.Flush()
 		m.deleteBatch = nil
+	}
+	if m.deletedRows > 0 {
+		m.shard.t.adjustPlannerRows(-int64(m.deletedRows))
+		m.deletedRows = 0
 	}
 }
 

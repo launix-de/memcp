@@ -611,6 +611,19 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics",
+		Desc: "return the immutable O(1) planner-statistics snapshot for a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return TableFromScmer(a[0]).PlannerStatistics()
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", ParamName: "table"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_selectivity_estimate",
 		Desc: "bounded estimate of visible rows matching a table filter; stops at max_rows and does not log scan telemetry",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -671,7 +684,7 @@ func Init(en scm.Env) {
 		Desc: "returns true if a table currently has no rows",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
-			return scm.NewBool(t.CountEstimate() == 0)
+			return scm.NewBool(t.CountExact() == 0)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{

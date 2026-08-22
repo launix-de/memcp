@@ -532,6 +532,7 @@ func TestTableStatisticsReadsPublishedSnapshotWithoutShardLock(t *testing.T) {
 	}
 	tbl := &table{schema: &database{Name: "table-statistics-test"}, Shards: []*storageShard{shard}}
 	shard.t = tbl
+	tbl.PlannerRowEstimate.value.Store(1)
 	tbl.publishShowColumnsSnapshot()
 	if stats := tbl.statistics(); stats.rowCount != 1 || stats.sizeBytes != 0 {
 		t.Fatalf("startup statistics = %+v, want row estimate 1 before size collection", stats)
