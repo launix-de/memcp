@@ -4175,6 +4175,28 @@ which output was renamed. */
 		(merge (map sources (lambda (src)
 			(stage_output_aggregate_fold_map_for_source original_index folded_index src)))))))
 
+/* Rewriting a dependency column can in turn rename an aggregate which reads
+that column. Propagate those positional interface renames through the stage DAG
+until both producers and all consumers agree. */
+(define propagate_stage_output_aggregate_columns (lambda (block original_stages rewritten_stages)
+	(begin
+		(define aggregate_col_map (stage_output_aggregate_fold_map
+			block original_stages rewritten_stages))
+		(if (empty_list? aggregate_col_map)
+			(list block rewritten_stages)
+			(begin
+				(define next_stages (rewrite_stage_graph_stages
+					aggregate_col_map '() rewritten_stages))
+				(define block_with_stages (make_query_block
+					(qb_schema block) (qb_sources block) (qb_fields block)
+					(qb_where block) (qb_group block) (qb_having block)
+					(qb_order block) (qb_limit block) (qb_offset block) (qb_hidden block)
+					next_stages (qb_facts block)))
+				(define next_block (rewrite_stage_graph_expr
+					aggregate_col_map '() block_with_stages))
+				(propagate_stage_output_aggregate_columns
+					next_block rewritten_stages next_stages))))))
+
 (define fold_boolean_tautologies_ir (lambda (ir)
 	(begin
 		(define root (ir_root ir))
@@ -4184,24 +4206,16 @@ which output was renamed. */
 				(define graph (stage_dependency_graph (qb_stages root)))
 				(define folded_stages (map (qb_stages root) (lambda (stage)
 					(fold_boolean_tautologies_stage graph stage))))
-				(define aggregate_col_map (stage_output_aggregate_fold_map
-					root (qb_stages root) folded_stages))
-				/* Most queries contain no foldable stage aggregate. Avoid copying the
-				whole stage graph when every aggregate keeps its canonical column. */
-				(define rewritten_stages (if (empty_list? aggregate_col_map)
-					folded_stages
-					(rewrite_stage_graph_stages aggregate_col_map '() folded_stages)))
 				(define folded_block (make_query_block
 					(qb_schema root) (qb_sources root) (qb_fields root)
 					(boolean_fold_maybe_expr (qb_where root))
 					(qb_group root)
 					(boolean_fold_maybe_expr (qb_having root))
 					(qb_order root) (qb_limit root) (qb_offset root) (qb_hidden root)
-					rewritten_stages (qb_facts root)))
-				(define rewritten_block (if (empty_list? aggregate_col_map)
-					folded_block
-					(rewrite_stage_graph_expr aggregate_col_map '() folded_block)))
-				(make_ir (ir_kind ir) rewritten_block rewritten_stages
+					folded_stages (qb_facts root)))
+				(define propagated (propagate_stage_output_aggregate_columns
+					folded_block (qb_stages root) folded_stages))
+				(make_ir (ir_kind ir) (nth propagated 0) (nth propagated 1)
 					(ir_context_of ir) (ir_return ir)))))))
 
 (define normalize_stage_dependencies (lambda (ir)

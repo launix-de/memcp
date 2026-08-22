@@ -603,6 +603,67 @@ test_cases:
           "ok"
           (error "multi aggregate stage output guessed a column")))
 
+  - name: "Boolean aggregate renames propagate through nested stage outputs"
+    scm: |
+      (begin
+        (define y66_fold_child_ag (list
+          (list (quote and) true false) (quote max) false))
+        (define y66_fold_child (make_group_stage
+          "fold-child"
+          (list "child-row" "memcp-tests" "dtl_join_ref" false nil)
+          '() '(1) (list y66_fold_child_ag) nil '() '() nil nil '()))
+        (define y66_fold_child_col (aggregate_col_name_using
+          (gs_input y66_fold_child) y66_fold_child_ag))
+        (define y66_fold_middle_ag (list
+          (list (quote get_column) "fold-child-output" false y66_fold_child_col false)
+          (quote max) false))
+        (define y66_fold_middle (make_group_stage
+          "fold-middle"
+          (make_query_block "memcp-tests"
+            (list (list "fold-child-output" "memcp-tests"
+              (make_stage_output_relation "fold-child") true true))
+            '() true nil nil nil nil nil '() '() '())
+          '() '(1) (list y66_fold_middle_ag) nil '() '() nil nil '()))
+        (define y66_fold_middle_col (aggregate_col_name_using
+          (gs_input y66_fold_middle) y66_fold_middle_ag))
+        (define y66_fold_top_ag (list
+          (list (quote get_column) "fold-middle-output" false y66_fold_middle_col false)
+          (quote max) false))
+        (define y66_fold_top (make_group_stage
+          "fold-top"
+          (make_query_block "memcp-tests"
+            (list (list "fold-middle-output" "memcp-tests"
+              (make_stage_output_relation "fold-middle") true true))
+            '() true nil nil nil nil nil '() '() '())
+          '() '(1) (list y66_fold_top_ag) nil '() '() nil nil '()))
+        (define y66_fold_top_col (aggregate_col_name_using
+          (gs_input y66_fold_top) y66_fold_top_ag))
+        (define y66_fold_root (make_query_block "memcp-tests"
+          (list (list "fold-top-output" "memcp-tests"
+            (make_stage_output_relation "fold-top") true true))
+          (list "value" (list (quote get_column)
+            "fold-top-output" false y66_fold_top_col false))
+          true nil nil nil nil nil '()
+          (list y66_fold_child y66_fold_middle y66_fold_top) '()))
+        (define y66_folded (fold_boolean_tautologies_ir
+          (make_ir (quote select) y66_fold_root
+            (qb_stages y66_fold_root) nil (quote rows))))
+        (define y66_folded_stages (ir_stages y66_folded))
+        (define y66_folded_middle (stage_by_id y66_folded_stages "fold-middle"))
+        (define y66_folded_top (stage_by_id y66_folded_stages "fold-top"))
+        (define y66_final_middle_col (aggregate_col_name_using
+          (gs_input y66_folded_middle) (car (gs_aggregates y66_folded_middle))))
+        (define y66_final_top_col (aggregate_col_name_using
+          (gs_input y66_folded_top) (car (gs_aggregates y66_folded_top))))
+        (define y66_top_input_col (nth
+          (car (car (gs_aggregates y66_folded_top))) 3))
+        (define y66_root_output_col (nth (nth (qb_fields (ir_root y66_folded)) 1) 3))
+        (if (and
+          (equal? y66_top_input_col y66_final_middle_col)
+          (equal? y66_root_output_col y66_final_top_col))
+          "ok"
+          (error "nested boolean folding kept a stale stage-output column")))
+
   - name: "Repeated global EXISTS in derived wrapper stays scalar"
     sql: |
       SELECT t.* FROM (
