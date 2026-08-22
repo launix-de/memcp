@@ -1032,6 +1032,44 @@ test_cases:
             - "chosen"
             - "rejected"
       - sql: |
+          EXPLAIN PHYSICAL CALIBRATE DISCOVER
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 2
+        expect:
+          rows: 2
+          contains:
+            - "membership_carrier"
+            - "ordered_batch_accept"
+            - "scan_order_batch_accept"
+      - sql: |
+          EXPLAIN PHYSICAL CALIBRATE
+          SELECT d.ID
+          FROM in_dv_doc d
+          WHERE d.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 2 OFFSET 1
+        expect:
+          rows: 4
+          contains:
+            - "ordered_batch_accept"
+            - "scan_order"
+            - "scan_order_batch_accept"
+            - "operator_consistent"
+            - "result_equal"
+          not_contains:
+            - "result_equal false"
+      - sql: |
           EXPLAIN
           SELECT t.ID
           FROM (

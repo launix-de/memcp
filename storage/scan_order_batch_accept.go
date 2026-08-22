@@ -149,8 +149,12 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	if len(sortcols) != len(sortdirs) {
 		panic("scan_order_batch_accept: sortcols and sortdirs must have equal length")
 	}
-	if source.recset != nil && currentTx == nil {
-		currentTx = source.recset.tx
+	if source.recset != nil {
+		if currentTx == nil {
+			currentTx = source.recset.tx
+		} else if currentTx != source.recset.tx {
+			panic("scan_order_batch_accept: input recset belongs to a different transaction")
+		}
 	}
 	if source.backingTable() == nil {
 		panic("scan_order_batch_accept: input must have a backing table")

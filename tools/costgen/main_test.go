@@ -77,6 +77,48 @@ func TestRowFeaturesKeepsBroadTextRowsAndBytesSeparate(t *testing.T) {
 	}
 }
 
+func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Plan: "scan_order_batch_accept", Consumer: "order_limit",
+		CandidateInputRows: value(1000), CandidateRows: value(50), ProjectedDriverRows: value(50),
+		DriverInputRows: value(1000), DriverRows: value(100), ExpectedDriverRowsVisited: value(100),
+		Limit: value(10), Offset: value(0), CandidateScanInvocations: value(1),
+		CandidateFilterColumns: value(2), CandidateMapColumns: value(1), CandidateCacheMapColumns: value(2),
+		CandidateExpressionOperations: value(3), CandidateBroadTextMatchRows: value(1000),
+		CandidateBroadTextMatchBytes: value(8192000), DriverScanInvocations: value(1),
+		DriverFilterColumns: value(0), DriverMapColumns: value(1), DriverExpressionOperations: value(0),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[0] != 4 || features[1] != 300 || features[2] != 200 ||
+		features[4] != 300 || features[6] != 250 {
+		t.Fatalf("adaptive features = %v", features)
+	}
+	if features[13] != 100 || features[14] != 819200 {
+		t.Fatalf("fractional broad text features = (%v, %v), want (100, 819200)",
+			features[13], features[14])
+	}
+}
+
+func TestMedianRowsAcceptsOrderedBatchPlans(t *testing.T) {
+	runs := [][]calibrationRow{
+		{{Plan: "scan_order", WholeQueryExecutionNS: 30}, {Plan: "scan_order_batch_accept", WholeQueryExecutionNS: 20}},
+		{{Plan: "scan_order", WholeQueryExecutionNS: 10}, {Plan: "scan_order_batch_accept", WholeQueryExecutionNS: 40}},
+		{{Plan: "scan_order", WholeQueryExecutionNS: 20}, {Plan: "scan_order_batch_accept", WholeQueryExecutionNS: 30}},
+	}
+	rows, err := medianRows(runs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Plan != "scan_order" || rows[0].WholeQueryExecutionNS != 20 ||
+		rows[1].Plan != "scan_order_batch_accept" || rows[1].WholeQueryExecutionNS != 30 {
+		t.Fatalf("unexpected medians: %+v", rows)
+	}
+}
+
 func TestRaceCalibrationVariantsCancelsSlowerPlan(t *testing.T) {
 	const decisionID = "membership_carrier:test"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

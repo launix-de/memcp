@@ -168,6 +168,7 @@ type observation struct {
 	caseName        string
 	cacheState      string
 	component       string
+	decision        string
 	plan            string
 	y               float64
 	currentEstimate float64
@@ -240,7 +241,17 @@ func main() {
 			fatal(err)
 		}
 	}
-	training := filterObservations(observations, false)
+	membershipObservations := make([]observation, 0, len(observations))
+	batchObservations := make([]observation, 0, len(observations))
+	for _, row := range observations {
+		switch row.decision {
+		case "membership_carrier":
+			membershipObservations = append(membershipObservations, row)
+		case "ordered_batch_accept":
+			batchObservations = append(batchObservations, row)
+		}
+	}
+	training := filterObservations(membershipObservations, false)
 	fitTraining := filterCompleteExactPairs(training)
 	if err := validateMeasurementSignal(fitTraining); err != nil {
 		fatal(err)
@@ -258,7 +269,7 @@ func main() {
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
 		c.groupCacheProbeRowNS, c.orderedDriverInputNS)
 	printModelComparison("training", training, c)
-	holdout := filterObservations(observations, true)
+	holdout := filterObservations(membershipObservations, true)
 	if len(holdout) > 0 {
 		printModelComparison("holdout", holdout, c)
 		if err := validateDecisionOrdering(holdout, c); err != nil {
@@ -268,12 +279,36 @@ func main() {
 			fatal(fmt.Errorf("holdout: %w", err))
 		}
 	}
-	printDecisionOrdering(observations, c)
+	printDecisionOrdering(membershipObservations, c)
+	printOrderedBatchCalibration(batchObservations)
 	if *patch {
 		if err := patchQueryplan(queryplanPath, c); err != nil {
 			fatal(err)
 		}
 		fmt.Println("patched", queryplanPath)
+	}
+}
+
+func printOrderedBatchCalibration(rows []observation) {
+	if len(rows) == 0 {
+		return
+	}
+	byCase := map[string][]observation{}
+	for _, row := range rows {
+		byCase[row.caseName] = append(byCase[row.caseName], row)
+	}
+	names := make([]string, 0, len(byCase))
+	for name := range byCase {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		plans := byCase[name]
+		sort.Slice(plans, func(i, j int) bool { return plans[i].plan < plans[j].plan })
+		for _, row := range plans {
+			fmt.Printf("ordered batch %-32s plan=%-24s actual=%8.3fms estimated=%8.3fms\n",
+				name, row.plan, row.y/1e6, row.currentEstimate/1e6)
+		}
 	}
 }
 
@@ -568,7 +603,7 @@ func runSuites(server *memcpServer, suites []suite) ([]observation, []calibratio
 					return nil, nil, fmt.Errorf("%s/%s: %w", currentSuite.Path, test.Name, err)
 				}
 				observations = append(observations, observation{
-					caseName: test.Name, plan: row.Plan, y: row.WholeQueryExecutionNS,
+					caseName: test.Name, decision: row.Decision, plan: row.Plan, y: row.WholeQueryExecutionNS,
 					cacheState: cacheState, component: test.CalibrationComponent,
 					currentEstimate: *row.EstimatedNS, holdout: test.CalibrationHoldout,
 					noiseNS: medianAbsoluteDeviation(runs, row.Plan), censored: row.TimedOut, x: features,
@@ -960,8 +995,13 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 			byPlan[row.Plan] = append(byPlan[row.Plan], row)
 		}
 	}
+	plans := make([]string, 0, len(byPlan))
+	for plan := range byPlan {
+		plans = append(plans, plan)
+	}
+	sort.Strings(plans)
 	var result []calibrationRow
-	for _, plan := range []string{"candidate_keyset", "driver_order_membership_probe"} {
+	for _, plan := range plans {
 		rows := byPlan[plan]
 		if len(rows) == 0 {
 			return nil, fmt.Errorf("no rows for %s", plan)
@@ -977,7 +1017,7 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 func rowFeatures(row calibrationRow) ([]float64, error) {
 	scanInvocations := *row.CandidateScanInvocations + *row.DriverScanInvocations
 	driverWorkRows := *row.DriverInputRows
-	if row.Plan == "driver_order_membership_probe" {
+	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
 		driverWorkRows = *row.ExpectedDriverRowsVisited
 	}
 	scanRows := *row.CandidateInputRows + driverWorkRows
@@ -992,11 +1032,11 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 	filterValues := candidateFilterValues + driverWorkRows**row.DriverFilterColumns
 	expressionOperations := candidateExpressionOperations + driverWorkRows**row.DriverExpressionOperations
 	mapColumns := *row.CandidateMapColumns
-	if row.Plan == "driver_order_membership_probe" {
+	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
 		mapColumns = *row.CandidateCacheMapColumns
 	}
 	driverMapRows := *row.ProjectedDriverRows
-	if row.Plan == "driver_order_membership_probe" {
+	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
 		driverMapRows = *row.DriverRows
 	}
 	mapValues := *row.CandidateRows*mapColumns + driverMapRows**row.DriverMapColumns
@@ -1016,12 +1056,37 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes,
 		}, nil
-	case "driver_order_membership_probe":
+	case "driver_order_membership_probe", "scan_order":
 		return []float64{
 			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
 			0, 0, 0, 1, *row.CandidateRows, *row.ExpectedDriverRowsVisited,
 			0, orderedDriverInputRows, 0,
 			0,
+		}, nil
+	case "scan_order_batch_accept":
+		fraction := 1.0
+		if *row.DriverInputRows > 0 {
+			fraction = math.Min(1, *row.ExpectedDriverRowsVisited / *row.DriverInputRows)
+		}
+		candidateWorkRows := *row.CandidateInputRows * fraction
+		firstBatch := *row.Limit + *row.Offset
+		batches, remaining, size := 1.0, *row.ExpectedDriverRowsVisited-firstBatch, firstBatch*2
+		for remaining > 0 && size > 0 {
+			batches++
+			remaining -= size
+			size *= 2
+		}
+		return []float64{
+			batches,
+			2**row.ExpectedDriverRowsVisited + candidateWorkRows,
+			candidateWorkRows * *row.CandidateFilterColumns,
+			0,
+			candidateWorkRows * *row.CandidateExpressionOperations,
+			0,
+			*row.ExpectedDriverRowsVisited + candidateWorkRows + *row.CandidateRows,
+			0, 0, 0, 0, 0, 0,
+			*row.CandidateBroadTextMatchRows * fraction,
+			*row.CandidateBroadTextMatchBytes * fraction,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported plan %q", row.Plan)
