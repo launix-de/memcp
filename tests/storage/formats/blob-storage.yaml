@@ -1,3 +1,4 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
 # Blob storage and REPEAT() function tests
 
 metadata:
@@ -59,7 +60,7 @@ test_cases:
         - id: 2
           payload: "world"
 
-  # --- TEXT column with long strings (triggers OverlayBlob) ---
+  # --- Medium TEXT remains inline below the 2 KiB boundary ---
   - name: "Insert long string (>255 bytes)"
     sql: "INSERT INTO blob_test (id, payload) VALUES (3, REPEAT('A', 1000))"
     expect:
@@ -369,9 +370,51 @@ test_cases:
     expect:
       rows: 0
 
+  # --- External blobs above the 2 KiB inline boundary ---
+  - name: "Create external blob boundary table"
+    sql: |
+      CREATE TABLE blob_external (
+        id INT PRIMARY KEY,
+        payload TEXT
+      )
+    expect:
+      rows: 0
+
+  - name: "Insert text and binary above 2 KiB"
+    sql: |
+      INSERT INTO blob_external (id, payload) VALUES
+      (1, REPEAT('E', 3000)),
+      (2, FROM_BASE64(REPEAT('AAAA', 1000)))
+    expect:
+      affected_rows: 2
+
+  - name: "Persist external blobs above 2 KiB"
+    sql: "SHUTDOWN"
+    expect:
+      rows: 0
+
+  - name: "External blobs survive restart"
+    sql: |
+      SELECT id, LENGTH(payload) AS len
+      FROM blob_external
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          len: 3000
+        - id: 2
+          len: 3000
+
+  - name: "Drop external blob boundary table"
+    sql: "DROP TABLE blob_external"
+    expect:
+      rows: 0
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS blob_test"
   - sql: "DROP TABLE IF EXISTS blob_rc1"
   - sql: "DROP TABLE IF EXISTS blob_shared1"
   - sql: "DROP TABLE IF EXISTS blob_shared2"
   - sql: "DROP TABLE IF EXISTS blob_rcpersist"
+  - sql: "DROP TABLE IF EXISTS blob_external"

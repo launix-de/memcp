@@ -17,6 +17,8 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +28,54 @@ import (
 
 	"github.com/launix-de/memcp/scm"
 )
+
+func TestGunzipReader(t *testing.T) {
+	const want = "streamed blob contents"
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write([]byte(want)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := gunzipReader(bytes.NewReader(compressed.Bytes()))
+	if !ok || got.String() != want {
+		t.Fatalf("gunzipReader() = (%q, %v), want (%q, true)", got.String(), ok, want)
+	}
+	if _, ok := gunzipReader(bytes.NewReader(nil)); ok {
+		t.Fatal("empty blob should not produce a value")
+	}
+}
+
+func TestOverlayBlobKeepsSmallTextInline(t *testing.T) {
+	values := []string{
+		strings.Repeat("a", maxInlineBlobBytes),
+		strings.Repeat("b", maxInlineBlobBytes+1),
+		strings.Repeat("c", maxInlineBlobBytes+2),
+		strings.Repeat("d", maxInlineBlobBytes+3),
+	}
+	rawColumn := buildViaCompression(len(values), func(i int) scm.Scmer {
+		return scm.NewString(values[i])
+	})
+	column, ok := rawColumn.(*OverlayBlob)
+	if !ok {
+		t.Fatalf("mixed inline/blob fixture should select OverlayBlob, got %T", rawColumn)
+	}
+
+	if raw := column.Base.GetValue(0).String(); raw != values[0] {
+		t.Fatal("text at the inline limit should remain in the base column")
+	}
+	if raw := column.Base.GetValue(1).String(); len(raw) != 33 || raw[0] != '!' {
+		t.Fatal("text above the inline limit should be stored as a blob reference")
+	}
+	for i, want := range values {
+		if got := column.GetValue(uint32(i)); got.String() != want {
+			t.Fatalf("row %d = %q, want %q", i, got.String(), want)
+		}
+	}
+}
 
 // countBlobFiles counts blob files under db's blob/ directory.
 func countBlobFiles(t *testing.T, dbName string) int {
@@ -117,8 +167,8 @@ func TestBlobInsertRebuildAndRead(t *testing.T) {
 	db := GetDatabase("tdb1")
 
 	// Need >2 long strings to trigger OverlayBlob compression
-	longA := strings.Repeat("X", 1000)
-	longB := strings.Repeat("Y", 500)
+	longA := strings.Repeat("X", maxInlineBlobBytes+1000)
+	longB := strings.Repeat("Y", maxInlineBlobBytes+500)
 	rows := [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString(longA)},
 		{scm.NewInt(2), scm.NewString(longA)}, // duplicate of row 1
@@ -167,7 +217,7 @@ func TestBlobInsertRebuildAndRead(t *testing.T) {
 	for _, tc := range []struct {
 		id  int64
 		len int
-	}{{1, 1000}, {2, 1000}, {3, 500}, {4, 500}} {
+	}{{1, len(longA)}, {2, len(longA)}, {3, len(longB)}, {4, len(longB)}} {
 		var readLen int
 		tbl.scan(
 			nil,
@@ -210,9 +260,9 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 
 	// 5 rows: 3 unique long strings, with enough longStrings (>2) to keep
 	// OverlayBlob after deletion. Rows 1,4,5 share longA.
-	longA := strings.Repeat("A", 1000)
-	longB := strings.Repeat("B", 1000)
-	longC := strings.Repeat("C", 1000)
+	longA := strings.Repeat("A", maxInlineBlobBytes+1000)
+	longB := strings.Repeat("B", maxInlineBlobBytes+1000)
+	longC := strings.Repeat("C", maxInlineBlobBytes+1000)
 	rows := [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString(longA)},
 		{scm.NewInt(2), scm.NewString(longB)},
@@ -284,8 +334,8 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
 			false,
 		)
-		if readLen != 1000 {
-			t.Fatalf("row id=%d after delete+rebuild: expected content length 1000, got %d", id, readLen)
+		if readLen != len(longA) {
+			t.Fatalf("row id=%d after delete+rebuild: expected content length %d, got %d", id, len(longA), readLen)
 		}
 	}
 }
@@ -312,9 +362,9 @@ func TestBlobDropTableReleasesBlobs(t *testing.T) {
 
 	// 3 different long strings to trigger OverlayBlob
 	rows := [][]scm.Scmer{
-		{scm.NewInt(1), scm.NewString(strings.Repeat("D", 1000))},
-		{scm.NewInt(2), scm.NewString(strings.Repeat("E", 1000))},
-		{scm.NewInt(3), scm.NewString(strings.Repeat("F", 1000))},
+		{scm.NewInt(1), scm.NewString(strings.Repeat("D", maxInlineBlobBytes+1000))},
+		{scm.NewInt(2), scm.NewString(strings.Repeat("E", maxInlineBlobBytes+1000))},
+		{scm.NewInt(3), scm.NewString(strings.Repeat("F", maxInlineBlobBytes+1000))},
 	}
 	tbl.Insert([]string{"id", "content"}, rows, nil, scm.NewNil(), false, nil)
 	Rebuild(true, true)
@@ -368,12 +418,12 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 	db := GetDatabase("tdb3")
 
 	// Same long strings in both tables
-	shared := strings.Repeat("S", 1000)
+	shared := strings.Repeat("S", maxInlineBlobBytes+1000)
 	for _, tbl := range []*table{tbl1, tbl2} {
 		rows := [][]scm.Scmer{
 			{scm.NewInt(1), scm.NewString(shared)},
-			{scm.NewInt(2), scm.NewString(strings.Repeat("U", 800))},
-			{scm.NewInt(3), scm.NewString(strings.Repeat("V", 600))},
+			{scm.NewInt(2), scm.NewString(strings.Repeat("U", maxInlineBlobBytes+800))},
+			{scm.NewInt(3), scm.NewString(strings.Repeat("V", maxInlineBlobBytes+600))},
 		}
 		tbl.Insert([]string{"id", "content"}, rows, nil, scm.NewNil(), false, nil)
 	}
@@ -420,8 +470,8 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
 		false,
 	)
-	if readLen != 1000 {
-		t.Fatalf("t2 content after t1 drop: expected 1000, got %d", readLen)
+	if readLen != len(shared) {
+		t.Fatalf("t2 content after t1 drop: expected %d, got %d", len(shared), readLen)
 	}
 
 	// Drop second table: blobs should be deleted

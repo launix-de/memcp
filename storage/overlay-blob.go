@@ -18,6 +18,7 @@ package storage
 
 import "io"
 import "fmt"
+import "sync"
 import "unsafe"
 import "reflect"
 import "strings"
@@ -35,6 +36,12 @@ type OverlayBlob struct {
 	schema *database       // reference to owning database
 	refs   map[string]bool // hex-hashes referenced in this build()
 }
+
+// Keep ordinary text values in the columnar string storage. Small text values
+// are cheap to scan in place, while externalizing them turns every
+// substring scan into hundreds of thousands of small file reads and gzip
+// initializations. Truly large values remain deduplicated external blobs.
+const maxInlineBlobBytes = 2 * 1024
 
 func (s *OverlayBlob) ComputeSize() uint {
 	return 48 + s.Base.ComputeSize()
@@ -130,15 +137,41 @@ func (s *OverlayBlob) SetSchema(db *database) {
 	s.size = 0
 }
 
-func gunzipValue(gzipped string) scm.Scmer {
+var gzipReaderPool sync.Pool
+
+func gunzipReader(compressed io.Reader) (scm.Scmer, bool) {
 	var b strings.Builder
-	reader, err := gzip.NewReader(strings.NewReader(gzipped))
+	reader, _ := gzipReaderPool.Get().(*gzip.Reader)
+	var err error
+	if reader == nil {
+		reader, err = gzip.NewReader(compressed)
+	} else {
+		err = reader.Reset(compressed)
+	}
+	if err == io.EOF {
+		return scm.NewNil(), false
+	}
 	if err != nil {
 		panic(err)
 	}
-	_, _ = io.Copy(&b, reader)
-	reader.Close()
-	return scm.NewString(b.String())
+	_, copyErr := io.Copy(&b, reader)
+	closeErr := reader.Close()
+	gzipReaderPool.Put(reader)
+	if copyErr != nil {
+		panic(copyErr)
+	}
+	if closeErr != nil {
+		panic(closeErr)
+	}
+	return scm.NewString(b.String()), true
+}
+
+func gunzipValue(gzipped string) scm.Scmer {
+	value, ok := gunzipReader(strings.NewReader(gzipped))
+	if !ok {
+		panic("empty gzip value")
+	}
+	return value
 }
 
 func (s *OverlayBlob) GetCachedReader() ColumnReader { return s }
@@ -191,10 +224,14 @@ func (s *OverlayBlob) resolveBlob(v scm.Scmer) scm.Scmer {
 			if s.schema != nil && s.schema.persistence != nil {
 				hexHash := fmt.Sprintf("%x", hashKey[:])
 				r := s.schema.persistence.ReadBlob(hexHash)
-				data, err := io.ReadAll(r)
-				r.Close()
-				if err == nil && len(data) > 0 {
-					return gunzipValue(string(data))
+				if _, readFailed := r.(ErrorReader); !readFailed {
+					value, ok := gunzipReader(r)
+					r.Close()
+					if ok {
+						return value
+					}
+				} else {
+					r.Close()
 				}
 			}
 
@@ -218,7 +255,7 @@ func (s *OverlayBlob) prepare() {
 func (s *OverlayBlob) scan(i uint32, value scm.Scmer) {
 	if value.IsString() {
 		vs := value.String()
-		if len(vs) > 255 {
+		if len(vs) > maxInlineBlobBytes {
 			h := sha256.New()
 			io.WriteString(h, vs)
 			s.Base.scan(i, scm.NewString("!"+string(h.Sum(nil))))
@@ -246,7 +283,7 @@ func (s *OverlayBlob) build(i uint32, value scm.Scmer) {
 	// compressed blob file directly, avoiding the gzip round-trip entirely.
 	if value.IsString() {
 		vs := value.String()
-		if len(vs) > 255 {
+		if len(vs) > maxInlineBlobBytes {
 			h := sha256.New()
 			io.WriteString(h, vs)
 			hashsum := h.Sum(nil)
