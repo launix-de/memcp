@@ -558,6 +558,37 @@ func copyTypeDescriptor(td *TypeDescriptor) *TypeDescriptor {
 	return &result
 }
 
+func cloneTypeDescriptor(td *TypeDescriptor, cloned map[*TypeDescriptor]*TypeDescriptor) *TypeDescriptor {
+	if td == nil {
+		return nil
+	}
+	if result, exists := cloned[td]; exists {
+		return result
+	}
+	result := *td
+	cloned[td] = &result
+	if len(td.Params) > 0 {
+		result.Params = make([]*TypeDescriptor, len(td.Params))
+		for i, param := range td.Params {
+			result.Params[i] = cloneTypeDescriptor(param, cloned)
+		}
+	}
+	result.Return = cloneTypeDescriptor(td.Return, cloned)
+	if len(td.Keys) > 0 {
+		result.Keys = make(map[string]*TypeDescriptor, len(td.Keys))
+		for key, child := range td.Keys {
+			result.Keys[key] = cloneTypeDescriptor(child, cloned)
+		}
+	}
+	result.Element = cloneTypeDescriptor(td.Element, cloned)
+	return &result
+}
+
+func immutableTypeInfo(info TypeInfo) TypeInfo {
+	info.Extra = cloneTypeDescriptor(info.Extra, make(map[*TypeDescriptor]*TypeDescriptor))
+	return info
+}
+
 func callbackParameterType(td *TypeDescriptor) *TypeDescriptor {
 	if td == nil {
 		return nil
@@ -1680,13 +1711,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				rhs = stripped
 			}
 			if items, ok := scmerSlice(rhs); ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda") && returnType.Kind() != KindAny {
-				procReturn := returnType.WithoutConst()
+				procReturn := immutableTypeInfo(returnType.WithoutConst())
 				v[2] = NewSlice([]Scmer{
 					NewSymbol("optimizer_proc_return"),
 					v[2],
-					NewInt(int64(procReturn.kind)),
-					NewInt(int64(procReturn.flags)),
-					NewInt(int64(procReturn.length)),
+					NewAny(optimizerProcReturnTemplate{Return: procReturn}),
 				})
 			}
 		}

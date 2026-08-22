@@ -259,6 +259,20 @@ test_cases:
     expect:
       rows: 0
 
+  - name: "COALESCE true preserves false from an existing scalar row"
+    sql: |
+      SELECT child.ID
+      FROM sq_cat AS child
+      WHERE child.ID = 1
+        AND COALESCE(
+          (SELECT FALSE
+           FROM sq_cat AS present
+           WHERE present.ID = child.ID
+           LIMIT 1),
+          TRUE)
+    expect:
+      rows: 0
+
   - name: "COALESCE true preserves nullable scalar lookup keys"
     sql: |
       SELECT child.ID

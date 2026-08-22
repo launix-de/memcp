@@ -288,20 +288,26 @@ restart:
 				}
 				return NewScmParser(NewParser(list[1], NewNil(), NewNil(), en, false))
 			case "optimizer_proc_return":
-				if len(list) != 5 {
-					panic("optimizer_proc_return expects procedure, kind, flags and length")
+				if len(list) != 3 {
+					panic("optimizer_proc_return expects procedure and return metadata")
 				}
 				value := Eval(list[1], en)
 				if value.GetTag() != tagProc {
 					return value
 				}
-				proc := *value.Proc()
-				proc.OptimizerReturn = TypeInfo{
-					kind:   uint8(ToInt(list[2])),
-					flags:  uint8(ToInt(list[3])),
-					length: int(ToInt(list[4])),
+				metadataValue := Eval(list[2], en)
+				if metadataValue.GetTag() != tagAny {
+					panic("optimizer_proc_return expects internal return metadata")
 				}
-				proc.HasOptimizerReturn = true
+				metadata, ok := metadataValue.Any().(optimizerProcReturnTemplate)
+				if !ok {
+					panic("optimizer_proc_return received invalid return metadata")
+				}
+				proc := *value.Proc()
+				// Allocate one metadata identity per evaluated lambda. Proc value
+				// copies deliberately share it; independently evaluated lambdas do
+				// not share future specialization state.
+				proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return}
 				return NewProcStruct(proc)
 			case "lambda":
 				params := list[1]
@@ -820,12 +826,25 @@ type Proc struct {
 	// original body remains attached so storage scan callbacks can later be
 	// specialized and recompiled against concrete column/storage types.
 	Compiled *JITEntryPoint
-	// OptimizerReturn belongs to this concrete procedure value. Keeping the
-	// metadata on the Proc makes lexical shadowing and redefinition follow the
-	// actual binding and avoids a mutable, process-wide optimizer side table.
+	// OptimizerMeta belongs to this concrete procedure identity. Proc values are
+	// copied by CloseProcedure and the JIT, so optimizer state must remain behind
+	// a pointer: copies share one identity without copying future locks or
+	// specialization tables. A fresh lambda evaluation allocates a fresh meta.
 	// Keep optimizer-only fields after the runtime/JIT-facing Proc layout.
-	OptimizerReturn    TypeInfo
-	HasOptimizerReturn bool
+	OptimizerMeta *ProcOptimizerMeta
+}
+
+// ProcOptimizerMeta is immutable today. Future specialization variants belong
+// here and must publish immutable snapshots for lock-free reads; only a miss for
+// the same procedure and specialization key may coordinate compilation.
+type ProcOptimizerMeta struct {
+	Return TypeInfo
+}
+
+// optimizerProcReturnTemplate is embedded in optimizer-generated ASTs. Eval
+// turns the immutable template into a new ProcOptimizerMeta identity.
+type optimizerProcReturnTemplate struct {
+	Return TypeInfo
 }
 
 // CloseProcedure snapshots explicit captures of a procedure without retaining
@@ -954,7 +973,10 @@ func (e *Env) optimizerProcHint(s Symbol) (TypeInfo, bool) {
 		return tiZero, false
 	}
 	proc := bound.Proc()
-	return proc.OptimizerReturn, proc.HasOptimizerReturn
+	if proc.OptimizerMeta == nil {
+		return tiZero, false
+	}
+	return proc.OptimizerMeta.Return, true
 }
 
 func (e *Env) FindRead(s Symbol) *Env {
@@ -2532,13 +2554,15 @@ func ComputeSize(v Scmer) uint {
 		if p == nil {
 			return base
 		}
-		// Proc struct: Params(16) + Body(16) + En(8) + NumVars(8) plus
-		// NumberedOnly padding and the optional compiled-entry pointer.
-		// Params and Body are inline Scmer fields — their slots are covered by
-		// the recursive ComputeSize base (same pattern as slice backing array).
-		// Only count non-Scmer fields here; avoid recursively recounting the
-		// source Proc retained by the compiled entry point.
-		sz := base + goAllocOverhead + 24 + ComputeSize(p.Params) + ComputeSize(p.Body)
+		// Params and Body are inline Scmer fields. Their slots are covered by
+		// recursive ComputeSize calls, so count the remaining Proc layout here.
+		// unsafe.Sizeof keeps this accounting in sync when Proc grows.
+		procFields := uint(unsafe.Sizeof(*p)) - 2*uint(unsafe.Sizeof(Scmer{}))
+		sz := base + goAllocOverhead + procFields + ComputeSize(p.Params) + ComputeSize(p.Body)
+		if p.OptimizerMeta != nil {
+			sz += goAllocOverhead + uint(unsafe.Sizeof(*p.OptimizerMeta))
+			sz += typeDescriptorRetainedSize(p.OptimizerMeta.Return.Extra, make(map[*TypeDescriptor]struct{}))
+		}
 		if p.Compiled != nil {
 			sz += goAllocOverhead + align8(uint(p.Compiled.CodeLen))
 		}
@@ -2606,6 +2630,35 @@ func ComputeSize(v Scmer) uint {
 		fmt.Println(fmt.Sprintf("warning: unknown tag %d", v.GetTag()))
 		return base
 	}
+}
+
+func typeDescriptorRetainedSize(td *TypeDescriptor, visited map[*TypeDescriptor]struct{}) uint {
+	if td == nil {
+		return 0
+	}
+	if _, exists := visited[td]; exists {
+		return 0
+	}
+	visited[td] = struct{}{}
+
+	sz := goAllocOverhead + uint(unsafe.Sizeof(*td))
+	sz += align8(uint(len(td.Kind) + len(td.ParamName) + len(td.ParamDesc)))
+	if len(td.Params) > 0 {
+		sz += goAllocOverhead + align8(uint(len(td.Params))*uint(unsafe.Sizeof(td)))
+		for _, param := range td.Params {
+			sz += typeDescriptorRetainedSize(param, visited)
+		}
+	}
+	if len(td.Keys) > 0 {
+		sz += goAllocOverhead
+		for key, child := range td.Keys {
+			sz += align8(uint(len(key)))
+			sz += typeDescriptorRetainedSize(child, visited)
+		}
+	}
+	sz += typeDescriptorRetainedSize(td.Return, visited)
+	sz += typeDescriptorRetainedSize(td.Element, visited)
+	return sz
 }
 
 func computeGoPayload(val any) uint {
