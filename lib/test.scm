@@ -173,6 +173,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list "id" expr_gc)
 		true nil nil nil nil nil))
 	(define simple_ir (untangle_query_term simple_select_ast nil))
+	(assert (planner_record_session_value_guards true) nil "physical cost choices can record session-value guards")
 	(assert (equal? (ir_kind simple_ir) 'select) true "untangle_query_term returns select IR")
 	(assert (equal? (logical_op (ir_root simple_ir)) 'query-block) true "untangle_query builds a combined query-block root")
 	(assert (equal? (source_relation (car (qb_sources (ir_root simple_ir)))) "t") true "query-block keeps base relation logical")

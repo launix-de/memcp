@@ -7075,6 +7075,14 @@ guarded by the values observed while compiling the cached plan. */
 				(list (quote broad_like_pattern?) pattern))
 			broad))))
 
+(define planner_record_session_value_guards (lambda (node)
+	(reduce (query_expr_session_reads node) (lambda (_ expr)
+		(begin
+			(define value (planner_literal_value expr))
+			(planner_record_guard_condition
+				(list (quote equal?) expr
+					(if (list? value) (list (quote quote) value) value))))) nil)))
+
 (define expr_contains_broad_text_match? (lambda (expr)
 	(match expr
 		((symbol strlike) _value pattern _collation)
