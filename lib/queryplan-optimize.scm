@@ -757,9 +757,6 @@ which selected a cached join plan without rerunning join enumeration. */
 			(list nil 0)
 			(join_order_dphyp_connected nodes aliases predicates (car connected))))))
 
-(define join_order_dphyp (lambda (nodes aliases predicates)
-	(join_order_dphyp_budgeted nodes aliases predicates (join_order_dp_state_budget))))
-
 (define join_order_alias_position (lambda (aliases alias)
 	(reduce (produceN (count aliases)) (lambda (found i)
 		(if (not (nil? found)) found
@@ -1510,81 +1507,6 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(join_optimizer_metadata_costed_predicates
 					all_sources default_alias graph aliases))))))
 
-(define join_optimizer_ref_matches? (lambda (ref src col)
-	(and (not (nil? ref))
-		(and (equal? (source_alias (car ref)) (source_alias src))
-			(equal? (cadr ref) col)))))
-
-(define join_optimizer_key_bound_to_driver? (lambda (sources default_alias graph driver lookup key_col)
-	(reduce (join_optimizer_predicates graph) (lambda (found entry)
-		(or found
-			(match (qassoc_get entry (quote predicate) true)
-				'(op left right) (if (or
-					(equal? op (quote equal?))
-					(equal? op (quote equal??))
-					(equal? op (quote =)))
-					(begin
-						(define left_ref (join_optimizer_column_ref sources default_alias left))
-						(define right_ref (join_optimizer_column_ref sources default_alias right))
-						(or
-							(and (join_optimizer_ref_matches? left_ref lookup key_col)
-								(and (not (nil? right_ref))
-									(equal? (source_alias (car right_ref)) (source_alias driver))))
-							(and (join_optimizer_ref_matches? right_ref lookup key_col)
-								(and (not (nil? left_ref))
-									(equal? (source_alias (car left_ref)) (source_alias driver))))))
-					false)
-				_ false)))
-		false)))
-
-(define join_optimizer_unique_lookup_from_driver? (lambda (sources default_alias graph driver lookup)
-	(begin
-		(define key_sets (source_unique_key_sets lookup))
-		(reduce key_sets (lambda (unique key_cols)
-			(or unique
-				(and (not (empty_list? key_cols))
-					(reduce key_cols (lambda (complete key_col)
-						(and complete (join_optimizer_key_bound_to_driver?
-							sources default_alias graph driver lookup key_col)))
-						true))))
-			false))))
-
-(define join_optimizer_order_expr_available_from_driver? (lambda (sources default_alias graph driver expr)
-	(begin
-		(define aliases (join_hypergraph_expr_aliases default_alias (source_aliases sources) expr))
-		(reduce aliases (lambda (available alias)
-			(and available
-				(or (equal? alias (source_alias driver))
-					(begin
-						(define lookup (join_optimizer_source_by_alias sources alias))
-						(and (not (nil? lookup))
-							(join_optimizer_unique_lookup_from_driver?
-								sources default_alias graph driver lookup))))))
-			true))))
-
-(define join_optimizer_bounded_order_driver? (lambda (sources segment default_alias graph driver order_items)
-	(and
-		(reduce segment (lambda (safe src)
-			(and safe
-				(or (equal? (source_alias src) (source_alias driver))
-					(join_optimizer_unique_lookup_from_driver?
-						sources default_alias graph driver src))))
-			true)
-		(reduce (order_exprs order_items) (lambda (available expr)
-			(and available (join_optimizer_order_expr_available_from_driver?
-				sources default_alias graph driver expr)))
-			true))))
-
-(define join_optimizer_bounded_order_driver (lambda (sources segment default_alias graph order_items)
-	(reduce segment (lambda (found candidate)
-		(if (not (nil? found))
-			found
-			(if (join_optimizer_bounded_order_driver?
-				sources segment default_alias graph candidate order_items)
-				candidate
-				nil)))
-		nil)))
-
 (define join_optimizer_order_alias_prefix_loop (lambda (sources segment_aliases default_alias exprs prefix)
 	(match exprs
 		(cons expr rest)
@@ -1784,14 +1706,6 @@ guarded by the values observed while compiling the cached plan. */
 			(planner_guarded_choice broad
 				(list (quote broad_like_pattern?) pattern))
 			broad))))
-
-(define planner_record_session_value_guards (lambda (node)
-	(reduce (query_expr_session_reads node) (lambda (_ expr)
-		(begin
-			(define value (planner_literal_value expr))
-			(planner_record_guard_condition
-				(list (quote equal?) expr
-					(if (list? value) (list (quote quote) value) value))))) nil)))
 
 (define expr_contains_broad_text_match? (lambda (expr)
 	(match expr
@@ -2788,9 +2702,6 @@ physical alternative. */
 				projection_rows 0.65)
 			base_cost))))
 
-(define membership_cached_driver_probe_cost (lambda (driver_rows)
-	(planner_cost 0 0 (* driver_rows 54) 0 0 0 0 0 driver_rows 0.5)))
-
 (define membership_driver_probe_cost (lambda (driver_rows probe_branches)
 	(begin
 		(define probes (* driver_rows probe_branches))
@@ -3393,11 +3304,6 @@ those stages remain excluded rather than crashing during preparation. */
 				broad_by_count
 				(equal? (qassoc_get facts (quote membership_selectivity_class) nil) (quote broad)))))))
 
-(define broad_driver_order_membership_probe? (lambda (facts)
-	(and
-		(driver_order_membership_strategy? facts)
-		(membership_estimate_broad? facts))))
-
 (define ordered_driver_membership_keyset? (lambda (facts)
 	(and
 		(qassoc_get facts (quote membership_driver_alternative) false)
@@ -3840,9 +3746,6 @@ boolean probe, matched against the specific logical output alias. */
 								(qb_facts block))
 							facts))))))))
 
-(define reorder_query_block_with_candidate_strategy (lambda (block)
-	(reorder_query_block_with_candidate_strategy_using (qb_stages block) block)))
-
 (define join_reorder_node_using (lambda (stage_catalog node)
 	(if (query_block? node)
 		(reorder_query_block_with_candidate_strategy_using stage_catalog node)
@@ -3855,9 +3758,6 @@ boolean probe, matched against the specific logical output alias. */
 				(union_offset node)
 				(union_facts node))
 			node))))
-
-(define join_reorder_node (lambda (node)
-	(join_reorder_node_using (if (query_block? node) (qb_stages node) '()) node)))
 
 (define join_reorder_stage_using (lambda (stage_catalog stage)
 	(if (group_stage? stage)
@@ -3875,9 +3775,6 @@ boolean probe, matched against the specific logical output alias. */
 				(gs_offset stage)
 				(gs_facts stage)))
 		stage)))
-
-(define join_reorder_stage (lambda (stage)
-	(join_reorder_stage_using (list stage) stage)))
 
 (define query_block_without_logical_stages (lambda (block)
 	(make_query_block

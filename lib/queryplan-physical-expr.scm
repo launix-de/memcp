@@ -1989,12 +1989,6 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			_ false)))
 		true)))
 
-(define direct_order_expr_for_source? (lambda (src expr)
-	(match expr
-		((symbol get_column) tblvar tbl_ignorecase _col _col_ignorecase) (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
-		((quote get_column) tblvar tbl_ignorecase _col _col_ignorecase) (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
-		_ false)))
-
 (define lower_grouped_scalar_top_expr (lambda (stage)
 	(begin
 		(define alias (group_stage_input_alias stage))
@@ -2676,22 +2670,6 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define count_distinct_combine (lambda ()
 	(count_distinct_reduce)))
 
-(define count_distinct_count_reduce (lambda ()
-	(list (quote lambda) (list (quote a) (quote b))
-		(list (quote count)
-			(list (quote begin)
-				(list (quote define) (quote aa) (list (quote if)
-					(list (quote list?) (quote a))
-					(quote a)
-					(list (quote if) (list (quote nil?) (quote a)) (list (quote list)) (list (quote cons) (quote a) (list (quote list))))))
-				(list (quote define) (quote bb) (list (quote if)
-					(list (quote list?) (quote b))
-					(quote b)
-					(list (quote if) (list (quote nil?) (quote b)) (list (quote list)) (list (quote cons) (quote b) (list (quote list))))))
-				(list (quote merge_unique)
-					(list (quote cons) (quote aa)
-						(list (quote cons) (quote bb) (list (quote list))))))))))
-
 (define count_distinct_descriptor (lambda (expr)
 	(list expr (count_distinct_reduce) (list (quote list)))))
 
@@ -2704,11 +2682,6 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 	(if (count_distinct_descriptor? ag)
 		(count_distinct_combine)
 		nil)))
-
-(define query_aggregate_shard_combine (lambda (ag)
-	(if (count_distinct_descriptor? ag)
-		(count_distinct_count_reduce)
-		(aggregate_shard_combine ag))))
 
 (define aggregate_map_value_expr (lambda (ag expr)
 	(if (count_distinct_descriptor? ag)
@@ -3930,42 +3903,6 @@ ever-larger subtrees. */
 			(extract_assoc resolved_fields (lambda (_title expr) expr))))
 		(direct_group_result_assoc_expr_indexed alias keys key_names ags key_index items resolved_fields))))
 
-(define direct_group_agg_index (lambda (ags expr)
-	(reduce (produceN (count ags)) (lambda (found i)
-		(if (not (nil? found))
-			found
-			(if (equal? expr (nth ags i)) i nil)))
-		nil)))
-
-(define direct_group_order_column_indexed (lambda (alias keys key_names ags key_index expr resolved)
-	(begin
-		(define key_idx (lookup_group_key_index key_index resolved))
-		(if (not (nil? key_idx))
-			(nth key_names key_idx)
-			(match expr
-				((symbol aggregate) agg_expr agg_reduce agg_neutral)
-				(begin
-					(define agg_idx (direct_group_agg_index ags (list agg_expr agg_reduce agg_neutral)))
-					(if (nil? agg_idx) nil (aggregate_col_name (nth ags agg_idx))))
-				((quote aggregate) agg_expr agg_reduce agg_neutral)
-				(begin
-					(define agg_idx (direct_group_agg_index ags (list agg_expr agg_reduce agg_neutral)))
-					(if (nil? agg_idx) nil (aggregate_col_name (nth ags agg_idx))))
-				_ nil)))))
-
-(define direct_group_order_supported? (lambda (alias keys key_names ags order_items)
-	(begin
-		(define items (coalesceNil order_items '()))
-		(define resolved_items (map items (lambda (item)
-			(match item '(expr dir) (list (canonical_column_expr_for_alias alias expr) dir)))))
-		(define key_index (make_group_key_index keys (map resolved_items car)))
-		(reduce (produceN (count items)) (lambda (ok i)
-			(and ok (match (nth items i)
-				'(expr _dir) (not (nil? (direct_group_order_column_indexed
-					alias keys key_names ags key_index expr (car (nth resolved_items i)))))
-				_ false)))
-			true))))
-
 (define build_base_group_scan_assoc_plan (lambda (schema tbl alias table_expr keys condition ags)
 	(begin
 		(define src (list alias schema tbl false nil))
@@ -4052,9 +3989,6 @@ ever-larger subtrees. */
 			(list
 				(list (quote lambda) (list membership_var) plan)
 				membership_expr)))))
-
-(define direct_group_map_params (lambda (key_names ags)
-	(map (merge (list key_names (map ags aggregate_col_name))) symbol)))
 
 (define direct_group_assoc_from_key_payload_expr (lambda (key_names ags)
 	(begin
