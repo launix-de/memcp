@@ -7029,6 +7029,16 @@ source catalog. join_plan remains the single owner of physical join order. */
 		((quote session) key) (planner_literal_value (list (quote session) key))
 		_ expr)))
 
+/* Physical selectivity decisions over session-dependent predicates must be
+guarded by the values observed while compiling the cached plan. */
+(define planner_record_session_value_guards (lambda (node)
+	(reduce (query_expr_session_reads node) (lambda (_ expr)
+		(begin
+			(define value (planner_literal_value expr))
+			(planner_record_guard_condition
+				(list (quote equal?) expr
+					(if (list? value) (list (quote quote) value) value))))) nil)))
+
 (define planner_concat_expr_value (lambda (items)
 	(match items
 		(cons item rest) (begin
