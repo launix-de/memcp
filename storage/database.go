@@ -898,6 +898,7 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 			if !hasColdShard {
 				// Update per-column statistics only when every rebuilt shard has
 				// authoritative in-memory counters and column statistics.
+				t.collectStatisticsFromShards(newShardList)
 				rowEst := uint64(t.CountEstimate())
 				for ci := range t.Columns {
 					var distinctSum uint64
@@ -923,7 +924,6 @@ func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, o
 						t.Columns[ci].PlannerStats.Store(nil)
 					}
 				}
-				t.collectStatisticsFromShards(newShardList)
 			}
 			t.publishShowColumnsSnapshot()
 			t.mu.Lock()

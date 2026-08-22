@@ -7156,19 +7156,25 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(not (nil? (extract_row_number_filter src (os_column stage) (source_join_expr src))))))))
 		false)))
 
-(define planner_table_row_count (lambda (schema relation)
+(define planner_table_statistics (lambda (schema relation)
 	(try
 		(lambda ()
-			/* SHOW exposes shard-local row_count values. Physical choices need the
-			whole relation cardinality, which the storage table estimate already
-			aggregates across active shards. */
-			(define live_count (scan_estimate (table schema relation)))
-			(if (and (not (nil? live_count)) (> live_count 0))
-				live_count
-				(match (get_schema schema relation)
-					(cons col _rest) (col "RowEstimate")
-					_ live_count)))
+			(begin
+				(define cache (session "__memcp_queryplan_statistics"))
+				(define key (concat schema "." relation))
+				(define cached (if (nil? cache) nil (cache key)))
+				(if (nil? cached)
+					(begin
+						(define snapshot (table_planner_statistics (table schema relation)))
+						(if (nil? cache) nil (cache key snapshot))
+						snapshot)
+					cached)))
 		(lambda (_e) nil))))
+
+(define planner_table_row_count (lambda (schema relation)
+	(begin
+		(define stats (planner_table_statistics schema relation))
+		(if (nil? stats) nil (stats "row_count")))))
 
 (define planner_source_filter_estimate (lambda (src condition max_rows)
 	(if (not (source_is_base_table? src))
@@ -7237,24 +7243,18 @@ source itself has no known row count (not a base table). */
 			(list (quote average_value_bytes) nil))
 		(try
 			(lambda ()
-				(reduce (get_schema (source_schema src) (source_relation src)) (lambda (found row)
-					(if (not (nil? found))
-						found
-						(if (equal?? (row "Field") column)
-							(list
-								(list (quote known) (row "StatisticsKnown"))
-								(list (quote confidence) (row "StatisticsConfidence"))
-								(list (quote source) (symbol (row "StatisticsSource")))
-								(list (quote distinct) (row "DistinctEstimate"))
-								(list (quote distinct_confidence)
-									(if (row "StatisticsKnown") (row "StatisticsConfidence") 0))
-								(list (quote distinct_source) (symbol (row "DistinctEstimateSource")))
-								(list (quote null_fraction) (row "NullFraction"))
-								(list (quote min) (row "MinEstimate"))
-								(list (quote max) (row "MaxEstimate"))
-								(list (quote average_value_bytes) (row "AverageValueBytes")))
-							nil)))
-					nil))
+				(begin
+					(define stats (planner_table_statistics (source_schema src) (source_relation src)))
+					(define columns (if (nil? stats) nil (stats "columns")))
+					(define column_stats (if (nil? columns) nil (columns column)))
+					/* The immutable column catalog deliberately does not get rebuilt
+					for every INSERT/DELETE. Resolve its row-count fallback against
+					the current two-entry table snapshot in constant time instead. */
+					(if (or (nil? column_stats)
+						(not (equal? (qassoc_get column_stats (quote distinct_source) (quote unknown))
+							(quote fallback_row_count))))
+						column_stats
+						(qassoc_set column_stats (quote distinct) (stats "row_count")))))
 			(lambda (_e) (list
 				(list (quote known) false)
 				(list (quote confidence) 0)
