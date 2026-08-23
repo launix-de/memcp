@@ -107,6 +107,54 @@ func TestCountEstimateIsLockFreeAndPersisted(t *testing.T) {
 	shard.mu.Unlock()
 }
 
+func TestCountEstimateFallsBackToSingleShardDeltaWithoutLocking(t *testing.T) {
+	dbName := "test_count_estimate_delta_only"
+	databases.Remove(dbName)
+	t.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	values := [][]scm.Scmer{
+		{scm.NewInt(1)},
+		{scm.NewInt(2)},
+		{scm.NewInt(3)},
+	}
+	tbl.Insert([]string{"id"}, values, nil, scm.NewNil(), false, nil)
+
+	// Simulate a missing pre-REBUILD table statistic. The fallback must use the
+	// atomically published delta length without looking through shard internals.
+	tbl.PlannerRowEstimate.value.Store(0)
+	shard := tbl.ActiveShards()[0]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	done := make(chan uint, 1)
+	go func() { done <- tbl.CountEstimate() }()
+	select {
+	case got := <-done:
+		if got != 3 {
+			t.Fatalf("CountEstimate() = %d, want 3 delta rows", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("delta-only CountEstimate blocked on the shard lock")
+	}
+}
+
+func TestCountEstimateDoesNotTreatPersistedRowsAsDeltaOnly(t *testing.T) {
+	tbl := showColumnsTestTable(1)
+	shard := &storageShard{t: tbl, main_count: 9, srState: WRITE}
+	shard.plannerMainRows.Store(9)
+	shard.plannerDeltaRows.Store(3)
+	tbl.Shards = []*storageShard{shard}
+	tbl.mu.Lock()
+	tbl.publishTopologyLocked()
+	tbl.mu.Unlock()
+	tbl.PlannerRowEstimate.value.Store(0)
+
+	if got := tbl.CountEstimate(); got != 0 {
+		t.Fatalf("CountEstimate() = %d, want unavailable estimate with main storage", got)
+	}
+}
+
 func TestLegacyPlannerRowEstimateIsInitializedFromShards(t *testing.T) {
 	tbl := showColumnsTestTable(1)
 	// The first release containing planner_row_estimate could persist a zero

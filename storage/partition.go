@@ -872,6 +872,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 		}
 		// Install main_count — from this point, new inserts get correct recids
 		s.main_count = uint32(mainN)
+		s.plannerMainRows.Store(uint32(mainN))
 		deltaLen := len(s.inserts)
 		if deltaLen > 0 {
 			// Shift deletion bitmap: bits in [0, deltaLen) move to [mainN, mainN+deltaLen).

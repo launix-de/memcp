@@ -1122,7 +1122,24 @@ func (t *table) Count() (result uint) {
 // lazy shard load. Statistics are refreshed by rebuild/collection; staleness is
 // preferable to adding locks or storage I/O to the query compiler hot path.
 func (t *table) CountEstimate() uint {
-	return uint(t.PlannerRowEstimate.value.Load())
+	rows := t.PlannerRowEstimate.value.Load()
+	if rows != 0 {
+		return uint(rows)
+	}
+	// A newly created table can be populated entirely through its one shard's
+	// delta before the first REBUILD publishes full statistics. Keep this common
+	// schema/import path useful to the planner even if a lower-level loader did
+	// not advance the table-wide estimate. The topology and both counters are
+	// atomically published; never inspect inserts or acquire a shard lock here.
+	topology := t.topology.Load()
+	if topology == nil || len(topology.shards) != 1 || topology.shards[0] == nil {
+		return 0
+	}
+	shard := topology.shards[0]
+	if shard.plannerMainRows.Load() != 0 {
+		return 0
+	}
+	return uint(shard.plannerDeltaRows.Load())
 }
 
 // initializeLegacyPlannerRowEstimate migrates schemas written before the
