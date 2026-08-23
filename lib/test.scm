@@ -567,7 +567,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric sentinel")
 	(assert (scalar_first_probe_keytable_cost_preferred? cost_probe_stage "72") false
 		"keytable cost check refuses the carrier when probe_work_rows is a non-numeric string")
-	(assert (membership_estimated_matching_rows
+	(assert (planner_estimated_matching_rows
 		(list
 			(list (quote rows) 512)
 			(list (quote sampled) 512)
@@ -580,7 +580,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"single-character text patterns use a broad prior")
 	(assert (text_pattern_selectivity_prior "%needle%") 0.01
 		"long text patterns use the selective prior floor")
-	(assert (membership_estimated_matching_rows
+	(assert (planner_estimated_matching_rows
 		(list
 			(list (quote rows) 512)
 			(list (quote sampled) 512)
@@ -590,7 +590,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list (quote fallback_selectivity) 0.01))
 		100000 100000) 1000
 		"capped text index candidates use the statistical prior instead of 100 percent")
-	(assert (membership_estimated_matching_rows
+	(assert (planner_estimated_matching_rows
 		(list
 			(list (quote rows) 128)
 			(list (quote sampled) 512)
