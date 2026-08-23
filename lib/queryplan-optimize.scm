@@ -270,6 +270,26 @@ and barrier ownership come from the pre-normalization query block. */
 		((quote >) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
 		((symbol >=) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
 		((quote >=) _left _right) (planner_estimate nil 0 (quote range_unknown) false)
+		((symbol strlike) _value pattern)
+		(begin
+			(define prior (text_pattern_selectivity_prior
+				(planner_string_expr_value pattern)))
+			(if (number? prior)
+				(planner_estimate prior 0.25 (quote text_pattern_prior) true)
+				(planner_unknown_selectivity_estimate)))
+		((symbol strlike) _value pattern _collation)
+		(begin
+			(define prior (text_pattern_selectivity_prior
+				(planner_string_expr_value pattern)))
+			(if (number? prior)
+				(planner_estimate prior 0.25 (quote text_pattern_prior) true)
+				(planner_unknown_selectivity_estimate)))
+		((quote strlike) value pattern)
+		(join_optimizer_expr_selectivity_estimate sources default_alias
+			(list (symbol "strlike") value pattern))
+		((quote strlike) value pattern collation)
+		(join_optimizer_expr_selectivity_estimate sources default_alias
+			(list (symbol "strlike") value pattern collation))
 		_ (planner_unknown_selectivity_estimate))))
 
 (define join_optimizer_expr_selectivity (lambda (sources default_alias expr)
@@ -1386,6 +1406,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(list (quote membership_consumer) (qassoc_get facts (quote membership_consumer) (quote filter)))
 					(list (quote membership_candidate_input_rows) (qassoc_get facts (quote membership_candidate_input_rows) nil))
 					(list (quote membership_candidate_estimated_rows) (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
+					(list (quote membership_candidate_matching_rows) (qassoc_get facts (quote membership_candidate_matching_rows) nil))
 					(list (quote membership_candidate_estimate_capped) (qassoc_get facts (quote membership_candidate_estimate_capped) false))
 					(list (quote membership_candidate_estimate_input) (qassoc_get facts (quote membership_candidate_estimate_input) nil))
 					(list (quote membership_candidate_estimate_sampled) (qassoc_get facts (quote membership_candidate_estimate_sampled) nil))
@@ -1844,9 +1865,14 @@ floor avoids pretending that an unseen word is impossible. */
 						(eval filter_expr)
 						max_rows))
 					(define text_prior (expr_text_selectivity_prior condition))
-					(if (number? text_prior)
+					(define enriched (if (number? text_prior)
 						(qassoc_set estimate (quote fallback_selectivity) text_prior)
-						estimate)))
+						estimate))
+					(define source_rows (planner_source_row_count src))
+					(if (number? source_rows)
+						(qassoc_set enriched (quote estimated_rows)
+							(planner_estimated_matching_rows enriched source_rows source_rows))
+						enriched)))
 			(lambda (_e) nil)))))
 
 (define planner_source_row_count (lambda (src)
@@ -2188,6 +2214,9 @@ resulting tree in semantic order. */
 						(qassoc_get estimate (quote input) nil)))))
 					(define sampled_rows (planner_add_estimates (map available (lambda (estimate)
 						(qassoc_get estimate (quote sampled) nil)))))
+					(define estimated_rows (planner_add_estimates (map available (lambda (estimate)
+						(qassoc_get estimate (quote estimated_rows)
+							(qassoc_get estimate (quote rows) nil))))))
 					(define capped (or (>= rows max_rows)
 						(reduce available (lambda (found estimate)
 							(or found (qassoc_get estimate (quote capped) false)))
@@ -2197,6 +2226,7 @@ resulting tree in semantic order. */
 						(list (quote capped) capped)
 						(list (quote sampled) sampled_rows)
 						(list (quote input) input_rows)
+						(list (quote estimated_rows) estimated_rows)
 						(list (quote population) (planner_merge_estimate_population available))
 						(list (quote coverage) (planner_merge_estimate_coverage available))))))
 		(if (query_block? input)
@@ -2419,15 +2449,20 @@ either physical alternative or sampling the table again. */
 			(count (union_branches (gs_input stage)))
 			1))
 		(define candidate_estimate (planner_stage_filter_estimate (gs_input stage) 512))
-		(define estimate_rows (qassoc_get candidate_estimate (quote rows) nil))
+		(define estimate_matching_rows (qassoc_get candidate_estimate (quote rows) nil))
+		(define estimate_rows (qassoc_get candidate_estimate (quote estimated_rows)
+			estimate_matching_rows))
 		(define estimate_capped (qassoc_get candidate_estimate (quote capped) false))
 		(define estimate_input (qassoc_get candidate_estimate (quote input) nil))
 		(define estimate_sampled (qassoc_get candidate_estimate (quote sampled) nil))
 		(define estimate_population (planner_estimate_population candidate_estimate))
 		(define estimate_coverage (planner_estimate_coverage candidate_estimate))
+		/* estimated_rows has already been scaled to the full candidate input.
+		Classify it against that same population; comparing it with sampled rows
+		mixes units and labels most capped selective estimates as broad. */
 		(define estimate_ratio_broad (and
-			(and (not (nil? estimate_rows)) (and (not (nil? estimate_sampled)) (> estimate_sampled 0)))
-			(>= (* estimate_rows 4) estimate_sampled)))
+			(and (number? estimate_rows) (and (number? candidate_rows) (> candidate_rows 0)))
+			(>= (* estimate_rows 4) candidate_rows)))
 		(define driver_alternative (membership_expr_has_driver_alternative? (qb_where block)))
 		(define class (if (or estimate_ratio_broad
 			(if driver_alternative (candidate_stage_broad? stage) false)) (quote broad) (quote selective)))
@@ -2448,6 +2483,7 @@ either physical alternative or sampling the table again. */
 				(qassoc_get driver_estimate (quote capped) false))
 			(list (quote membership_candidate_input_rows) candidate_rows)
 			(list (quote membership_candidate_estimated_rows) estimate_rows)
+			(list (quote membership_candidate_matching_rows) estimate_matching_rows)
 			(list (quote membership_candidate_estimate_capped) estimate_capped)
 			(list (quote membership_candidate_estimate_input) estimate_input)
 			(list (quote membership_candidate_estimate_sampled) estimate_sampled)
@@ -2623,16 +2659,28 @@ selectivity sample. Once an index or RecSet has restricted the iterator,
 sampled means "index candidates examined", not "table rows sampled". A capped
 restricted estimate is therefore merely a lower bound and must not be
 extrapolated as though the iterator were an unbiased table sample. */
-(define membership_estimated_matching_rows (lambda (estimate input_rows fallback)
+(define planner_estimated_matching_rows (lambda (estimate input_rows fallback)
 	(if (nil? estimate)
 		fallback
 		(begin
 			(define rows (qassoc_get estimate (quote rows) nil))
 			(define sampled_input (qassoc_get estimate (quote sampled) nil))
-			(if (and (qassoc_get estimate (quote capped) false)
+			(define coverage (planner_estimate_coverage estimate))
+			/* A random-shard estimate is a population sample even when the shard was
+			read to completion. Scale that sample exactly once here. Zero observed
+			matches retain the expression prior because one shard cannot prove that
+			the complete table is empty for the predicate. */
+			(if (and (equal? coverage (quote sampled))
 				(and (number? input_rows)
 					(and (number? rows) (and (number? sampled_input) (> sampled_input 0)))))
-				(if (equal? (planner_estimate_coverage estimate) (quote lower_bound))
+				(if (and (equal? rows 0)
+					(number? (qassoc_get estimate (quote fallback_selectivity) nil)))
+					(* input_rows (qassoc_get estimate (quote fallback_selectivity) 1))
+					(min input_rows (* input_rows (/ rows sampled_input))))
+				(if (and (qassoc_get estimate (quote capped) false)
+				(and (number? input_rows)
+					(and (number? rows) (and (number? sampled_input) (> sampled_input 0)))))
+				(if (equal? coverage (quote lower_bound))
 					(begin
 						(define fallback_selectivity
 							(qassoc_get estimate (quote fallback_selectivity) nil))
@@ -2640,7 +2688,7 @@ extrapolated as though the iterator were an unbiased table sample. */
 							(min input_rows (max rows (* input_rows fallback_selectivity)))
 							(coalesceNil fallback input_rows)))
 					(min input_rows (* input_rows (/ rows sampled_input))))
-				(coalesceNil rows fallback))))))
+					(coalesceNil rows fallback)))))))
 
 (define membership_driver_filter (lambda (condition)
 	/* Only top-level conjuncts which do not contain membership are guaranteed
@@ -2865,15 +2913,11 @@ expression, and RecSet components used by the other membership carriers. */
 
 (define membership_cost_options_for_telemetry (lambda (telemetry)
 	(begin
-		(define candidate_rows (membership_estimated_matching_rows
-			(list
-				(list (quote rows) (qassoc_get telemetry (quote membership_candidate_estimated_rows) nil))
-				(list (quote input) (qassoc_get telemetry (quote membership_candidate_estimate_input) nil))
-				(list (quote sampled) (qassoc_get telemetry (quote membership_candidate_estimate_sampled) nil))
-				(list (quote capped) (qassoc_get telemetry (quote membership_candidate_estimate_capped) false))
-				(list (quote population) (qassoc_get telemetry (quote membership_candidate_estimate_population) (quote table_rows)))
-				(list (quote coverage) (qassoc_get telemetry (quote membership_candidate_estimate_coverage) (quote sampled))))
-			(qassoc_get telemetry (quote membership_candidate_input_rows) nil)
+		/* candidate_estimated_rows is the shared cardinality result. Reapplying
+		planner_estimated_matching_rows here would treat a UNION's merged raw
+		sample as a fresh table sample and can inflate a selective path to 100%. */
+		(define candidate_rows (qassoc_get telemetry
+			(quote membership_candidate_estimated_rows)
 			(qassoc_get telemetry (quote membership_candidate_input_rows) nil)))
 		(define driver_strategy (membership_driver_strategy_for_telemetry telemetry))
 		(define driver_rows (qassoc_get telemetry (quote membership_driver_rows) nil))
@@ -2897,15 +2941,8 @@ expression, and RecSet components used by the other membership carriers. */
 		(define forced (planner_physical_override decision_id))
 		(define chosen (planner_physical_choice decision_id (string strategy) alternatives))
 		(define candidate_input_rows (qassoc_get requirement (quote membership_candidate_input_rows) nil))
-		(define candidate_rows (membership_estimated_matching_rows
-			(list
-				(list (quote rows) (qassoc_get requirement (quote membership_candidate_estimated_rows) nil))
-				(list (quote input) (qassoc_get requirement (quote membership_candidate_estimate_input) nil))
-				(list (quote sampled) (qassoc_get requirement (quote membership_candidate_estimate_sampled) nil))
-				(list (quote capped) (qassoc_get requirement (quote membership_candidate_estimate_capped) false))
-				(list (quote population) (qassoc_get requirement (quote membership_candidate_estimate_population) (quote table_rows)))
-				(list (quote coverage) (qassoc_get requirement (quote membership_candidate_estimate_coverage) (quote sampled))))
-			candidate_input_rows candidate_input_rows))
+		(define candidate_rows (qassoc_get requirement
+			(quote membership_candidate_estimated_rows) candidate_input_rows))
 		(define driver_input_rows (qassoc_get requirement (quote membership_driver_input_rows) nil))
 		(define driver_rows (if (qassoc_get requirement (quote membership_order_limit_driver) false)
 			(coalesceNil (probe_limit_work_rows (qassoc_get requirement (quote membership_order_limit) nil))
@@ -3062,7 +3099,7 @@ keyset/probe names enter the IR here, at the physical preparation boundary. */
 				(define capped (if (nil? candidate_estimate) false
 					(qassoc_get candidate_estimate (quote capped) false)))
 				(define candidate_total_rows (planner_source_row_count input))
-				(define candidate_rows (membership_estimated_matching_rows
+				(define candidate_rows (planner_estimated_matching_rows
 					candidate_estimate candidate_total_rows candidate_total_rows))
 				(define driver (car base_sources))
 				(define driver_total_rows (planner_source_row_count driver))

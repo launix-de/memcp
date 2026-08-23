@@ -637,24 +637,37 @@ func Init(en scm.Env) {
 			if limit <= 0 {
 				limit = 1024
 			}
-			var rows int64
-			var sampled int64
-			capped := false
-			population := "table_rows"
-			coverage := "exact"
 			shards := t.ActiveShards()
+			input := int64(t.CountEstimate())
+			if len(shards) == 0 || input == 0 {
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(0)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(false)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(0)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol("table_rows")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol("exact")}),
+				})
+			}
 			start := 0
 			if len(shards) > 1 {
 				start = rand.Intn(len(shards))
 			}
+			// Costing must never depend on whether an auto-index already exists and
+			// must not turn planning into a scan of every shard. Sample one randomly
+			// selected non-empty shard. An installed index hook makes the same call
+			// constant-time and more precise; the generated crossover guard then
+			// invalidates a cached choice if that new selectivity changes the winner.
 			for offset := range shards {
 				shard := shards[(start+offset)%len(shards)]
 				if shard == nil {
 					continue
 				}
-				estimate := shard.EstimateFilteredRows(conditionCols, condition, limit-int(rows), currentTx)
+				estimate := shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx)
+				if estimate.examined == 0 {
+					continue
+				}
 				if estimate.population == "index_hook_candidates" && estimate.examined > 0 {
-					input := int64(t.CountEstimate())
 					estimatedRows := input * estimate.rows / estimate.examined
 					return scm.NewSlice([]scm.Scmer{
 						scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(estimatedRows)}),
@@ -665,27 +678,24 @@ func Init(en scm.Env) {
 						scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(estimate.coverage)}),
 					})
 				}
-				rows += estimate.rows
-				sampled += estimate.examined
-				if estimate.population != "table_rows" {
-					population = estimate.population
-				}
-				if estimate.coverage != "exact" {
-					coverage = estimate.coverage
-				}
-				if estimate.capped || rows >= int64(limit) {
-					capped = true
-					break
-				}
+				return scm.NewSlice([]scm.Scmer{
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(estimate.rows)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(estimate.capped)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(estimate.examined)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol("table_rows")}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol("sampled")}),
+				})
 			}
-			input := int64(t.CountEstimate())
+			// All active shards were empty snapshots. The table estimate may include
+			// concurrent deltas; keep the estimate unknown rather than claiming zero.
 			return scm.NewSlice([]scm.Scmer{
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(rows)}),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(capped)}),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(sampled)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(0)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(true)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(0)}),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol(population)}),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(coverage)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol("table_rows")}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol("lower_bound")}),
 			})
 		},
 		Type: &scm.TypeDescriptor{

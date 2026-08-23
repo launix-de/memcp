@@ -2581,21 +2581,28 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(qassoc_get facts (quote membership_candidate_input_rows) nil)
 					(planner_stage_input_rows (gs_input stage))))
 				(define candidate_matching_rows (coalesceNil
-					(qassoc_get facts (quote membership_candidate_estimated_rows) nil)
+					(qassoc_get facts (quote membership_candidate_matching_rows) nil)
 					(qassoc_get measured_estimate (quote rows) nil)))
-				(define candidate_rows (membership_estimated_matching_rows
-					(list
-						(list (quote rows) candidate_matching_rows)
-						(list (quote input) (coalesceNil
-							(qassoc_get facts (quote membership_candidate_estimate_input) nil)
-							(qassoc_get measured_estimate (quote input) nil)))
-						(list (quote sampled) (coalesceNil
-							(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
-							(qassoc_get measured_estimate (quote sampled) nil)))
-						(list (quote capped) capped)
-						(list (quote population) estimate_population)
-						(list (quote coverage) estimate_coverage))
-					candidate_input_rows candidate_input_rows))
+				(define costed_candidate_rows
+					(qassoc_get facts (quote membership_candidate_estimated_rows) nil))
+				/* Reorder owns stage cardinality. Physical lowering consumes that
+				estimate verbatim; re-extrapolating the merged UNION sample here was a
+				second, contradictory planner that could turn a selective text path
+				back into 100% of its input. */
+				(define candidate_rows (coalesceNil costed_candidate_rows
+					(planner_estimated_matching_rows
+						(list
+							(list (quote rows) candidate_matching_rows)
+							(list (quote input) (coalesceNil
+								(qassoc_get facts (quote membership_candidate_estimate_input) nil)
+								(qassoc_get measured_estimate (quote input) nil)))
+							(list (quote sampled) (coalesceNil
+								(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
+								(qassoc_get measured_estimate (quote sampled) nil)))
+							(list (quote capped) capped)
+							(list (quote population) estimate_population)
+							(list (quote coverage) estimate_coverage))
+						candidate_input_rows candidate_input_rows)))
 				(define source_rows (planner_source_row_count src))
 				/* Ordered LIMIT consumes only its local window before downstream
 				operators. Cost this edge with that workload instead of a global

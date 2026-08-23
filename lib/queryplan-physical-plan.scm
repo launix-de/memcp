@@ -2598,15 +2598,10 @@ RecSet; membership edges retain their own physical operators. */
 (define ordered_batch_accept_cost (lambda (facts)
 	(begin
 		(define candidate_input_rows (qassoc_get facts (quote membership_candidate_input_rows) nil))
-		(define candidate_rows (membership_estimated_matching_rows
-			(list
-				(list (quote rows) (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
-				(list (quote input) (qassoc_get facts (quote membership_candidate_estimate_input) nil))
-				(list (quote sampled) (qassoc_get facts (quote membership_candidate_estimate_sampled) nil))
-				(list (quote capped) (qassoc_get facts (quote membership_candidate_estimate_capped) false))
-				(list (quote population) (qassoc_get facts (quote membership_candidate_estimate_population) (quote table_rows)))
-				(list (quote coverage) (qassoc_get facts (quote membership_candidate_estimate_coverage) (quote sampled))))
-			candidate_input_rows candidate_input_rows))
+		/* Physical consumers use the one cardinality produced by logical costing.
+		They may compare operators, but must not reinterpret statistics. */
+		(define candidate_rows (qassoc_get facts
+			(quote membership_candidate_estimated_rows) candidate_input_rows))
 		(define driver_rows (qassoc_get facts (quote membership_driver_rows) nil))
 		(define driver_input_rows (membership_driver_input_rows driver_rows facts))
 		(define visited_rows (membership_expected_driver_rows_visited
@@ -3388,47 +3383,51 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 			(list (quote default) (coalesceNil (car work) default_rows))
 			(list (quote by_alias) (cadr work))))))
 
-/* A source-local text predicate is already a canonical logical predicate by
-the time it reaches this boundary. For a selective join driver, enumerate an
-exact RecSet carrier so expensive downstream ACL/join work runs only for the
-matching record IDs. This is a physical choice over the normalized predicate;
-it does not recover parser spelling or leak a scan into logical IR. */
-(define selective_text_filter_candidate (lambda (src all_sources default_alias condition)
+/* Access-path enumerators describe executable alternatives; they do not pick
+an operator, change join order, or remove a predicate. Adding a leaf-local
+"if this expression then use that scan" below the common selector is a code
+smell: add a descriptor here and let choose_scan_access_path compare it with
+every other carrier instead. Logical join order remains owned by join_plan. */
+(define scan_access_path_text_candidates (lambda (src all_sources default_alias condition)
 	(begin
 		(define alias (source_alias src))
 		(define aliases (source_aliases all_sources))
 		(define input_rows (planner_source_row_count src))
 		(if (or (not (number? input_rows)) (< input_rows 1024))
-			nil
-			(reduce (split_and_terms (coalesceNil condition true)) (lambda (best term)
-				(if (or (not (expr_contains_text_match? term))
-					(not (equal? (join_hypergraph_expr_aliases default_alias aliases term)
-						(list alias))))
-					best
-					(begin
-						(define estimate (planner_source_filter_estimate src term 512))
-						(define rows (membership_estimated_matching_rows estimate input_rows nil))
-						(define work (membership_source_work_profile src term true))
-						(define candidate (if (number? rows)
-							(list
-								(list (quote predicate) term)
-								(list (quote rows) rows)
-								(list (quote input_rows) input_rows)
-								(list (quote work) work)
-								(list (quote estimate) estimate))
-							nil))
-						(if (or (nil? candidate)
-							(and (not (nil? best))
-								(<= (qassoc_get best (quote rows) input_rows) rows)))
-							best candidate))))
-				nil)))))
+			'()
+			(filter
+				(map (split_and_terms (coalesceNil condition true)) (lambda (term)
+					(if (or (not (expr_contains_text_match? term))
+						(not (equal? (join_hypergraph_expr_aliases default_alias aliases term)
+							(list alias))))
+						nil
+						(begin
+							(define estimate (planner_source_filter_estimate src term 512))
+							(define rows (qassoc_get estimate (quote estimated_rows) nil))
+							(define work (membership_source_work_profile src term true))
+							(if (number? rows)
+								(list
+									(list (quote kind) (quote predicate_recset))
+									(list (quote plan) "scan_recset")
+									(list (quote predicate) term)
+									(list (quote rows) rows)
+									(list (quote input_rows) input_rows)
+									(list (quote work) work)
+									(list (quote estimate) estimate))
+								nil)))))
+				(lambda (item) (not (nil? item))))))))
+
+(define scan_access_path_candidates (lambda (src all_sources default_alias condition)
+	/* Text-backed exact RecSets are the first descriptor kind. Index ranges,
+	persisted RecSets, or future scan primitives belong in this same list. */
+	(scan_access_path_text_candidates src all_sources default_alias condition)))
 
 /* The text predicate itself is common work. The carrier decision determines
 whether the downstream join continuation is entered for every driver row or
 only for exact matches after a parallel RecSet-producing pass. Reuse the
 calibrated physical primitives; do not hide another selectivity threshold in
 this lowering boundary. */
-(define selective_text_filter_scan_cost (lambda (src candidate)
+(define scan_access_path_scan_cost (lambda (src candidate)
 	(begin
 		(define input_rows (qassoc_get candidate (quote input_rows) 0))
 		(define work (qassoc_get candidate (quote work) '()))
@@ -3447,21 +3446,21 @@ this lowering boundary. */
 					planner_membership_broad_text_match_byte_ns))
 			0 0 0 0 0 0 input_rows 0.75))))
 
-(define selective_text_filter_base_cost (lambda (src candidate)
+(define scan_access_path_base_cost (lambda (src candidate)
 	(begin
 		(define input_rows (qassoc_get candidate (quote input_rows) 0))
 		(planner_cost_add
-			(selective_text_filter_scan_cost src candidate)
+			(scan_access_path_scan_cost src candidate)
 			(planner_join_work_cost input_rows 0.65)
 			(qassoc_get candidate (quote rows) input_rows) 0.65))))
 
-(define selective_text_filter_recset_cost (lambda (src candidate)
+(define scan_access_path_recset_cost (lambda (src candidate)
 	(begin
 		(define input_rows (qassoc_get candidate (quote input_rows) 0))
 		(define rows (qassoc_get candidate (quote rows) input_rows))
 		(planner_cost_add
 			(planner_cost_add
-				(selective_text_filter_scan_cost src candidate)
+				(scan_access_path_scan_cost src candidate)
 				(planner_cost planner_membership_recset_startup_ns
 					(* rows planner_membership_scan_row_ns) 0 0 0
 					(* rows planner_membership_recset_build_row_ns)
@@ -3470,25 +3469,30 @@ this lowering boundary. */
 			(planner_join_work_cost rows 0.65)
 			rows 0.65))))
 
+(define scan_access_path_candidate_cost (lambda (src candidate)
+	(match (qassoc_get candidate (quote kind) nil)
+		(quote predicate_recset) (scan_access_path_recset_cost src candidate)
+		_ (neumann_fail "build_queryplan" "unsupported physical scan access-path descriptor"))))
+
 /* Both alternatives contain the same text scan. Solve the remaining linear
 cost inequality once and guard the cached plan by that crossover, not by an
 exact parameter value. */
-(define selective_text_filter_crossover_rows (lambda (src candidate)
+(define scan_access_path_crossover_rows (lambda (src candidate)
 	(begin
 		(define zero_candidate (qassoc_set candidate (quote rows) 0))
 		(define one_candidate (qassoc_set candidate (quote rows) 1))
 		(define recset_zero (qassoc_get
-			(selective_text_filter_recset_cost src zero_candidate) (quote total_ns) 0))
+			(scan_access_path_recset_cost src zero_candidate) (quote total_ns) 0))
 		(define recset_one (qassoc_get
-			(selective_text_filter_recset_cost src one_candidate) (quote total_ns) 0))
+			(scan_access_path_recset_cost src one_candidate) (quote total_ns) 0))
 		(define base_total (qassoc_get
-			(selective_text_filter_base_cost src candidate) (quote total_ns) 0))
+			(scan_access_path_base_cost src candidate) (quote total_ns) 0))
 		(define row_slope (- recset_one recset_zero))
 		(if (<= row_slope 0)
 			0
 			(max 0 (/ (- base_total recset_zero) row_slope))))))
 
-(define selective_text_filter_runtime_rows_expr (lambda (src candidate)
+(define scan_access_path_runtime_rows_expr (lambda (src candidate)
 	(begin
 		(define predicate (qassoc_get candidate (quote predicate) true))
 		(define alias (source_alias src))
@@ -3502,7 +3506,7 @@ exact parameter value. */
 				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 				(lower_column_expr_for_alias src predicate))
 			512))
-		(list (quote membership_estimated_matching_rows)
+		(list (quote planner_estimated_matching_rows)
 			(if (nil? pattern_expr)
 				estimate_expr
 				(list (quote qassoc_set)
@@ -3512,35 +3516,42 @@ exact parameter value. */
 			(qassoc_get candidate (quote input_rows) nil)
 			(qassoc_get candidate (quote input_rows) nil)))))
 
-(define choose_selective_text_filter_carrier (lambda (src candidate)
-	(if (nil? candidate)
+(define choose_scan_access_path (lambda (src candidates)
+	(if (empty_list? candidates)
 		(list "fused_base_scan" nil)
 		(begin
+			(define candidate (reduce candidates (lambda (best item)
+				(if (or (nil? best)
+					(planner_cost_better?
+						(scan_access_path_candidate_cost src item)
+						(scan_access_path_candidate_cost src best)))
+					item best)) nil))
 			(define alias (source_alias src))
-			(define decision_id (concat "selective_text_filter_carrier:" alias))
-			(define recset_cost (selective_text_filter_recset_cost src candidate))
-			(define base_cost (selective_text_filter_base_cost src candidate))
+			(define decision_id (concat "scan_access_path:" alias))
+			(define candidate_plan (qassoc_get candidate (quote plan) nil))
+			(define candidate_cost (scan_access_path_candidate_cost src candidate))
+			(define base_cost (scan_access_path_base_cost src candidate))
 			(define work (qassoc_get candidate (quote work) '()))
-			(define normal_choice (if (planner_cost_better? recset_cost base_cost)
-				"scan_recset" "fused_base_scan"))
-			(define crossover_rows (selective_text_filter_crossover_rows src candidate))
-			(if (empty_list? (query_expr_session_reads
-				(qassoc_get candidate (quote predicate) true)))
-				nil
-				(planner_record_guard_condition
-					(if (equal? normal_choice "scan_recset")
-						(list (quote <)
-							(selective_text_filter_runtime_rows_expr src candidate)
-							crossover_rows)
-						(list (quote >=)
-							(selective_text_filter_runtime_rows_expr src candidate)
-							crossover_rows))))
-			(define alternatives (list "scan_recset" "fused_base_scan"))
+			(define normal_choice (if (planner_cost_better? candidate_cost base_cost)
+				candidate_plan "fused_base_scan"))
+			(define crossover_rows (scan_access_path_crossover_rows src candidate))
+			/* Guard the cost crossover even for a literal predicate. Auto-index
+			construction can improve the same query's estimate after compilation;
+			the cached variant must then be rejected if the winning path changes. */
+			(planner_record_guard_condition
+				(if (equal? normal_choice candidate_plan)
+					(list (quote <)
+						(scan_access_path_runtime_rows_expr src candidate)
+						crossover_rows)
+					(list (quote >=)
+						(scan_access_path_runtime_rows_expr src candidate)
+						crossover_rows)))
+			(define alternatives (list candidate_plan "fused_base_scan"))
 			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
 			(define forced (planner_physical_override decision_id))
 			(planner_record_physical_decision (list
 				(list "decision_id" decision_id)
-				(list "decision" "selective_text_filter_carrier")
+				(list "decision" "scan_access_path")
 				(list "decision_site" "join_scan_leaf")
 				(list "source" alias)
 				(list "chosen" chosen)
@@ -3565,10 +3576,10 @@ exact parameter value. */
 					(list "crossover_rows" crossover_rows)))
 				(list "alternatives" (list
 					(list
-						(list "plan" "scan_recset")
-						(list "status" (if (equal? chosen "scan_recset") "chosen" "rejected"))
-						(list "reason" (if (equal? chosen "scan_recset") "selected" "higher_total_ns_or_forced_alternative"))
-						(list "cost" (planner_cost_explain recset_cost)))
+						(list "plan" candidate_plan)
+						(list "status" (if (equal? chosen candidate_plan) "chosen" "rejected"))
+						(list "reason" (if (equal? chosen candidate_plan) "selected" "higher_total_ns_or_forced_alternative"))
+						(list "cost" (planner_cost_explain candidate_cost)))
 					(list
 						(list "plan" "fused_base_scan")
 						(list "status" (if (equal? chosen "fused_base_scan") "chosen" "rejected"))
@@ -3576,7 +3587,7 @@ exact parameter value. */
 						(list "cost" (planner_cost_explain base_cost)))))))
 			(list chosen candidate)))))
 
-(define selective_text_filter_recset_expr (lambda (stages src candidate)
+(define scan_access_path_recset_expr (lambda (stages src candidate)
 	(begin
 		(define alias (source_alias src))
 		(define predicate (qassoc_get candidate (quote predicate) true))
@@ -3589,7 +3600,12 @@ exact parameter value. */
 				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 				(lower_column_expr_for_alias src predicate))))))
 
-(define strip_selective_text_filter_candidate (lambda (condition candidate)
+(define scan_access_path_table_expr (lambda (stages src candidate)
+	(match (qassoc_get candidate (quote kind) nil)
+		(quote predicate_recset) (scan_access_path_recset_expr stages src candidate)
+		_ (neumann_fail "build_queryplan" "unsupported physical scan access-path descriptor"))))
+
+(define strip_scan_access_path_predicate (lambda (condition candidate)
 	(if (nil? candidate)
 		condition
 		(begin
@@ -3670,28 +3686,34 @@ exact parameter value. */
 			(not (nil? membership_table_expr))
 			(nil? row_number_stage_filter)))
 		(define membership_filter (and (not (nil? membership_table_expr)) (not membership_driver)))
-		(define text_filter_eligible (and
+		/* Query-local access-path construction is safe only at the selected driver:
+		inside a continuation it would rebuild the carrier once per outer row. This
+		is an execution-scope capability, not a predicate- or text-specific rule.
+		Join reorder has already selected the driver before this boundary. */
+		(define access_path_build_allowed (and
 			(not membership_driver)
 			(nil? row_number_stage_filter)
 			(> (count all_sources) 1)
 			(equal? alias (probe_work_context_driver_alias probe_context))))
-		(define text_filter_candidate_before_point_check (if text_filter_eligible
-			(selective_text_filter_candidate src all_sources default_alias effective_condition)
-			nil))
-		/* Most join leaves have no text predicate. Avoid walking their full
-		condition a second time to prove point access before the cheap candidate
-		classifier has established that this decision is relevant at all. */
-		(define text_filter_candidate (if (and
-			(not (nil? text_filter_candidate_before_point_check))
+		(define access_path_candidates_before_point_check (if access_path_build_allowed
+			(scan_access_path_candidates src all_sources default_alias effective_condition)
+			'()))
+		/* A unique point lookup already bounds downstream work. This capability
+		check applies uniformly to every candidate; an enumerator must not hide a
+		second operator decision behind its expression-shape recognizer. */
+		(define access_path_candidates (if (and
+			(not (empty_list? access_path_candidates_before_point_check))
 			(source_unique_point_condition? src effective_condition))
-			nil
-			text_filter_candidate_before_point_check))
-		(define text_filter_plan (choose_selective_text_filter_carrier src text_filter_candidate))
-		(define text_filter_recset (and (not (nil? text_filter_candidate))
-			(equal? (car text_filter_plan) "scan_recset")))
+			'()
+			access_path_candidates_before_point_check))
+		(define access_path_plan (choose_scan_access_path src access_path_candidates))
+		(define access_path_candidate (cadr access_path_plan))
+		(define access_path_selected (and (not (nil? access_path_candidate))
+			(equal? (car access_path_plan)
+				(qassoc_get access_path_candidate (quote plan) nil))))
 		(define residual_condition
-			(strip_selective_text_filter_candidate effective_condition
-				(if text_filter_recset text_filter_candidate nil)))
+			(strip_scan_access_path_predicate effective_condition
+				(if access_path_selected access_path_candidate nil)))
 		(define membership_var (symbol "__membership_recset"))
 		(define membership_filter_expr (if membership_filter
 			(recset_contains_call_expr membership_var)
@@ -3706,9 +3728,9 @@ exact parameter value. */
 			recipe_mapcols))
 		(define mapcols raw_mapcols)
 		(define table_expr (if membership_driver membership_table_expr
-			(if (not text_filter_recset)
+			(if (not access_path_selected)
 				(source_table_expr_using stages src)
-				(selective_text_filter_recset_expr stages src text_filter_candidate))))
+				(scan_access_path_table_expr stages src access_path_candidate))))
 		(define lowered_filter_condition (mark_outer_join_symbols
 			all_sources
 			alias
