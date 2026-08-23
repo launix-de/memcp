@@ -37,22 +37,25 @@ type shardDimension struct {
 }
 
 // computes the index of a datapoint in PShards -> if item == pivot, sort left
+func computeShardDimensionIndex(sd shardDimension, value scm.Scmer) int {
+	min := 0                    // greater equal min
+	max := sd.NumPartitions - 1 // smaller than max
+	for min < max {
+		pivot := (min + max - 1) / 2
+		if scm.Less(sd.Pivots[pivot], value) {
+			min = pivot + 1
+		} else {
+			max = pivot
+		}
+	}
+	return min
+}
+
 func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int) {
 	for i, sd := range schema {
-		// get slice idx of this dimension
-		min := 0                    // greater equal min
-		max := sd.NumPartitions - 1 // smaller than max
-		for min < max {
-			pivot := (min + max - 1) / 2
-			if scm.Less(sd.Pivots[pivot], values[i]) {
-				min = pivot + 1
-			} else {
-				max = pivot
-			}
-		}
-		result = result*sd.NumPartitions + min // accumulate
+		result = result*sd.NumPartitions + computeShardDimensionIndex(sd, values[i])
 	}
-	return // schema[0] has the higest stride; schema[len(schema)-1] is the least significant bit
+	return // schema[0] has the highest stride; the last dimension is least significant
 }
 
 // runFanoutTasks executes a fanout without recursively multiplying worker

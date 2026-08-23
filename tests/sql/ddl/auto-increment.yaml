@@ -1,3 +1,10 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
 metadata:
   version: "1.0"
   description: "AUTO_INCREMENT correctness: sequential assignment, explicit ID coexistence, counter persistence"
@@ -10,6 +17,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS ai_restart"
   - sql: "DROP TABLE IF EXISTS ai_same_col"
   - sql: "DROP TABLE IF EXISTS ai_tx"
+  - sql: "DROP TABLE IF EXISTS ai_partitioned"
   - sql: "CREATE TABLE ai_basic (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_explicit (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_mixed (id INT AUTO_INCREMENT PRIMARY KEY, val INT)"
@@ -23,6 +31,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ai_mixed"
   - sql: "DROP TABLE IF EXISTS ai_same_col"
   - sql: "DROP TABLE IF EXISTS ai_tx"
+  - sql: "DROP TABLE IF EXISTS ai_partitioned"
 
 test_cases:
 
@@ -236,6 +245,51 @@ test_cases:
       rows: 1
       data:
         - {cnt: 2}
+
+  # --- Partition routing: omitted AUTO_INCREMENT key is generated only after
+  # shard selection and must nevertheless route to the key's range shard. ---
+
+  - name: "Partitioned auto ID: create compact fixture"
+    setup:
+      - scm: '(settings "ShardSize" 3)'
+      - scm: '(settings "PartitionMaxDimensions" 1)'
+      - sql: "CREATE TABLE ai_partitioned (id INT AUTO_INCREMENT PRIMARY KEY, tenant INT, name TEXT)"
+    scm: |
+      (begin
+        (insert (table "memcp-tests" "ai_partitioned") '("id" "tenant" "name")
+          (map (produceN 21) (lambda (i) (list (+ i 1) (mod i 2) (concat "main-" i)))))
+        true)
+
+  - name: "Partitioned auto ID: repartition by ID"
+    scm: |
+      (partitiontable
+        (table "memcp-tests" "ai_partitioned")
+        (list (list "id" (list 3 6 9 12 15 18))))
+
+  - name: "Partitioned auto ID: insert without partition key"
+    sql: "INSERT INTO ai_partitioned (tenant, name) VALUES (0, 'generated-high-id')"
+    expect:
+      affected_rows: 1
+
+  - name: "Partitioned auto ID: generated row exists without ID pruning"
+    sql: "SELECT id, name FROM ai_partitioned WHERE name = 'generated-high-id'"
+    expect:
+      data:
+        - id: 22
+          name: "generated-high-id"
+
+  - name: "Partitioned auto ID: generated key remains index-visible"
+    sql: "SELECT id, name FROM ai_partitioned WHERE id = 22"
+    expect:
+      data:
+        - id: 22
+          name: "generated-high-id"
+
+  - name: "Partitioned auto ID: restore shard size"
+    scm: |
+      (begin
+        (settings "ShardSize" 60000)
+        (settings "PartitionMaxDimensions" 0))
 
   # --- Restart scenario: counter must survive server restart ---
   # ai_restart table was created and seeded in setup (no inserts yet).
