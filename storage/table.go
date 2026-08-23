@@ -2274,12 +2274,31 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		// TODO: check which shards are involved; a sharding dimension column must be present in ALL unique keys, otherwise we cannot prune
 		dims := topology.dimensions
 		partitionShards := topology.shards
-		shardcols := make([]scm.Scmer, len(dims))
 		translatable := make([]int, len(dims))
+		omittedPartitions := make([]int, len(dims))
 		for i, cd := range dims {
+			translatable[i] = -1
 			for j, col := range columns {
 				if cd.Column == col {
 					translatable[i] = j
+					break
+				}
+			}
+			if translatable[i] >= 0 {
+				continue
+			}
+			defaultValue := scm.NewNil()
+			for _, col := range t.Columns {
+				if cd.Column == col.Name {
+					defaultValue = col.Default
+					if col.AutoIncrement {
+						// Generated AUTO_INCREMENT values are monotonically above the
+						// values from which the immutable range pivots were derived.
+						omittedPartitions[i] = cd.NumPartitions - 1
+						break
+					}
+					omittedPartitions[i] = computeShardDimensionIndex(cd, defaultValue)
+					break
 				}
 			}
 		}
@@ -2329,14 +2348,18 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 		last_i := 0
 		var last_shard *storageShard = nil
 		for i := 0; i < len(values); i++ {
-			for j, colidx := range translatable {
-				if colidx < len(values[i]) {
-					shardcols[j] = values[i][colidx]
+			shardnum := 0
+			for j, dim := range dims {
+				partition := 0
+				colidx := translatable[j]
+				if colidx >= 0 && colidx < len(values[i]) {
+					partition = computeShardDimensionIndex(dim, values[i][colidx])
 				} else {
-					shardcols[j] = scm.NewNil()
+					partition = omittedPartitions[j]
 				}
+				shardnum = shardnum*dim.NumPartitions + partition
 			}
-			shard := partitionShards[computeShardIndex(dims, shardcols)]
+			shard := partitionShards[shardnum]
 			if i > 0 && shard != last_shard {
 				checkUniqueForShard(last_shard, values[last_i:i]) // shard has changed: bulk insert all items that belong to this shard
 				last_i = i
