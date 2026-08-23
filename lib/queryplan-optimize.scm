@@ -1707,6 +1707,44 @@ guarded by the values observed while compiling the cached plan. */
 (define like_pattern_core (lambda (pattern)
 	(replace (replace (coalesceNil pattern "") "%" "") "_" "")))
 
+(define text_pattern_selectivity_prior_for_length (lambda (length)
+	(if (<= length 0)
+		1
+		(if (equal? length 1)
+			0.7
+			(max 0.01 (* 0.35
+				(text_pattern_selectivity_prior_for_length (- length 1))))))))
+
+/* Before an index has a measured candidate density, text length is still
+useful statistical evidence. Single-character searches are usually broad;
+each additional literal character rapidly narrows the candidate set. The
+floor avoids pretending that an unseen word is impossible. */
+(define text_pattern_selectivity_prior (lambda (pattern)
+	(if (not (string? pattern))
+		nil
+		(text_pattern_selectivity_prior_for_length
+			(strlen (like_pattern_core pattern))))))
+
+(define expr_text_selectivity_prior (lambda (expr)
+	(match expr
+		((symbol strlike) _value pattern _collation)
+		(text_pattern_selectivity_prior (planner_string_expr_value pattern))
+		((quote strlike) _value pattern _collation)
+		(text_pattern_selectivity_prior (planner_string_expr_value pattern))
+		(cons head tail) (reduce tail (lambda (found item)
+			(if (number? found) found (expr_text_selectivity_prior item)))
+			(expr_text_selectivity_prior head))
+		_ nil)))
+
+(define expr_text_pattern_expr (lambda (expr)
+	(match expr
+		((symbol strlike) _value pattern _collation) pattern
+		((quote strlike) _value pattern _collation) pattern
+		(cons head tail) (reduce tail (lambda (found item)
+			(if (nil? found) (expr_text_pattern_expr item) found))
+			(expr_text_pattern_expr head))
+		_ nil)))
+
 (define broad_like_pattern? (lambda (pattern)
 	(if (not (string? pattern))
 		false
@@ -1799,12 +1837,16 @@ guarded by the values observed while compiling the cached plan. */
 					(define filter_expr (optimize (list (quote lambda)
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(lower_column_expr_for_alias src condition))))
-					(scan_selectivity_estimate
+					(define estimate (scan_selectivity_estimate
 						(session "__memcp_tx")
 						(table (source_schema src) (source_relation src))
 						filtercols
 						(eval filter_expr)
-						max_rows)))
+						max_rows))
+					(define text_prior (expr_text_selectivity_prior condition))
+					(if (number? text_prior)
+						(qassoc_set estimate (quote fallback_selectivity) text_prior)
+						estimate)))
 			(lambda (_e) nil)))))
 
 (define planner_source_row_count (lambda (src)
@@ -2591,7 +2633,12 @@ extrapolated as though the iterator were an unbiased table sample. */
 				(and (number? input_rows)
 					(and (number? rows) (and (number? sampled_input) (> sampled_input 0)))))
 				(if (equal? (planner_estimate_coverage estimate) (quote lower_bound))
-					(coalesceNil fallback input_rows)
+					(begin
+						(define fallback_selectivity
+							(qassoc_get estimate (quote fallback_selectivity) nil))
+						(if (number? fallback_selectivity)
+							(min input_rows (max rows (* input_rows fallback_selectivity)))
+							(coalesceNil fallback input_rows)))
 					(min input_rows (* input_rows (/ rows sampled_input))))
 				(coalesceNil rows fallback))))))
 

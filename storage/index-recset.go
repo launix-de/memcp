@@ -50,6 +50,21 @@ type recSetIndexHook struct {
 
 func (h *recSetIndexHook) ComputeSize() uint { return 0 }
 
+func (h *recSetIndexHook) EstimateCandidates(lower scm.Scmer) (uint32, uint32, bool) {
+	if h == nil || h.shard == nil || !lower.IsCustom(TagRecSet) {
+		return 0, 0, false
+	}
+	set := RecSetFromScmer(lower)
+	if set == nil || set.table != h.shard.t {
+		return 0, 0, false
+	}
+	part := set.shardEntry(h.shard)
+	if part == nil {
+		return 0, h.shard.main_count, true
+	}
+	return uint32(part.count), h.shard.main_count, true
+}
+
 func (h *recSetIndexHook) Bind(lower scm.Scmer) IndexRowMatcher {
 	if h == nil || h.shard == nil || !lower.IsCustom(TagRecSet) {
 		return nil

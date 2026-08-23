@@ -292,8 +292,17 @@ func TestLikeBigramIndexCandidatesAreSafeSuperset(t *testing.T) {
 	check("%casino%", []uint32{0, 1})
 	check("%needle%", []uint32{4})
 	check("%missing%", []uint32{})
+	if candidates, universe, ok := index.EstimateCandidates(scm.NewString("%casino%")); !ok || candidates != 2 || universe != uint32(len(values)) {
+		t.Fatalf("casino estimate = (%d, %d, %v), want (2, %d, true)", candidates, universe, ok, len(values))
+	}
+	if candidates, universe, ok := index.EstimateCandidates(scm.NewString("%missing%")); !ok || candidates != 0 || universe != uint32(len(values)) {
+		t.Fatalf("missing estimate = (%d, %d, %v), want (0, %d, true)", candidates, universe, ok, len(values))
+	}
 	if _, constrained := index.candidatesPattern("%x%"); constrained {
 		t.Fatal("single-rune pattern unexpectedly produced a bigram constraint")
+	}
+	if _, _, ok := index.EstimateCandidates(scm.NewString("%x%")); ok {
+		t.Fatal("single-rune pattern unexpectedly produced a cardinality estimate")
 	}
 }
 

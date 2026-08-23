@@ -576,6 +576,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list (quote coverage) (quote lower_bound)))
 		100000 100000) 100000
 		"capped index candidates remain a lower bound instead of becoming 100% selectivity")
+	(assert (text_pattern_selectivity_prior "%x%") 0.7
+		"single-character text patterns use a broad prior")
+	(assert (text_pattern_selectivity_prior "%needle%") 0.01
+		"long text patterns use the selective prior floor")
+	(assert (membership_estimated_matching_rows
+		(list
+			(list (quote rows) 512)
+			(list (quote sampled) 512)
+			(list (quote capped) true)
+			(list (quote population) (quote index_candidates))
+			(list (quote coverage) (quote lower_bound))
+			(list (quote fallback_selectivity) 0.01))
+		100000 100000) 1000
+		"capped text index candidates use the statistical prior instead of 100 percent")
 	(assert (membership_estimated_matching_rows
 		(list
 			(list (quote rows) 128)

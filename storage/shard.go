@@ -2631,12 +2631,23 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	sampled := int64(0)
 	capped := false
 	indexRestricted := false
+	hookCandidates := int64(-1)
+	hookUniverse := int64(0)
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	var buf [256]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 0, func(_ *StorageIndex, active bool) {
+	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 0, func(index *StorageIndex, active bool) {
 		indexRestricted = active && len(lower) > 0
+		if active {
+			if candidates, universe, ok := index.estimateHookCandidates(currentTx, bounds); ok {
+				hookCandidates = int64(candidates) + int64(len(t.inserts))
+				hookUniverse = int64(universe) + int64(len(t.inserts))
+			}
+		}
 	}, func(batch []uint32) bool {
+		if hookCandidates >= 0 {
+			return false
+		}
 		for _, idx := range batch {
 			if acidMode {
 				if !currentTx.IsVisible(t, idx) {
@@ -2679,6 +2690,14 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		}
 		return true
 	})
+	if hookCandidates >= 0 {
+		return filteredRowEstimate{
+			rows:       hookCandidates,
+			examined:   hookUniverse,
+			population: "index_hook_candidates",
+			coverage:   "upper_bound",
+		}
+	}
 
 	population := "table_rows"
 	if indexRestricted {

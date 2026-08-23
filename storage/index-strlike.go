@@ -151,6 +151,33 @@ func (s *bigramIndex) Bind(lower scm.Scmer) IndexRowMatcher {
 	}
 }
 
+func (s *bigramIndex) EstimateCandidates(lower scm.Scmer) (uint32, uint32, bool) {
+	minimum := s.universe
+	constrained := false
+	var previous rune
+	havePrevious := false
+	for _, current := range lower.String() {
+		if current == '%' || current == '_' {
+			havePrevious = false
+			continue
+		}
+		current = normalizeBigramRune(current)
+		if havePrevious {
+			position := s.grams.find(normalizedBigramKey(previous, current))
+			if position < 0 {
+				return 0, s.universe, true
+			}
+			constrained = true
+			if count := s.grams.counts[position]; count < minimum {
+				minimum = count
+			}
+		}
+		previous = current
+		havePrevious = true
+	}
+	return minimum, s.universe, constrained
+}
+
 func normalizedBigramKey(left, right rune) uint64 {
 	return uint64(uint32(left))<<32 | uint64(uint32(right))
 }
