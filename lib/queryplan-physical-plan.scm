@@ -3406,12 +3406,6 @@ it does not recover parser spelling or leak a scan into logical IR. */
 						(list alias))))
 					best
 					(begin
-						(reduce (query_expr_session_reads term) (lambda (_ expr)
-							(begin
-								(define value (planner_literal_value expr))
-								(planner_record_guard_condition
-									(list (quote equal?) expr
-										(if (list? value) (list (quote quote) value) value))))) nil)
 						(define estimate (planner_source_filter_estimate src term 512))
 						(define rows (membership_estimated_matching_rows estimate input_rows nil))
 						(define work (membership_source_work_profile src term true))
@@ -3476,6 +3470,48 @@ this lowering boundary. */
 			(planner_join_work_cost rows 0.65)
 			rows 0.65))))
 
+/* Both alternatives contain the same text scan. Solve the remaining linear
+cost inequality once and guard the cached plan by that crossover, not by an
+exact parameter value. */
+(define selective_text_filter_crossover_rows (lambda (src candidate)
+	(begin
+		(define zero_candidate (qassoc_set candidate (quote rows) 0))
+		(define one_candidate (qassoc_set candidate (quote rows) 1))
+		(define recset_zero (qassoc_get
+			(selective_text_filter_recset_cost src zero_candidate) (quote total_ns) 0))
+		(define recset_one (qassoc_get
+			(selective_text_filter_recset_cost src one_candidate) (quote total_ns) 0))
+		(define base_total (qassoc_get
+			(selective_text_filter_base_cost src candidate) (quote total_ns) 0))
+		(define row_slope (- recset_one recset_zero))
+		(if (<= row_slope 0)
+			0
+			(max 0 (/ (- base_total recset_zero) row_slope))))))
+
+(define selective_text_filter_runtime_rows_expr (lambda (src candidate)
+	(begin
+		(define predicate (qassoc_get candidate (quote predicate) true))
+		(define alias (source_alias src))
+		(define cols (extract_columns_for_alias src predicate))
+		(define pattern_expr (expr_text_pattern_expr predicate))
+		(define estimate_expr (list (quote scan_selectivity_estimate)
+			'(session "__memcp_tx")
+			(list (quote table) (source_schema src) (source_relation src))
+			(cons (quote list) cols)
+			(list (quote lambda)
+				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+				(lower_column_expr_for_alias src predicate))
+			512))
+		(list (quote membership_estimated_matching_rows)
+			(if (nil? pattern_expr)
+				estimate_expr
+				(list (quote qassoc_set)
+					estimate_expr
+					(list (quote quote) (quote fallback_selectivity))
+					(list (quote text_pattern_selectivity_prior) pattern_expr)))
+			(qassoc_get candidate (quote input_rows) nil)
+			(qassoc_get candidate (quote input_rows) nil)))))
+
 (define choose_selective_text_filter_carrier (lambda (src candidate)
 	(if (nil? candidate)
 		(list "fused_base_scan" nil)
@@ -3487,6 +3523,18 @@ this lowering boundary. */
 			(define work (qassoc_get candidate (quote work) '()))
 			(define normal_choice (if (planner_cost_better? recset_cost base_cost)
 				"scan_recset" "fused_base_scan"))
+			(define crossover_rows (selective_text_filter_crossover_rows src candidate))
+			(if (empty_list? (query_expr_session_reads
+				(qassoc_get candidate (quote predicate) true)))
+				nil
+				(planner_record_guard_condition
+					(if (equal? normal_choice "scan_recset")
+						(list (quote <)
+							(selective_text_filter_runtime_rows_expr src candidate)
+							crossover_rows)
+						(list (quote >=)
+							(selective_text_filter_runtime_rows_expr src candidate)
+							crossover_rows))))
 			(define alternatives (list "scan_recset" "fused_base_scan"))
 			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
 			(define forced (planner_physical_override decision_id))
@@ -3513,7 +3561,8 @@ this lowering boundary. */
 					(list "driver_rows" (qassoc_get candidate (quote rows) nil))
 					(list "driver_input_rows" (qassoc_get candidate (quote input_rows) nil))
 					(list "density" (/ (qassoc_get candidate (quote rows) 0)
-						(qassoc_get candidate (quote input_rows) 1)))))
+						(qassoc_get candidate (quote input_rows) 1)))
+					(list "crossover_rows" crossover_rows)))
 				(list "alternatives" (list
 					(list
 						(list "plan" "scan_recset")

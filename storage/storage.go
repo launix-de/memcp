@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "io"
+import "math/rand"
 import "sort"
 import "unsafe"
 import "github.com/carli2/hybridsort"
@@ -641,11 +642,29 @@ func Init(en scm.Env) {
 			capped := false
 			population := "table_rows"
 			coverage := "exact"
-			for _, shard := range t.ActiveShards() {
+			shards := t.ActiveShards()
+			start := 0
+			if len(shards) > 1 {
+				start = rand.Intn(len(shards))
+			}
+			for offset := range shards {
+				shard := shards[(start+offset)%len(shards)]
 				if shard == nil {
 					continue
 				}
 				estimate := shard.EstimateFilteredRows(conditionCols, condition, limit-int(rows), currentTx)
+				if estimate.population == "index_hook_candidates" && estimate.examined > 0 {
+					input := int64(t.CountEstimate())
+					estimatedRows := input * estimate.rows / estimate.examined
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(estimatedRows)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(false)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(estimate.examined)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol(estimate.population)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(estimate.coverage)}),
+					})
+				}
 				rows += estimate.rows
 				sampled += estimate.examined
 				if estimate.population != "table_rows" {

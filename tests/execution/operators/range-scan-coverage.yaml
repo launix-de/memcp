@@ -518,6 +518,29 @@ test_cases:
         - 'selective_text_filter_carrier'
         - 'chosen fused_base_scan'
 
+  - name: "Cached text filter recompiles across the RecSet cost crossover"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define resultrow (lambda (_row) nil))
+        (define selective_query "SELECT f.id, d.label FROM selective_text_driver f LEFT JOIN selective_text_dim d ON d.id = f.dim_id WHERE f.search LIKE '%needle%' ORDER BY f.id LIMIT 4")
+        (define broad_query "SELECT f.id, d.label FROM selective_text_driver f LEFT JOIN selective_text_dim d ON d.id = f.dim_id WHERE f.search LIKE '%asset%' ORDER BY f.id LIMIT 4")
+        (define first_formula (cached_parse cache parse_sql "memcp-tests" selective_query nil "root" sess true))
+        (with_session sess (lambda () (eval first_formula)))
+        (define entry (car (cache (car (cache)))))
+        (define variants_after_first (count (entry "variants")))
+        (define second_formula (cached_parse cache parse_sql "memcp-tests" broad_query nil "root" sess true))
+        (with_session sess (lambda () (eval second_formula)))
+        (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
+          "ok"
+          (error (concat "unexpected text selectivity variants: first=" variants_after_first
+            " final=" (count (entry "variants"))))))
+    expect:
+      data: ["ok"]
+
   - name: "EXPLAIN IR swaps to selective driver"
     fail_comment: "query is not fully decorrelated anymore; logical IR must not contain subquery markers"
     sql: "EXPLAIN IR SELECT d.label, m.id FROM perf_main m JOIN perf_dim d ON m.category = d.cat_id WHERE d.label = 'one'"

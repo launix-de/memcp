@@ -1085,6 +1085,45 @@ func (s *StorageIndex) bindRowMatchers(bounds boundaries, cols []colGetter, hook
 	}
 }
 
+func (s *StorageIndex) estimateHookCandidates(tx *TxContext, bounds boundaries) (uint32, uint32, bool) {
+	state := s.stateForTx(tx, false)
+	if state == nil {
+		return 0, 0, false
+	}
+	s.mu.Lock()
+	if !state.active {
+		s.mu.Unlock()
+		return 0, 0, false
+	}
+	hooks := append([]IndexHook(nil), state.indexHooks...)
+	s.mu.Unlock()
+
+	var candidates uint32
+	var universe uint32
+	found := false
+	for colIdx, bound := range bounds {
+		if bound.matcher == nil || bound.matcher.IsSorted() || colIdx >= len(hooks) {
+			continue
+		}
+		estimator, ok := hooks[colIdx].(IndexCandidateEstimator)
+		if !ok {
+			continue
+		}
+		count, hookUniverse, ok := estimator.EstimateCandidates(bound.lower)
+		if !ok {
+			continue
+		}
+		if !found || count < candidates {
+			candidates = count
+		}
+		if hookUniverse > universe {
+			universe = hookUniverse
+		}
+		found = true
+	}
+	return candidates, universe, found
+}
+
 // iterate over index using a caller-provided buffer for batching
 func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 

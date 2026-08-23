@@ -37,6 +37,13 @@ type IndexHook interface {
 	ComputeSize() uint
 }
 
+// IndexCandidateEstimator is an optional, constant-time cardinality view over
+// a bound hook. Candidate counts may be upper bounds because the residual SQL
+// predicate remains authoritative for correctness.
+type IndexCandidateEstimator interface {
+	EstimateCandidates(lower scm.Scmer) (candidates uint32, universe uint32, ok bool)
+}
+
 // IndexDeployContext is passed while binding an analyzer to one shard. External
 // custom indexes can use the public batch reader without accessing shard state.
 type IndexDeployContext struct {
