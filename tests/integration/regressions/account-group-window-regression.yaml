@@ -95,3 +95,100 @@ test_cases:
           _year_date: 1735689600
           differenz: 7
           istAz: 13
+
+  - name: "nested window aggregate retains derived expression alias"
+    sql: |
+      SELECT _year_date,
+        SUM(differenz) AS differenz,
+        SUM(differenz)*100/GREATEST((SUM(SUM(differenz)) OVER ()), 1) AS differenz_percent
+      FROM (
+        SELECT date AS _year_date,
+          COALESCE(resultAz, 0) + COALESCE(istAz, 0) - COALESCE(sollAz, 0) AS differenz
+        FROM vac_reg_main
+      ) t
+      GROUP BY _year_date
+      ORDER BY _year_date
+    expect:
+      data:
+        - _year_date: 1704067200
+          differenz: 1
+          differenz_percent: 8.333333333333334
+        - _year_date: 1706745600
+          differenz: 4
+          differenz_percent: 33.333333333333336
+        - _year_date: 1735689600
+          differenz: 7
+          differenz_percent: 58.333333333333336
+
+  - name: "outer wrapper retains nested window aggregate derived alias"
+    sql: |
+      SELECT grouped.*
+      FROM (
+        SELECT COUNT(*) AS _count,
+          _year_date AS _year_date,
+          SUM(differenz) AS differenz,
+          SUM(differenz)*100/GREATEST((SUM(SUM(differenz)) OVER ()), 1) AS differenz_percent
+        FROM (
+          SELECT m.date AS _year_date,
+            COALESCE(m.resultAz, 0) + COALESCE(m.istAz, 0) - COALESCE(m.sollAz, 0) AS differenz
+          FROM vac_reg_main m
+        ) account_rows
+        WHERE account_rows._year_date >= 1704067200
+        GROUP BY _year_date
+      ) grouped
+      WHERE TRUE
+      ORDER BY grouped._year_date
+      LIMIT 72 OFFSET 0
+    expect:
+      data:
+        - _count: 1
+          _year_date: 1704067200
+          differenz: 1
+          differenz_percent: 8.333333333333334
+        - _count: 1
+          _year_date: 1706745600
+          differenz: 4
+          differenz_percent: 33.333333333333336
+        - _count: 1
+          _year_date: 1735689600
+          differenz: 7
+          differenz_percent: 58.333333333333336
+
+  - name: "window aggregate derived alias survives flattened derived left joins"
+    sql: |
+      SELECT grouped.*
+      FROM (
+        SELECT COUNT(*) AS _count,
+          _year_date AS _year_date,
+          SUM(differenz) AS differenz,
+          SUM(differenz)*100/GREATEST((SUM(SUM(differenz)) OVER ()), 1) AS differenz_percent
+        FROM (
+          SELECT m.date AS _year_date,
+            COALESCE(m.resultAz, 0) + COALESCE(m.istAz, 0) - COALESCE(m.sollAz, 0) AS differenz,
+            ref.label AS ref_label
+          FROM vac_reg_main m
+          LEFT JOIN (
+            SELECT ID AS ref_id, label AS label
+            FROM vac_reg_ref
+          ) ref ON ref.ref_id = m.ID
+        ) account_rows
+        WHERE account_rows._year_date >= 1704067200
+        GROUP BY _year_date
+      ) grouped
+      WHERE TRUE
+      ORDER BY grouped._year_date
+      LIMIT 72 OFFSET 0
+    expect:
+      data:
+        - _count: 1
+          _year_date: 1704067200
+          differenz: 1
+          differenz_percent: 8.333333333333334
+        - _count: 1
+          _year_date: 1706745600
+          differenz: 4
+          differenz_percent: 33.333333333333336
+        - _count: 1
+          _year_date: 1735689600
+          differenz: 7
+          differenz_percent: 58.333333333333336

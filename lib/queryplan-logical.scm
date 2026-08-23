@@ -1000,6 +1000,8 @@ instead of capturing whichever session populated the cache first. */
 		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) false
 		((symbol count_distinct) _agg_expr) false
 		((quote count_distinct) _agg_expr) false
+		((symbol group_concat_distinct) _agg_expr _separator) false
+		((quote group_concat_distinct) _agg_expr _separator) false
 		((symbol get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
 		((quote get_column) tblvar _ _ _) (equal?? (resolve_column_alias tblvar default_alias) alias)
 		(cons _head tail) (reduce tail (lambda (found item) (or found (expr_refs_alias_after_group? default_alias alias item))) false)
@@ -3574,8 +3576,17 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(neumann_fail "untangle_query" "window aggregate stage requires a base source")
 			true)
 		(define alias (source_alias src))
-		(define partition_exprs (nth over 0))
-		(define canonical_args (map (coalesceNil args '()) (lambda (arg) (canonical_column_expr_for_alias alias arg))))
+		/* Window arguments contain a list-of-expressions below the window node.
+		Keep the active derived projections in the logical context so aliases in
+		nested aggregate arguments are expanded before the stage sees a base
+		source. This remains an expression tree walk; it never builds an
+		alternative physical plan. */
+		(define derived_rewrites (uctx_get ctx (quote derived-rewrites) '()))
+		(define rewrite_window_expr (lambda (expr)
+			(canonical_column_expr_for_alias alias
+				(rewrite_window_derived_ref_chain derived_rewrites expr))))
+		(define partition_exprs (map (nth over 0) rewrite_window_expr))
+		(define canonical_args (map (coalesceNil args '()) rewrite_window_expr))
 		(define ags (dedupe_aggregates_by_col (window_aggregate_descriptor fn canonical_args)))
 		(define keys (if (empty_list? partition_exprs)
 			'(1)
@@ -4722,7 +4733,9 @@ source alias is the stable identity consumed by all later planner phases. */
 		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (equal? tblvar alias)
 			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
 			expr)
-		(cons head tail) (cons head (map tail (lambda (item) (rewrite_derived_ref alias projection item))))
+		(cons head tail) (cons
+			(rewrite_derived_ref alias projection head)
+			(map tail (lambda (item) (rewrite_derived_ref alias projection item))))
 		_ expr)))
 
 (define rewrite_derived_fields (lambda (alias projection fields)
@@ -4762,6 +4775,30 @@ source alias is the stable identity consumed by all later planner phases. */
 	(reduce (coalesceNil rewrites '()) (lambda (acc rewrite)
 		(match rewrite
 			'(alias projection) (rewrite_derived_ref alias projection acc)
+			_ acc))
+		expr)))
+
+/* Aggregate arguments below a window node can retain an unqualified output
+alias after name binding. Resolve that alias against a flattened derived
+projection before the physical base-source alias is applied. Only a projection
+that actually owns the title consumes the reference. */
+(define rewrite_window_derived_ref (lambda (alias projection expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (nil? tblvar) (equal? tblvar alias))
+			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
+			expr)
+		((quote get_column) tblvar _tbl_ignorecase col col_ignorecase) (if (or (nil? tblvar) (equal? tblvar alias))
+			(coalesceNil (field_expr_by_title projection col col_ignorecase) expr)
+			expr)
+		(cons head tail) (cons
+			(rewrite_window_derived_ref alias projection head)
+			(map tail (lambda (item) (rewrite_window_derived_ref alias projection item))))
+		_ expr)))
+
+(define rewrite_window_derived_ref_chain (lambda (rewrites expr)
+	(reduce (coalesceNil rewrites '()) (lambda (acc rewrite)
+		(match rewrite
+			'(alias projection) (rewrite_window_derived_ref alias projection acc)
 			_ acc))
 		expr)))
 
@@ -5194,7 +5231,8 @@ source alias is the stable identity consumed by all later planner phases. */
 								(define expr_ctx (make_uctx child_ctx (list
 									(list (quote outer-sources) expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
-									(list (quote local-sources) sources))))
+									(list (quote local-sources) sources)
+									(list (quote derived-rewrites) rewrites))))
 								(define source_join_result (untangle_source_join_exprs_with_stages sources expr_outer_sources expr_ctx))
 								(define untangled_sources (nth source_join_result 0))
 								(define source_join_stage_sources (nth source_join_result 2))
@@ -5202,7 +5240,8 @@ source alias is the stable identity consumed by all later planner phases. */
 								(define joined_expr_ctx (make_uctx child_ctx (list
 									(list (quote outer-sources) joined_expr_outer_sources)
 									(list (quote outer-resolution-sources) nested_outer_resolution_sources)
-									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources))))))
+									(list (quote local-sources) (merge_unique (list untangled_sources source_join_stage_sources)))
+									(list (quote derived-rewrites) rewrites))))
 								/* SQL name ownership ends in bind_query_names. Derived flattening
 								only rewrites references carrying an explicit bound alias. */
 								(if (expr_contains_window? rewritten_where)

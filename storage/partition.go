@@ -908,7 +908,7 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 					// Rebuild with shifted recids
 					items := make([]indexPair, 0)
 					index.baseState.deltaBtree.Ascend(func(item indexPair) bool {
-						items = append(items, indexPair{item.itemid + int(mainN), item.data})
+						items = append(items, indexPair{itemid: item.itemid + int(mainN), data: item.data})
 						return true
 					})
 					index.baseState.deltaBtree.Clear(false)

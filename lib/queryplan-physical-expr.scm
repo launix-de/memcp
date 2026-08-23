@@ -420,18 +420,31 @@ partner. */
 					(list (quote coalesceNil) raw_probe false)
 					raw_probe))))))
 
-(define bounded_scalar_query_probe_inline_presence_stages (lambda (direct_stages probe_work_rows)
-	(if (not (equal? (count direct_stages) 1))
-		'()
-		(filter direct_stages (lambda (nested_stage)
+(define bounded_scalar_query_probe_inline_presence_stages (lambda (dependency_graph direct_stages probe_work_rows)
+	(begin
+		(define eligible_stages (filter direct_stages (lambda (nested_stage)
 			(and (group_stage? nested_stage)
 				(and (or (presence_probe_stage? nested_stage)
 					(not (stage_shared_prepare? nested_stage)))
 					(and (scalar_or_presence_probe_stage? nested_stage)
 						(and (not (stage_has_residual_outer_refs? nested_stage))
-							(stage_direct_probe_cost_preferred? nested_stage probe_work_rows))))))))))
+							(stage_direct_probe_cost_preferred? nested_stage probe_work_rows))))))))
+		(define one_dependency_chain (reduce direct_stages (lambda (found root)
+			(or found
+				(begin
+					(define closure_ids (stage_id_set
+						(stage_dependency_closure_using_graph dependency_graph root)))
+					(reduce direct_stages (lambda (covered candidate)
+						(and covered (has_assoc? closure_ids (gs_id candidate)))) true)))) false))
+		/* A dependency closure is one physical choice. Mixing direct children with
+		prepared parents duplicates work; independent sibling projections retain
+		their shared carrier instead of emitting one scan per output column. */
+		(if (and one_dependency_chain
+			(equal? (count eligible_stages) (count direct_stages)))
+			eligible_stages
+			'()))))
 
-(define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys probe_work_rows)
+(define lower_scalar_first_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys probe_work_rows fallback_probe_work_rows)
 	(begin
 		(define direct_stages (scalar_first_query_probe_direct_nested_stages all_stages stage))
 		(define probe_catalog (stage_catalog_with_nested
@@ -440,11 +453,19 @@ partner. */
 		(define closure_index (stage_dependency_closure_index_using_graph dependency_graph direct_stages))
 		(define nested_stages
 			(scalar_first_query_probe_nested_stages_using_index direct_stages closure_index))
+		(define fallback_probe_literal (planner_literal_value fallback_probe_work_rows))
+		(define decision_probe_work_rows (if (number? (planner_literal_value probe_work_rows))
+			probe_work_rows
+			(if (and (equal? (count (gs_aggregates stage)) 1)
+				(and (> (count (stage_dependency_closure_using_graph dependency_graph stage)) 1)
+					(and (number? fallback_probe_literal) (<= fallback_probe_literal 1))))
+				fallback_probe_work_rows
+				probe_work_rows)))
 		/* A bounded parent probe evaluates this subtree only for rows that survived
 		root braking. Compare those expected probe calls with the dependent stage's
 		input size; retain the group cache when repeated probes amortize its build. */
-		(define inline_presence_stages (if (number? probe_work_rows)
-			(bounded_scalar_query_probe_inline_presence_stages direct_stages probe_work_rows)
+		(define inline_presence_stages (if (number? (planner_literal_value decision_probe_work_rows))
+			(bounded_scalar_query_probe_inline_presence_stages dependency_graph direct_stages decision_probe_work_rows)
 			'()))
 		/* Once a parent is selected for direct probing, its complete dependency
 		closure is owned by that probe. Preparing children separately would pay
@@ -1385,7 +1406,8 @@ choice table instead of adding another promotion path. */
 				value_expr
 				keys
 				(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
-				probe_work_rows)
+				probe_work_rows
+				effective_probe_work_rows)
 			(symbol table-scan)
 			(lower_table_scalar_first_probe_expr
 				sources default_alias src stage value_expr keys lookup_keys
@@ -2799,6 +2821,10 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 	(match expr
 		((symbol aggregate) _expr _reduce _neutral) true
 		((quote aggregate) _expr _reduce _neutral) true
+		((symbol count_distinct) _expr) true
+		((quote count_distinct) _expr) true
+		((symbol group_concat_distinct) _expr _separator) true
+		((quote group_concat_distinct) _expr _separator) true
 		_ false)))
 
 (define aggregate_count_descriptor (list 1 (quote +) 0))
@@ -2851,6 +2877,8 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 			(dedupe_aggregates_by_col (merge (map (list stage requested_col) extract_aggregates))))
 		((symbol count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
 		((quote count_distinct) agg_expr) (list (count_distinct_descriptor agg_expr))
+		((symbol group_concat_distinct) agg_expr _separator) (list (count_distinct_descriptor agg_expr))
+		((quote group_concat_distinct) agg_expr _separator) (list (count_distinct_descriptor agg_expr))
 		((symbol aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
 		((quote aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
 		(cons head tail) (dedupe_aggregates_by_col (merge (map tail extract_aggregates)))
@@ -3083,6 +3111,8 @@ working on the original values. */
 	(match expr
 		((symbol count_distinct) _agg_expr) '()
 		((quote count_distinct) _agg_expr) '()
+		((symbol group_concat_distinct) _agg_expr _separator) '()
+		((quote group_concat_distinct) _agg_expr _separator) '()
 		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) '()
 		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) '()
 		((symbol get_column) tblvar ignorecase col col_ignorecase)
@@ -3601,6 +3631,31 @@ ever-larger subtrees. */
 			(list (quote count) read_expr)
 			(list (quote coalesceNil) read_expr 0)))))
 
+(define group_concat_distinct_value_expr (lambda (read_expr separator)
+	(list (quote if)
+		(list (quote list?) read_expr)
+		(list (quote reduce)
+			(list (quote filter) read_expr
+				(list (quote lambda) (list (quote value))
+					(list (quote not) (list (quote nil?) (quote value)))))
+			(list (quote lambda) (list (quote joined) (quote value))
+				(list (quote if)
+					(list (quote nil?) (quote joined))
+					(list (quote concat) (quote value))
+					(list (quote concat) (quote joined) separator (quote value))))
+			nil)
+		(list (quote if) (list (quote nil?) read_expr) nil (list (quote concat) read_expr)))))
+
+(define group_concat_distinct_read_expr (lambda (input grouptbl agg_expr separator)
+	(group_concat_distinct_value_expr
+		(list (quote get_column) grouptbl false (aggregate_col_name_using input (count_distinct_descriptor agg_expr)) false)
+		separator)))
+
+(define direct_group_concat_distinct_read_expr (lambda (agg_expr separator)
+	(group_concat_distinct_value_expr
+		(list (quote get_assoc) (quote rowassoc) (aggregate_col_name (count_distinct_descriptor agg_expr)))
+		separator)))
+
 (define replace_group_probe_stage_lookup_keys (lambda (input alias grouptbl keys key_names ags key_index stage)
 	(if (not (group_stage? stage))
 		stage
@@ -3665,6 +3720,10 @@ ever-larger subtrees. */
 				(count_distinct_read_expr input grouptbl agg_expr)
 				((quote count_distinct) agg_expr)
 				(count_distinct_read_expr input grouptbl agg_expr)
+				((symbol group_concat_distinct) agg_expr separator)
+				(group_concat_distinct_read_expr input grouptbl agg_expr separator)
+				((quote group_concat_distinct) agg_expr separator)
+				(group_concat_distinct_read_expr input grouptbl agg_expr separator)
 				((symbol aggregate) agg_expr agg_reduce agg_neutral)
 				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
@@ -3714,6 +3773,10 @@ ever-larger subtrees. */
 				(count_distinct_read_expr input grouptbl agg_expr)
 				((quote count_distinct) agg_expr)
 				(count_distinct_read_expr input grouptbl agg_expr)
+				((symbol group_concat_distinct) agg_expr separator)
+				(group_concat_distinct_read_expr input grouptbl agg_expr separator)
+				((quote group_concat_distinct) agg_expr separator)
+				(group_concat_distinct_read_expr input grouptbl agg_expr separator)
 				((symbol aggregate) agg_expr agg_reduce agg_neutral)
 				(group_aggregate_order_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
@@ -4011,6 +4074,10 @@ ever-larger subtrees. */
 				(count_distinct_read_expr (quote rowassoc) agg_expr)
 				((quote count_distinct) agg_expr)
 				(count_distinct_read_expr (quote rowassoc) agg_expr)
+				((symbol group_concat_distinct) agg_expr separator)
+				(direct_group_concat_distinct_read_expr agg_expr separator)
+				((quote group_concat_distinct) agg_expr separator)
+				(direct_group_concat_distinct_read_expr agg_expr separator)
 				((symbol aggregate) agg_expr agg_reduce agg_neutral)
 				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)

@@ -487,6 +487,39 @@ func TestShardWriteOwnershipUsesExplicitTransactionState(t *testing.T) {
 	}
 }
 
+func TestShardWriteOwnershipIsLocalToParallelTransactionWorker(t *testing.T) {
+	shard := &storageShard{}
+	tx := NewTxContext(TxCursorStability)
+	ownerReady := make(chan struct{})
+	releaseOwner := make(chan struct{})
+	ownerDone := make(chan struct{})
+
+	go func() {
+		scm.SetValues(map[string]any{"write-owner-test": true}, func() {
+			shard.enterWriteOwner()
+			tx.EnterShardWrite(shard)
+			close(ownerReady)
+			<-releaseOwner
+			tx.ExitShardWrite(shard)
+			shard.exitWriteOwner()
+		})
+		close(ownerDone)
+	}()
+	<-ownerReady
+
+	visible := make(chan bool, 1)
+	go scm.SetValues(map[string]any{"write-observer-test": true}, func() {
+		visible <- shard.hasWriteOwnerForTx(tx)
+	})
+	if <-visible {
+		close(releaseOwner)
+		<-ownerDone
+		t.Fatal("parallel transaction worker inherited another goroutine's shard ownership")
+	}
+	close(releaseOwner)
+	<-ownerDone
+}
+
 func TestShowStatsLockedDoesNotReenterWithQueuedWriter(t *testing.T) {
 	shard := &storageShard{
 		main_count:  1,

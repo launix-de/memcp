@@ -761,6 +761,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s sep) _over))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func "GROUP_CONCAT" (list s ",") _over))
 		/* plain GROUP_CONCAT */
+		(parser '((atom "GROUP_CONCAT" true) "(" (atom "DISTINCT" true) (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")") '('group_concat_distinct s sep))
+		(parser '((atom "GROUP_CONCAT" true) "(" (atom "DISTINCT" true) (define s sql_expression) ")") '('group_concat_distinct s ","))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) (atom "SEPARATOR" true) (define sep sql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s sql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a "," 'b))) nil))
 		/* user-registered aggregates: FUNCNAME(expr) where FUNCNAME is in sql_aggregates */

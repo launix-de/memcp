@@ -903,11 +903,47 @@ func (t *storageShard) hasWriteOwner() bool {
 	return t.writeOwners[goid] > 0
 }
 
+// runWithWriteLockReleased lets trigger code execute without holding shard.mu.
+// The ownership markers must disappear together with the physical lock:
+// nested trigger queries use them to decide whether they have to acquire the
+// shard lock themselves. Leaving either marker published makes a nested update
+// believe it owns an unlocked RWMutex and can end in an unmatched Unlock.
+func (t *storageShard) runWithWriteLockReleased(currentTx *TxContext, fn func()) {
+	hadGoroutineOwner := t.hasWriteOwner()
+	hadTxOwner := currentTx != nil && currentTx.HasShardWrite(t)
+	if hadGoroutineOwner {
+		t.exitWriteOwner()
+	}
+	if hadTxOwner {
+		currentTx.ExitShardWrite(t)
+	}
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		if hadTxOwner {
+			currentTx.EnterShardWrite(t)
+		}
+		if hadGoroutineOwner {
+			t.enterWriteOwner()
+		}
+	}()
+	fn()
+}
+
 // hasWriteOwnerForTx uses the explicit transaction lock state on SQL paths.
 // The goroutine owner fallback remains necessary for internal callers that do
 // not carry a transaction context.
 func (t *storageShard) hasWriteOwnerForTx(currentTx *TxContext) bool {
 	if currentTx != nil {
+		// TxContext is shared by parallel shard workers. Its depth is useful for
+		// transaction bookkeeping, but it cannot prove that this goroutine owns
+		// the mutex: another worker in the same transaction may hold it. SQL and
+		// fanout goroutines have a GLS identity, so use the goroutine-local marker
+		// whenever one is available and keep the transaction marker only as an
+		// untagged internal-call fallback.
+		if currentGoroutineID() != 0 {
+			return t.hasWriteOwner()
+		}
 		return currentTx.HasShardWrite(t)
 	}
 	return t.hasWriteOwner()
@@ -1124,11 +1160,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				if withTrigger && triggerOldRow != nil {
 					newSchemaRow := schemaRowFromDelta(d2)
 					if alreadyLocked {
-						func() {
-							t.mu.Unlock()
-							defer t.mu.Lock()
+						t.runWithWriteLockReleased(currentTx, func() {
 							newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
-						}()
+						})
 					} else {
 						newSchemaRow = t.t.ExecuteBeforeUpdateTriggers(triggerOldRow, newSchemaRow)
 					}
@@ -1328,11 +1362,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 			}
 			if withTrigger && triggerOldRow != nil {
 				if alreadyLocked {
-					func() {
-						t.mu.Unlock()
-						defer t.mu.Lock()
+					t.runWithWriteLockReleased(currentTx, func() {
 						t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
-					}()
+					})
 				} else {
 					t.t.ExecuteTriggers(AfterUpdate, triggerOldRow, triggerNewRow)
 				}
@@ -1370,11 +1402,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 				// Execute BEFORE DELETE triggers (can abort delete by returning false)
 				beforeDeleteOk := true
 				if alreadyLocked {
-					func() {
-						t.mu.Unlock()
-						defer t.mu.Lock()
+					t.runWithWriteLockReleased(currentTx, func() {
 						beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow)
-					}()
+					})
 				} else {
 					beforeDeleteOk = t.t.ExecuteBeforeDeleteTriggers(triggerDeletedRow)
 				}
@@ -1429,11 +1459,9 @@ func (t *storageShard) UpdateFunctionBatch(idx uint32, withTrigger bool, already
 					// Batch mode: collect row, trigger fires later via Flush()
 					batch.Add(triggerDeletedRow)
 				} else if alreadyLocked {
-					func() {
-						t.mu.Unlock()
-						defer t.mu.Lock()
+					t.runWithWriteLockReleased(currentTx, func() {
 						t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
-					}()
+					})
 				} else {
 					t.t.ExecuteTriggers(AfterDelete, triggerDeletedRow, nil)
 				}
@@ -2437,7 +2465,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			}
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
-				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
 			}
 			index.mu.Unlock()
 		}
@@ -2505,7 +2533,7 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 			}
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
-				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{int(recid), newrow})
+				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
 			}
 			index.mu.Unlock()
 		}

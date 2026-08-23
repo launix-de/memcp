@@ -96,6 +96,16 @@ test_cases:
       data:
         - {filename: "report.pdf"}
 
+  - name: "Bounded doubly-nested scalar probe does not build the revision domain"
+    fail_comment: "a point-constrained outer row must carry the complete nested scalar dependency chain as direct probes"
+    sql: "EXPLAIN SELECT ID FROM nc_doc WHERE (SELECT f.filename FROM nc_files f WHERE f.ID = (SELECT r.file FROM nc_revision r WHERE r.doc = nc_doc.ID ORDER BY r.created DESC, r.id DESC LIMIT 1) LIMIT 1) = 'report.pdf' AND ID IN (10)"
+    expect:
+      result_contains:
+        - "scan_order"
+        - "nc_revision"
+      result_not_contains:
+        - ".grp:nc_revision"
+
   - name: "Doubly-nested inside derived table"
     sql: "SELECT t.filename FROM (SELECT (SELECT f.filename FROM nc_files f WHERE f.ID = (SELECT r.file FROM nc_revision r WHERE r.doc = nc_doc.ID ORDER BY r.created DESC LIMIT 1) LIMIT 1) AS filename FROM nc_doc) t"
     expect:

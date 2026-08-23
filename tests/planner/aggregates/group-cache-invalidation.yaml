@@ -37,6 +37,16 @@ test_cases:
         (4, 'Sales', 50, false),
         (5, 'HR', 120, true)
 
+  - name: "Parameterized filtered scalar aggregate materializes its presence column"
+    sql: >
+      SELECT COALESCE(SUM(COALESCE(salary, 0) - COALESCE(id, 0)), 0) AS balance
+      FROM sc_base
+      WHERE id > 0 AND salary < 1000
+    expect:
+      rows: 1
+      data:
+        - balance: 605
+
   # --- Baseline GROUP BY queries ---
   - name: "Baseline: COUNT per dept"
     sql: "SELECT dept, COUNT(*) AS c FROM sc_base GROUP BY dept ORDER BY dept"
