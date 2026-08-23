@@ -37,6 +37,11 @@ type storageShard struct {
 	uuid uuid.UUID // uuid.String()
 	// main storage
 	main_count uint32 // size of main storage
+	// plannerMainRows and plannerDeltaRows publish only row counts. They may be
+	// read without mu by the compiler; shard containers themselves remain
+	// strictly lock-protected. Writers update these counters while holding mu.
+	plannerMainRows  atomic.Uint32
+	plannerDeltaRows atomic.Uint64
 	// columns, deltaColumns, inserts, deletions and Indexes are shard-local
 	// internals guarded by mu. Code outside this file
 	// must treat s.mu as the only authority for shard-local state and must not
@@ -520,6 +525,7 @@ func (u *storageShard) ensureColumnLoaded(colName string, alreadyLocked bool) Co
 		f.Close()
 		if uint32(cnt) > u.main_count {
 			u.main_count = uint32(cnt)
+			u.plannerMainRows.Store(uint32(cnt))
 		}
 		columnstorage = u.attachColumnRuntime(colName, columnstorage)
 		u.columns[colName] = columnstorage
@@ -809,8 +815,10 @@ func cacheShardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	}
 	// clear in-memory data (no disk backing to flush to)
 	s.inserts = nil
+	s.plannerDeltaRows.Store(0)
 	s.deletions.Reset()
 	s.main_count = 0
+	s.plannerMainRows.Store(0)
 	for col := range s.columns {
 		if str, ok := s.columns[col].(*StorageString); ok && str.compressed {
 			GlobalCache.removeInternal(str, freedByType)
@@ -2434,6 +2442,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			index.mu.Unlock()
 		}
 	}
+	t.plannerDeltaRows.Store(uint64(len(t.inserts)))
 	// If any row had an explicit AI value exceeding the reserved range, bump the counter.
 	// Auto_increment (local) holds the base before reservation; auto-assigned IDs are
 	// in [Auto_increment+1 .. Auto_increment+len(values)]. Any stored value beyond that
@@ -2501,6 +2510,7 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 			index.mu.Unlock()
 		}
 	}
+	t.plannerDeltaRows.Store(uint64(len(t.inserts)))
 }
 
 func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer, currentTx *TxContext) (result uint32, present bool) {
@@ -3167,6 +3177,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 				newProxy := cloneComputeProxyRows(oldProxy, result, rebuiltRowIDs)
 				result.columns[col] = newProxy
 				result.main_count = uint32(len(rebuiltRowIDs))
+				result.plannerMainRows.Store(result.main_count)
 				b.WriteString(col)
 				b.WriteString(" ")
 				b.WriteString(newProxy.String())
@@ -3222,6 +3233,7 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 
 			result.columns[col] = newcol
 			result.main_count = i
+			result.plannerMainRows.Store(i)
 
 			// write statistics
 			b.WriteString(col) // colname
@@ -3301,7 +3313,9 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		result.columns = t.columns
 		result.deltaColumns = t.deltaColumns
 		result.main_count = t.main_count
+		result.plannerMainRows.Store(t.main_count)
 		result.inserts = t.inserts
+		result.plannerDeltaRows.Store(uint64(len(t.inserts)))
 		result.deletions = deletions
 		result.Indexes = t.Indexes
 		if t.t.PersistencyMode == Safe || t.t.PersistencyMode == Logged {
