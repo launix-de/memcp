@@ -433,6 +433,14 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 		((quote dependent-subquery) _kind _probe _subquery _outer_sources) true
 		_ false)))
 
+(define expr_contains_dependent_subquery_marker? (lambda (expr)
+	(if (dependent_subquery_marker? expr)
+		true
+		(match expr
+			(cons _head tail) (reduce tail (lambda (found item)
+				(or found (expr_contains_dependent_subquery_marker? item))) false)
+			_ false))))
+
 (define dep_subquery_kind (lambda (expr) (nth expr 1)))
 (define dep_subquery_probe (lambda (expr) (nth expr 2)))
 (define dep_subquery_query (lambda (expr) (nth expr 3)))
@@ -4137,15 +4145,15 @@ carrier selection remains a later, per-stage cost decision. */
 			(nth rewritten 3))
 		rewritten)))
 
-(define btw2025_decorrelate_exprs_using (lambda (exprs ctx resolved)
+(define btw2025_decorrelate_marked_exprs_using (lambda (exprs ctx resolved)
 	(match exprs
 		(cons expr rest) (begin
-			(define current (btw2025_decorrelate_expr_using expr ctx resolved))
-			(define tail (btw2025_decorrelate_exprs_using rest ctx (nth current 1)))
+			(define current (btw2025_decorrelate_marked_expr_using expr ctx resolved))
+			(define tail (btw2025_decorrelate_marked_exprs_using rest ctx (nth current 1)))
 			(list (cons (nth current 0) (nth tail 0)) (nth tail 1)))
 		_ (list '() resolved))))
 
-(define btw2025_decorrelate_expr_using (lambda (expr ctx resolved)
+(define btw2025_decorrelate_marked_expr_using (lambda (expr ctx resolved)
 	(begin
 		(define key (btw2025_dependent_marker_key expr))
 		(if (and (not (nil? key)) (has_assoc? resolved key))
@@ -4158,11 +4166,16 @@ carrier selection remains a later, per-stage cost decision. */
 					(define rewritten (btw2025_resolve_dependent_subquery expr ctx))
 					(list rewritten (set_assoc resolved key rewritten)))
 				(cons head tail) (begin
-					(define rewritten_tail (btw2025_decorrelate_exprs_using tail ctx resolved))
+					(define rewritten_tail (btw2025_decorrelate_marked_exprs_using tail ctx resolved))
 					(list
 						(combine_stage_rewrite_results head (nth rewritten_tail 0))
 						(nth rewritten_tail 1)))
 				_ (list (list expr '() '()) resolved))))))
+
+(define btw2025_decorrelate_expr_using (lambda (expr ctx resolved)
+	(if (expr_contains_dependent_subquery_marker? expr)
+		(btw2025_decorrelate_marked_expr_using expr ctx resolved)
+		(list (list expr '() '()) resolved))))
 
 (define btw2025_decorrelate_expr_with_stages (lambda (expr ctx)
 	(nth (btw2025_decorrelate_expr_using expr ctx '()) 0)))

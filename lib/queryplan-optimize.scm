@@ -1442,33 +1442,48 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(begin
 			(define planned (apply_join_optimizer_plan node))
 			(define physical_planned (query_block_with_physical_requirement_choices planned))
-			(define physical_consumer (if (query_block_has_aggregates? physical_planned)
-				(quote aggregate)
-				(if (query_limit_active? (qb_offset physical_planned) (qb_limit physical_planned))
-					(quote order_limit)
-					(quote filter))))
-			(define local_driver_rows (if (equal? physical_consumer (quote order_limit))
-				(probe_limit_work_rows (qb_limit physical_planned)) nil))
-			(define physical_facts (merge (list
-				(list
-					(list (quote membership_consumer) physical_consumer)
-					(list (quote membership_driver_rows) (coalesceNil local_driver_rows
-						(qassoc_get (qb_facts physical_planned) (quote membership_driver_rows) nil))))
-				(qb_facts physical_planned))))
-			(make_query_block
-				(qb_schema physical_planned)
-				(map (qb_sources physical_planned) (lambda (src)
-					(physicalize_membership_requirement_source_using src physical_facts)))
-				(physicalize_membership_requirement_expr_using (qb_fields physical_planned) physical_facts)
-				(physicalize_membership_requirement_expr_using (qb_where physical_planned) physical_facts)
-				(physicalize_membership_requirement_expr_using (qb_group physical_planned) physical_facts)
-				(physicalize_membership_requirement_expr_using (qb_having physical_planned) physical_facts)
-				(physicalize_membership_requirement_expr_using (qb_order physical_planned) physical_facts)
-				(qb_limit physical_planned)
-				(qb_offset physical_planned)
-				(physicalize_membership_requirement_expr_using (qb_hidden physical_planned) physical_facts)
-				(map (qb_stages physical_planned) apply_join_optimizer_plan_stage)
-				(physicalize_membership_requirement_expr_using physical_facts physical_facts)))
+			(define physical_stages (map (qb_stages physical_planned) apply_join_optimizer_plan_stage))
+			(define requirement (qassoc_get (qb_facts physical_planned) (quote membership_requirement) nil))
+			/* Reorder attaches the requirement to the query block which owns every
+			membership_requirement_probe. Nested blocks and stages recurse separately.
+			Keep the ordinary query expressions structurally shared instead of walking
+			and rebuilding the complete block when there is no physical choice here. */
+			(if (nil? requirement)
+				(make_query_block
+					(qb_schema physical_planned) (qb_sources physical_planned)
+					(qb_fields physical_planned) (qb_where physical_planned)
+					(qb_group physical_planned) (qb_having physical_planned)
+					(qb_order physical_planned) (qb_limit physical_planned)
+					(qb_offset physical_planned) (qb_hidden physical_planned)
+					physical_stages (qb_facts physical_planned))
+				(begin
+					(define physical_consumer (if (query_block_has_aggregates? physical_planned)
+						(quote aggregate)
+						(if (query_limit_active? (qb_offset physical_planned) (qb_limit physical_planned))
+							(quote order_limit)
+							(quote filter))))
+					(define local_driver_rows (if (equal? physical_consumer (quote order_limit))
+						(probe_limit_work_rows (qb_limit physical_planned)) nil))
+					(define physical_facts (merge (list
+						(list
+							(list (quote membership_consumer) physical_consumer)
+							(list (quote membership_driver_rows) (coalesceNil local_driver_rows
+								(qassoc_get (qb_facts physical_planned) (quote membership_driver_rows) nil))))
+						(qb_facts physical_planned))))
+					(make_query_block
+						(qb_schema physical_planned)
+						(map (qb_sources physical_planned) (lambda (src)
+							(physicalize_membership_requirement_source_using src physical_facts)))
+						(physicalize_membership_requirement_expr_using (qb_fields physical_planned) physical_facts)
+						(physicalize_membership_requirement_expr_using (qb_where physical_planned) physical_facts)
+						(physicalize_membership_requirement_expr_using (qb_group physical_planned) physical_facts)
+						(physicalize_membership_requirement_expr_using (qb_having physical_planned) physical_facts)
+						(physicalize_membership_requirement_expr_using (qb_order physical_planned) physical_facts)
+						(qb_limit physical_planned)
+						(qb_offset physical_planned)
+						(physicalize_membership_requirement_expr_using (qb_hidden physical_planned) physical_facts)
+						physical_stages
+						(physicalize_membership_requirement_expr_using physical_facts physical_facts)))))
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
