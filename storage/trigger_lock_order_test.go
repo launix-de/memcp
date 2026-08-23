@@ -145,3 +145,39 @@ func TestWriteTableLockPublicationWaitsForShardReaders(t *testing.T) {
 		t.Fatal("WRITE table lock publication did not continue after reader release")
 	}
 }
+
+func TestTriggerUnlockTemporarilyWithdrawsWriteOwnership(t *testing.T) {
+	shard := &storageShard{}
+	tx := NewTxContext(TxCursorStability)
+	shard.mu.Lock()
+	tx.EnterShardWrite(shard)
+
+	txOwnerVisible := false
+	nestedAcquired := false
+	shard.runWithWriteLockReleased(tx, func() {
+		txOwnerVisible = tx.HasShardWrite(shard)
+		acquired := make(chan struct{}, 1)
+		go func() {
+			shard.mu.Lock()
+			shard.mu.Unlock()
+			acquired <- struct{}{}
+		}()
+		select {
+		case <-acquired:
+			nestedAcquired = true
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	if txOwnerVisible {
+		t.Fatal("trigger callback observed stale shard write ownership")
+	}
+	if !nestedAcquired {
+		t.Fatal("nested trigger query could not acquire the released shard lock")
+	}
+	if !tx.HasShardWrite(shard) {
+		t.Fatal("write ownership was not restored after trigger callback")
+	}
+	tx.ExitShardWrite(shard)
+	shard.mu.Unlock()
+}

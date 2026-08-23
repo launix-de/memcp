@@ -516,7 +516,110 @@ test_cases:
         - id: 3
           label: "apple"
 
+  # A prefix lookup may reuse a longer ordered index. The unbound suffix is
+  # not a concrete lower bound, especially for DESC relations: starting the
+  # delta iterator at a tuple containing NULL must not skip every live row.
+  - name: "Setup prefix lookup over DESC delta index"
+    setup:
+      - sql: "DROP TABLE IF EXISTS idx_desc_delta_prefix"
+    sql: "CREATE TABLE idx_desc_delta_prefix (id INT PRIMARY KEY, tenant INT, label TEXT)"
+
+  - name: "Populate DESC prefix fixture in delta"
+    scm: |
+      (begin
+        (define target (table "memcp-tests" "idx_desc_delta_prefix"))
+        (insert target '("id" "tenant" "label")
+          (map (produceN 200)
+            (lambda (i) (list i 1 (concat "value-" i))))))
+
+  - name: "Build DESC compound delta index hit 1"
+    sql: "SELECT id FROM idx_desc_delta_prefix WHERE tenant = 1 ORDER BY label DESC LIMIT 5"
+    expect:
+      rows: 5
+
+  - name: "Build DESC compound delta index hit 2"
+    sql: "SELECT id FROM idx_desc_delta_prefix WHERE tenant = 1 ORDER BY label DESC LIMIT 5"
+    expect:
+      rows: 5
+
+  - name: "Build DESC compound delta index hit 3"
+    sql: "SELECT id FROM idx_desc_delta_prefix WHERE tenant = 1 ORDER BY label DESC LIMIT 5"
+    expect:
+      rows: 5
+
+  - name: "Prefix lookup retains rows from unbound DESC suffix"
+    sql: "SELECT COUNT(*) AS cnt FROM idx_desc_delta_prefix WHERE tenant = 1"
+    expect:
+      data:
+        - cnt: 200
+
+  - name: "Setup ordered OR range over delta rows"
+    setup:
+      - sql: "DROP TABLE IF EXISTS idx_prefix_or_range"
+    sql: "CREATE TABLE idx_prefix_or_range (ID INT, typ_new INT, mitarbeiter INT, anfang INT, ende INT, tage DECIMAL(4,1), status INT)"
+
+  - name: "Populate ordered OR range fixture"
+    sql: |
+      INSERT INTO idx_prefix_or_range (ID, typ_new, mitarbeiter, anfang, ende, tage, status) VALUES
+        (5, 2, 1, 1685916000, 1686002399, 1, 3),
+        (6, 2, 1, 1785103200, 1785189599, 1, 3),
+        (7, 23, 1, 1785189600, 1785275999, 1, 3),
+        (8, 24, 1, 1785276000, 1785362399, 1, 3),
+        (9, 2, 1, 1785362400, 1785448799, 0.5, 3)
+
+  - name: "Cold ordered OR range retains matching delta rows"
+    sql: |
+      SELECT ID
+      FROM idx_prefix_or_range
+      WHERE (mitarbeiter IS NULL OR mitarbeiter = 1)
+        AND ende >= 1785103200
+        AND anfang < 1785794399
+        AND (status = 3 OR status = 4)
+      ORDER BY anfang ASC
+    expect:
+      data:
+        - ID: 6
+        - ID: 7
+        - ID: 8
+        - ID: 9
+
+  - name: "Warm ordered OR range hit 1"
+    sql: |
+      SELECT ID FROM idx_prefix_or_range
+      WHERE (mitarbeiter IS NULL OR mitarbeiter = 1)
+        AND ende >= 1785103200 AND anfang < 1785794399
+        AND (status = 3 OR status = 4)
+      ORDER BY anfang ASC
+    expect:
+      rows: 4
+
+  - name: "Warm ordered OR range hit 2"
+    sql: |
+      SELECT ID FROM idx_prefix_or_range
+      WHERE (mitarbeiter IS NULL OR mitarbeiter = 1)
+        AND ende >= 1785103200 AND anfang < 1785794399
+        AND (status = 3 OR status = 4)
+      ORDER BY anfang ASC
+    expect:
+      rows: 4
+
+  - name: "Warm ordered OR range remains complete after index creation"
+    sql: |
+      SELECT ID FROM idx_prefix_or_range
+      WHERE (mitarbeiter IS NULL OR mitarbeiter = 1)
+        AND ende >= 1785103200 AND anfang < 1785794399
+        AND (status = 3 OR status = 4)
+      ORDER BY anfang ASC
+    expect:
+      data:
+        - ID: 6
+        - ID: 7
+        - ID: 8
+        - ID: 9
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS idx_prefix_or_range"
+  - sql: "DROP TABLE IF EXISTS idx_desc_delta_prefix"
   - sql: "DROP TABLE IF EXISTS idx_nopfx"
   - sql: "DROP TABLE IF EXISTS idx_nonoverlap"
   - sql: "DROP TABLE IF EXISTS idx_order_relation"

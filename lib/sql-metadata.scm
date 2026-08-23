@@ -43,21 +43,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 )))
 
-/* build one INFORMATION_SCHEMA.TABLES row for (schema, tbl) */
-(define info_schema_table_row (lambda (schema tbl) (begin
-	(define tblinfo (show schema tbl true))
-	(define meta (tblinfo "meta"))
-	(define shards (tblinfo "shards"))
+/* build one INFORMATION_SCHEMA.TABLES row from the catalog snapshot returned
+by (show schema true).  Keeping table discovery and metadata collection in one
+storage call avoids a DROP racing the second per-table lookup. */
+(define info_schema_table_row (lambda (schema tblinfo) (begin
 	(list
 		"table_catalog" "def"
 		"table_schema" schema
-		"table_name" tbl
+		"table_name" (tblinfo "name")
 		"table_type" "BASE TABLE"
-		"engine" (meta "Engine")
-		"table_rows" (reduce shards (lambda (acc s) (+ acc (+ (s "main_count") (s "delta")) (- 0 (s "deletions")))) 0)
-		"data_length" (reduce shards (lambda (acc s) (+ acc (s "size_bytes"))) 0)
-		"table_collation" (meta "Collation")
-		"table_comment" (meta "Comment")
+		"engine" (tblinfo "engine")
+		"table_rows" (tblinfo "row_count")
+		"data_length" (tblinfo "size_bytes")
+		"table_collation" (tblinfo "collation")
+		"table_comment" (tblinfo "comment")
 	)
 )))
 
@@ -187,8 +186,8 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 
 	'((ignorecase "information_schema") (ignorecase "tables"))
 	(merge (map (show) (lambda (db)
-		(map (show db) (lambda (table_name)
-			(info_schema_table_row db table_name))))))
+		(map (show db true) (lambda (table_info)
+			(info_schema_table_row db table_info))))))
 
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge (map (show) (lambda (db)
@@ -234,10 +233,10 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 	(list 'begin
 		/* TODO(planner-scalability): expose catalog metadata as a physical
 		relation instead of constructing a cardinality-dependent SCM list. */
-		/* Materialize the table list at runtime but BEFORE the scan starts, so
-		info_schema_table_row's (show schema tbl true) calls do not execute inside
-		a scan callback where locks are held (which deadlocks). */
-		'('define '__info_tables_data '('merge '('map '('show) '('lambda '('s) '('map '('show 's) '('lambda '('t) '('info_schema_table_row 's 't)))))))
+		/* Materialize a complete catalog snapshot at runtime but BEFORE the scan
+		starts.  The single (show schema true) call also keeps concurrent DROP from
+		invalidating names between table discovery and metadata collection. */
+		'('define '__info_tables_data '('merge '('map '('show) '('lambda '('s) '('map '('show 's true) '('lambda '('t) '('info_schema_table_row 's 't)))))))
 		(merge '(scanfn '(session "__memcp_tx") '__info_tables_data) rest))
 	'((ignorecase "information_schema") (ignorecase "columns"))
 	(merge '(scanfn '(session "__memcp_tx")

@@ -29,8 +29,9 @@ import "github.com/carli2/hybridsort"
 import "github.com/launix-de/memcp/scm"
 
 type indexPair struct {
-	itemid int // -1 for reference items
-	data   []scm.Scmer
+	itemid      int // -1 for reference items
+	data        []scm.Scmer
+	compareCols int // reference-only prefix length; zero compares the complete key
 }
 
 type storageIndexState struct {
@@ -414,8 +415,8 @@ func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []s
 			continue // non-sorted: block-skip handles this, scan() filters exact
 		}
 		v := getter(i)
-		if i < len(bounds) && boundaryIsUnboundedOrder(bounds[i]) {
-			continue // unbounded ORDER BY suffix, not a SQL range predicate
+		if i < len(bounds) && (boundaryIsUnboundedOrder(bounds[i]) || boundaryIsUnboundedRange(bounds[i])) {
+			continue // ordering or residual-only range, not an index restriction
 		}
 		if i == lastSorted {
 			if !upperLast.IsNil() {
@@ -990,7 +991,14 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// delta storage — comparator uses getDeltaColValue so computed columns work;
 	// skip non-sorted matcher columns (they don't participate in sort order)
 	state.deltaBtree = btree.NewG[indexPair](8, func(a, b indexPair) bool {
-		for colIdx := range s.Cols {
+		compareCols := len(s.Cols)
+		if a.compareCols > 0 && a.compareCols < compareCols {
+			compareCols = a.compareCols
+		}
+		if b.compareCols > 0 && b.compareCols < compareCols {
+			compareCols = b.compareCols
+		}
+		for colIdx := 0; colIdx < compareCols; colIdx++ {
 			if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
 				continue
 			}
@@ -1025,9 +1033,9 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				values[colIdx] = s.getDeltaColValueTx(tx, recid, data, colIdx)
 			}
 			state.precomputedDelta = true
-			state.deltaBtree.ReplaceOrInsert(indexPair{int(recid), values})
+			state.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: values})
 		} else {
-			state.deltaBtree.ReplaceOrInsert(indexPair{int(recid), data})
+			state.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: data})
 		}
 	}
 
@@ -1374,7 +1382,8 @@ start_scan:
 
 		// For computed or non-sorted matcher columns, AscendGreaterOrEqual cannot be
 		// used (computed col names have no entry in deltaColumns, matcher patterns
-		// don't map to sort order), so scan all.
+		// don't map to sort order), so scan all. Prefix lookups remain seekable: the
+		// reference comparator stops at cmpCols, making the missing suffix unbounded.
 		hasUnsearchableInBounds := state.precomputedDelta
 		for i := 0; i < cmpCols; i++ {
 			if lower[i].IsNil() || (len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil()) || (len(bounds) > i && !bounds[i].matcher.IsSorted()) {
@@ -1398,7 +1407,7 @@ start_scan:
 					refLower[pos] = lower[i]
 				}
 			}
-			snapDeltaBtree.AscendGreaterOrEqual(indexPair{-1, refLower}, iterFn)
+			snapDeltaBtree.AscendGreaterOrEqual(indexPair{itemid: -1, data: refLower, compareCols: cmpCols}, iterFn)
 		}
 	}
 

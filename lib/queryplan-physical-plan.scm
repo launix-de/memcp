@@ -818,8 +818,16 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 		(define src (gs_input stage))
 		(define alias (group_stage_input_alias stage))
 		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
-		(define ags (gs_aggregates stage))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		/* scalar_single already carries its own empty/cardinality semantics. Its
+		ordered aggregates must remain one combined point recipe; a synthetic
+		presence column would split that recipe into per-column cache scans. */
+		(define needs_count_filter (and
+			(not (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single)))
+			(and (not (equal? keys '(1))) (not (equal? condition true)))))
+		(define ags (if needs_count_filter
+			(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
+			(gs_aggregates stage)))
 		(define key_names (group_key_cols keys))
 		(define cache (group_stage_cache stage))
 		(define schema (group_cache_schema cache))
@@ -846,7 +854,6 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 			original_having resolved_having))
 		(define count_col_name (aggregate_col_name_using src aggregate_count_descriptor))
 		(define count_check (list (quote >) (list (quote get_column) grouptbl false count_col_name false) 0))
-		(define needs_count_filter (and (not (equal? keys '(1))) (not (equal? condition true))))
 		(define aggregate_having_expr (if (not needs_count_filter)
 			replaced_having
 			(if (or (nil? replaced_having) (equal? replaced_having true))
@@ -1108,13 +1115,18 @@ get_column refs to the source) are excluded automatically too. */
 		(define prepare_resolved_order_exprs (map prepare_order_items (lambda (item)
 			(match item '(expr _dir) (canonical_column_expr_for_alias alias expr)))))
 		(define key_index (make_group_key_index keys prepare_resolved_order_exprs))
-		(define ags (gs_aggregates stage))
-		(define lowering_ags (if (query_block? src)
-			(rewrite_scalar_first_probe_aggregates stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias ags)
-			ags))
 		(define condition (if (query_block? src)
 			(rewrite_scalar_first_probe_expr stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 			(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)))
+		(define needs_count_filter (and
+			(not (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single)))
+			(and (not (equal? keys '(1))) (not (equal? condition true)))))
+		(define ags (if needs_count_filter
+			(dedupe_aggregates_by_col (merge (list (gs_aggregates stage) (list aggregate_count_descriptor))))
+			(gs_aggregates stage)))
+		(define lowering_ags (if (query_block? src)
+			(rewrite_scalar_first_probe_aggregates stage_lookup presence_probe_sources_for_rewrite rewrite_default_alias ags)
+			ags))
 		(define key_names (group_key_cols keys))
 		(define aggregate_condition (replace_group_session_expr stage keys key_names condition))
 		(define grouptbl (group_cache_relation cache))

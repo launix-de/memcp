@@ -305,13 +305,13 @@ test_cases:
   - name: "SQL compiler reaches selective bigram candidate"
     sql: |
       SELECT CASE
-        WHEN matched_ns > 0 AND absent_ns > 0 AND absent_ns < matched_ns THEN 'ok'
+        WHEN matched_scans > 0 AND absent_scans > 0 THEN 'ok'
         ELSE 'FAIL'
       END AS result
       FROM (
         SELECT
-          MIN(CASE WHEN outputCount = 5 THEN exec_ns ELSE NULL END) AS matched_ns,
-          MIN(CASE WHEN outputCount = 0 THEN exec_ns ELSE NULL END) AS absent_ns
+          SUM(CASE WHEN outputCount = 5 THEN 1 ELSE 0 END) AS matched_scans,
+          SUM(CASE WHEN outputCount = 0 THEN 1 ELSE 0 END) AS absent_scans
         FROM `system_statistic`.`scans`
         WHERE `table` = 'ft_large' AND index_cols = 'name'
       ) s

@@ -195,6 +195,10 @@ func boundaryIsUnboundedOrder(b columnboundaries) bool {
 	return b.order != nil && b.lower.IsNil() && b.upper.IsNil()
 }
 
+func boundaryIsUnboundedRange(b columnboundaries) bool {
+	return b.matcher.IsSorted() && !boundaryIsPoint(b) && b.lower.IsNil() && b.upper.IsNil()
+}
+
 // addConstraint merges a column boundary into an existing set, narrowing the
 // range for an already-present column (AND semantics) or appending a new entry.
 func addConstraint(in boundaries, b2 columnboundaries) boundaries {
@@ -245,47 +249,74 @@ func widenBounds(a, b boundaries) boundaries {
 				continue
 			}
 			found = true
+			distinctPointUnion := false
+			if boundaryIsPoint(a[i]) && boundaryIsPoint(cb) {
+				samePoint := a[i].lowerBatch && cb.lowerBatch &&
+					a[i].lowerBatchSubidx == cb.lowerBatchSubidx
+				if !a[i].lowerBatch && !cb.lowerBatch {
+					samePoint = boundaryValueEqual(a[i].lower, cb.lower)
+				}
+				distinctPointUnion = !samePoint
+			}
+			literalPointUnion := distinctPointUnion && !a[i].lowerBatch && !cb.lowerBatch
 			// matcher demotion: OR takes the weaker matcher (range < like < equal)
 			if !cb.matcher.IsPointLike() && a[i].matcher.IsPointLike() {
 				a[i].matcher = cb.matcher
 			}
-			// widen lower: take the smaller
-			if a[i].lower.IsNil() {
-				// already unbounded
-			} else if cb.lower.IsNil() {
-				a[i].lower = scm.NewNil()
-				a[i].lowerInclusive = false
-				a[i].lowerBatch = false
-				a[i].lowerBatchSubidx = 0
-			} else if scm.Less(cb.lower, a[i].lower) {
-				a[i].lower = cb.lower
-				a[i].lowerInclusive = cb.lowerInclusive
-				a[i].lowerBatch = cb.lowerBatch
-				a[i].lowerBatchSubidx = cb.lowerBatchSubidx
-			} else if boundaryValueEqual(cb.lower, a[i].lower) {
-				a[i].lowerInclusive = a[i].lowerInclusive || cb.lowerInclusive
-			}
-			// widen upper: take the larger
-			if a[i].upper.IsNil() {
-				// already unbounded
-			} else if cb.upper.IsNil() {
-				a[i].upper = scm.NewNil()
-				a[i].upperInclusive = false
-				a[i].upperBatch = false
-				a[i].upperBatchSubidx = 0
-			} else if scm.Less(a[i].upper, cb.upper) {
-				a[i].upper = cb.upper
-				a[i].upperInclusive = cb.upperInclusive
-				a[i].upperBatch = cb.upperBatch
-				a[i].upperBatchSubidx = cb.upperBatchSubidx
-			} else if boundaryValueEqual(a[i].upper, cb.upper) {
-				a[i].upperInclusive = a[i].upperInclusive || cb.upperInclusive
+			if literalPointUnion {
+				// Nil is both SQL NULL and the legacy unbounded sentinel. While
+				// widening two known points it is a real sortable value, so retain
+				// the finite [min,max] interval instead of turning NULL OR value into
+				// a full scan. The residual predicate removes values between points.
+				lower, upper := a[i].lower, cb.lower
+				if scm.Less(upper, lower) {
+					lower, upper = upper, lower
+				}
+				a[i].lower, a[i].upper = lower, upper
+				a[i].lowerInclusive, a[i].upperInclusive = true, true
+				a[i].lowerBatch, a[i].upperBatch = false, false
+				a[i].lowerBatchSubidx, a[i].upperBatchSubidx = 0, 0
+			} else {
+				// widen lower: take the smaller
+				if a[i].lower.IsNil() {
+					// already unbounded
+				} else if cb.lower.IsNil() {
+					a[i].lower = scm.NewNil()
+					a[i].lowerInclusive = false
+					a[i].lowerBatch = false
+					a[i].lowerBatchSubidx = 0
+				} else if scm.Less(cb.lower, a[i].lower) {
+					a[i].lower = cb.lower
+					a[i].lowerInclusive = cb.lowerInclusive
+					a[i].lowerBatch = cb.lowerBatch
+					a[i].lowerBatchSubidx = cb.lowerBatchSubidx
+				} else if boundaryValueEqual(cb.lower, a[i].lower) {
+					a[i].lowerInclusive = a[i].lowerInclusive || cb.lowerInclusive
+				}
+				// widen upper: take the larger
+				if a[i].upper.IsNil() {
+					// already unbounded
+				} else if cb.upper.IsNil() {
+					a[i].upper = scm.NewNil()
+					a[i].upperInclusive = false
+					a[i].upperBatch = false
+					a[i].upperBatchSubidx = 0
+				} else if scm.Less(a[i].upper, cb.upper) {
+					a[i].upper = cb.upper
+					a[i].upperInclusive = cb.upperInclusive
+					a[i].upperBatch = cb.upperBatch
+					a[i].upperBatchSubidx = cb.upperBatchSubidx
+				} else if boundaryValueEqual(a[i].upper, cb.upper) {
+					a[i].upperInclusive = a[i].upperInclusive || cb.upperInclusive
+				}
 			}
 			// The union of distinct equality points is a range. Keeping the
 			// EqualMatcher here would let adaptive index ordering place this
 			// widened column before real equality columns and make the B-tree
 			// scan treat only the lower point as an exact prefix.
-			if matcherKindEqual(a[i].matcher, EqualMatcher) {
+			if distinctPointUnion {
+				a[i].matcher = RangeMatcher
+			} else if matcherKindEqual(a[i].matcher, EqualMatcher) {
 				samePoint := a[i].lowerBatch && a[i].upperBatch &&
 					a[i].lowerBatchSubidx == a[i].upperBatchSubidx
 				if !a[i].lowerBatch && !a[i].upperBatch {

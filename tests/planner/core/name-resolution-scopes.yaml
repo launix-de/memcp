@@ -23,16 +23,27 @@ setup:
   - sql: "DROP TABLE IF EXISTS nr_inner"
   - sql: "DROP TABLE IF EXISTS nr_outer"
   - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
+  - sql: "DROP TABLE IF EXISTS nr_line"
   - sql: "CREATE TABLE nr_outer (ID INT PRIMARY KEY, outer_only INT, shared INT, file_id INT)"
   - sql: "CREATE TABLE nr_inner (ID INT PRIMARY KEY, inner_only INT, shared INT, label VARCHAR(20))"
   - sql: "CREATE TABLE nr_other (ID INT PRIMARY KEY, shared INT)"
   - sql: "CREATE TABLE nr_leaf (leaf_id INT PRIMARY KEY)"
   - sql: "CREATE TABLE nr_alias_conflict (ID INT PRIMARY KEY, computed INT)"
+  - sql: "CREATE TABLE nr_line (ID INT PRIMARY KEY, o INT, item_code VARCHAR(20))"
   - sql: "INSERT INTO nr_outer VALUES (1, 101, 1001, 10), (2, 102, 1002, 20)"
   - sql: "INSERT INTO nr_inner VALUES (10, 201, 2001, 'ten'), (20, 202, 2002, 'twenty')"
   - sql: "INSERT INTO nr_other VALUES (30, 3001)"
   - sql: "INSERT INTO nr_leaf VALUES (1)"
   - sql: "INSERT INTO nr_alias_conflict VALUES (1, 2), (2, 1)"
+  - sql: "INSERT INTO nr_line VALUES (1, 1, 'A'), (2, 1, 'A'), (3, 1, 'B'), (4, 2, 'C')"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nr_line"
+  - sql: "DROP TABLE IF EXISTS nr_alias_conflict"
+  - sql: "DROP TABLE IF EXISTS nr_leaf"
+  - sql: "DROP TABLE IF EXISTS nr_other"
+  - sql: "DROP TABLE IF EXISTS nr_inner"
+  - sql: "DROP TABLE IF EXISTS nr_outer"
 
 test_cases:
   - name: "Column identifiers remain case-insensitive when quoted"
@@ -129,6 +140,22 @@ test_cases:
       data:
         - {ID: 1}
         - {ID: 2}
+
+  - name: "Distinct scalar aggregate retains correlation when inner column matches outer alias"
+    sql: |
+      SELECT o.ID AS ID,
+        /* item_codes */ (
+          SELECT GROUP_CONCAT(DISTINCT item_code SEPARATOR ', ')
+          FROM nr_line
+          WHERE o AND o = o.ID
+        ) AS item_codes
+      FROM nr_outer o
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, item_codes: "A, B"}
+        - {ID: 2, item_codes: "C"}
 
   - name: "A user alias cannot collide with a generated lexical alias"
     sql: |

@@ -1926,3 +1926,84 @@ test_cases:
     sql: "DROP TRIGGER IF EXISTS not_isnull_au"
     expect:
       affected_rows: 0
+
+  # =====================================================
+  # Nested trigger updates must withdraw shard lock ownership
+  # =====================================================
+
+  - name: "Clean up nested trigger update regression"
+    sql: "DROP TABLE IF EXISTS trigger_nested_source"
+    expect:
+      affected_rows: 0
+
+  - name: "Clean up nested trigger update target"
+    sql: "DROP TABLE IF EXISTS trigger_nested_target"
+    expect:
+      affected_rows: 0
+
+  - name: "Create nested trigger update source"
+    sql: "CREATE TABLE trigger_nested_source (id INT PRIMARY KEY, val INT)"
+    expect:
+      affected_rows: 0
+
+  - name: "Create nested trigger update target"
+    sql: "CREATE TABLE trigger_nested_target (id INT PRIMARY KEY, val INT)"
+    expect:
+      affected_rows: 0
+
+  - name: "Insert nested trigger update rows"
+    sql: "INSERT INTO trigger_nested_source VALUES (1, 10), (2, 20)"
+    expect:
+      affected_rows: 2
+
+  - name: "Insert nested trigger target rows"
+    sql: "INSERT INTO trigger_nested_target VALUES (1, 100), (2, 200)"
+    expect:
+      affected_rows: 2
+
+  - name: "Create target BEFORE UPDATE trigger"
+    sql: "CREATE TRIGGER nested_target_bu BEFORE UPDATE ON trigger_nested_target FOR EACH ROW SET NEW.val = NEW.val + 1"
+    expect:
+      affected_rows: 0
+
+  - name: "Create source AFTER UPDATE trigger with nested UPDATE"
+    sql: >
+      CREATE TRIGGER nested_source_au AFTER UPDATE ON trigger_nested_source FOR EACH ROW
+      BEGIN
+        UPDATE trigger_nested_target SET val = val + 10 WHERE id = NEW.id;
+      END
+    expect:
+      affected_rows: 0
+
+  - name: "Nested trigger UPDATE retains balanced shard locks"
+    sql: "UPDATE trigger_nested_source SET val = val + 1"
+    expect:
+      affected_rows: 2
+
+  - name: "Nested BEFORE and AFTER UPDATE triggers produce correct rows"
+    sql: "SELECT id, val FROM trigger_nested_target ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - {id: 1, val: 111}
+        - {id: 2, val: 211}
+
+  - name: "Drop nested source trigger"
+    sql: "DROP TRIGGER IF EXISTS nested_source_au"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop nested target trigger"
+    sql: "DROP TRIGGER IF EXISTS nested_target_bu"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop nested trigger source table"
+    sql: "DROP TABLE IF EXISTS trigger_nested_source"
+    expect:
+      affected_rows: 0
+
+  - name: "Drop nested trigger target table"
+    sql: "DROP TABLE IF EXISTS trigger_nested_target"
+    expect:
+      affected_rows: 0

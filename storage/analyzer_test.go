@@ -184,6 +184,33 @@ func TestWidenDistinctEqualityPointsProducesRange(t *testing.T) {
 	}
 }
 
+func TestWidenNullAndValueEqualityPointsProducesRange(t *testing.T) {
+	left := boundaries{{
+		col: "actor_id", matcher: EqualMatcher,
+		lower: scm.NewNil(), lowerInclusive: true,
+		upper: scm.NewNil(), upperInclusive: true,
+	}}
+	right := boundaries{{
+		col: "actor_id", matcher: EqualMatcher,
+		lower: scm.NewInt(8), lowerInclusive: true,
+		upper: scm.NewInt(8), upperInclusive: true,
+	}}
+
+	got := widenBounds(left, right)
+	if len(got) != 1 {
+		t.Fatalf("expected one widened boundary, got %d", len(got))
+	}
+	if got[0].matcher.Kind() != "range" {
+		t.Fatalf("NULL/value widened matcher = %q, want range", got[0].matcher.Kind())
+	}
+	if !got[0].lower.IsNil() || got[0].upper.Int() != 8 {
+		t.Fatalf("NULL/value widened bounds = [%v,%v], want [NULL,8]", got[0].lower, got[0].upper)
+	}
+	if !got[0].lowerInclusive || !got[0].upperInclusive {
+		t.Fatal("NULL/value widened bounds must include both original points")
+	}
+}
+
 func TestEffectiveBoundaryInclusivenessUsesIndexedRange(t *testing.T) {
 	bounds := boundaries{
 		{col: "discount", matcher: RangeMatcher, lowerInclusive: true, upperInclusive: true},
