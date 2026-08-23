@@ -56,6 +56,16 @@ func (p *failSchemaWritePersistence) WriteSchema(schema []byte) {
 	p.PersistenceEngine.WriteSchema(schema)
 }
 
+type countingSchemaWritePersistence struct {
+	PersistenceEngine
+	calls atomic.Int32
+}
+
+func (p *countingSchemaWritePersistence) WriteSchema(schema []byte) {
+	p.calls.Add(1)
+	p.PersistenceEngine.WriteSchema(schema)
+}
+
 type blockingSchemaWritePersistence struct {
 	PersistenceEngine
 	entered chan struct{}
@@ -1728,6 +1738,57 @@ func TestRebuildInsideActiveTransactionDoesNotWaitForItself(t *testing.T) {
 	}
 	if got := tbl.Count(); got != 2 {
 		t.Fatalf("row count after transactional rebuild = %d, want 2", got)
+	}
+}
+
+func TestEphemeralCacheColumnDDLBuffersSchemaPublicationUntilRebuild(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-cache-schema-batching-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBasepath := Basepath
+	Basepath = dir
+	t.Cleanup(func() {
+		databases.Remove("tcachecolumnbatch")
+		Basepath = oldBasepath
+		os.RemoveAll(dir)
+	})
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	CreateDatabase("tcachecolumnbatch", false)
+	db := GetDatabase("tcachecolumnbatch")
+	tbl, created := CreateTable("tcachecolumnbatch", ".grp:query:test", Cache, false)
+	if !created {
+		t.Fatal("ephemeral cache table was not created")
+	}
+	db.ensureBlobTable()
+	counting := &countingSchemaWritePersistence{PersistenceEngine: db.persistence}
+	db.persistence = counting
+
+	for i := 0; i < 32; i++ {
+		if !tbl.CreateColumn(fmt.Sprintf("agg_%d", i), "int", nil, nil) {
+			t.Fatalf("cache column %d was not created", i)
+		}
+	}
+	if got := counting.calls.Load(); got != 0 {
+		t.Fatalf("ephemeral cache column DDL published schema %d times, want 0 before rebuild", got)
+	}
+	if !db.schemaDirty.Load() {
+		t.Fatal("buffered ephemeral cache columns did not mark the schema dirty")
+	}
+	if got := len(tbl.Columns); got != 32 {
+		t.Fatalf("live cache table has %d columns, want 32 before schema publication", got)
+	}
+
+	if result := RebuildTable(tbl, true, false); strings.Contains(result, "errors:") {
+		t.Fatalf("cache table rebuild failed: %s", result)
+	}
+	if got := counting.calls.Load(); got != 1 {
+		t.Fatalf("rebuild published schema %d times, want one deduplicated snapshot", got)
+	}
+	if db.schemaDirty.Load() {
+		t.Fatal("rebuild left the buffered schema dirty")
 	}
 }
 

@@ -1004,9 +1004,13 @@ func (t *table) isEphemeralQueryTable() bool {
 	return strings.HasPrefix(t.Name, ".") && t.PersistencyMode == Cache
 }
 
-// schemaSaveMode selects the synchronous persistence guarantee for ordinary
-// DDL. Callers explicitly override it for reconstructible temp metadata.
+// schemaSaveMode selects the persistence guarantee for table DDL. Planner-owned
+// cache tables remain immediately usable in memory, while their reconstructible
+// catalog changes are coalesced into the next schema save or rebuild.
 func (t *table) schemaSaveMode() schemaSaveMode {
+	if t.isEphemeralQueryTable() {
+		return schemaSaveBuffered
+	}
 	return schemaSaveModeForDurability(t.PersistencyMode == Safe)
 }
 
