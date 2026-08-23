@@ -260,21 +260,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"memcp-tests" outer_graph_sources '() true nil nil nil nil nil '() '() '())))
 	(define outer_barrier (car (qassoc_get outer_graph 'barriers '())))
 	(assert (equal? (qassoc_get outer_barrier 'owner nil) "b") true "join hypergraph identifies the nullable outer-join source")
-	(assert (equal? (qassoc_get outer_barrier 'preserved '()) '("a" "c")) true "outer-join barrier preserves the complete left input")
+	(assert (equal? (qassoc_get outer_barrier 'preserved '()) '("a")) true "outer-join barrier records the referenced preserved input")
 	(assert (equal? (qassoc_get outer_barrier 'references '()) '("a" "b")) true "outer-join barrier records aliases referenced by ON")
 	(assert (equal? (qassoc_get (car (qassoc_get outer_graph 'edges '())) 'origin nil) 'outer-on) true
 		"join hypergraph preserves OUTER ON provenance")
 	(assert (empty_list? (join_order_local_predicates_for_alias
 		(list (list (list "b") 0.1 'outer-on "b" (source_join_expr (nth outer_graph_sources 2))))
 		"b")) true "reorder never converts an OUTER ON predicate into leaf ownership")
-	(define normalized_graph_block (join_optimizer_normalize_inner_joins graph_block))
+	(define normalized_graph_block (join_optimizer_normalize_inner_joins '() graph_block))
 	(assert (equal? (count (split_and_terms (qb_where normalized_graph_block))) 4) true "inner ON predicates join the logical query-block predicate cloud")
 	(assert (equal? (map (qb_sources normalized_graph_block) source_join_expr) '(nil nil nil)) true "normalized inner sources do not retain physical predicate ownership")
-	(define normalized_outer_graph (join_optimizer_normalize_inner_joins (make_query_block
+	(define normalized_outer_graph (join_optimizer_normalize_inner_joins '() (make_query_block
 		"memcp-tests" outer_graph_sources '() true nil nil nil nil nil '() '() '())))
 	(assert (equal? (source_join_expr (nth (qb_sources normalized_outer_graph) 2))
 		(source_join_expr (nth outer_graph_sources 2))) true "outer ON predicate remains attached to its semantic barrier")
-	(define graph_plan (join_optimizer_plan_segment '() graph_sources graph_sources "a" graph_view))
+	(define graph_plan (join_optimizer_plan_segment '() '() graph_sources graph_sources "a" graph_view '()))
+	(assert (equal? (join_order_required_aliases
+		(list (list (quote ordered_aliases) (list "v" "c" "p"))))
+		(list "v" "c" "p")) true
+		"join reorder decodes the required ordered source sequence")
+	(define order_property_universe (list "p" "v" "c"))
+	(define order_property_plan (join_order_join_plan order_property_universe '()
+		(join_order_join_plan order_property_universe '()
+			(join_order_leaf_plan (list "p" 1 1 (quote inner) '()))
+			(join_order_leaf_plan (list "v" 1 1 (quote inner) '())))
+		(join_order_leaf_plan (list "c" 1 1 (quote inner) '()))))
+	(assert (join_order_plan_satisfies_driver_property? order_property_plan
+		(list (list (quote ordered_aliases) (list "v" "c" "p")))) false
+		"join reorder rejects a non-ORDER root while retaining alternatives")
 	(assert (equal? (qassoc_get graph_plan 'strategy nil) 'dphyp) true "small join graphs use DPHyp")
 	(assert (equal? (count (qassoc_get graph_plan 'order '())) 3) true "DPHyp covers every logical join source")
 	(assert (equal? (car (qassoc_get graph_plan 'tree '())) 'join-node) true "DPHyp records a bushy logical join tree")
@@ -338,7 +351,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		nil nil nil nil nil '() '() '()))
 	(define graph_residual_view (extract_join_hypergraph graph_residual_block))
 	(define graph_residual_plan (join_optimizer_plan_segment
-		'() graph_sources graph_sources "a" graph_residual_view))
+		'() '() graph_sources graph_sources "a" graph_residual_view '()))
 	(assert (equal? (count (qassoc_get graph_residual_view 'residuals '())) 1) true
 		"zero-alias conjunct remains a query-block residual")
 	(assert (equal? (count (test_join_tree_predicates
@@ -351,7 +364,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define singleton_stage (make_group_stage
 		"logical-singleton" (car graph_sources) '() '(1) '() nil '() '() nil nil
 		(list
-			(list 'purpose 'scalar_single)
+			(list 'null_semantics 'scalar)
+			(list 'partition_by '())
+			(list 'result_max_rows_per_partition 1)
 			(list 'preserve_empty_domain true)
 			(list 'lookup-keys '()))))
 	(define singleton_source (list "scalar" "memcp-tests"
@@ -375,6 +390,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"dense hypergraphs select GOO with DPHyp subtree optimization in SCM")
 	(assert (equal? (join_order_choose_strategy 101 false true) 'goo-linearized-dp) true
 		"very large regular graphs select GOO with linearized-DP subtree optimization in SCM")
+	(assert (join_order_has_outer_barriers?
+		(list (list "nullable" 1 1 'left-outer '("driver") 1 false))) true
+		"outer join requirements classify an over-budget graph as a hypergraph")
 	(assert (join_order_degree_exceeds_budget? 13 10000) false
 		"degree 13 does not prove that the connected-subgraph budget is exceeded")
 	(assert (join_order_degree_exceeds_budget? 14 10000) true
@@ -383,16 +401,30 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(slice dense_join_nodes 0 4)
 		(slice dense_join_aliases 0 4)
 		(filter dense_join_predicates (lambda (predicate)
-			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))))
+			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))
+		'()))
 	(assert (equal? (join_order_plan_size (car small_linearized)) 4) true
 		"SCM IKKBZ and linearized DP construct a complete bushy plan")
 	(define small_goo (join_order_goo
 		(slice dense_join_nodes 0 4)
 		(slice dense_join_aliases 0 4)
 		(filter dense_join_predicates (lambda (predicate)
-			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))))
+			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))
+		'()))
 	(assert (equal? (join_order_plan_size small_goo) 4) true
 		"SCM GOO greedily constructs a complete bushy plan")
+	(define small_chain_predicates (filter dense_join_predicates (lambda (predicate)
+		(begin
+			(define refs (join_order_pred_aliases predicate))
+			(equal? (- (join_order_alias_position dense_join_aliases (cadr refs))
+				(join_order_alias_position dense_join_aliases (car refs))) 1)))))
+	(define small_chain_plans (map (slice dense_join_nodes 0 4) join_order_leaf_plan))
+	(define small_chain_indexes (join_order_goo_indexes small_chain_plans))
+	(assert (equal? (count (join_order_goo_connected_pairs
+		(filter small_chain_predicates (lambda (predicate)
+			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))
+		(car small_chain_indexes))) 3) true
+		"GOO join lookup exposes only the three connected pairs of a four-node chain")
 	(define small_hyper_predicates (append
 		(filter dense_join_predicates (lambda (predicate)
 			(join_order_set_subset? (join_order_pred_aliases predicate) (slice dense_join_aliases 0 4))))
@@ -401,7 +433,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(slice dense_join_nodes 0 4)
 		(slice dense_join_aliases 0 4)
 		(join_order_prepare_predicates (slice dense_join_aliases 0 4) small_hyper_predicates)
-		true))
+		true '()))
 	(assert (equal? (join_order_plan_size (car small_hyper_goo_dp)) 4) true
 		"SCM GOO-DP applies DPHyp to hypergraph subtrees")
 	(define graph_reordered_block (hybrid_reorder_query_block graph_block))
@@ -693,11 +725,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		nil '() '() nil nil
 		(list
 			(list (quote purpose) (quote exists))
+			(list (quote null_semantics) (quote exists))
+			(list (quote partition_by) (list (list (quote session) "probe_user")))
+			(list (quote result_max_rows_per_partition) 1)
 			(list (quote presence_only) true)
 			(list (quote max_needed_per_domain) 1)
-			(list (quote physical_max_rows) 1)
+			(list (quote partition_limit) 1)
 			(list (quote on_overflow) (quote ignore))
-			(list (quote cardinality_mode) (quote many))
 			(list (quote lookup-keys) (list (list (quote session) "probe_user"))))))
 	(assert (query_invariant_presence_stage? invariant_probe_stage) true
 		"a base-table presence stage whose lookup key is only a session read is query-invariant")
@@ -715,11 +749,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		nil '() '() nil nil
 		(list
 			(list (quote purpose) (quote exists))
+			(list (quote null_semantics) (quote exists))
+			(list (quote partition_by) (list (list (quote get_column) "outer" false "standort" false)))
+			(list (quote result_max_rows_per_partition) 1)
 			(list (quote presence_only) true)
 			(list (quote max_needed_per_domain) 1)
-			(list (quote physical_max_rows) 1)
+			(list (quote partition_limit) 1)
 			(list (quote on_overflow) (quote ignore))
-			(list (quote cardinality_mode) (quote many))
 			(list (quote lookup-keys) (list (list (quote get_column) "outer" false "standort" false))))))
 	(assert (query_invariant_presence_stage? correlated_probe_stage) false
 		"a presence stage whose lookup key references an outer column is not query-invariant -- it must keep using its per-row/keytable probe unchanged")
@@ -2966,6 +3002,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (_win_results4 "items") '(nil nil 10 100)) true "window_mut stride=2 row2 emits old=(10 100)")
 	(set _win_stride2 (window_mut _win_stride2 (lambda (old_c1 old_c2 new_c1 new_c2) (_win_results4 "items" (merge (_win_results4 "items") (list old_c1 old_c2)))) (list 30 300)))
 	(assert (equal? (_win_results4 "items") '(nil nil 10 100 20 200)) true "window_mut stride=2 row3 emits old=(20 200)")
+	(assert (equal?
+		(stream_window_reduce 1 2 + 0 (lambda (emit)
+			(begin (emit 1) (emit 2) (emit 3) (emit 4))))
+		5) true "stream_window_reduce counts complete emitted values")
+	(assert (equal?
+		(stream_window_reduce 2 -1 + 0 (lambda (emit)
+			(begin (emit 1) (emit 2) (emit 3) (emit 4))))
+		7) true "stream_window_reduce supports OFFSET without a finite limit")
 
 	/* promise */
 	(print "testing promise ...")

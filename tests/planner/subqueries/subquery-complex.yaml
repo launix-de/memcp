@@ -129,10 +129,10 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - ".join-order:"
         - "scan_order"
-        - "droptable"
+        - "stream_window_reduce"
       result_not_contains:
+        - ".join-order:"
         - "(sort rows"
 
   - name: "Ordered join intermediate relation is query-local"

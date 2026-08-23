@@ -213,6 +213,7 @@ test_cases:
         - "scan_order"
       result_not_contains:
         - "recset_project_join"
+        - "membership_truth"
 
   - name: "Nested OR membership preserves sibling alternatives"
     sql: |
@@ -479,7 +480,8 @@ test_cases:
         - "domain"
         - "lookup-keys"
         - "null_semantics"
-        - "cardinality_mode"
+        - "partition_by"
+        - "result_max_rows_per_partition"
       not_contains:
         - "dependent-subquery"
         - "neumann_in"

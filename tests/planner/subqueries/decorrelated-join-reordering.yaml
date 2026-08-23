@@ -1,0 +1,168 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Costed reordering across decorrelated nullable stages"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS djr_assignment"
+  - sql: "DROP TABLE IF EXISTS djr_site"
+  - sql: "DROP TABLE IF EXISTS djr_document"
+  - sql: "DROP TABLE IF EXISTS djr_tenant"
+  - sql: "CREATE TABLE djr_tenant (id INT PRIMARY KEY, enabled INT)"
+  - sql: "CREATE TABLE djr_document (id INT PRIMARY KEY, tenant_id INT, site_id INT)"
+  - sql: "CREATE TABLE djr_site (id INT PRIMARY KEY, allowed INT)"
+  - sql: "CREATE TABLE djr_assignment (id INT PRIMARY KEY, site_id INT, principal_id INT)"
+  - sql: "INSERT INTO djr_tenant VALUES (1, 1), (2, 1)"
+  - sql: "INSERT INTO djr_site VALUES (10, 1), (20, 0)"
+  - sql: |
+      INSERT INTO djr_document VALUES
+        (1, 1, 10),
+        (2, 1, 20),
+        (3, 2, 30),
+        (4, 2, NULL)
+  - sql: "INSERT INTO djr_assignment VALUES (1, 10, 7), (2, 20, 8)"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS djr_assignment"
+  - sql: "DROP TABLE IF EXISTS djr_site"
+  - sql: "DROP TABLE IF EXISTS djr_document"
+  - sql: "DROP TABLE IF EXISTS djr_tenant"
+
+test_cases:
+  - name: "Decorrelated scalar keeps unmatched domain rows NULL"
+    sql: |
+      SELECT d.id,
+        (SELECT s.allowed
+         FROM djr_site s
+         WHERE s.id = d.site_id
+         LIMIT 1) AS allowed
+      FROM djr_document d
+      JOIN djr_tenant t ON t.id = d.tenant_id
+      ORDER BY d.id
+    expect:
+      rows: 4
+      data:
+        - { id: 1, allowed: 1 }
+        - { id: 2, allowed: 0 }
+        - { id: 3, allowed: null }
+        - { id: 4, allowed: null }
+
+  - name: "Nullable scalar predicate filters after null extension"
+    sql: |
+      SELECT d.id
+      FROM djr_document d
+      JOIN djr_tenant t ON t.id = d.tenant_id
+      WHERE COALESCE((
+        SELECT s.allowed
+        FROM djr_site s
+        WHERE s.id = d.site_id
+        LIMIT 1
+      ), 0) = 1
+      ORDER BY d.id
+    expect:
+      rows: 1
+      data:
+        - { id: 1 }
+
+  - name: "Cost model may attach nullable stage before an unrelated join"
+    scm: |
+      (begin
+        (define nodes (list
+          (list "d" 10000 10000 'inner '())
+          (list "u" 10000 10000 'inner '())
+          (list "s" 10 10 'left-outer (list "d"))))
+        (define predicates (list
+          (list (list "d" "u") 1 'where nil true nil 1)
+          (list (list "d" "s") 0.001 'outer-on "s" true nil 0.001)
+          (list (list "s") 0.001 'where nil true "s" 0.001)))
+        (define plan (qassoc_get (join_order_adaptive nodes predicates '()) 'tree nil))
+        (and (equal? (car plan) 'join-node)
+          (not (equal? (cadr plan) 'left-outer))
+          (reduce (list (nth plan 2) (nth plan 3)) (lambda (found child)
+            (or found (and (equal? (car child) 'join-node)
+              (equal? (cadr child) 'left-outer)))) false)))
+    expect:
+      data: [true]
+
+  - name: "Cost model delays nullable stage behind a selective join"
+    scm: |
+      (begin
+        (define nodes (list
+          (list "d" 10000 10000 'inner '())
+          (list "u" 1 1 'inner '())
+          (list "s" 10 10 'left-outer (list "d"))))
+        (define predicates (list
+          (list (list "d" "u") 0.0001 'where nil true nil 0.0001)
+          (list (list "d" "s") 0.001 'outer-on "s" true nil 0.001)
+          (list (list "s") 0.001 'where nil true "s" 0.001)))
+        (define plan (qassoc_get (join_order_adaptive nodes predicates '()) 'tree nil))
+        (and (equal? (car plan) 'join-node)
+          (equal? (cadr plan) 'left-outer)
+          (equal? (car (join_optimizer_tree_aliases (nth plan 3))) "s")))
+    expect:
+      data: [true]
+
+  - name: "LIMIT without ORDER BY leaves the join driver costed"
+    sql: |
+      EXPLAIN REORDER SELECT TRUE
+      FROM djr_site s
+      JOIN djr_assignment a ON a.site_id = s.id
+      WHERE a.principal_id = 7
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - "join_reorder_strategy"
+        - "dphyp"
+      result_not_contains:
+        - "preserve-order-limit"
+
+  - name: "ORDER BY relation becomes driver independent of SQL source order"
+    sql: |
+      EXPLAIN SELECT s.id
+      FROM djr_assignment a
+      JOIN djr_site s ON a.id = s.id
+      ORDER BY s.id
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "djr_site"
+        - "djr_assignment"
+      result_not_contains:
+        - ".join-order:"
+        - "initialize_cache_table"
+
+  - name: "ORDER BY lambda may read a unique downstream lookup"
+    sql: |
+      EXPLAIN SELECT a.id
+      FROM djr_assignment a
+      JOIN djr_site s ON s.id = a.site_id
+      ORDER BY s.allowed, a.id
+      LIMIT 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "djr_assignment"
+        - "djr_site"
+      result_not_contains:
+        - ".prejoin:"
+        - "(sort rows"
+        - "(slice sorted"

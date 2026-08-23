@@ -65,9 +65,9 @@ test_cases:
       contains:
         - "(stage-output"
         - "scalar-single:"
-        - "(purpose scalar_single)"
-        - "(cardinality_mode single_or_error)"
-        - "(physical_max_rows 2)"
+        - "(null_semantics scalar)"
+        - "(partition_limit 2)"
+        - "(result_max_rows_per_partition 1)"
         - "(on_overflow error)"
         - "jd_ref"
       not_contains:
@@ -130,8 +130,9 @@ test_cases:
       contains:
         - "(stage-output"
         - "scalar-single:"
-        - "(purpose scalar_single)"
-        - "(cardinality_mode single_or_error)"
+        - "(null_semantics scalar)"
+        - "(partition_limit 2)"
+        - "(result_max_rows_per_partition 1)"
         - "jd_ref"
       not_contains:
         - "dependent-subquery"

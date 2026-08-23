@@ -761,11 +761,35 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "__join_order_intermediate"
+        - "stream_window_reduce"
       result_not_contains:
+        - "__join_order_intermediate"
+        - ".join-order:"
+        - "createtable"
+        - "droptable"
+        - '"$break"'
         - "(lambda (rows)"
         - "(sort (var 0)"
         - "(slice (var 0)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_composite_lookup"
+
+  - name: "Ordered one-to-many window counts expanded rows for OFFSET and LIMIT"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_composite_lookup"
+      - sql: "CREATE TABLE ord_composite_lookup (lookup_id INT, variant INT, name TEXT, UNIQUE KEY lookup_variant (lookup_id, variant))"
+      - sql: "INSERT INTO ord_composite_lookup VALUES (10,1,'first'),(10,2,'second'),(20,1,'third')"
+    sql: |
+      SELECT d.id
+      FROM ord_member_doc d
+      JOIN ord_composite_lookup c ON c.lookup_id = d.label_id
+      ORDER BY d.rank_value DESC
+      LIMIT 2 OFFSET 1
+    expect:
+      rows: 2
+      data:
+        - { id: 1 }
+        - { id: 2 }
     cleanup:
       - sql: "DROP TABLE IF EXISTS ord_composite_lookup"
 

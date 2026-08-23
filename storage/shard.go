@@ -898,6 +898,10 @@ func (t *storageShard) hasWriteOwner() bool {
 	if goid == 0 {
 		return false
 	}
+	return t.hasWriteOwnerID(goid)
+}
+
+func (t *storageShard) hasWriteOwnerID(goid uint64) bool {
 	t.writeOwnMu.Lock()
 	defer t.writeOwnMu.Unlock()
 	return t.writeOwners[goid] > 0
@@ -935,14 +939,20 @@ func (t *storageShard) runWithWriteLockReleased(currentTx *TxContext, fn func())
 // not carry a transaction context.
 func (t *storageShard) hasWriteOwnerForTx(currentTx *TxContext) bool {
 	if currentTx != nil {
+		// A missing transaction marker proves that no worker in this transaction
+		// owns the shard. Keep ordinary read scans off the goroutine-ID path; only a
+		// positive shared marker needs the stricter goroutine-local verification.
+		if !currentTx.HasShardWrite(t) {
+			return false
+		}
 		// TxContext is shared by parallel shard workers. Its depth is useful for
 		// transaction bookkeeping, but it cannot prove that this goroutine owns
 		// the mutex: another worker in the same transaction may hold it. SQL and
 		// fanout goroutines have a GLS identity, so use the goroutine-local marker
 		// whenever one is available and keep the transaction marker only as an
 		// untagged internal-call fallback.
-		if currentGoroutineID() != 0 {
-			return t.hasWriteOwner()
+		if goid := currentGoroutineID(); goid != 0 {
+			return t.hasWriteOwnerID(goid)
 		}
 		return currentTx.HasShardWrite(t)
 	}

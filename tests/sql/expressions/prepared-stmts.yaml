@@ -14,6 +14,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS ps_guard_right"
   - sql: "DROP TABLE IF EXISTS ps_search_docs"
   - sql: "DROP TABLE IF EXISTS ps_search_files"
+  - sql: "DROP TABLE IF EXISTS ps_search_links"
   - sql: "DROP TABLE IF EXISTS ps_unique"
   - sql: "DROP TABLE IF EXISTS ps_test"
   - sql: "CREATE TABLE ps_test (id int, name text, score float)"
@@ -23,14 +24,17 @@ setup:
   - sql: "INSERT INTO ps_guard_right (id) VALUES (1)"
   - sql: "CREATE TABLE ps_search_docs (id int primary key, file int, title text, sort_key int)"
   - sql: "CREATE TABLE ps_search_files (id int primary key, filename text, search text)"
+  - sql: "CREATE TABLE ps_search_links (id int primary key, document_id int, file_id int)"
   - sql: "INSERT INTO ps_search_docs (id, file, title, sort_key) VALUES (1, 10, NULL, 1), (2, 20, 'Ca direct', 2), (3, 30, NULL, 3)"
   - sql: "INSERT INTO ps_search_files (id, filename, search) VALUES (10, 'Scan report.pdf', NULL), (20, 'other.pdf', NULL), (30, 'C-only report.pdf', NULL)"
+  - sql: "INSERT INTO ps_search_links (id, document_id, file_id) VALUES (100, 1, 10), (200, 2, 20), (300, 3, 30)"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ps_guard_left"
   - sql: "DROP TABLE IF EXISTS ps_guard_right"
   - sql: "DROP TABLE IF EXISTS ps_search_docs"
   - sql: "DROP TABLE IF EXISTS ps_search_files"
+  - sql: "DROP TABLE IF EXISTS ps_search_links"
   - sql: "DROP TABLE IF EXISTS ps_unique"
   - sql: "DROP TABLE IF EXISTS ps_test"
 
@@ -198,6 +202,57 @@ test_cases:
 
   - name: "Second broad literal reuses the guarded shape without losing membership rows"
     sql: "SELECT d.id FROM ps_search_docs d WHERE d.title COLLATE utf8mb4_unicode_ci LIKE '%Ca%' OR d.file IN (SELECT f.id FROM ps_search_files f WHERE f.filename COLLATE utf8mb4_unicode_ci LIKE '%Ca%' UNION SELECT f.id FROM ps_search_files f WHERE f.search COLLATE utf8mb4_unicode_ci LIKE '%Ca%') ORDER BY d.sort_key LIMIT 10"
+    expect:
+      rows: 2
+      data:
+        - {id: 1}
+        - {id: 2}
+
+  - name: "Joined file search projects the complete candidate relation to documents"
+    sql: |
+      EXPLAIN SELECT d.id
+      FROM ps_search_docs d
+      WHERE d.title COLLATE utf8mb4_unicode_ci LIKE '%C%'
+        OR d.id IN (
+          SELECT l.document_id
+          FROM ps_search_links l
+          JOIN ps_search_files f ON f.id = l.file_id
+          WHERE f.filename COLLATE utf8mb4_unicode_ci LIKE '%C%'
+          UNION
+          SELECT l.document_id
+          FROM ps_search_links l
+          JOIN ps_search_files f ON f.id = l.file_id
+          WHERE f.search COLLATE utf8mb4_unicode_ci LIKE '%C%'
+        )
+      ORDER BY d.sort_key
+      LIMIT 10
+    expect:
+      rows: 1
+      result_contains:
+        - "recset_key_index"
+        - "recset_union"
+        - "scan_order"
+      result_not_contains:
+        - "scan_exists"
+
+  - name: "Joined file search returns document rows through the projected carrier"
+    sql: |
+      SELECT d.id
+      FROM ps_search_docs d
+      WHERE d.title COLLATE utf8mb4_unicode_ci LIKE '%Ca%'
+        OR d.id IN (
+          SELECT l.document_id
+          FROM ps_search_links l
+          JOIN ps_search_files f ON f.id = l.file_id
+          WHERE f.filename COLLATE utf8mb4_unicode_ci LIKE '%Ca%'
+          UNION
+          SELECT l.document_id
+          FROM ps_search_links l
+          JOIN ps_search_files f ON f.id = l.file_id
+          WHERE f.search COLLATE utf8mb4_unicode_ci LIKE '%Ca%'
+        )
+      ORDER BY d.sort_key
+      LIMIT 10
     expect:
       rows: 2
       data:
@@ -439,7 +494,8 @@ test_cases:
             (list
               (list "left" (planning "left") (list (list (quote context) "session") "left"))
               (list "right" (planning "right") (list (list (quote context) "session") "right")))
-            (list (list '("left" "right") 0.01 nil nil true nil 0.01))))))
+            (list (list '("left" "right") 0.01 nil nil true nil 0.01))
+            '()))))
         (define guard (sql_queryplan_guard_from_session planning))
         (define initially_valid (with_session planning (lambda () (eval guard))))
         (planning "left" 10)

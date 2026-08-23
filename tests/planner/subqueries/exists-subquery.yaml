@@ -311,7 +311,8 @@ test_cases:
             - "max_needed_per_domain"
             - "domain"
             - "lookup-keys"
-            - "cardinality_mode"
+            - "partition_by"
+            - "result_max_rows_per_partition"
           not_contains:
             - "neumann_exists"
             - "exists_probe"
@@ -593,7 +594,8 @@ test_cases:
             - "max_needed_per_domain"
             - "domain"
             - "lookup-keys"
-            - "cardinality_mode"
+            - "partition_by"
+            - "result_max_rows_per_partition"
           not_contains:
             - "neumann_exists"
             - "inner_select"
@@ -665,7 +667,8 @@ test_cases:
             - "max_needed_per_domain"
             - "domain"
             - "lookup-keys"
-            - "cardinality_mode"
+            - "partition_by"
+            - "result_max_rows_per_partition"
           not_contains:
             - "neumann_exists"
             - "inner_select"

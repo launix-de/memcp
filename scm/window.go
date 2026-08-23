@@ -39,6 +39,58 @@ func init_window() {
 	DeclareTitle("Window Functions")
 
 	Declare(&Globalenv, &Declaration{
+		Name: "stream_window_reduce",
+		Desc: "applies OFFSET/LIMIT and a serial reducer to complete values emitted by a nested streaming producer without collecting an intermediate relation",
+		Fn: func(a ...Scmer) (result Scmer) {
+			offset := ToInt(a[0])
+			limit := ToInt(a[1])
+			if offset < 0 {
+				panic("stream_window_reduce: offset must not be negative")
+			}
+			if limit < -1 {
+				panic("stream_window_reduce: limit must be -1 or non-negative")
+			}
+			result = a[3]
+			if limit == 0 {
+				return result
+			}
+			reduceFn := OptimizeProcToSerialFunction(a[2])
+			producerFn := OptimizeProcToSerialFunction(a[4])
+			seen := 0
+			emitted := 0
+			emit := NewFunc(func(values ...Scmer) Scmer {
+				if len(values) != 1 {
+					panic("stream_window_reduce: emit expects exactly one complete value")
+				}
+				seen++
+				if seen <= offset {
+					return result
+				}
+				if limit >= 0 && emitted >= limit {
+					return result
+				}
+				result = reduceFn(result, values[0])
+				emitted++
+				return result
+			})
+			producerFn(emit)
+			return result
+		},
+		Type: &TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*TypeDescriptor{
+				{Kind: "number", ParamName: "offset", ParamDesc: "number of complete producer values to skip"},
+				{Kind: "number", ParamName: "limit", ParamDesc: "maximum values to reduce, or -1 for no limit"},
+				{Kind: "func", ParamName: "reduce", ParamDesc: "serial accumulator over complete values", Params: []*TypeDescriptor{{Kind: "any", ParamName: "acc"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", ParamName: "neutral", ParamDesc: "initial accumulator"},
+				{Kind: "func", ParamName: "producer", ParamDesc: "nested streaming plan called with a one-value emit callback", Params: []*TypeDescriptor{{Kind: "func", ParamName: "emit"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:  &TypeDescriptor{Kind: "any"},
+			JITEmit: nil,
+		},
+	})
+
+	Declare(&Globalenv, &Declaration{
 		Name: "window_mut",
 		Desc: "Ring buffer shift-insert for window functions. (window_mut window emit_fn vals) writes vals (a list of stride values) into the current slot, increments counter. If skip>0, decrements skip. Otherwise calls (emit_fn oldest_v0 oldest_v1 ... newest_v0 newest_v1) with all slot values ordered oldest-to-newest. Returns updated window.",
 		Fn: func(a ...Scmer) Scmer {
