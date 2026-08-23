@@ -52,5 +52,14 @@ test_cases:
         "ok"
         (error "missing dashboard admin credentials should be rejected"))
 
+  - name: "Dashboard authentication treats an empty scan list as no user"
+    scm: |
+      (if
+        (and
+          (not (dashboard_auth_row_present? nil))
+          (not (dashboard_auth_row_present? '())))
+        "ok"
+        (error "an empty authentication scan result must be rejected"))
+
 cleanup:
   - sql: "DELETE FROM system.user WHERE username IN ('auth_scan_nil_repro', 'auth_scan_nil_other')"

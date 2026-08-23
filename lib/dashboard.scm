@@ -17,17 +17,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* Dashboard: admin-only live metrics via WebSocket */
 
+/* Parallel scan reduction may represent an empty result as nil or (). */
+(define dashboard_auth_row_present? (lambda (row)
+	(not (empty_list? row))))
+
 /* check admin credentials against system.user table */
 (define dashboard_check_admin (lambda (req) (begin
 	(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
-	(if (nil? pw) false
+	(if (not (dashboard_auth_row_present? pw)) false
 		(and (equal? (car pw) (password (req "password"))) (car (cdr pw))))
 )))
 
 /* check any authenticated user (returns admin flag or false) */
 (define dashboard_check_user (lambda (req) (begin
 	(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
-	(if (nil? pw) nil
+	(if (not (dashboard_auth_row_present? pw)) nil
 		(if (equal? (car pw) (password (req "password"))) (equal? (car (cdr pw)) 1) nil))
 )))
 
