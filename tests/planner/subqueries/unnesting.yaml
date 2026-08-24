@@ -201,6 +201,41 @@ test_cases:
           name: "Alice"
         - typ: 20
           name: "Bob"
+  - name: "Derived LEFT JOIN preserves point boundary in ON condition"
+    setup:
+      - scm: '(rebuild (table "memcp-tests" "unn_ref") true false)'
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'unn_ref'"
+    sql: |
+      SELECT m.id, r.ref_descr
+      FROM unn_main m
+      LEFT JOIN (
+        SELECT id AS ref_id, descr AS ref_descr
+        FROM unn_ref
+      ) r ON r.ref_id = m.typ
+      ORDER BY m.id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          ref_descr: "Type-A"
+        - id: 2
+          ref_descr: "Type-B"
+  - name: "Derived LEFT JOIN exposes equality bounds to reference scans"
+    setup:
+      - scm: '(sleep 0.1)'
+    sql: |
+      SELECT COUNT(*) AS scans,
+        SUM(CASE WHEN index_cols = 'id' THEN 1 ELSE 0 END) AS bounded_scans
+      FROM system_statistic.scans
+      WHERE schema = 'memcp-tests' AND `table` = 'unn_ref'
+    expect:
+      rows: 1
+      data:
+        - scans: 2
+          bounded_scans: 2
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'
   - name: "cleanup unn_main"
     sql: "DROP TABLE IF EXISTS unn_main"
     expect: {}

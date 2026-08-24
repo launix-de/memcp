@@ -5000,7 +5000,12 @@ that actually owns the title consumes the reference. */
 												(null_extend_projection_fields projection)
 												projection))
 											(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
-											(define outer_join (rewrite_derived_ref alias effective_projection (source_join_expr src)))
+											/* The ON predicate tests real rows from the right relation, before
+											NULL extension. Rewriting it through effective_projection would wrap
+											even a key column in IF(IS NULL, NULL, key), hiding equality bounds
+											from physical scan analysis. NULL extension remains part of the
+											projection exposed above the LEFT JOIN boundary. */
+											(define outer_join (rewrite_derived_ref alias projection (source_join_expr src)))
 											(define joined_condition (if (or (source_outer? src) (not (nil? outer_join)))
 												(combine_where inner_where outer_join)
 												nil))
@@ -5030,7 +5035,9 @@ that actually owns the title consumes the reference. */
 														(null_extend_projection_fields projection)
 														projection))
 													(define inner_where (requalify_single_source_expr inner_alias alias (qb_where inner)))
-													(define outer_join (rewrite_derived_ref alias effective_projection (source_join_expr src)))
+													/* ON sees candidate rows; only consumers above the LEFT JOIN
+													boundary see the NULL-extended projection. */
+													(define outer_join (rewrite_derived_ref alias projection (source_join_expr src)))
 													(define joined_condition (combine_where inner_where outer_join))
 													(define derived_base_source (list
 														alias
