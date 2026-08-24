@@ -1278,7 +1278,7 @@ func (db *database) newTable(name string, pm PersistencyMode) *table {
 	t.Shards = make([]*storageShard, 1)
 	t.Shards[0] = NewShard(t)
 	t.publishTopologyLocked()
-	t.Auto_increment = 1
+	t.Auto_increment = 0
 	t.publishShowColumnsSnapshot()
 	return t
 }

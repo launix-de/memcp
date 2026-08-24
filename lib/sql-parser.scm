@@ -106,8 +106,8 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 (define sql_interval_unit (parser '((define unit sql_identifier_unquoted) (? "(" (regex "[0-9]+") ")")) unit))
 
 (define sql_string (parser (or
-	(parser '((atom "'" false) (define x (regex "(\\\\.|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape x))
-	(parser '((atom "\"" false) (define x (regex "(\\\\.|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape x))
+	(parser '((atom "'" false) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape (replace x "''" "'")))
+	(parser '((atom "\"" false) (define x (regex "(\\\\.|\"\"|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape (replace x "\"\"" "\"")))
 )))
 
 /* SQL modulo expression: NULL-safe, division-by-zero-safe, truncates quotient toward zero */
@@ -629,7 +629,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "NOT" true) (atom "NULL" true)) '("null" false))
 		(parser (atom "NULL" true) '("null" true))
 		(parser '((atom "DEFAULT" true) (define default sql_literal)) '("default" default))
-		(parser '((atom "DEFAULT" true) (atom "CURRENT_TIMESTAMP" true)) '("default" '('now)))
+		(parser '((atom "DEFAULT" true) (atom "CURRENT_TIMESTAMP" true) (? "(" ")")) '("default_expression" "CURRENT_TIMESTAMP"))
 		(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_literal)) '("update" default))
 		(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
 		(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
