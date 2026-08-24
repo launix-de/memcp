@@ -3483,7 +3483,8 @@ move the window to the wrong tree level. */
 			(probe_limit_work_rows limit_value)
 			acceptance_probe_work_rows))
 		(define emit_value (quote __ordered_join_emit_value))
-		(define row_expr (list emit_value (value_builder projection_probe_work_rows scalar_probe)))
+		(define row_expr (list (quote stream_emit) emit_value
+			(value_builder projection_probe_work_rows scalar_probe)))
 		(define mapcols (join_cols_for_alias all_sources default_alias alias carrier_needed_exprs))
 		(define projection (build_join_scan_pipeline_using_recipe
 			schema all_sources remaining_plan default_alias carrier_needed_exprs remaining_condition row_expr

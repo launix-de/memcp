@@ -3079,6 +3079,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(stream_window_reduce 2 -1 + 0 (lambda (emit)
 			(begin (emit 1) (emit 2) (emit 3) (emit 4))))
 		7) true "stream_window_reduce supports OFFSET without a finite limit")
+	(assert (equal? (stream_emit (lambda (value) (+ value 1)) 4) 5)
+		true "stream_emit invokes its callback immediately")
 
 	/* promise */
 	(print "testing promise ...")
