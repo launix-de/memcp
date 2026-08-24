@@ -2839,6 +2839,30 @@ NULL semantics, never the syntactic reason that introduced the stage. */
 		(list (quote >) (symbol value_col) 0)
 		(list (quote equal??) (symbol value_col) true))))
 
+/* A cache-backed carrier owns the preparation of the cache it reads. The
+query-block prelude must not also build a logical stage whose selected physical
+alternative is a raw RecSet or direct probe. */
+(define prepared_group_cache_expr (lambda (stage carrier)
+	(begin
+		(define raw_input (gs_input stage))
+		(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
+		(define stage_catalog (stage_catalog_with_nested
+			(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
+				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
+		(list (quote begin)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
+			carrier))))
+
+(define prepared_group_cache_recset_expr (lambda (stage)
+	(begin
+		(define cache (group_stage_cache stage))
+		(prepared_group_cache_expr stage
+			(list (quote scan_recset)
+				'(session "__memcp_tx")
+				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+				(list (quote list))
+				(list (quote lambda) '() true))))))
+
 (define exists_recset_project_join_expr (lambda (target_src stage)
 	(begin
 		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
@@ -2886,11 +2910,7 @@ the auto-index chooses the concrete access path on both tables. */
 			(define cache (group_stage_cache stage))
 			(list (quote recset_project_join)
 				'(session "__memcp_tx")
-				(list (quote scan_recset)
-					'(session "__memcp_tx")
-					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
-					(list (quote list))
-					(list (quote lambda) '() true))
+				(prepared_group_cache_recset_expr stage)
 				(quoted_runtime_list (list "k0"))
 				(source_table_expr target_src)
 				(quoted_runtime_list (list target_col)))))))

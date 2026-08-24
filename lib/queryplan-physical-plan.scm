@@ -1949,6 +1949,19 @@ get_column refs to the source) are excluded automatically too. */
 							(not (scalar_aggregate_probe_stage? stage))
 							(contains? stage_output_ids (gs_id stage))))))))))
 
+/* A physical membership marker is the exclusive owner of its carrier. Stop at
+the marker instead of walking into the embedded logical stage; cache-backed
+alternatives prepare themselves, while raw RecSet and direct-probe alternatives
+must not pay for an unused group cache. */
+(define physical_membership_probe_stage_ids (lambda (expr)
+	(match expr
+		((symbol driver_membership_probe) stage _probe) (list (gs_id stage))
+		((quote driver_membership_probe) stage _probe) (list (gs_id stage))
+		((symbol driver_membership_subscan_probe) stage _probe) (list (gs_id stage))
+		((quote driver_membership_subscan_probe) stage _probe) (list (gs_id stage))
+		(cons _head tail) (merge_unique (map tail physical_membership_probe_stage_ids))
+		_ '())))
+
 (define query_block_stages_to_prepare_base_using (lambda (all_stages block)
 	(begin
 		(define sources (qb_sources block))
@@ -1957,10 +1970,14 @@ get_column refs to the source) are excluded automatically too. */
 		(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block
 			all_stages sources default_alias (qb_limit block) (qb_where block) (query_block_probe_consumers block))))
 		(define stage_output_ids (stage_output_source_ids sources))
+		(define physical_membership_stage_ids
+			(physical_membership_probe_stage_ids (query_block_probe_consumers block)))
 		(define direct (filter (qb_stages block) (lambda (stage)
 			(and
-				(stage_direct_prepare_source_visible? block sources default_alias stage)
-				(stage_direct_prepare_semantic_candidate? consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)))))
+				(not (contains? physical_membership_stage_ids (gs_id stage)))
+				(and
+					(stage_direct_prepare_source_visible? block sources default_alias stage)
+					(stage_direct_prepare_semantic_candidate? consumed_probe_ids consumed_source_probe_ids stage_output_ids stage))))))
 		direct)))
 
 (define selected_group_cache_keys (lambda (stages)
@@ -2559,9 +2576,9 @@ path. */
 
 /* Computed membership keys are already stored canonically as k0 in the group
 cache. Probing that keytable is cheaper than first copying its rows into a
-query-local RecSet index. The surrounding physical prelude prepares the cache
-once; this closure performs only the indexed presence lookup for each ordered
-driver candidate. */
+query-local RecSet index. This selected carrier prepares its cache once before
+returning the closure; the closure then performs only the indexed presence
+lookup for each ordered driver candidate. */
 (define membership_cache_key_probe_expr (lambda (stage)
 	(begin
 		(define cache (group_stage_cache stage))
@@ -2569,16 +2586,17 @@ driver candidate. */
 		(define key_name "k0")
 		(define value_col (aggregate_col_name_using (gs_input stage) (car (gs_aggregates stage))))
 		(define filtercols (list key_name value_col))
-		(list (quote lambda) (list probe_var)
-			(list (quote scan_exists)
-				'(session "__memcp_tx")
-				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
-				(cons (quote list) filtercols)
-				(list (quote lambda) (map filtercols symbol)
-					(list (quote and)
-						(list (quote equal??) (symbol key_name)
-							(list (quote outer) probe_var))
-						(stage_recset_value_filter_term stage value_col))))))))
+		(prepared_group_cache_expr stage
+			(list (quote lambda) (list probe_var)
+				(list (quote scan_exists)
+					'(session "__memcp_tx")
+					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+					(cons (quote list) filtercols)
+					(list (quote lambda) (map filtercols symbol)
+						(list (quote and)
+							(list (quote equal??) (symbol key_name)
+								(list (quote outer) probe_var))
+							(stage_recset_value_filter_term stage value_col)))))))))
 
 (define membership_keyset_parts (lambda (membership)
 	(begin

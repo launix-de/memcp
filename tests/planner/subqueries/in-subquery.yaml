@@ -93,6 +93,7 @@ test_cases:
       result_contains:
         - "scan_order"
         - "scan_order_batch_accept"
+      result_not_contains:
         - "touch_keytable"
 
   - name: "Selective IN branches under OR preserve ordered results"

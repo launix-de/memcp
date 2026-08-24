@@ -229,7 +229,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "recset_key_index"
+        - "recset_project_join"
         - "recset_union"
         - "scan_order"
       result_not_contains:
