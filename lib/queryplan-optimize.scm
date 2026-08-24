@@ -825,19 +825,6 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 		(and (equal? (join_order_plan_cost candidate) (join_order_plan_cost current))
 			(< (join_order_driver_cardinality candidate) (join_order_driver_cardinality current))))))
 
-(define join_order_candidate_better_expr (lambda (current candidate)
-	(list (quote or)
-		(list (quote <)
-			(join_order_plan_cost_expr candidate)
-			(join_order_plan_cost_expr current))
-		(list (quote and)
-			(list (quote equal?)
-				(join_order_plan_cost_expr candidate)
-				(join_order_plan_cost_expr current))
-			(list (quote <)
-				(join_order_plan_driver_expr candidate)
-				(join_order_plan_driver_expr current))))))
-
 (define join_order_plan_driver_alias (lambda (plan)
 	(if (nil? plan) nil (join_optimizer_tree_first_alias (join_order_plan_tree plan)))))
 
@@ -886,9 +873,7 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 					candidate
 					(if (and current_valid (not candidate_valid))
 						current
-						(if (planner_guarded_choice
-							(join_order_candidate_better? current candidate)
-							(join_order_candidate_better_expr current candidate))
+						(if (join_order_candidate_better? current candidate)
 							candidate current))))))))
 
 (define join_order_best_orientation (lambda (universe predicates left right required_drivers)
@@ -1755,8 +1740,9 @@ running DP over a wide projection-only graph. */
 			(count aliases) predicate_hypergraph (cadr connected_count)))
 		(define exact (equal? strategy (quote dphyp)))
 		/* Cached plans depend on the sampled cardinalities even when DPHyp keeps a
-		fixed physical driver. Record the inputs as guards as well as the pairwise
-		choice inequalities so a statistics change can trigger re-costing. */
+		fixed physical driver. Guard every cost input once. Pairwise DP inequalities
+		are deterministic consequences of these inputs and retaining all of them
+		would duplicate complete intermediate plan trees. */
 		(join_order_record_exact_cost_inputs nodes predicates)
 		(define result (if (not (nil? functional_relation_plan))
 			(list functional_relation_plan (- (count aliases) 1))
@@ -5266,7 +5252,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				(gs_limit stage)
 				(gs_offset stage)
 				(stage_semantic_facts alias_map signatures (gs_facts stage))))
-			(concat "stage-backbone:" (fnv_hash (serialize payload)))))))
+			(concat "stage-backbone:" (stable_structural_hash payload true))))))
 
 (define stage_semantic_signature (lambda (signatures stage)
 	(if (not (group_stage? stage))
@@ -5285,7 +5271,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				(gs_limit stage)
 				(gs_offset stage)
 				(stage_semantic_facts alias_map signatures (gs_facts stage))))
-			(concat "stage-semantic:" (fnv_hash (serialize payload)))))))
+			(concat "stage-semantic:" (stable_structural_hash payload true))))))
 
 (define stage_semantic_signature_index (lambda (stages)
 	(reduce (coalesceNil stages '()) (lambda (index stage)
@@ -5344,10 +5330,10 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 				(define stage_key (stage_output_left_join_stage_key signature_index stage))
 				(if (nil? stage_key)
 					nil
-					(concat "stage-output-left-join:" (fnv_hash (serialize (list
+					(concat "stage-output-left-join:" (stable_structural_hash (list
 						stage_key
 						(source_schema src)
-						(normalize_stage_output_left_join_expr (source_alias src) (source_join_expr src))))))))))))
+						(normalize_stage_output_left_join_expr (source_alias src) (source_join_expr src))) true))))))))
 
 (define stage_output_left_join_stage_with_aggregates (lambda (stage ags)
 	(make_group_stage
@@ -5954,8 +5940,8 @@ accept exactly the same aggregate descriptors. */
 		(define movable (combine_where_terms movable_terms true))
 		(define filtered_stage_aliases
 			(map (aggregate_pushdown_filtered_stage_sources block movable_terms) source_alias))
-		(define partition_id (concat "aggregate-partition:" (fnv_hash (serialize (list
-			(source_schema driver) (source_relation driver) keys residual)))))
+		(define partition_id (concat "aggregate-partition:" (stable_structural_hash (list
+			(source_schema driver) (source_relation driver) keys residual) true)))
 		(define partition_alias (concat "__aggregate_partition_" (fnv_hash partition_id)))
 		(define partition_stage (make_group_stage
 			partition_id

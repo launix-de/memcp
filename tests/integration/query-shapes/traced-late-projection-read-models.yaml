@@ -1029,6 +1029,70 @@ test_cases:
         - id: 2
           can_view: false
 
+  - name: "Join DP comparisons do not duplicate guarded cost inputs"
+    scm: |
+      (begin
+        (define compile_session (newsession))
+        (define conditions (newsession))
+        (compile_session "__memcp_queryplan_guard_conditions" conditions)
+        (compile_session "__memcp_queryplan_guard_condition_catalog"
+          (make_structural_catalog (quote ast)))
+        (compile_session "__memcp_queryplan_guarded_session_keys"
+          (make_structural_catalog (quote ast)))
+        (define chosen (with_session compile_session (lambda ()
+          (join_order_better_plan
+            (join_order_leaf_plan (list "larger" 100))
+            (join_order_leaf_plan (list "smaller" 1))
+            '()))))
+        (if (and (equal? (join_order_plan_aliases chosen) '("smaller"))
+            (equal? (count (conditions)) 0))
+          "ok"
+          (error (concat "join DP retained " (count (conditions))
+            " redundant intermediate guards"))))
+    expect:
+      data: ["ok"]
+
+  - name: "Parameterized derived scalar and outer-join compilation stays bounded"
+    max_time: 5.0
+    scm: |
+      (begin
+        (define inner (reduce (produceN 48) (lambda (sql i)
+          (begin
+            (define suffix (string i))
+            (concat sql
+              ", COALESCE((SELECT parent_" suffix ".owner_id = " (+ i 1)
+              " OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_" suffix
+              " WHERE member_" suffix ".team_id = parent_" suffix ".team_id"
+              " AND member_" suffix ".member_id = " (+ i 1) " LIMIT 1)"
+              " FROM trace_wide_parent parent_" suffix
+              " WHERE parent_" suffix ".id = item.parent_id LIMIT 1), FALSE) AS access_" suffix)))
+          "SELECT item.id"))
+        (define inner (concat inner " FROM trace_wide_prop item WHERE item.id < 0"))
+        (define query (reduce (produceN 18) (lambda (sql i)
+          (begin
+            (define suffix (string i))
+            (concat sql " LEFT JOIN trace_actor sorter_" suffix
+              " ON sorter_" suffix ".id = projected.id")))
+          (concat "SELECT projected.*, sorter_0.enabled AS sort_0 FROM (" inner ") projected")))
+        (define query (concat query " ORDER BY projected.id LIMIT 72"))
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (define exact_started (nanotime))
+        (cached_parse (newcachemap) parse_sql "memcp-tests" query
+          (lambda (_schema _table _write) true) "root" session false)
+        (define exact_elapsed (- (nanotime) exact_started))
+        (define started (nanotime))
+        (cached_parse (newcachemap) parse_sql "memcp-tests" query
+          (lambda (_schema _table _write) true) "root" session true)
+        (define elapsed (- (nanotime) started))
+        (if (and (< elapsed 5000000000)
+            (< elapsed (+ 1000000000 (* exact_elapsed 3))))
+          "ok"
+          (error (concat "derived compile exact=" exact_elapsed "ns parameterized=" elapsed "ns"))))
+    expect:
+      data: ["ok"]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_case_item"
   - sql: "DROP TABLE IF EXISTS trace_lazy_error"

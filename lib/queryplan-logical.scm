@@ -99,8 +99,8 @@ PostgreSQL parsers should both lower to the same combined operators.
 
 /* Cost-model decisions register the condition which keeps their chosen branch
 valid in a compile-local newsession. cached_parse installs the accumulator;
-direct planner users deliberately remain unaffected. Structural string keys
-deduplicate identical conditions without mutable Scheme lists. */
+direct planner users deliberately remain unaffected. The structural catalogs
+deduplicate immutable ASTs without serializing the growing expressions. */
 (define planner_record_guard_condition (lambda (condition)
 	(begin
 		(define condition_accumulator (try
@@ -109,14 +109,25 @@ deduplicate identical conditions without mutable Scheme lists. */
 		(if (nil? condition_accumulator)
 			condition
 			(begin
-				(condition_accumulator (string condition) condition)
+				(define condition_catalog (try
+					(lambda () ((context "session") "__memcp_queryplan_guard_condition_catalog"))
+					(lambda (_e) nil)))
+				(if (nil? condition_catalog)
+					(condition_accumulator (string condition) condition)
+					(if (condition_catalog condition)
+						nil
+						(begin
+							(define count (coalesceNil (condition_accumulator "count") 0))
+							(condition_catalog condition true)
+							(condition_accumulator (concat "condition:" count) condition)
+							(condition_accumulator "count" (+ count 1)))))
 				(define covered_bindings (try
 					(lambda () ((context "session") "__memcp_queryplan_guarded_session_keys"))
 					(lambda (_e) nil)))
 				(if (nil? covered_bindings)
 					nil
 					(reduce (query_expr_session_reads condition) (lambda (_ expr)
-						(covered_bindings (string expr) true)) nil))
+						(covered_bindings (if (nil? condition_catalog) (string expr) expr) true)) nil))
 				condition)))))
 
 (define planner_guarded_choice (lambda (chosen condition)
@@ -202,14 +213,23 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 		(if (nil? bindings)
 			expr
 			(begin
-				(define key (string expr))
-				(define existing (bindings key))
+				(define binding_catalog (try
+					(lambda () ((context "session") "__memcp_queryplan_guard_binding_catalog"))
+					(lambda (_e) nil)))
+				(define key (if (nil? binding_catalog) (string expr) expr))
+				(define existing (if (nil? binding_catalog) (bindings key) (binding_catalog key)))
 				(if (nil? existing)
 					(begin
 						(define binding (list
-							(symbol (concat "__queryplan_guard_value_" (fnv_hash key)))
+							(symbol (concat "__queryplan_guard_value_" (stable_structural_hash expr false)))
 							expr))
-						(bindings key binding)
+						(if (nil? binding_catalog)
+							(bindings key binding)
+							(begin
+								(define count (coalesceNil (bindings "count") 0))
+								(binding_catalog key binding)
+								(bindings (concat "binding:" count) binding)
+								(bindings "count" (+ count 1))))
 						(car binding))
 					(car existing)))))))
 
@@ -1968,7 +1988,7 @@ general recursive boolean proof above. */
 			(canonical_column_expr_for_alias inner_default expr))))
 		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
 			(not (contains? explicit_keys expr)))))))
-		(define stage_id (concat "scalar-group-top:" (fnv_hash (serialize (list subquery keys ags (qb_order inner))))))
+		(define stage_id (concat "scalar-group-top:" (stable_structural_hash (list subquery keys ags (qb_order inner)) true)))
 		(define stage (make_group_stage
 			stage_id
 			inner_src
@@ -2033,7 +2053,7 @@ general recursive boolean proof above. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "exists:" (fnv_hash (string (list subquery keys outer_domain condition)))))
+		(define stage_id (concat "exists:" (stable_structural_hash (list subquery keys outer_domain condition) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2109,8 +2129,8 @@ general recursive boolean proof above. */
 			'()
 			(qb_stages inner)
 			(qb_facts inner)))
-		(define stage_id (concat "exists-group:" (fnv_hash
-			(string (list subquery keys outer_domain condition (qb_having inner))))))
+		(define stage_id (concat "exists-group:" (stable_structural_hash
+			(list subquery keys outer_domain condition (qb_having inner)) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2249,7 +2269,7 @@ general recursive boolean proof above. */
 		serialization once and reuse the compact identity below; serializing that
 		large immutable tree twice made canonicalization scale with an avoidable
 		second full traversal. */
-		(define inner_hash (fnv_hash (serialize inner)))
+		(define inner_hash (stable_structural_hash inner true))
 		(define candidate_alias (concat "__exists_union_" inner_hash))
 		(define union_input (make_union_block
 			(union_mode inner)
@@ -2262,7 +2282,7 @@ general recursive boolean proof above. */
 		(define keys (mapIndex (gs_keys first_stage) (lambda (i _key)
 			(list (quote get_column) candidate_alias false (concat "k" (string i)) false))))
 		(define stage_id (concat "exists-union:"
-			(fnv_hash (serialize (list inner_hash outer_domain lookup_keys)))))
+			(stable_structural_hash (list inner_hash outer_domain lookup_keys) true)))
 		(define stage (make_group_stage
 			stage_id
 			union_input
@@ -2420,7 +2440,7 @@ without separately proving two-valued semantics. */
 		(define where_mode (if (>= (count args) 4) (nth args 3) false))
 		(define truth_membership (string? where_mode))
 		(define semijoin_where (and (not truth_membership) where_mode))
-		(define candidate_alias (concat "__in_candidate_" (fnv_hash (string (list probe inner)))))
+		(define candidate_alias (concat "__in_candidate_" (stable_structural_hash (list probe inner) false)))
 		(define union_input (make_union_block
 			(union_mode inner)
 			(map (union_branches inner) make_in_union_candidate_branch)
@@ -2430,8 +2450,8 @@ without separately proving two-valued semantics. */
 				(list (quote alias) candidate_alias))))
 		(define candidate_key (list (quote get_column) candidate_alias false "v" false))
 		(define keys (list candidate_key))
-		(define stage_id (concat "in-candidate:" (fnv_hash (string (list probe inner)))))
-		(define null_stage_id (concat "in-candidate-null:" (fnv_hash (string inner))))
+		(define stage_id (concat "in-candidate:" (stable_structural_hash (list probe inner) false)))
+		(define null_stage_id (concat "in-candidate-null:" (stable_structural_hash inner false)))
 		(define null_ag (in_rhs_state_descriptor candidate_key))
 		(define stage (make_group_stage
 			stage_id
@@ -2555,9 +2575,9 @@ without separately proving two-valued semantics. */
 				(qb_stages membership_inner)
 				(qb_facts membership_inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "in:" (fnv_hash (string (list probe keys lookup_keys condition)))))
+		(define stage_id (concat "in:" (stable_structural_hash (list probe keys lookup_keys condition) false)))
 		(define null_ag (in_rhs_state_descriptor rhs_expr))
-		(define null_stage_id (concat "in-null:" (fnv_hash (string (list outer_domain condition rhs_expr)))))
+		(define null_stage_id (concat "in-null:" (stable_structural_hash (list outer_domain condition rhs_expr) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2741,7 +2761,7 @@ without separately proving two-valued semantics. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-agg:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
+		(define stage_id (concat "scalar-agg:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2829,7 +2849,7 @@ without separately proving two-valued semantics. */
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-once:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
+		(define stage_id (concat "scalar-once:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -2898,7 +2918,7 @@ without separately proving two-valued semantics. */
 			'()
 			(qb_stages inner)
 			(qb_facts inner)))
-		(define stage_id (concat "derived-once:" (fnv_hash (string (list original_relation alias ags)))))
+		(define stage_id (concat "derived-once:" (stable_structural_hash (list original_relation alias ags) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3080,7 +3100,7 @@ without separately proving two-valued semantics. */
 
 (define derived_stage_rebind_id_map (lambda (alias stages)
 	(map (coalesceNil stages '()) (lambda (stage)
-		(list (gs_id stage) (concat (gs_id stage) ":derived:" (fnv_hash (string alias))))))))
+		(list (gs_id stage) (concat (gs_id stage) ":derived:" (stable_structural_hash alias false)))))))
 
 (define derived_stage_rebind_alias_map (lambda (id_map stages)
 	(begin
@@ -3191,7 +3211,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(qb_stages inner)
 				(qb_facts inner))))
 		(define stage_condition (if (query_block? stage_input) true condition))
-		(define stage_id (concat "scalar-single:" (fnv_hash (string (list subquery keys outer_domain condition ags)))))
+		(define stage_id (concat "scalar-single:" (stable_structural_hash (list subquery keys outer_domain condition ags) false)))
 		(define stage (make_group_stage
 			stage_id
 			stage_input
@@ -3627,7 +3647,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define outer_domain (if (empty_list? partition_exprs)
 			'()
 			partition_exprs))
-		(define stage_id (concat "window-agg:" (fnv_hash (string (list fn canonical_args keys)))))
+		(define stage_id (concat "window-agg:" (stable_structural_hash (list fn canonical_args keys) false)))
 		(define stage (make_group_stage
 			stage_id
 			src
@@ -4119,10 +4139,10 @@ carrier selection remains a later, per-stage cost decision. */
 		(define parent (uctx_get ctx (quote btw2025-current-handle) nil))
 		(define parent_ancestors (uctx_get ctx (quote btw2025-ancestor-handles) '()))
 		(define current_ancestors (if (nil? parent) '() (cons parent parent_ancestors)))
-		(define current_handle (concat "djoin:" (fnv_hash (string (list
+		(define current_handle (concat "djoin:" (stable_structural_hash (list
 			kind
 			(dependent_subquery_scope_backbone kind subquery)
-			outer_sources)))))
+			outer_sources) false)))
 		(define current_info (btw2025_pending_unnesting_info subquery outer_sources current_handle parent current_ancestors))
 		(define resolve_ctx (make_uctx ctx (list
 			(list (quote defer-subquery-rewrites) true)
@@ -4173,11 +4193,11 @@ carrier selection remains a later, per-stage cost decision. */
 (define btw2025_dependent_marker_key (lambda (expr)
 	(if (dependent_subquery_marker? expr)
 		(if (equal? (dep_subquery_kind expr) (quote scalar-output))
-			(concat "dependent-bundle:" (fnv_hash (string (list
+			(concat "dependent-bundle:" (stable_structural_hash (list
 				(dep_subquery_kind expr)
 				(dep_subquery_query expr)
-				(dep_subquery_outer_sources expr)))))
-			(concat "dependent:" (fnv_hash (string expr))))
+				(dep_subquery_outer_sources expr)) false))
+			(concat "dependent:" (stable_structural_hash expr false)))
 		nil)))
 
 (define btw2025_cached_dependent_rewrite (lambda (marker rewritten)

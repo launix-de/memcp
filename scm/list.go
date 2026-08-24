@@ -6756,7 +6756,7 @@ func init_list() {
 		Fn:   NewStructuralCatalog,
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
-				{Kind: "bool", ParamName: "force_collision", ParamDesc: "test-only: place every key in one bucket", Optional: true},
+				{Kind: "bool|symbol", ParamName: "mode", ParamDesc: "true forces collisions for tests; ast selects type-stable compiler equality", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "func"},
 		},

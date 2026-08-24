@@ -1468,7 +1468,7 @@ choice table instead of adding another promotion path. */
 (define query_invariant_scalar_first_probe_key (lambda (stage requested_col)
 	(concat
 		(if (presence_probe_stage? stage) "__query_presence_probe_" "__query_scalar_probe_")
-		(fnv_hash (serialize (list (gs_id stage) requested_col))))))
+		(stable_structural_hash (list (gs_id stage) requested_col) true))))
 
 (define lower_query_invariant_scalar_first_probe_expr (lambda (stage requested_col expr)
 	(list
@@ -3499,7 +3499,7 @@ working on the original values. */
 	(concat "k" i)))
 
 (define aggregate_col_name (lambda (ag)
-	(concat "agg_" (fnv_hash (serialize ag)))))
+	(concat "agg_" (stable_structural_hash ag true))))
 
 (define canonical_aggregate_probe_reference (lambda (stage requested_col)
 	(begin
@@ -3538,9 +3538,9 @@ the enclosing carrier identity supplies the remaining query context. */
 			(define alias_map (merge (list
 				(stage_semantic_alias_entries local_aliases "__aggregate_local_")
 				(stage_semantic_alias_entries outer_aliases "__aggregate_outer_"))))
-			(concat "agg_" (fnv_hash (serialize (list
+			(concat "agg_" (stable_structural_hash (list
 				"canonical-aggregate-v5"
-				(stage_semantic_rewrite_expr alias_map '() ag)))))))))
+				(stage_semantic_rewrite_expr alias_map '() ag)) true))))))
 
 (define dedupe_aggregates_by_col (lambda (ags)
 	(begin
@@ -3560,8 +3560,8 @@ the enclosing carrier identity supplies the remaining query context. */
 	/* The readable label is not an identity. The hash covers the canonical input
 	graph, source-role-aware keys, and complete filter, so equivalent aliases
 	converge while self-join roles and different predicates remain separated. */
-	(concat ".grp:" label ":" (fnv_hash (serialize (list
-		"canonical-group-keytable-v5" schema input_identity keys condition))))))
+	(concat ".grp:" label ":" (stable_structural_hash (list
+		"canonical-group-keytable-v5" schema input_identity keys condition) true))))
 
 /* Persistent helper objects must be named by the physical data they represent,
 not by disposable SQL aliases. Source position remains part of the identity so
@@ -3698,10 +3698,10 @@ self-joins of the same base table still describe two distinct row roles. */
 (define canonical_orc_column_name (lambda (kind src payload)
 	/* ORCs live on one base table. Their identity is the table plus the complete
 	physical window recipe; SELECT aliases and read-time LIMIT/OFFSET are absent. */
-	(concat "__orc_" kind "_" (fnv_hash (serialize (list
+	(concat "__orc_" kind "_" (stable_structural_hash (list
 		"canonical-orc-v2"
 		(list (source_schema src) (source_relation src))
-		payload))))))
+		payload) true))))
 
 (define make_group_keytable_cache (lambda (schema relation)
 	(list (quote group-keytable) schema relation)))
@@ -3737,9 +3737,9 @@ self-joins of the same base table still describe two distinct row roles. */
 	(begin
 		(define input (gs_input stage))
 		(if (union_block? input)
-			(concat "union:" (fnv_hash (string input)))
+			(concat "union:" (stable_structural_hash input false))
 			(if (query_block? input)
-				(concat "query:" (fnv_hash (string input)))
+				(concat "query:" (stable_structural_hash input false))
 				(source_relation input))))))
 
 (define group_stage_default_cache (lambda (stage signatures)
@@ -3860,7 +3860,7 @@ self-joins of the same base table still describe two distinct row roles. */
 		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
 			(not (contains? explicit_keys expr)))))))
 		(make_group_stage
-			(concat "group:" (source_relation src) ":" (fnv_hash (string (list keys ags))))
+			(concat "group:" (source_relation src) ":" (stable_structural_hash (list keys ags) false))
 			src
 			session_keys
 			keys
@@ -3898,8 +3898,8 @@ self-joins of the same base table still describe two distinct row roles. */
 			(qb_stages block)
 			(qb_facts block)))
 		(make_group_stage
-			(concat "group:query:" (fnv_hash (serialize (list
-				(qb_sources block) (qb_where block) keys ags))))
+			(concat "group:query:" (stable_structural_hash (list
+				(qb_sources block) (qb_where block) keys ags) true))
 			input
 			session_keys
 			keys
@@ -4161,7 +4161,7 @@ ever-larger subtrees. */
 		_ false)))
 
 (define group_computed_order_col_name (lambda (expr)
-	(concat "ord_" (fnv_hash (serialize expr)))))
+	(concat "ord_" (stable_structural_hash expr true))))
 
 (define group_order_physical_expr (lambda (grouptbl expr)
 	(if (direct_group_order_expr? expr)
@@ -4381,7 +4381,7 @@ ever-larger subtrees. */
 						(physical_query_session_symbol)
 						"get_or_compute_scoped"
 						(physical_query_scope_symbol)
-						(concat "__group_count_recset_" (fnv_hash (serialize membership_expr)))
+						(concat "__group_count_recset_" (stable_structural_hash membership_expr true))
 						(list (quote lambda) '() membership_expr)))
 				(list (quote scan)
 					'(session "__memcp_tx")
