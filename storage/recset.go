@@ -1582,11 +1582,18 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 // subscans) without ever touching rows outside the incoming membership --
 // e.g. evaluating an expensive correlated ACL check only over the ~30k rows a
 // mandant filter already narrowed a table down to, not the full table.
-func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
+func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
+	// Keep RecSet narrowing on the ordinary index-boundary path. The exact
+	// RecSet matcher and approximate hooks such as Bigram LIKE then prune the
+	// same candidate batches before the residual predicate reads any columns.
+	// This is an operator capability, not a planner shape rule: every
+	// scan_recset whose input is a RecSet gets the same combined boundaries.
+	boundaries := recSetFilterBoundaries(owner, conditionCols, condition)
+	lower, upperLast := indexFromBoundaries(boundaries)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
 	cReaders := make([]ColumnReader, len(conditionCols))
@@ -1626,17 +1633,17 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
 	visibleUpper := mainCount + uint32(len(t.inserts))
-	matches := make([]uint32, 0, part.count)
-	part.forEachID(func(idx uint32) bool {
+	builder := newRecSetShardBuilder(t, visibleUpper, false, mainCount)
+	evaluateOne := func(idx uint32) {
 		if idx >= visibleUpper {
-			return true
+			return
 		}
 		if acidMode {
 			if !currentTx.IsVisible(t, idx) {
-				return true
+				return
 			}
 		} else if t.deletions.Get(uint(idx)) {
-			return true
+			return
 		}
 		if idx < mainCount {
 			for i, c := range cReaders {
@@ -1657,13 +1664,33 @@ func (t *storageShard) filterRecSetPart(part *recSetShard, conditionCols []strin
 				}
 			}
 		}
-		if !scm.ToBool(conditionFn(cdataset...)) {
-			return true
+		builder.add(idx, scm.ToBool(conditionFn(cdataset...)))
+	}
+	evaluateBatch := func(batch []uint32) bool {
+		for _, idx := range batch {
+			evaluateOne(idx)
 		}
-		matches = append(matches, idx)
 		return true
-	})
-	return newRecSetShardFromSortedIDs(t, visibleUpper, matches)
+	}
+	/* A tiny batch is already the cheapest exact candidate iterator; walking a
+	whole inactive boundary index just to rediscover those IDs would defeat
+	adaptive LIMIT. Broad RecSets take the normal boundary path, where LIKE and
+	other hooks can reduce work below the incoming membership cardinality. */
+	if part.count*4 < int64(visibleUpper) {
+		part.forEachID(func(idx uint32) bool {
+			evaluateOne(idx)
+			return true
+		})
+	} else {
+		var buf [1024]uint32
+		t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, len(t.inserts), buf[:], true, nil, evaluateBatch)
+	}
+	return builder.finish()
+}
+
+func recSetFilterBoundaries(owner *recSet, conditionCols []string, condition scm.Scmer) boundaries {
+	result := extractBoundaries(conditionCols, condition)
+	return append(result, NewIndexBoundary("$recset_contains", RecSetMatcher, NewRecSetScmer(owner), ""))
 }
 
 // filterToRecSet narrows r to the members that also satisfy condition,
@@ -1699,7 +1726,7 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 				panic("query killed")
 			}
 			values <- recSetBuildResult{
-				part: part.shard.filterRecSetPart(&part, conditionCols, condition, currentTx, ss),
+				part: part.shard.filterRecSetPart(r, &part, conditionCols, condition, currentTx, ss),
 			}
 			return scm.NewNil()
 		})
