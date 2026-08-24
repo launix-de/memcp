@@ -1093,6 +1093,29 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Diverse independent scalar stages skip shared-carrier consolidation"
+    scm: |
+      (begin
+        (define independent_stage (make_group_stage
+          "independent" (list "item" "memcp-tests" "trace_wide_prop" false nil)
+          '() '(1) '() nil '() '() nil nil '()))
+        (define shared_stage (group_stage_with_facts independent_stage
+          (qassoc_set (gs_facts independent_stage) (quote shared_prepare) true)))
+        (define make_test_ir (lambda (stage)
+          (make_ir (quote select)
+            (make_query_block "memcp-tests" '() '(1) true '() nil '() nil nil '()
+              (list stage) '())
+            '() nil (quote rows))))
+        (if (and
+            (not (closed_group_prepare_consolidation_required?
+              (make_test_ir independent_stage)))
+            (closed_group_prepare_consolidation_required?
+              (make_test_ir shared_stage)))
+          "ok"
+          (error "shared-carrier consolidation predicate lost stage ownership")))
+    expect:
+      data: ["ok"]
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trace_case_item"
   - sql: "DROP TABLE IF EXISTS trace_lazy_error"

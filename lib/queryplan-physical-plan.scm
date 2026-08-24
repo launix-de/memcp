@@ -5851,48 +5851,59 @@ recipe in one zero-argument helper. */
 					(list (list (quote context) "session") (shared_prepare_owner_key stage))
 					(quoted_runtime_list '())))))))
 
+(define closed_group_prepare_consolidation_required? (lambda (ir)
+	(and (query_block? (ir_root ir))
+		(reduce
+			(stage_catalog_with_nested
+				(query_block_stage_catalog (ir_root ir)))
+			(lambda (shared stage)
+				(or shared (stage_shared_prepare? stage)))
+			false))))
+
 /* Recipe emission is a two-step physical pass: normal lowering records which
 lazy stage keys are actually reachable, then this collector emits one closed
 initializer owner per canonical carrier and replaces local copies with aliases.
 Both AST walks are linear; no pairwise recipe comparison is performed. */
 (define consolidate_closed_group_prepares (lambda (ir plan)
-	(if (not (query_block? (ir_root ir)))
+	(if (not (closed_group_prepare_consolidation_required? ir))
 		plan
 		(begin
 			(define catalog (stage_catalog_with_nested
 				(query_block_stage_catalog (ir_root ir))))
-			(if (empty_list? catalog)
-				plan
-				(begin
-					(define emitted_keys (emitted_prepare_binding_keys plan '()))
-					(define emitted_call_keys (emitted_prepare_call_keys plan '()))
-					(define emitted_strings (physical_string_set plan '()))
-					(define dependency_graph (stage_dependency_graph catalog))
-					(define consumers (filter catalog (lambda (stage)
-						(and (closed_group_prepare_stage? dependency_graph stage)
-							(has_assoc? emitted_keys (stage_prepare_key stage))))))
-					(define selected_backbones (stage_prepare_backbone_set consumers))
-					/* A consumer can read an aggregate column without owning a prepare
-					binding. Once a carrier is reachable, collect every compatible column
-					requirement for it from the canonical catalog. */
-					(define selected (filter catalog (lambda (stage)
-						(and (closed_group_prepare_stage? dependency_graph stage)
-							(and (has_assoc? selected_backbones (stage_prepare_backbone_signature stage))
-								(or (has_assoc? emitted_keys (stage_prepare_key stage))
-									(or (has_assoc? emitted_call_keys (stage_prepare_key stage))
-										(stage_aggregate_referenced? emitted_strings stage))))))))
-					(if (empty_list? selected)
-						plan
-						(begin
-							(define carriers (collect_stage_prepares selected))
-							(define selected_keys (reduce selected (lambda (keys stage)
-								(set_assoc keys (stage_prepare_key stage) true)) '()))
-							(cons (quote !begin)
-								(merge (list
-									(map carriers (lambda (stage)
-										(shared_prepare_owner_binding dependency_graph catalog stage)))
-									(map selected shared_prepare_alias_binding)
-									(list (without_prepare_bindings plan selected_keys)))))))))))))
+			/* Unique carriers already own exactly one initializer. The consolidation
+			pass exists only for canonical backbones shared by multiple logical
+			stages; without one, its repeated full-plan usage and rewrite walks are
+			pure allocation overhead on wide scalar read models. */
+			(begin
+				(define emitted_keys (emitted_prepare_binding_keys plan '()))
+				(define emitted_call_keys (emitted_prepare_call_keys plan '()))
+				(define emitted_strings (physical_string_set plan '()))
+				(define dependency_graph (stage_dependency_graph catalog))
+				(define consumers (filter catalog (lambda (stage)
+					(and (closed_group_prepare_stage? dependency_graph stage)
+						(has_assoc? emitted_keys (stage_prepare_key stage))))))
+				(define selected_backbones (stage_prepare_backbone_set consumers))
+				/* A consumer can read an aggregate column without owning a prepare
+				binding. Once a carrier is reachable, collect every compatible column
+				requirement for it from the canonical catalog. */
+				(define selected (filter catalog (lambda (stage)
+					(and (closed_group_prepare_stage? dependency_graph stage)
+						(and (has_assoc? selected_backbones (stage_prepare_backbone_signature stage))
+							(or (has_assoc? emitted_keys (stage_prepare_key stage))
+								(or (has_assoc? emitted_call_keys (stage_prepare_key stage))
+									(stage_aggregate_referenced? emitted_strings stage))))))))
+				(if (empty_list? selected)
+					plan
+					(begin
+						(define carriers (collect_stage_prepares selected))
+						(define selected_keys (reduce selected (lambda (keys stage)
+							(set_assoc keys (stage_prepare_key stage) true)) '()))
+						(cons (quote !begin)
+							(merge (list
+								(map carriers (lambda (stage)
+									(shared_prepare_owner_binding dependency_graph catalog stage)))
+								(map selected shared_prepare_alias_binding)
+								(list (without_prepare_bindings plan selected_keys))))))))))))
 
 (define physical_plan_uses_query_scope? (lambda (expr)
 	(if (or (equal? expr (physical_query_session_symbol))
