@@ -48,6 +48,8 @@ setup:
       CREATE TABLE csa_ref (
         id INT PRIMARY KEY,
         group_id INT,
+        duration_past INT,
+        duration_future INT,
         label VARCHAR(32)
       )
   - sql: |
@@ -90,11 +92,11 @@ setup:
         (31, 3, 3000, 3, 0),
         (41, 4, NULL, 8, 1)
   - sql: |
-      INSERT INTO csa_ref (id, group_id, label) VALUES
-        (1000, 1, 'alpha'),
-        (1001, 1, 'beta'),
-        (2000, 2, 'gamma'),
-        (3000, NULL, 'delta')
+      INSERT INTO csa_ref (id, group_id, duration_past, duration_future, label) VALUES
+        (1000, 1, 1, 1, 'alpha'),
+        (1001, 1, 1, 1, 'beta'),
+        (2000, 2, 2, 2, 'gamma'),
+        (3000, NULL, NULL, NULL, 'delta')
   - sql: |
       INSERT INTO csa_assignment (id, actor_id, tenant_id, ref_id, allowed) VALUES
         (1, 7, 100, 1000, TRUE),
@@ -121,6 +123,48 @@ setup:
       FROM cq_digit d1, cq_digit d2, cq_digit d3
 
 test_cases:
+
+  - name: "Cold nested scalar ranges under OR initialize all dependent carriers"
+    sql: |
+      SELECT (
+        SELECT SUM(1)
+        FROM csa_item i
+        WHERE i.score IS NOT NULL
+          AND (
+            (((100 - i.score) % 100) / 10 BETWEEN 0 AND (
+              SELECT duration_past
+              FROM csa_ref
+              WHERE id = (
+                SELECT p.ref_id
+                FROM csa_parent p
+                WHERE p.id = i.parent_id
+                LIMIT 1
+              )
+            ))
+            OR
+            (((100 - i.score) % 100) / 10 BETWEEN 10 - (
+              SELECT duration_future
+              FROM csa_ref
+              WHERE id = (
+                SELECT p.ref_id
+                FROM csa_parent p
+                WHERE p.id = i.parent_id
+                LIMIT 1
+              )
+            ) AND 10)
+          )
+          AND COALESCE((
+            SELECT TRUE
+            FROM csa_parent visible_parent
+            WHERE visible_parent.id = i.parent_id
+            LIMIT 1
+          ), FALSE)
+        LIMIT 1
+      ) AS reminder
+    expect:
+      rows: 1
+      data:
+        - reminder: 3
 
   - name: "Correlated scalar ORDER BY LIMIT chooses the top item"
     sql: |

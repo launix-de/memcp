@@ -5598,6 +5598,62 @@ build_queryplan contract. */
 					(emitted_prepare_binding_keys head keys))
 				_ keys)))))
 
+(define prepare_call_key (lambda (expr)
+	(if (and (list? expr) (equal? (count expr) 3))
+		(begin
+			(define head (nth expr 0))
+			(define target (nth expr 1))
+			(if (and
+				(or (equal? head (quote apply)) (equal? head (symbol "apply")))
+				(list? target)
+				(equal? (count target) 2))
+				(begin
+					(define session_call (nth target 0))
+					(if (and
+						(list? session_call)
+						(equal? (count session_call) 2)
+						(or
+							(equal? (nth session_call 0) (quote context))
+							(equal? (nth session_call 0) (symbol "context")))
+						(equal? (nth session_call 1) "session"))
+						(nth target 1)
+						nil))
+				nil))
+		nil)))
+
+(define emitted_prepare_call_keys (lambda (expr keys)
+	(begin
+		(define key (prepare_call_key expr))
+		(define found (if (nil? key) keys (set_assoc keys key true)))
+		(match expr
+			((symbol quote) _value) found
+			((quote quote) _value) found
+			(cons head tail) (reduce tail (lambda (acc item)
+				(emitted_prepare_call_keys item acc))
+				(emitted_prepare_call_keys head found))
+			_ found))))
+
+/* Carrier consolidation can retain calls through nested consumer paths after
+their physical recipe has been merged into another owner. Keep those logical
+handles callable without rebuilding the already consolidated carrier. */
+(define complete_emitted_prepare_bindings (lambda (ir plan)
+	(if (not (query_block? (ir_root ir)))
+		plan
+		(begin
+			(define catalog (unique_stages_by_id
+				(stage_catalog_with_nested (query_block_stage_catalog (ir_root ir)))))
+			(define bound_keys (emitted_prepare_binding_keys plan '()))
+			(define called_keys (emitted_prepare_call_keys plan '()))
+			(define missing_roots (filter catalog (lambda (stage)
+				(begin
+					(define key (stage_prepare_key stage))
+					(and (has_assoc? called_keys key) (not (has_assoc? bound_keys key)))))))
+			(if (empty_list? missing_roots)
+				plan
+				(cons (quote !begin) (merge (list
+					(map missing_roots prepared_stage_binding)
+					(list plan)))))))))
+
 (define without_prepare_bindings (lambda (expr keys)
 	(begin
 		(define key (prepare_binding_key expr))
@@ -5722,11 +5778,13 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 	(if (not (query_block? (ir_root ir)))
 		plan
 		(begin
-			(define catalog (query_block_stage_catalog (ir_root ir)))
+			(define catalog (stage_catalog_with_nested
+				(query_block_stage_catalog (ir_root ir))))
 			(if (empty_list? catalog)
 				plan
 				(begin
 					(define emitted_keys (emitted_prepare_binding_keys plan '()))
+					(define emitted_call_keys (emitted_prepare_call_keys plan '()))
 					(define emitted_strings (physical_string_set plan '()))
 					(define dependency_graph (stage_dependency_graph catalog))
 					(define consumers (filter catalog (lambda (stage)
@@ -5740,7 +5798,8 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 						(and (closed_group_prepare_stage? dependency_graph stage)
 							(and (has_assoc? selected_backbones (stage_prepare_backbone_signature stage))
 								(or (has_assoc? emitted_keys (stage_prepare_key stage))
-									(stage_aggregate_referenced? emitted_strings stage)))))))
+									(or (has_assoc? emitted_call_keys (stage_prepare_key stage))
+										(stage_aggregate_referenced? emitted_strings stage))))))))
 					(if (empty_list? selected)
 						plan
 						(begin
@@ -5887,7 +5946,8 @@ though both handles are constant for the complete query generation. */
 				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))
 		(define consolidated_plan (consolidate_closed_group_prepares ir plan))
-		(define deduplicated_plan (deduplicate_lazy_prepare_recipes consolidated_plan))
+		(define complete_plan (complete_emitted_prepare_bindings ir consolidated_plan))
+		(define deduplicated_plan (deduplicate_lazy_prepare_recipes complete_plan))
 		(define memoized_plan (if (empty_list? (ir_stages ir))
 			deduplicated_plan
 			(consolidate_query_invariant_presence_memos deduplicated_plan)))
