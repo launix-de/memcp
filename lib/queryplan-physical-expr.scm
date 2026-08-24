@@ -5500,9 +5500,13 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 Calibrated by tools/costgen from tests/**/*.yaml workloads tagged with
 metadata.physical_calibration. Each observation is an executed, forced
 EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
-(define planner_direct_presence_probe_row_ns 20243)
+(define planner_scalar_presence_probe_row_ns 48685)
 (define planner_direct_presence_probe_cost (lambda (probe_rows)
-	(planner_cost 0 0 (* probe_rows planner_direct_presence_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
+	(planner_cost 0 0 (* probe_rows planner_scalar_presence_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
+
+(define planner_membership_direct_probe_row_ns 28470)
+(define planner_membership_direct_probe_cost (lambda (probe_rows)
+	(planner_cost 0 0 (* probe_rows planner_membership_direct_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
 (define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
@@ -5518,14 +5522,14 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_map_column_row_ns 32)
 (define planner_membership_expression_operation_row_ns 220)
 (define planner_membership_broad_text_match_row_ns 1)
-(define planner_membership_broad_text_match_byte_ns 2)
+(define planner_membership_broad_text_match_byte_ns 3)
 (define planner_membership_recset_startup_ns 1)
 (define planner_membership_recset_build_row_ns 1)
 (define planner_membership_recset_probe_row_ns 1)
-(define planner_membership_recset_aggregate_row_ns 132)
-(define planner_membership_group_cache_startup_ns 4489531)
+(define planner_membership_recset_aggregate_row_ns 149)
+(define planner_membership_group_cache_startup_ns 4825882)
 (define planner_membership_group_cache_build_row_ns 1)
 (define planner_membership_group_cache_probe_row_ns 1)
 (define planner_membership_ordered_driver_input_row_ns 1)
-(define planner_membership_ordered_scan_invocation_ns 2523969)
+(define planner_membership_ordered_scan_invocation_ns 2784159)
 /* END GENERATED COST CONSTANTS */

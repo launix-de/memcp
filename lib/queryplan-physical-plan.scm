@@ -2850,7 +2850,7 @@ RecSet; membership edges retain their own physical operators. */
 				planner_membership_recset_build_row_ns)
 			(* projection_rows 8)
 			0 visited_rows 0.55)
-			(planner_direct_presence_probe_cost
+			(planner_membership_direct_probe_cost
 				(* visited_rows
 					(membership_candidate_density candidate_input_rows candidate_rows facts)
 					(qassoc_get facts (quote membership_downstream_probe_branches) 0)))

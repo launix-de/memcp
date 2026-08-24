@@ -183,23 +183,24 @@ type observation struct {
 }
 
 type constants struct {
-	scanInvocationNS         int64
-	scanRowNS                int64
-	filterColumnRowNS        int64
-	mapColumnRowNS           int64
-	expressionOperationNS    int64
-	broadTextMatchRowNS      int64
-	broadTextMatchByteNS     int64
-	recsetStartupNS          int64
-	recsetBuildRowNS         int64
-	recsetProbeRowNS         int64
-	recsetAggregateRowNS     int64
-	groupCacheStartupNS      int64
-	groupCacheBuildRowNS     int64
-	groupCacheProbeRowNS     int64
-	orderedDriverInputNS     int64
-	orderedScanInvocationNS  int64
-	directPresenceProbeRowNS int64
+	scanInvocationNS           int64
+	scanRowNS                  int64
+	filterColumnRowNS          int64
+	mapColumnRowNS             int64
+	expressionOperationNS      int64
+	broadTextMatchRowNS        int64
+	broadTextMatchByteNS       int64
+	recsetStartupNS            int64
+	recsetBuildRowNS           int64
+	recsetProbeRowNS           int64
+	recsetAggregateRowNS       int64
+	groupCacheStartupNS        int64
+	groupCacheBuildRowNS       int64
+	groupCacheProbeRowNS       int64
+	orderedDriverInputNS       int64
+	orderedScanInvocationNS    int64
+	scalarPresenceProbeRowNS   int64
+	membershipDirectProbeRowNS int64
 }
 
 func main() {
@@ -260,12 +261,12 @@ func main() {
 	if err := validateDecisionOrdering(training, c); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("scan invocation:      %d ns/invocation\nscan row:             %d ns/input-row\nfilter column:        %d ns/value\nmap column:           %d ns/value\nexpression operation: %d ns/row-operation\nbroad text match:     %d ns/input-row + %d ns/input-byte\nrecset startup:       %d ns\nrecset build:         %d ns/matching-row\nrecset probe:         %d ns/driver-row\nrecset aggregate:     %d ns/driver-input-row\ngroup-cache startup:  %d ns\ngroup-cache build:    %d ns/matching-row\ngroup-cache probe:    %d ns/driver-row\nordered driver input: %d ns/(rows²/1M)\nordered scan startup: %d ns/invocation\ndirect presence probe:%d ns/probe\n",
+	fmt.Printf("scan invocation:      %d ns/invocation\nscan row:             %d ns/input-row\nfilter column:        %d ns/value\nmap column:           %d ns/value\nexpression operation: %d ns/row-operation\nbroad text match:     %d ns/input-row + %d ns/input-byte\nrecset startup:       %d ns\nrecset build:         %d ns/matching-row\nrecset probe:         %d ns/driver-row\nrecset aggregate:     %d ns/driver-input-row\ngroup-cache startup:  %d ns\ngroup-cache build:    %d ns/matching-row\ngroup-cache probe:    %d ns/driver-row\nordered driver input: %d ns/(rows²/1M)\nordered scan startup: %d ns/invocation\nscalar presence probe:%d ns/probe\nmembership probe:     %d ns/probe\n",
 		c.scanInvocationNS, c.scanRowNS, c.filterColumnRowNS, c.mapColumnRowNS,
 		c.expressionOperationNS, c.broadTextMatchRowNS, c.broadTextMatchByteNS, c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
-		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS,
-		c.directPresenceProbeRowNS)
+		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS, c.scalarPresenceProbeRowNS,
+		c.membershipDirectProbeRowNS)
 	printModelComparison("training", training, c)
 	holdout := filterObservations(observations, true)
 	if len(holdout) > 0 {
@@ -1207,13 +1208,13 @@ func solveEquationSystem(rows []observation) (constants, error) {
 		recsetProbeRowNS:      int64(math.Round(beta[7])),
 		// Cache startup is identified below from cache-backed/direct pairs.
 		// Build and probe stay at their floor until fixtures vary them independently.
-		groupCacheStartupNS:      1,
-		groupCacheBuildRowNS:     1,
-		groupCacheProbeRowNS:     1,
-		recsetAggregateRowNS:     1,
-		orderedDriverInputNS:     1,
-		orderedScanInvocationNS:  1,
-		directPresenceProbeRowNS: 1,
+		groupCacheStartupNS:        1,
+		groupCacheBuildRowNS:       1,
+		groupCacheProbeRowNS:       1,
+		recsetAggregateRowNS:       1,
+		orderedDriverInputNS:       1,
+		orderedScanInvocationNS:    1,
+		membershipDirectProbeRowNS: 1,
 	}, nil
 }
 
@@ -1268,7 +1269,7 @@ func solve(exactRows, allRows []observation, baseline constants) (constants, err
 	}
 	if startup, probe, ok := fitDirectCarrierPair(allRows, selected); ok {
 		selected.groupCacheStartupNS = startup
-		selected.directPresenceProbeRowNS = probe
+		selected.membershipDirectProbeRowNS = probe
 	}
 	/* A race timeout mixes cold startup and incomplete operator work. It is a
 	lower bound for that whole alternative, not evidence for a linear ordered
@@ -1355,7 +1356,7 @@ func fitDirectCarrierPair(rows []observation, c constants) (int64, int64, bool) 
 		}
 		without := c
 		without.groupCacheStartupNS = 0
-		without.directPresenceProbeRowNS = 0
+		without.membershipDirectProbeRowNS = 0
 		/* Both variants execute the surrounding query. Fitting a direct probe from
 		its absolute duration attributes all shared scan/join work to every probe
 		and grossly overprices small selective drivers. Paired differences expose
@@ -1460,7 +1461,7 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.broadTextMatchRowNS),
 		float64(c.broadTextMatchByteNS),
 		float64(c.orderedScanInvocationNS),
-		float64(c.directPresenceProbeRowNS),
+		float64(c.membershipDirectProbeRowNS),
 	}
 	total := 0.0
 	for i, value := range row.x {
@@ -1785,7 +1786,8 @@ func readCurrentConstants(path string) (constants, error) {
 		"planner_membership_broad_text_match_row_ns",
 		"planner_membership_broad_text_match_byte_ns",
 		"planner_membership_ordered_scan_invocation_ns",
-		"planner_direct_presence_probe_row_ns",
+		"planner_scalar_presence_probe_row_ns",
+		"planner_membership_direct_probe_row_ns",
 	}
 	values := make([]int64, len(names))
 	content := string(data)
@@ -1793,11 +1795,9 @@ func readCurrentConstants(path string) (constants, error) {
 		prefix := "(define " + name + " "
 		start := strings.Index(content, prefix)
 		if start < 0 {
-			// The direct-probe coefficient used to be an anonymous literal inside
-			// planner_direct_presence_probe_cost. A one-nanosecond floor lets the
-			// first run fit it from direct-consumer observations and then persist
-			// the named coefficient in the generated block.
-			if name == "planner_direct_presence_probe_row_ns" ||
+			// A one-nanosecond floor lets the first run fit new membership and
+			// ordered-scan coefficients from their physical-consumer observations.
+			if name == "planner_membership_direct_probe_row_ns" ||
 				name == "planner_membership_ordered_scan_invocation_ns" {
 				values[i] = 1
 				continue
@@ -1822,11 +1822,12 @@ func readCurrentConstants(path string) (constants, error) {
 		recsetBuildRowNS: values[6], recsetProbeRowNS: values[7],
 		recsetAggregateRowNS: values[8], groupCacheStartupNS: values[9],
 		groupCacheBuildRowNS: values[10], groupCacheProbeRowNS: values[11],
-		orderedDriverInputNS:     values[12],
-		broadTextMatchRowNS:      values[13],
-		broadTextMatchByteNS:     values[14],
-		orderedScanInvocationNS:  values[15],
-		directPresenceProbeRowNS: values[16],
+		orderedDriverInputNS:       values[12],
+		broadTextMatchRowNS:        values[13],
+		broadTextMatchByteNS:       values[14],
+		orderedScanInvocationNS:    values[15],
+		scalarPresenceProbeRowNS:   values[16],
+		membershipDirectProbeRowNS: values[17],
 	}, nil
 }
 
@@ -1846,9 +1847,13 @@ func patchQueryplan(path string, c constants) error {
 Calibrated by tools/costgen from tests/**/*.yaml workloads tagged with
 metadata.physical_calibration. Each observation is an executed, forced
 EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
-(define planner_direct_presence_probe_row_ns %d)
+(define planner_scalar_presence_probe_row_ns %d)
 (define planner_direct_presence_probe_cost (lambda (probe_rows)
-	(planner_cost 0 0 (* probe_rows planner_direct_presence_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
+	(planner_cost 0 0 (* probe_rows planner_scalar_presence_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
+
+(define planner_membership_direct_probe_row_ns %d)
+(define planner_membership_direct_probe_cost (lambda (probe_rows)
+	(planner_cost 0 0 (* probe_rows planner_membership_direct_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
 (define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
@@ -1874,7 +1879,7 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_group_cache_probe_row_ns %d)
 (define planner_membership_ordered_driver_input_row_ns %d)
 (define planner_membership_ordered_scan_invocation_ns %d)
-/* END GENERATED COST CONSTANTS */`, c.directPresenceProbeRowNS,
+/* END GENERATED COST CONSTANTS */`, c.scalarPresenceProbeRowNS, c.membershipDirectProbeRowNS,
 		c.scanInvocationNS, c.scanRowNS,
 		c.filterColumnRowNS, c.mapColumnRowNS, c.expressionOperationNS, c.broadTextMatchRowNS, c.broadTextMatchByteNS,
 		c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,

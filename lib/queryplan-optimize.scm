@@ -3464,7 +3464,7 @@ physical alternative. */
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
 			projection_rows 0.65)
 			candidate_cache_cost projection_rows 0.65))
-		(define downstream_cost (planner_direct_presence_probe_cost
+		(define downstream_cost (planner_membership_direct_probe_cost
 			(* projected_rows
 				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
 		(define carrier_cost (planner_cost_add base_cost downstream_cost projected_rows 0.65))
@@ -3531,7 +3531,7 @@ expression, and RecSet components used by the other membership carriers. */
 			(* projection_rows planner_membership_recset_build_row_ns)
 			(* projection_rows 8)
 			0 driver_rows 0.65)
-			(planner_direct_presence_probe_cost
+			(planner_membership_direct_probe_cost
 				(* driver_rows candidate_density
 					(membership_work_value work (quote membership_downstream_probe_branches) 0)))
 			driver_rows 0.65))))
@@ -3542,7 +3542,7 @@ expression, and RecSet components used by the other membership carriers. */
 		/* A driver membership check lowers each candidate branch to an indexed
 		point-presence probe. Keep that storage subscan distinct from the ordered
 		candidate-key index calibrated below. */
-		(planner_direct_presence_probe_cost probes))))
+		(planner_membership_direct_probe_cost probes))))
 
 (define membership_ordered_driver_probe_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
 	(begin
@@ -3568,7 +3568,7 @@ expression, and RecSet components used by the other membership carriers. */
 					(* candidate_rows 8) 0 (+ candidate_rows visited_rows) 0.65))
 			visited_rows 0.65))
 		(define carrier_cost (planner_cost_add base_cost
-			(planner_direct_presence_probe_cost
+			(planner_membership_direct_probe_cost
 				(* visited_rows
 					(membership_work_value work (quote membership_downstream_probe_branches) 0)))
 			visited_rows 0.65))
