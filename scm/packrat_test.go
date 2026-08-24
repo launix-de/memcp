@@ -16,7 +16,11 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "testing"
+import (
+	"fmt"
+	"sync"
+	"testing"
+)
 
 func TestKleeneParserWithoutMemoization(t *testing.T) {
 	parserValue := Eval(Read("no-memo parser", `(parser '(
@@ -31,4 +35,64 @@ func TestKleeneParserWithoutMemoization(t *testing.T) {
 	if got := parser.Execute("", &Globalenv); String(got) != `()` {
 		t.Fatalf("empty no-memo parser returned %s", String(got))
 	}
+}
+
+func TestSharedParserConcurrentCaptures(t *testing.T) {
+	parserValue := Eval(Read("concurrent parser", `(parser '(
+		(define value (or
+			(regex "value-[0-9]+" false false)
+			(regex "word-[a-z]+" false false)))
+		$
+	) value "")`), &Globalenv)
+	parser := parserValue.Parser()
+
+	const workers = 64
+	const iterations = 200
+	start := make(chan struct{})
+	errors := make(chan string, workers)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for iteration := 0; iteration < iterations; iteration++ {
+				input := fmt.Sprintf("value-%d", worker*iterations+iteration)
+				if got := parser.Execute(input, &Globalenv).String(); got != input {
+					errors <- fmt.Sprintf("input %q returned %q", input, got)
+					return
+				}
+			}
+		}(worker)
+	}
+	close(start)
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
+	}
+}
+
+func benchmarkCaptureParser(b *testing.B) *ScmParser {
+	b.Helper()
+	return Eval(Read("parser benchmark", `(parser '(
+		(define values (* (regex "[a-z]+" false false) "," true))
+		$
+	) values "")`), &Globalenv).Parser()
+}
+
+func BenchmarkSharedParserSequential(b *testing.B) {
+	parser := benchmarkCaptureParser(b)
+	for b.Loop() {
+		parser.Execute("alpha,beta,gamma,delta,epsilon", &Globalenv)
+	}
+}
+
+func BenchmarkSharedParserParallel(b *testing.B) {
+	parser := benchmarkCaptureParser(b)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			parser.Execute("alpha,beta,gamma,delta,epsilon", &Globalenv)
+		}
+	})
 }

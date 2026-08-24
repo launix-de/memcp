@@ -499,6 +499,62 @@ test_cases:
         - {ID: 1, visible: true}
         - {ID: 2, visible: false}
 
+  - name: "Deep scalar scopes bind aliases independently below a derived window"
+    parallel: cold_scope_binding
+    sql: |
+      SELECT vacation.ID,
+        (
+          SELECT COALESCE((
+            SELECT SUM(period.day_factor * LEAST(
+              COALESCE(period.part_end, COALESCE((
+                SELECT employee.inner_only
+                FROM nr_inner employee
+                WHERE employee.ID = vacation.file_id
+                LIMIT 1
+              ), 999)),
+              COALESCE((
+                SELECT employee.inner_only
+                FROM nr_inner employee
+                WHERE employee.ID = vacation.file_id
+                LIMIT 1
+              ), 999)
+            ))
+            FROM (
+              SELECT line.o AS ID,
+                1 AS day_factor,
+                line.ID AS part_start,
+                LEAD(line.ID) OVER (PARTITION BY line.o ORDER BY line.ID) AS part_end
+              FROM nr_line line
+            ) period
+            WHERE period.ID = owner.ID
+              AND period.part_start < COALESCE((
+                SELECT employee.inner_only
+                FROM nr_inner employee
+                WHERE employee.ID = vacation.file_id
+                LIMIT 1
+              ), 999)
+          ), 0)
+          FROM nr_outer owner
+          WHERE owner.ID = vacation.ID
+          LIMIT 1
+        ) AS weighted_end
+      FROM nr_outer vacation
+      ORDER BY vacation.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 1, weighted_end: 206}
+        - {ID: 2, weighted_end: 202}
+
+  - name: "Shared SQL grammar keeps deep alias captures isolated"
+    scm: |
+      (begin
+        (define query "SELECT vacation.ID, (SELECT COALESCE((SELECT SUM(period.day_factor * LEAST(COALESCE(period.part_end, COALESCE((SELECT employee.inner_only FROM nr_inner employee WHERE employee.ID = vacation.file_id LIMIT 1), 999)), COALESCE((SELECT employee.inner_only FROM nr_inner employee WHERE employee.ID = vacation.file_id LIMIT 1), 999))) FROM (SELECT line.o AS ID, 1 AS day_factor, line.ID AS part_start, LEAD(line.ID) OVER (PARTITION BY line.o ORDER BY line.ID) AS part_end FROM nr_line line) period WHERE period.ID = owner.ID AND period.part_start < COALESCE((SELECT employee.inner_only FROM nr_inner employee WHERE employee.ID = vacation.file_id LIMIT 1), 999)), 0) FROM nr_outer owner WHERE owner.ID = vacation.ID LIMIT 1) AS weighted_end FROM nr_outer vacation ORDER BY vacation.ID")
+        (count (parallelN 32 (lambda (_i)
+          (parse_sql "memcp-tests" query (lambda (_schema _table _write) true))))))
+    expect:
+      data: [32]
+
   - name: "JOIN ON cannot reference a later source"
     sql: |
       SELECT o.ID

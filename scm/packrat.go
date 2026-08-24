@@ -19,6 +19,7 @@ package scm
 
 import "fmt"
 import "regexp"
+import "sync"
 import packrat "github.com/launix-de/go-packrat/v2"
 
 type parserResult struct {
@@ -43,6 +44,7 @@ type UndefinedParser struct {
 	Parser packrat.Parser[*parserResult]
 	En     *Env
 	Sym    Symbol
+	once   sync.Once
 }
 
 // ScmCaptureParser wraps a parser to capture the matched text
@@ -83,14 +85,14 @@ func scmerToParser(v Scmer) packrat.Parser[*parserResult] {
 
 // allows self recursion on parsers
 func (b *UndefinedParser) Match(s *packrat.Scanner[*parserResult]) (packrat.Node[*parserResult], bool) {
-	if b.Parser == nil {
+	b.once.Do(func() {
 		en2 := b.En.FindRead(b.Sym)
 		val, ok := en2.Vars[b.Sym]
 		if !ok {
 			panic("error parsing parser: variable does not contain a valid parser: " + string(b.Sym))
 		}
 		b.Parser = scmerToParser(val)
-	}
+	})
 	return b.Parser.Match(s)
 }
 
