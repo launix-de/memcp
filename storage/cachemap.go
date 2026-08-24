@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,36 @@ import (
 // Per-entry overhead: cacheMapEntry struct (~80 bytes) + map bucket slot (~128 bytes) + softItem (~120 bytes)
 const cacheMapEntryOverhead = 328
 
+var queryCompileAdmission = newCacheMapAdmission()
+
+type cacheMapAdmission struct {
+	tokens chan struct{}
+}
+
+func newCacheMapAdmission() *cacheMapAdmission {
+	limit := (runtime.GOMAXPROCS(0) + 1) / 2
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 4 {
+		limit = 4
+	}
+	return &cacheMapAdmission{tokens: make(chan struct{}, limit)}
+}
+
+func (a *cacheMapAdmission) acquire(ctx context.Context) bool {
+	select {
+	case a.tokens <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (a *cacheMapAdmission) release() {
+	<-a.tokens
+}
+
 type cacheMapEntry struct {
 	cm       *cacheMap
 	key      string
@@ -37,9 +68,10 @@ type cacheMapEntry struct {
 }
 
 type cacheMap struct {
-	mu      sync.RWMutex
-	entries map[string]*cacheMapEntry
-	flights map[string]*cacheMapFlight
+	mu        sync.RWMutex
+	entries   map[string]*cacheMapEntry
+	flights   map[string]*cacheMapFlight
+	admission *cacheMapAdmission
 }
 
 type cacheMapFlight struct {
@@ -60,6 +92,9 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 	cm := &cacheMap{
 		entries: make(map[string]*cacheMapEntry),
 		flights: make(map[string]*cacheMapFlight),
+	}
+	if len(a) == 1 && scm.String(a[0]) == "compile" {
+		cm.admission = queryCompileAdmission
 	}
 	return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 		switch len(a) {
@@ -199,7 +234,18 @@ func (cm *cacheMap) cancelWaiter(key string, flight *cacheMapFlight) {
 }
 
 func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Scmer, flight *cacheMapFlight) {
+	if cm.admission != nil {
+		if !cm.admission.acquire(ctx) {
+			cm.finishProducer(ctx, key, flight, scm.NewNil(), ctx.Err(), true)
+			return
+		}
+		defer cm.admission.release()
+	}
 	value, panicValue, failed := runCacheMapProducer(ctx, producer)
+	cm.finishProducer(ctx, key, flight, value, panicValue, failed)
+}
+
+func (cm *cacheMap) finishProducer(ctx context.Context, key string, flight *cacheMapFlight, value scm.Scmer, panicValue any, failed bool) {
 
 	var entry *cacheMapEntry
 	if !failed && ctx.Err() == nil {

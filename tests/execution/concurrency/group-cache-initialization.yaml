@@ -29,6 +29,31 @@ setup:
       )
 
 test_cases:
+  - name: "Distinct cold compile producers have bounded overlap"
+    scm: |
+      (begin
+        (define cache (newcachemap "compile"))
+        (define timings (newsession))
+        (define producer_count 12)
+        (define values (parallelN producer_count (lambda (i)
+          (cache "get_or_compute" (concat "shape-" i) (lambda ()
+            (begin
+              (timings (concat "start-" i) (nanotime))
+              (sleep 0.1)
+              (timings (concat "end-" i) (nanotime))
+              i))))))
+        (define peak (reduce (produceN producer_count) (lambda (highest i)
+          (begin
+            (define started (timings (concat "start-" i)))
+            (max highest (count (filter (produceN producer_count) (lambda (j)
+              (and (<= (timings (concat "start-" j)) started)
+                (>= (timings (concat "end-" j)) started)))))))) 0))
+        (if (and (equal? values (produceN producer_count)) (<= peak 4))
+          "ok"
+          (error (concat "cold compile producer overlap=" peak))))
+    expect:
+      data: ["ok"]
+
   - name: "Creator waits for existing table initialization 1/2"
     parallel: existing_creation_barrier
     scm: &create_with_initializer |

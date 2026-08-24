@@ -23,8 +23,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "sql-views.scm")
 
 /* query plan caches: separate cachemap per parser dialect */
-(set sql_queryplan_cache (newcachemap))
-(set psql_queryplan_cache (newcachemap))
+(set sql_queryplan_cache (newcachemap "compile"))
+(set psql_queryplan_cache (newcachemap "compile"))
 (set sql_literal_shape_cache (newcachemap))
 
 /* Keep exact SQL variants out of the parser while sharing their compiled plan.
