@@ -18,6 +18,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS ai_same_col"
   - sql: "DROP TABLE IF EXISTS ai_tx"
   - sql: "DROP TABLE IF EXISTS ai_partitioned"
+  - sql: "DROP TABLE IF EXISTS ai_seeded"
+  - sql: "DROP TABLE IF EXISTS ai_seeded_copy"
   - sql: "CREATE TABLE ai_basic (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_explicit (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_mixed (id INT AUTO_INCREMENT PRIMARY KEY, val INT)"
@@ -32,6 +34,8 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ai_same_col"
   - sql: "DROP TABLE IF EXISTS ai_tx"
   - sql: "DROP TABLE IF EXISTS ai_partitioned"
+  - sql: "DROP TABLE IF EXISTS ai_seeded"
+  - sql: "DROP TABLE IF EXISTS ai_seeded_copy"
 
 test_cases:
 
@@ -41,6 +45,13 @@ test_cases:
     sql: "INSERT INTO ai_basic (name) VALUES ('alpha')"
     expect:
       affected_rows: 1
+
+  - name: "Fresh AUTO_INCREMENT starts at one"
+    sql: "SELECT id FROM ai_basic WHERE name = 'alpha'"
+    expect:
+      rows: 1
+      data:
+        - {id: 1}
 
   - name: "INSERT without ID assigns auto id (second row)"
     sql: "INSERT INTO ai_basic (name) VALUES ('beta')"
@@ -107,11 +118,12 @@ test_cases:
         - {id: 100}
 
   - name: "Auto rows have IDs distinct from 100 and from each other"
-    sql: "SELECT COUNT(DISTINCT id) AS cnt FROM ai_explicit WHERE name IN ('auto1', 'auto2')"
+    sql: "SELECT id, name FROM ai_explicit WHERE name IN ('auto1', 'auto2') ORDER BY id"
     expect:
-      rows: 1
+      rows: 2
       data:
-        - {cnt: 2}
+        - {id: 101, name: "auto1"}
+        - {id: 102, name: "auto2"}
 
   - name: "Auto IDs do not collide with explicit ID 100"
     sql: "SELECT COUNT(*) AS cnt FROM ai_explicit WHERE name IN ('auto1', 'auto2') AND id = 100"
@@ -290,6 +302,72 @@ test_cases:
       (begin
         (settings "ShardSize" 60000)
         (settings "PartitionMaxDimensions" 0))
+
+  # --- Explicit next-value state must survive SHOW CREATE and restart. ---
+
+  - name: "Explicit AUTO_INCREMENT next value is accepted"
+    sql: "CREATE TABLE ai_seeded (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT) ENGINE=InnoDB AUTO_INCREMENT=42"
+    expect:
+      affected_rows: 1
+
+  - name: "SHOW CREATE preserves explicit AUTO_INCREMENT next value"
+    sql: "SHOW CREATE TABLE ai_seeded"
+    expect:
+      rows: 1
+      result_contains: "AUTO_INCREMENT=42"
+
+  - name: "Explicit AUTO_INCREMENT value is the first generated ID"
+    sql: "INSERT INTO ai_seeded (name) VALUES ('first-seeded')"
+    expect:
+      affected_rows: 1
+
+  - name: "Verify first explicitly seeded ID"
+    sql: "SELECT id FROM ai_seeded WHERE name = 'first-seeded'"
+    expect:
+      rows: 1
+      data:
+        - {id: 42}
+
+  - name: "ALTER TABLE sets the next AUTO_INCREMENT value"
+    sql: "ALTER TABLE ai_seeded AUTO_INCREMENT=80"
+
+  - name: "SHOW CREATE preserves altered AUTO_INCREMENT next value"
+    sql: "SHOW CREATE TABLE ai_seeded"
+    expect:
+      rows: 1
+      result_contains: "AUTO_INCREMENT=80"
+
+  - name: "Create a round-trip copy from emitted AUTO_INCREMENT state"
+    sql: "CREATE TABLE ai_seeded_copy (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT) ENGINE=InnoDB AUTO_INCREMENT=80"
+
+  - name: "Round-trip copy generates the emitted next ID"
+    sql: "INSERT INTO ai_seeded_copy (name) VALUES ('copy-seeded')"
+
+  - name: "Verify round-trip copy next ID"
+    sql: "SELECT id FROM ai_seeded_copy WHERE name = 'copy-seeded'"
+    expect:
+      rows: 1
+      data:
+        - {id: 80}
+
+  - name: "Persist explicit AUTO_INCREMENT state"
+    sql: "SHUTDOWN"
+
+  - name: "SHOW CREATE keeps explicit next value after restart"
+    sql: "SHOW CREATE TABLE ai_seeded"
+    expect:
+      rows: 1
+      result_contains: "AUTO_INCREMENT=80"
+
+  - name: "Restarted table generates the persisted next ID"
+    sql: "INSERT INTO ai_seeded (name) VALUES ('after-seed-restart')"
+
+  - name: "Verify persisted next ID after restart"
+    sql: "SELECT id FROM ai_seeded WHERE name = 'after-seed-restart'"
+    expect:
+      rows: 1
+      data:
+        - {id: 80}
 
   # --- Restart scenario: counter must survive server restart ---
   # ai_restart table was created and seeded in setup (no inserts yet).

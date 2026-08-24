@@ -29,5 +29,26 @@ test_cases:
       data:
         - ok: true
 
+  - name: "SHOW CREATE preserves CURRENT_TIMESTAMP expression"
+    sql: "SHOW CREATE TABLE tstamp"
+    expect:
+      rows: 1
+      result_contains: "DEFAULT CURRENT_TIMESTAMP"
+
+  - name: "Persist CURRENT_TIMESTAMP default expression"
+    sql: "SHUTDOWN"
+
+  - name: "CURRENT_TIMESTAMP default remains active after restart"
+    sql: "INSERT INTO tstamp (id) VALUES (2)"
+    expect:
+      affected_rows: 1
+
+  - name: "Restarted CURRENT_TIMESTAMP default is not null"
+    sql: "SELECT created_at IS NOT NULL AS ok FROM tstamp WHERE id = 2"
+    expect:
+      rows: 1
+      data:
+        - ok: true
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS tstamp"
