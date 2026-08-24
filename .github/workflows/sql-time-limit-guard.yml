@@ -11,9 +11,6 @@ on:
 
 jobs:
   sql-time-limit-guard:
-    # Temporarily paused while maintainers review the 300ms -> 350ms aggregate
-    # planner budget adjustment. The dedicated 100ms reorder phase gate remains.
-    if: ${{ false }}
     runs-on: ubuntu-latest
 
     steps:

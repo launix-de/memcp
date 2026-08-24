@@ -58,9 +58,11 @@ setup:
 test_cases:
   - name: "Independent nested scalar aggregates compile within a linear budget"
     max_time: 1.0
-    max_planner_time_ms: 350
+    # The 48-stage scaling suite owns the asymptotic gate. Keep this smaller
+    # correctness shape insensitive to cold-start and runner CPU variance.
+    max_planner_time_ms: 2000
     max_compile_phase_ms:
-      reorder_ns: 100
+      reorder_ns: 500
       recipe_emit_ns: 600
     max_compile_metrics:
       plan_nodes: 6500

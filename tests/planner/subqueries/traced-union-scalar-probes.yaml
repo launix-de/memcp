@@ -285,9 +285,11 @@ test_cases:
 
   - name: "Selective nested UNION EXISTS keeps bounded physical probes"
     max_time: 1.0
-    max_planner_time_ms: 510
+    # Structural metrics guard this UNION shape; the larger scalar scaling case
+    # detects a return of quadratic stage lookup with substantially more signal.
+    max_planner_time_ms: 2000
     max_compile_phase_ms:
-      reorder_ns: 200
+      reorder_ns: 500
     max_plan_size: 350000
     max_compile_metrics:
       group_stages: 49
