@@ -4236,8 +4236,8 @@ carrier selection remains a later, per-stage cost decision. */
 			(define tail (btw2025_decorrelate_fields_with_stages_using rest ctx (nth current 1)))
 			(list
 				(cons title (cons (nth rewritten 0) (nth tail 0)))
-				(unique_stages_by_id (merge (list (nth rewritten 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten 2) (nth tail 2)))
+				(merge (list (nth rewritten 1) (nth tail 1)))
+				(merge (list (nth rewritten 2) (nth tail 2)))
 				(nth tail 3)))
 		_ (list '() '() '() resolved))))
 
@@ -4255,8 +4255,8 @@ carrier selection remains a later, per-stage cost decision. */
 				rest ctx (nth rewritten_item 3)))
 			(list
 				(cons (nth rewritten_item 0) (nth tail 0))
-				(unique_stages_by_id (merge (list (nth rewritten_item 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten_item 2) (nth tail 2)))
+				(merge (list (nth rewritten_item 1) (nth tail 1)))
+				(merge (list (nth rewritten_item 2) (nth tail 2)))
 				(nth tail 3)))
 		_ (list '() '() '() resolved))))
 
@@ -4268,8 +4268,8 @@ carrier selection remains a later, per-stage cost decision. */
 			(define tail (btw2025_decorrelate_expr_list_with_stages_using rest ctx (nth current 1)))
 			(list
 				(cons (nth rewritten 0) (nth tail 0))
-				(unique_stages_by_id (merge (list (nth rewritten 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten 2) (nth tail 2)))
+				(merge (list (nth rewritten 1) (nth tail 1)))
+				(merge (list (nth rewritten 2) (nth tail 2)))
 				(nth tail 3)))
 		_ (list '() '() '() resolved))))
 
@@ -4298,11 +4298,11 @@ carrier selection remains a later, per-stage cost decision. */
 			(define rewritten_src (btw2025_decorrelate_source_with_stages_using src ctx resolved))
 			(define tail (btw2025_decorrelate_sources_with_stages_using rest ctx (nth rewritten_src 3)))
 			(list
-				(merge_unique (list (nth rewritten_src 0) (nth tail 0)))
-				(unique_stages_by_id (merge (list (nth rewritten_src 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten_src 2) (nth tail 2)))
+				(merge (list (nth rewritten_src 0) (nth tail 0)))
+				(merge (list (nth rewritten_src 1) (nth tail 1)))
+				(merge (list (nth rewritten_src 2) (nth tail 2)))
 				(nth tail 3)
-				(merge_unique (list (nth rewritten_src 4) (nth tail 4)))))
+				(merge (list (nth rewritten_src 4) (nth tail 4)))))
 		_ (list '() '() '() resolved '()))))
 
 (define btw2025_decorrelate_query_block (lambda (block ctx)

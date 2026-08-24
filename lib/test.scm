@@ -384,15 +384,59 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define dense_join_predicates (merge (mapIndex dense_join_aliases (lambda (left_index left)
 		(map (filter (produceN 14) (lambda (right_index) (> right_index left_index))) (lambda (right_index)
 			(list (list left (nth dense_join_aliases right_index)) 0.1)))))))
-	(assert (equal? (join_order_choose_strategy 14 false true) 'linearized-dp) true
-		"dense medium regular graphs select IKKBZ plus linearized DP in SCM")
+	(assert (equal? (join_order_choose_strategy 14 false true) 'decomposed-dphyp) true
+		"dense medium regular graphs decompose independent arms before local DPHyp")
 	(assert (equal? (join_order_choose_strategy 14 true true) 'goo-dphyp) true
 		"dense hypergraphs select GOO with DPHyp subtree optimization in SCM")
-	(assert (equal? (join_order_choose_strategy 101 false true) 'goo-linearized-dp) true
-		"very large regular graphs select GOO with linearized-DP subtree optimization in SCM")
+	(assert (equal? (join_order_choose_strategy 101 false true) 'decomposed-dphyp) true
+		"very large regular graphs decompose independent arms before bounded DPHyp")
+	(define independent_arm_aliases '("arm_root" "left_a" "left_b" "right_a" "right_b"))
+	(define independent_arm_nodes (mapIndex independent_arm_aliases (lambda (i alias)
+		(list alias (+ 10 i)))))
+	(define independent_arm_predicates (list
+		(list '("arm_root" "left_a") 0.1)
+		(list '("left_a" "left_b") 0.1)
+		(list '("arm_root" "right_a") 0.1)
+		(list '("right_a" "right_b") 0.1)))
+	(define independent_arm_edges (join_order_regular_edges
+		independent_arm_aliases independent_arm_predicates))
+	(define independent_arm_plan (join_order_arm_plan independent_arm_nodes
+		independent_arm_aliases independent_arm_predicates independent_arm_edges '()))
+	(assert (equal? (join_order_plan_driver_alias independent_arm_plan) "arm_root") true
+		"generic decomposition roots independent join arms at their shared articulation")
+	(assert (equal? (join_order_plan_size independent_arm_plan) 5) true
+		"generic arm decomposition constructs the complete join graph")
+	(define cross_arm_outer_aliases '("outer_root" "nullable_arm" "required_sibling"))
+	(define cross_arm_outer_nodes (list
+		(list "outer_root" 10 10 'inner '())
+		(list "nullable_arm" 1 1 'left-outer '("required_sibling"))
+		(list "required_sibling" 100 100 'inner '())))
+	(define cross_arm_outer_predicates (list
+		(list '("outer_root" "nullable_arm") 0.1)
+		(list '("outer_root" "required_sibling") 0.1)))
+	(assert (nil? (join_order_arm_plan
+		cross_arm_outer_nodes cross_arm_outer_aliases cross_arm_outer_predicates
+		(join_order_regular_edges cross_arm_outer_aliases cross_arm_outer_predicates) '())) true
+		"cross-arm LEFT requirements defer to the general valid-plan completion")
+	(define cyclic_arm_aliases '("cycle_root" "left_a" "left_b" "left_c" "right_a" "right_b" "right_c"))
+	(define cyclic_arm_nodes (mapIndex cyclic_arm_aliases (lambda (i alias)
+		(list alias (+ 20 i)))))
+	(define cyclic_arm_predicates (list
+		(list '("cycle_root" "left_a") 0.1)
+		(list '("left_a" "left_b") 0.1)
+		(list '("left_b" "left_c") 0.1)
+		(list '("left_c" "left_a") 0.1)
+		(list '("cycle_root" "right_a") 0.1)
+		(list '("right_a" "right_b") 0.1)
+		(list '("right_b" "right_c") 0.1)
+		(list '("right_c" "right_a") 0.1)))
+	(define cyclic_arm_result (join_order_arm_dp
+		cyclic_arm_nodes cyclic_arm_aliases cyclic_arm_predicates '()))
+	(assert (equal? (join_order_plan_size (car cyclic_arm_result)) 7) true
+		"generic decomposition composes complete independently reorderable cyclic subtrees")
 	(assert (join_order_has_outer_barriers?
 		(list (list "nullable" 1 1 'left-outer '("driver") 1 false))) true
-		"outer join requirements classify an over-budget graph as a hypergraph")
+		"outer join requirements remain visible to adaptive planning")
 	(assert (join_order_degree_exceeds_budget? 13 10000) false
 		"degree 13 does not prove that the connected-subgraph budget is exceeded")
 	(assert (join_order_degree_exceeds_budget? 14 10000) true

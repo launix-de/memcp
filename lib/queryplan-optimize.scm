@@ -20,9 +20,21 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* Join reordering can consume a logical hypergraph view of the query block. The
 extractor deliberately does not rewrite sources or move predicates: WHERE and
 ON terms remain owned by the query-block until physical lowering. */
+(define join_hypergraph_alias_index (lambda (aliases)
+	(reduce (mapIndex (coalesceNil aliases '()) (lambda (position alias)
+		(list alias position))) (lambda (index entry)
+			(set_assoc index (toLower (car entry)) entry)) '())))
+
+(define join_hypergraph_expr_aliases_using (lambda (default_alias alias_index expr)
+	(map (sort (filter
+		(extract_assoc (query_expr_alias_set default_alias expr '()) (lambda (alias _present)
+			(get_assoc alias_index (toLower alias) nil)))
+		(lambda (entry) (not (nil? entry))))
+		(lambda (left right) (< (cadr left) (cadr right)))) car)))
+
 (define join_hypergraph_expr_aliases (lambda (default_alias aliases expr)
-	(filter (coalesceNil aliases '()) (lambda (alias)
-		(expr_refs_alias? default_alias alias expr)))))
+	(join_hypergraph_expr_aliases_using default_alias
+		(join_hypergraph_alias_index aliases) expr)))
 
 (define make_join_hypergraph_predicate (lambda (aliases origin owner predicate)
 	(list
@@ -38,17 +50,17 @@ ON terms remain owned by the query-block until physical lowering. */
 		2 (quote edge)
 		_ (quote hyperedge))))
 
-(define join_hypergraph_where_predicates (lambda (block default_alias aliases)
+(define join_hypergraph_where_predicates (lambda (block default_alias alias_index)
 	(if (equal? (coalesceNil (qb_where block) true) true)
 		'()
 		(map (split_and_terms (qb_where block)) (lambda (predicate)
 			(make_join_hypergraph_predicate
-				(join_hypergraph_expr_aliases default_alias aliases predicate)
+				(join_hypergraph_expr_aliases_using default_alias alias_index predicate)
 				(quote where)
 				nil
 				predicate))))))
 
-(define join_hypergraph_source_predicates (lambda (sources default_alias aliases)
+(define join_hypergraph_source_predicates (lambda (sources default_alias alias_index)
 	(merge (map (coalesceNil sources '()) (lambda (src)
 		(begin
 			(define join_expr (coalesceNil (source_join_expr src) true))
@@ -57,7 +69,7 @@ ON terms remain owned by the query-block until physical lowering. */
 				(map (split_and_terms join_expr) (lambda (predicate)
 					(make_join_hypergraph_predicate
 						(merge_unique (list
-							(join_hypergraph_expr_aliases default_alias aliases predicate)
+							(join_hypergraph_expr_aliases_using default_alias alias_index predicate)
 							(list (source_alias src))))
 						(if (source_outer? src) (quote outer-on) (quote inner-on))
 						(source_alias src)
@@ -78,13 +90,13 @@ ON terms remain owned by the query-block until physical lowering. */
 			(list (quote kind) (join_hypergraph_node_kind src))
 			(list (quote outer_join) (source_outer? src)))))))
 
-(define join_hypergraph_outer_barriers_acc (lambda (stages relation_units all_sources sources preceding_aliases default_alias aliases)
+(define join_hypergraph_outer_barriers_acc (lambda (stages relation_units all_sources sources preceding_aliases default_alias alias_index)
 	(match (coalesceNil sources '())
 		(cons src rest) (begin
 			(define alias (source_alias src))
-			(define next_preceding (append preceding_aliases alias))
+			(define next_preceding (cons alias preceding_aliases))
 			(define remaining (join_hypergraph_outer_barriers_acc
-				stages relation_units all_sources rest next_preceding default_alias aliases))
+				stages relation_units all_sources rest next_preceding default_alias alias_index))
 			(if (source_outer? src)
 				(cons
 					(list
@@ -92,9 +104,9 @@ ON terms remain owned by the query-block until physical lowering. */
 						(list (quote owner) alias)
 						(list (quote preserved)
 							(join_optimizer_outer_requirements
-								stages relation_units all_sources default_alias src))
+								stages relation_units all_sources default_alias alias_index src))
 						(list (quote references)
-							(join_hypergraph_expr_aliases default_alias aliases
+							(join_hypergraph_expr_aliases_using default_alias alias_index
 								(coalesceNil (source_join_expr src) true)))
 						(list (quote predicate) (source_join_expr src)))
 					remaining)
@@ -109,10 +121,11 @@ ON terms remain owned by the query-block until physical lowering. */
 	(begin
 		(define sources (qb_sources block))
 		(define aliases (source_aliases sources))
+		(define alias_index (join_hypergraph_alias_index aliases))
 		(define default_alias (if (empty_list? aliases) nil (car aliases)))
 		(define predicates (merge (list
-			(join_hypergraph_where_predicates block default_alias aliases)
-			(join_hypergraph_source_predicates sources default_alias aliases))))
+			(join_hypergraph_where_predicates block default_alias alias_index)
+			(join_hypergraph_source_predicates sources default_alias alias_index))))
 		(list
 			(list (quote nodes) (join_hypergraph_nodes sources))
 			(list (quote locals) (join_hypergraph_predicates_of_kind predicates (quote local)))
@@ -123,7 +136,7 @@ ON terms remain owned by the query-block until physical lowering. */
 				(join_hypergraph_outer_barriers_acc
 					(qb_stages block)
 					(qassoc_get (qb_facts block) (quote join_relation_units) '())
-					sources sources '() default_alias aliases))))))
+					sources sources '() default_alias alias_index))))))
 
 (define join_optimizer_source_stage (lambda (stages src)
 	(coalesceNil
@@ -439,24 +452,31 @@ inside the nullable relation unit and therefore are not preserved inputs of
 their parent. An ON TRUE join still needs one preserved-side anchor, for which
 the nearest external predecessor is sufficient; unrelated inner joins may be
 cost-reordered around the complete relation unit. */
-(define join_optimizer_outer_requirements (lambda (stages relation_units sources default_alias src)
+(define join_optimizer_outer_requirements (lambda (stages relation_units sources default_alias alias_index src)
 	(if (join_optimizer_inner_source? stages src)
 		'()
 		(begin
 			(define alias (source_alias src))
 			(define children (join_optimizer_relation_children relation_units alias))
 			(define references (filter
-				(join_hypergraph_expr_aliases default_alias (source_aliases sources)
+				(join_hypergraph_expr_aliases_using default_alias alias_index
 					(coalesceNil (source_join_expr src) true))
 				(lambda (required_alias) (and
 					(not (equal? required_alias alias))
 					(not (contains? children required_alias))))))
 			(define parent (join_optimizer_relation_parent relation_units alias))
-			(define anchor (join_optimizer_last_external_predecessor relation_units sources alias))
 			(define required (merge_unique (list references (if (nil? parent) '() (list parent)))))
-			(if (or (not (empty_list? required)) (nil? anchor)) required (list anchor)))))))
+			/* Finding the nearest fallback anchor walks the source prefix. Most
+			LEFT arms already name their preserved input, so do not pay that
+			quadratic prefix cost merely to discard the answer. */
+			(if (not (empty_list? required))
+				required
+				(begin
+					(define anchor (join_optimizer_last_external_predecessor
+						relation_units sources alias))
+					(if (nil? anchor) required (list anchor)))))))))
 
-(define join_optimizer_metadata_nodes (lambda (stages relation_units sources default_alias graph fixed_cardinality)
+(define join_optimizer_metadata_nodes (lambda (stages relation_units sources default_alias alias_index graph fixed_cardinality)
 	(map sources (lambda (src)
 		(begin
 			(define stage (join_optimizer_source_stage stages src))
@@ -468,7 +488,7 @@ cost-reordered around the complete relation unit. */
 				(if (or singleton fixed_cardinality) 1
 					(join_optimizer_source_rows_expr stages sources default_alias graph src))
 				(if (join_optimizer_inner_source? stages src) (quote inner) (quote left-outer))
-				(join_optimizer_outer_requirements stages relation_units sources default_alias src)
+				(join_optimizer_outer_requirements stages relation_units sources default_alias alias_index src)
 				(if (group_stage? stage) (stage_result_max_rows_per_partition stage) nil)
 				singleton))))))
 
@@ -1027,8 +1047,13 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 		(if (not (nil? found)) found
 			(if (equal? (nth aliases i) alias) i nil))) nil)))
 
+(define join_order_alias_position_index (lambda (aliases)
+	(reduce (mapIndex aliases (lambda (position alias) (list alias position)))
+		(lambda (index entry) (set_assoc index (car entry) (cadr entry))) '())))
+
 (define join_order_regular_edges (lambda (aliases predicates)
 	(begin
+		(define positions (join_order_alias_position_index aliases))
 		(define edge_dict (reduce predicates (lambda (dict predicate)
 			(begin
 				(define refs (join_order_pred_aliases predicate))
@@ -1037,8 +1062,8 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 					(begin
 						(define left (car refs))
 						(define right (cadr refs))
-						(define ordered (if (< (join_order_alias_position aliases left)
-							(join_order_alias_position aliases right))
+						(define ordered (if (< (get_assoc positions left)
+							(get_assoc positions right))
 							(list left right) (list right left)))
 						(define key (string ordered))
 						(define old (get_assoc dict key nil))
@@ -1316,6 +1341,94 @@ memory independently of the number of pairs. */
 		(map aliases (lambda (alias)
 			(join_order_leaf_plan (join_order_find_node nodes alias)))) required_drivers)))
 
+/* Over-budget regular join graphs are rooted once and decomposed at every
+branch. Each recursive result is a complete independent arm; siblings are
+never considered as a join candidate because they have no predicate between
+them. This is the relational counterpart of collapsing the paper's
+independently optimizable subqueries into meta-nodes, without recognizing a
+particular star shape. */
+(define join_order_arm_adjacency (lambda (aliases regular_edges)
+	(reduce regular_edges (lambda (adjacency edge)
+		(begin
+			(define left (nth edge 0))
+			(define right (nth edge 1))
+			(set_assoc
+				(set_assoc adjacency left (append (get_assoc adjacency left '()) right))
+				right (append (get_assoc adjacency right '()) left))))
+		(reduce aliases (lambda (adjacency alias)
+			(set_assoc adjacency alias '())) '()))))
+
+(define join_order_arm_root (lambda (nodes aliases adjacency required_drivers)
+	(begin
+		(define ordered (join_order_required_aliases required_drivers))
+		(define drivers (join_order_required_drivers required_drivers))
+		(define required (if (empty_list? ordered) drivers ordered))
+		/* A pending nullable relation cannot drive its preserved input. Root the
+		dependency tree at an unconstrained inner relation; NULL-extending arms
+		then remain directed parent-to-child without any shape-specific rule. */
+		(define roots (filter aliases (lambda (alias)
+			(begin
+				(define node (join_order_find_node nodes alias))
+				(and (equal? (join_order_node_kind node) (quote inner))
+					(empty_list? (join_order_node_requirements node)))))))
+		(define candidates (if (empty_list? roots) aliases roots))
+		(define required_root (find candidates (lambda (alias)
+			(contains? required alias)) nil))
+		(if (not (nil? required_root))
+			required_root
+			(car (reduce candidates (lambda (best alias)
+				(begin
+					(define degree (count (get_assoc adjacency alias '())))
+					(define rows (cadr (join_order_find_node nodes alias)))
+					(if (or (nil? best)
+						(> degree (cadr best))
+						(and (equal? degree (cadr best)) (< rows (nth best 2))))
+						(list alias degree rows) best))) nil))))))
+
+(define join_order_arm_plan_from (lambda (nodes universe predicates adjacency alias visited required_drivers)
+	(begin
+		(define with_root (set_assoc visited alias true))
+		(define children_state (reduce (get_assoc adjacency alias '()) (lambda (state child)
+			(if (get_assoc (cadr state) child false)
+				state
+				(begin
+					(define child_result (join_order_arm_plan_from
+						nodes universe predicates adjacency child (cadr state) required_drivers))
+					(list (append (car state) (car child_result)) (cadr child_result)))))
+			(list '() with_root)))
+		/* A child plan is already a complete arm. Sorting those meta-nodes once
+		keeps the branch composition O(k log k), rather than reconsidering all
+		pairs after every attachment. */
+		(define children (sort (car children_state) (lambda (left right)
+			(if (or (nil? left) (nil? right))
+				false
+				(< (join_order_plan_cardinality left) (join_order_plan_cardinality right))))))
+		/* A nullable child may depend on aliases which live in another arm. Such a
+		local subtree has no legal orientation yet. Propagate that fact to the
+		adaptive caller, which already owns the general source/property completion,
+		instead of passing a partial plan into the next cardinality comparison. */
+		(define invalid_child (reduce children (lambda (invalid child)
+			(or invalid (nil? child))) false))
+		(if invalid_child
+			(list nil (cadr children_state))
+			(begin
+				(define plan (reduce children (lambda (parent child)
+					/* Independent arms contribute one global choice: attach the arm above
+					the parent or below it. LEFT dependencies naturally invalidate the
+					reversed orientation in join_order_join_shape. */
+					(if (nil? parent)
+						nil
+						(join_order_best_orientation universe predicates parent child required_drivers)))
+					(join_order_leaf_plan (join_order_find_node nodes alias))))
+				(list plan (cadr children_state)))))))
+
+(define join_order_arm_plan (lambda (nodes aliases predicates regular_edges required_drivers)
+	(begin
+		(define adjacency (join_order_arm_adjacency aliases regular_edges))
+		(define root (join_order_arm_root nodes aliases adjacency required_drivers))
+		(car (join_order_arm_plan_from
+			nodes aliases predicates adjacency root '() required_drivers)))))
+
 (define join_order_plan_with_atomic (lambda (plan atomic)
 	(list
 		(join_order_plan_tree plan)
@@ -1334,16 +1447,37 @@ memory independently of the number of pairs. */
 		(join_order_plan_pending_kind plan)
 		(join_order_plan_pending_requirements plan))))
 
-(define join_order_expensive_subtree (lambda (plan parent_size limit)
+(define join_order_subtree_has_regular_cycle? (lambda (plan regular_edges)
+	(begin
+		(define aliases (join_order_plan_aliases plan))
+		(define internal_edges (filter regular_edges (lambda (edge)
+			(and (contains? aliases (nth edge 0)) (contains? aliases (nth edge 1))))))
+		(>= (count internal_edges) (count aliases)))))
+
+(define join_order_subtree_has_hyperedge? (lambda (plan predicates)
+	(begin
+		(define aliases (join_order_plan_aliases plan))
+		(reduce predicates (lambda (found predicate)
+			(or found
+				(and (> (count (join_order_pred_aliases predicate)) 2)
+					(join_order_set_subset? (join_order_pred_aliases predicate) aliases)))) false))))
+
+(define join_order_subtree_needs_exact_dp? (lambda (plan regular_edges predicates)
+	(or (join_order_subtree_has_regular_cycle? plan regular_edges)
+		(join_order_subtree_has_hyperedge? plan predicates))))
+
+(define join_order_expensive_subtree (lambda (plan parent_size limit regular_edges predicates)
 	(if (or (nil? plan) (join_order_plan_atomic? plan)
 		(equal? (join_order_plan_size plan) 1))
 		nil
 		(begin
-			(define own (if (and (<= (join_order_plan_size plan) limit) (> parent_size limit)) plan nil))
+			(define own (if (and (<= (join_order_plan_size plan) limit)
+				(and (> parent_size limit)
+					(join_order_subtree_needs_exact_dp? plan regular_edges predicates))) plan nil))
 			(define left (join_order_expensive_subtree
-				(join_order_plan_left plan) (join_order_plan_size plan) limit))
+				(join_order_plan_left plan) (join_order_plan_size plan) limit regular_edges predicates))
 			(define right (join_order_expensive_subtree
-				(join_order_plan_right plan) (join_order_plan_size plan) limit))
+				(join_order_plan_right plan) (join_order_plan_size plan) limit regular_edges predicates))
 			(reduce (list own left right) (lambda (best candidate)
 				(if (and (not (nil? candidate))
 					(or (nil? best) (> (join_order_plan_cost candidate) (join_order_plan_cost best))))
@@ -1358,32 +1492,53 @@ memory independently of the number of pairs. */
 				(join_order_replace_subtree universe predicates (join_order_plan_left plan) target replacement required_drivers)
 				(join_order_replace_subtree universe predicates (join_order_plan_right plan) target replacement required_drivers))))))
 
-(define join_order_goo_dp_loop (lambda (nodes aliases predicates hypergraph plan budget used required_drivers)
+(define join_order_goo_dp_loop (lambda (nodes aliases predicates regular_edges plan budget used required_drivers)
 	(if (<= budget 0)
 		(list plan used)
 		(begin
-			(define limit (if hypergraph 10 100))
-			(define target (join_order_expensive_subtree plan (+ (join_order_plan_size plan) 1) limit))
+			/* The global greedy tree composes independent connected arms. Exact
+			DP is deliberately confined to small connected subtrees, which are
+			then marked atomic and behave as the paper's meta-nodes. */
+			(define limit 10)
+			(define target (join_order_expensive_subtree plan
+				(+ (join_order_plan_size plan) 1) limit regular_edges predicates))
 			(if (nil? target)
 				(list plan used)
 				(begin
-					(define optimized (if hypergraph
-						(join_order_dphyp_budgeted nodes (join_order_plan_aliases target)
-							predicates budget required_drivers)
-						(join_order_linearized_dp nodes (join_order_plan_aliases target) predicates required_drivers)))
+					(define optimized (join_order_dphyp_budgeted nodes
+						(join_order_plan_aliases target) predicates budget required_drivers))
 					(define replacement (car optimized))
 					(define entries (cadr optimized))
 					(define accepted (and (not (nil? replacement))
 						(< (join_order_plan_cost replacement) (join_order_plan_cost target))))
 					(define final_replacement (join_order_plan_with_atomic
 						(if accepted replacement target) true))
-					(join_order_goo_dp_loop nodes aliases predicates hypergraph
+					(join_order_goo_dp_loop nodes aliases predicates regular_edges
 						(join_order_replace_subtree aliases predicates plan target final_replacement required_drivers)
 						(- budget entries) (+ used entries) required_drivers))))))))
 
-(define join_order_goo_dp (lambda (nodes aliases predicates hypergraph required_drivers)
-	(join_order_goo_dp_loop nodes aliases predicates hypergraph
+(define join_order_goo_dp (lambda (nodes aliases predicates _hypergraph required_drivers)
+	(join_order_goo_dp_loop nodes aliases predicates
+		(join_order_regular_edges aliases predicates)
 		(join_order_goo nodes aliases predicates required_drivers) 10000 0 required_drivers)))
+
+(define join_order_arm_dp (lambda (nodes aliases predicates required_drivers)
+	(begin
+		(define regular_edges (join_order_regular_edges aliases predicates))
+		(define plan (join_order_arm_plan
+			nodes aliases predicates regular_edges required_drivers))
+		/* Multi-parent outer dependencies cannot be represented as independent
+		arms. The ordinary hypergraph-aware composer remains the correctness path
+		when the rooted construction cannot consume every pending boundary. */
+		(if (or (nil? plan) (not (equal? (join_order_plan_size plan) (count aliases))))
+			(join_order_goo_dp nodes aliases predicates true required_drivers)
+			/* A connected regular graph with fewer edges than vertices is acyclic.
+			There is no coupled subset for exact DP to improve, so avoid even walking
+			the plan and rescanning its edges. */
+			(if (< (count regular_edges) (count aliases))
+				(list plan 0)
+				(join_order_goo_dp_loop nodes aliases predicates regular_edges
+					plan 10000 0 required_drivers))))))
 
 (define join_order_local_predicates_for_alias (lambda (predicates alias)
 	(filter predicates (lambda (predicate)
@@ -1448,11 +1603,7 @@ memory independently of the number of pairs. */
 (define join_order_choose_strategy (lambda (alias_count hypergraph connected_over_budget)
 	(if (and (<= alias_count 100) (not connected_over_budget))
 		(quote dphyp)
-		(if hypergraph
-			(quote goo-dphyp)
-			(if (<= alias_count 100)
-				(quote linearized-dp)
-				(quote goo-linearized-dp))))))
+		(if hypergraph (quote goo-dphyp) (quote decomposed-dphyp)))))
 
 (define join_order_record_exact_cost_inputs (lambda (nodes predicates)
 	(begin
@@ -1484,10 +1635,18 @@ subsets without materializing them. */
 		(lambda (edge)
 			(if (equal? (nth edge 0) alias) (nth edge 1) (nth edge 0))))))
 
+(define join_order_degree_index (lambda (edges)
+	(reduce edges (lambda (degrees edge)
+		(set_assoc
+			(set_assoc degrees (nth edge 0) (+ (get_assoc degrees (nth edge 0) 0) 1))
+			(nth edge 1) (+ (get_assoc degrees (nth edge 1) 0) 1))) '())))
+
 (define join_order_degree_proves_budget_overflow? (lambda (aliases edges budget)
-	(reduce aliases (lambda (proven alias)
-		(or proven (join_order_degree_exceeds_budget?
-			(count (join_order_regular_neighbors edges alias)) budget))) false)))
+	(begin
+		(define degrees (join_order_degree_index edges))
+		(reduce aliases (lambda (proven alias)
+			(or proven (join_order_degree_exceeds_budget?
+				(get_assoc degrees alias 0) budget))) false))))
 
 (define join_order_ordered_completion (lambda (predicates ordered remaining)
 	(if (empty_list? remaining)
@@ -1576,7 +1735,8 @@ running DP over a wide projection-only graph. */
 		predicate happens to mention only two aliases. Linearized DP cannot encode
 		the pending preserved-side requirement, so route an over-budget outer-join
 		graph through the paper's hypergraph-aware GOO-DPHyp path. */
-		(define hypergraph (or (join_order_hypergraph? raw_predicates)
+		(define predicate_hypergraph (join_order_hypergraph? raw_predicates))
+		(define hypergraph (or predicate_hypergraph
 			(join_order_has_outer_barriers? nodes)))
 		(define predicates (join_order_prepare_predicates aliases raw_predicates))
 		(define functional_relation_plan
@@ -1592,7 +1752,7 @@ running DP over a wide projection-only graph. */
 					(join_order_enumerate_connected aliases predicates state_budget))
 				(list '() true))))
 		(define strategy (join_order_choose_strategy
-			(count aliases) hypergraph (cadr connected_count)))
+			(count aliases) predicate_hypergraph (cadr connected_count)))
 		(define exact (equal? strategy (quote dphyp)))
 		/* Cached plans depend on the sampled cardinalities even when DPHyp keeps a
 		fixed physical driver. Record the inputs as guards as well as the pairwise
@@ -1602,8 +1762,8 @@ running DP over a wide projection-only graph. */
 			(list functional_relation_plan (- (count aliases) 1))
 			(if exact
 				(join_order_dphyp_connected nodes aliases predicates (car connected_count) required_drivers)
-				(if (equal? strategy (quote linearized-dp))
-					(join_order_linearized_dp nodes aliases predicates required_drivers)
+				(if (equal? strategy (quote decomposed-dphyp))
+					(join_order_arm_dp nodes aliases predicates required_drivers)
 					(join_order_goo_dp nodes aliases predicates hypergraph required_drivers)))))
 		(define result_plan (car result))
 		/* One cheapest state per alias set is sufficient for inner joins, but a
@@ -1974,6 +2134,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 (define join_optimizer_plan_segment (lambda (stages relation_units all_sources segment default_alias graph required_drivers)
 	(begin
 		(define aliases (map segment source_alias))
+		(define alias_index (join_hypergraph_alias_index aliases))
 		(define predicates (join_optimizer_metadata_costed_predicates
 			all_sources default_alias graph aliases))
 		(define fixed_functional_pair (and (equal? (count segment) 2)
@@ -1988,11 +2149,11 @@ source catalog. join_plan remains the single owner of physical join order. */
 								(and (equal? (stage_result_max_rows_per_partition lookup_stage) 1)
 									(join_order_set_subset?
 										(join_optimizer_outer_requirements stages relation_units
-											segment default_alias lookup)
+											segment default_alias alias_index lookup)
 										(list (source_alias driver)))))))))))
 		(define planned (join_order_adaptive
 			(join_optimizer_metadata_nodes stages relation_units
-				segment default_alias graph fixed_functional_pair)
+				segment default_alias alias_index graph fixed_functional_pair)
 			predicates
 			required_drivers))
 		(qassoc_set planned (quote tree)
