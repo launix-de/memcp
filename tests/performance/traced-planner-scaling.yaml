@@ -58,9 +58,9 @@ setup:
 test_cases:
   - name: "Independent nested scalar aggregates compile within a linear budget"
     max_time: 1.0
-    # The 48-stage scaling suite owns the asymptotic gate. Keep this smaller
-    # correctness shape insensitive to cold-start and runner CPU variance.
-    max_planner_time_ms: 1000
+    # The separate 48-stage suite owns the asymptotic gate. Retain this small
+    # shape's established reference; the runner scales it to the host CPU.
+    max_planner_time_ms: 300
     max_compile_phase_ms:
       reorder_ns: 500
       recipe_emit_ns: 600
@@ -88,10 +88,8 @@ test_cases:
           metric_6: 1
           metric_7: 1
           metric_8: 1
-  - name: "Holistic nested dependent joins compile within a bounded budget"
-    # Roughly half of this 80KB case is parsing. Leave clock/architecture
-    # headroom here; the phase-specific large-N gates catch planner scaling.
-    max_time: 1.5
+  - name: "Holistic nested dependent joins compile within one second"
+    max_time: 1.0
     sql: |
       EXPLAIN COMPILE SELECT
         (SELECT SUM(1) FROM tps_prop item WHERE item.id = 1 AND COALESCE((SELECT (parent.owner_id = 7 OR EXISTS (SELECT TRUE FROM tps_assignment member WHERE member.team_id = parent.team_id AND member.member_id = 7 LIMIT 1)) FROM tps_parent parent WHERE parent.id = item.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_001,
