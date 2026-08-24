@@ -684,6 +684,128 @@ test_cases:
         - id: 5
 
 
+  - name: "Indexed nested stage catalogs preserve compound scalar evaluation"
+    sql: |
+      SELECT p.id,
+        COALESCE((
+          SELECT (
+          COALESCE((SELECT a1.allowed FROM csa_assignment a1
+                    WHERE a1.id = 1
+                      AND a1.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a2.allowed FROM csa_assignment a2
+                    WHERE a2.id = 2
+                      AND a2.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a3.allowed FROM csa_assignment a3
+                    WHERE a3.id = 3
+                      AND a3.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a4.allowed FROM csa_assignment a4
+                    WHERE a4.id = 4
+                      AND a4.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a5.allowed FROM csa_assignment a5
+                    WHERE a5.id = 5
+                      AND a5.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a6.allowed FROM csa_assignment a6
+                    WHERE a6.id = 6
+                      AND a6.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a7.allowed FROM csa_assignment a7
+                    WHERE a7.id = 7
+                      AND a7.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a8.allowed FROM csa_assignment a8
+                    WHERE a8.id = 8
+                      AND a8.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a9.allowed FROM csa_assignment a9
+                    WHERE a9.id = 9
+                      AND a9.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a10.allowed FROM csa_assignment a10
+                    WHERE a10.id = 10
+                      AND a10.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a11.allowed FROM csa_assignment a11
+                    WHERE a11.id = 11
+                      AND a11.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a12.allowed FROM csa_assignment a12
+                    WHERE a12.id = 12
+                      AND a12.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a13.allowed FROM csa_assignment a13
+                    WHERE a13.id = 13
+                      AND a13.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a14.allowed FROM csa_assignment a14
+                    WHERE a14.id = 14
+                      AND a14.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a15.allowed FROM csa_assignment a15
+                    WHERE a15.id = 15
+                      AND a15.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a16.allowed FROM csa_assignment a16
+                    WHERE a16.id = 16
+                      AND a16.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a17.allowed FROM csa_assignment a17
+                    WHERE a17.id = 17
+                      AND a17.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a18.allowed FROM csa_assignment a18
+                    WHERE a18.id = 18
+                      AND a18.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a19.allowed FROM csa_assignment a19
+                    WHERE a19.id = 19
+                      AND a19.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a20.allowed FROM csa_assignment a20
+                    WHERE a20.id = 20
+                      AND a20.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a21.allowed FROM csa_assignment a21
+                    WHERE a21.id = 21
+                      AND a21.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a22.allowed FROM csa_assignment a22
+                    WHERE a22.id = 22
+                      AND a22.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a23.allowed FROM csa_assignment a23
+                    WHERE a23.id = 23
+                      AND a23.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a24.allowed FROM csa_assignment a24
+                    WHERE a24.id = 24
+                      AND a24.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE) AND
+          COALESCE((SELECT a25.allowed FROM csa_assignment a25
+                    WHERE a25.id = 25
+                      AND a25.tenant_id = nested_parent.tenant_id
+                    LIMIT 1), TRUE)
+            AND (COALESCE((SELECT rr.label FROM csa_ref rr
+                           WHERE rr.id = nested_parent.ref_id
+                           LIMIT 1), '') <> '')
+          )
+          FROM csa_parent nested_parent
+          WHERE nested_parent.id = p.id
+          LIMIT 1
+        ), FALSE) AS allowed
+      FROM csa_parent p
+      WHERE p.id = 1
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          allowed: false
+
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS cq_large_parent"
   - sql: "DROP TABLE IF EXISTS cq_digit"

@@ -287,7 +287,7 @@ partner. */
 		(define fact_catalog (group_stage_lowering_catalog stage))
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define stage_lookup (stage_catalog_with_nested
-			(merge (list all_stages
+			(merge_stage_catalogs (list all_stages
 				(if (lowering_catalog? fact_catalog)
 					(lowering_catalog_stages fact_catalog)
 					(coalesceNil fact_catalog '()))
@@ -513,7 +513,7 @@ partner. */
 	(begin
 		(define direct_stages (scalar_first_query_probe_direct_nested_stages all_stages stage))
 		(define probe_catalog (stage_catalog_with_nested
-			(merge (list all_stages direct_stages))))
+			(merge_stage_catalogs (list all_stages direct_stages))))
 		(define dependency_graph (stage_dependency_graph probe_catalog))
 		(define closure_index (stage_dependency_closure_index_using_graph dependency_graph direct_stages))
 		(define nested_stages
@@ -1114,7 +1114,7 @@ until lowering without creating a depth-proportional binary OR chain. */
 		(define branch_stages (merge (map (coalesceNil branches '()) (lambda (branch)
 			(if (query_block? branch) (qb_stages branch) '())))))
 		(define stage_lookup
-			(make_lowering_catalog (unique_stages_by_id (merge (list all_stages branch_stages)))))
+			(make_lowering_catalog (merge_stage_catalogs (list all_stages branch_stages))))
 		(define dependency_graph (stage_dependency_graph stage_lookup))
 		(cons (quote or)
 			(map (coalesceNil branches '()) (lambda (branch)
@@ -1214,7 +1214,7 @@ through to reach the base table -- src already is it. */
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
-			(merge (list all_stages probe_catalog (nested_stage_catalog stage)))))
+			(merge_stage_catalogs (list all_stages probe_catalog (nested_stage_catalog stage)))))
 		(define physical_stage (if (empty_list? probe_catalog)
 			stage
 			(group_stage_with_stage_catalog stage stage_catalog)))
@@ -1338,7 +1338,7 @@ membership set. */
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
-			(merge (list all_stages probe_catalog (nested_stage_catalog stage)))))
+			(merge_stage_catalogs (list all_stages probe_catalog (nested_stage_catalog stage)))))
 		(define physical_stage (if (empty_list? probe_catalog)
 			stage
 			(group_stage_with_stage_catalog stage stage_catalog)))
@@ -1503,7 +1503,7 @@ choice table instead of adding another promotion path. */
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define lowering_catalog (group_stage_lowering_catalog stage))
 		(define probe_stages (stage_catalog_with_nested
-			(merge (list
+			(merge_stage_catalogs (list
 				all_stages
 				probe_catalog
 				(if (lowering_catalog? lowering_catalog)
@@ -1589,7 +1589,7 @@ choice table instead of adding another promotion path. */
 		(define neutral_expr (nth ag 2))
 		(if (query_block? src)
 			(lower_scalar_aggregate_query_probe_expr
-				(stage_catalog_with_nested (merge (list
+				(stage_catalog_with_nested (merge_stage_catalogs (list
 					(qassoc_get (gs_facts stage) (quote probe_catalog) '())
 					(if (lowering_catalog? (group_stage_lowering_catalog stage))
 						(lowering_catalog_stages (group_stage_lowering_catalog stage))
@@ -1643,7 +1643,7 @@ choice table instead of adding another promotion path. */
 		(define value_expr (nth ag 0))
 		(if (query_block? src)
 			(lower_scalar_first_query_probe_expr
-				(stage_catalog_with_nested (merge (list
+				(stage_catalog_with_nested (merge_stage_catalogs (list
 					(qassoc_get (gs_facts stage) (quote probe_catalog) '())
 					(if (lowering_catalog? (group_stage_lowering_catalog stage))
 						(lowering_catalog_stages (group_stage_lowering_catalog stage))
@@ -2324,7 +2324,7 @@ cache identity or a logical fallback. */
 		(define raw_input (gs_input stage))
 		(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
-			(merge (list stamped_catalog (nested_stage_catalog stage)
+			(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
 				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
@@ -2820,7 +2820,7 @@ NULL semantics, never the syntactic reason that introduced the stage. */
 					true))
 				(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
 				(define stage_catalog (stage_catalog_with_nested
-					(merge (list stamped_catalog (nested_stage_catalog stage)
+					(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
 						(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 				(list (quote begin)
 					(lower_group_stage_prepare_using stage_catalog stage_catalog stage)

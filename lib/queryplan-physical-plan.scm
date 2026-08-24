@@ -1460,9 +1460,21 @@ get_column refs to the source) are excluded automatically too. */
 				catalog
 				(merge (map nested nested_stage_catalog))))))))
 
+(define stage_catalog_entries (lambda (stages)
+	(if (lowering_catalog? stages)
+		(lowering_catalog_stages stages)
+		(merge (map (coalesceNil stages '()) (lambda (stage)
+			(if (lowering_catalog? stage)
+				(lowering_catalog_stages stage)
+				(list stage))))))))
+
+(define merge_stage_catalogs (lambda (catalogs)
+	(unique_stages_by_id
+		(merge (map (coalesceNil catalogs '()) lowering_catalog_stages)))))
+
 (define stage_catalog_with_nested (lambda (stages)
 	(unique_stages_by_id
-		(merge (map (coalesceNil stages '()) nested_stage_catalog)))))
+		(merge (map (stage_catalog_entries stages) nested_stage_catalog)))))
 
 (define lower_group_stage (lambda (stage)
 	(begin
@@ -4621,7 +4633,7 @@ source of that driver leaf. */
 				(define target_col (if (nil? key_index) nil
 					(direct_column_name_for_alias driver_src (nth lookup_keys key_index))))
 				(define probe_stages (stage_catalog_with_nested
-					(merge (list stages dependencies
+					(merge_stage_catalogs (list stages dependencies
 						(qassoc_get (gs_facts stage) (quote probe_catalog) '())
 						(list stage)))))
 				(define operator (if (nil? target_col) (quote unsupported)

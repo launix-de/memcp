@@ -870,6 +870,20 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define prepared_lowering_catalog (make_lowering_catalog indexed_catalog_stages))
 	(assert (lowering_catalog? prepared_lowering_catalog) true
 		"physical preparation indexes stage catalogs above the measured crossover")
+	(define merged_catalog_stage (make_group_stage
+		"merged-catalog-stage"
+		(list "merged" "memcp-tests" "merged_source" false nil)
+		'() '(1) '() nil '() '() nil nil '()))
+	(define merged_indexed_catalog (merge_stage_catalogs
+		(list prepared_lowering_catalog (list merged_catalog_stage))))
+	(assert (equal? (count merged_indexed_catalog) 26) true
+		"physical catalog composition expands indexed handles before merging stages")
+	(assert (empty_list? (filter merged_indexed_catalog lowering_catalog?)) true
+		"physical catalog composition never leaks an indexed handle into a stage list")
+	(assert (equal? (gs_id (stage_by_id
+		(stage_catalog_with_nested merged_indexed_catalog)
+		"merged-catalog-stage")) "merged-catalog-stage") true
+		"nested physical catalog traversal accepts stages composed with an indexed root")
 	(assert (lowering_catalog? (make_lowering_catalog (cdr indexed_catalog_stages))) false
 		"physical preparation keeps exactly 24 stages on the list path")
 	(assert (equal? (gs_id (stage_for_output_relation prepared_lowering_catalog
