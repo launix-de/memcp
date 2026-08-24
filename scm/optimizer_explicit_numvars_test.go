@@ -74,6 +74,19 @@ func TestOptimizeProcToSerialFunctionExplicitNumVarsKeepsNamedVariadicBinding(t 
 	}
 }
 
+func TestOptimizeProcToSerialFunctionKeepsCompatibilitySlotsForNamedProc(t *testing.T) {
+	lambda := NewProcStruct(Proc{
+		Params:  NewSlice([]Scmer{NewSymbol("value")}),
+		Body:    NewSlice([]Scmer{NewSymbol("list"), NewNthLocalVar(1)}),
+		En:      &Globalenv,
+		NumVars: 1,
+	})
+	got := OptimizeProcToSerialFunction(lambda)(NewInt(3))
+	if !Equal(got, NewSlice([]Scmer{NewNil()})) {
+		t.Fatalf("expected an unbound compatibility slot to be nil, got %v", got)
+	}
+}
+
 func BenchmarkOptimizeProcToSerialFunctionNumberedAdapter(b *testing.B) {
 	body := NewNthLocalVar(0)
 	for i := 0; i < 256; i++ {

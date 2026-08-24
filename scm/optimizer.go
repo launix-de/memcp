@@ -166,8 +166,14 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	}
 
 	numVars := p.NumVars
-	if required := requiredNumberedSlots(p.Body); required > numVars {
-		numVars = required
+	// Numbered-only optimized lambdas carry their complete frame size as the
+	// fourth lambda item. Walking a large generated callback again at every
+	// adapter creation duplicates optimizer work and can dominate compilation.
+	// Hand-built and named procedures retain the compatibility scan.
+	if numVars == 0 || !p.NumberedOnly {
+		if required := requiredNumberedSlots(p.Body); required > numVars {
+			numVars = required
+		}
 	}
 	var vars Vars
 	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, numVars), Outer: p.En, Nodefine: false}

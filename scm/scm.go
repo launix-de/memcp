@@ -2763,7 +2763,10 @@ func computeGoPayload(val any) uint {
 	case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
 		return 0
 	default:
-		fmt.Println(fmt.Sprintf("warning: unknown any payload %T", v))
+		// Opaque runtime helpers (notably parser combinators) are shared and are
+		// intentionally not charged to each cached AST reference. Do not emit a
+		// warning per reference: a wide query can contain thousands of them and
+		// turn cache accounting into synchronous log I/O.
 		return 0
 	}
 }

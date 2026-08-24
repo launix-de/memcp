@@ -876,6 +876,74 @@ test_cases:
         - id: 2
           access_a: false
           access_b: false
+
+  - name: "Outer LIMIT brakes before a wide derived scalar projection"
+    max_time: 2.0
+    max_planner_time_ms: 1800
+    max_compile_phase_ms:
+      recipe_emit_ns: 1000
+    max_compile_metrics:
+      plan_nodes: 6000
+      ordered_scans: 64
+      exists_scans: 64
+    setup:
+      - sql: "INSERT INTO trace_wide_prop SELECT id + 1024, parent_id, archived FROM trace_wide_prop WHERE id <= 1024"
+      - sql: "INSERT INTO trace_wide_prop SELECT id + 2048, parent_id, archived FROM trace_wide_prop WHERE id <= 2048"
+      - sql: "INSERT INTO trace_wide_prop SELECT id + 4096, parent_id, archived FROM trace_wide_prop WHERE id <= 4096"
+      - sql: "INSERT INTO trace_wide_prop SELECT id + 8192, parent_id, archived FROM trace_wide_prop WHERE id <= 8192"
+      - sql: "INSERT INTO trace_wide_prop SELECT id + 16384, parent_id, archived FROM trace_wide_prop WHERE id <= 16384"
+      - sql: "INSERT INTO trace_wide_prop SELECT id + 32768, parent_id, archived FROM trace_wide_prop WHERE id <= 32768"
+    sql: |
+      SELECT projected.*
+      FROM (
+        SELECT item.id,
+          COALESCE((SELECT parent_01.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_01 WHERE member_01.team_id = parent_01.team_id AND member_01.member_id = 1 LIMIT 1) FROM trace_wide_parent parent_01 WHERE parent_01.id = item.parent_id LIMIT 1), FALSE) AS value_01,
+          COALESCE((SELECT parent_02.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_02 WHERE member_02.team_id = parent_02.team_id AND member_02.member_id = 2 LIMIT 1) FROM trace_wide_parent parent_02 WHERE parent_02.id = item.parent_id LIMIT 1), FALSE) AS value_02,
+          COALESCE((SELECT parent_03.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_03 WHERE member_03.team_id = parent_03.team_id AND member_03.member_id = 3 LIMIT 1) FROM trace_wide_parent parent_03 WHERE parent_03.id = item.parent_id LIMIT 1), FALSE) AS value_03,
+          COALESCE((SELECT parent_04.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_04 WHERE member_04.team_id = parent_04.team_id AND member_04.member_id = 4 LIMIT 1) FROM trace_wide_parent parent_04 WHERE parent_04.id = item.parent_id LIMIT 1), FALSE) AS value_04,
+          COALESCE((SELECT parent_05.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_05 WHERE member_05.team_id = parent_05.team_id AND member_05.member_id = 5 LIMIT 1) FROM trace_wide_parent parent_05 WHERE parent_05.id = item.parent_id LIMIT 1), FALSE) AS value_05,
+          COALESCE((SELECT parent_06.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_06 WHERE member_06.team_id = parent_06.team_id AND member_06.member_id = 6 LIMIT 1) FROM trace_wide_parent parent_06 WHERE parent_06.id = item.parent_id LIMIT 1), FALSE) AS value_06,
+          COALESCE((SELECT parent_07.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_07 WHERE member_07.team_id = parent_07.team_id AND member_07.member_id = 7 LIMIT 1) FROM trace_wide_parent parent_07 WHERE parent_07.id = item.parent_id LIMIT 1), FALSE) AS value_07,
+          COALESCE((SELECT parent_08.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_08 WHERE member_08.team_id = parent_08.team_id AND member_08.member_id = 8 LIMIT 1) FROM trace_wide_parent parent_08 WHERE parent_08.id = item.parent_id LIMIT 1), FALSE) AS value_08,
+          COALESCE((SELECT parent_09.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_09 WHERE member_09.team_id = parent_09.team_id AND member_09.member_id = 9 LIMIT 1) FROM trace_wide_parent parent_09 WHERE parent_09.id = item.parent_id LIMIT 1), FALSE) AS value_09,
+          COALESCE((SELECT parent_10.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_10 WHERE member_10.team_id = parent_10.team_id AND member_10.member_id = 10 LIMIT 1) FROM trace_wide_parent parent_10 WHERE parent_10.id = item.parent_id LIMIT 1), FALSE) AS value_10,
+          COALESCE((SELECT parent_11.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_11 WHERE member_11.team_id = parent_11.team_id AND member_11.member_id = 11 LIMIT 1) FROM trace_wide_parent parent_11 WHERE parent_11.id = item.parent_id LIMIT 1), FALSE) AS value_11,
+          COALESCE((SELECT parent_12.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_12 WHERE member_12.team_id = parent_12.team_id AND member_12.member_id = 12 LIMIT 1) FROM trace_wide_parent parent_12 WHERE parent_12.id = item.parent_id LIMIT 1), FALSE) AS value_12,
+          COALESCE((SELECT parent_13.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_13 WHERE member_13.team_id = parent_13.team_id AND member_13.member_id = 13 LIMIT 1) FROM trace_wide_parent parent_13 WHERE parent_13.id = item.parent_id LIMIT 1), FALSE) AS value_13,
+          COALESCE((SELECT parent_14.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_14 WHERE member_14.team_id = parent_14.team_id AND member_14.member_id = 14 LIMIT 1) FROM trace_wide_parent parent_14 WHERE parent_14.id = item.parent_id LIMIT 1), FALSE) AS value_14,
+          COALESCE((SELECT parent_15.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_15 WHERE member_15.team_id = parent_15.team_id AND member_15.member_id = 15 LIMIT 1) FROM trace_wide_parent parent_15 WHERE parent_15.id = item.parent_id LIMIT 1), FALSE) AS value_15,
+          COALESCE((SELECT parent_16.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_16 WHERE member_16.team_id = parent_16.team_id AND member_16.member_id = 16 LIMIT 1) FROM trace_wide_parent parent_16 WHERE parent_16.id = item.parent_id LIMIT 1), FALSE) AS value_16,
+          COALESCE((SELECT parent_17.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_17 WHERE member_17.team_id = parent_17.team_id AND member_17.member_id = 17 LIMIT 1) FROM trace_wide_parent parent_17 WHERE parent_17.id = item.parent_id LIMIT 1), FALSE) AS value_17,
+          COALESCE((SELECT parent_18.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_18 WHERE member_18.team_id = parent_18.team_id AND member_18.member_id = 18 LIMIT 1) FROM trace_wide_parent parent_18 WHERE parent_18.id = item.parent_id LIMIT 1), FALSE) AS value_18,
+          COALESCE((SELECT parent_19.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_19 WHERE member_19.team_id = parent_19.team_id AND member_19.member_id = 19 LIMIT 1) FROM trace_wide_parent parent_19 WHERE parent_19.id = item.parent_id LIMIT 1), FALSE) AS value_19,
+          COALESCE((SELECT parent_20.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_20 WHERE member_20.team_id = parent_20.team_id AND member_20.member_id = 20 LIMIT 1) FROM trace_wide_parent parent_20 WHERE parent_20.id = item.parent_id LIMIT 1), FALSE) AS value_20,
+          COALESCE((SELECT parent_21.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_21 WHERE member_21.team_id = parent_21.team_id AND member_21.member_id = 21 LIMIT 1) FROM trace_wide_parent parent_21 WHERE parent_21.id = item.parent_id LIMIT 1), FALSE) AS value_21,
+          COALESCE((SELECT parent_22.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_22 WHERE member_22.team_id = parent_22.team_id AND member_22.member_id = 22 LIMIT 1) FROM trace_wide_parent parent_22 WHERE parent_22.id = item.parent_id LIMIT 1), FALSE) AS value_22,
+          COALESCE((SELECT parent_23.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_23 WHERE member_23.team_id = parent_23.team_id AND member_23.member_id = 23 LIMIT 1) FROM trace_wide_parent parent_23 WHERE parent_23.id = item.parent_id LIMIT 1), FALSE) AS value_23,
+          COALESCE((SELECT parent_24.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_24 WHERE member_24.team_id = parent_24.team_id AND member_24.member_id = 24 LIMIT 1) FROM trace_wide_parent parent_24 WHERE parent_24.id = item.parent_id LIMIT 1), FALSE) AS value_24,
+          COALESCE((SELECT parent_25.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_25 WHERE member_25.team_id = parent_25.team_id AND member_25.member_id = 25 LIMIT 1) FROM trace_wide_parent parent_25 WHERE parent_25.id = item.parent_id LIMIT 1), FALSE) AS value_25,
+          COALESCE((SELECT parent_26.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_26 WHERE member_26.team_id = parent_26.team_id AND member_26.member_id = 26 LIMIT 1) FROM trace_wide_parent parent_26 WHERE parent_26.id = item.parent_id LIMIT 1), FALSE) AS value_26,
+          COALESCE((SELECT parent_27.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_27 WHERE member_27.team_id = parent_27.team_id AND member_27.member_id = 27 LIMIT 1) FROM trace_wide_parent parent_27 WHERE parent_27.id = item.parent_id LIMIT 1), FALSE) AS value_27,
+          COALESCE((SELECT parent_28.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_28 WHERE member_28.team_id = parent_28.team_id AND member_28.member_id = 28 LIMIT 1) FROM trace_wide_parent parent_28 WHERE parent_28.id = item.parent_id LIMIT 1), FALSE) AS value_28,
+          COALESCE((SELECT parent_29.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_29 WHERE member_29.team_id = parent_29.team_id AND member_29.member_id = 29 LIMIT 1) FROM trace_wide_parent parent_29 WHERE parent_29.id = item.parent_id LIMIT 1), FALSE) AS value_29,
+          COALESCE((SELECT parent_30.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_30 WHERE member_30.team_id = parent_30.team_id AND member_30.member_id = 30 LIMIT 1) FROM trace_wide_parent parent_30 WHERE parent_30.id = item.parent_id LIMIT 1), FALSE) AS value_30,
+          COALESCE((SELECT parent_31.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_31 WHERE member_31.team_id = parent_31.team_id AND member_31.member_id = 31 LIMIT 1) FROM trace_wide_parent parent_31 WHERE parent_31.id = item.parent_id LIMIT 1), FALSE) AS value_31,
+          COALESCE((SELECT parent_32.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_32 WHERE member_32.team_id = parent_32.team_id AND member_32.member_id = 32 LIMIT 1) FROM trace_wide_parent parent_32 WHERE parent_32.id = item.parent_id LIMIT 1), FALSE) AS value_32,
+          COALESCE((SELECT parent_33.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_33 WHERE member_33.team_id = parent_33.team_id AND member_33.member_id = 33 LIMIT 1) FROM trace_wide_parent parent_33 WHERE parent_33.id = item.parent_id LIMIT 1), FALSE) AS value_33,
+          COALESCE((SELECT parent_34.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_34 WHERE member_34.team_id = parent_34.team_id AND member_34.member_id = 34 LIMIT 1) FROM trace_wide_parent parent_34 WHERE parent_34.id = item.parent_id LIMIT 1), FALSE) AS value_34,
+          COALESCE((SELECT parent_35.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_35 WHERE member_35.team_id = parent_35.team_id AND member_35.member_id = 35 LIMIT 1) FROM trace_wide_parent parent_35 WHERE parent_35.id = item.parent_id LIMIT 1), FALSE) AS value_35,
+          COALESCE((SELECT parent_36.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_36 WHERE member_36.team_id = parent_36.team_id AND member_36.member_id = 36 LIMIT 1) FROM trace_wide_parent parent_36 WHERE parent_36.id = item.parent_id LIMIT 1), FALSE) AS value_36,
+          COALESCE((SELECT parent_37.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_37 WHERE member_37.team_id = parent_37.team_id AND member_37.member_id = 37 LIMIT 1) FROM trace_wide_parent parent_37 WHERE parent_37.id = item.parent_id LIMIT 1), FALSE) AS value_37,
+          COALESCE((SELECT parent_38.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_38 WHERE member_38.team_id = parent_38.team_id AND member_38.member_id = 38 LIMIT 1) FROM trace_wide_parent parent_38 WHERE parent_38.id = item.parent_id LIMIT 1), FALSE) AS value_38,
+          COALESCE((SELECT parent_39.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_39 WHERE member_39.team_id = parent_39.team_id AND member_39.member_id = 39 LIMIT 1) FROM trace_wide_parent parent_39 WHERE parent_39.id = item.parent_id LIMIT 1), FALSE) AS value_39,
+          COALESCE((SELECT parent_40.owner_id = 7 OR EXISTS (SELECT TRUE FROM trace_wide_assignment member_40 WHERE member_40.team_id = parent_40.team_id AND member_40.member_id = 40 LIMIT 1) FROM trace_wide_parent parent_40 WHERE parent_40.id = item.parent_id LIMIT 1), FALSE) AS value_40
+        FROM trace_wide_prop item
+      ) projected
+      LIMIT 72
+    expect:
+      rows: 72
+    cleanup:
+      - sql: "DELETE FROM trace_wide_prop WHERE id > 1024"
   - name: "Prelimit presence predicate retains shared group cache"
     sql: |
       EXPLAIN

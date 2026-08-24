@@ -878,6 +878,39 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 			(scalar_first_query_probe_direct_nested_stages all_stages stage))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe entry"))))
 
+/* A catalog stamped onto a stage is a lookup aid, not part of that stage's
+probe expression. Rewriting it for every bounded projection recursively copies
+the complete query catalog once per result column. Keep only the dependency
+closure which the recipe can actually lower; lower_group_stage_prepare_using
+still receives every transitive dependency through this compact catalog. */
+(define scalar_query_probe_stage_without_catalogs (lambda (stage)
+	(if (not (group_stage? stage))
+		stage
+		(group_stage_with_facts stage
+			(filter (gs_facts stage) (lambda (entry)
+				(match entry
+					(cons key _value) (and
+						(not (equal? key (quote stage_catalog)))
+						(and
+							(not (equal? key (quote lowering_catalog)))
+							(not (equal? key (quote probe_catalog)))))
+					_ true)))))))
+
+(define scalar_query_probe_compact_stages (lambda (stage nested_stages)
+	(begin
+		(define bases (unique_stages_by_id
+			(map (cons stage nested_stages) scalar_query_probe_stage_without_catalogs)))
+		(define catalog (make_lowering_catalog bases))
+		(define cataloged (map bases (lambda (candidate)
+			(if (group_stage? candidate)
+				(group_stage_with_lowering_catalog candidate catalog)
+				candidate))))
+		(list
+			(stage_by_id cataloged (gs_id stage))
+			(filter (map nested_stages (lambda (nested_stage)
+				(stage_by_id cataloged (gs_id nested_stage))))
+				(lambda (nested_stage) (not (nil? nested_stage))))))))
+
 (define scalar_query_probe_recipe_plan_using_index (lambda (closure_index bounded_recipe_keys seed)
 	(match seed
 		'(stage requested_col direct_stages) (begin
@@ -912,13 +945,18 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 			(define consumed_ids (stage_id_set (merge (list hoisted_stages inline_owned_stages))))
 			(define prepare_stages (filter nested_stages (lambda (nested_stage)
 				(not (has_assoc? consumed_ids (gs_id nested_stage))))))
+			(define compact (scalar_query_probe_compact_stages stage nested_stages))
+			(define compact_stage (nth compact 0))
+			(define compact_nested_stages (nth compact 1))
+			(define compact_stage_for (lambda (candidate)
+				(stage_by_id compact_nested_stages (gs_id candidate))))
 			(list
-				stage
+				compact_stage
 				requested_col
-				nested_stages
-				hoisted_stages
-				prepare_stages
-				inline_presence_stages
+				compact_nested_stages
+				(map hoisted_stages compact_stage_for)
+				(map prepare_stages compact_stage_for)
+				(map inline_presence_stages compact_stage_for)
 				bounded_consumer))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe seed"))))
 
