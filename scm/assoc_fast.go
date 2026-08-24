@@ -262,6 +262,75 @@ func hashStructuralReadonly(key Scmer) uint64 {
 	}
 }
 
+// hashASTKey keeps compiler node types distinct. Unlike Scheme equality it
+// never parses strings as dates or numbers while indexing an immutable AST.
+func hashASTKey(key Scmer, memo map[Scmer]uint64) uint64 {
+	switch key.GetTag() {
+	case tagSourceInfo:
+		return hashASTKey(key.SourceInfo().value, memo)
+	case tagAny:
+		if source, ok := key.Any().(SourceInfo); ok {
+			return hashASTKey(source.value, memo)
+		}
+		return HashKey(key)
+	case tagSlice:
+		if hash, ok := memo[key]; ok {
+			return hash
+		}
+		items := key.Slice()
+		hash := combineStructuralHash(0xbb67ae8584caa73b, uint64(len(items)))
+		for _, item := range items {
+			hash = combineStructuralHash(hash, hashASTKey(item, memo))
+		}
+		memo[key] = hash
+		return hash
+	case tagFastDict:
+		panic("AST hashing rejects mutable FastDict expressions")
+	default:
+		return HashKey(key)
+	}
+}
+
+func hashASTReadonly(key Scmer) uint64 {
+	return hashASTKey(key, make(map[Scmer]uint64))
+}
+
+func astStructuralEqual(a, b Scmer) bool {
+	if a.IsSourceInfo() {
+		return astStructuralEqual(a.SourceInfo().value, b)
+	}
+	if b.IsSourceInfo() {
+		return astStructuralEqual(a, b.SourceInfo().value)
+	}
+	if a.GetTag() == tagAny {
+		if source, ok := a.Any().(SourceInfo); ok {
+			return astStructuralEqual(source.value, b)
+		}
+	}
+	if b.GetTag() == tagAny {
+		if source, ok := b.Any().(SourceInfo); ok {
+			return astStructuralEqual(a, source.value)
+		}
+	}
+	if a.GetTag() != b.GetTag() {
+		return false
+	}
+	if a.GetTag() != tagSlice {
+		return Equal(a, b)
+	}
+	left := a.Slice()
+	right := b.Slice()
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !astStructuralEqual(left[i], right[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func structuralScalarTag(tag uint8) bool {
 	switch tag {
 	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagCString, tagBString:
@@ -324,19 +393,40 @@ type structuralCatalog struct {
 	entries        []structuralIndexEntry
 	buckets        map[uint64][]int
 	forceCollision bool
+	strictAST      bool
 }
 
 func (catalog *structuralCatalog) hash(key Scmer, memo map[Scmer]uint64) uint64 {
 	if catalog.forceCollision {
 		return 0
 	}
+	if catalog.strictAST {
+		return hashASTKey(key, memo)
+	}
 	return hashStructuralKey(key, memo)
+}
+
+func (catalog *structuralCatalog) hashReadonly(key Scmer) uint64 {
+	if catalog.forceCollision {
+		return 0
+	}
+	if catalog.strictAST {
+		return hashASTReadonly(key)
+	}
+	return hashStructuralReadonly(key)
+}
+
+func (catalog *structuralCatalog) equal(left, right Scmer) bool {
+	if catalog.strictAST {
+		return astStructuralEqual(left, right)
+	}
+	return structuralEqual(left, right)
 }
 
 func (catalog *structuralCatalog) set(key, value Scmer) {
 	if catalog.buckets == nil {
 		for i := range catalog.entries {
-			if structuralEqual(catalog.entries[i].key, key) {
+			if catalog.equal(catalog.entries[i].key, key) {
 				catalog.entries[i].value = value
 				return
 			}
@@ -353,12 +443,9 @@ func (catalog *structuralCatalog) set(key, value Scmer) {
 		}
 		return
 	}
-	hash := uint64(0)
-	if !catalog.forceCollision {
-		hash = hashStructuralReadonly(key)
-	}
+	hash := catalog.hashReadonly(key)
 	for _, i := range catalog.buckets[hash] {
-		if structuralEqual(catalog.entries[i].key, key) {
+		if catalog.equal(catalog.entries[i].key, key) {
 			catalog.entries[i].value = value
 			return
 		}
@@ -379,18 +466,15 @@ func (catalog *structuralCatalog) get(key Scmer) Scmer {
 	defer catalog.mu.Unlock()
 	if catalog.buckets == nil {
 		for _, entry := range catalog.entries {
-			if structuralEqual(entry.key, key) {
+			if catalog.equal(entry.key, key) {
 				return entry.value
 			}
 		}
 		return NewNil()
 	}
-	hash := uint64(0)
-	if !catalog.forceCollision {
-		hash = hashStructuralReadonly(key)
-	}
+	hash := catalog.hashReadonly(key)
 	for _, index := range catalog.buckets[hash] {
-		if structuralEqual(catalog.entries[index].key, key) {
+		if catalog.equal(catalog.entries[index].key, key) {
 			return catalog.entries[index].value
 		}
 	}
@@ -403,7 +487,7 @@ func (catalog *structuralCatalog) snapshot() []structuralIndexEntry {
 	return append([]structuralIndexEntry(nil), catalog.entries...)
 }
 
-func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool) Scmer {
+func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision, strictAST bool) Scmer {
 	memo := make(map[Scmer]uint64)
 	var buckets map[uint64][]structuralIndexEntry
 	if len(entries) >= structuralCatalogFastThreshold {
@@ -411,7 +495,11 @@ func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool)
 		for _, entry := range entries {
 			hash := uint64(0)
 			if !forceCollision {
-				hash = hashStructuralKey(entry.key, memo)
+				if strictAST {
+					hash = hashASTKey(entry.key, memo)
+				} else {
+					hash = hashStructuralKey(entry.key, memo)
+				}
 			}
 			buckets[hash] = append(buckets[hash], entry)
 		}
@@ -426,7 +514,7 @@ func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool)
 		}
 		if buckets == nil {
 			for _, entry := range entries {
-				if structuralEqual(entry.key, key) {
+				if (strictAST && astStructuralEqual(entry.key, key)) || (!strictAST && structuralEqual(entry.key, key)) {
 					return entry.value
 				}
 			}
@@ -436,12 +524,14 @@ func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool)
 		if !forceCollision {
 			if memoHash, ok := memo[key]; ok {
 				hash = memoHash
+			} else if strictAST {
+				hash = hashASTReadonly(key)
 			} else {
 				hash = hashStructuralReadonly(key)
 			}
 		}
 		for _, entry := range buckets[hash] {
-			if structuralEqual(entry.key, key) {
+			if (strictAST && astStructuralEqual(entry.key, key)) || (!strictAST && structuralEqual(entry.key, key)) {
 				return entry.value
 			}
 		}
@@ -452,17 +542,20 @@ func frozenStructuralLookup(entries []structuralIndexEntry, forceCollision bool)
 // NewStructuralCatalog returns an atomic compile-local collector. Calling it
 // with (key value) inserts or replaces an equal key; (catalog key) performs an
 // atomic compile-local lookup; calling it with no arguments publishes and
-// returns a frozen read-only lookup closure. The optional constructor flag
-// forces one bucket for collision tests.
+// returns a frozen read-only lookup closure. The optional constructor argument
+// is true for collision tests or the symbol ast for type-stable compiler ASTs.
 func NewStructuralCatalog(a ...Scmer) Scmer {
 	if len(a) > 1 {
-		panic("make_structural_catalog expects an optional collision-test flag")
+		panic("make_structural_catalog expects an optional mode")
 	}
-	catalog := &structuralCatalog{forceCollision: len(a) == 1 && a[0].Bool()}
+	catalog := &structuralCatalog{
+		forceCollision: len(a) == 1 && a[0].GetTag() == tagBool && a[0].Bool(),
+		strictAST:      len(a) == 1 && a[0].String() == "ast",
+	}
 	return NewFunc(func(args ...Scmer) Scmer {
 		switch len(args) {
 		case 0:
-			return frozenStructuralLookup(catalog.snapshot(), catalog.forceCollision)
+			return frozenStructuralLookup(catalog.snapshot(), catalog.forceCollision, catalog.strictAST)
 		case 1:
 			if args[0].GetTag() == tagFastDict {
 				panic("structural catalog rejects mutable FastDict keys")

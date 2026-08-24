@@ -2803,6 +2803,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define structural_collision_frozen (structural_collision))
 	(assert (structural_collision_frozen "collision6") 6 "structural catalog resolves deliberate collisions with equality")
 	(assert (nil? (structural_collision_frozen "collision99")) true "structural collision bucket cannot create false identity")
+	(define structural_ast_typed (make_structural_catalog (quote ast)))
+	(structural_ast_typed (list (quote literal) "2024-06-15") "string")
+	(structural_ast_typed (list (quote literal) (parse_date "2024-06-15")) "date")
+	(structural_ast_typed (list (quote literal) (symbol "2024-06-15")) "symbol")
+	(define structural_ast_typed_frozen (structural_ast_typed))
+	(assert (structural_ast_typed_frozen (list (quote literal) "2024-06-15")) "string"
+		"AST catalog keeps string literals type-stable")
+	(assert (structural_ast_typed_frozen (list (quote literal) (parse_date "2024-06-15"))) "date"
+		"AST catalog does not parse strings while hashing")
+	(assert (structural_ast_typed_frozen (list (quote literal) (symbol "2024-06-15"))) "symbol"
+		"AST catalog distinguishes symbols from strings")
 	(define structural_literal_ast (list (quote if) true))
 	(define structural_probe_ast (list (quote if) (list (quote probe))))
 	(define structural_ast_catalog (make_structural_catalog))

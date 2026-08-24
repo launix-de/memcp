@@ -151,8 +151,10 @@ functional planner return value. */
 					(planning_session key (source_session key))))) nil)
 		(planning_session "__memcp_queryplan_compile_bindings" compile_bindings)
 		(planning_session "__memcp_queryplan_guard_conditions" (newsession))
+		(planning_session "__memcp_queryplan_guard_condition_catalog" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_guard_bindings" (newsession))
-		(planning_session "__memcp_queryplan_guarded_session_keys" (newsession))
+		(planning_session "__memcp_queryplan_guard_binding_catalog" (make_structural_catalog (quote ast)))
+		(planning_session "__memcp_queryplan_guarded_session_keys" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_observed_session_keys" (newsession))
 		(planning_session "__memcp_queryplan_statistics" (newsession))
 		planning_session)))
@@ -160,10 +162,13 @@ functional planner return value. */
 (define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
 	(begin
 		(define covered (planning_session "__memcp_queryplan_guarded_session_keys"))
+		(define structural (planning_session "__memcp_queryplan_guard_condition_catalog"))
 		(define observed (planning_session "__memcp_queryplan_observed_session_keys"))
 		(define compile_bindings (planning_session "__memcp_queryplan_compile_bindings"))
 		(map (filter (observed) (lambda (key)
-			(not (covered (string (list (quote session) key))))))
+			(not (covered (if (nil? structural)
+				(string (list (quote session) key))
+				(list (quote session) key))))))
 			(lambda (key)
 				(begin
 					(define value (compile_bindings key))
@@ -187,15 +192,23 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 (define sql_queryplan_guard_from_session (lambda (planning_session)
 	(begin
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
+		(define condition_catalog (planning_session "__memcp_queryplan_guard_condition_catalog"))
 		(define conditions (merge (list
-			(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
+			(if (nil? condition_catalog)
+				(map (condition_accumulator) (lambda (key) (condition_accumulator key)))
+				(map (produceN (coalesceNil (condition_accumulator "count") 0))
+					(lambda (idx) (condition_accumulator (concat "condition:" idx)))))
 			(sql_queryplan_uncovered_binding_conditions planning_session))))
 		(define raw_guard (match conditions
 			(cons condition '()) condition
 			(cons _head _tail) (cons (quote and) conditions)
 			_ true))
 		(define binding_session (planning_session "__memcp_queryplan_guard_bindings"))
-		(define bindings (map (binding_session) (lambda (key) (binding_session key))))
+		(define binding_catalog (planning_session "__memcp_queryplan_guard_binding_catalog"))
+		(define bindings (if (nil? binding_catalog)
+			(map (binding_session) (lambda (key) (binding_session key)))
+			(map (produceN (coalesceNil (binding_session "count") 0))
+				(lambda (idx) (binding_session (concat "binding:" idx))))))
 		(sql_queryplan_runtime_guard_expr (if (empty_list? bindings)
 			raw_guard
 			(cons

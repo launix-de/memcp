@@ -987,9 +987,9 @@ key-fill recipe per carrier. */
 			condition semantics. It is therefore the physical identity used to
 			collect all aggregate columns and emit exactly one initializer. */
 			(concat "stage-prepare:"
-				(fnv_hash (serialize (list
+				(stable_structural_hash (list
 					(group_cache_schema cache)
-					(group_cache_relation cache)))))))))
+					(group_cache_relation cache)) true))))))
 
 (define group_prepare_stage_with_aggregates (lambda (stage aggregates)
 	(make_group_stage
@@ -1052,7 +1052,7 @@ key-fill recipe per carrier. */
 				(group_cache_relation cache)
 				(map (gs_aggregates stage) (lambda (ag)
 					(aggregate_col_name_using (gs_input stage) ag)))
-				(map (gs_order stage) (lambda (item) (fnv_hash (serialize item))))
+				(map (gs_order stage) (lambda (item) (stable_structural_hash item true)))
 				(if (source_is_base_table? (gs_input stage))
 					nil
 					(list
@@ -2400,12 +2400,12 @@ accepted by non-membership branches. The storage analyzer may use a RecSet as a
 scan boundary only when the complete predicate implies it. */
 
 (define membership_recset_var (lambda (src membership)
-	(symbol (concat "__membership_recset_" (fnv_hash (serialize (list
+	(symbol (concat "__membership_recset_" (stable_structural_hash (list
 		(source_schema src)
 		(source_relation src)
 		(gs_id (nth membership 0))
 		(nth membership 1)
-		(nth membership 2))))))))
+		(nth membership 2)) true)))))
 
 (define replace_driver_membership_markers (lambda (src expr memberships)
 	(begin
@@ -4290,7 +4290,7 @@ ownership remain available until the physical scans are emitted. */
 		(define pos (prejoin_source_position sources alias))
 		(if (nil? pos)
 			(neumann_fail "build_queryplan" (concat "prejoin source alias not found: " alias))
-			(concat "s" pos "_" (fnv_hash (string col)))))))
+			(concat "s" pos "_" (stable_structural_hash col false))))))
 
 (define prejoin_source_table_key (lambda (src)
 	(list (source_schema src) (source_relation src))))
@@ -4398,7 +4398,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			"physical-prejoin-v2"
 			(map sources prejoin_source_table_key)
 			(prejoin_rewrite_expr sources default_alias canonical_alias (prejoin_join_condition block))))
-		(concat ".prejoin:" (fnv_hash (serialize signature))))))
+		(concat ".prejoin:" (stable_structural_hash signature true)))))
 
 (define prejoin_primary_key_exprs (lambda (sources)
 	(merge (map sources (lambda (src)
