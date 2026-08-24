@@ -26,6 +26,10 @@ test_cases:
   # --- SHOW operations ---
   - name: "SHOW TABLES"
     sql: "SHOW TABLES"
+  - name: "SHOW TABLES LIKE filters table names"
+    sql: "SHOW TABLES LIKE 'dbc_t'"
+    expect:
+      rows: 1
   - name: "SHOW FULL COLUMNS FROM table"
     sql: "SHOW FULL COLUMNS FROM dbc_t"
   - name: "SHOW FULL COLUMNS FROM table with WHERE Key=PRI"
@@ -37,6 +41,10 @@ test_cases:
           Key: "PRI"
   - name: "SHOW CREATE TABLE"
     sql: "SHOW CREATE TABLE dbc_t"
+  - name: "SHOW CREATE DATABASE IF NOT EXISTS"
+    sql: "SHOW CREATE DATABASE IF NOT EXISTS `memcp-tests`"
+    expect:
+      rows: 1
   - name: "SHOW INDEXES FROM table"
     sql: "SHOW INDEXES FROM dbc_t"
 
@@ -164,6 +172,22 @@ test_cases:
     sql: "DROP TRIGGER IF EXISTS `cron.ib`"
   - name: "CREATE TRIGGER"
     sql: "CREATE TRIGGER `dbc_t.ib` BEFORE INSERT ON dbc_t FOR EACH ROW BEGIN SET NEW.status = COALESCE(NEW.status, 'new'); END"
+  - name: "SHOW TRIGGERS LIKE"
+    sql: "SHOW TRIGGERS LIKE 'dbc_t.ib'"
+    expect:
+      rows: 1
+  - name: "SHOW CREATE TRIGGER"
+    sql: "SHOW CREATE TRIGGER `dbc_t.ib`"
+    expect:
+      rows: 1
+  - name: "mysqldump executable-comment CREATE TRIGGER"
+    sql: "/*!50003 CREATE TRIGGER `dbc_t.dump_bi` BEFORE INSERT ON `dbc_t` FOR EACH ROW SET NEW.status = COALESCE(NEW.status, 'dumped') */"
+  - name: "SHOW CREATE restored mysqldump trigger"
+    sql: "SHOW CREATE TRIGGER `dbc_t.dump_bi`"
+    expect:
+      rows: 1
+  - name: "DROP restored mysqldump trigger"
+    sql: "DROP TRIGGER IF EXISTS `dbc_t.dump_bi`"
   - name: "DROP TRIGGER IF EXISTS after create"
     sql: "DROP TRIGGER IF EXISTS `dbc_t.ib`"
   # --- ANALYZE TABLE (no-op) ---

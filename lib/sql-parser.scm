@@ -160,6 +160,25 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 (define parse_sql (lambda (schema s policy) (begin
 	(define parse_started_ns (nanotime))
+	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. Other
+	versioned comments remain compatibility no-ops unless their SQL form is
+	explicitly supported; trigger DDL must execute for a lossless restore. */
+	(set s (if (and (>= (strlen s) 3) (equal? (substr s 0 3) "/*!"))
+		(match s
+			(regex "^/\\*![0-9]+[\\r\\n\\t ]+((?is:CREATE[\\r\\n\\t ]+TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) body
+			s)
+		s))
+	/* MemCP has no MySQL tablespaces or undo logs. Match the two exact
+	mysqldump projection prefixes before constructing the general SELECT
+	parser; both INFORMATION_SCHEMA.FILES relations are proven empty. */
+	(set s (if (or
+		(and (>= (strlen s) 25) (equal? (toUpper (substr s 0 25)) "SELECT LOGFILE_GROUP_NAME"))
+		(and (>= (strlen s) 31) (equal? (toUpper (substr s 0 31)) "SELECT DISTINCT TABLESPACE_NAME")))
+		(match s
+			(regex "^(?is:SELECT[\\r\\n\\t ]+LOGFILE_GROUP_NAME.*FROM[\\r\\n\\t ]+INFORMATION_SCHEMA\\.FILES.*FILE_TYPE[\\r\\n\\t ]*=[\\r\\n\\t ]*'UNDO LOG'.*)\\z" _) ""
+			(regex "^(?is:SELECT[\\r\\n\\t ]+DISTINCT[\\r\\n\\t ]+TABLESPACE_NAME.*FROM[\\r\\n\\t ]+INFORMATION_SCHEMA\\.FILES.*FILE_TYPE[\\r\\n\\t ]*=[\\r\\n\\t ]*'DATAFILE'.*)\\z" _) ""
+			s)
+		s))
 
 	/* counter for positional ? placeholders: each ? compiles to (session "vN") */
 	(define placeholder_counter (newsession))
@@ -1651,13 +1670,25 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					0
 		)))
 
+		/* SHOW CREATE DATABASE [IF NOT EXISTS] database */
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (or (atom "DATABASE" true) (atom "SCHEMA" true))
+			(define if_not_exists (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)))
+			(define id sql_identifier))
+			'((quote resultrow) '((quote list) "Database" id "Create Database" '((quote format_create_database) id (if if_not_exists true false)))))
+
 		/* SHOW CREATE TABLE [schema.]table */
 		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier))
 			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema2 id))))
 		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TABLE" true) (define id sql_identifier))
 			'((quote resultrow) '((quote list) "Table" id "Create Table" '((quote format_create_table) schema id))))
 		(parser '((atom "SHOW" true) (atom "DATABASES" true)) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote resultrow) '((quote list) "Database" (quote schema))))))
-		(parser '((atom "SHOW" true) (atom "TABLES" true) (? (atom "FROM" true) (define schema sql_identifier))) '((quote map) '((quote show) schema) '((quote lambda) '((quote tbl)) '((quote resultrow) '((quote list) "Table" (quote tbl))))))
+		(parser '((atom "SHOW" true) (atom "TABLES" true)
+			(? (or (atom "FROM" true) (atom "IN" true)) (define schema2 sql_identifier))
+			(? (atom "LIKE" true) (define likepattern sql_expression)))
+			'((quote map) '((quote show) (coalesce schema2 schema))
+				'((quote lambda) '((quote tbl))
+					'((quote if) '((quote strlike) (quote tbl) (coalesce likepattern "%"))
+						'((quote resultrow) '((quote list) "Table" (quote tbl))) nil))))
 		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema2 sql_identifier)) (? (atom "LIKE" true) (define likepattern sql_expression))) '((quote map) '((quote show) (coalesce schema2 schema)) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */
 		(parser '((or (atom "DESCRIBE" true) (atom "DESC" true)) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier)) '((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((or (atom "DESCRIBE" true) (atom "DESC" true)) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
@@ -1682,9 +1713,21 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				'((quote map) '((quote show) schema id) (list (quote lambda) '((quote line)) (list (quote if) (transform_col where) (list (quote resultrow) (quote line)) nil))))
 		))
 
-		/* SHOW TRIGGERS [FROM schema] */
-		(parser '((atom "SHOW" true) (atom "TRIGGERS" true) (? (atom "FROM" true) (define tgtschema sql_identifier)))
-			'((quote map) '((quote show_triggers) (coalesce tgtschema schema)) '((quote lambda) '((quote tr)) '((quote resultrow) (quote tr)))))
+		/* SHOW TRIGGERS [FROM schema] [LIKE pattern] */
+		(parser '((atom "SHOW" true) (atom "TRIGGERS" true)
+			(? (or (atom "FROM" true) (atom "IN" true)) (define tgtschema sql_identifier))
+			(? (atom "LIKE" true) (define likepattern sql_expression)))
+			'((quote map) '((quote show_triggers) (coalesce tgtschema schema))
+				'((quote lambda) '((quote tr))
+					'((quote if) '((quote strlike) '((quote tr) "Trigger") (coalesce likepattern "%"))
+						'((quote resultrow) (quote tr)) nil))))
+
+		/* SHOW CREATE TRIGGER [schema.]trigger */
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TRIGGER" true)
+			(define schema2 sql_identifier) (atom "." true) (define id sql_identifier))
+			'((quote resultrow) '((quote format_create_trigger) schema2 id)))
+		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TRIGGER" true) (define id sql_identifier))
+			'((quote resultrow) '((quote format_create_trigger) schema id)))
 
 		/* SHOW INDEXES FROM t / SHOW INDEX FROM t / SHOW KEYS FROM t (no-op, returns empty) */
 		(parser '((atom "SHOW" true) (or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true)) (atom "FROM" true) sql_identifier (? (atom "WHERE" true) sql_expression)) "ignore")
@@ -1770,6 +1813,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(if policy (policy view_schema id true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (? "@") (define key sql_identifier)
+			(or "=" (atom ":=" true)) (atom "DEFAULT" true))
+			(list (list (quote context) "session") key nil))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))

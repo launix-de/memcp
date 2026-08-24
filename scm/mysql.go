@@ -146,7 +146,10 @@ func refreshMySQLSessionProcesslistMeta(session *driver.Session) {
 }
 
 func (m *MySQLWrapper) ServerVersion() string {
-	return "MemCP"
+	// MySQL clients parse the leading numeric version before enabling feature
+	// probes such as SHOW CREATE TRIGGER. Keep the compatibility baseline
+	// explicit and retain MemCP in the vendor suffix.
+	return "5.7.44-MemCP"
 }
 func (m *MySQLWrapper) SetServerVersion() {
 }
