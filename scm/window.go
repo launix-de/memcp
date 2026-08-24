@@ -39,6 +39,22 @@ func init_window() {
 	DeclareTitle("Window Functions")
 
 	Declare(&Globalenv, &Declaration{
+		Name: "stream_emit",
+		Desc: "invokes a streaming callback immediately; marks ordering-sensitive emission as an observable effect",
+		Fn: func(a ...Scmer) Scmer {
+			return Apply(a[0], a[1])
+		},
+		Type: &TypeDescriptor{
+			HasSideEffects: true,
+			Params: []*TypeDescriptor{
+				{Kind: "func", ParamName: "emit", Params: []*TypeDescriptor{{Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", ParamName: "value"},
+			},
+			Return: &TypeDescriptor{Kind: "any"},
+		},
+	})
+
+	Declare(&Globalenv, &Declaration{
 		Name: "stream_window_reduce",
 		Desc: "applies OFFSET/LIMIT and a serial reducer to complete values emitted by a nested streaming producer without collecting an intermediate relation",
 		Fn: func(a ...Scmer) (result Scmer) {

@@ -60,6 +60,17 @@ func TestScanBatchRewriteKeepsEffectfulInnerMapperStreaming(t *testing.T) {
 	}
 }
 
+func TestScanBatchRewriteKeepsStreamingEmitterOrdered(t *testing.T) {
+	emit := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("stream_emit"),
+		scm.NewSymbol("emit"),
+		scm.NewSymbol("inner_id"),
+	})
+	if rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(emit)); !rewritten.IsNil() {
+		t.Fatalf("stream emitter was buffered: %s", scm.SerializeToString(rewritten, &scm.Globalenv))
+	}
+}
+
 func TestScanBatchRewriteStillBatchesPureInnerMapper(t *testing.T) {
 	rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(scm.NewSymbol("inner_id")))
 	if rewritten.IsNil() {
