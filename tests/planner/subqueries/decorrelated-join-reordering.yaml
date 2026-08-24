@@ -99,6 +99,21 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "Probe rewriting retains a relational driver for grouped consumers"
+    scm: |
+      (begin
+        (define sources '(aggregate_partition))
+        (and
+          (equal? (probe_sources_with_relational_driver
+            sources sources '(aggregate_partition)) '())
+          (equal? (probe_sources_with_relational_driver
+            '(scalar_permission permission_fallback)
+            '(scalar_permission permission_fallback)
+            '(scalar_permission))
+            '(scalar_permission permission_fallback))))
+    expect:
+      data: [true]
+
   - name: "Cost model delays nullable stage behind a selective join"
     scm: |
       (begin
