@@ -92,6 +92,7 @@ test_cases:
     expect:
       result_contains:
         - "scan_order"
+        - "scan_order_batch_accept"
         - "touch_keytable"
 
   - name: "Selective IN branches under OR preserve ordered results"

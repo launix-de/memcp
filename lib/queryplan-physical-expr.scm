@@ -3076,9 +3076,15 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define normal_choice (if (and guarded_broad_order_driver driver_probe_supported)
 					driver_strategy
 					(if (nil? cost_choice)
-						(if (and driver_probe_supported
-							(or owns_requirement branch_not_implied))
-							driver_strategy "candidate_keyset")
+						/* With no cardinality facts, adaptive batching is the only bounded
+						alternative: it preserves ORDER while increasing its candidate window
+						until LIMIT is satisfied. Candidate materialization and unbounded
+						driver filtering would both commit to unknown full-relation work. */
+						(if allow_ordered_batch
+							"ordered_batch_accept"
+							(if (and driver_probe_supported
+								(or owns_requirement branch_not_implied))
+								driver_strategy "candidate_keyset"))
 						(car cost_choice))))
 				(define alternatives (merge (list
 					(cons "candidate_keyset"

@@ -2557,6 +2557,29 @@ path. */
 							(source_table_expr (nth first_descriptor 0)))
 							(equal? (nth descriptor 1) (nth first_descriptor 1))))) true))))))
 
+/* Computed membership keys are already stored canonically as k0 in the group
+cache. Probing that keytable is cheaper than first copying its rows into a
+query-local RecSet index. The surrounding physical prelude prepares the cache
+once; this closure performs only the indexed presence lookup for each ordered
+driver candidate. */
+(define membership_cache_key_probe_expr (lambda (stage)
+	(begin
+		(define cache (group_stage_cache stage))
+		(define probe_var (symbol "__membership_probe"))
+		(define key_name "k0")
+		(define value_col (aggregate_col_name_using (gs_input stage) (car (gs_aggregates stage))))
+		(define filtercols (list key_name value_col))
+		(list (quote lambda) (list probe_var)
+			(list (quote scan_exists)
+				'(session "__memcp_tx")
+				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+				(cons (quote list) filtercols)
+				(list (quote lambda) (map filtercols symbol)
+					(list (quote and)
+						(list (quote equal??) (symbol key_name)
+							(list (quote outer) probe_var))
+						(stage_recset_value_filter_term stage value_col))))))))
+
 (define membership_keyset_parts (lambda (membership)
 	(begin
 		(define descriptor (membership_keyset_descriptor membership))
@@ -2565,7 +2588,17 @@ path. */
 				(define stage (nth membership 0))
 				(define input (gs_input stage))
 				(if (not (union_block? input))
-					nil
+					(if (and (group_stage? stage)
+						(equal? (count (gs_keys stage)) 1))
+						(begin
+							(define cache (group_stage_cache stage))
+							(list
+								(list (quote table)
+									(group_cache_schema cache) (group_cache_relation cache))
+								"k0"
+								(membership_cache_key_probe_expr stage)
+								(quote group_cache_probe)))
+						nil)
 					(begin
 						(define carriers (map (union_branches input) candidate_recset_branch_carrier))
 						(define supported (and (not (empty_list? carriers))
@@ -2615,27 +2648,45 @@ path. */
 				(and same
 					(and (equal? (nth item 0) (nth (car parts) 0))
 						(equal? (nth item 1) (nth (car parts) 1))))) true)))
-		(if (not compatible)
+		(if (not supported)
 			'()
+			(if (not compatible)
+				(merge (map memberships (lambda (membership)
+					(membership_keyset_bindings (list membership)))))
 			(begin
-				(define keyset_var (symbol "__membership_keyset"))
+				(define keyset_var (symbol (concat "__membership_keyset_"
+					(stable_structural_hash (map memberships (lambda (membership)
+						(gs_id (nth membership 0)))) true))))
+				(define group_cache_probe (and (single_source? parts)
+					(equal? (count (car parts)) 4)))
 				(define candidate_recsets (map parts (lambda (item) (nth item 2))))
 				(define candidate_recset (if (single_source? candidate_recsets)
 					(car candidate_recsets)
 					(list (quote recset_union) (cons (quote list) candidate_recsets))))
-				(define keyset_expr (list (quote recset_key_index)
-					'(session "__memcp_tx")
-					candidate_recset
-					(quoted_runtime_list (list (nth (car parts) 1)))))
+				(define keyset_expr (if group_cache_probe
+					(nth (car parts) 2)
+					(list (quote recset_key_index)
+						'(session "__memcp_tx")
+						candidate_recset
+						(quoted_runtime_list (list (nth (car parts) 1))))))
 				(map memberships (lambda (membership)
-					(list membership keyset_var keyset_expr))))))))
+					(list membership keyset_var keyset_expr)))))))))
+
+(define unique_membership_keyset_bindings (lambda (bindings)
+	(reduce bindings (lambda (unique binding)
+		(if (reduce unique (lambda (found existing)
+			(or found (equal? (nth existing 1) (nth binding 1)))) false)
+			unique
+			(cons binding unique))) '())))
 
 (define wrap_membership_keyset_bindings (lambda (bindings body)
 	(if (empty_list? bindings)
 		body
-		(list
-			(list (quote lambda) (list (nth (car bindings) 1)) body)
-			(nth (car bindings) 2)))))
+		(begin
+			(define unique (reverse (unique_membership_keyset_bindings bindings)))
+			(cons
+				(list (quote lambda) (map unique (lambda (binding) (nth binding 1))) body)
+				(map unique (lambda (binding) (nth binding 2))))))))
 
 (define replace_driver_membership_keyset_markers (lambda (expr bindings)
 	(begin
@@ -2909,11 +2960,8 @@ RecSet; membership edges retain their own physical operators. */
 						nil (car memberships)) (and scan_order_supported bounded)))
 				(define allow_ordered_batch_binding (and scan_order_supported
 					(and bounded
-						(and (equal? (count memberships) 1)
-							(and (not (membership_expr_has_driver_alternative? condition))
-								(and (or (empty_list? order_items)
-									(not (empty_list? (source_primary_key_columns src))))
-									(ordered_batch_stage_supported? (nth (car memberships) 0))))))))
+						(or (empty_list? order_items)
+							(not (empty_list? (source_primary_key_columns src)))))))
 				/* This node-local lowering is the sole carrier decision. Older code
 				selected a keyset from block-level broadness facts before reaching this
 				point; that duplicate choice could label an alternative as selected while
@@ -3042,10 +3090,14 @@ RecSet; membership edges retain their own physical operators. */
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(lower_column_expr_for_alias src filter_condition)))
-				(define remaining_memberships (driver_memberships_for_source src filter_condition))
-				(define remaining_batch_memberships (ordered_batch_membership_terms src filter_condition))
-				(define batch_filter (if (and (equal? table_expr source_table)
-					(equal? (count remaining_memberships) (count remaining_batch_memberships)))
+				(define remaining_batch_memberships (filter
+					(ordered_batch_membership_terms src filter_condition)
+					(lambda (membership) (ordered_batch_stage_supported? (nth membership 0)))))
+				/* Membership markers which cannot project a batch RecSet remain in the
+				residual expression and lower through the ordinary probe machinery. This
+				makes adaptive ordered batching a property of the consuming scan, not of
+				one privileged predicate shape. */
+				(define batch_filter (if (equal? table_expr source_table)
 					(ordered_batch_filter_expr (list src) alias src filter_condition
 						remaining_batch_memberships (probe_context_row_count (list src)) '() true)
 					nil))
