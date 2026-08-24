@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "context"
 import "fmt"
 import "math"
 import "sort"
@@ -1048,6 +1049,10 @@ func (t *table) scan_order(currentTx *TxContext, conditionCols []string, conditi
 func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, notFoundValue scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
+	var queryCtx context.Context
+	if ss != nil {
+		queryCtx = ss.QueryContext(querySeq)
+	}
 	bounds := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(bounds, t)
 	lower, upperLast := indexFromBoundaries(bounds)
@@ -1075,7 +1080,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		recid, present := shard.scanFirstRecord(bounds, lower, upperLast, conditionCols, condition, currentTx, ss, nil)
+		recid, present := shard.scanFirstRecord(bounds, lower, upperLast, conditionCols, condition, currentTx, ss, queryCtx, nil)
 		if !present {
 			return
 		}

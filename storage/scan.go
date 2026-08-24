@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "context"
 import "fmt"
 import "time"
 import "runtime/debug"
@@ -34,6 +35,20 @@ func (s scanError) Error() string {
 
 func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 	return make([]scm.Scmer, len(callbackCols))
+}
+
+// queryContextDone is a lock-free cancellation check. Read-only scans call it
+// once per index batch; mutation scans deliberately remain shard-atomic.
+func queryContextDone(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
@@ -453,7 +468,11 @@ func (t *table) hasBoundUniquePoint(boundaries boundaries) bool {
 
 func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
 	ss := SessionStateFromTx(currentTx)
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
+	var queryCtx context.Context
+	if ss != nil {
+		queryCtx = ss.QueryContext(querySeq)
+	}
 	touchTempColumns(t, conditionCols, nil)
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
@@ -474,12 +493,12 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		// Cancellation contract: check only at the scheduling boundary, before entering
-		// the shard. Once entered, a shard runs atomically without cancellation checks.
+		// Reject work killed before shard admission. Read-only shards additionally
+		// observe their context between batches; mutation shards remain atomic.
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		if s.scanExists(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, &found) {
+		if s.scanExists(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, queryCtx, &found) {
 			found.Store(true)
 			values <- scanResult{outCount: 1}
 			return
@@ -516,7 +535,11 @@ func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm
 
 func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
+	var queryCtx context.Context
+	if ss != nil {
+		queryCtx = ss.QueryContext(querySeq)
+	}
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -567,12 +590,12 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 				values <- scanResult{err: scanError{r, string(debug.Stack())}}
 			}
 		}()
-		// Cancellation contract: check only at the scheduling boundary, before entering
-		// the shard. Once entered, a shard runs atomically without cancellation checks.
+		// Reject work killed before shard admission. Read-only shards additionally
+		// observe their context between batches; mutation shards remain atomic.
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
+		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, queryCtx)
 		values <- scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount}
 	})
 	if done != nil {
@@ -677,12 +700,12 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	return akkumulator
 }
 
-func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
-	_, found := t.scanFirstRecord(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, stop)
+func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, queryCtx context.Context, stop *atomic.Bool) bool {
+	_, found := t.scanFirstRecord(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, queryCtx, stop)
 	return found
 }
 
-func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) (uint32, bool) {
+func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, queryCtx context.Context, stop *atomic.Bool) (uint32, bool) {
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -743,6 +766,9 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 
 	var buf [8]uint32
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+		if queryContextDone(queryCtx) {
+			panic("query killed")
+		}
 		if stop != nil && stop.Load() {
 			return false
 		}
@@ -792,9 +818,9 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	return foundID, found
 }
 
-func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, queryCtx context.Context) (scm.Scmer, int64, int64) {
 	if stride > 0 {
-		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
+		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss, queryCtx)
 	}
 	akkumulator := neutral
 	var outCount int64
@@ -905,6 +931,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	hadValue := false
 
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
+		if !hasMutationCallback && queryContextDone(queryCtx) {
+			panic("query killed")
+		}
 		candidateCount += int64(len(batch))
 		// filter in-place: overwrite batch with passing IDs
 		outN := 0
@@ -1039,7 +1068,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	return akkumulator, outCount, candidateCount
 }
 
-func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState, queryCtx context.Context) (scm.Scmer, int64, int64) {
 	akkumulator := neutral
 	var outCount int64
 	var candidateCount int64
@@ -1156,6 +1185,9 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		}
 
 		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+			if !hasMutationCallback && queryContextDone(queryCtx) {
+				panic("query killed")
+			}
 			candidateCount += int64(len(batch))
 			outN := 0
 			for _, idx := range batch {

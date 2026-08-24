@@ -404,6 +404,38 @@ test_cases:
         expect:
           rows: 1
 
+  - name: "KILL QUERY interrupts read-only work at scan batch boundaries"
+    setup:
+      - sql: "DROP TABLE IF EXISTS kill_batch_ctrl"
+      - sql: "DROP TABLE IF EXISTS kill_batch_rows"
+      - sql: "CREATE TABLE kill_batch_ctrl (id BIGINT)"
+      - sql: "CREATE TABLE kill_batch_rows (id INT)"
+      - sql: "INSERT INTO kill_batch_rows SELECT id FROM kill_big"
+      - sql: "INSERT INTO kill_batch_rows SELECT id + 1000 FROM kill_batch_rows"
+      - sql: "INSERT INTO kill_batch_rows SELECT id + 2000 FROM kill_batch_rows"
+      - sql: "INSERT INTO kill_batch_rows SELECT id + 4000 FROM kill_batch_rows"
+      - sql: "INSERT INTO kill_batch_rows SELECT id + 8000 FROM kill_batch_rows"
+      - sql: "INSERT INTO kill_batch_rows SELECT id + 16000 FROM kill_batch_rows"
+      - sql: "INSERT INTO kill_batch_rows SELECT id + 32000 FROM kill_batch_rows"
+    steps:
+      - scm: "(begin (define kill_batch_state (newsession)) (define kill_batch_spin (lambda (x) (begin (kill_batch_state \"started\" true) (strlen (regexp_replace (string_repeat (concat x) 10000) \"1\" \"2\"))))) (sql_builtins \"KILL_BATCH_SPIN\" kill_batch_spin) true)"
+      - session_id: "kill-batch-victim"
+        sql: "INSERT INTO kill_batch_ctrl VALUES (CONNECTION_ID())"
+      - session_id: "kill-batch-victim"
+        sql: "SELECT COUNT(*) FROM kill_batch_rows WHERE KILL_BATCH_SPIN(id) > 0"
+        background: true
+        expect:
+          error: true
+        timeout: 20
+      - scm: "(begin (define wait_kill_batch_started (lambda (remaining) (if (or (kill_batch_state \"started\") (<= remaining 0)) true (begin (sleep 0.01) (wait_kill_batch_started (- remaining 1)))))) (wait_kill_batch_started 500))"
+      # The expression can be sampled during planning. Give execution enough time
+      # to enter the single shard before sending KILL QUERY.
+      - scm: "(begin (sleep 0.5) true)"
+      - session_id: "kill-batch-attacker"
+        sql: "SELECT KILL_QUERY(id) FROM kill_batch_ctrl LIMIT 1"
+      - wait_for_background: true
+        timeout: 8
+
   # ── KILL mid-INSERT rollback: no partial state ────────────────────────────
   #
   # Validates the kill→drain→rollback path introduced alongside the
@@ -477,6 +509,12 @@ test_cases:
 
   - name: "cleanup: drop kill_ctrl2 table"
     sql: "DROP TABLE IF EXISTS kill_ctrl2"
+
+  - name: "cleanup: drop batch cancellation tables"
+    sql: "DROP TABLE IF EXISTS kill_batch_rows"
+
+  - name: "cleanup: drop batch cancellation control table"
+    sql: "DROP TABLE IF EXISTS kill_batch_ctrl"
 
   - name: "cleanup: drop lock_test2 table"
     sql: "DROP TABLE IF EXISTS lock_test2"
