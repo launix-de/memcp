@@ -99,6 +99,51 @@ test_cases:
         - column_name: "label"
           column_default: "'fallback'"
 
+  - name: "COLUMNS: numeric, temporal, and escaped defaults"
+    setup:
+      - sql: "DROP TABLE IF EXISTS isc_special_defaults"
+      - sql: >
+          CREATE TABLE isc_special_defaults (
+            id INT NOT NULL,
+            amount DECIMAL(8,2) DEFAULT -12.50,
+            enabled BOOLEAN DEFAULT FALSE,
+            quoted_value VARCHAR(40) DEFAULT 'a''b',
+            slashed_value VARCHAR(40) DEFAULT 'a\\b',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
+          )
+    sql: "SELECT column_name, column_default FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = 'memcp-tests' AND table_name = 'isc_special_defaults' ORDER BY ordinal_position"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS isc_special_defaults"
+    expect:
+      rows: 6
+      data:
+        - column_name: "id"
+          column_default: null
+        - column_name: "amount"
+          column_default: "-12.5"
+        - column_name: "enabled"
+          column_default: "false"
+        - column_name: "quoted_value"
+          column_default: "'a''b'"
+        - column_name: "slashed_value"
+          column_default: "'a\\\\b'"
+        - column_name: "created_at"
+          column_default: "current_timestamp()"
+
+  - name: "SHOW CREATE emits restorable special defaults"
+    setup:
+      - sql: "DROP TABLE IF EXISTS isc_show_defaults"
+      - sql: "CREATE TABLE isc_show_defaults (id INT PRIMARY KEY, amount DECIMAL(8,2) DEFAULT -12.50, quoted_value VARCHAR(40) DEFAULT 'a''b', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    sql: "SHOW CREATE TABLE isc_show_defaults"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS isc_show_defaults"
+    expect:
+      rows: 1
+      result_contains:
+        - "DEFAULT -12.5"
+        - "DEFAULT 'a''b'"
+        - "DEFAULT CURRENT_TIMESTAMP"
+
   - name: "COLUMNS: mysqldump generation metadata is non-null"
     sql: >
       SELECT column_name, extra, generation_expression, data_type
@@ -265,6 +310,121 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS is_unique_enforced"
     expect:
       error: true
+
+  - name: "Composite unique and foreign-key metadata preserves ordinals"
+    setup:
+      - sql: "DROP TABLE IF EXISTS is_composite_child"
+      - sql: "DROP TABLE IF EXISTS is_composite_parent"
+      - sql: "CREATE TABLE is_composite_parent (id INT PRIMARY KEY, tenant_id INT NOT NULL, external_id INT NOT NULL, UNIQUE KEY is_uq_composite (tenant_id, external_id))"
+      - sql: "CREATE TABLE is_composite_child (id INT PRIMARY KEY, tenant_id INT, external_id INT, CONSTRAINT is_fk_composite FOREIGN KEY (tenant_id, external_id) REFERENCES is_composite_parent(tenant_id, external_id) ON DELETE CASCADE ON UPDATE SET NULL)"
+    sql: >
+      SELECT k.constraint_name, k.column_name, k.ordinal_position,
+             k.position_in_unique_constraint, k.referenced_column_name,
+             r.unique_constraint_name
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+      JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS r
+        ON k.constraint_schema = r.constraint_schema
+       AND k.constraint_name = r.constraint_name
+      WHERE k.table_schema = 'memcp-tests'
+        AND k.table_name = 'is_composite_child'
+        AND k.constraint_name = 'is_fk_composite'
+      ORDER BY k.ordinal_position
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS is_composite_child"
+      - sql: "DROP TABLE IF EXISTS is_composite_parent"
+    expect:
+      rows: 2
+      data:
+        - constraint_name: "is_fk_composite"
+          column_name: "tenant_id"
+          ordinal_position: 1
+          position_in_unique_constraint: 1
+          referenced_column_name: "tenant_id"
+          unique_constraint_name: "is_uq_composite"
+        - constraint_name: "is_fk_composite"
+          column_name: "external_id"
+          ordinal_position: 2
+          position_in_unique_constraint: 2
+          referenced_column_name: "external_id"
+          unique_constraint_name: "is_uq_composite"
+
+  - name: "Composite unique metadata preserves ordinals"
+    setup:
+      - sql: "DROP TABLE IF EXISTS is_composite_unique"
+      - sql: "CREATE TABLE is_composite_unique (id INT PRIMARY KEY, tenant_id INT, external_id INT, UNIQUE KEY is_uq_pair (tenant_id, external_id))"
+    sql: "SELECT constraint_name, column_name, ordinal_position FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE table_schema = 'memcp-tests' AND table_name = 'is_composite_unique' AND constraint_name = 'is_uq_pair' ORDER BY ordinal_position"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS is_composite_unique"
+    expect:
+      rows: 2
+      data:
+        - constraint_name: "is_uq_pair"
+          column_name: "tenant_id"
+          ordinal_position: 1
+        - constraint_name: "is_uq_pair"
+          column_name: "external_id"
+          ordinal_position: 2
+
+  - name: "Composite unique constraint remains enforced"
+    setup:
+      - sql: "DROP TABLE IF EXISTS is_composite_enforced"
+      - sql: "CREATE TABLE is_composite_enforced (id INT PRIMARY KEY, tenant_id INT, external_id INT, UNIQUE KEY is_uq_enforced_pair (tenant_id, external_id))"
+      - sql: "INSERT INTO is_composite_enforced VALUES (1, 7, 9)"
+      - sql: "INSERT INTO is_composite_enforced VALUES (2, 7, 10)"
+    sql: "INSERT INTO is_composite_enforced VALUES (3, 7, 9)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS is_composite_enforced"
+    expect:
+      error: true
+
+  - name: "Composite foreign key remains enforced"
+    setup:
+      - sql: "DROP TABLE IF EXISTS is_composite_fk_child"
+      - sql: "DROP TABLE IF EXISTS is_composite_fk_parent"
+      - sql: "CREATE TABLE is_composite_fk_parent (tenant_id INT, external_id INT, UNIQUE KEY is_uq_fk_pair (tenant_id, external_id))"
+      - sql: "CREATE TABLE is_composite_fk_child (id INT PRIMARY KEY, tenant_id INT, external_id INT, CONSTRAINT is_fk_enforced_pair FOREIGN KEY (tenant_id, external_id) REFERENCES is_composite_fk_parent(tenant_id, external_id))"
+      - sql: "INSERT INTO is_composite_fk_parent VALUES (7, 9)"
+      - sql: "INSERT INTO is_composite_fk_child VALUES (1, 7, 9)"
+    sql: "INSERT INTO is_composite_fk_child VALUES (2, 7, 10)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS is_composite_fk_child"
+      - sql: "DROP TABLE IF EXISTS is_composite_fk_parent"
+    expect:
+      error: true
+
+  - name: "SHOW CREATE quotes unusual identifiers and every FK action"
+    setup:
+      - sql: "DROP TABLE IF EXISTS `is``action child`"
+      - sql: "DROP TABLE IF EXISTS `is``action parent`"
+      - sql: "CREATE TABLE `is``action parent` (`id``part` INT PRIMARY KEY, tenant_id INT, external_id INT, UNIQUE KEY `uq``pair` (tenant_id, external_id))"
+      - sql: >
+          CREATE TABLE `is``action child` (
+            id INT PRIMARY KEY,
+            tenant_id INT,
+            external_id INT,
+            restrict_id INT,
+            cascade_id INT,
+            `nullable``id` INT,
+            UNIQUE KEY `uq``local` (tenant_id, external_id),
+            CONSTRAINT `fk``pair` FOREIGN KEY (tenant_id, external_id) REFERENCES `is``action parent`(tenant_id, external_id) ON DELETE CASCADE ON UPDATE SET NULL,
+            CONSTRAINT fk_restrict FOREIGN KEY (restrict_id) REFERENCES `is``action parent`(`id``part`) ON DELETE RESTRICT ON UPDATE RESTRICT,
+            CONSTRAINT fk_cascade FOREIGN KEY (cascade_id) REFERENCES `is``action parent`(`id``part`) ON DELETE CASCADE ON UPDATE CASCADE,
+            CONSTRAINT fk_set_null FOREIGN KEY (`nullable``id`) REFERENCES `is``action parent`(`id``part`) ON DELETE SET NULL ON UPDATE SET NULL
+          )
+    sql: "SHOW CREATE TABLE `is``action child`"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS `is``action child`"
+      - sql: "DROP TABLE IF EXISTS `is``action parent`"
+    expect:
+      rows: 1
+      result_contains:
+        - "CREATE TABLE `is``action child`"
+        - "`nullable``id` INT"
+        - "UNIQUE KEY `uq``local` (`tenant_id`,`external_id`)"
+        - "CONSTRAINT `fk``pair` FOREIGN KEY (`tenant_id`,`external_id`) REFERENCES `is``action parent` (`tenant_id`,`external_id`) ON DELETE CASCADE ON UPDATE SET NULL"
+        - "CONSTRAINT `fk_restrict` FOREIGN KEY (`restrict_id`) REFERENCES `is``action parent` (`id``part`) ON DELETE RESTRICT ON UPDATE RESTRICT"
+        - "CONSTRAINT `fk_cascade` FOREIGN KEY (`cascade_id`) REFERENCES `is``action parent` (`id``part`) ON DELETE CASCADE ON UPDATE CASCADE"
+        - "CONSTRAINT `fk_set_null` FOREIGN KEY (`nullable``id`) REFERENCES `is``action parent` (`id``part`) ON DELETE SET NULL ON UPDATE SET NULL"
 
   - name: "A genuinely ambiguous metadata column is rejected"
     sql: >

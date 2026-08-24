@@ -412,8 +412,8 @@ func (u *storageShard) load(t *table) {
 					}
 				}
 			}
-			if maxVal+1 > t.Auto_increment {
-				t.Auto_increment = maxVal + 1
+			if maxVal > t.Auto_increment {
+				t.Auto_increment = maxVal
 			}
 			break // only one AUTO_INCREMENT column per table
 		}
@@ -2423,7 +2423,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			t.t.Auto_increment = t.t.Auto_increment + uint64(len(values)) // batch reservation of new IDs
 			t.t.mu.Unlock()
 		}
-		if c.AutoIncrement || !c.Default.IsNil() {
+		if c.AutoIncrement || c.hasDefault() {
 			// column with default or auto increment -> also add to deltacolumns
 			cidx, ok := t.deltaColumns[c.Name]
 			if !ok {
@@ -2452,10 +2452,10 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 				cidx := t.deltaColumns[c.Name]
 				Auto_increment++ // local increase
 				newrow[cidx] = scm.NewInt(int64(Auto_increment))
-			} else if !c.Default.IsNil() {
+			} else if c.hasDefault() {
 				// fill col with default
 				cidx := t.deltaColumns[c.Name]
-				newrow[cidx] = c.Default
+				newrow[cidx] = c.defaultValue()
 			}
 		}
 		recid := uint32(len(t.inserts)) + t.main_count
@@ -2497,8 +2497,8 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		}
 		if maxExplicit > 0 {
 			t.t.mu.Lock()
-			if maxExplicit+1 > t.t.Auto_increment {
-				t.t.Auto_increment = maxExplicit + 1
+			if maxExplicit > t.t.Auto_increment {
+				t.t.Auto_increment = maxExplicit
 			}
 			t.t.mu.Unlock()
 		}

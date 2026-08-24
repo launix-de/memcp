@@ -1575,7 +1575,10 @@ func Init(en scm.Env) {
 				case "comment":
 					comment = scm.String(val)
 				case "auto_increment":
-					autoIncrement, _ = strconv.ParseUint(scm.String(val), 0, 64)
+					nextAutoIncrement, _ := strconv.ParseUint(scm.String(val), 0, 64)
+					if nextAutoIncrement > 0 {
+						autoIncrement = nextAutoIncrement - 1
+					}
 				case "oninit":
 					oninit = val
 				default:
@@ -1593,7 +1596,6 @@ func Init(en scm.Env) {
 			newTable.Shards = make([]*storageShard, 1)
 			newTable.Shards[0] = NewShard(newTable)
 			newTable.publishTopologyLocked()
-			newTable.Auto_increment = 1
 			newTable.Collation = collation
 			newTable.Charset = charset
 			newTable.Comment = comment
@@ -1728,7 +1730,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", ParamName: "schema", ParamDesc: "name of the existing database that will contain the table"},
 				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to create"},
-				{Kind: "list", ParamName: "cols", ParamDesc: "column and constraint definitions: (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). dimensions is a list of integer type dimensions. typeparams is an alternating key/value list supporting primary (bool), unique (bool), auto_increment (bool), null (bool), default (any), update (expression), comment (string), collate (string), temp (bool), filtercols (string list), filter (function), sortcols (string list), sortdirs (bool list), partitioncount (integer), mapcols (string list), mapfn (function), reducefn (function), and reduceinit (any). Column lists are string lists; foreign-key modes are restrict, cascade, or set null"},
+				{Kind: "list", ParamName: "cols", ParamDesc: "column and constraint definitions: (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). dimensions is a list of integer type dimensions. typeparams is an alternating key/value list supporting primary (bool), unique (bool), auto_increment (bool), null (bool), default (any), default_expression (string), update (expression), comment (string), collate (string), temp (bool), filtercols (string list), filter (function), sortcols (string list), sortdirs (bool list), partitioncount (integer), mapcols (string list), mapfn (function), reducefn (function), and reduceinit (any). Column lists are string lists; foreign-key modes are restrict, cascade, or set null"},
 				{Kind: "list", ParamName: "options", ParamDesc: "alternating key/value list; supported keys are engine (safe, logged, sloppy, memory, or cache), collation (string), charset (string), comment (string), auto_increment (non-negative integer), and oninit (closed zero-argument function run synchronously once per data generation; concurrent if-not-exists callers wait for it, and memory/cache tables persist the callback so the first idempotent createtable after restart repopulates their empty data)"},
 				{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "when true, return false instead of failing if the table exists; if another caller is still creating it, wait for that caller's after-create-table initialization before returning false", Optional: true},
 			},
@@ -1832,7 +1834,7 @@ func Init(en scm.Env) {
 				{Kind: "string", ParamName: "colname", ParamDesc: "name of the new column"},
 				{Kind: "string", ParamName: "type", ParamDesc: "name of the basetype"},
 				{Kind: "list", ParamName: "dimensions", ParamDesc: "dimensions of the type (e.g. for decimal)"},
-				{Kind: "list", ParamName: "options", ParamDesc: "assoc list: primary, unique, auto_increment, null, comment, default, collate; ORC: sortcols, sortdirs, partitioncount, mapcols, mapfn, reducefn, reduceinit"},
+				{Kind: "list", ParamName: "options", ParamDesc: "assoc list: primary, unique, auto_increment, null, comment, default, default_expression, collate; ORC: sortcols, sortdirs, partitioncount, mapcols, mapfn, reducefn, reduceinit"},
 				{Kind: "list", ParamName: "computorCols", ParamDesc: "list of columns that is passed into params of computor", Optional: true},
 				{Kind: "func", ParamName: "computor", ParamDesc: "lambda expression that can take other column values and computes the value of that column", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
@@ -2085,6 +2087,17 @@ func Init(en scm.Env) {
 				return scm.NewBool(true)
 			case "owner":
 				return scm.NewBool(false) // ignore
+			case "auto_increment":
+				next := uint64(scm.ToInt(a[2]))
+				if next > 0 {
+					t.mu.Lock()
+					if next-1 > t.Auto_increment {
+						t.Auto_increment = next - 1
+					}
+					t.mu.Unlock()
+					db.save()
+				}
+				return scm.NewBool(true)
 			default:
 				panic("unimplemented alter table operation: " + scm.String(a[1]))
 			}
@@ -2092,7 +2105,7 @@ func Init(en scm.Env) {
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "operation", ParamDesc: "one of owner|drop|engine|collation"},
+				{Kind: "string", ParamName: "operation", ParamDesc: "one of owner|drop|engine|collation|auto_increment"},
 				{Kind: "any", ParamName: "parameter", ParamDesc: "name of the column to drop or value of the parameter"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
@@ -2114,7 +2127,9 @@ func Init(en scm.Env) {
 					case "auto_increment":
 						ai := scm.ToInt(a[3])
 						if ai > 1 {
+							t.mu.Lock()
 							t.Auto_increment = uint64(ai)
+							t.mu.Unlock()
 							db.save()
 							return scm.NewBool(true)
 						}
@@ -3924,6 +3939,9 @@ func plannerDistinctForColumns(t *table, columns []string) (float64, float64, st
 // multi-column planner statistics. All statistics are immutable snapshots.
 func showBuildMeta(db *database, t *table) scm.Scmer {
 	engine := showEngineStr(t)
+	t.mu.Lock()
+	nextAutoIncrement := t.Auto_increment + 1
+	t.mu.Unlock()
 	uniques := make([]scm.Scmer, len(t.Unique))
 	for i, uk := range t.Unique {
 		uniques[i] = scm.NewSlice([]scm.Scmer{
@@ -4006,6 +4024,7 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		scm.NewString("Collation"), scm.NewString(t.Collation),
 		scm.NewString("Charset"), scm.NewString(t.Charset),
 		scm.NewString("Comment"), scm.NewString(t.Comment),
+		scm.NewString("AutoIncrement"), scm.NewInt(int64(nextAutoIncrement)),
 		scm.NewString("Unique"), scm.NewSlice(uniques),
 		scm.NewString("ForeignKeys"), scm.NewSlice(foreignKeys),
 		scm.NewString("Fanout"), scm.NewSlice(fanouts),

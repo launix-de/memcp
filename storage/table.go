@@ -104,6 +104,7 @@ type column struct {
 	PartitioningScore  int       // count this up to increase the chance of partitioning for this column
 	AutoIncrement      bool
 	Default            scm.Scmer
+	DefaultExpression  string
 	OnUpdate           scm.Scmer
 	AllowNull          bool
 	IsTemp             bool // columns with IsTemp may be removed without consequences
@@ -129,6 +130,20 @@ type column struct {
 	OrcMapFn          scm.Scmer // (lambda ($set mapcols...) ...) — passes data to reduceFn
 	OrcReduceFn       scm.Scmer // (lambda (acc mapped) ...) — accumulates and writes via $set
 	OrcReduceInit     scm.Scmer // initial accumulator value (neutral element)
+}
+
+func (c *column) hasDefault() bool {
+	return !c.Default.IsNil() || c.DefaultExpression != ""
+}
+
+func (c *column) defaultValue() scm.Scmer {
+	if strings.EqualFold(c.DefaultExpression, "CURRENT_TIMESTAMP") {
+		return scm.NewDate(time.Now().Unix())
+	}
+	if c.DefaultExpression != "" {
+		panic("unsupported default expression: " + c.DefaultExpression)
+	}
+	return c.Default
 }
 
 // OrcFirstSortCol returns the first sort column name.
@@ -427,7 +442,7 @@ type table struct {
 	tableLockState      atomic.Int64                     // 0 = unlocked, -1 = WRITE, positive = READ count
 	tableLockReadOwners map[*scm.SessionState]uint32     // guarded by tableLockMu
 	_                   [32]byte                         // separate table locks from insert traffic
-	Auto_increment      uint64                           // this dosen't scale over multiple cores, so assign auto_increment ranges to each shard
+	Auto_increment      uint64                           // last assigned/reserved value; the next generated ID is this value plus one
 	Collation           string
 	Charset             string
 	Comment             string
@@ -1576,6 +1591,7 @@ func (c *column) show(keyType string, distinctEstimate uint64, rowEstimate uint,
 		scm.NewString("Null"), scm.NewBool(c.AllowNull),
 		scm.NewString("Key"), scm.NewString(keyType),
 		scm.NewString("Default"), c.Default,
+		scm.NewString("DefaultExpression"), scm.NewString(c.DefaultExpression),
 		scm.NewString("Extra"), scm.NewString(extra),
 		scm.NewString("Privileges"), scm.NewString("select,insert,update,references"),
 		scm.NewString("Comment"), scm.NewString(c.Comment),
@@ -1775,7 +1791,12 @@ func (c *column) Alter(key string, val scm.Scmer) scm.Scmer {
 		panic("invalid dimensions value for alter column")
 	case "default":
 		c.Default = val
+		c.DefaultExpression = ""
 		return c.Default
+	case "default_expression":
+		c.Default = scm.NewNil()
+		c.DefaultExpression = scm.String(val)
+		return scm.NewString(c.DefaultExpression)
 	case "null":
 		c.AllowNull = scm.ToBool(val)
 		c.UpdateSanitizer()
@@ -1848,6 +1869,8 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.AllowNull = scm.ToBool(extrainfo[i+1])
 		case "default":
 			c.Default = extrainfo[i+1]
+		case "default_expression":
+			c.DefaultExpression = scm.String(extrainfo[i+1])
 		case "update":
 			c.OnUpdate = extrainfo[i+1]
 		case "comment":
@@ -2135,7 +2158,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 
 	// check NOT NULL for omitted columns (not skippable by IGNORE)
 	for _, colDesc := range t.Columns {
-		if !colDesc.AllowNull && !colDesc.Default.IsNil() {
+		if !colDesc.AllowNull && colDesc.hasDefault() {
 			continue // has a default value
 		}
 		if !colDesc.AllowNull && !colDesc.AutoIncrement {
@@ -2294,7 +2317,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			defaultValue := scm.NewNil()
 			for _, col := range t.Columns {
 				if cd.Column == col.Name {
-					defaultValue = col.Default
+					defaultValue = col.defaultValue()
 					if col.AutoIncrement {
 						// Generated AUTO_INCREMENT values are monotonically above the
 						// values from which the immutable range pivots were derived.
@@ -2533,7 +2556,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 				// If so, the auto-increment/default mechanism guarantees a unique value,
 				// so there is no point checking (and no safe value to check against).
 				for _, tc := range t.Columns {
-					if tc.Name == col && (tc.AutoIncrement || !tc.Default.IsNil()) {
+					if tc.Name == col && (tc.AutoIncrement || tc.hasDefault()) {
 						skipConstraint = true
 						break
 					}
