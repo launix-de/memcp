@@ -45,7 +45,7 @@ EXPECTED_PERFORMANCE_CALIBRATION_ROUNDS = {
     "armv7l": 8,
     "other": 16,
 }
-EXPECTED_CALIBRATION_AST_SHA256 = "2e3ab9d30e772472d35c44d9dc11e330a2755e68e65fb848c652dd1af5d08dd2"
+EXPECTED_CALIBRATION_AST_SHA256 = "75b8cf16269b75974504e1fed684517dc42f4bc21c5f3ed4fa12d94bac6916ed"
 MAPPING_BUDGETS = ("max_compile_phase_ms", "max_compile_metrics")
 PROTECTED_POLICY_PATHS = (
     ".github/workflows/sql-regression-policy.yml",
@@ -166,6 +166,8 @@ def check_runner(root: Path) -> None:
         "load_performance_scale",
         "publish_performance_scale",
         "scaled_wall_clock_limit_ms",
+        "scaled_compile_time_limit_ms",
+        "planner_time_limit_with_tolerance_ms",
     }
     calibration_nodes = [
         node
@@ -206,12 +208,50 @@ def check_runner(root: Path) -> None:
     ]
     if len(scale_calls) != 1 or len(scaled_assignments) != 1:
         raise GuardFailure(
-            "machine scaling must apply exactly once and only to the max_time wall-clock gate"
+            "wall-clock machine scaling must apply exactly once to the max_time gate"
+        )
+
+    compile_scale_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "scaled_compile_time_limit_ms"
+    ]
+    planner_limit_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "planner_time_limit_ms"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "planner_time_limit_with_tolerance_ms"
+    ]
+    phase_limit_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "limit_ms"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "scaled_compile_time_limit_ms"
+    ]
+    if (
+        len(compile_scale_calls) != 2
+        or len(planner_limit_assignments) != 1
+        or len(phase_limit_assignments) != 1
+    ):
+        raise GuardFailure(
+            "machine scaling must cover planner-total and compile-phase time gates exactly once"
         )
     for unscaled_gate in (
         "plan_size_limit",
-        "planner_time_limit_ms",
-        "compile_phase_limits_ms",
         "compile_metric_limits",
     ):
         if re.search(rf"{unscaled_gate}[^\n]*performance_calibration", source):
