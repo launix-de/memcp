@@ -3415,12 +3415,23 @@ move the window to the wrong tree level. */
 				(equal? membership_strategy "prefiltered_candidate_keyset")))
 			(cadr membership_plan)
 			nil))
+		/* An ordered driver probe owns one immutable RHS key index. Reuse the
+		same carrier representation as the single-source lowerer so join reordering
+		cannot turn this alternative into one relational subscan per driver row. */
+		(define membership_keysets (if (and (not (nil? membership))
+			(equal? membership_strategy "driver_order_membership_probe"))
+			(membership_keyset_bindings (list membership))
+			'()))
+		(define use_membership_keyset (not (empty_list? membership_keysets)))
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
-		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define effective_condition (if use_membership_keyset
+			(replace_driver_membership_keyset_markers condition membership_keysets)
+			(strip_driver_membership_for_source src condition effective_membership)))
 		/* The node-local physical choice is final. A full or driver-prefiltered
-		candidate keyset becomes the ordered carrier; a driver-probe choice leaves
-		the marker in the base-table filter so its established direct probe lowering
-		remains in charge. */
+		candidate keyset becomes the ordered carrier. A driver-probe choice keeps the
+		base table ordered and replaces a supported direct-column marker with the
+		query-scoped key index; unsupported computed keys retain the established probe
+		fallback and its separately calibrated cost. */
 		(define filter_condition effective_condition)
 		/* A scalar probe already owns a nested relational callback. Copying it into
 		the scan_order acceptance callback adds another outer scope and would make
@@ -3495,9 +3506,12 @@ move the window to the wrong tree level. */
 			map_expr nil nil false nil
 			(cons (quote list) acceptance_cols)
 			acceptance_expr))
-		(list (quote stream_window_reduce)
+		(define window_expr (list (quote stream_window_reduce)
 			offset limit reduce_expr neutral_expr
-			(list (quote lambda) (list emit_value) scan_expr)))))
+			(list (quote lambda) (list emit_value) scan_expr)))
+		(if use_membership_keyset
+			(wrap_membership_keyset_bindings membership_keysets window_expr)
+			window_expr))))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -4010,6 +4024,14 @@ exact parameter value. */
 				(equal? membership_strategy "prefiltered_candidate_keyset")))
 			(cadr membership_plan)
 			nil))
+		/* Join-tree leaves consume the same ordered RHS key-index alternative as
+		the top-level ordered lowerer. The index is bound outside the scan callback
+		and is therefore built once per query, irrespective of tree depth. */
+		(define membership_keysets (if (and (not (nil? membership))
+			(equal? membership_strategy "driver_order_membership_probe"))
+			(membership_keyset_bindings (list membership))
+			'()))
+		(define use_membership_keyset (not (empty_list? membership_keysets)))
 		(if (expr_contains_driver_membership? condition)
 			(planner_record_physical_decision (list
 				(list "decision" "join_leaf_membership_consumer")
@@ -4021,18 +4043,22 @@ exact parameter value. */
 						(reduce all_sources (lambda (found candidate_src)
 							(or found (not (nil? (driver_membership_for_source candidate_src condition)))))
 							false))
+					(list "keyset_binding_count" (count membership_keysets))
 					(list "carrier_allowed" allow_membership_recset)
 					(list "limit_delayed" delay_limit_after_join)
 					(list "projection_built" (not (nil? membership_table_expr)))))))
 			nil)
 		(define effective_membership (if (nil? membership_table_expr) nil membership))
-		(define effective_condition (strip_driver_membership_for_source src condition effective_membership))
+		(define effective_condition (if use_membership_keyset
+			(replace_driver_membership_keyset_markers condition membership_keysets)
+			(strip_driver_membership_for_source src condition effective_membership)))
 		(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
 		/* A candidate-keyset choice makes the projected row positions this leaf's
-		scan carrier even when later join leaves are continuations. A driver-probe
-		choice leaves the logical marker in the established direct probe path. The
-		row-number pipeline still owns a base-table carrier, so it consumes a chosen
-		candidate RecSet as a membership filter until it accepts an explicit source. */
+		scan carrier even when later join leaves are continuations. A supported
+		driver-probe choice instead keeps the base table and binds one RHS key index
+		outside every continuation. The row-number pipeline still owns a base-table
+		carrier, so it consumes a chosen candidate RecSet as a membership filter until
+		it accepts an explicit source. */
 		(define membership_driver (and
 			(not (nil? membership_table_expr))
 			(nil? row_number_stage_filter)))
@@ -4146,11 +4172,14 @@ exact parameter value. */
 						reduce_expr
 						(join_scan_neutral_expr result_mode)
 						(or outer_scan (source_outer? src))))))
-		(if membership_filter
+		(define membership_bound_scan (if membership_filter
 			(list
 				(list (quote lambda) (list membership_var) scan_expr)
 				membership_table_expr)
-			scan_expr))))
+			scan_expr))
+		(if use_membership_keyset
+			(wrap_membership_keyset_bindings membership_keysets membership_bound_scan)
+			membership_bound_scan))))
 
 /* Consume the logical join tree recursively. The right subtree is lowered as
 the continuation of the left subtree, so join-node boundaries and outer-join
@@ -6189,14 +6218,15 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		"ordered_batch_accept"
 		(if (physical_prefiltered_membership_expr? plan)
 			"prefiltered_candidate_keyset"
-			(if (physical_expr_has_head? plan (quote recset_project_join))
-				"candidate_keyset"
-				/* A forced membership variant reaches this function only after
-				require_physical_scan_relations has rejected every surviving logical
-				marker. Without a projected RecSet its emitted carrier is therefore the
-				driver-side probe family, independent of the concrete group-cache/index
-				primitive selected inside that family. */
-				"driver_order_membership_probe")))))
+			/* Calibration compiles one membership decision at a time, but the query
+			may contain unrelated projected RecSets (for example an ACL carrier). The
+			key index uniquely identifies the selected ordered-driver implementation,
+			so inspect it before the more general recset_project_join primitive. */
+			(if (physical_expr_has_head? plan (quote recset_key_index))
+				"driver_order_membership_probe"
+				(if (physical_expr_has_head? plan (quote recset_project_join))
+					"candidate_keyset"
+					"driver_order_membership_probe"))))))
 
 (define physical_operator_family_for_decision (lambda (plan decision)
 	(begin

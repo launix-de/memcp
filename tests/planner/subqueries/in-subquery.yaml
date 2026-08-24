@@ -767,7 +767,7 @@ test_cases:
             tenant INT,
             allowed INT
           )
-      - sql: "CREATE TABLE in_batch_file (ID INT PRIMARY KEY, flag INT)"
+      - sql: "CREATE TABLE in_batch_file (ID INT PRIMARY KEY, flag INT, search VARCHAR(8192))"
       - sql: "CREATE TABLE in_batch_doc (ID INT PRIMARY KEY, file_id INT, sort_key INT)"
       - sql: |
           INSERT INTO in_dv_file (ID, filename, search) VALUES
@@ -793,12 +793,16 @@ test_cases:
           (2, 2, 0)
       - scm: |
           (begin
-            (insert (table "memcp-tests" "in_batch_file") '("ID" "flag")
+            (define long_search (reduce (produceN 192) (lambda (text _i)
+              (concat text "common searchable text ")) ""))
+            (insert (table "memcp-tests" "in_batch_file") '("ID" "flag" "search")
               (map (produceN 8000) (lambda (i)
-                (list (+ i 1) 1))))
+                (list (+ i 1) 1 long_search))))
             (insert (table "memcp-tests" "in_batch_doc") '("ID" "file_id" "sort_key")
               (map (produceN 10000) (lambda (i)
                 (list (+ i 1) (if (< i 8000) (+ i 1) (- i 7999)) (- 10000 i)))))
+            (rebuild (table "memcp-tests" "in_batch_file") true false)
+            (rebuild (table "memcp-tests" "in_batch_doc") true false)
             true)
     steps:
       - sql: |
@@ -1260,6 +1264,42 @@ test_cases:
             - "chosen"
             - "rejected"
       - sql: |
+          SELECT t.ID, t.allowed
+          FROM (
+            SELECT d.ID, d.file_id, d.sort_key, a.allowed
+            FROM in_batch_doc d
+            LEFT JOIN in_dv_acl a ON a.ID = d.file_id
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_batch_file f WHERE f.search LIKE '%common%'
+            UNION
+            SELECT f.ID FROM in_batch_file f WHERE f.flag = 0
+          )
+          ORDER BY t.sort_key
+          LIMIT 72
+        expect:
+          rows: 72
+      - sql: |
+          EXPLAIN PHYSICAL
+          SELECT t.ID, t.allowed
+          FROM (
+            SELECT d.ID, d.file_id, d.sort_key, a.allowed
+            FROM in_batch_doc d
+            LEFT JOIN in_dv_acl a ON a.ID = d.file_id
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_batch_file f WHERE f.search LIKE '%common%'
+            UNION
+            SELECT f.ID FROM in_batch_file f WHERE f.flag = 0
+          )
+          ORDER BY t.sort_key
+          LIMIT 72
+        expect:
+          contains:
+            - "driver_order_membership_probe"
+            - "recset_key_index"
+            - "scan_order"
+      - sql: |
           EXPLAIN
           SELECT t.ID
           FROM (
@@ -1312,6 +1352,8 @@ test_cases:
             - "candidate_rows"
             - "driver_rows"
             - "result_equal"
+          not_contains:
+            - "operator_consistent false"
       - sql: |
           EXPLAIN PHYSICAL CALIBRATE DISCOVER
           SELECT t.ID
