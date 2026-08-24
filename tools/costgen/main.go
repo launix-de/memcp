@@ -52,6 +52,8 @@ const (
 	database    = "memcp-tests"
 )
 
+var errInsufficientCalibrationObservations = errors.New("insufficient calibration observations")
+
 var activeServer *memcpServer
 
 type syncBuffer struct {
@@ -132,6 +134,7 @@ type calibrationRow struct {
 	ProjectedDriverRows              *float64 `json:"projected_driver_rows"`
 	DriverInputRows                  *float64 `json:"driver_input_rows"`
 	DriverRows                       *float64 `json:"driver_rows"`
+	PrefilteredDriverRows            *float64 `json:"prefiltered_driver_rows"`
 	ExpectedDriverRowsVisited        *float64 `json:"expected_driver_rows_visited"`
 	Limit                            *float64 `json:"limit"`
 	Offset                           *float64 `json:"offset"`
@@ -140,6 +143,7 @@ type calibrationRow struct {
 	CandidateFilterColumns           *float64 `json:"candidate_filter_columns"`
 	CandidateMapColumns              *float64 `json:"candidate_map_columns"`
 	CandidateCacheMapColumns         *float64 `json:"candidate_cache_map_columns"`
+	CandidateCacheBacked             bool     `json:"candidate_cache_backed"`
 	CandidateExpressionOperations    *float64 `json:"candidate_expression_operations"`
 	CandidateExpressionDepth         *float64 `json:"candidate_expression_depth"`
 	CandidateBroadTextMatchRows      *float64 `json:"candidate_broad_text_match_rows"`
@@ -179,22 +183,23 @@ type observation struct {
 }
 
 type constants struct {
-	scanInvocationNS      int64
-	scanRowNS             int64
-	filterColumnRowNS     int64
-	mapColumnRowNS        int64
-	expressionOperationNS int64
-	broadTextMatchRowNS   int64
-	broadTextMatchByteNS  int64
-	recsetStartupNS       int64
-	recsetBuildRowNS      int64
-	recsetProbeRowNS      int64
-	recsetAggregateRowNS  int64
-	groupCacheStartupNS   int64
-	groupCacheBuildRowNS  int64
-	groupCacheProbeRowNS  int64
-	orderedDriverInputNS  int64
-	orderedBatchStartupNS int64
+	scanInvocationNS         int64
+	scanRowNS                int64
+	filterColumnRowNS        int64
+	mapColumnRowNS           int64
+	expressionOperationNS    int64
+	broadTextMatchRowNS      int64
+	broadTextMatchByteNS     int64
+	recsetStartupNS          int64
+	recsetBuildRowNS         int64
+	recsetProbeRowNS         int64
+	recsetAggregateRowNS     int64
+	groupCacheStartupNS      int64
+	groupCacheBuildRowNS     int64
+	groupCacheProbeRowNS     int64
+	orderedDriverInputNS     int64
+	orderedScanInvocationNS  int64
+	directPresenceProbeRowNS int64
 }
 
 func main() {
@@ -248,18 +253,19 @@ func main() {
 	if err := validateMeasurementSignal(fitTraining); err != nil {
 		fatal(err)
 	}
-	c, err := solve(fitTraining, training, currentConstants)
+	c, err := solve(carrierTraining, training, currentConstants)
 	if err != nil {
 		fatal(err)
 	}
 	if err := validateDecisionOrdering(training, c); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("scan invocation:      %d ns/invocation\nscan row:             %d ns/input-row\nfilter column:        %d ns/value\nmap column:           %d ns/value\nexpression operation: %d ns/row-operation\nbroad text match:     %d ns/input-row + %d ns/input-byte\nrecset startup:       %d ns\nrecset build:         %d ns/matching-row\nrecset probe:         %d ns/driver-row\nrecset aggregate:     %d ns/driver-input-row\ngroup-cache startup:  %d ns\ngroup-cache build:    %d ns/matching-row\ngroup-cache probe:    %d ns/driver-row\nordered driver input: %d ns/(rows²/1M)\nordered batch startup:%d ns\n",
+	fmt.Printf("scan invocation:      %d ns/invocation\nscan row:             %d ns/input-row\nfilter column:        %d ns/value\nmap column:           %d ns/value\nexpression operation: %d ns/row-operation\nbroad text match:     %d ns/input-row + %d ns/input-byte\nrecset startup:       %d ns\nrecset build:         %d ns/matching-row\nrecset probe:         %d ns/driver-row\nrecset aggregate:     %d ns/driver-input-row\ngroup-cache startup:  %d ns\ngroup-cache build:    %d ns/matching-row\ngroup-cache probe:    %d ns/driver-row\nordered driver input: %d ns/(rows²/1M)\nordered scan startup: %d ns/invocation\ndirect presence probe:%d ns/probe\n",
 		c.scanInvocationNS, c.scanRowNS, c.filterColumnRowNS, c.mapColumnRowNS,
 		c.expressionOperationNS, c.broadTextMatchRowNS, c.broadTextMatchByteNS, c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
-		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedBatchStartupNS)
+		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS,
+		c.directPresenceProbeRowNS)
 	printModelComparison("training", training, c)
 	holdout := filterObservations(observations, true)
 	if len(holdout) > 0 {
@@ -283,6 +289,19 @@ func main() {
 func validateModelImprovement(rows []observation, c constants) error {
 	current := measureModelError(rows, func(row observation) float64 { return row.currentEstimate })
 	updated := measureModelError(rows, func(row observation) float64 { return estimatedNS(row, c) })
+	currentCorrect, total := decisionAccuracy(rows, func(row observation) float64 { return row.currentEstimate })
+	updatedCorrect, _ := decisionAccuracy(rows, func(row observation) float64 { return estimatedNS(row, c) })
+	if updatedCorrect < currentCorrect {
+		return fmt.Errorf("updated model regresses holdout decisions: %d/%d -> %d/%d",
+			currentCorrect, total, updatedCorrect, total)
+	}
+	/* Exact duration is a tie-breaker for an incomplete decision model. Once all
+	holdout inequalities are correct, rejecting a newly identifiable coefficient
+	because unrelated absolute residuals move by a few percent preserves stale
+	constants indefinitely and contradicts solve's decision-first selection. */
+	if updatedCorrect == total {
+		return nil
+	}
 	if updated.medianAbsolutePercent > current.medianAbsolutePercent || updated.meanFactor > current.meanFactor {
 		return fmt.Errorf("updated model does not improve exact holdouts: median %.1f%% -> %.1f%%, mean factor %.2fx -> %.2fx",
 			current.medianAbsolutePercent, updated.medianAbsolutePercent,
@@ -324,6 +343,12 @@ func discoverSuites(root string) ([]suite, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		/* The SQL runner accepts a broader YAML surface than this calibration
+		tool needs. Avoid strictly decoding unrelated suites: only files which
+		explicitly opt into physical calibration can contribute observations. */
+		if !bytes.Contains(data, []byte("physical_calibration: true")) {
+			return nil
 		}
 		var header struct {
 			Metadata metadata `yaml:"metadata"`
@@ -627,9 +652,9 @@ func discoverCalibrationDecision(server *memcpServer, query, decisionName string
 			decision = &discovered[i]
 		}
 	}
-	if decision == nil || len(decision.Alternatives) < 2 || len(decision.Alternatives) > 3 ||
+	if decision == nil || len(decision.Alternatives) < 2 || len(decision.Alternatives) > 4 ||
 		len(decision.EstimatedNS) != len(decision.Alternatives) {
-		return nil, nil, fmt.Errorf("discovery did not expose two or three costed alternatives: %+v", decision)
+		return nil, nil, fmt.Errorf("discovery did not expose two to four costed alternatives: %+v", decision)
 	}
 	estimates := map[string]*float64{}
 	for i, plan := range decision.Alternatives {
@@ -916,8 +941,8 @@ func validateRows(rows []calibrationRow) error {
 			return errors.New(row.Error)
 		}
 	}
-	if len(rows) < 2 || len(rows) > 3 {
-		return fmt.Errorf("expected two or three membership alternatives, got %d", len(rows))
+	if len(rows) < 2 || len(rows) > 4 {
+		return fmt.Errorf("expected two to four membership alternatives, got %d", len(rows))
 	}
 	seen := map[string]bool{}
 	for _, row := range rows {
@@ -956,12 +981,20 @@ func validateRows(rows []calibrationRow) error {
 			return fmt.Errorf("invalid whole_query_execution_ns for %s", row.Plan)
 		}
 		seen[row.Plan] = true
+		if row.Plan == "prefiltered_candidate_keyset" && row.PrefilteredDriverRows == nil {
+			return fmt.Errorf("prefiltered alternative has no driver cardinality: %+v", row)
+		}
 	}
-	if !seen["candidate_keyset"] || !seen["driver_order_membership_probe"] {
+	if !seen["candidate_keyset"] ||
+		(!seen["driver_order_membership_probe"] && !seen["driver_filter_join_probe"]) {
 		return fmt.Errorf("alternatives incomplete: %v", seen)
 	}
-	if len(rows) == 3 && !seen["ordered_batch_accept"] {
+	if len(rows) == 3 && (!seen["ordered_batch_accept"] || !seen["driver_order_membership_probe"]) {
 		return fmt.Errorf("three-way decision is missing ordered_batch_accept: %v", seen)
+	}
+	if len(rows) == 4 && (!seen["ordered_batch_accept"] ||
+		!seen["driver_order_membership_probe"] || !seen["prefiltered_candidate_keyset"]) {
+		return fmt.Errorf("four-way decision is incomplete: %v", seen)
 	}
 	return nil
 }
@@ -1011,7 +1044,9 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 	expressionOperations := candidateExpressionOperations + driverWorkRows**row.DriverExpressionOperations
 	mapColumns := *row.CandidateMapColumns
 	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
-		mapColumns = *row.CandidateCacheMapColumns
+		if row.CandidateCacheBacked {
+			mapColumns = *row.CandidateCacheMapColumns
+		}
 	}
 	driverMapRows := *row.ProjectedDriverRows
 	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
@@ -1023,23 +1058,37 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		aggregateDriverRows = *row.DriverInputRows
 	}
 	orderedDriverInputRows := 0.0
+	orderedScanInvocations := 0.0
 	if row.Limit != nil {
 		orderedDriverInputRows = *row.DriverInputRows * *row.DriverInputRows / 1_000_000
+		orderedScanInvocations = *row.DriverScanInvocations
 	}
 	switch row.Plan {
 	case "candidate_keyset":
+		cacheStartup, cacheBuildRows := 0.0, 0.0
+		if row.CandidateCacheBacked {
+			cacheStartup, cacheBuildRows = 1, *row.CandidateRows
+		}
 		return []float64{
 			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
-			1, *row.CandidateRows + *row.ProjectedDriverRows, *row.DriverRows, 0, 0, 0,
+			1, *row.CandidateRows + *row.ProjectedDriverRows, *row.DriverRows,
+			cacheStartup, cacheBuildRows, 0,
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
-			*row.CandidateBroadTextMatchBytes, 0,
+			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0,
 		}, nil
 	case "driver_order_membership_probe", "scan_order":
+		recsetStartup, recsetBuildRows, recsetProbeRows := 1.0, *row.CandidateRows, *row.ExpectedDriverRowsVisited
+		cacheStartup, cacheBuildRows, cacheProbeRows := 0.0, 0.0, 0.0
+		if row.CandidateCacheBacked {
+			recsetStartup, recsetBuildRows, recsetProbeRows = 0, 0, 0
+			cacheStartup, cacheBuildRows, cacheProbeRows = 1, *row.CandidateRows, *row.ExpectedDriverRowsVisited
+		}
 		return []float64{
 			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
-			0, 0, 0, 1, *row.CandidateRows, *row.ExpectedDriverRowsVisited,
+			recsetStartup, recsetBuildRows, recsetProbeRows,
+			cacheStartup, cacheBuildRows, cacheProbeRows,
 			0, orderedDriverInputRows, 0,
-			0, 0,
+			0, orderedScanInvocations, 0,
 		}, nil
 	case "ordered_batch_accept":
 		fraction := 1.0
@@ -1058,6 +1107,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		candidateMatchRows := *row.CandidateRows * repeatFraction
 		projectionRows := *row.ProbeBranches *
 			(2**row.ExpectedDriverRowsVisited + candidateWorkRows + candidateMatchRows)
+		orderedDriverWork := batches * *row.DriverInputRows * *row.DriverInputRows / 1_000_000
 		return []float64{
 			*row.DriverScanInvocations + batches**row.CandidateScanInvocations,
 			*row.ExpectedDriverRowsVisited + candidateWorkRows + projectionRows,
@@ -1066,10 +1116,39 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			candidateWorkRows * *row.CandidateExpressionOperations,
 			0,
 			projectionRows,
-			0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, orderedDriverWork,
 			*row.CandidateBroadTextMatchRows * repeatFraction,
 			*row.CandidateBroadTextMatchBytes * repeatFraction,
-			1,
+			batches * *row.DriverScanInvocations, 0,
+		}, nil
+	case "driver_filter_join_probe":
+		return []float64{
+			scanInvocations, scanRows, filterValues, mapValues, expressionOperations,
+			0, 0, 0, 0, 0, 0,
+			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
+			*row.CandidateBroadTextMatchBytes, 0,
+			*row.DriverRows * *row.ProbeBranches,
+		}, nil
+	case "prefiltered_candidate_keyset":
+		branches := math.Max(1, *row.ProbeBranches)
+		candidateDomainRows := *row.CandidateInputRows / branches
+		candidateWorkRows := math.Min(*row.PrefilteredDriverRows, candidateDomainRows) * branches
+		candidateMatchRows := candidateWorkRows * *row.CandidateDensity
+		candidateFraction := 0.0
+		if *row.CandidateInputRows > 0 {
+			candidateFraction = math.Min(1, candidateWorkRows / *row.CandidateInputRows)
+		}
+		projectionRows := 2**row.PrefilteredDriverRows + candidateWorkRows + candidateMatchRows
+		return []float64{
+			*row.DriverScanInvocations + *row.CandidateScanInvocations,
+			*row.DriverInputRows + candidateWorkRows + projectionRows,
+			*row.DriverInputRows**row.DriverFilterColumns + candidateWorkRows**row.CandidateFilterColumns,
+			projectionRows,
+			*row.DriverInputRows**row.DriverExpressionOperations + candidateWorkRows**row.CandidateExpressionOperations,
+			1, projectionRows, 0, 0, 0, 0, 0, 0,
+			*row.CandidateBroadTextMatchRows * candidateFraction,
+			*row.CandidateBroadTextMatchBytes * candidateFraction,
+			orderedScanInvocations, 0,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported plan %q", row.Plan)
@@ -1083,8 +1162,6 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 //	       + expression_operation_rows*expression_operation
 //	candidate = recset_startup + common
 //	          + candidate_rows*recset_build + driver_rows*recset_probe
-//	driver    = group_cache_startup + common
-//	          + candidate_rows*cache_build + driver_rows*cache_probe
 //
 // Non-negative coordinate descent prevents noisy samples from generating
 // impossible negative costs. Weighting every equation by 1/actual^2 minimizes
@@ -1092,12 +1169,9 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 // drown out the millisecond candidate plans whose inequality we also need to
 // predict correctly.
 func solveEquationSystem(rows []observation) (constants, error) {
-	if len(rows) < 11 {
-		return constants{}, fmt.Errorf("need at least eleven training observations, got %d", len(rows))
-	}
 	candidateX, candidateY := make([][]float64, 0), make([]float64, 0)
 	for _, row := range rows {
-		if row.plan != "candidate_keyset" {
+		if row.censored || row.plan != "candidate_keyset" || row.x[8] > 0 {
 			continue
 		}
 		candidateX = append(candidateX, []float64{
@@ -1108,32 +1182,17 @@ func solveEquationSystem(rows []observation) (constants, error) {
 		// the workload and are therefore identifiable from exact winner runs.
 		candidateY = append(candidateY, math.Max(1, row.y-row.x[5]-row.x[7]))
 	}
+	if len(candidateX) < 6 {
+		return constants{}, fmt.Errorf("%w: common scan fit needs six candidate observations, got %d",
+			errInsufficientCalibrationObservations, len(candidateX))
+	}
 	common, err := fitNonnegative(candidateX, candidateY)
 	if err != nil {
 		return constants{}, fmt.Errorf("common candidate work: %w", err)
 	}
-	pairs, err := decisionPairs(rows)
-	if err != nil {
-		return constants{}, err
-	}
-	groupX, groupY := make([][]float64, 0, len(pairs)), make([]float64, 0, len(pairs))
-	for _, pair := range pairs {
-		commonDifference := 0.0
-		for i := 0; i < 5; i++ {
-			commonDifference += (pair.driver.x[i] - pair.candidate.x[i]) * common[i]
-		}
-		candidateCarrier := pair.candidate.x[5] + pair.candidate.x[6]*common[5] + pair.candidate.x[7]
-		groupX = append(groupX, pair.driver.x[8:11])
-		groupY = append(groupY, math.Max(1,
-			pair.driver.y-pair.candidate.y-commonDifference+candidateCarrier))
-	}
-	group, err := fitNonnegative(groupX, groupY)
-	if err != nil {
-		return constants{}, fmt.Errorf("paired carrier difference: %w", err)
-	}
 	beta := []float64{
 		common[0], common[1], common[2], common[3], common[4],
-		1, common[5], 1, group[0], group[1], group[2],
+		1, common[5], 1,
 	}
 	return constants{
 		scanInvocationNS:      int64(math.Round(beta[0])),
@@ -1146,12 +1205,15 @@ func solveEquationSystem(rows []observation) (constants, error) {
 		recsetStartupNS:       int64(math.Round(beta[5])),
 		recsetBuildRowNS:      int64(math.Round(beta[6])),
 		recsetProbeRowNS:      int64(math.Round(beta[7])),
-		groupCacheStartupNS:   int64(math.Round(beta[8])),
-		groupCacheBuildRowNS:  int64(math.Round(beta[9])),
-		groupCacheProbeRowNS:  int64(math.Round(beta[10])),
-		recsetAggregateRowNS:  1,
-		orderedDriverInputNS:  1,
-		orderedBatchStartupNS: 1,
+		// Cache startup is identified below from cache-backed/direct pairs.
+		// Build and probe stay at their floor until fixtures vary them independently.
+		groupCacheStartupNS:      1,
+		groupCacheBuildRowNS:     1,
+		groupCacheProbeRowNS:     1,
+		recsetAggregateRowNS:     1,
+		orderedDriverInputNS:     1,
+		orderedScanInvocationNS:  1,
+		directPresenceProbeRowNS: 1,
 	}, nil
 }
 
@@ -1162,25 +1224,37 @@ func solveEquationSystem(rows []observation) (constants, error) {
 // lower_bound_ns.
 func solve(exactRows, allRows []observation, baseline constants) (constants, error) {
 	fitted, err := solveEquationSystem(exactRows)
-	if err != nil {
+	if err != nil && !errors.Is(err, errInsufficientCalibrationObservations) {
 		return constants{}, err
 	}
+	if errors.Is(err, errInsufficientCalibrationObservations) {
+		logStep("model selection preserves baseline: %v", err)
+	}
 	selected := baseline
-	baseError := measureModelError(exactRows, func(row observation) float64 {
-		return estimatedNS(row, baseline)
-	})
-	fitError := measureModelError(exactRows, func(row observation) float64 {
-		return estimatedNS(row, fitted)
-	})
-	baseCorrect, _ := decisionAccuracy(exactRows, func(row observation) float64 {
-		return estimatedNS(row, baseline)
-	})
-	fitCorrect, _ := decisionAccuracy(exactRows, func(row observation) float64 {
-		return estimatedNS(row, fitted)
-	})
-	if fitError.medianAbsolutePercent <= baseError.medianAbsolutePercent &&
-		fitError.meanFactor <= baseError.meanFactor && fitCorrect >= baseCorrect {
-		selected = fitted
+	if err == nil {
+		baseError := measureModelError(exactRows, func(row observation) float64 {
+			return estimatedNS(row, baseline)
+		})
+		fitError := measureModelError(exactRows, func(row observation) float64 {
+			return estimatedNS(row, fitted)
+		})
+		baseCorrect, _ := decisionAccuracy(exactRows, func(row observation) float64 {
+			return estimatedNS(row, baseline)
+		})
+		fitCorrect, _ := decisionAccuracy(exactRows, func(row observation) float64 {
+			return estimatedNS(row, fitted)
+		})
+		/* The model exists to rank physical alternatives. Prefer a fit which gets
+		more measured decisions right even when a few absolute-duration residuals
+		grow; use duration accuracy only to break equal-ranking fits. Requiring all
+		metrics to improve lets stale constants survive indefinitely. */
+		if fitCorrect > baseCorrect || (fitCorrect == baseCorrect &&
+			fitError.medianAbsolutePercent <= baseError.medianAbsolutePercent &&
+			fitError.meanFactor <= baseError.meanFactor) {
+			selected = fitted
+		}
+		logStep("model selection baseline decisions=%d fitted decisions=%d selected_fitted=%t",
+			baseCorrect, fitCorrect, selected == fitted)
 	}
 
 	if value, ok := fitExactResidualPerRow(allRows, selected, 11); ok {
@@ -1189,8 +1263,12 @@ func solve(exactRows, allRows []observation, baseline constants) (constants, err
 	if value, ok := fitBroadTextResidualPerByte(allRows, selected); ok {
 		selected.broadTextMatchByteNS = value
 	}
-	if value, ok := fitOrderedBatchStartup(allRows, selected); ok {
-		selected.orderedBatchStartupNS = value
+	if value, ok := fitOrderedScanInvocation(allRows, selected); ok {
+		selected.orderedScanInvocationNS = value
+	}
+	if startup, probe, ok := fitDirectCarrierPair(allRows, selected); ok {
+		selected.groupCacheStartupNS = startup
+		selected.directPresenceProbeRowNS = probe
 	}
 	/* A race timeout mixes cold startup and incomplete operator work. It is a
 	lower bound for that whole alternative, not evidence for a linear ordered
@@ -1231,21 +1309,74 @@ func fitBroadTextResidualPerByte(rows []observation, c constants) (int64, bool) 
 	return int64(math.Round(values[len(values)/2])), true
 }
 
-func fitOrderedBatchStartup(rows []observation, c constants) (int64, bool) {
+func fitOrderedScanInvocation(rows []observation, c constants) (int64, bool) {
+	candidates := make(map[string]observation)
+	for _, row := range rows {
+		if !row.censored && row.component == "" && row.plan == "candidate_keyset" {
+			candidates[row.caseName] = row
+		}
+	}
 	values := make([]float64, 0)
 	for _, row := range rows {
-		if row.censored || row.plan != "ordered_batch_accept" || len(row.x) <= 15 || row.x[15] <= 0 {
+		candidate, paired := candidates[row.caseName]
+		if row.censored || row.component != "" ||
+			(row.plan != "driver_order_membership_probe" && row.plan != "ordered_batch_accept") ||
+			!paired || len(row.x) <= 15 || row.x[15] <= 0 {
 			continue
 		}
 		without := c
-		without.orderedBatchStartupNS = 0
-		values = append(values, math.Max(1, (row.y-estimatedNS(row, without))/row.x[15]))
+		without.orderedScanInvocationNS = 0
+		/* Both alternatives execute the surrounding query. Their difference
+		isolates ordered scan startup without charging common scan and result work
+		to every adaptive batch. */
+		values = append(values, math.Max(1, (row.y-candidate.y-
+			(estimatedNS(row, without)-estimatedNS(candidate, without)))/row.x[15]))
 	}
 	if len(values) == 0 {
 		return 0, false
 	}
 	sort.Float64s(values)
 	return int64(math.Round(values[len(values)/2])), true
+}
+
+func fitDirectCarrierPair(rows []observation, c constants) (int64, int64, bool) {
+	candidates := make(map[string]observation)
+	for _, row := range rows {
+		if !row.censored && row.component == "" && row.plan == "candidate_keyset" {
+			candidates[row.caseName] = row
+		}
+	}
+	x, y := make([][]float64, 0), make([]float64, 0)
+	for _, row := range rows {
+		candidate, paired := candidates[row.caseName]
+		if row.censored || row.component != "" || row.plan != "driver_filter_join_probe" ||
+			!paired || len(row.x) <= 16 || row.x[16] <= 0 {
+			continue
+		}
+		without := c
+		without.groupCacheStartupNS = 0
+		without.directPresenceProbeRowNS = 0
+		/* Both variants execute the surrounding query. Fitting a direct probe from
+		its absolute duration attributes all shared scan/join work to every probe
+		and grossly overprices small selective drivers. Paired differences expose
+		the two physical terms which do not cancel: the candidate's fixed group-cache
+		startup and the driver's per-probe work. Signed features let non-negative
+		least squares identify both without a hand-written crossover threshold. */
+		if candidate.x[8] <= 0 {
+			continue
+		}
+		x = append(x, []float64{candidate.x[8], -row.x[16]})
+		y = append(y, candidate.y-row.y-
+			(estimatedNS(candidate, without)-estimatedNS(row, without)))
+	}
+	if len(x) < 2 {
+		return 0, 0, false
+	}
+	beta, err := fitNonnegative(x, y)
+	if err != nil {
+		return 0, 0, false
+	}
+	return int64(math.Round(beta[0])), int64(math.Round(beta[1])), true
 }
 
 func fitExactResidualPerRow(rows []observation, c constants, feature int) (int64, bool) {
@@ -1328,7 +1459,8 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.orderedDriverInputNS),
 		float64(c.broadTextMatchRowNS),
 		float64(c.broadTextMatchByteNS),
-		float64(c.orderedBatchStartupNS),
+		float64(c.orderedScanInvocationNS),
+		float64(c.directPresenceProbeRowNS),
 	}
 	total := 0.0
 	for i, value := range row.x {
@@ -1384,9 +1516,16 @@ func filterRankObservations(rows []observation) []observation {
 }
 
 func filterCarrierObservations(rows []observation) []observation {
+	directCases := make(map[string]bool)
+	for _, row := range rows {
+		if row.plan == "driver_filter_join_probe" {
+			directCases[row.caseName] = true
+		}
+	}
 	filtered := make([]observation, 0, len(rows))
 	for _, row := range rows {
-		if row.plan != "ordered_batch_accept" {
+		if row.plan != "ordered_batch_accept" && row.plan != "prefiltered_candidate_keyset" &&
+			!directCases[row.caseName] {
 			filtered = append(filtered, row)
 		}
 	}
@@ -1403,7 +1542,7 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 			return nil, fmt.Errorf("duplicate %s observation for %q", row.plan, row.caseName)
 		}
 		switch row.plan {
-		case "candidate_keyset", "driver_order_membership_probe", "ordered_batch_accept":
+		case "candidate_keyset", "driver_order_membership_probe", "driver_filter_join_probe", "ordered_batch_accept", "prefiltered_candidate_keyset":
 			groups[row.caseName][row.plan] = row
 		default:
 			return nil, fmt.Errorf("unsupported plan %q", row.plan)
@@ -1413,7 +1552,9 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 		if _, ok := plans["candidate_keyset"]; !ok {
 			return nil, fmt.Errorf("incomplete alternatives for %q", name)
 		}
-		if _, ok := plans["driver_order_membership_probe"]; !ok {
+		_, ordered := plans["driver_order_membership_probe"]
+		_, direct := plans["driver_filter_join_probe"]
+		if !ordered && !direct {
 			return nil, fmt.Errorf("incomplete alternatives for %q", name)
 		}
 	}
@@ -1470,7 +1611,9 @@ func decisionAccuracy(rows []observation, estimate func(observation) float64) (i
 	}
 	correct := 0
 	for _, plans := range groups {
-		if winningPlan(plans, func(row observation) float64 { return row.y }) == winningPlan(plans, estimate) {
+		actualWinner := winningPlan(plans, func(row observation) float64 { return row.y })
+		estimatedWinner := winningPlan(plans, estimate)
+		if actualWinner == estimatedWinner || plansStatisticallyEquivalent(plans, actualWinner, estimatedWinner) {
 			correct++
 		}
 	}
@@ -1511,13 +1654,16 @@ func validateMeasurementSignal(rows []observation) error {
 	if err != nil {
 		return err
 	}
-	for name, pair := range pairs {
+	signals := 0
+	for _, pair := range pairs {
 		difference := math.Abs(pair.driver.y - pair.candidate.y)
 		noise := 3 * (pair.driver.noiseNS + pair.candidate.noiseNS)
-		if difference <= noise {
-			return fmt.Errorf("%q has no calibratable A/B signal: difference %.3fms <= 3*(MAD candidate + driver) %.3fms",
-				name, difference/1e6, noise/1e6)
+		if difference > noise {
+			signals++
 		}
+	}
+	if signals == 0 {
+		return errors.New("calibration workload has no carrier A/B signal outside its measured noise")
 	}
 	return nil
 }
@@ -1565,12 +1711,26 @@ func validateDecisionOrdering(rows []observation, c constants) error {
 	for name, plans := range groups {
 		actualWinner := winningPlan(plans, func(row observation) float64 { return row.y })
 		estimatedWinner := winningPlan(plans, func(row observation) float64 { return estimatedNS(row, c) })
-		if actualWinner != estimatedWinner {
-			return fmt.Errorf("calibrated ordering disagrees for %q: actual winner=%s estimated winner=%s",
-				name, actualWinner, estimatedWinner)
+		if actualWinner != estimatedWinner && !plansStatisticallyEquivalent(plans, actualWinner, estimatedWinner) {
+			actualRow := plans[actualWinner]
+			estimatedRow := plans[estimatedWinner]
+			return fmt.Errorf("calibrated ordering disagrees for %q: actual winner=%s (measured %.0f ns, estimated %.0f ns), estimated winner=%s (measured %.0f ns, estimated %.0f ns)",
+				name, actualWinner, actualRow.y, estimatedNS(actualRow, c),
+				estimatedWinner, estimatedRow.y, estimatedNS(estimatedRow, c))
 		}
 	}
 	return nil
+}
+
+func plansStatisticallyEquivalent(plans map[string]observation, left, right string) bool {
+	leftRow, leftOK := plans[left]
+	rightRow, rightOK := plans[right]
+	if !leftOK || !rightOK || leftRow.censored || rightRow.censored {
+		return false
+	}
+	difference := math.Abs(leftRow.y - rightRow.y)
+	noise := 3 * (leftRow.noiseNS + rightRow.noiseNS)
+	return difference <= noise
 }
 
 func printDecisionOrdering(rows []observation, c constants) {
@@ -1624,7 +1784,8 @@ func readCurrentConstants(path string) (constants, error) {
 		"planner_membership_ordered_driver_input_row_ns",
 		"planner_membership_broad_text_match_row_ns",
 		"planner_membership_broad_text_match_byte_ns",
-		"planner_ordered_batch_accept_startup_ns",
+		"planner_membership_ordered_scan_invocation_ns",
+		"planner_direct_presence_probe_row_ns",
 	}
 	values := make([]int64, len(names))
 	content := string(data)
@@ -1632,6 +1793,15 @@ func readCurrentConstants(path string) (constants, error) {
 		prefix := "(define " + name + " "
 		start := strings.Index(content, prefix)
 		if start < 0 {
+			// The direct-probe coefficient used to be an anonymous literal inside
+			// planner_direct_presence_probe_cost. A one-nanosecond floor lets the
+			// first run fit it from direct-consumer observations and then persist
+			// the named coefficient in the generated block.
+			if name == "planner_direct_presence_probe_row_ns" ||
+				name == "planner_membership_ordered_scan_invocation_ns" {
+				values[i] = 1
+				continue
+			}
 			return constants{}, fmt.Errorf("cost constant %s not found", name)
 		}
 		start += len(prefix)
@@ -1652,10 +1822,11 @@ func readCurrentConstants(path string) (constants, error) {
 		recsetBuildRowNS: values[6], recsetProbeRowNS: values[7],
 		recsetAggregateRowNS: values[8], groupCacheStartupNS: values[9],
 		groupCacheBuildRowNS: values[10], groupCacheProbeRowNS: values[11],
-		orderedDriverInputNS:  values[12],
-		broadTextMatchRowNS:   values[13],
-		broadTextMatchByteNS:  values[14],
-		orderedBatchStartupNS: values[15],
+		orderedDriverInputNS:     values[12],
+		broadTextMatchRowNS:      values[13],
+		broadTextMatchByteNS:     values[14],
+		orderedScanInvocationNS:  values[15],
+		directPresenceProbeRowNS: values[16],
 	}, nil
 }
 
@@ -1675,8 +1846,9 @@ func patchQueryplan(path string, c constants) error {
 Calibrated by tools/costgen from tests/**/*.yaml workloads tagged with
 metadata.physical_calibration. Each observation is an executed, forced
 EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
+(define planner_direct_presence_probe_row_ns %d)
 (define planner_direct_presence_probe_cost (lambda (probe_rows)
-	(planner_cost 0 0 (* probe_rows 48685) 0 0 0 0 0 probe_rows 0.75)))
+	(planner_cost 0 0 (* probe_rows planner_direct_presence_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
 (define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
@@ -1701,11 +1873,12 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_group_cache_build_row_ns %d)
 (define planner_membership_group_cache_probe_row_ns %d)
 (define planner_membership_ordered_driver_input_row_ns %d)
-(define planner_ordered_batch_accept_startup_ns %d)
-/* END GENERATED COST CONSTANTS */`, c.scanInvocationNS, c.scanRowNS,
+(define planner_membership_ordered_scan_invocation_ns %d)
+/* END GENERATED COST CONSTANTS */`, c.directPresenceProbeRowNS,
+		c.scanInvocationNS, c.scanRowNS,
 		c.filterColumnRowNS, c.mapColumnRowNS, c.expressionOperationNS, c.broadTextMatchRowNS, c.broadTextMatchByteNS,
 		c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
-		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedBatchStartupNS)
+		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS)
 	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }

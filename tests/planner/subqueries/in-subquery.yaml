@@ -1002,7 +1002,7 @@ test_cases:
           LIMIT 10
         expect:
           contains:
-            - "recset_project_join"
+            - "recset_key_index"
             - "scan_order"
           not_contains:
             - "touch_keytable"
@@ -1296,9 +1296,9 @@ test_cases:
           LIMIT 72
         expect:
           contains:
+            - "ordered_batch_accept"
+            - "candidate_keyset"
             - "driver_order_membership_probe"
-            - "recset_key_index"
-            - "scan_order"
       - sql: |
           EXPLAIN
           SELECT t.ID
@@ -1317,7 +1317,7 @@ test_cases:
         expect:
           contains:
             - "in_dv_file"
-            - "recset_project_join"
+            - "recset_key_index"
             - "recset_union"
           not_contains:
             - "$break"
@@ -1354,6 +1354,32 @@ test_cases:
             - "result_equal"
           not_contains:
             - "operator_consistent false"
+      - sql: |
+          EXPLAIN PHYSICAL CALIBRATE
+          SELECT t.ID
+          FROM (
+            SELECT d.ID, d.file_id, d.sort_key
+            FROM in_dv_doc d
+            LEFT JOIN in_dv_acl a ON a.ID = d.file_id
+          ) t
+          WHERE t.file_id IN (
+            SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%e%'
+            UNION
+            SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%e%'
+          )
+          ORDER BY t.sort_key
+          LIMIT 2
+        expect:
+          rows: 3
+          contains:
+            - "candidate_keyset"
+            - "driver_order_membership_probe"
+            - "ordered_batch_accept"
+            - "operator_consistent"
+            - "result_equal"
+          not_contains:
+            - "operator_consistent false"
+            - "result_equal false"
       - sql: |
           EXPLAIN PHYSICAL CALIBRATE DISCOVER
           SELECT t.ID

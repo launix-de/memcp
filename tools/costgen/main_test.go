@@ -40,6 +40,17 @@ func TestFitNonnegativePhysicalCostEquation(t *testing.T) {
 	}
 }
 
+func TestSolveKeepsBaselineWhenLegacyCarrierFitIsUnderdetermined(t *testing.T) {
+	baseline := constants{scanRowNS: 123}
+	got, err := solve(nil, nil, baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.scanRowNS != baseline.scanRowNS {
+		t.Fatalf("scan row coefficient = %d, want preserved baseline %d", got.scanRowNS, baseline.scanRowNS)
+	}
+}
+
 func TestValidateRowsRejectsDecisionPlanMismatch(t *testing.T) {
 	estimated, candidateInput, candidateRows, driverRows := 100.0, 1000.0, 100.0, 4000.0
 	rows := []calibrationRow{
@@ -101,19 +112,99 @@ func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 		t.Fatalf("repeated broad text features = (%v, %v), want (400, 3276800)",
 			features[13], features[14])
 	}
-	if features[15] != 1 {
-		t.Fatalf("ordered batch startup feature = %v, want 1", features[15])
+	if features[12] != 4 {
+		t.Fatalf("ordered batch driver work = %v, want 4 rows²/1M", features[12])
+	}
+	if features[15] != 4 {
+		t.Fatalf("ordered scan invocations = %v, want 4", features[15])
 	}
 }
 
-func TestFitOrderedBatchStartupUsesExactBatchObservations(t *testing.T) {
-	features := make([]float64, 16)
-	features[15] = 1
-	value, ok := fitOrderedBatchStartup([]observation{
-		{plan: "ordered_batch_accept", y: 42000, x: features},
+func TestRowFeaturesModelsDirectPresenceProbes(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Plan: "driver_filter_join_probe", Consumer: "filter",
+		CandidateInputRows: value(100), CandidateRows: value(10), ProjectedDriverRows: value(20),
+		DriverInputRows: value(1000), DriverRows: value(25), ExpectedDriverRowsVisited: value(25),
+		ProbeBranches: value(3), CandidateScanInvocations: value(1), CandidateFilterColumns: value(1),
+		CandidateMapColumns: value(1), CandidateCacheMapColumns: value(2),
+		CandidateExpressionOperations: value(1), CandidateBroadTextMatchRows: value(0),
+		CandidateBroadTextMatchBytes: value(0), DriverScanInvocations: value(1),
+		DriverFilterColumns: value(0), DriverMapColumns: value(1), DriverExpressionOperations: value(0),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(features) != 17 || features[16] != 75 {
+		t.Fatalf("direct presence features = %v, want 75 probes", features)
+	}
+}
+
+func TestFitOrderedScanInvocationUsesExactBatchObservations(t *testing.T) {
+	features := make([]float64, 17)
+	features[15] = 4
+	value, ok := fitOrderedScanInvocation([]observation{
+		{caseName: "batch", plan: "candidate_keyset", y: 1000, x: make([]float64, 17)},
+		{caseName: "batch", plan: "ordered_batch_accept", y: 2680, x: features},
 	}, constants{})
-	if !ok || value != 42000 {
-		t.Fatalf("ordered batch startup = (%d, %v), want (42000, true)", value, ok)
+	if !ok || value != 420 {
+		t.Fatalf("ordered scan invocation = (%d, %v), want (420, true)", value, ok)
+	}
+}
+
+func TestRowFeaturesModelsPrefilteredCandidateWork(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Plan: "prefiltered_candidate_keyset", Consumer: "order_limit",
+		CandidateInputRows: value(1000), CandidateRows: value(100), CandidateDensity: value(0.1),
+		ProjectedDriverRows: value(20), DriverInputRows: value(10000), DriverRows: value(72),
+		PrefilteredDriverRows: value(100), ExpectedDriverRowsVisited: value(100), ProbeBranches: value(2),
+		CandidateScanInvocations: value(2), CandidateFilterColumns: value(1), CandidateMapColumns: value(1),
+		CandidateCacheMapColumns: value(2), CandidateExpressionOperations: value(1),
+		CandidateBroadTextMatchRows: value(1000), CandidateBroadTextMatchBytes: value(8000),
+		DriverScanInvocations: value(1), DriverFilterColumns: value(1), DriverMapColumns: value(1),
+		DriverExpressionOperations: value(2),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// candidate work=200, matches=20, projection=420.
+	if features[0] != 3 || features[1] != 10620 || features[2] != 10200 || features[5] != 1 ||
+		features[3] != 420 || features[4] != 20200 || features[6] != 420 ||
+		features[13] != 200 || features[14] != 1600 {
+		t.Fatalf("prefiltered features = %v", features)
+	}
+}
+
+func TestFitDirectCarrierPairCancelsPairedCommonWork(t *testing.T) {
+	candidateA, driverA := make([]float64, 17), make([]float64, 17)
+	candidateA[5], candidateA[8], driverA[16] = 1, 1, 100
+	candidateB, driverB := make([]float64, 17), make([]float64, 17)
+	candidateB[5], candidateB[8], driverB[16] = 1, 1, 10
+	startup, probe, ok := fitDirectCarrierPair([]observation{
+		{caseName: "large", plan: "candidate_keyset", y: 10000, x: candidateA},
+		{caseName: "large", plan: "driver_filter_join_probe", y: 42000, x: driverA},
+		{caseName: "small", plan: "candidate_keyset", y: 10000, x: candidateB},
+		{caseName: "small", plan: "driver_filter_join_probe", y: 9000, x: driverB},
+	}, constants{})
+	if !ok || startup != 4667 || probe != 367 {
+		t.Fatalf("direct carrier pair = (%d, %d, %v), want (4667, 367, true)", startup, probe, ok)
+	}
+}
+
+func TestDecisionAlternativesAcceptsDirectFilterConsumer(t *testing.T) {
+	rows := []observation{
+		{caseName: "filter", plan: "candidate_keyset"},
+		{caseName: "filter", plan: "driver_filter_join_probe"},
+	}
+	groups, err := decisionAlternatives(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups["filter"]) != 2 {
+		t.Fatalf("unexpected alternatives: %+v", groups)
 	}
 }
 
@@ -135,7 +226,7 @@ func TestMedianRowsAcceptsOrderedBatchPlans(t *testing.T) {
 
 func TestValidateDecisionOrderingIncludesOrderedBatch(t *testing.T) {
 	features := func(first float64) []float64 {
-		values := make([]float64, 15)
+		values := make([]float64, 17)
 		values[0] = first
 		return values
 	}
@@ -146,6 +237,25 @@ func TestValidateDecisionOrderingIncludesOrderedBatch(t *testing.T) {
 	}
 	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
 		t.Fatal("three-way validation accepted an incorrectly ranked ordered batch plan")
+	}
+}
+
+func TestDecisionOrderingAcceptsOnlyMeasuredNoiseTies(t *testing.T) {
+	features := func(first float64) []float64 {
+		values := make([]float64, 17)
+		values[0] = first
+		return values
+	}
+	rows := []observation{
+		{caseName: "tie", plan: "candidate_keyset", y: 100, noiseNS: 10, x: features(2)},
+		{caseName: "tie", plan: "driver_order_membership_probe", y: 120, noiseNS: 10, x: features(1)},
+	}
+	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err != nil {
+		t.Fatalf("noise-equivalent alternatives rejected: %v", err)
+	}
+	rows[1].y = 200
+	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
+		t.Fatal("materially slower estimated winner accepted as a noise tie")
 	}
 }
 

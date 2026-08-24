@@ -23,6 +23,11 @@ setup:
   - sql: "DROP TABLE IF EXISTS pc_files_large"
   - sql: "DROP TABLE IF EXISTS pc_docs_large"
   - sql: "DROP TABLE IF EXISTS pc_docs_million"
+  - sql: "DROP TABLE IF EXISTS pc_doc_meta"
+  # String-key membership prevents the target-side prefiltered projection and
+  # isolates candidate startup from direct probe work.
+  - sql: "DROP TABLE IF EXISTS pc_events"
+  - sql: "DROP TABLE IF EXISTS pc_keys"
   # Inline values contribute more than 15 MB of candidate text work while the
   # ordered driver still exercises the production-scale million-row shape. A
   # separate component fixture below covers wider values without turning this
@@ -36,6 +41,9 @@ setup:
   - sql: "CREATE TABLE pc_files_large (id INT PRIMARY KEY, filename VARCHAR(32), search VARCHAR(32), f1 INT, f2 INT, f3 INT, f4 INT, f5 INT, f6 INT, f7 INT, f8 INT)"
   - sql: "CREATE TABLE pc_docs_large (id INT PRIMARY KEY, file_id INT, sort_key INT, p1 INT, p2 INT, p3 INT, p4 INT, p5 INT, p6 INT, p7 INT, p8 INT)"
   - sql: "CREATE TABLE pc_docs_million (id INT PRIMARY KEY, file_id INT, sort_key INT, p1 INT) ENGINE=sloppy"
+  - sql: "CREATE TABLE pc_doc_meta (id INT PRIMARY KEY, label VARCHAR(32))"
+  - sql: "CREATE TABLE pc_events (id INT PRIMARY KEY, entity_key VARCHAR(32), event_time INT, kind VARCHAR(16))"
+  - sql: "CREATE TABLE pc_keys (id INT PRIMARY KEY, enabled INT)"
   - sql: "CREATE TABLE pc_files_text (id INT PRIMARY KEY, filename VARCHAR(255), search VARCHAR(255)) ENGINE=memory"
   - sql: "CREATE TABLE pc_files_wide (id INT PRIMARY KEY, filename VARCHAR(16384), search VARCHAR(16384)) ENGINE=sloppy"
   - scm: |
@@ -51,7 +59,15 @@ setup:
         (insert (table "memcp-tests" "pc_files_small") '("id" "filename" "search" "f1" "f2" "f3" "f4" "f5" "f6" "f7" "f8") (make_files 1000))
         (insert (table "memcp-tests" "pc_docs_small") '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 4000 1000))
         (insert (table "memcp-tests" "pc_files_large") '("id" "filename" "search" "f1" "f2" "f3" "f4" "f5" "f6" "f7" "f8") (make_files 5000))
-        (insert (table "memcp-tests" "pc_docs_large") '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 20000 5000)))
+        (insert (table "memcp-tests" "pc_docs_large") '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 20000 5000))
+        (insert (table "memcp-tests" "pc_doc_meta") '("id" "label")
+          (map (produceN 5000) (lambda (i) (list i (concat "meta-" (string i))))))
+        (insert (table "memcp-tests" "pc_events") '("id" "entity_key" "event_time" "kind")
+          (map (produceN 10000) (lambda (i)
+            (list i (if (>= i 9990) "key:1" (concat "noise:" (string i))) i
+              (if (equal? (mod i 2) 0) "root" "leaf")))))
+        (insert (table "memcp-tests" "pc_keys") '("id" "enabled")
+          (list (list 1 1) (list 2 0))))
   - scm: |
       (insert (table "memcp-tests" "pc_docs_million") '("id" "file_id" "sort_key" "p1")
         (map (produceN 250000) (lambda (i) (list i (mod i 5000) i i))))
@@ -94,6 +110,9 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS pc_files_large"
   - sql: "DROP TABLE IF EXISTS pc_docs_large"
   - sql: "DROP TABLE IF EXISTS pc_docs_million"
+  - sql: "DROP TABLE IF EXISTS pc_doc_meta"
+  - sql: "DROP TABLE IF EXISTS pc_events"
+  - sql: "DROP TABLE IF EXISTS pc_keys"
   - sql: "DROP TABLE IF EXISTS pc_files_text"
   - sql: "DROP TABLE IF EXISTS pc_files_wide"
 
@@ -164,6 +183,37 @@ test_cases:
         SELECT f.id FROM pc_files_small f WHERE f.search LIKE '%hit%'
       )
 
+  # A branch-local membership below a highly selective outer predicate makes
+  # candidate startup and direct per-probe work independently identifiable.
+  # Without this row-count scale the two terms are collinear in broad scans and
+  # the fitted model can only describe their large-driver sum.
+  - name: "computed-key membership with tiny driver"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT e.id
+      FROM pc_events e
+      WHERE e.event_time >= 9990
+        AND (e.kind = 'root' OR e.entity_key IN (
+          SELECT CONCAT('key:', k.id) FROM pc_keys k WHERE k.enabled = 1
+        ))
+
+  # Pair the same cache-backed candidate with a larger driver. The two driver
+  # cardinalities make fixed group-cache startup and per-row direct probes
+  # independently identifiable instead of fitting their combined duration.
+  - name: "computed-key membership with medium driver"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT e.id
+      FROM pc_events e
+      WHERE e.event_time >= 9900
+        AND (e.kind = 'root' OR e.entity_key IN (
+          SELECT CONCAT('key:', k.id) FROM pc_keys k WHERE k.enabled = 1
+        ))
+
   - name: "selective membership below ordered limit one"
     physical_calibration: true
     calibration_holdout: true
@@ -194,6 +244,23 @@ test_cases:
       )
       ORDER BY d.sort_key
       LIMIT 10
+
+  # The production pagination width varies driver and projection work and
+  # provides the sixth independent exact observation for the common fit.
+  - name: "ordered membership at limit seventy-two"
+    physical_calibration: true
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_large d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_large f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_large f WHERE f.search LIKE '%hit%'
+      )
+      ORDER BY d.sort_key
+      LIMIT 72
 
   - name: "same candidate column with several predicate operations"
     physical_calibration: true
@@ -277,7 +344,7 @@ test_cases:
     compile_state: "variant_compile_and_execute"
     expected_driver_input_rows: 1000000
     warmup: 0
-    repetitions: 3
+    repetitions: 7
     sql: |
       SELECT d.id, d.p1
       FROM pc_docs_million d
@@ -353,6 +420,26 @@ test_cases:
       ORDER BY d.sort_key, d.p1, d.id, d.file_id
       LIMIT 72
 
+  - name: "ordered batch with unique late projection"
+    physical_calibration: true
+    calibration_decision: "membership_carrier"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id, m.label
+      FROM pc_docs_large d
+      LEFT JOIN pc_doc_meta m ON m.id = d.file_id
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_large f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_large f WHERE f.search LIKE '%hit%'
+      )
+      ORDER BY d.sort_key, d.id
+      LIMIT 72
+
+  # A uniformly distributed selective equality models tenant/location filters
+  # without making a random one-shard estimate depend on which range shard was
+  # sampled. The physical winner should narrow the driver before text/ACL work.
   - name: "production-scale prefiltered membership carrier"
     physical_calibration: true
     calibration_decision: "membership_carrier"
@@ -368,7 +455,7 @@ test_cases:
     sql: |
       SELECT d.id, d.p1
       FROM pc_docs_million d
-      WHERE d.p1 >= 999000
+      WHERE d.file_id = 4999
         AND d.file_id IN (
           SELECT f.id FROM pc_files_text f WHERE f.filename LIKE '%c%'
           UNION

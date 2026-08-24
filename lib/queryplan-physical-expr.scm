@@ -2918,17 +2918,21 @@ the auto-index chooses the concrete access path on both tables. */
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe)
 	(begin
 		(define stage (nth membership 0))
 		/* Some late RecSet consumers are introduced after reorder telemetry was
 		attached. Reconstruct only the candidate's scalar work from the existing
 		logical stage; this is one formula walk, never an alternative plan build. */
 		(define facts (merge (list (membership_candidate_work_facts stage) (gs_facts stage))))
-		(define cost_facts (if (equal? consumer (quote aggregate))
-			(qassoc_set facts (quote membership_consumer) (quote aggregate))
-			facts))
-		(define driver_probe_supported (membership_driver_subscan_supported? stage))
+		(define cost_facts (qassoc_set
+			(if (equal? consumer (quote aggregate))
+				(qassoc_set facts (quote membership_consumer) (quote aggregate))
+				facts)
+			(quote membership_downstream_probe_branches)
+			(coalesceNil downstream_probe_branches 0)))
+		(define driver_probe_supported (and allow_driver_probe
+			(membership_driver_subscan_supported? stage)))
 		(define raw_expr (recset_project_join_expr_for_membership_raw src membership))
 		(if (or (nil? raw_expr)
 			(not (or
@@ -2940,8 +2944,12 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				measure here for callers that reached physical lowering without those
 				facts; repeating a selective estimate may build an entire adaptive text
 				index even though the sample itself is capped. */
+				(define stage_input (gs_input stage))
 				(define measured_estimate (if (nil? (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
-					(planner_stage_filter_estimate (gs_input stage) 512)
+					(if (source_is_base_table? stage_input)
+						(planner_source_filter_estimate stage_input
+							(coalesceNil (qassoc_get facts (quote condition) true) true) 512)
+						(planner_stage_filter_estimate stage_input 512))
 					nil))
 				(define estimate_population (coalesceNil
 					(qassoc_get facts (quote membership_candidate_estimate_population) nil)
@@ -2954,7 +2962,9 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(qassoc_get measured_estimate (quote capped) false)))
 				(define candidate_input_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_input_rows) nil)
-					(planner_stage_input_rows (gs_input stage))))
+					(if (source_is_base_table? stage_input)
+						(planner_source_row_count stage_input)
+						(planner_stage_input_rows stage_input))))
 				(define candidate_matching_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_matching_rows) nil)
 					(qassoc_get measured_estimate (quote rows) nil)))
@@ -2995,11 +3005,28 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				feasible carrier pair outside this semantic/Top-K constraint. */
 				(define guarded_broad_order_driver
 					(qassoc_get facts (quote guarded_broad_order_driver) false))
+				(define branch_not_implied
+					(qassoc_get facts (quote membership_branch_not_implied) false))
+				/* The consumer determines which lazy driver operator is executable.
+				An ordered LIMIT probes one prepared RHS key index while it walks the
+				order. An ordinary filter/aggregate can instead lower the marker to
+				direct indexed presence probes over its already-filtered driver rows. */
+				(define ordered_driver_keyset_supported
+					(not (empty_list? (membership_keyset_bindings (list membership)))))
+				(define driver_strategy (if (and
+					(equal? consumer (quote order_limit))
+					ordered_driver_keyset_supported)
+					"driver_order_membership_probe"
+					"driver_filter_join_probe"))
 				(define candidate_cost (if known
 					(membership_projection_cost candidate_input_rows candidate_rows driver_rows cost_facts)
 					nil))
 				(define driver_cost (if (and known driver_probe_supported)
-					(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows cost_facts)
+					(if (equal? driver_strategy "driver_order_membership_probe")
+						(membership_ordered_driver_probe_cost
+							candidate_input_rows candidate_rows driver_rows cost_facts)
+						(membership_driver_probe_cost driver_rows
+							(qassoc_get facts (quote membership_candidate_probe_branches) 1)))
 					nil))
 				(define batch_cost_facts (if allow_ordered_batch
 					(merge (list
@@ -3023,17 +3050,20 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(list
 						(list (quote lambda) (list prefiltered_driver_var) prefiltered_body)
 						prefiltered_driver_expr)))
-				(define prefiltered_eligible (and
+				/* Executability is structural and must remain stable when an autoindex
+				refines cardinality after compilation. Selectivity affects the cost, not
+				whether CALIBRATE or a later recompile may choose this carrier. */
+				(define prefiltered_supported (and
 					(not (nil? prefiltered_expr))
 					(and (number? prefiltered_driver_rows)
-						(and (number? source_rows) (< prefiltered_driver_rows source_rows)))))
-				(define prefiltered_cost (if (and prefiltered_eligible (number? candidate_rows))
+						(number? source_rows))))
+				(define prefiltered_cost (if (and prefiltered_supported (number? candidate_rows))
 					(membership_prefiltered_candidate_cost
 						candidate_input_rows candidate_rows prefiltered_driver_rows cost_facts)
 					nil))
 				(define cost_choices (filter (list
 					(if (nil? candidate_cost) nil (list "candidate_keyset" candidate_cost))
-					(if (nil? driver_cost) nil (list "driver_order_membership_probe" driver_cost))
+					(if (nil? driver_cost) nil (list driver_strategy driver_cost))
 					(if (nil? batch_cost) nil (list "ordered_batch_accept" batch_cost))
 					(if (nil? prefiltered_cost) nil
 						(list "prefiltered_candidate_keyset" prefiltered_cost)))
@@ -3044,16 +3074,17 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						(if (planner_cost_better? (cadr choice) (cadr best)) choice best))
 						(car cost_choices))))
 				(define normal_choice (if (and guarded_broad_order_driver driver_probe_supported)
-					"driver_order_membership_probe"
+					driver_strategy
 					(if (nil? cost_choice)
-						(if (and owns_requirement driver_probe_supported)
-							"driver_order_membership_probe" "candidate_keyset")
+						(if (and driver_probe_supported
+							(or owns_requirement branch_not_implied))
+							driver_strategy "candidate_keyset")
 						(car cost_choice))))
 				(define alternatives (merge (list
 					(cons "candidate_keyset"
-						(if driver_probe_supported (list "driver_order_membership_probe") '()))
+						(if driver_probe_supported (list driver_strategy) '()))
 					(if allow_ordered_batch (list "ordered_batch_accept") '())
-					(if prefiltered_eligible (list "prefiltered_candidate_keyset") '()))))
+					(if prefiltered_supported (list "prefiltered_candidate_keyset") '()))))
 				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
 				(define forced (planner_physical_override decision_id))
 				(planner_record_physical_decision
@@ -3101,6 +3132,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "candidate_filter_columns" (qassoc_get facts (quote membership_candidate_filter_columns) 0))
 							(list "candidate_map_columns" (qassoc_get facts (quote membership_candidate_map_columns) 1))
 							(list "candidate_cache_map_columns" (qassoc_get facts (quote membership_candidate_cache_map_columns) 2))
+							(list "candidate_cache_backed"
+								(qassoc_get facts (quote membership_candidate_cache_backed) false))
 							(list "candidate_expression_operations" (qassoc_get facts (quote membership_candidate_expression_operations) 0))
 							(list "candidate_expression_depth" (qassoc_get facts (quote membership_candidate_expression_depth) 0))
 							(list "candidate_broad_text_match_rows" (qassoc_get facts (quote membership_candidate_broad_text_match_rows) 0))
@@ -3120,9 +3153,9 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 								(list "reason" (if (equal? chosen "candidate_keyset") "selected" (if known "higher_total_ns_or_forced_alternative" "unknown_statistics_fallback")))
 								(list "cost" (if (nil? candidate_cost) '() (planner_cost_explain candidate_cost))))
 							(list
-								(list "plan" "driver_order_membership_probe")
-								(list "status" (if (equal? chosen "driver_order_membership_probe") "chosen" "rejected"))
-								(list "reason" (if (equal? chosen "driver_order_membership_probe") "selected" "higher_total_ns_or_forced_alternative"))
+								(list "plan" driver_strategy)
+								(list "status" (if (equal? chosen driver_strategy) "chosen" "rejected"))
+								(list "reason" (if (equal? chosen driver_strategy) "selected" "higher_total_ns_or_forced_alternative"))
 								(list "cost" (if (nil? driver_cost) '() (planner_cost_explain driver_cost))))
 							(if allow_ordered_batch
 								(list
@@ -3131,7 +3164,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(list "reason" (if (equal? chosen "ordered_batch_accept") "selected" "higher_total_ns_or_forced_alternative"))
 									(list "cost" (if (nil? batch_cost) '() (planner_cost_explain batch_cost))))
 								nil)
-							(if prefiltered_eligible
+							(if prefiltered_supported
 								(list
 									(list "plan" "prefiltered_candidate_keyset")
 									(list "status" (if (equal? chosen "prefiltered_candidate_keyset") "chosen" "rejected"))
@@ -3146,7 +3179,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
-			src membership consumer driver_rows_override allow_ordered_batch nil))
+			src membership consumer driver_rows_override allow_ordered_batch nil 0 true))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
 			nil))))
@@ -5467,8 +5500,9 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 Calibrated by tools/costgen from tests/**/*.yaml workloads tagged with
 metadata.physical_calibration. Each observation is an executed, forced
 EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
+(define planner_direct_presence_probe_row_ns 20243)
 (define planner_direct_presence_probe_cost (lambda (probe_rows)
-	(planner_cost 0 0 (* probe_rows 48685) 0 0 0 0 0 probe_rows 0.75)))
+	(planner_cost 0 0 (* probe_rows planner_direct_presence_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
 (define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
@@ -5478,20 +5512,20 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 	(planner_cost 365607 0 0 0 0 (* probe_rows 17681)
 		(* probe_rows 1) 0 probe_rows 0.6)))
 
-(define planner_membership_scan_invocation_ns 1)
-(define planner_membership_scan_row_ns 178)
+(define planner_membership_scan_invocation_ns 122080)
+(define planner_membership_scan_row_ns 1)
 (define planner_membership_filter_column_row_ns 1)
-(define planner_membership_map_column_row_ns 28)
-(define planner_membership_expression_operation_row_ns 98)
+(define planner_membership_map_column_row_ns 32)
+(define planner_membership_expression_operation_row_ns 220)
 (define planner_membership_broad_text_match_row_ns 1)
-(define planner_membership_broad_text_match_byte_ns 4)
+(define planner_membership_broad_text_match_byte_ns 2)
 (define planner_membership_recset_startup_ns 1)
 (define planner_membership_recset_build_row_ns 1)
 (define planner_membership_recset_probe_row_ns 1)
-(define planner_membership_recset_aggregate_row_ns 215)
-(define planner_membership_group_cache_startup_ns 17538872)
-(define planner_membership_group_cache_build_row_ns 11590)
-(define planner_membership_group_cache_probe_row_ns 132886)
-(define planner_membership_ordered_driver_input_row_ns 255)
-(define planner_ordered_batch_accept_startup_ns 1)
+(define planner_membership_recset_aggregate_row_ns 132)
+(define planner_membership_group_cache_startup_ns 4489531)
+(define planner_membership_group_cache_build_row_ns 1)
+(define planner_membership_group_cache_probe_row_ns 1)
+(define planner_membership_ordered_driver_input_row_ns 1)
+(define planner_membership_ordered_scan_invocation_ns 2523969)
 /* END GENERATED COST CONSTANTS */
