@@ -35,5 +35,14 @@ test_cases:
     sql: "SHOW PLUGINS"
     expect: {}  # Accept empty result
 
-cleanup: []
+  - name: "SET session variable to DEFAULT"
+    sql: "SET optimizer_switch=DEFAULT"
 
+  - name: "mysqldump database collation probe is non-null"
+    sql: "SELECT @@collation_database AS collation_database"
+    expect:
+      rows: 1
+      data:
+        - collation_database: "utf8mb4_general_ci"
+
+cleanup: []

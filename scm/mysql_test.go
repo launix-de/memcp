@@ -46,3 +46,9 @@ func TestAppendMySQLResultRowDuplicateAliasUsesLastValueType(t *testing.T) {
 		t.Fatalf("expected last duplicate value, got %q", got)
 	}
 }
+
+func TestMySQLServerVersionHasClientCompatiblePrefix(t *testing.T) {
+	if got := (&MySQLWrapper{}).ServerVersion(); got != "5.7.44-MemCP" {
+		t.Fatalf("unexpected MySQL protocol version %q", got)
+	}
+}

@@ -9,6 +9,7 @@ metadata:
 
 setup:
   - sql: "CREATE TABLE IF NOT EXISTS isc_test_tbl (id INT, name VARCHAR(50), score DOUBLE)"
+  - sql: "CREATE TRIGGER isc_test_bi BEFORE INSERT ON isc_test_tbl FOR EACH ROW SET NEW.name = COALESCE(NEW.name, 'synthetic')"
   - scm: '(createtable "memcp-tests" ".is_hidden_meta" (list (list "column" "id" "int" (list) (list))) (list "engine" "sloppy") true)'
 
 test_cases:
@@ -81,6 +82,15 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "COLUMNS: mysqldump generation metadata is non-null"
+    sql: >
+      SELECT column_name, extra, generation_expression, data_type
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE table_schema = 'memcp-tests' AND table_name = 'isc_test_tbl'
+      ORDER BY ordinal_position
+    expect:
+      rows: 3
+
   # --- STATISTICS ---
 
   - name: "STATISTICS: query returns without error"
@@ -102,12 +112,59 @@ test_cases:
     expect:
       min_rows: 0
 
+  # --- TRIGGERS (mysqldump compat) ---
+
+  - name: "TRIGGERS: mysqldump discovers table trigger"
+    sql: >
+      SELECT trigger_name
+      FROM INFORMATION_SCHEMA.TRIGGERS
+      WHERE event_object_schema = DATABASE()
+        AND event_object_table = 'isc_test_tbl'
+    expect:
+      rows: 1
+      data:
+        - trigger_name: "isc_test_bi"
+
   # --- FILES (mysqldump compat) ---
 
   - name: "FILES: empty result for compatibility"
     sql: "SELECT * FROM INFORMATION_SCHEMA.FILES LIMIT 5"
     expect:
       min_rows: 0
+
+  - name: "FILES: mysqldump tablespace probe accepts legacy GROUP BY semantics"
+    sql: >
+      SELECT LOGFILE_GROUP_NAME, FILE_NAME, TOTAL_EXTENTS, INITIAL_SIZE, ENGINE, EXTRA
+      FROM INFORMATION_SCHEMA.FILES
+      WHERE FILE_TYPE = 'UNDO LOG'
+        AND FILE_NAME IS NOT NULL
+        AND LOGFILE_GROUP_NAME IS NOT NULL
+        AND LOGFILE_GROUP_NAME IN (
+          SELECT DISTINCT LOGFILE_GROUP_NAME
+          FROM INFORMATION_SCHEMA.FILES
+          WHERE FILE_TYPE = 'DATAFILE'
+            AND TABLESPACE_NAME IN (
+              SELECT DISTINCT TABLESPACE_NAME
+              FROM INFORMATION_SCHEMA.PARTITIONS
+              WHERE TABLE_SCHEMA IN ('memcp-tests')))
+      GROUP BY LOGFILE_GROUP_NAME, FILE_NAME, ENGINE, TOTAL_EXTENTS, INITIAL_SIZE
+      ORDER BY LOGFILE_GROUP_NAME
+    expect:
+      rows: 0
+
+  - name: "FILES: mysqldump datafile probe exposes tablespace columns"
+    sql: >
+      SELECT DISTINCT TABLESPACE_NAME, FILE_NAME, LOGFILE_GROUP_NAME,
+             EXTENT_SIZE, INITIAL_SIZE, ENGINE
+      FROM INFORMATION_SCHEMA.FILES
+      WHERE FILE_TYPE = 'DATAFILE'
+        AND TABLESPACE_NAME IN (
+          SELECT DISTINCT TABLESPACE_NAME
+          FROM INFORMATION_SCHEMA.PARTITIONS
+          WHERE TABLE_SCHEMA IN ('memcp-tests'))
+      ORDER BY TABLESPACE_NAME, LOGFILE_GROUP_NAME
+    expect:
+      rows: 0
 
   # --- PARTITIONS (mysqldump compat) ---
 
@@ -173,5 +230,6 @@ test_cases:
       error: true
 
 cleanup:
+  - sql: "DROP TRIGGER IF EXISTS isc_test_bi"
   - sql: "DROP TABLE IF EXISTS isc_test_tbl"
   - sql: "DROP TABLE IF EXISTS `.is_hidden_meta`"
