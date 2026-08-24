@@ -380,7 +380,47 @@ func scanExprMayHaveSideEffects(v scm.Scmer) bool {
 	if !v.IsSlice() {
 		return false
 	}
-	for _, item := range v.Slice() {
+	items := v.Slice()
+	if len(items) > 0 {
+		if name, ok := scanSymbolName(items[0]); ok {
+			if name == "quote" {
+				return false
+			}
+			if name == "lambda" {
+				if len(items) < 3 {
+					return false
+				}
+				return scanExprMayHaveSideEffects(items[2])
+			}
+			if declaration := scm.DeclarationForValue(items[0]); declaration != nil {
+				if declaration.Type != nil && declaration.Type.HasSideEffects {
+					return true
+				}
+				for _, item := range items[1:] {
+					if scanExprMayHaveSideEffects(item) {
+						return true
+					}
+				}
+				return false
+			}
+			switch name {
+			case "and", "begin", "begin_mut", "if", "or", "outer", "var":
+				// Core forms control evaluation; their children are checked below.
+			default:
+				// A free procedure value can close over an emitter or other effect.
+				// Delaying it across a batch boundary is therefore not semantics-safe.
+				return true
+			}
+		} else if _, _, ok := scanLambdaParts(items[0]); ok {
+			// An immediately invoked lambda is statically visible. Its body and
+			// arguments are checked recursively below like any declared call.
+		} else {
+			// A computed call head, such as ((var 0) row), can resolve to a
+			// closure that emits a result. Its effects cannot be inferred here.
+			return true
+		}
+	}
+	for _, item := range items {
 		if scanExprMayHaveSideEffects(item) {
 			return true
 		}

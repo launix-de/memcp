@@ -60,6 +60,28 @@ func TestScanBatchRewriteKeepsEffectfulInnerMapperStreaming(t *testing.T) {
 	}
 }
 
+func TestScanBatchRewriteKeepsDynamicCallbackStreaming(t *testing.T) {
+	emit := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("emit"),
+		scm.NewSymbol("inner_id"),
+	})
+	if rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(emit)); !rewritten.IsNil() {
+		t.Fatalf("dynamic callback was buffered: %s", scm.SerializeToString(rewritten, &scm.Globalenv))
+	}
+}
+
+func TestScanBatchRewriteKeepsDeclaredEffectStreaming(t *testing.T) {
+	insert := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("insert"),
+		scm.NewSymbol("target"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("ID")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewSymbol("inner_id")}),
+	})
+	if rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(insert)); !rewritten.IsNil() {
+		t.Fatalf("declared effect was buffered: %s", scm.SerializeToString(rewritten, &scm.Globalenv))
+	}
+}
+
 func TestScanBatchRewriteStillBatchesPureInnerMapper(t *testing.T) {
 	rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(scm.NewSymbol("inner_id")))
 	if rewritten.IsNil() {
@@ -67,5 +89,41 @@ func TestScanBatchRewriteStillBatchesPureInnerMapper(t *testing.T) {
 	}
 	if plan := scm.SerializeToString(rewritten, &scm.Globalenv); !strings.Contains(plan, "scan_batch") {
 		t.Fatalf("rewritten plan contains no scan_batch: %s", plan)
+	}
+}
+
+func TestScanBatchRewriteStillBatchesDeclaredPureCall(t *testing.T) {
+	pureCall := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewSymbol("inner_id"),
+		scm.NewInt(1),
+	})
+	rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(pureCall))
+	if rewritten.IsNil() {
+		t.Fatal("declared pure callback was not batched")
+	}
+}
+
+func TestScanBatchRewriteStillBatchesImmediatePureLambda(t *testing.T) {
+	pureCall := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("lambda"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("value")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewSymbol("value")}),
+		}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("var"), scm.NewInt(0)}),
+	})
+	if rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(pureCall)); rewritten.IsNil() {
+		t.Fatal("immediately invoked pure lambda was not batched")
+	}
+}
+
+func TestScanBatchRewriteKeepsComputedCallbackStreaming(t *testing.T) {
+	emit := scm.NewSlice([]scm.Scmer{
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("var"), scm.NewInt(0)}),
+		scm.NewSymbol("inner_id"),
+	})
+	if rewritten := tryScanBatchRewrite(nestedScanBatchRewriteCall(emit)); !rewritten.IsNil() {
+		t.Fatalf("computed callback was buffered: %s", scm.SerializeToString(rewritten, &scm.Globalenv))
 	}
 }

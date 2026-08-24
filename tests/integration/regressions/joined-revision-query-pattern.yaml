@@ -1,4 +1,11 @@
-# Regression coverage for isodoc revision/file metadata via nested scalar subselects.
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# Regression coverage for revision/file metadata via joins and scalar subselects.
 
 metadata:
   version: "1.0"
@@ -87,6 +94,21 @@ test_cases:
           operation::pdf: true
           employee::description: null
           employee::canView: null
+
+  - name: "Ordered limited three-table join sees delta rows"
+    sql: |
+      SELECT d.ID, d.subject
+      FROM isodoc d
+      JOIN isodoc_revision r ON r.isodoc = d.ID
+      JOIN fop_files f ON f.ID = r.file
+      WHERE f.filename = 'scan-a2.pdf'
+      ORDER BY d.ID DESC
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          subject: "Akte A"
 
   - name: "Drop isodoc_revision table"
     sql: "DROP TABLE IF EXISTS isodoc_revision"
