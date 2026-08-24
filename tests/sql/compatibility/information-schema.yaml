@@ -82,6 +82,23 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "COLUMNS: MySQL-compatible default expressions"
+    setup:
+      - sql: "DROP TABLE IF EXISTS isc_defaults"
+      - sql: "CREATE TABLE isc_defaults (id INT NOT NULL, optional_value INT NULL, label VARCHAR(20) DEFAULT 'fallback')"
+    sql: "SELECT column_name, column_default FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = 'memcp-tests' AND table_name = 'isc_defaults' ORDER BY ordinal_position"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS isc_defaults"
+    expect:
+      rows: 3
+      data:
+        - column_name: "id"
+          column_default: null
+        - column_name: "optional_value"
+          column_default: "NULL"
+        - column_name: "label"
+          column_default: "'fallback'"
+
   - name: "COLUMNS: mysqldump generation metadata is non-null"
     sql: >
       SELECT column_name, extra, generation_expression, data_type
@@ -190,6 +207,64 @@ test_cases:
         AND table_schema = 'memcp-tests'
     expect:
       min_rows: 0
+
+  - name: "Foreign key metadata includes columns and actions"
+    setup:
+      - sql: "DROP TABLE IF EXISTS is_fk_child"
+      - sql: "DROP TABLE IF EXISTS is_fk_parent"
+      - sql: "CREATE TABLE is_fk_parent (id INT PRIMARY KEY, external_id INT, UNIQUE KEY is_uq_external (external_id))"
+      - sql: "CREATE TABLE is_fk_child (id INT PRIMARY KEY, parent_id INT, CONSTRAINT is_fk_child_parent FOREIGN KEY (parent_id) REFERENCES is_fk_parent(id) ON DELETE SET NULL ON UPDATE CASCADE)"
+    sql: >
+      SELECT key_column_usage.constraint_name AS constraint_name,
+             key_column_usage.column_name AS column_name,
+             key_column_usage.referenced_table_name AS referenced_table_name,
+             key_column_usage.referenced_column_name AS referenced_column_name,
+             referential_constraints.update_rule AS update_rule,
+             referential_constraints.delete_rule AS delete_rule
+      FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+      JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+        ON key_column_usage.constraint_schema = referential_constraints.constraint_schema
+       AND key_column_usage.constraint_name = referential_constraints.constraint_name
+      WHERE key_column_usage.table_schema = 'memcp-tests'
+        AND key_column_usage.constraint_name = 'is_fk_child_parent'
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS is_fk_child"
+      - sql: "DROP TABLE IF EXISTS is_fk_parent"
+    expect:
+      rows: 1
+      data:
+        - constraint_name: "is_fk_child_parent"
+          column_name: "parent_id"
+          referenced_table_name: "is_fk_parent"
+          referenced_column_name: "id"
+          update_rule: "CASCADE"
+          delete_rule: "SET NULL"
+
+  - name: "Unique constraints appear in key column usage"
+    setup:
+      - sql: "DROP TABLE IF EXISTS is_unique_metadata"
+      - sql: "CREATE TABLE is_unique_metadata (id INT PRIMARY KEY, external_id INT, UNIQUE KEY is_uq_metadata_external (external_id))"
+    sql: "SELECT constraint_name, column_name FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE table_schema = 'memcp-tests' AND table_name = 'is_unique_metadata' ORDER BY ordinal_position, constraint_name"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS is_unique_metadata"
+    expect:
+      rows: 2
+      data:
+        - constraint_name: "PRIMARY"
+          column_name: "id"
+        - constraint_name: "is_uq_metadata_external"
+          column_name: "external_id"
+
+  - name: "Unique constraint remains enforced"
+    setup:
+      - sql: "DROP TABLE IF EXISTS is_unique_enforced"
+      - sql: "CREATE TABLE is_unique_enforced (id INT PRIMARY KEY, external_id INT, UNIQUE KEY is_uq_enforced_external (external_id))"
+      - sql: "INSERT INTO is_unique_enforced VALUES (1, 7)"
+    sql: "INSERT INTO is_unique_enforced VALUES (2, 7)"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS is_unique_enforced"
+    expect:
+      error: true
 
   - name: "A genuinely ambiguous metadata column is rejected"
     sql: >

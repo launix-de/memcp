@@ -23,6 +23,15 @@ test_cases:
   - name: "UNLOCK TABLES"
     sql: "UNLOCK TABLES"
 
+  - name: "mysqldump repeatable-read session isolation"
+    sql: "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+  - name: "mysqldump savepoint"
+    sql: "SAVEPOINT sp"
+  - name: "mysqldump rollback to savepoint"
+    sql: "ROLLBACK TO SAVEPOINT sp"
+  - name: "mysqldump release savepoint"
+    sql: "RELEASE SAVEPOINT sp"
+
   # --- SHOW operations ---
   - name: "SHOW TABLES"
     sql: "SHOW TABLES"
@@ -186,6 +195,14 @@ test_cases:
     sql: "SHOW CREATE TRIGGER `dbc_t.dump_bi`"
     expect:
       rows: 1
+  - name: "MariaDB executable-comment CREATE TRIGGER"
+    sql: "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER `dbc_t.dump_ai` AFTER INSERT ON `dbc_t` FOR EACH ROW SET @dump_seen = NEW.id */"
+  - name: "SHOW CREATE restored MariaDB trigger"
+    sql: "SHOW CREATE TRIGGER `dbc_t.dump_ai`"
+    expect:
+      rows: 1
+  - name: "DROP restored MariaDB trigger"
+    sql: "DROP TRIGGER IF EXISTS `dbc_t.dump_ai`"
   - name: "DROP restored mysqldump trigger"
     sql: "DROP TRIGGER IF EXISTS `dbc_t.dump_bi`"
   - name: "DROP TRIGGER IF EXISTS after create"

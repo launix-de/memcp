@@ -49,10 +49,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(reduce (map (uk "Cols") (lambda (c) (concat "`" c "`"))) (lambda (a b) (concat a "," b)))
 			")")
 	)))
-	(define all_defs (merge col_defs uk_defs))
+	(define fk_defs (map (filter (meta "ForeignKeys") (lambda (fk)
+		(equal? (fk "Role") "referencing"))) (lambda (fk)
+			(concat "  CONSTRAINT " (quote_mysql_identifier (fk "Id")) " FOREIGN KEY ("
+				(reduce (map (fk "LocalColumns") quote_mysql_identifier) (lambda (a b) (concat a "," b)))
+				") REFERENCES " (quote_mysql_identifier (fk "OtherTable")) " ("
+				(reduce (map (fk "OtherColumns") quote_mysql_identifier) (lambda (a b) (concat a "," b)))
+				") ON DELETE " (toUpper (fk "DeleteMode"))
+				" ON UPDATE " (toUpper (fk "UpdateMode")))
+	)))
+	(define all_defs (merge col_defs uk_defs fk_defs))
 	(define body (reduce all_defs (lambda (acc item) (concat acc ",\n" item))))
 	(concat "CREATE TABLE `" tbl "` (\n" body
-		"\n) ENGINE=" (meta "Engine")
+		"\n) ENGINE=" (if (equal? (meta "Engine") "memory") "MEMORY" "InnoDB")
 		(if (not (equal? (meta "Collation") "")) (concat " COLLATE=" (meta "Collation")) "")
 		(if (not (equal? (meta "Comment") "")) (concat " COMMENT=" (quote_mysql_string (meta "Comment"))) "")
 	)
@@ -79,6 +88,13 @@ original body, while SHOW TRIGGERS supplies the table, timing, and event. */
 			"Created" NULL))
 )))
 
+(define info_schema_column_default (lambda (col)
+	(if (nil? (col "Default"))
+		(if (col "Null") "NULL" NULL)
+		(if (string? (col "Default"))
+			(quote_mysql_string (col "Default"))
+			(concat (col "Default"))))))
+
 (define info_schema_columns_for_table (lambda (schema table_name) (begin
 	(define columns (show schema table_name))
 	(map (produceN (count columns)) (lambda (ordinal) (begin
@@ -89,7 +105,7 @@ original body, while SHOW TRIGGERS supplies the table, timing, and event. */
 			"table_name" table_name
 			"column_name" (col "Field")
 			"ordinal_position" (+ ordinal 1)
-			"column_default" (col "Default")
+			"column_default" (info_schema_column_default col)
 			"is_nullable" (if (col "Null") "YES" "NO")
 			"data_type" (col "RawType")
 			"column_type" (col "Type")
@@ -124,6 +140,78 @@ original body, while SHOW TRIGGERS supplies the table, timing, and event. */
 				"character_set_client" (tr "character_set_client")
 				"collation_connection" (tr "collation_connection")
 				"database_collation" (tr "Database Collation")))))))))
+
+(define info_schema_fk_column_rows (lambda (schema tbl fk local_columns other_columns ordinal)
+	(if (empty_list? local_columns)
+		(if (empty_list? other_columns) '()
+			(error (concat "foreign key " (fk "Id") " has mismatched column lists")))
+		(if (empty_list? other_columns)
+			(error (concat "foreign key " (fk "Id") " has mismatched column lists"))
+			(cons (list "constraint_catalog" "def" "constraint_schema" schema
+				"constraint_name" (fk "Id") "table_catalog" "def"
+				"table_schema" schema "table_name" tbl
+				"column_name" (car local_columns)
+				"ordinal_position" ordinal
+				"position_in_unique_constraint" ordinal
+				"referenced_table_schema" schema
+				"referenced_table_name" (fk "OtherTable")
+				"referenced_column_name" (car other_columns))
+				(info_schema_fk_column_rows schema tbl fk
+					(cdr local_columns) (cdr other_columns) (+ ordinal 1)))))))
+
+(define info_schema_unique_column_rows (lambda (schema tbl key columns ordinal)
+	(if (empty_list? columns) '()
+		(cons (list "constraint_catalog" "def" "constraint_schema" schema
+			"constraint_name" (key "Id") "table_catalog" "def"
+			"table_schema" schema "table_name" tbl
+			"column_name" (car columns)
+			"ordinal_position" ordinal
+			"position_in_unique_constraint" NULL
+			"referenced_table_schema" NULL
+			"referenced_table_name" NULL
+			"referenced_column_name" NULL)
+			(info_schema_unique_column_rows schema tbl key (cdr columns) (+ ordinal 1))))))
+
+(define info_schema_fk_unique_name (lambda (schema fk) (begin
+	(define referenced_info (show schema (fk "OtherTable") true))
+	(define referenced_meta (referenced_info "meta"))
+	(define referenced_key (find (referenced_meta "Unique") (lambda (key)
+		(equal? (key "Cols") (fk "OtherColumns")))))
+	(if (nil? referenced_key) NULL (referenced_key "Id"))
+)))
+
+(define info_schema_key_column_usage_rows (lambda ()
+	(merge (map (show) (lambda (schema)
+		(merge (map (show schema) (lambda (tbl) (begin
+			(define tblinfo (show schema tbl true))
+			(define meta (tblinfo "meta"))
+			(define unique_rows (merge (map (meta "Unique") (lambda (key)
+				(info_schema_unique_column_rows schema tbl key (key "Cols") 1)))))
+			(define foreign_rows (merge (map (filter (meta "ForeignKeys") (lambda (fk)
+				(equal? (fk "Role") "referencing"))) (lambda (fk)
+					(info_schema_fk_column_rows schema tbl fk
+						(fk "LocalColumns") (fk "OtherColumns") 1)))))
+			(merge unique_rows foreign_rows)
+)))))))))
+
+(define info_schema_referential_constraint_rows (lambda ()
+	(merge (map (show) (lambda (schema)
+		(merge (map (show schema) (lambda (tbl) (begin
+			(define tblinfo (show schema tbl true))
+			(define meta (tblinfo "meta"))
+			(map (filter (meta "ForeignKeys") (lambda (fk)
+				(equal? (fk "Role") "referencing"))) (lambda (fk)
+					(list "constraint_catalog" "def" "constraint_schema" schema
+						"constraint_name" (fk "Id")
+						"unique_constraint_catalog" "def"
+						"unique_constraint_schema" schema
+						"unique_constraint_name" (info_schema_fk_unique_name schema fk)
+						"match_option" "NONE"
+						"update_rule" (toUpper (fk "UpdateMode"))
+						"delete_rule" (toUpper (fk "DeleteMode"))
+						"table_name" tbl
+						"referenced_table_name" (fk "OtherTable"))))
+)))))))))
 
 /* build one INFORMATION_SCHEMA.TABLES row from the catalog snapshot returned
 by (show schema true).  Keeping table discovery and metadata collection in one
@@ -298,10 +386,10 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 			(info_schema_columns_for_table db table_name)))))))
 
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(list)
+	(info_schema_key_column_usage_rows)
 
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(list)
+	(info_schema_referential_constraint_rows)
 
 	'((ignorecase "information_schema") (ignorecase "statistics"))
 	(merge (map (show) (lambda (db)
@@ -342,9 +430,9 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 		'((quote merge) '((quote map) '((quote show)) '((quote lambda) '((quote schema)) '((quote merge) '((quote map) '((quote show) (quote schema)) '((quote lambda) '((quote tbl)) '((quote info_schema_columns_for_table) (quote schema) (quote tbl))))))))
 	) rest)
 	'((ignorecase "information_schema") (ignorecase "key_column_usage"))
-	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn '(session "__memcp_tx") '('info_schema_key_column_usage_rows)) rest)
 	'((ignorecase "information_schema") (ignorecase "referential_constraints"))
-	(merge '(scanfn '(session "__memcp_tx") '(list)) rest) /* TODO: list constraints */
+	(merge '(scanfn '(session "__memcp_tx") '('info_schema_referential_constraint_rows)) rest)
 	'((ignorecase "information_schema") (ignorecase "statistics"))
 	(merge '(scanfn '(session "__memcp_tx") '('merge '('map '('show) '('lambda '('schema) '('merge '('map '('show 'schema) '('lambda '('tbl) '('show 'schema 'tbl "statistics")))))))) rest)
 	'((ignorecase "information_schema") (ignorecase "triggers"))

@@ -3878,6 +3878,17 @@ func showStringSlice(values []string) scm.Scmer {
 	return scm.NewSlice(items)
 }
 
+func showForeignKeyMode(mode foreignKeyMode) string {
+	switch mode {
+	case CASCADE:
+		return "cascade"
+	case SETNULL:
+		return "set null"
+	default:
+		return "restrict"
+	}
+}
+
 func plannerDistinctForColumns(t *table, columns []string) (float64, float64, string) {
 	rows := float64(t.CountEstimate())
 	if len(columns) == 0 {
@@ -3957,6 +3968,8 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 			scm.NewString("LocalColumns"), showStringSlice(localColumns),
 			scm.NewString("OtherTable"), scm.NewString(otherTable),
 			scm.NewString("OtherColumns"), showStringSlice(otherColumns),
+			scm.NewString("UpdateMode"), scm.NewString(showForeignKeyMode(fk.Updatemode)),
+			scm.NewString("DeleteMode"), scm.NewString(showForeignKeyMode(fk.Deletemode)),
 		}))
 		fanoutEstimate := scm.NewNil()
 		confidenceValue := 0.0

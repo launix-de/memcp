@@ -160,12 +160,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 (define parse_sql (lambda (schema s policy) (begin
 	(define parse_started_ns (nanotime))
-	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. Other
+	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. MariaDB
+	splits CREATE, DEFINER, and TRIGGER across three comments; discard the
+	account-specific DEFINER while reconstructing executable trigger DDL. Other
 	versioned comments remain compatibility no-ops unless their SQL form is
 	explicitly supported; trigger DDL must execute for a lossless restore. */
 	(set s (if (and (>= (strlen s) 3) (equal? (substr s 0 3) "/*!"))
 		(match s
 			(regex "^/\\*![0-9]+[\\r\\n\\t ]+((?is:CREATE[\\r\\n\\t ]+TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) body
+			(regex "^/\\*![0-9]+[\\r\\n\\t ]+CREATE[\\r\\n\\t ]*\\*/[\\r\\n\\t ]*/\\*![0-9]+[\\r\\n\\t ]+DEFINER=(?is:.*?)[\\r\\n\\t ]*\\*/[\\r\\n\\t ]*/\\*![0-9]+[\\r\\n\\t ]+((?is:TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) (concat "CREATE " body)
 			s)
 		s))
 	/* MemCP has no MySQL tablespaces or undo logs. Match the two exact
@@ -1813,6 +1816,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(if policy (policy view_schema id true) true)
 				(list (quote drop_sql_view) (list (quote session) "__memcp_tx") view_schema id (if if_exists true false)))))
 		(parser '((atom "RENAME" true) (atom "TABLE" true) (define oldname sql_identifier) (atom "TO" true) (define newname sql_identifier)) '((quote renametable) schema oldname newname))
+		/* mysqldump --single-transaction establishes this before START TRANSACTION. */
+		(parser '((atom "SET" true) (atom "SESSION" true) (atom "TRANSACTION" true)
+			(atom "ISOLATION" true) (atom "LEVEL" true) (atom "REPEATABLE" true) (atom "READ" true)) (quote true))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (? "@") (define key sql_identifier)
 			(or "=" (atom ":=" true)) (atom "DEFAULT" true))
 			(list (list (quote context) "session") key nil))
@@ -1896,6 +1902,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (list (quote context) "session")))
 		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (list (quote context) "session")))
 		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (list (quote context) "session")))
+		/* mysqldump uses read-only savepoints around each table. MemCP keeps the
+		outer consistent transaction and accepts these markers as no-ops. */
+		(parser '((atom "SAVEPOINT" true) sql_identifier) (quote true))
+		(parser '((atom "ROLLBACK" true) (atom "TO" true) (? (atom "SAVEPOINT" true)) sql_identifier) (quote true))
+		(parser '((atom "RELEASE" true) (atom "SAVEPOINT" true) sql_identifier) (quote true))
 		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
 		"" /* comment only command */
 	)))
