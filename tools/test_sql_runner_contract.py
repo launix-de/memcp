@@ -46,6 +46,7 @@ from run_sql_tests import (  # noqa: E402
     planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
     resolve_timing_samples,
+    scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
 )
 
@@ -64,7 +65,8 @@ class PerformanceScaleContractTest(unittest.TestCase):
 
     def test_cold_planner_budget_allows_bounded_measurement_jitter(self) -> None:
         self.assertEqual(PLANNER_TIME_TOLERANCE_FACTOR, 1.2)
-        self.assertEqual(planner_time_limit_with_tolerance_ms(500), 600)
+        calibration = {"scale": 1.0}
+        self.assertEqual(planner_time_limit_with_tolerance_ms(500, calibration), 600)
 
     def test_architecture_aliases_select_stable_profiles(self) -> None:
         self.assertEqual(performance_architecture("AMD64"), "x86_64")
@@ -82,7 +84,7 @@ class PerformanceScaleContractTest(unittest.TestCase):
         self.assertEqual(calibration["scale"], 1.0)
         self.assertEqual(scaled_wall_clock_limit_ms(0.02, calibration), 20.0)
 
-    def test_slower_machine_scales_only_the_wall_clock_budget(self) -> None:
+    def test_slower_machine_scales_wall_clock_and_compile_budgets(self) -> None:
         reference_ns = (
             PERFORMANCE_REFERENCE_NS_PER_MIB
             * PERFORMANCE_CALIBRATION_ROUNDS["aarch64"]
@@ -92,6 +94,8 @@ class PerformanceScaleContractTest(unittest.TestCase):
         )
         self.assertEqual(calibration["scale"], 4.0)
         self.assertEqual(scaled_wall_clock_limit_ms(0.02, calibration), 80.0)
+        self.assertEqual(scaled_compile_time_limit_ms(300, calibration), 1200.0)
+        self.assertEqual(planner_time_limit_with_tolerance_ms(300, calibration), 1440.0)
 
     def test_unreasonably_slow_calibration_fails_instead_of_disabling_gates(self) -> None:
         reference_ns = (
