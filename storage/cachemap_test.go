@@ -77,3 +77,71 @@ func TestCompileCacheBoundsDistinctColdProducers(t *testing.T) {
 	close(release)
 	callers.Wait()
 }
+
+func TestCompileCacheAdmissionAccountsForProducerWeight(t *testing.T) {
+	cache := NewCacheMap(scm.NewString("compile"))
+	limit := (runtime.GOMAXPROCS(0) + 1) / 2
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 4 {
+		limit = 4
+	}
+
+	heavyStarted := make(chan struct{}, 1)
+	heavyRelease := make(chan struct{})
+	lightStarted := make(chan struct{}, 1)
+	var callers sync.WaitGroup
+	callers.Add(2)
+	go func() {
+		defer callers.Done()
+		producer := scm.NewFunc(func(_ ...scm.Scmer) scm.Scmer {
+			heavyStarted <- struct{}{}
+			<-heavyRelease
+			return scm.NewString("heavy")
+		})
+		scm.Apply(cache,
+			scm.NewString("get_or_compute"),
+			scm.NewString("heavy"),
+			producer,
+			scm.NewInt(int64(limit)),
+		)
+	}()
+	select {
+	case <-heavyStarted:
+	case <-time.After(time.Second):
+		close(heavyRelease)
+		callers.Wait()
+		t.Fatal("weighted producer did not start")
+	}
+
+	go func() {
+		defer callers.Done()
+		producer := scm.NewFunc(func(_ ...scm.Scmer) scm.Scmer {
+			lightStarted <- struct{}{}
+			return scm.NewString("light")
+		})
+		scm.Apply(cache,
+			scm.NewString("get_or_compute"),
+			scm.NewString("light"),
+			producer,
+			scm.NewInt(1),
+		)
+	}()
+	select {
+	case <-lightStarted:
+		close(heavyRelease)
+		callers.Wait()
+		t.Fatal("light producer bypassed the weighted admission budget")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(heavyRelease)
+	select {
+	case <-lightStarted:
+	case <-time.After(time.Second):
+		callers.Wait()
+		t.Fatal("light producer did not start after weighted release")
+	}
+	callers.Wait()
+}

@@ -27,6 +27,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (set psql_queryplan_cache (newcachemap "compile"))
 (set sql_literal_shape_cache (newcachemap))
 
+/* Keep several small cold plans concurrent while preventing a single very
+wide generated query from competing with three equally allocation-heavy
+producers. The admission remains outside parsing and does not affect hits. */
+(define sql_query_compile_weight (lambda (query)
+	(if (> (strlen query) 65536)
+		3
+		(if (> (strlen query) 32768) 2 1))))
+
 /* Keep exact SQL variants out of the parser while sharing their compiled plan.
 Only parameterized results enter the small front cache; exact-only statements
 continue to occupy just their existing query-plan entry. The third result item
@@ -323,10 +331,12 @@ On parse error the result is not cached. */
 			(define formula (if (or compile_diagnostic (not guarded_select))
 				(if compile_diagnostic
 					(exact_compile)
-					(queryplan_cache "get_or_compute" cache_key exact_compile))
+					(queryplan_cache "get_or_compute" cache_key exact_compile
+						(sql_query_compile_weight parse_query)))
 				(begin
 					(define cached_entry (queryplan_cache "get_or_compute" cache_key
-						(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query policy session))))
+						(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query policy session))
+						(sql_query_compile_weight parse_query)))
 					(cadr cached_entry))))
 			formula)))))
 

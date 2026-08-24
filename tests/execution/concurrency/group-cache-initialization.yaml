@@ -54,6 +54,35 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Large cold compile reserves proportional admission capacity"
+    scm: |
+      (begin
+        (define cache (newcachemap "compile"))
+        (define timings (newsession))
+        (define values (parallelN 2 (lambda (i)
+          (if (equal? i 0)
+            (cache "get_or_compute" "heavy-shape" (lambda ()
+              (begin
+                (timings "heavy-start" (nanotime))
+                (sleep 0.1)
+                (timings "heavy-end" (nanotime))
+                "heavy")) 4)
+            (cache "get_or_compute" "light-shape" (lambda ()
+              (begin
+                (timings "light-start" (nanotime))
+                (sleep 0.1)
+                (timings "light-end" (nanotime))
+                "light")) 1)))))
+        (if (and
+          (equal? values (list "heavy" "light"))
+          (or
+            (>= (timings "light-start") (timings "heavy-end"))
+            (>= (timings "heavy-start") (timings "light-end"))))
+          "ok"
+          (error "weighted cold compile admission overlapped full capacity")))
+    expect:
+      data: ["ok"]
+
   - name: "Creator waits for existing table initialization 1/2"
     parallel: existing_creation_barrier
     scm: &create_with_initializer |

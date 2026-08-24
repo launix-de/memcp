@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/launix-de/memcp/scm"
+	"golang.org/x/sync/semaphore"
 )
 
 // Per-entry overhead: cacheMapEntry struct (~80 bytes) + map bucket slot (~128 bytes) + softItem (~120 bytes)
@@ -32,7 +33,8 @@ const cacheMapEntryOverhead = 328
 var queryCompileAdmission = newCacheMapAdmission()
 
 type cacheMapAdmission struct {
-	tokens chan struct{}
+	limit  int64
+	tokens *semaphore.Weighted
 }
 
 func newCacheMapAdmission() *cacheMapAdmission {
@@ -43,20 +45,28 @@ func newCacheMapAdmission() *cacheMapAdmission {
 	if limit > 4 {
 		limit = 4
 	}
-	return &cacheMapAdmission{tokens: make(chan struct{}, limit)}
-}
-
-func (a *cacheMapAdmission) acquire(ctx context.Context) bool {
-	select {
-	case a.tokens <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
+	return &cacheMapAdmission{
+		limit:  int64(limit),
+		tokens: semaphore.NewWeighted(int64(limit)),
 	}
 }
 
-func (a *cacheMapAdmission) release() {
-	<-a.tokens
+func (a *cacheMapAdmission) boundedWeight(weight int64) int64 {
+	if weight < 1 {
+		return 1
+	}
+	if weight > a.limit {
+		return a.limit
+	}
+	return weight
+}
+
+func (a *cacheMapAdmission) acquire(ctx context.Context, weight int64) bool {
+	return a.tokens.Acquire(ctx, a.boundedWeight(weight)) == nil
+}
+
+func (a *cacheMapAdmission) release(weight int64) {
+	a.tokens.Release(a.boundedWeight(weight))
 }
 
 type cacheMapEntry struct {
@@ -128,9 +138,14 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 			if scm.String(a[0]) != "get_or_compute" {
 				panic("cachemap: unknown 3-argument operation")
 			}
-			return cm.getOrCompute(scm.String(a[1]), a[2])
+			return cm.getOrCompute(scm.String(a[1]), a[2], 1)
+		case 4:
+			if scm.String(a[0]) != "get_or_compute" {
+				panic("cachemap: unknown 4-argument operation")
+			}
+			return cm.getOrCompute(scm.String(a[1]), a[2], int64(scm.ToInt(a[3])))
 		default:
-			panic("cachemap: expected 0, 1, 2, or 3 arguments")
+			panic("cachemap: expected 0, 1, 2, 3, or 4 arguments")
 		}
 	})
 }
@@ -178,7 +193,7 @@ func currentCacheMapContext() context.Context {
 	return context.Background()
 }
 
-func (cm *cacheMap) getOrCompute(key string, producer scm.Scmer) scm.Scmer {
+func (cm *cacheMap) getOrCompute(key string, producer scm.Scmer, weight int64) scm.Scmer {
 	cm.mu.RLock()
 	if entry := cm.entries[key]; entry != nil {
 		entry.lastUsed.Store(time.Now().UnixNano())
@@ -202,7 +217,7 @@ func (cm *cacheMap) getOrCompute(key string, producer scm.Scmer) scm.Scmer {
 			waiters: 1,
 		}
 		cm.flights[key] = flight
-		go cm.runProducer(compileCtx, key, producer, flight)
+		go cm.runProducer(compileCtx, key, producer, flight, weight)
 	} else {
 		flight.waiters++
 	}
@@ -233,13 +248,13 @@ func (cm *cacheMap) cancelWaiter(key string, flight *cacheMapFlight) {
 	cm.mu.Unlock()
 }
 
-func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Scmer, flight *cacheMapFlight) {
+func (cm *cacheMap) runProducer(ctx context.Context, key string, producer scm.Scmer, flight *cacheMapFlight, weight int64) {
 	if cm.admission != nil {
-		if !cm.admission.acquire(ctx) {
+		if !cm.admission.acquire(ctx, weight) {
 			cm.finishProducer(ctx, key, flight, scm.NewNil(), ctx.Err(), true)
 			return
 		}
-		defer cm.admission.release()
+		defer cm.admission.release(weight)
 	}
 	value, panicValue, failed := runCacheMapProducer(ctx, producer)
 	cm.finishProducer(ctx, key, flight, value, panicValue, failed)
