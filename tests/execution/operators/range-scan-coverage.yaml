@@ -20,6 +20,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS perf_tiny"
   - sql: "DROP TABLE IF EXISTS selective_text_driver"
   - sql: "DROP TABLE IF EXISTS selective_text_dim"
+  - sql: "DROP TABLE IF EXISTS selective_text_peer"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
   - sql: "DROP TABLE IF EXISTS stats_contract_child"
@@ -435,6 +436,11 @@ test_cases:
     expect:
       rows: 0
 
+  - name: "Create text reorder peer"
+    sql: "CREATE TABLE selective_text_peer (id INT PRIMARY KEY)"
+    expect:
+      rows: 0
+
   - name: "Insert selective text RecSet fixture"
     scm: |
       (begin
@@ -445,6 +451,8 @@ test_cases:
           (map (produceN 2048) (lambda (i)
             (list i (mod i 4)
               (if (< i 8) (concat "asset-needle-" i) (concat "asset-other-" i))))))
+        (insert (table "memcp-tests" "selective_text_peer") '("id")
+          (map (produceN 100) (lambda (i) (list i))))
         (rebuild)
         2048)
 
@@ -460,7 +468,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - 'selective_text_filter_carrier'
+        - 'scan_access_path'
         - 'chosen scan_recset'
         - 'candidate_rows 8'
         - 'candidate_input_rows 2048'
@@ -478,7 +486,7 @@ test_cases:
     expect:
       rows: 2
       contains:
-        - 'selective_text_filter_carrier'
+        - 'scan_access_path'
         - 'scan_recset'
         - 'fused_base_scan'
         - 'result_equal'
@@ -515,8 +523,21 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - 'selective_text_filter_carrier'
+        - 'scan_access_path'
         - 'chosen fused_base_scan'
+
+  - name: "Text cardinality participates in the common join reorder"
+    sql: |
+      EXPLAIN REORDER
+      SELECT f.id
+      FROM selective_text_peer p
+      JOIN selective_text_driver f ON f.id = p.id
+      WHERE f.search LIKE '%needle%'
+    expect:
+      rows: 1
+      result_contains:
+        - '(source text_pattern_prior)'
+        - '(planning_value 0.01)'
 
   - name: "Cached text filter recompiles across the RecSet cost crossover"
     scm: |
@@ -1049,6 +1070,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS perf_tiny"
   - sql: "DROP TABLE IF EXISTS selective_text_driver"
   - sql: "DROP TABLE IF EXISTS selective_text_dim"
+  - sql: "DROP TABLE IF EXISTS selective_text_peer"
   - sql: "DROP TABLE IF EXISTS pushdown_main"
   - sql: "DROP TABLE IF EXISTS pushdown_lookup"
   - sql: "DROP TABLE IF EXISTS stats_contract_child"
