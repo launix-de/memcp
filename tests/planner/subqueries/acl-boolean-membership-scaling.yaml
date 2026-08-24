@@ -383,6 +383,52 @@ test_cases:
       data:
         - {total: 768, counted_count: 768}
 
+  - name: "joined selective search relation projects files onto document recsets"
+    sql: |
+      EXPLAIN PHYSICAL SELECT COUNT(*) AS total
+      FROM bqm_document counted
+      WHERE counted.id IN (
+        SELECT filename_doc.id
+        FROM bqm_file filename_file
+        JOIN bqm_document filename_doc
+          ON filename_doc.file_id = filename_file.id
+        WHERE filename_file.filename LIKE '%needle%'
+        UNION
+        SELECT search_doc.id
+        FROM bqm_file search_file
+        JOIN bqm_document search_doc
+          ON search_doc.file_id = search_file.id
+        WHERE search_file.search LIKE '%needle%'
+      )
+    expect:
+      result_contains:
+        - "recset_union"
+        - "recset_project_join"
+        - "recset_project_join_access"
+
+  - name: "joined selective search relation preserves projected documents"
+    max_time: 2
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM bqm_document counted
+      WHERE counted.id IN (
+        SELECT filename_doc.id
+        FROM bqm_file filename_file
+        JOIN bqm_document filename_doc
+          ON filename_doc.file_id = filename_file.id
+        WHERE filename_file.filename LIKE '%needle%'
+        UNION
+        SELECT search_doc.id
+        FROM bqm_file search_file
+        JOIN bqm_document search_doc
+          ON search_doc.file_id = search_file.id
+        WHERE search_file.search LIKE '%needle%'
+      )
+    expect:
+      rows: 1
+      data:
+        - {total: 1024}
+
   - name: "selective driver filter wins the physical membership cost comparison"
     sql: |
       EXPLAIN PHYSICAL SELECT COUNT(*) AS total

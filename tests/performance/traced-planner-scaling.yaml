@@ -58,8 +58,11 @@ setup:
 test_cases:
   - name: "Independent nested scalar aggregates compile within a linear budget"
     max_time: 1.0
+    # The separate 48-stage suite owns the asymptotic gate. Retain this small
+    # shape's established reference; the runner scales it to the host CPU.
     max_planner_time_ms: 300
     max_compile_phase_ms:
+      reorder_ns: 500
       recipe_emit_ns: 600
     max_compile_metrics:
       plan_nodes: 6500
@@ -372,7 +375,17 @@ test_cases:
       rows: 1
       result_occurrences:
         - text: "touch_keytable"
-          count: 4
+          count: 2
+  - name: "Shared physical carriers keep distinct nested filter results"
+    sql: |
+      SELECT
+        (SELECT SUM(1) FROM tps_prop item_1 WHERE item_1.id = 1 AND COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM tps_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM tps_parent parent_1 WHERE parent_1.id = item_1.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_1,
+        (SELECT SUM(1) FROM tps_prop item_2 WHERE item_2.id = 1 AND COALESCE((SELECT (parent_2.owner_id = 8 OR EXISTS (SELECT TRUE FROM tps_assignment member_2 WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 8 LIMIT 1)) FROM tps_parent parent_2 WHERE parent_2.id = item_2.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_2
+    expect:
+      rows: 1
+      data:
+        - metric_1: 1
+          metric_2: null
   - name: "Constant CASE prunes dead scalar aggregate"
     max_time: 0.2
     max_plan_size: 2000

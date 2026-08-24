@@ -31,6 +31,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS sq_order_offer"
   - sql: "DROP TABLE IF EXISTS sq_order_country"
   - sql: "DROP TABLE IF EXISTS sq_order_region"
+  - sql: "DROP TABLE IF EXISTS sq_invoice_line"
+  - sql: "DROP TABLE IF EXISTS sq_invoice"
   - sql: |
       CREATE TABLE sq_dept (did INT, dname VARCHAR(30))
   - sql: |
@@ -60,6 +62,10 @@ setup:
   - sql: "INSERT INTO sq_order_offer VALUES (1,10,50),(1,20,40),(2,10,30),(2,30,20)"
   - sql: "INSERT INTO sq_order_country VALUES (100,1000,'country a'),(200,2000,'country b')"
   - sql: "INSERT INTO sq_order_region VALUES (1000,'north'),(2000,'south')"
+  - sql: "CREATE TABLE sq_invoice (id INT PRIMARY KEY, customer_id INT, issued_at DATE)"
+  - sql: "CREATE TABLE sq_invoice_line (id INT PRIMARY KEY, invoice_id INT, quantity INT, price INT)"
+  - sql: "INSERT INTO sq_invoice VALUES (1,100,'2026-01-10'),(2,200,'2026-01-11'),(3,300,'2026-01-12')"
+  - sql: "INSERT INTO sq_invoice_line VALUES (10,1,2,50),(11,1,3,40),(12,2,9,11)"
   - scm: |
       (insert (table "memcp-tests" "sq_large_dept") '("did")
         (map (produceN 1001) (lambda (i) (list i))))
@@ -129,10 +135,10 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - ".join-order:"
         - "scan_order"
-        - "droptable"
+        - "stream_window_reduce"
       result_not_contains:
+        - ".join-order:"
         - "(sort rows"
 
   - name: "Ordered join intermediate relation is query-local"
@@ -413,6 +419,47 @@ test_cases:
         - "dependent-subquery"
         - "scalar_aggregate_probe"
 
+  - name: "ERP invoice projection uses a correlated line total"
+    sql: |
+      SELECT i.id, i.customer_id, i.issued_at,
+        (SELECT SUM(l.quantity * l.price)
+         FROM sq_invoice_line l
+         WHERE l.invoice_id = i.id) AS total
+      FROM sq_invoice i
+      ORDER BY i.id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+          customer_id: 100
+          issued_at: "2026-01-10"
+          total: 220
+        - id: 2
+          customer_id: 200
+          issued_at: "2026-01-11"
+          total: 99
+        - id: 3
+          customer_id: 300
+          issued_at: "2026-01-12"
+          total: null
+
+  - name: "ERP invoice line total remains a relational aggregate stage"
+    sql: |
+      EXPLAIN IR SELECT i.id, i.customer_id, i.issued_at,
+        (SELECT SUM(l.quantity * l.price)
+         FROM sq_invoice_line l
+         WHERE l.invoice_id = i.id) AS total
+      FROM sq_invoice i
+      ORDER BY i.id
+    expect:
+      rows: 1
+      result_contains:
+        - "partition_by"
+        - "result_max_rows_per_partition"
+      result_not_contains:
+        - "dependent-subquery"
+        - "scalar_aggregate_probe"
+
   - name: "Correlated SUM initializes a condition keytable"
     sql: |
       SELECT d.did,
@@ -665,6 +712,8 @@ test_cases:
         - dname: "Empty"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS sq_invoice_line"
+  - sql: "DROP TABLE IF EXISTS sq_invoice"
   - sql: "DROP TABLE IF EXISTS sq_large_emp"
   - sql: "DROP TABLE IF EXISTS sq_large_dept"
   - sql: "DROP TABLE IF EXISTS sq_emp"

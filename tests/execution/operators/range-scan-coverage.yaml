@@ -671,7 +671,7 @@ test_cases:
       rows: 1
       result_contains:
         - 'join_reorder_strategy'
-        - 'linearized-dp'
+        - 'decomposed-dphyp'
     cleanup:
       - scm: '(settings "JoinReorderDPBudget" 256)'
 
@@ -691,7 +691,7 @@ test_cases:
       rows: 1
       result_contains:
         - 'join_reorder_strategy'
-        - 'linearized-dp'
+        - 'decomposed-dphyp'
         - 'join_plan'
         - 'join_estimated_cost'
         - 'join_estimated_rows'
@@ -734,7 +734,7 @@ test_cases:
       rows: 1
       result_contains:
         - 'join_reorder_strategy'
-        - 'linearized-dp'
+        - 'decomposed-dphyp'
         - 'join_plan'
 
   - name: "Create physical pushdown tables"

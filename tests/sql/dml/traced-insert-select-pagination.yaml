@@ -228,8 +228,9 @@ test_cases:
     expect:
       contains:
         - "group-stage"
-        - "cardinality_mode first"
-        - "physical_max_rows 1"
+        - "null_semantics scalar"
+        - "partition_limit 1"
+        - "result_max_rows_per_partition 1"
       not_contains:
         - "legacy_materialized"
         - "inner_select"

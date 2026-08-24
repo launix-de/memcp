@@ -715,13 +715,18 @@ work before decorrelation has even started. */
 (define source_unique_key_sets (lambda (src)
 	(if (not (source_is_base_table? src))
 		'()
-		(try
-			(lambda ()
-				(begin
-					(define info (show (source_schema src) (source_relation src) true))
-					(map ((info "meta") "Unique") (lambda (unique_key)
-						(unique_key "Cols")))))
-			(lambda (_e) '())))))
+		(begin
+			(define primary_key (source_primary_key_columns src))
+			(define unique_keys (try
+				(lambda ()
+					(begin
+						(define info (show (source_schema src) (source_relation src) true))
+						(map ((info "meta") "Unique") (lambda (unique_key)
+							(unique_key "Cols")))))
+				(lambda (_e) '())))
+			(merge_unique (list
+				(if (empty_list? primary_key) '() (list primary_key))
+				unique_keys))))))
 
 (define unique_lookup_column_name (lambda (src expr)
 	(match expr
@@ -1570,6 +1575,18 @@ physical membership probe. */
 			(quote b)
 			(quote a)))))
 
+(define scalar_query_probe_reduce_cardinality (lambda ()
+	(begin
+		(define unset (list (quote quote) scalar_query_probe_empty))
+		(list (quote lambda)
+			(list (quote a) (quote b))
+			(list (quote if)
+				(list (quote and)
+					(list (quote symbol?) (quote a))
+					(list (quote equal?) (quote a) unset))
+				(quote b)
+				(list (quote error) "scalar subselect returned more than one row"))))))
+
 (define scalar_first_payload (lambda (order_key value)
 	(list order_key value)))
 
@@ -1634,23 +1651,27 @@ physical membership probe. */
 			false))))
 
 (define scalar_first_probe_stage? (lambda (stage)
-	(and (group_stage? stage)
-		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
-			(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote first))
-				(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-					(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
-						(and (not (reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '()) (lambda (found key)
-							(or found (expr_refs_stage_output_alias? key)))
-							false))
-							(and (or
-								(source_is_base_table? (gs_input stage))
-								(and (query_block? (gs_input stage))
+	(if (not (group_stage? stage))
+		false
+		(begin
+			(define facts (gs_facts stage))
+			(define lookup_keys (qassoc_get facts (quote lookup-keys) '()))
+			(and (scalar_value_stage? stage)
+				(and (equal? (qassoc_get facts (quote partition_limit) nil) 1)
+					(and (equal? (qassoc_get facts (quote on_overflow) nil) (quote ignore))
+						(and (not (empty_list? lookup_keys))
+							(and (empty_list? (qassoc_get facts (quote btw2025_accessing_after_simple) '()))
+								(and (not (reduce lookup_keys (lambda (found key)
+									(or found (expr_refs_stage_output_alias? key))) false))
 									(or
-										(expr_refs_stage_output_alias? (nth (car (gs_aggregates stage)) 0))
-										(scalar_first_query_stage_output_key? stage))))
-								(and (equal? (count (gs_aggregates stage)) 1)
-									(and (equal? (nth (car (gs_aggregates stage)) 1) (scalar_once_reduce_first))
-										(not (scalar_once_ordered_payload? (car (gs_aggregates stage)))))))))))))))
+										(source_is_base_table? (gs_input stage))
+										(and (query_block? (gs_input stage))
+											(or
+												(expr_refs_stage_output_alias? (nth (car (gs_aggregates stage)) 0))
+												(scalar_first_query_stage_output_key? stage)))
+										(and (equal? (count (gs_aggregates stage)) 1)
+											(and (equal? (nth (car (gs_aggregates stage)) 1) (scalar_once_reduce_first))
+												(not (scalar_once_ordered_payload? (car (gs_aggregates stage)))))))))))))))))
 
 (define scalar_aggregate_probe_stage? (lambda (stage)
 	(if (not (group_stage? stage))
@@ -1658,15 +1679,16 @@ physical membership probe. */
 		(begin
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
 			(define keys (if (empty_list? lookup_keys) '() (gs_keys stage)))
-			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_aggregate))
-				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote many))
+			(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote aggregate))
+				(and (equal? (stage_result_max_rows_per_partition stage) 1)
 					(and (equal? (count keys) (count lookup_keys))
 						(and (or
 							(not (empty_list? lookup_keys))
 							(and (empty_list? (gs_domain stage))
 								(not (stage_has_residual_outer_refs? stage))))
 							(and (equal? (coalesceNil (gs_having stage) true) true)
-								(source_is_base_table? (gs_input stage)))))))))))
+								(or (source_is_base_table? (gs_input stage))
+									(query_block? (gs_input stage))))))))))))
 
 (define scalar_cardinality_probe_stage? (lambda (stage)
 	(if (not (group_stage? stage))
@@ -1674,48 +1696,54 @@ physical membership probe. */
 		(begin
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
 			(define ags (gs_aggregates stage))
-			(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote scalar_single))
-				(and (equal? (qassoc_get (gs_facts stage) (quote cardinality_mode) nil) (quote single_or_error))
-					(and (not (empty_list? lookup_keys))
-						(and (equal? (count (gs_keys stage)) (count lookup_keys))
-							(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
-								(and (equal? (coalesceNil (gs_having stage) true) true)
-									(and (source_is_base_table? (gs_input stage))
-										(and (equal? (count ags) 2)
-											(equal? (nth ags 1) aggregate_count_descriptor)))))))))))))
+			(and (scalar_value_stage? stage)
+				(and (equal? (qassoc_get (gs_facts stage) (quote partition_limit) nil) 2)
+					(and (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
+						(and (not (empty_list? lookup_keys))
+							(and (equal? (count (gs_keys stage)) (count lookup_keys))
+								(and (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '()))
+									(and (equal? (coalesceNil (gs_having stage) true) true)
+										(and (or (source_is_base_table? (gs_input stage))
+											(query_block? (gs_input stage)))
+											(and (equal? (count ags) 2)
+												(equal? (nth ags 1) aggregate_count_descriptor))))))))))))))
 
 /* Scalar row bounds belong to the decorrelated LEFT JOIN helper. Physical
 lowering consumes this contract instead of reconstructing scalar semantics from
 the original SQL shape after join reorder and stage rewrites. */
-(define bounded_probe_physical_max_rows (lambda (stage)
+(define stage_partition_limit (lambda (stage)
 	(begin
 		(define facts (gs_facts stage))
-		(define mode (qassoc_get facts (quote cardinality_mode) nil))
-		(define max_rows (qassoc_get facts (quote physical_max_rows) nil))
+		(define max_rows (qassoc_get facts (quote partition_limit) nil))
 		(define on_overflow (qassoc_get facts (quote on_overflow) nil))
-		(match mode
-			(symbol first) (if (and (equal? max_rows 1) (equal? on_overflow (quote ignore)))
-				max_rows
-				(neumann_fail "build_queryplan" "scalar first stage requires physical_max_rows=1 and on_overflow=ignore"))
-			(symbol single_or_error) (if (and (equal? max_rows 2) (equal? on_overflow (quote error)))
-				max_rows
-				(neumann_fail "build_queryplan" "scalar single_or_error stage requires physical_max_rows=2 and on_overflow=error"))
-			(symbol many) (if (and (equal? (qassoc_get facts (quote presence_only) false) true)
-				(and (equal? (qassoc_get facts (quote max_needed_per_domain) nil) 1)
-					(and (equal? max_rows 1) (equal? on_overflow (quote ignore)))))
-				max_rows
-				(neumann_fail "build_queryplan" "presence probe stage requires physical_max_rows=1 and on_overflow=ignore"))
-			_ (neumann_fail "build_queryplan" "bounded probe stage is missing its cardinality contract")))))
+		(if (and (number? max_rows)
+			(and (> max_rows 0)
+				(or (equal? on_overflow (quote ignore)) (equal? on_overflow (quote error)))))
+			max_rows
+			(neumann_fail "build_queryplan" "bounded relation is missing a valid partition limit contract")))))
 
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
-		(and (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote exists))
+		(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote exists))
 			(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
 				(and (equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
 					(equal? (coalesceNil (gs_having stage) true) true)))))))
 
 (define stage_has_residual_outer_refs? (lambda (stage)
 	(not (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '())))))
+
+/* Cardinality is a relational property, independent of why a stage was
+introduced. A value of one means every partition identified by partition_by
+contributes at most one output tuple. */
+(define stage_result_max_rows_per_partition (lambda (stage)
+	(if (group_stage? stage)
+		(qassoc_get (gs_facts stage) (quote result_max_rows_per_partition) nil)
+		nil)))
+
+(define scalar_value_stage? (lambda (stage)
+	(and (group_stage? stage)
+		(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote scalar))
+			(equal? (stage_result_max_rows_per_partition stage) 1)))))
 
 (define stage_keys_are_input_local? (lambda (stage)
 	(begin
@@ -1915,13 +1943,10 @@ general recursive boolean proof above. */
 				(match item
 					'(_order_expr dir) dir
 					_ (neumann_fail "untangle_query" "malformed scalar once_limit ORDER BY")))))
-			(if (and (equal? (coalesceNil offset_value 0) 0)
-				(and (single_source? order_exprs) (equal? (car order_exprs) value_expr)))
-				(list value_expr (if (equal? (car dirs) <) (quote min) (quote max)) nil)
-				(list
-					(list (quote scalar_order_value) value_expr order_exprs dirs (coalesceNil offset_value 0))
-					(scalar_once_reduce_first)
-					nil))))))
+			(list
+				(list (quote scalar_order_value) value_expr order_exprs dirs (coalesceNil offset_value 0))
+				(scalar_once_reduce_first)
+				nil)))))
 
 (define order_item_exprs (lambda (order_items)
 	(map (coalesceNil order_items '()) (lambda (item)
@@ -1957,12 +1982,12 @@ general recursive boolean proof above. */
 			nil
 			(list
 				(list (quote condition) (coalesceNil (qb_where inner) true))
-				(list (quote purpose) (quote scalar_aggregate))
 				(list (quote domain) session_keys)
 				(list (quote lookup-keys) session_keys)
 				(list (quote preserve_empty_domain) false)
 				(list (quote null_semantics) (quote scalar))
-				(list (quote cardinality_mode) (quote first)))))
+				(list (quote partition_by) keys)
+				(list (quote result_max_rows_per_partition) 1))))
 		(list
 			(list (quote grouped_scalar_top) stage)
 			(list stage)
@@ -2025,13 +2050,14 @@ general recursive boolean proof above. */
 					(list (quote purpose) (quote exists))
 					(list (quote presence_only) true)
 					(list (quote max_needed_per_domain) 1)
-					(list (quote physical_max_rows) 1)
+					(list (quote partition_limit) 1)
 					(list (quote on_overflow) (quote ignore))
+					(list (quote partition_by) outer_domain)
+					(list (quote result_max_rows_per_partition) 1)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
-					(list (quote null_semantics) (quote exists))
-					(list (quote cardinality_mode) (quote many)))
+					(list (quote null_semantics) (quote exists)))
 				(btw2025_stage_facts inner outer_sources lookup_pairs residual_outer_refs pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
@@ -2101,13 +2127,14 @@ general recursive boolean proof above. */
 					(list (quote purpose) (quote exists))
 					(list (quote presence_only) true)
 					(list (quote max_needed_per_domain) 1)
-					(list (quote physical_max_rows) 1)
+					(list (quote partition_limit) 1)
 					(list (quote on_overflow) (quote ignore))
+					(list (quote partition_by) outer_domain)
+					(list (quote result_max_rows_per_partition) 1)
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
-					(list (quote null_semantics) (quote exists))
-					(list (quote cardinality_mode) (quote many)))
+					(list (quote null_semantics) (quote exists)))
 				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
@@ -2172,7 +2199,8 @@ general recursive boolean proof above. */
 					(gs_domain stage)
 					lookup_keys
 					(qassoc_get (gs_facts stage) (quote null_semantics) nil)
-					(qassoc_get (gs_facts stage) (quote cardinality_mode) nil)))))))
+					(qassoc_get (gs_facts stage) (quote partition_by) '())
+					(stage_result_max_rows_per_partition stage)))))))
 
 (define exists_union_results_compatible? (lambda (results)
 	(match (coalesceNil results '())
@@ -2247,13 +2275,14 @@ general recursive boolean proof above. */
 				(list (quote purpose) (quote exists))
 				(list (quote presence_only) true)
 				(list (quote max_needed_per_domain) 1)
-				(list (quote physical_max_rows) 1)
+				(list (quote partition_limit) 1)
 				(list (quote on_overflow) (quote ignore))
+				(list (quote partition_by) outer_domain)
+				(list (quote result_max_rows_per_partition) 1)
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) lookup_keys)
 				(list (quote preserve_empty_domain) (not (empty_list? outer_domain)))
-				(list (quote null_semantics) (quote exists))
-				(list (quote cardinality_mode) (quote many)))))
+				(list (quote null_semantics) (quote exists)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define source (list
 			stage_alias
@@ -2330,11 +2359,7 @@ without separately proving two-valued semantics. */
 					(define canonical_supported (in_union_truth_canonical_supported? inner (nth args 0)))
 					(if (and (not (if (>= (count args) 3) (nth args 2) false))
 						(and candidate_supported (or (not truth_mode) (not canonical_supported))))
-						(make_in_union_candidate_stage_rewrite probe inner
-							(if truth_mode
-								(list (nth args 0) (nth args 1) false true
-									(if (>= (count args) 5) (nth args 4) nil))
-								args))
+						(make_in_union_candidate_stage_rewrite probe inner args)
 						(begin
 							/* Unsupported complex branches keep their semantic barrier.
 							Only simple membership relations become the OR cloud. */
@@ -2392,7 +2417,9 @@ without separately proving two-valued semantics. */
 
 (define make_in_union_candidate_stage_rewrite (lambda (probe inner args)
 	(begin
-		(define semijoin_where (if (>= (count args) 4) (nth args 3) false))
+		(define where_mode (if (>= (count args) 4) (nth args 3) false))
+		(define truth_membership (string? where_mode))
+		(define semijoin_where (and (not truth_membership) where_mode))
 		(define candidate_alias (concat "__in_candidate_" (fnv_hash (string (list probe inner)))))
 		(define union_input (make_union_block
 			(union_mode inner)
@@ -2424,7 +2451,8 @@ without separately proving two-valued semantics. */
 				(list (quote lookup-keys) (list probe))
 				(list (quote preserve_empty_domain) false)
 				(list (quote null_semantics) (quote in))
-				(list (quote cardinality_mode) (quote many)))))
+				(list (quote partition_by) keys)
+				(list (quote result_max_rows_per_partition) 1))))
 		(define null_stage (make_group_stage
 			null_stage_id
 			union_input
@@ -2443,7 +2471,8 @@ without separately proving two-valued semantics. */
 				(list (quote lookup-keys) '())
 				(list (quote preserve_empty_domain) false)
 				(list (quote null_semantics) (quote in))
-				(list (quote cardinality_mode) (quote many)))))
+				(list (quote partition_by) '(1))
+				(list (quote result_max_rows_per_partition) 1))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define null_stage_alias (exists_stage_alias null_stage_id))
 		(define key_names (group_key_cols keys))
@@ -2451,7 +2480,7 @@ without separately proving two-valued semantics. */
 			stage_alias
 			(group_stage_schema stage)
 			(make_stage_output_relation stage_id)
-			(not semijoin_where)
+			(or truth_membership (not semijoin_where))
 			(if semijoin_where
 				(make_positive_in_join_condition (gs_input stage) stage_alias key_names (list probe) probe aggregate_count_descriptor)
 				(make_exists_stage_join_condition stage_alias key_names (list probe)))))
@@ -2463,11 +2492,16 @@ without separately proving two-valued semantics. */
 			true))
 		(if semijoin_where
 			(list true (list stage) (list source))
-			(list
-				(in_membership_expr (gs_input stage) (gs_input null_stage)
-					probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
-				(list stage null_stage)
-				(list source null_source))))))
+			(if truth_membership
+				(list
+					(in_membership_truth_expr (gs_input stage) probe stage_alias aggregate_count_descriptor)
+					(list stage)
+					(list source))
+				(list
+					(in_membership_expr (gs_input stage) (gs_input null_stage)
+						probe stage_alias aggregate_count_descriptor null_stage_alias null_ag)
+					(list stage null_stage)
+					(list source null_source)))))))
 
 (define make_plain_in_stage_rewrite (lambda (probe inner args)
 	(begin
@@ -2542,7 +2576,8 @@ without separately proving two-valued semantics. */
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) false)
 					(list (quote null_semantics) (quote in))
-					(list (quote cardinality_mode) (quote many)))
+					(list (quote partition_by) keys)
+					(list (quote result_max_rows_per_partition) 1))
 				(btw2025_stage_facts membership_inner outer_sources lookup_pairs '() pending_info)))))
 		(define null_stage (make_group_stage
 			null_stage_id
@@ -2562,7 +2597,8 @@ without separately proving two-valued semantics. */
 					(list (quote lookup-keys) domain_lookup_keys)
 					(list (quote preserve_empty_domain) false)
 					(list (quote null_semantics) (quote in))
-					(list (quote cardinality_mode) (quote many)))
+					(list (quote partition_by) null_keys)
+					(list (quote result_max_rows_per_partition) 1))
 				(btw2025_stage_facts membership_inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define null_stage_alias (exists_stage_alias null_stage_id))
@@ -2683,7 +2719,7 @@ without separately proving two-valued semantics. */
 		(define local_value_expr (decorrelate_expr_with_pairs inner_default all_corr_pairs value_expr))
 		(define ags (dedupe_aggregates_by_col (merge (list (extract_aggregates local_value_expr) (list aggregate_count_descriptor)))))
 		(if (empty_list? ags)
-			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs cardinality_mode single_or_error lowering")
+			(neumann_fail "untangle_query" "table-backed scalar subquery without aggregate needs partition_limit=2 and overflow checking")
 			true)
 		(define explicit_group_keys (map (coalesceNil (qb_group inner) '()) (lambda (expr)
 			(canonical_column_expr_for_alias inner_default expr))))
@@ -2719,12 +2755,12 @@ without separately proving two-valued semantics. */
 			(merge (list
 				(list
 					(list (quote condition) stage_condition)
-					(list (quote purpose) (quote scalar_aggregate))
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote aggregate))
-					(list (quote cardinality_mode) (quote many)))
+					(list (quote partition_by) keys)
+					(list (quote result_max_rows_per_partition) 1))
 				(btw2025_stage_facts inner outer_sources all_corr_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
@@ -2751,7 +2787,7 @@ without separately proving two-valued semantics. */
 		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
 		(define output_index (if (>= (count args) 4) (nth args 3) 0))
 		(if (not (scalar_once_supported? inner))
-			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
+			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs partition_limit=2 and overflow checking")
 			true)
 		(define value_exprs (extract_assoc (qb_fields inner) (lambda (_title expr) expr)))
 		(if (>= output_index (count value_exprs))
@@ -2807,14 +2843,13 @@ without separately proving two-valued semantics. */
 			(merge (list
 				(list
 					(list (quote condition) stage_condition)
-					(list (quote purpose) (quote scalar_single))
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote scalar))
-					(list (quote cardinality_mode) (quote first))
 					(list (quote partition_by) outer_domain)
-					(list (quote physical_max_rows) 1)
+					(list (quote partition_limit) 1)
+					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote ignore)))
 				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
@@ -2876,14 +2911,13 @@ without separately proving two-valued semantics. */
 			nil nil
 			(list
 				(list (quote condition) true)
-				(list (quote purpose) (quote scalar_single))
 				(list (quote domain) '())
 				(list (quote lookup-keys) '())
 				(list (quote preserve_empty_domain) true)
 				(list (quote null_semantics) (quote scalar))
-				(list (quote cardinality_mode) (quote first))
 				(list (quote partition_by) '())
-				(list (quote physical_max_rows) 1)
+				(list (quote partition_limit) 1)
+				(list (quote result_max_rows_per_partition) 1)
 				(list (quote on_overflow) (quote ignore)))))
 		(define projection (map_assoc (qb_fields inner) (lambda (_title expr)
 			(begin
@@ -3119,7 +3153,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define pending_info (if (>= (count args) 3) (nth args 2) nil))
 		(define output_index (if (>= (count args) 4) (nth args 3) 0))
 		(if (not (scalar_single_supported? inner))
-			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs cardinality_mode single_or_error lowering")
+			(neumann_fail "untangle_query" "table-backed scalar subquery without explicit LIMIT 1 needs partition_limit=2 and overflow checking")
 			true)
 		(define value_exprs (extract_assoc (qb_fields inner) (lambda (_title expr) expr)))
 		(if (>= output_index (count value_exprs))
@@ -3171,14 +3205,13 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(merge (list
 				(list
 					(list (quote condition) stage_condition)
-					(list (quote purpose) (quote scalar_single))
 					(list (quote domain) outer_domain)
 					(list (quote lookup-keys) lookup_keys)
 					(list (quote preserve_empty_domain) true)
 					(list (quote null_semantics) (quote scalar))
-					(list (quote cardinality_mode) (quote single_or_error))
 					(list (quote partition_by) outer_domain)
-					(list (quote physical_max_rows) 2)
+					(list (quote partition_limit) 2)
+					(list (quote result_max_rows_per_partition) 1)
 					(list (quote on_overflow) (quote error)))
 				(btw2025_stage_facts inner outer_sources lookup_pairs '() pending_info)))))
 		(define stage_alias (exists_stage_alias stage_id))
@@ -3612,7 +3645,8 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 				(list (quote lookup-keys) outer_domain)
 				(list (quote preserve_empty_domain) false)
 				(list (quote null_semantics) (quote aggregate))
-				(list (quote cardinality_mode) (quote many)))))
+				(list (quote partition_by) keys)
+				(list (quote result_max_rows_per_partition) 1))))
 		(define stage_alias (exists_stage_alias stage_id))
 		(define key_names (group_key_cols keys))
 		(define source (list
@@ -4202,8 +4236,8 @@ carrier selection remains a later, per-stage cost decision. */
 			(define tail (btw2025_decorrelate_fields_with_stages_using rest ctx (nth current 1)))
 			(list
 				(cons title (cons (nth rewritten 0) (nth tail 0)))
-				(unique_stages_by_id (merge (list (nth rewritten 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten 2) (nth tail 2)))
+				(merge (list (nth rewritten 1) (nth tail 1)))
+				(merge (list (nth rewritten 2) (nth tail 2)))
 				(nth tail 3)))
 		_ (list '() '() '() resolved))))
 
@@ -4221,8 +4255,8 @@ carrier selection remains a later, per-stage cost decision. */
 				rest ctx (nth rewritten_item 3)))
 			(list
 				(cons (nth rewritten_item 0) (nth tail 0))
-				(unique_stages_by_id (merge (list (nth rewritten_item 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten_item 2) (nth tail 2)))
+				(merge (list (nth rewritten_item 1) (nth tail 1)))
+				(merge (list (nth rewritten_item 2) (nth tail 2)))
 				(nth tail 3)))
 		_ (list '() '() '() resolved))))
 
@@ -4234,8 +4268,8 @@ carrier selection remains a later, per-stage cost decision. */
 			(define tail (btw2025_decorrelate_expr_list_with_stages_using rest ctx (nth current 1)))
 			(list
 				(cons (nth rewritten 0) (nth tail 0))
-				(unique_stages_by_id (merge (list (nth rewritten 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten 2) (nth tail 2)))
+				(merge (list (nth rewritten 1) (nth tail 1)))
+				(merge (list (nth rewritten 2) (nth tail 2)))
 				(nth tail 3)))
 		_ (list '() '() '() resolved))))
 
@@ -4243,11 +4277,20 @@ carrier selection remains a later, per-stage cost decision. */
 	(begin
 		(define current (btw2025_decorrelate_expr_using (source_join_expr src) ctx resolved))
 		(define rewritten_join (nth current 0))
+		(define generated_sources (nth rewritten_join 2))
+		(define nested_sources (filter generated_sources (lambda (generated)
+			(expr_refs_alias? (source_alias src) (source_alias src)
+				(source_join_expr generated)))))
 		(list
-			(merge_unique (list (nth rewritten_join 2) (list (source_with_join_expr src (nth rewritten_join 0)))))
+			(merge_unique (list generated_sources (list (source_with_join_expr src (nth rewritten_join 0)))))
 			(nth rewritten_join 1)
 			'()
-			(nth current 1)))))
+			(nth current 1)
+			(if (empty_list? nested_sources)
+				'()
+				(list (list
+					(list (quote parent) (source_alias src))
+					(list (quote children) (source_aliases nested_sources)))))))))
 
 (define btw2025_decorrelate_sources_with_stages_using (lambda (sources ctx resolved)
 	(match (coalesceNil sources '())
@@ -4255,11 +4298,12 @@ carrier selection remains a later, per-stage cost decision. */
 			(define rewritten_src (btw2025_decorrelate_source_with_stages_using src ctx resolved))
 			(define tail (btw2025_decorrelate_sources_with_stages_using rest ctx (nth rewritten_src 3)))
 			(list
-				(merge_unique (list (nth rewritten_src 0) (nth tail 0)))
-				(unique_stages_by_id (merge (list (nth rewritten_src 1) (nth tail 1))))
-				(merge_unique (list (nth rewritten_src 2) (nth tail 2)))
-				(nth tail 3)))
-		_ (list '() '() '() resolved))))
+				(merge (list (nth rewritten_src 0) (nth tail 0)))
+				(merge (list (nth rewritten_src 1) (nth tail 1)))
+				(merge (list (nth rewritten_src 2) (nth tail 2)))
+				(nth tail 3)
+				(merge (list (nth rewritten_src 4) (nth tail 4)))))
+		_ (list '() '() '() resolved '()))))
 
 (define btw2025_decorrelate_query_block (lambda (block ctx)
 	(begin
@@ -4294,7 +4338,11 @@ carrier selection remains a later, per-stage cost decision. */
 			(qb_offset bundled)
 			(nth hidden_result 0)
 			(unique_stages_by_id (merge (list (qb_stages bundled) source_stages (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1))))
-			(qb_facts bundled)))))
+			(qassoc_set (qb_facts bundled)
+				(quote join_relation_units)
+				(merge_unique (list
+					(qassoc_get (qb_facts bundled) (quote join_relation_units) '())
+					(nth source_result 4))))))))
 
 (define field_expr_by_title (lambda (fields title ignorecase)
 	(match (coalesceNil fields '())
@@ -5028,11 +5076,28 @@ that actually owns the title consumes the reference. */
 		(cons src rest) (begin
 			(define head (untangle_source_join_expr_with_stages src outer_sources ctx))
 			(define tail (untangle_source_join_exprs_with_stages rest outer_sources ctx))
+			(define generated_sources (nth head 2))
+			(define nested_sources (filter generated_sources (lambda (generated)
+				(expr_refs_alias? (source_alias src) (source_alias src)
+					(source_join_expr generated)))))
+			/* Relations introduced while rewriting an ON expression belong to the
+			nullable relation of that JOIN. Preserve this logical nesting explicitly:
+			a later join reorder may move the complete relation unit, but must perform
+			NULL extension at the original LEFT boundary. This is expression provenance,
+			not a scalar/EXISTS or physical-operator classification. */
+			(define relation_units (if (empty_list? nested_sources)
+				(nth tail 3)
+				(cons
+					(list
+						(list (quote parent) (source_alias src))
+						(list (quote children) (source_aliases nested_sources)))
+					(nth tail 3))))
 			(list
-				(merge (list (nth head 2) (list (nth head 0)) (nth tail 0)))
+				(merge (list generated_sources (list (nth head 0)) (nth tail 0)))
 				(merge_unique (list (nth head 1) (nth tail 1)))
-				(merge_unique (list (nth head 2) (nth tail 2)))))
-		_ (list '() '() '()))))
+				(merge_unique (list generated_sources (nth tail 2)))
+				relation_units))
+		_ (list '() '() '() '()))))
 
 /* ------------------------------------------------------------------------- */
 /* Top-down untangle                                                          */
@@ -5278,7 +5343,8 @@ that actually owns the title consumes the reference. */
 									(qb_offset block)
 									(nth hidden_result 0)
 									(merge_unique (list source_stages (qb_stages block) (nth source_join_result 1) (nth where_result 1) (nth field_result 1) (nth group_result 1) (nth having_result 1) (nth order_result 1) (nth hidden_result 1)))
-									(qb_facts block)))
+									(qassoc_set (qb_facts block)
+										(quote join_relation_units) (nth source_join_result 3))))
 								(btw2025_decorrelate_query_block delayed_block
 									(make_uctx child_ctx (list
 										(list (quote outer-resolution-sources) nested_outer_resolution_sources)))))))))))))

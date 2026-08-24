@@ -37,7 +37,12 @@ setup:
 test_cases:
   - name: "Distinct scalar probe stages compile within a linear budget"
     max_time: 1.0
+    # This large input is the complexity gate: the indexed implementation is
+    # around 130ms locally, while the retired per-stage catalog scan projects
+    # to several seconds at 48 stages.
+    max_planner_time_ms: 1500
     max_compile_phase_ms:
+      reorder_ns: 500
       recipe_emit_ns: 700
     sql: |
       SELECT
@@ -97,4 +102,3 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS scale_box"
   - sql: "DROP TABLE IF EXISTS scale_host"
-

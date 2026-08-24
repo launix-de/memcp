@@ -94,8 +94,9 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "(cardinality_mode first)"
-        - "(physical_max_rows 1)"
+        - "(null_semantics scalar)"
+        - "(partition_limit 1)"
+        - "(result_max_rows_per_partition 1)"
         - "(on_overflow ignore)"
       result_not_contains:
         - "inner_select"

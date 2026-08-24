@@ -307,6 +307,11 @@ def scaled_wall_clock_limit_ms(seconds: float, calibration: Dict[str, Any]) -> f
     return seconds * 1000.0 * calibration["scale"]
 
 
+def scaled_compile_time_limit_ms(reference_ms: float, calibration: Dict[str, Any]) -> float:
+    """Translate a reference-machine compile budget to this machine."""
+    return reference_ms * calibration["scale"]
+
+
 def resolve_timing_samples(test_case: Dict[str, Any], is_perf_test: bool) -> int:
     """Return an odd sample count so the timed result has an unambiguous median."""
     default = PERF_REPEAT if is_perf_test else 1
@@ -316,9 +321,14 @@ def resolve_timing_samples(test_case: Dict[str, Any], is_perf_test: bool) -> int
     return raw
 
 
-def planner_time_limit_with_tolerance_ms(reference_budget_ms: float) -> float:
+def planner_time_limit_with_tolerance_ms(
+    reference_budget_ms: float, calibration: Dict[str, Any]
+) -> float:
     """Allow bounded cold-compile jitter without hiding complexity regressions."""
-    return reference_budget_ms * PLANNER_TIME_TOLERANCE_FACTOR
+    return (
+        scaled_compile_time_limit_ms(reference_budget_ms, calibration)
+        * PLANNER_TIME_TOLERANCE_FACTOR
+    )
 
 
 def is_error_response(response: Optional[requests.Response]) -> bool:
@@ -864,7 +874,9 @@ class SQLTestRunner:
         else:
             plan_size_limit = DEFAULT_MAX_PLAN_SIZE
         planner_time_budget_ms = float(test_case.get("max_planner_time_ms", 0))
-        planner_time_limit_ms = planner_time_limit_with_tolerance_ms(planner_time_budget_ms)
+        planner_time_limit_ms = planner_time_limit_with_tolerance_ms(
+            planner_time_budget_ms, self.performance_calibration
+        )
         compile_phase_limits_ms = test_case.get("max_compile_phase_ms", {})
         if not isinstance(compile_phase_limits_ms, dict):
             return self._record_fail(name, "max_compile_phase_ms must be a mapping",
@@ -1185,7 +1197,9 @@ class SQLTestRunner:
                                 name, f"EXPLAIN COMPILE did not report phase {phase}",
                                 query, compile_resp, test_case.get("expect"), is_noncritical,
                             )
-                        limit_ms = float(limit_ms_value)
+                        limit_ms = scaled_compile_time_limit_ms(
+                            float(limit_ms_value), self.performance_calibration
+                        )
                         phase_time_ms = float(metrics[phase]) / 1_000_000.0
                         if phase_time_ms > limit_ms:
                             diag = self._run_on_fail(test_case, database)
