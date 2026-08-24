@@ -15,7 +15,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Maintainer-approved administrative policy update. Restore the trusted
-      # base-policy evaluation immediately after the update has merged.
-      - name: Administrative policy-update bypass
-        run: echo "Protected regression policy temporarily bypassed for its approved update"
+      # Policy code always comes from the trusted base revision.  Candidate
+      # files are parsed as data and are never imported or executed.
+      - name: Check out trusted policy
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          path: policy
+
+      - name: Check out candidate as data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: candidate
+
+      - name: Install policy dependencies
+        run: pip install PyYAML
+
+      - name: Apply trusted regression policy
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git -C candidate fetch ../policy "$BASE_REF"
+          python3 policy/tools/check_sql_time_limit.py \
+            --root candidate \
+            --base-ref "$BASE_REF"
