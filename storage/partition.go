@@ -99,15 +99,15 @@ func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <
 		querySeq := scm.CurrentQuerySeq()
 		startWorker = func(worker func()) {
 			go func() {
+				// A worker needs one complete execution context. Nesting
+				// SetValues around WithSession makes go-gls discover and tag the
+				// goroutine stack twice for every fanout worker, even though all
+				// values have the same lifetime.
 				scm.SetValues(map[string]any{
+					"session":         currentTx.Session,
 					"sessionStatePtr": ss,
 					"querySeq":        querySeq,
-				}, func() {
-					withTxSession(currentTx, func() scm.Scmer {
-						worker()
-						return scm.NewNil()
-					})
-				})
+				}, worker)
 			}()
 		}
 	}
