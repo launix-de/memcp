@@ -271,6 +271,32 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 		(filter (coalesceNil sources '()) (lambda (src)
 			(not (has_assoc? probe_aliases (source_alias src))))))))
 
+/* A physical probe is a lookup from a relational driver row. Consuming the
+only partitioned FROM source would erase the block's row multiplicity
+(including empty-input semantics) and leave grouped lowering without a driver. */
+(define probe_sources_with_relational_driver (lambda (sources probe_sources relational_sources)
+	(if (and (not (empty_list? sources))
+		(and (single_source? sources)
+			(and (not (empty_list? relational_sources))
+				(equal? (count sources) (count probe_sources)))))
+		'()
+		probe_sources)))
+
+(define partitioned_stage_output_sources (lambda (stages sources)
+	(filter (coalesceNil sources '()) (lambda (src)
+		(if (not (stage_output_relation? (source_relation src)))
+			false
+			(begin
+				(define stage (stage_by_id stages
+					(stage_output_relation_id (source_relation src))))
+				(and (not (nil? stage))
+					(not (empty_list? (qassoc_get (gs_facts stage) (quote partition_by) '()))))))))))
+
+(define grouped_probe_consumer? (lambda (block)
+	(or (not (empty_list? (qb_group block)))
+		(or (not (nil? (qb_having block)))
+			(query_block_has_aggregates? block)))))
+
 (define presence_probe_output_sources (lambda (stages sources default_alias)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(if (not (presence_stage_output_source? stages src))
@@ -665,9 +691,15 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 		(define retained_order_alias (if (or (nil? order_lookup) (nil? (nth order_lookup 0)))
 			nil
 			(source_alias (nth order_lookup 0))))
-		(define probe_sources (if (nil? retained_order_alias)
+		(define selected_probe_sources (if (nil? retained_order_alias)
 			probe_candidates
 			(merge_unique (list probe_candidates (list (nth order_lookup 0))))))
+		(define probe_sources
+			(probe_sources_with_relational_driver sources selected_probe_sources
+				(if (and (single_source? sources)
+					(and (single_source? selected_probe_sources) (grouped_probe_consumer? block)))
+					(partitioned_stage_output_sources stages selected_probe_sources)
+					'())))
 		(define probe_index (probe_stage_alias_index_using_graph
 			stages dependency_graph probe_sources consumers))
 		(define rewritten_sources (rewrite_scalar_first_probe_sources_using_index stages sources probe_index default_alias))
@@ -695,21 +727,28 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 (define query_block_with_presence_probe_sources_using (lambda (stages probe_sources block)
 	(begin
 		(define sources (qb_sources block))
+		(define selected_probe_sources
+			(probe_sources_with_relational_driver sources probe_sources
+				(if (and (single_source? sources)
+					(and (single_source? probe_sources) (grouped_probe_consumer? block)))
+					(partitioned_stage_output_sources stages probe_sources)
+					'())))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(define rewritten_sources (rewrite_scalar_first_probe_sources_using stages sources probe_sources default_alias))
+		(define rewritten_sources (rewrite_scalar_first_probe_sources_using
+			stages sources selected_probe_sources default_alias))
 		(make_query_block
 			(qb_schema block)
 			/* probe_sources is the caller's already costed and semantics-checked
 			selection. Do not rerun the unbounded cache heuristic while removing it. */
-			(sources_without_probe_outputs rewritten_sources probe_sources)
-			(rewrite_scalar_first_probe_fields stages probe_sources default_alias (qb_fields block))
-			(rewrite_scalar_first_probe_expr stages probe_sources default_alias (qb_where block))
+			(sources_without_probe_outputs rewritten_sources selected_probe_sources)
+			(rewrite_scalar_first_probe_fields stages selected_probe_sources default_alias (qb_fields block))
+			(rewrite_scalar_first_probe_expr stages selected_probe_sources default_alias (qb_where block))
 			(qb_group block)
-			(rewrite_scalar_first_probe_expr stages probe_sources default_alias (qb_having block))
-			(rewrite_scalar_first_probe_order stages probe_sources default_alias (qb_order block))
+			(rewrite_scalar_first_probe_expr stages selected_probe_sources default_alias (qb_having block))
+			(rewrite_scalar_first_probe_order stages selected_probe_sources default_alias (qb_order block))
 			(qb_limit block)
 			(qb_offset block)
-			(rewrite_scalar_first_probe_fields stages probe_sources default_alias (qb_hidden block))
+			(rewrite_scalar_first_probe_fields stages selected_probe_sources default_alias (qb_hidden block))
 			(qb_stages block)
 			(join_optimizer_facts_without_aliases
 				(qassoc_set
@@ -717,8 +756,8 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 					(quote consumed_presence_probe_stage_ids)
 					(merge_unique (list
 						(qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '())
-						(stage_output_source_ids probe_sources))))
-				(map probe_sources source_alias))))))
+						(stage_output_source_ids selected_probe_sources))))
+				(map selected_probe_sources source_alias))))))
 
 (define query_block_with_presence_probes_using (lambda (stages block)
 	(begin
