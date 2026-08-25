@@ -233,6 +233,53 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 						(car binding))
 					(car existing)))))))
 
+/* Expensive physical choices may depend on a cardinality which is unknowable
+from source-local statistics (for example after projecting a selective RHS
+through a heavily skewed foreign key). Register one request-local preparation
+instead of guessing that correlation. cached_parse executes the producer once
+before its side-effect-free guards, stores both the reusable value and its
+metric, and makes them visible to a recompilation of the same request. */
+(define planner_queryplan_observation_value_key (lambda (decision_id)
+	(concat "__memcp_queryplan_observation_value_" (fnv_hash decision_id))))
+
+(define planner_queryplan_observation_metric_key (lambda (decision_id)
+	(concat "__memcp_queryplan_observation_metric_" (fnv_hash decision_id))))
+
+(define planner_register_queryplan_observation (lambda (decision_id producer metric_expr)
+	(begin
+		(define preparations (try
+			(lambda () ((context "session") "__memcp_queryplan_preparations"))
+			(lambda (_e) nil)))
+		(if (nil? preparations)
+			nil
+			(begin
+				(define key (concat "observation:" decision_id))
+				(if (preparations key)
+					nil
+					(begin
+						(define count (coalesceNil (preparations "count") 0))
+						(preparations key true)
+						(preparations (concat "preparation:" count)
+							(list decision_id producer metric_expr))
+						(preparations "count" (+ count 1))))
+				(list
+					(planner_queryplan_observation_value_key decision_id)
+					(planner_queryplan_observation_metric_key decision_id)))))))
+
+(define planner_queryplan_observation_registered? (lambda (decision_id)
+	(begin
+		(define preparations (try
+			(lambda () ((context "session") "__memcp_queryplan_preparations"))
+			(lambda (_e) nil)))
+		(and (not (nil? preparations))
+			(preparations (concat "observation:" decision_id))))))
+
+(define planner_queryplan_observed_metric (lambda (decision_id)
+	(try
+		(lambda () ((context "session")
+			(planner_queryplan_observation_metric_key decision_id)))
+		(lambda (_e) nil))))
+
 (define empty_list? (lambda (xs)
 	(or (nil? xs) (equal? xs '()))))
 

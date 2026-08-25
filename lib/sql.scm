@@ -146,7 +146,11 @@ functional planner return value. */
 				(begin
 					(compile_bindings key (source_session key))
 					(planning_session key (source_session key)))
-				(if (equal? key "__memcp_tx")
+				/* Prepared carriers are opaque native values owned by the executing
+				query. Compilation consumes only their scalar observation; copying a
+				RecSet here would also make structural guard/catalog code inspect it. */
+				(if (or (equal? key "__memcp_tx")
+					(match key (regex "^__memcp_queryplan_observation_value_" _) true false))
 					nil
 					(planning_session key (source_session key))))) nil)
 		(planning_session "__memcp_queryplan_compile_bindings" compile_bindings)
@@ -156,8 +160,15 @@ functional planner return value. */
 		(planning_session "__memcp_queryplan_guard_binding_catalog" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_guarded_session_keys" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_observed_session_keys" (newsession))
+		(planning_session "__memcp_queryplan_preparations" (newsession))
 		(planning_session "__memcp_queryplan_statistics" (newsession))
 		planning_session)))
+
+(define sql_queryplan_preparations_from_session (lambda (planning_session)
+	(begin
+		(define preparations (planning_session "__memcp_queryplan_preparations"))
+		(map (produceN (coalesceNil (preparations "count") 0))
+			(lambda (idx) (preparations (concat "preparation:" idx)))))))
 
 (define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
 	(begin
@@ -227,7 +238,56 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 		(context "check")
 		(define plan (optimize raw_plan))
 		(context "check")
-		(list (sql_queryplan_guard_from_session planning_session) plan))))
+		(list
+			(sql_queryplan_guard_from_session planning_session)
+			plan
+			(sql_queryplan_preparations_from_session planning_session)))))
+
+(define sql_queryplan_preparation_expr (lambda (preparation)
+	(match preparation '(decision_id producer metric_expr) (begin
+		(define value_key (planner_queryplan_observation_value_key decision_id))
+		(define metric_key (planner_queryplan_observation_metric_key decision_id))
+		(define request_session (list (quote context) "session"))
+		(define prepared_value (symbol "__queryplan_prepared_value"))
+		(list (quote if)
+			(list (quote number?) (list request_session metric_key))
+			true
+			(list (quote !begin)
+				(list (quote context) "check")
+				(list
+					(list (quote lambda) (list prepared_value)
+						(list (quote !begin)
+							(list request_session value_key prepared_value)
+							(list request_session metric_key
+								(list
+									(list (quote lambda) (list (symbol "__queryplan_observed_value")) metric_expr)
+									prepared_value))
+							true))
+					(sql_queryplan_runtime_guard_expr producer))
+				(list (quote context) "check")
+				true))))))
+
+/* Walk variants in priority order. A cheap guarded variant can return before
+an older expensive observation is prepared. Once a variant needs an
+observation, prepare each physical decision at most once and then evaluate its
+otherwise side-effect-free guard. */
+(define sql_queryplan_formula_dispatch (lambda (variants prepared_catalog miss_expr)
+	(match variants
+		(cons variant rest) (begin
+			(define new_preparations (filter (nth variant 2) (lambda (preparation)
+				(if (prepared_catalog (car preparation))
+					false
+					(begin (prepared_catalog (car preparation) true) true)))))
+			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
+			(define dispatch (if (equal? (car variant) true)
+				(cadr variant)
+				(list (quote if) (car variant) (cadr variant) tail_expr)))
+			(if (empty_list? new_preparations)
+				dispatch
+				(cons (quote !begin)
+					(merge (list (map new_preparations sql_queryplan_preparation_expr)
+						(list dispatch))))))
+		_ miss_expr)))
 
 (define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
 	(list (quote eval)
@@ -235,17 +295,11 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			queryplan_cache cache_key entry parse_fn schema parse_query policy))))
 
 (define sql_queryplan_formula (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
-	(match variants
-		(cons variant '()) (if (equal? (car variant) true)
-			(cadr variant)
-			(cons (quote if) (list
-				(car variant) (cadr variant)
-				(sql_queryplan_miss_expr queryplan_cache cache_key entry parse_fn schema parse_query policy))))
-		_ (cons (quote if)
-			(merge (list
-				(merge (map variants (lambda (variant)
-					(list (car variant) (cadr variant)))))
-				(list (sql_queryplan_miss_expr queryplan_cache cache_key entry parse_fn schema parse_query policy))))))))
+	(begin
+		(define miss_expr (sql_queryplan_miss_expr
+			queryplan_cache cache_key entry parse_fn schema parse_query policy))
+		(sql_queryplan_formula_dispatch variants
+			(make_structural_catalog (quote ast)) miss_expr))))
 
 (define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
 	(begin
@@ -263,8 +317,13 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 
 (define sql_queryplan_matching_variant (lambda (variants)
 	(match variants
-		(cons variant rest)
-		(if (eval (car variant)) variant (sql_queryplan_matching_variant rest))
+		(cons variant rest) (begin
+			/* This request may hold an older formula while another request prepends a
+			variant under the compile lock. Prepare that newly visible variant before
+			rechecking its guard; preparation expressions are request-idempotent. */
+			(map (nth variant 2) (lambda (preparation)
+				(eval (sql_queryplan_preparation_expr preparation))))
+			(if (eval (car variant)) variant (sql_queryplan_matching_variant rest)))
 		_ nil)))
 
 /* Called only by the final else branch of a cached plan. Recheck after taking

@@ -698,7 +698,7 @@ test_cases:
 
   - name: "Bounded nested permission and membership stay on the ordered base driver"
     sql: |
-      EXPLAIN SELECT d.*
+      EXPLAIN PHYSICAL SELECT d.*
       FROM (
         SELECT m.id, m.file_id, m.label_id, m.rank_value,
           projected_label.name AS label_name,
@@ -736,6 +736,7 @@ test_cases:
         - "scan_order"
         - "recset"
       result_not_contains:
+        - "adaptive_observation_required true"
         - "__join_order_intermediate"
         - '"$recset_contains"'
         - "(lambda (rows)"
