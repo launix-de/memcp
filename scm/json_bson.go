@@ -306,6 +306,45 @@ func bsonArrayFromRawValues(values []bson.RawValue, flags uint64) Scmer {
 	return newBSONValueFlags(bson.TypeArray, payload, flags)
 }
 
+func bsonArrayFromRawParts(left bson.RawValue, leftArray bool, right bson.RawValue, rightArray bool, flags uint64) Scmer {
+	index, payload := bsoncore.AppendArrayStart(nil)
+	valueIndex := 0
+	appendValue := func(value bson.RawValue) {
+		payload = append(payload, byte(value.Type))
+		payload = strconv.AppendInt(payload, int64(valueIndex), 10)
+		payload = append(payload, 0)
+		payload = append(payload, value.Value...)
+		valueIndex++
+	}
+	appendPart := func(value bson.RawValue, array bool) {
+		if !array {
+			appendValue(value)
+			return
+		}
+		if len(value.Value) < bsoncore.EmptyDocumentLength {
+			panic(fmt.Errorf("invalid BSON array length %d", len(value.Value)))
+		}
+		remaining := value.Value[4 : len(value.Value)-1]
+		for len(remaining) > 0 {
+			element, rest, ok := bsoncore.ReadElement(remaining)
+			if !ok {
+				panic("invalid BSON array element")
+			}
+			child := element.Value()
+			appendValue(bson.RawValue{Type: bson.Type(child.Type), Value: child.Data})
+			remaining = rest
+		}
+	}
+	appendPart(left, leftArray)
+	appendPart(right, rightArray)
+	var err error
+	payload, err = bsoncore.AppendArrayEnd(payload, index)
+	if err != nil {
+		panic(err)
+	}
+	return newBSONValueFlags(bson.TypeArray, payload, flags)
+}
+
 func bsonDocumentFromPairs(pairs []bsonJSONPair, flags uint64) Scmer {
 	// JSON object keys are canonicalized to deterministic order. For duplicate
 	// keys the last input pair wins.
@@ -667,6 +706,105 @@ func appendBSONJSON(dst []byte, value bson.RawValue, pretty bool, prefix string,
 
 func appendBSONText(dst []byte, value Scmer, pretty bool, prefix string) ([]byte, error) {
 	return appendBSONJSON(dst, bsonRawValue(value), pretty, prefix, 0)
+}
+
+func writeBSONJSON(writer io.Writer, value bson.RawValue) error {
+	bufferSize := len(value.Value)
+	if bufferSize < 256 {
+		bufferSize = 256
+	} else if bufferSize > 16*1024 {
+		bufferSize = 16 * 1024
+	}
+	buffer := make([]byte, 0, bufferSize)
+	flush := func() error {
+		pending := buffer
+		for len(pending) > 0 {
+			written, err := writer.Write(pending)
+			if err != nil {
+				return err
+			}
+			if written == 0 {
+				return io.ErrShortWrite
+			}
+			pending = pending[written:]
+		}
+		buffer = buffer[:0]
+		return nil
+	}
+	appendByte := func(value byte) error {
+		buffer = append(buffer, value)
+		if len(buffer) >= cap(buffer) {
+			return flush()
+		}
+		return nil
+	}
+	var walk func(bson.RawValue) error
+	walk = func(current bson.RawValue) error {
+		if current.Type != bson.TypeEmbeddedDocument && current.Type != bson.TypeArray {
+			var err error
+			buffer, err = appendBSONJSON(buffer, current, false, "", 0)
+			if err != nil {
+				return err
+			}
+			if len(buffer) >= cap(buffer) {
+				return flush()
+			}
+			return nil
+		}
+
+		if len(current.Value) < bsoncore.EmptyDocumentLength {
+			return fmt.Errorf("invalid BSON container length %d", len(current.Value))
+		}
+		isDocument := current.Type == bson.TypeEmbeddedDocument
+		if isDocument {
+			if err := appendByte('{'); err != nil {
+				return err
+			}
+		} else if err := appendByte('['); err != nil {
+			return err
+		}
+		remaining := current.Value[4 : len(current.Value)-1]
+		count := 0
+		for len(remaining) > 0 {
+			element, rest, ok := bsoncore.ReadElement(remaining)
+			if !ok {
+				return fmt.Errorf("invalid BSON element")
+			}
+			if count > 0 {
+				if err := appendByte(','); err != nil {
+					return err
+				}
+			}
+			if isDocument {
+				key, err := element.KeyBytesErr()
+				if err != nil {
+					return err
+				}
+				if bytes.HasPrefix(key, []byte(bsonEscapedKeyPrefix)) {
+					buffer = appendJSONString(buffer, decodeBSONKey(string(key)))
+				} else {
+					buffer = appendJSONStringBytes(buffer, key)
+				}
+				if err := appendByte(':'); err != nil {
+					return err
+				}
+			}
+			child := element.Value()
+			if err := walk(bson.RawValue{Type: bson.Type(child.Type), Value: child.Data}); err != nil {
+				return err
+			}
+			remaining = rest
+			count++
+		}
+		if isDocument {
+			return appendByte('}')
+		}
+		return appendByte(']')
+	}
+	if err := walk(value); err != nil {
+		return err
+	}
+	return flush()
 }
 
 func bsonText(value Scmer) string {

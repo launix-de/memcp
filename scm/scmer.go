@@ -840,12 +840,21 @@ func (s Scmer) String() string {
 
 // Stream returns an io.Reader for the value.
 // - If the underlying value is already an io.Reader (streams are encoded as Any), it is passed through.
-// - Otherwise, the value is converted to its string form and a strings.Reader is returned.
+// - BSON is serialized incrementally through the existing writer path.
+// - Other values are converted to their string form and returned through a strings.Reader.
 func (s Scmer) Stream() io.Reader {
 	if s.GetTag() == tagAny {
 		if r, ok := s.Any().(io.Reader); ok {
 			return r
 		}
+	}
+	if s.IsBSON() {
+		reader, writer := io.Pipe()
+		go func() {
+			err := writeBSONJSON(writer, bsonRawValue(s))
+			_ = writer.CloseWithError(err)
+		}()
+		return reader
 	}
 	return strings.NewReader(s.String())
 }
@@ -1188,12 +1197,9 @@ func (s *Scmer) Write(w io.Writer) {
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagBSON:
-		var buffer [512]byte
-		encoded, err := appendBSONText(buffer[:0], *s, false, "")
-		if err != nil {
+		if err := writeBSONJSON(w, bsonRawValue(*s)); err != nil {
 			panic(err)
 		}
-		w.Write(encoded)
 	case tagFunc:
 		io.WriteString(w, "[func]")
 	case tagSlice:

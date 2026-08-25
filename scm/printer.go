@@ -161,8 +161,12 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	switch v.GetTag() {
 	case tagNil:
 		w.WriteString("nil")
-	case tagBool, tagString, tagCString, tagBString, tagBSON, tagSymbol:
+	case tagBool, tagString, tagCString, tagBString, tagSymbol:
 		w.WriteString(v.String())
+	case tagBSON:
+		if err := writeBSONJSON(w, bsonRawValue(v)); err != nil {
+			panic(err)
+		}
 	case tagInt:
 		var buffer [32]byte
 		value := strconv.AppendInt(buffer[:0], v.Int(), 10)

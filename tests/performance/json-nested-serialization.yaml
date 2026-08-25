@@ -1,0 +1,235 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# These queries intentionally emit one complete JSON/BSON value without
+# pagination. Each shape adds one serialization level so A/B reports can
+# distinguish flat aggregation, child-array embedding, and full three-level
+# delivery-note serialization.
+
+metadata:
+  version: "1.0"
+  description: "Complete nested JSON/BSON serialization without pagination"
+  isolated: true
+
+x-delivery-setup: &delivery_setup
+  - sql: "DROP TABLE IF EXISTS json_perf_serial_numbers"
+  - sql: "DROP TABLE IF EXISTS json_perf_delivery_items"
+  - sql: "DROP TABLE IF EXISTS json_perf_delivery_notes"
+  - scm: "(rebuild)"
+  - sql: |
+      CREATE TABLE json_perf_delivery_notes (
+        id INT PRIMARY KEY,
+        note_number VARCHAR(32) NOT NULL,
+        customer_name VARCHAR(64) NOT NULL,
+        delivery_date INT NOT NULL,
+        status VARCHAR(16) NOT NULL
+      ) ENGINE=memory
+  - sql: |
+      CREATE TABLE json_perf_delivery_items (
+        id INT PRIMARY KEY,
+        delivery_note_id INT NOT NULL,
+        sku VARCHAR(32) NOT NULL,
+        quantity INT NOT NULL,
+        unit_price INT NOT NULL,
+        FOREIGN KEY (delivery_note_id) REFERENCES json_perf_delivery_notes(id)
+      ) ENGINE=memory
+  - sql: |
+      CREATE TABLE json_perf_serial_numbers (
+        id INT PRIMARY KEY,
+        delivery_item_id INT NOT NULL,
+        serial_number VARCHAR(48) NOT NULL,
+        FOREIGN KEY (delivery_item_id) REFERENCES json_perf_delivery_items(id)
+      ) ENGINE=memory
+  - scm: |
+      (begin
+        (define delivery_count {rows})
+        (define item_count (* delivery_count 8))
+        (define serial_count (* item_count 3))
+        (define inserted_deliveries
+          (insert (table "{database}" "json_perf_delivery_notes")
+            '("id" "note_number" "customer_name" "delivery_date" "status")
+            (map (produceN delivery_count) (lambda (i)
+              (list (+ i 1)
+                (concat "DN-" (+ i 1))
+                (concat "Customer " (mod i 4096))
+                (+ 1700000000 i)
+                (if (equal? (mod i 5) 0) "open" "shipped"))))))
+        (define inserted_items
+          (insert (table "{database}" "json_perf_delivery_items")
+            '("id" "delivery_note_id" "sku" "quantity" "unit_price")
+            (map (produceN item_count) (lambda (i)
+              (list (+ i 1)
+                (+ (floor (/ i 8)) 1)
+                (concat "SKU-" (mod i 16384))
+                (+ (mod i 7) 1)
+                (+ (mod (* i 37) 10000) 100))))))
+        (define inserted_serials
+          (insert (table "{database}" "json_perf_serial_numbers")
+            '("id" "delivery_item_id" "serial_number")
+            (map (produceN serial_count) (lambda (i)
+              (list (+ i 1)
+                (+ (floor (/ i 3)) 1)
+                (concat "SN-" (+ i 1000000)))))))
+        (rebuild)
+        (define mem (memstats))
+        (list (+ inserted_deliveries inserted_items inserted_serials) (mem "heap_alloc")))
+
+test_cases:
+  - name: "Perf JSON delivery: emit complete flat object list"
+    setup: *delivery_setup
+    sql: |
+      SELECT JSON_ARRAYAGG(JSON_OBJECT(
+        'id', delivery_note.id,
+        'number', delivery_note.note_number,
+        'customer', delivery_note.customer_name,
+        'date', delivery_note.delivery_date,
+        'status', delivery_note.status
+      )) AS delivery_notes
+      FROM json_perf_delivery_notes AS delivery_note
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  - name: "Perf JSON delivery: emit complete list with item arrays"
+    setup: *delivery_setup
+    sql: |
+      SELECT JSON_ARRAYAGG(JSON_OBJECT(
+        'id', delivery_note.id,
+        'number', delivery_note.note_number,
+        'customer', delivery_note.customer_name,
+        'date', delivery_note.delivery_date,
+        'status', delivery_note.status,
+        'items', (
+          SELECT JSON_ARRAYAGG(JSON_OBJECT(
+            'id', delivery_item.id,
+            'sku', delivery_item.sku,
+            'quantity', delivery_item.quantity,
+            'unitPrice', delivery_item.unit_price
+          ))
+          FROM json_perf_delivery_items AS delivery_item
+          WHERE delivery_item.delivery_note_id = delivery_note.id
+        )
+      )) AS delivery_notes
+      FROM json_perf_delivery_notes AS delivery_note
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  - name: "Perf JSON delivery: emit complete three-level list with serial arrays"
+    setup: *delivery_setup
+    sql: |
+      SELECT JSON_ARRAYAGG(JSON_OBJECT(
+        'id', delivery_note.id,
+        'number', delivery_note.note_number,
+        'customer', delivery_note.customer_name,
+        'date', delivery_note.delivery_date,
+        'status', delivery_note.status,
+        'items', (
+          SELECT JSON_ARRAYAGG(JSON_OBJECT(
+            'id', delivery_item.id,
+            'sku', delivery_item.sku,
+            'quantity', delivery_item.quantity,
+            'unitPrice', delivery_item.unit_price,
+            'serialNumbers', (
+              SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                'id', serial_number.id,
+                'serialNumber', serial_number.serial_number
+              ))
+              FROM json_perf_serial_numbers AS serial_number
+              WHERE serial_number.delivery_item_id = delivery_item.id
+            )
+          ))
+          FROM json_perf_delivery_items AS delivery_item
+          WHERE delivery_item.delivery_note_id = delivery_note.id
+        )
+      )) AS delivery_notes
+      FROM json_perf_delivery_notes AS delivery_note
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  - name: "Perf JSON PostgreSQL delivery: emit complete three-level list with serial arrays"
+    syntax: postgresql
+    setup: *delivery_setup
+    sql: |
+      SELECT jsonb_agg(jsonb_build_object(
+        'id', delivery_note.id,
+        'number', delivery_note.note_number,
+        'customer', delivery_note.customer_name,
+        'date', delivery_note.delivery_date,
+        'status', delivery_note.status,
+        'items', (
+          SELECT jsonb_agg(jsonb_build_object(
+            'id', delivery_item.id,
+            'sku', delivery_item.sku,
+            'quantity', delivery_item.quantity,
+            'unitPrice', delivery_item.unit_price,
+            'serialNumbers', (
+              SELECT jsonb_agg(jsonb_build_object(
+                'id', serial_number.id,
+                'serialNumber', serial_number.serial_number
+              ))
+              FROM json_perf_serial_numbers AS serial_number
+              WHERE serial_number.delivery_item_id = delivery_item.id
+            )
+          ))
+          FROM json_perf_delivery_items AS delivery_item
+          WHERE delivery_item.delivery_note_id = delivery_note.id
+        )
+      )) AS delivery_notes
+      FROM json_perf_delivery_notes AS delivery_note
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  - name: "Perf JSON delivery control: explicit grouped item carrier"
+    setup: *delivery_setup
+    sql: |
+      SELECT JSON_ARRAYAGG(JSON_OBJECT(
+        'id', delivery_note.id,
+        'number', delivery_note.note_number,
+        'customer', delivery_note.customer_name,
+        'date', delivery_note.delivery_date,
+        'status', delivery_note.status,
+        'items', grouped_items.items
+      )) AS delivery_notes
+      FROM json_perf_delivery_notes AS delivery_note
+      LEFT JOIN (
+        SELECT delivery_item.delivery_note_id,
+          JSON_ARRAYAGG(JSON_OBJECT(
+            'id', delivery_item.id,
+            'sku', delivery_item.sku,
+            'quantity', delivery_item.quantity,
+            'unitPrice', delivery_item.unit_price,
+            'serialNumbers', (
+              SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                'id', serial_number.id,
+                'serialNumber', serial_number.serial_number
+              ))
+              FROM json_perf_serial_numbers AS serial_number
+              WHERE serial_number.delivery_item_id = delivery_item.id
+            )
+          )) AS items
+        FROM json_perf_delivery_items AS delivery_item
+        GROUP BY delivery_item.delivery_note_id
+      ) AS grouped_items ON grouped_items.delivery_note_id = delivery_note.id
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS json_perf_serial_numbers"
+  - sql: "DROP TABLE IF EXISTS json_perf_delivery_items"
+  - sql: "DROP TABLE IF EXISTS json_perf_delivery_notes"
