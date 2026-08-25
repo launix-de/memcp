@@ -17,14 +17,13 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "io"
-import "fmt"
 import "math"
 import "bufio"
-import "unsafe"
-import "encoding/json"
 import "encoding/base64"
+import "encoding/json"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
+import "unsafe"
 
 // main type for storage: can store any value, is inefficient but does type analysis how to optimize
 type StorageSCMER struct {
@@ -58,28 +57,21 @@ func (s *StorageSCMER) String() string {
 	return "SCMER"
 }
 
-// StorageSCMER binary layout (magic byte 42 consumed by shard loader):
+// StorageSCMER binary layout (magic byte 1 consumed by shard loader):
 //
-//	[version uint8]
 //	[count uint64]
-//	[values: count × tagged value]
-//	  tag 0: [JSON length uint32][legacy Scmer JSON]
-//	  tag 1: [BSON type uint8][payload length uint32][raw BSON payload]
+//	[values: count × JSON line (terminated by '\n')]
 //
 // Version history:
 //
-//	v1: raw BSON payloads; other Scmer tags retain their established JSON form.
-//
-// Magic byte 1 is handled by StorageSCMERLegacy below and remains readable
-// forever. The raw BSON payload is the sole persisted JSON representation;
-// there is no Base64 or ordinary-JSON copy beside it.
-const storageSCMERVersion = 1
-
-const (
-	storageSCMERJSON = iota
-	storageSCMERBSON
-)
-
+//	v0 (original, no version byte): layout as above.  This type had no padding
+//	byte in v0.1.0. Historically StorageSCMER was not a final storage type;
+//	BSON values intentionally remain in it. Format changes still require a NEW
+//	magic byte in storages[] (storage.go); keep magic 1 as a legacy reader
+//	forever.
+//	BSON values use a reserved JSON object envelope inside their existing JSONL
+//	line. This adds a representation for the new Scmer tag without changing the
+//	legacy framing or the decoding of any previously supported Scmer value.
 func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var idxInt scm.JITValueDesc
@@ -181,102 +173,35 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 }
 
 func (s *StorageSCMER) Serialize(f io.Writer) {
-	binary.Write(f, binary.LittleEndian, uint8(42))
-	binary.Write(f, binary.LittleEndian, uint8(storageSCMERVersion))
+	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
-	for _, value := range s.values {
+	for i := 0; i < len(s.values); i++ {
+		value := s.values[i]
+		var v []byte
+		var err error
 		if value.IsBSON() {
 			typ, payload := value.BSONRaw()
-			binary.Write(f, binary.LittleEndian, uint8(storageSCMERBSON))
-			binary.Write(f, binary.LittleEndian, typ)
-			binary.Write(f, binary.LittleEndian, uint32(len(payload)))
-			if _, err := f.Write(payload); err != nil {
-				panic(err)
-			}
-			continue
+			v, err = json.Marshal(map[string]any{
+				"$memcp.scmer": "bson-v1",
+				"type":         typ,
+				"payload":      base64.RawStdEncoding.EncodeToString(payload),
+			})
+		} else {
+			v, err = json.Marshal(value)
 		}
-		encoded, err := json.Marshal(value)
 		if err != nil {
 			panic(err)
 		}
-		if uint64(len(encoded)) > math.MaxUint32 {
-			panic("StorageSCMER value exceeds 32-bit size limit")
-		}
-		binary.Write(f, binary.LittleEndian, uint8(storageSCMERJSON))
-		binary.Write(f, binary.LittleEndian, uint32(len(encoded)))
-		if _, err := f.Write(encoded); err != nil {
-			panic(err)
-		}
+		f.Write(v)
+		f.Write([]byte("\n")) // endline so the serialized file becomes a jsonl file beginning at byte 10
 	}
 }
-
 func (s *StorageSCMER) Deserialize(f io.Reader) uint {
-	var version uint8
-	if err := binary.Read(f, binary.LittleEndian, &version); err != nil {
-		panic(err)
-	}
-	if version != storageSCMERVersion {
-		panic(fmt.Sprintf("StorageSCMER: unknown version %d", version))
-	}
-	var count uint64
-	if err := binary.Read(f, binary.LittleEndian, &count); err != nil {
-		panic(err)
-	}
-	s.values = make([]scm.Scmer, count)
-	for i := range s.values {
-		var kind uint8
-		if err := binary.Read(f, binary.LittleEndian, &kind); err != nil {
-			panic(err)
-		}
-		switch kind {
-		case storageSCMERJSON:
-			var length uint32
-			if err := binary.Read(f, binary.LittleEndian, &length); err != nil {
-				panic(err)
-			}
-			encoded := make([]byte, length)
-			if _, err := io.ReadFull(f, encoded); err != nil {
-				panic(err)
-			}
-			var value any
-			if err := json.Unmarshal(encoded, &value); err != nil {
-				panic(err)
-			}
-			s.values[i] = scm.TransformFromJSON(value)
-		case storageSCMERBSON:
-			var typ uint8
-			var length uint32
-			if err := binary.Read(f, binary.LittleEndian, &typ); err != nil {
-				panic(err)
-			}
-			if err := binary.Read(f, binary.LittleEndian, &length); err != nil {
-				panic(err)
-			}
-			payload := make([]byte, length)
-			if _, err := io.ReadFull(f, payload); err != nil {
-				panic(err)
-			}
-			s.values[i] = scm.NewBSONRaw(typ, payload)
-		default:
-			panic(fmt.Sprintf("StorageSCMER: unknown value tag %d", kind))
-		}
-	}
-	return uint(count)
-}
-
-// StorageSCMERLegacy is the read-only decoder for permanent magic byte 1. Its
-// embedded StorageSCMER supplies the regular column operations. If a legacy
-// shard is rebuilt, Serialize writes the current magic byte 42 format.
-type StorageSCMERLegacy struct {
-	StorageSCMER
-}
-
-func (s *StorageSCMERLegacy) Deserialize(f io.Reader) uint {
 	// No version byte: this type had no padding byte in v0.1.0.
 	// Count is read directly.  Format changes require a new magic byte.
 	var l uint64
 	binary.Read(f, binary.LittleEndian, &l)
-	s.StorageSCMER.values = make([]scm.Scmer, l)
+	s.values = make([]scm.Scmer, l)
 	scanner := bufio.NewScanner(f)
 	// BSON documents may be substantially larger than Scanner's 64 KiB default.
 	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
@@ -289,12 +214,12 @@ func (s *StorageSCMERLegacy) Deserialize(f io.Reader) uint {
 				payload, payloadOK := envelope["payload"].(string)
 				decoded, err := base64.RawStdEncoding.DecodeString(payload)
 				if typeOK && typ >= 0 && typ <= 255 && typ == math.Trunc(typ) && payloadOK && err == nil {
-					s.StorageSCMER.values[i] = scm.NewBSONRaw(byte(typ), decoded)
+					s.values[i] = scm.NewBSONRaw(byte(typ), decoded)
 					continue
 				}
 				panic("invalid BSON envelope in StorageSCMER")
 			}
-			s.StorageSCMER.values[i] = scm.TransformFromJSON(v)
+			s.values[i] = scm.TransformFromJSON(v)
 		}
 	}
 	return uint(l)

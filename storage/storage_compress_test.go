@@ -18,9 +18,6 @@ package storage
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -736,15 +733,8 @@ func TestStorageSCMERPreservesBSONTag(t *testing.T) {
 	storage := &StorageSCMER{values: []scm.Scmer{value, scm.NewNil()}}
 	var serialized bytes.Buffer
 	storage.Serialize(&serialized)
-	_, payload := value.BSONRaw()
-	if !bytes.Contains(serialized.Bytes(), payload) {
-		t.Fatal("StorageSCMER did not persist the BSON payload directly")
-	}
-	if bytes.Contains(serialized.Bytes(), []byte("$memcp.scmer")) {
-		t.Fatal("StorageSCMER persisted the obsolete JSON/Base64 BSON envelope")
-	}
-	if magic, err := serialized.ReadByte(); err != nil || magic != 42 {
-		t.Fatalf("magic = %d, err=%v; want 42", magic, err)
+	if magic, err := serialized.ReadByte(); err != nil || magic != 1 {
+		t.Fatalf("magic = %d, err=%v; want 1", magic, err)
 	}
 
 	var decoded StorageSCMER
@@ -756,34 +746,6 @@ func TestStorageSCMERPreservesBSONTag(t *testing.T) {
 	}
 	if !decoded.GetValue(1).IsNil() {
 		t.Fatal("SQL NULL did not survive SCMER roundtrip")
-	}
-}
-
-func TestStorageSCMERReadsLegacyBSONEnvelope(t *testing.T) {
-	value, err := scm.NewBSONFromJSON(`{"legacy":true}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	typ, payload := value.BSONRaw()
-	envelope, err := json.Marshal(map[string]any{
-		"$memcp.scmer": "bson-v1",
-		"type":         typ,
-		"payload":      base64.RawStdEncoding.EncodeToString(payload),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var serialized bytes.Buffer
-	binary.Write(&serialized, binary.LittleEndian, uint64(1))
-	serialized.Write(envelope)
-	serialized.WriteByte('\n')
-
-	var decoded StorageSCMERLegacy
-	if count := decoded.Deserialize(&serialized); count != 1 {
-		t.Fatalf("decoded count = %d, want 1", count)
-	}
-	if got := decoded.GetValue(0); !got.IsBSON() || got.String() != value.String() {
-		t.Fatalf("legacy BSON value = %s, want %s", got.String(), value.String())
 	}
 }
 
