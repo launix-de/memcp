@@ -6340,14 +6340,30 @@ ordering run. Storage artifacts begin in build_queryplan. */
 	(join_reorder (aggregate_pushdown_logical ir))))
 
 (define neumann_compile_pipeline (lambda (ast)
-	(build_queryplan
-		(optimize_logical_query
-			(decorrelate_logical_query ast)))))
+	(begin
+		(context "check")
+		(define ir (decorrelate_logical_query ast))
+		(context "check")
+		(define reordered (optimize_logical_query ir))
+		(context "check")
+		(define prepared (prepare_physical_queryplan reordered))
+		(context "check")
+		(define plan (emit_physical_queryplan prepared))
+		(context "check")
+		plan)))
 
 (define neumann_compile_ir_pipeline (lambda (ir)
-	(build_queryplan
-		(optimize_logical_query
-			(require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir))))))
+	(begin
+		(context "check")
+		(define normalized (require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir)))
+		(context "check")
+		(define reordered (optimize_logical_query normalized))
+		(context "check")
+		(define prepared (prepare_physical_queryplan reordered))
+		(context "check")
+		(define plan (emit_physical_queryplan prepared))
+		(context "check")
+		plan)))
 
 /* ------------------------------------------------------------------------- */
 /* Parser-facing adapters                                                     */

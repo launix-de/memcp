@@ -217,10 +217,16 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 
 (define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session)
 	(begin
+		(context "check")
 		(define planning_session (sql_queryplan_compile_session source_session))
 		(define compile_policy (sql_compile_table_policy policy))
-		(define plan (optimize (with_session planning_session (lambda ()
-			(parse_fn schema parse_query compile_policy)))))
+		(define raw_plan (with_session planning_session (lambda ()
+			(parse_fn schema parse_query compile_policy))))
+		/* Parsing includes logical and physical planning. Never spend optimizer
+		work or install a variant after its requesting context was cancelled. */
+		(context "check")
+		(define plan (optimize raw_plan))
+		(context "check")
 		(list (sql_queryplan_guard_from_session planning_session) plan))))
 
 (define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
