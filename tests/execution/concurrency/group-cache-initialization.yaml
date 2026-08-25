@@ -29,6 +29,43 @@ setup:
       )
 
 test_cases:
+  - name: "Duplicate logical stage IDs retain every aggregate extension"
+    scm: |
+      (begin
+        (define narrow (make_group_stage "shared-window-carrier"
+          (list "src" "memcp-tests" "aggregate_source" false nil)
+          (list) (list 1) (list "count-aggregate") nil
+          (list "count" "count-expression") (list) nil nil
+          (list (list (quote merge-aggregate-extensions) true))))
+        (define extended (make_group_stage "shared-window-carrier"
+          (list "src" "memcp-tests" "aggregate_source" false nil)
+          (list) (list 1) (list "count-aggregate" "sum-aggregate") nil
+          (list "count" "count-expression" "sum" "sum-expression") (list) nil nil
+          (list (list (quote merge-aggregate-extensions) true))))
+        (define retained (unique_stages_by_id (list narrow extended)))
+        (if (and (equal? (count retained) 1)
+            (equal? (count (gs_aggregates (car retained))) 2))
+          true
+          (error "deduplicating a shared stage discarded aggregate columns")))
+
+  - name: "Same stage ID does not merge unrelated aggregate variants"
+    scm: |
+      (begin
+        (define retained (make_group_stage "canonical-scalar-carrier"
+          (list "first" "memcp-tests" "aggregate_source" false nil)
+          (list "first-domain") (list 1) (list "count-aggregate") nil
+          (list "count" "count-expression") (list) 1 nil (list)))
+        (define alias_variant (make_group_stage "canonical-scalar-carrier"
+          (list "first" "memcp-tests" "aggregate_source" false nil)
+          (list "first-domain") (list 1) (list "sum-aggregate") nil
+          (list "sum" "sum-expression") (list) 1 nil (list)))
+        (define stages (unique_stages_by_id (list retained alias_variant)))
+        (if (and (equal? (count stages) 1)
+            (equal? (gs_input (car stages)) (gs_input retained))
+            (equal? (gs_aggregates (car stages)) (gs_aggregates retained)))
+          true
+          (error "deduplicating an alias variant changed the scalar carrier contract")))
+
   - name: "Creator waits for existing table initialization 1/2"
     parallel: existing_creation_barrier
     scm: &create_with_initializer |

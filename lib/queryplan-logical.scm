@@ -300,19 +300,84 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 				(concat "window:" (nth stage 1))
 				nil)))))
 
-(define unique_stages_by_id_acc (lambda (stages seen)
+(define logical_append_unique (lambda (items item)
+	(if (contains? (coalesceNil items '()) item)
+		(coalesceNil items '())
+		(merge (coalesceNil items '()) (list item)))))
+
+(define logical_merge_unique (lambda (parts)
+	(reduce (merge (coalesceNil parts '())) (lambda (items item)
+		(logical_append_unique items item)) '())))
+
+(define logical_contains_all? (lambda (items required)
+	(reduce (coalesceNil required '()) (lambda (contains_all item)
+		(and contains_all (contains? (coalesceNil items '()) item))) true)))
+
+(define same_group_carrier_backbone? (lambda (left right)
+	(and (equal? (gs_input left) (gs_input right))
+		(equal? (gs_domain left) (gs_domain right))
+		(equal? (gs_keys left) (gs_keys right))
+		(equal? (gs_having left) (gs_having right))
+		(equal? (gs_order left) (gs_order right))
+		(equal? (gs_limit left) (gs_limit right))
+		(equal? (gs_offset left) (gs_offset right)))))
+
+(define group_stage_merges_aggregate_extensions? (lambda (stage)
+	(equal? (qassoc_get (gs_facts stage) (quote merge-aggregate-extensions) false) true)))
+
+/* A shared group-stage ID denotes one logical carrier which may be discovered
+through several consumers. Later consumers can extend that carrier with more
+aggregate columns. Preserve the first stage's domain and output contract and add
+only aggregates from a compatible superset variant which explicitly declares
+this extension contract. Same-ID scalar carriers remain independent. Dropping
+true extensions leaves physical readers pointing at columns which no retained
+prepare stage creates. */
+(define merge_same_id_stage_variants (lambda (retained candidate)
+	(if (and (group_stage? retained) (group_stage? candidate)
+		(group_stage_merges_aggregate_extensions? retained)
+		(group_stage_merges_aggregate_extensions? candidate)
+		(same_group_carrier_backbone? retained candidate)
+		(logical_contains_all? (gs_aggregates candidate) (gs_aggregates retained)))
+		(make_group_stage
+			(gs_id retained)
+			(gs_input retained)
+			(gs_domain retained)
+			(gs_keys retained)
+			(logical_merge_unique (list (gs_aggregates retained) (gs_aggregates candidate)))
+			(gs_having retained)
+			(gs_output retained)
+			(gs_order retained)
+			(gs_limit retained)
+			(gs_offset retained)
+			(gs_facts retained))
+		retained)))
+
+(define collect_stage_variants_by_id (lambda (stages variants)
+	(match (coalesceNil stages '())
+		(cons stage rest) (begin
+			(define key (logical_stage_key stage))
+			(if (nil? key)
+				(collect_stage_variants_by_id rest variants)
+				(collect_stage_variants_by_id rest
+					(set_assoc variants key
+						(if (has_assoc? variants key)
+							(merge_same_id_stage_variants (variants key) stage)
+							stage)))))
+		_ variants)))
+
+(define unique_stages_by_id_acc (lambda (stages variants seen)
 	(match (coalesceNil stages '())
 		(cons stage rest) (begin
 			(define key (logical_stage_key stage))
 			(if (and (not (nil? key)) (has_assoc? seen key))
-				(unique_stages_by_id_acc rest seen)
-				(cons stage
-					(unique_stages_by_id_acc rest
+				(unique_stages_by_id_acc rest variants seen)
+				(cons (if (nil? key) stage (variants key))
+					(unique_stages_by_id_acc rest variants
 						(if (nil? key) seen (set_assoc seen key true))))))
 		_ '())))
 
 (define unique_stages_by_id (lambda (stages)
-	(unique_stages_by_id_acc stages '())))
+	(unique_stages_by_id_acc stages (collect_stage_variants_by_id stages '()) '())))
 
 (define qb_schema (lambda (node) (nth node 1)))
 (define qb_sources (lambda (node) (nth node 2)))
@@ -3661,6 +3726,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list
 				(list (quote condition) true)
 				(list (quote purpose) (quote window_partition_aggregate))
+				(list (quote merge-aggregate-extensions) true)
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) outer_domain)
 				(list (quote preserve_empty_domain) false)
