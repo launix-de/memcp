@@ -127,6 +127,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ))))
 
 /* vectors */
+(sql_builtins "JSON_QUOTE" json_quote)
 (sql_builtins "VECTOR_DISTANCE" dot)
 (sql_builtins "STRING_TO_VECTOR" json_decode)
 (sql_builtins "VECTOR_TO_STRING" json_encode)
