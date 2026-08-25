@@ -5080,7 +5080,7 @@ conjunct of AND is safe because every surviving row must satisfy it. */
 			(group_stage_with_facts stage
 				(qassoc_set
 					(qassoc_set (gs_facts stage) (quote lookup-keys) bound_keys)
-					(quote memoize_bound_scalar_probe) true))))))
+					(quote segment_invariant_scalar_probe) true))))))
 
 (define rewrite_physical_scalar_probe_stage (lambda (probe replacement expr)
 	(match expr
@@ -5121,8 +5121,14 @@ conjunct of AND is safe because every surviving row must satisfy it. */
 /* Return (driver-alias carrier-expression original-probe selected-stage).
 The carrier is non-nil only for the projected RecSet alternative. When every
 correlation key is fixed by a source-local equality, selected-stage instead
-marks the direct probe as query-memoized: its value is constant for the whole
-base-index segment even though the logical expression remains correlated. */
+records the semantic proof that its value is constant for the whole base-index
+segment even though the logical expression remains correlated.
+
+That proof is an immediate dominance decision: evaluating and caching the one
+scalar cannot require more driver work than projecting a full carrier. Do not
+extend this branch with estimated-selectivity or row-count thresholds. Whenever
+either alternative can win for different data, feed both costs into the normal
+physical decision and preserve its runtime recompile gate. */
 (define physical_scalar_truth_plan (lambda (sources driver_src default_alias condition probe_work_rows carrier_work_rows stages)
 	(begin
 		(define probe (physical_scalar_truth_probe condition))

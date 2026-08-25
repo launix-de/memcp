@@ -1437,12 +1437,20 @@ choice at the consuming join edge. */
 Logical decorrelation contributes the stage shape; the current scan node
 contributes its work estimate. Emitters below only implement the selected
 operator and do not repeat policy gates, so future carriers join this one
-choice table instead of adding another promotion path. */
+choice table instead of adding another promotion path.
+
+Decision contract: resolve an operator without comparing costs only when a
+semantic proof makes every competing realization strictly redundant. Every
+choice that can change with cardinality, selectivity, cache state, or data
+growth belongs in the calibrated comparison above and must retain the planner's
+recompile gate. A segment-invariant scalar is the proof case here: one cached
+scalar value replaces the same value for every segment row, while a carrier
+would still have to project that value over the segment. */
 (define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics)
 	(if (union_block? src)
 		(quote union-probe)
 		(if (query_block? src)
-			(if (qassoc_get (gs_facts stage) (quote memoize_bound_scalar_probe) false)
+			(if (qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
 				(quote query-scan)
 				(if (and (equal? probe_semantics (quote truth))
 				(scalar_first_probe_recset_eligible?
@@ -1452,7 +1460,7 @@ choice table instead of adding another promotion path. */
 					(quote keytable)
 					(quote query-scan))))
 			(if (source_is_base_table? src)
-				(if (qassoc_get (gs_facts stage) (quote memoize_bound_scalar_probe) false)
+				(if (qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
 					(quote table-scan)
 					(if (and (equal? probe_semantics (quote truth))
 					(scalar_first_probe_recset_eligible_base?
@@ -1610,7 +1618,7 @@ choice table instead of adding another promotion path. */
 					order_exprs dirs offset_value partition_limit))
 			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator")))
 		(define memoized_lowered (if
-			(qassoc_get (gs_facts stage) (quote memoize_bound_scalar_probe) false)
+			(qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
 			(list
 				(physical_query_session_symbol)
 				"get_or_compute_scoped"
