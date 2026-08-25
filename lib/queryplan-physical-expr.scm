@@ -5108,15 +5108,76 @@ ever-larger subtrees. */
 expressions. Persistent column identity was selected from the original logical
 stage before that rewrite; thread it through unchanged to keep create and fill
 on the same columns. */
+(define scalar_order_payload_before_expr (lambda (dirs idx)
+	(if (>= idx (count dirs))
+		false
+		(begin
+			(define old_value (list (quote nth) (quote old) idx))
+			(define new_value (list (quote nth) (quote new) idx))
+			(list (quote if)
+				(list (quote equal??) old_value new_value)
+				(scalar_order_payload_before_expr dirs (+ idx 1))
+				(list (nth dirs idx) old_value new_value))))))
+
+(define query_group_aggregate_descriptor (lambda (ag)
+	(begin
+		(define parts (scalar_order_aggregate_parts ag))
+		(if (nil? parts)
+			ag
+			(begin
+				(define value_expr (nth parts 0))
+				(define order_exprs (nth parts 1))
+				(define dirs (nth parts 2))
+				(define offset_value (nth parts 3))
+				(if (not (equal? offset_value 0))
+					(neumann_fail "build_queryplan" "joined scalar ORDER/LIMIT currently requires OFFSET 0")
+					true)
+				(list
+					(runtime_cons_list_expr (merge (list order_exprs (list value_expr))))
+					(list (quote lambda) (list (quote old) (quote new))
+						(list (quote if) (list (quote nil?) (quote old))
+							(quote new)
+							(list (quote if) (list (quote nil?) (quote new))
+								(quote old)
+								(list (quote if)
+									(scalar_order_payload_before_expr dirs 0)
+									(quote old)
+									(quote new)))))
+					nil))))))
+
+(define query_group_final_payload_expr (lambda (ags idx)
+	(if (>= idx (count ags))
+		(quoted_runtime_list '())
+		(begin
+			(define parts (scalar_order_aggregate_parts (nth ags idx)))
+			(define stored (list (quote nth) (quote payload) idx))
+			(cons (quote cons) (list
+				(if (nil? parts)
+					stored
+					(list (quote if) (list (quote nil?) stored) nil
+						(list (quote nth) stored (count (nth parts 1)))))
+				(query_group_final_payload_expr ags (+ idx 1))))))))
+
+(define finalize_query_grouped_assoc_expr (lambda (ags grouped_expr)
+	(list
+		(list (quote lambda) (list (quote grouped))
+			(list (quote reduce_assoc) (quote grouped)
+				(list (quote lambda) (list (quote acc) (quote key) (quote payload))
+					(list (quote set_assoc) (quote acc) (quote key)
+						(query_group_final_payload_expr ags 0)))
+				(list (quote list))))
+		grouped_expr)))
+
 (define build_query_grouped_assoc_plan (lambda (input keys key_names ags)
 	(begin
+		(define runtime_ags (map ags query_group_aggregate_descriptor))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define value_cols (map (produceN (count ags)) (lambda (i) (concat "__agg" i))))
 		(define row_fields (merge (list
 			(merge (map (produceN (count keys)) (lambda (i)
 				(list (nth row_key_names i) (nth keys i)))))
 			(merge (map (produceN (count ags)) (lambda (i)
-				(match (nth ags i)
+				(match (nth runtime_ags i)
 					'(agg_expr _agg_reduce _agg_neutral)
 					(list (nth value_cols i)
 						(if (equal? (nth ags i) aggregate_count_descriptor)
@@ -5131,22 +5192,23 @@ on the same columns. */
 				1
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
-			(aggregate_payload_merge_expr ags 0)))
+			(aggregate_payload_merge_expr runtime_ags 0)))
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
-		(lower_query_block_as_dataset_reduce
-			input
-			row_fields
-			(list (quote lambda)
-				(extract_assoc row_fields (lambda (title _expr) (symbol title)))
-				(runtime_cons_list_expr (list key_expr payload_expr)))
-			(list (quote lambda) (list (quote acc) (quote rowvals))
-				(list (quote set_assoc)
-					(quote acc)
-					(list (quote car) (quote rowvals))
-					(list (quote cadr) (quote rowvals))
-					merge_payload))
-			(list (quote list))
-			combine_grouped))))
+		(finalize_query_grouped_assoc_expr ags
+			(lower_query_block_as_dataset_reduce
+				input
+				row_fields
+				(list (quote lambda)
+					(extract_assoc row_fields (lambda (title _expr) (symbol title)))
+					(runtime_cons_list_expr (list key_expr payload_expr)))
+				(list (quote lambda) (list (quote acc) (quote rowvals))
+					(list (quote set_assoc)
+						(quote acc)
+						(list (quote car) (quote rowvals))
+						(list (quote cadr) (quote rowvals))
+						merge_payload))
+				(list (quote list))
+				combine_grouped)))))
 
 (define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags aggregate_cols)
 	(begin

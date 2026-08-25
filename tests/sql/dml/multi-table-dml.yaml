@@ -10,6 +10,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS mtd_log"
   - sql: "DROP TABLE IF EXISTS mtd_assoc"
   - sql: "DROP TABLE IF EXISTS mtd_source"
+  - sql: "DROP TABLE IF EXISTS mtd_document"
+  - sql: "DROP TABLE IF EXISTS mtd_revision"
+  - sql: "DROP TABLE IF EXISTS mtd_file"
   - sql: |
       CREATE TABLE mtd_source (
         ID INT PRIMARY KEY,
@@ -34,6 +37,12 @@ setup:
   - sql: "INSERT INTO mtd_source VALUES (1, 'hello', 3000, 6000), (2, 'world', 1000, 2000)"
   - sql: "INSERT INTO mtd_assoc VALUES (1, 1, 10, 1000), (2, 2, 20, 2000)"
   - sql: "INSERT INTO mtd_log VALUES (1, 1, 999, 'old1'), (2, 2, 888, 'old2')"
+  - sql: "CREATE TABLE mtd_document (ID INT PRIMARY KEY, subject TEXT)"
+  - sql: "CREATE TABLE mtd_revision (ID INT PRIMARY KEY, document_id INT, file_id INT, created BIGINT)"
+  - sql: "CREATE TABLE mtd_file (ID INT PRIMARY KEY, filename TEXT)"
+  - sql: "INSERT INTO mtd_document VALUES (1, NULL), (2, ''), (3, 'keep')"
+  - sql: "INSERT INTO mtd_file VALUES (10, 'old.txt'), (11, 'latest.txt'), (12, 'only.txt')"
+  - sql: "INSERT INTO mtd_revision VALUES (100, 1, 10, 1000), (101, 1, 11, 2000), (102, 2, 12, 1500)"
 
 test_cases:
 
@@ -55,6 +64,32 @@ test_cases:
           notiz: "hello"
         - ref_id: 2
           notiz: "old2"
+
+  - name: "UPDATE from correlated ordered joined scalar subquery"
+    sql: |
+      UPDATE mtd_document SET subject = (
+        SELECT f.filename
+        FROM mtd_revision r
+        JOIN mtd_file f ON f.ID = r.file_id
+        WHERE r.document_id = mtd_document.ID
+        ORDER BY r.created DESC
+        LIMIT 1
+      )
+      WHERE subject = '' OR subject IS NULL
+    expect:
+      rows_affected: 2
+
+  - name: "verify correlated ordered joined scalar UPDATE"
+    sql: "SELECT ID, subject FROM mtd_document ORDER BY ID"
+    expect:
+      rows: 3
+      data:
+        - ID: 1
+          subject: "latest.txt"
+        - ID: 2
+          subject: "only.txt"
+        - ID: 3
+          subject: "keep"
 
   - name: "multi-table UPDATE SET to constant zero"
     sql: |
@@ -124,3 +159,6 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS mtd_assoc"
   - sql: "DROP TABLE IF EXISTS mtd_source"
   - sql: "DROP TABLE IF EXISTS mtd_ordered"
+  - sql: "DROP TABLE IF EXISTS mtd_document"
+  - sql: "DROP TABLE IF EXISTS mtd_revision"
+  - sql: "DROP TABLE IF EXISTS mtd_file"
