@@ -120,6 +120,20 @@ test_cases:
         - found: 20
           missing: null
 
+  - name: "BSON JSON scalars participate in SQL coercion and arithmetic"
+    sql: |
+      SELECT JSON_EXTRACT('{"integer":41,"floating":1.5,"yes":true,"numeric":"2.25"}', '$.integer') + 1.0 AS integer_sum,
+             JSON_EXTRACT('{"floating":1.5}', '$.floating') + 1 AS floating_sum,
+             JSON_EXTRACT('{"yes":true}', '$.yes') + 1 AS boolean_sum,
+             JSON_EXTRACT('{"numeric":"2.25"}', '$.numeric') + 1.0 AS string_sum
+    expect:
+      rows: 1
+      data:
+        - integer_sum: 42
+          floating_sum: 2.5
+          boolean_sum: 2
+          string_sum: 3.25
+
   - name: "JSON_EXTRACT multiple paths returns an array"
     sql: "SELECT JSON_EXTRACT('{\"a\":1,\"b\":2}', '$.b', '$.a') AS value"
     expect:

@@ -766,7 +766,13 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		}
 		return base64.StdEncoding.EncodeToString(b), dst
 	case tagBSON:
-		return bsonText(s), dst
+		start := len(dst)
+		var err error
+		dst, err = appendBSONText(dst, s, false, "")
+		if err != nil {
+			panic(err)
+		}
+		return unsafe.String(unsafe.SliceData(dst[start:]), len(dst)-start), dst
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return "true", dst
@@ -1059,6 +1065,9 @@ func ToFloat(v Scmer) float64 { return v.Float() }
 // types first (nil, bool, float64/int64, string, []any, map-like assoc
 // list), ensuring stable and portable JSON output for persistence and APIs.
 func (s Scmer) MarshalJSON() ([]byte, error) {
+	if s.IsBSON() {
+		return appendBSONText(nil, s, false, "")
+	}
 	// Custom, stable encoding for persistence of SCM values.
 	var toJSONable func(Scmer) any
 	// helper: find name of native func in Globalenv
@@ -1179,7 +1188,12 @@ func (s *Scmer) Write(w io.Writer) {
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagBSON:
-		io.WriteString(w, bsonText(*s))
+		var buffer [512]byte
+		encoded, err := appendBSONText(buffer[:0], *s, false, "")
+		if err != nil {
+			panic(err)
+		}
+		w.Write(encoded)
 	case tagFunc:
 		io.WriteString(w, "[func]")
 	case tagSlice:

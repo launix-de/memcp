@@ -68,6 +68,23 @@ func jsonDocumentArgument(value Scmer) (any, bool) {
 	return jsonConstructorArgument(value), true
 }
 
+func jsonBSONDocumentArgument(value Scmer) (Scmer, bool) {
+	if value.IsNil() {
+		return NewNil(), false
+	}
+	if value.IsBSON() {
+		return value, true
+	}
+	if value.IsString() || value.IsSymbol() {
+		parsed, err := NewBSONFromJSON(value.String())
+		jsonPanic(err)
+		return parsed, true
+	}
+	parsed, err := bsonFromSQLScalar(value)
+	jsonPanic(err)
+	return parsed, true
+}
+
 func jsonConstructorArgument(value Scmer) any {
 	switch {
 	case value.IsNil():
@@ -296,6 +313,124 @@ func jsonExtractValues(document any, paths []Scmer) ([]any, bool) {
 	return result, multiple
 }
 
+func jsonRawChildren(value bson.RawValue) []bson.RawValue {
+	switch value.Type {
+	case bson.TypeEmbeddedDocument:
+		elements, err := value.Document().Elements()
+		jsonPanic(err)
+		result := make([]bson.RawValue, len(elements))
+		for i := range elements {
+			result[i] = elements[i].Value()
+		}
+		return result
+	case bson.TypeArray:
+		values, err := value.Array().Values()
+		jsonPanic(err)
+		return values
+	default:
+		return nil
+	}
+}
+
+func jsonRawPathMatches(values []bson.RawValue, legs []jsonPathLeg) []bson.RawValue {
+	if len(legs) == 0 {
+		return values
+	}
+	leg := legs[0]
+	remaining := legs[1:]
+	next := make([]bson.RawValue, 0, len(values))
+	for _, value := range values {
+		switch leg.kind {
+		case jsonPathKey:
+			if value.Type == bson.TypeEmbeddedDocument {
+				child, err := value.Document().LookupErr(encodeBSONKey(leg.key))
+				if err == nil {
+					next = append(next, child)
+				}
+			}
+		case jsonPathIndex:
+			if value.Type == bson.TypeArray {
+				array := value.Array()
+				index := leg.index
+				if index < 0 {
+					values, err := array.Values()
+					jsonPanic(err)
+					index += len(values)
+					if index >= 0 && index < len(values) {
+						next = append(next, values[index])
+					}
+				} else if child, err := array.IndexErr(uint(index)); err == nil {
+					next = append(next, child)
+				}
+			}
+		case jsonPathWildcard:
+			next = append(next, jsonRawChildren(value)...)
+		case jsonPathRecursive:
+			var visit func(bson.RawValue)
+			visit = func(parent bson.RawValue) {
+				next = append(next, parent)
+				for _, child := range jsonRawChildren(parent) {
+					visit(child)
+				}
+			}
+			visit(value)
+		}
+	}
+	return jsonRawPathMatches(next, remaining)
+}
+
+func jsonExtractBSONValues(document Scmer, paths []Scmer) ([]bson.RawValue, bool) {
+	result := make([]bson.RawValue, 0, len(paths))
+	multiple := len(paths) > 1
+	root := bsonRawValue(document)
+	for _, pathArg := range paths {
+		if pathArg.IsNil() {
+			return nil, false
+		}
+		legs, err := parseJSONPath(pathArg.String())
+		jsonPanic(err)
+		matches := jsonRawPathMatches([]bson.RawValue{root}, legs)
+		if len(matches) > 1 {
+			multiple = true
+		}
+		result = append(result, matches...)
+	}
+	return result, multiple
+}
+
+func jsonRawDepth(value bson.RawValue) int64 {
+	depth := int64(1)
+	for _, child := range jsonRawChildren(value) {
+		if childDepth := 1 + jsonRawDepth(child); childDepth > depth {
+			depth = childDepth
+		}
+	}
+	return depth
+}
+
+func jsonRawTypeName(value bson.RawValue) string {
+	switch value.Type {
+	case bson.TypeNull:
+		return "NULL"
+	case bson.TypeBoolean:
+		return "BOOLEAN"
+	case bson.TypeInt32, bson.TypeInt64:
+		return "INTEGER"
+	case bson.TypeDouble:
+		return "DOUBLE"
+	case bson.TypeDecimal128:
+		return "DECIMAL"
+	case bson.TypeString:
+		return "STRING"
+	case bson.TypeArray:
+		return "ARRAY"
+	case bson.TypeEmbeddedDocument:
+		return "OBJECT"
+	default:
+		return "OPAQUE"
+	}
+}
+
 func jsonNumeric(value any) (float64, bool) {
 	switch value := value.(type) {
 	case int32:
@@ -447,10 +582,18 @@ func jsonPointer(parts []string) string {
 
 func pgTextArray(value Scmer) []string {
 	if value.IsBSON() {
-		if array, ok := bsonDecoded(value).(bson.A); ok {
+		raw := bsonRawValue(value)
+		if raw.Type == bson.TypeArray {
+			array := mustBSONValues(raw)
 			result := make([]string, len(array))
 			for i := range array {
-				result[i] = fmt.Sprint(array[i])
+				if array[i].Type == bson.TypeString {
+					result[i] = array[i].StringValue()
+				} else {
+					encoded, err := appendBSONJSON(nil, array[i], false, "", 0)
+					jsonPanic(err)
+					result[i] = string(encoded)
+				}
 			}
 			return result
 		}
@@ -500,7 +643,7 @@ func pgPathLegs(value Scmer) []jsonPathLeg {
 }
 
 func pgExtractPath(document Scmer, paths []Scmer, textResult bool) Scmer {
-	value, ok := jsonDocumentArgument(document)
+	value, ok := jsonBSONDocumentArgument(document)
 	if !ok {
 		return NewNil()
 	}
@@ -521,14 +664,19 @@ func pgExtractPath(document Scmer, paths []Scmer, textResult bool) Scmer {
 			legs[i] = jsonPathLeg{kind: jsonPathKey, key: path.String()}
 		}
 	}
-	matches := jsonPathMatches([]any{value}, legs)
+	matches := jsonRawPathMatches([]bson.RawValue{bsonRawValue(value)}, legs)
 	if len(matches) == 0 {
 		return NewNil()
 	}
 	if textResult {
-		return jsonScalarResult(matches[0], "CHAR")
+		if matches[0].Type == bson.TypeArray || matches[0].Type == bson.TypeEmbeddedDocument {
+			encoded, err := appendBSONJSON(nil, matches[0], false, "", 0)
+			jsonPanic(err)
+			return NewString(string(encoded))
+		}
+		return jsonRawScalarResult(matches[0], "CHAR")
 	}
-	return jsonResult(matches[0])
+	return NewBSONValue(matches[0].Type, matches[0].Value)
 }
 
 func pgStripJSONNulls(value any, arrays bool) any {
@@ -615,6 +763,86 @@ func pgJSONBDelete(value any, operand Scmer) any {
 		return result
 	}
 	panic("jsonb deletion requires an object or array")
+}
+
+func pgRawStripJSONNulls(value bson.RawValue, arrays bool) bson.RawValue {
+	switch value.Type {
+	case bson.TypeEmbeddedDocument:
+		pairs := make([]bsonJSONPair, 0, len(mustBSONElements(value)))
+		for _, element := range mustBSONElements(value) {
+			if element.Value().Type != bson.TypeNull {
+				pairs = append(pairs, bsonJSONPair{
+					key: decodeBSONKey(element.Key()), value: pgRawStripJSONNulls(element.Value(), arrays),
+				})
+			}
+		}
+		return jsonRawDocument(pairs)
+	case bson.TypeArray:
+		result := make([]bson.RawValue, 0, len(mustBSONValues(value)))
+		for _, item := range mustBSONValues(value) {
+			if item.Type != bson.TypeNull || !arrays {
+				result = append(result, pgRawStripJSONNulls(item, arrays))
+			}
+		}
+		return jsonRawArray(result)
+	default:
+		return value
+	}
+}
+
+func pgRawJSONBConcat(left, right bson.RawValue) bson.RawValue {
+	if left.Type == bson.TypeEmbeddedDocument && right.Type == bson.TypeEmbeddedDocument {
+		result := left
+		for _, element := range mustBSONElements(right) {
+			result, _ = jsonRawModify(result, []jsonPathLeg{{kind: jsonPathKey, key: decodeBSONKey(element.Key())}}, element.Value(), 's')
+		}
+		return result
+	}
+	leftValues := []bson.RawValue{left}
+	if left.Type == bson.TypeArray {
+		leftValues = mustBSONValues(left)
+	}
+	rightValues := []bson.RawValue{right}
+	if right.Type == bson.TypeArray {
+		rightValues = mustBSONValues(right)
+	}
+	return jsonRawArray(append(append([]bson.RawValue(nil), leftValues...), rightValues...))
+}
+
+func pgRawJSONBDelete(value bson.RawValue, operand Scmer) bson.RawValue {
+	if value.Type == bson.TypeEmbeddedDocument {
+		result := value
+		for _, key := range pgTextArray(operand) {
+			result, _ = jsonRawRemove(result, []jsonPathLeg{{kind: jsonPathKey, key: key}})
+		}
+		return result
+	}
+	if value.Type != bson.TypeArray {
+		panic("jsonb deletion requires an object or array")
+	}
+	array := mustBSONValues(value)
+	if operand.IsInt() || operand.IsFloat() {
+		index := int(operand.Int())
+		if index < 0 {
+			index += len(array)
+		}
+		if index < 0 || index >= len(array) {
+			return value
+		}
+		result := append([]bson.RawValue(nil), array[:index]...)
+		return jsonRawArray(append(result, array[index+1:]...))
+	}
+	remove := make(map[string]bool)
+	for _, text := range pgTextArray(operand) {
+		remove[text] = true
+	}
+	result := make([]bson.RawValue, 0, len(array))
+	for _, item := range array {
+		if item.Type != bson.TypeString || !remove[item.StringValue()] {
+			result = append(result, item)
+		}
+	}
+	return jsonRawArray(result)
 }
 
 func pgJSONPathVariable(vars any, name string) (any, bool) {
@@ -734,6 +962,117 @@ func pgJSONPathQuery(document any, path string, vars any) ([]any, bool) {
 	return jsonPathMatches([]any{document}, legs), predicateResult
 }
 
+func pgRawJSONPathLiteral(text string, vars bson.RawValue) (bson.RawValue, bool) {
+	text = strings.TrimSpace(strings.ReplaceAll(text, ".datetime()", ""))
+	if strings.HasPrefix(text, "$") && len(text) > 1 {
+		if vars.Type != bson.TypeEmbeddedDocument {
+			return bson.RawValue{}, false
+		}
+		value, err := vars.Document().LookupErr(encodeBSONKey(text[1:]))
+		return value, err == nil
+	}
+	if value, err := parseBSONJSONText(text); err == nil {
+		return value, true
+	}
+	value, _ := bsonFromSQLScalar(NewString(strings.Trim(text, `"`)))
+	return bsonRawValue(value), true
+}
+
+func pgRawJSONPathCompare(left bson.RawValue, operator string, right bson.RawValue) bool {
+	if operator == "==" {
+		return bsonRawEqual(left, right)
+	}
+	if operator == "!=" || operator == "<>" {
+		return !bsonRawEqual(left, right)
+	}
+	if bsonRawEqual(left, right) {
+		return operator == ">=" || operator == "<="
+	}
+	less := bsonRawLess(left, right)
+	switch operator {
+	case "<", "<=":
+		return less
+	case ">", ">=":
+		return !less
+	default:
+		return false
+	}
+}
+
+func pgRawJSONPathPredicate(value bson.RawValue, predicate string, vars bson.RawValue) bool {
+	predicate = strings.TrimSpace(predicate)
+	if strings.HasPrefix(predicate, "!") {
+		return !pgRawJSONPathPredicate(value, strings.TrimSpace(strings.TrimPrefix(predicate, "!")), vars)
+	}
+	if parts := strings.Split(predicate, "||"); len(parts) > 1 {
+		for _, part := range parts {
+			if pgRawJSONPathPredicate(value, part, vars) {
+				return true
+			}
+		}
+		return false
+	}
+	if parts := strings.Split(predicate, "&&"); len(parts) > 1 {
+		for _, part := range parts {
+			if !pgRawJSONPathPredicate(value, part, vars) {
+				return false
+			}
+		}
+		return true
+	}
+	if strings.HasPrefix(predicate, "(") && strings.HasSuffix(predicate, ")") {
+		predicate = strings.TrimSpace(predicate[1 : len(predicate)-1])
+	}
+	predicate = strings.ReplaceAll(predicate, "@.datetime()", "@")
+	comparison := regexp.MustCompile(`^@\s*(==|!=|<>|>=|<=|>|<)\s*(.+)$`).FindStringSubmatch(predicate)
+	if comparison == nil {
+		return false
+	}
+	right, ok := pgRawJSONPathLiteral(comparison[2], vars)
+	return ok && pgRawJSONPathCompare(value, comparison[1], right)
+}
+
+func pgRawJSONPathQuery(document bson.RawValue, path string, vars bson.RawValue) ([]bson.RawValue, bool) {
+	path = strings.TrimSpace(path)
+	path = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(path, "lax "), "strict "))
+	predicateResult := false
+	if strings.HasPrefix(path, "exists(") && strings.HasSuffix(path, ")") {
+		predicateResult = true
+		path = strings.TrimSpace(path[len("exists(") : len(path)-1])
+	}
+	if match := regexp.MustCompile(`^(.*?)\s*\?\s*\((.*)\)$`).FindStringSubmatch(path); match != nil {
+		legs, err := parseJSONPath(strings.TrimSpace(match[1]))
+		jsonPanic(err)
+		candidates := jsonRawPathMatches([]bson.RawValue{document}, legs)
+		result := make([]bson.RawValue, 0, len(candidates))
+		for _, candidate := range candidates {
+			if pgRawJSONPathPredicate(candidate, match[2], vars) {
+				result = append(result, candidate)
+			}
+		}
+		return result, predicateResult
+	}
+	if match := regexp.MustCompile(`^(\$.*?)(==|!=|<>|>=|<=|>|<)\s*(.+)$`).FindStringSubmatch(path); match != nil {
+		legs, err := parseJSONPath(strings.TrimSpace(match[1]))
+		jsonPanic(err)
+		right, ok := pgRawJSONPathLiteral(match[3], vars)
+		if !ok {
+			return nil, true
+		}
+		for _, candidate := range jsonRawPathMatches([]bson.RawValue{document}, legs) {
+			if pgRawJSONPathCompare(candidate, match[2], right) {
+				value, _ := bsonFromSQLScalar(NewBool(true))
+				return []bson.RawValue{bsonRawValue(value)}, true
+			}
+		}
+		value, _ := bsonFromSQLScalar(NewBool(false))
+		return []bson.RawValue{bsonRawValue(value)}, true
+	}
+	legs, err := parseJSONPath(path)
+	jsonPanic(err)
+	return jsonRawPathMatches([]bson.RawValue{document}, legs), predicateResult
+}
+
 func pgJSONTableCell(value any, text bool) Scmer {
 	if value == nil {
 		return NewNil()
@@ -754,6 +1093,34 @@ func pgJSONRecordRow(document bson.D, columns []string) Scmer {
 	for i, column := range columns {
 		value, _ := jsonObjectLookup(document, column)
 		row[i] = pgJSONTableCell(value, false)
+	}
+	return NewSlice(row)
+}
+
+func pgRawJSONTableCell(value bson.RawValue, text bool) Scmer {
+	if value.Type == bson.TypeNull {
+		return NewNil()
+	}
+	if text {
+		if value.Type != bson.TypeArray && value.Type != bson.TypeEmbeddedDocument {
+			return jsonRawScalarResult(value, "CHAR")
+		}
+		encoded, err := appendBSONJSON(nil, value, false, "", 0)
+		jsonPanic(err)
+		return NewString(string(encoded))
+	}
+	return NewBSONValue(value.Type, value.Value)
+}
+
+func pgRawJSONRecordRow(document bson.RawValue, columns []string) Scmer {
+	row := make([]Scmer, len(columns))
+	for i, column := range columns {
+		value, err := document.Document().LookupErr(encodeBSONKey(column))
+		if err != nil {
+			row[i] = NewNil()
+		} else {
+			row[i] = pgRawJSONTableCell(value, false)
+		}
 	}
 	return NewSlice(row)
 }
@@ -801,6 +1168,62 @@ func jsonContainsValue(target, candidate any) bool {
 		}
 		return jsonEqual(target, candidate)
 	}
+}
+
+func jsonRawContainsValue(target, candidate bson.RawValue) bool {
+	switch candidate.Type {
+	case bson.TypeEmbeddedDocument:
+		if target.Type != bson.TypeEmbeddedDocument {
+			return false
+		}
+		for _, element := range mustBSONElements(candidate) {
+			available, err := target.Document().LookupErr(element.Key())
+			if err != nil || !jsonRawContainsValue(available, element.Value()) {
+				return false
+			}
+		}
+		return true
+	case bson.TypeArray:
+		if target.Type != bson.TypeArray {
+			return false
+		}
+		available := mustBSONValues(target)
+		for _, wanted := range mustBSONValues(candidate) {
+			found := false
+			for _, item := range available {
+				if jsonRawContainsValue(item, wanted) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	default:
+		if target.Type == bson.TypeArray {
+			for _, item := range mustBSONValues(target) {
+				if bsonRawEqual(item, candidate) {
+					return true
+				}
+			}
+			return false
+		}
+		return bsonRawEqual(target, candidate)
+	}
+}
+
+func mustBSONElements(value bson.RawValue) []bson.RawElement {
+	elements, err := value.Document().Elements()
+	jsonPanic(err)
+	return elements
+}
+
+func mustBSONValues(value bson.RawValue) []bson.RawValue {
+	values, err := value.Array().Values()
+	jsonPanic(err)
+	return values
 }
 
 func jsonDepthValue(value any) int64 {
@@ -982,6 +1405,150 @@ func jsonRemoveValue(value any, legs []jsonPathLeg) (any, bool) {
 	return jsonModify(value, []jsonPathLeg{leg}, modified, 's')
 }
 
+func jsonRawDocument(pairs []bsonJSONPair) bson.RawValue {
+	return bsonRawValue(bsonDocumentFromPairs(pairs, 0))
+}
+
+func jsonRawArray(values []bson.RawValue) bson.RawValue {
+	return bsonRawValue(bsonArrayFromRawValues(values, 0))
+}
+
+func jsonRawModify(value bson.RawValue, legs []jsonPathLeg, replacement bson.RawValue, mode byte) (bson.RawValue, bool) {
+	if len(legs) == 0 {
+		switch mode {
+		case 'i':
+			return value, false
+		case 's', 'r':
+			return replacement, true
+		}
+	}
+	leg := legs[0]
+	if leg.kind != jsonPathKey && leg.kind != jsonPathIndex {
+		panic("JSON modification paths cannot contain wildcards")
+	}
+	if leg.kind == jsonPathKey {
+		if value.Type != bson.TypeEmbeddedDocument {
+			return value, false
+		}
+		elements := mustBSONElements(value)
+		pairs := make([]bsonJSONPair, 0, len(elements)+1)
+		found := false
+		for _, element := range elements {
+			key := decodeBSONKey(element.Key())
+			child := element.Value()
+			if key == leg.key {
+				found = true
+				if len(legs) == 1 {
+					if mode == 'i' {
+						return value, false
+					}
+					child = replacement
+				} else {
+					modified, changed := jsonRawModify(child, legs[1:], replacement, mode)
+					if !changed {
+						return value, false
+					}
+					child = modified
+				}
+			}
+			pairs = append(pairs, bsonJSONPair{key: key, value: child})
+		}
+		if !found {
+			if len(legs) != 1 || mode == 'r' {
+				return value, false
+			}
+			pairs = append(pairs, bsonJSONPair{key: leg.key, value: replacement})
+		}
+		return jsonRawDocument(pairs), true
+	}
+	if value.Type != bson.TypeArray {
+		return value, false
+	}
+	values := mustBSONValues(value)
+	index := leg.index
+	if index < 0 {
+		index += len(values)
+	}
+	if len(legs) == 1 {
+		if index >= 0 && index < len(values) {
+			if mode == 'i' {
+				return value, false
+			}
+			result := append([]bson.RawValue(nil), values...)
+			result[index] = replacement
+			return jsonRawArray(result), true
+		}
+		if mode != 'r' && index >= len(values) {
+			return jsonRawArray(append(append([]bson.RawValue(nil), values...), replacement)), true
+		}
+		return value, false
+	}
+	if index < 0 || index >= len(values) {
+		return value, false
+	}
+	modified, changed := jsonRawModify(values[index], legs[1:], replacement, mode)
+	if !changed {
+		return value, false
+	}
+	result := append([]bson.RawValue(nil), values...)
+	result[index] = modified
+	return jsonRawArray(result), true
+}
+
+func jsonRawRemove(value bson.RawValue, legs []jsonPathLeg) (bson.RawValue, bool) {
+	if len(legs) == 0 {
+		panic("JSON_REMOVE cannot remove the root value")
+	}
+	leg := legs[0]
+	if leg.kind != jsonPathKey && leg.kind != jsonPathIndex {
+		panic("JSON_REMOVE paths cannot contain wildcards")
+	}
+	if len(legs) > 1 {
+		matches := jsonRawPathMatches([]bson.RawValue{value}, legs[:1])
+		if len(matches) == 0 {
+			return value, false
+		}
+		child, changed := jsonRawRemove(matches[0], legs[1:])
+		if !changed {
+			return value, false
+		}
+		return jsonRawModify(value, legs[:1], child, 's')
+	}
+	if leg.kind == jsonPathKey {
+		if value.Type != bson.TypeEmbeddedDocument {
+			return value, false
+		}
+		pairs := make([]bsonJSONPair, 0, len(mustBSONElements(value)))
+		removed := false
+		for _, element := range mustBSONElements(value) {
+			key := decodeBSONKey(element.Key())
+			if key == leg.key {
+				removed = true
+				continue
+			}
+			pairs = append(pairs, bsonJSONPair{key: key, value: element.Value()})
+		}
+		if !removed {
+			return value, false
+		}
+		return jsonRawDocument(pairs), true
+	}
+	if value.Type != bson.TypeArray {
+		return value, false
+	}
+	values := mustBSONValues(value)
+	index := leg.index
+	if index < 0 {
+		index += len(values)
+	}
+	if index < 0 || index >= len(values) {
+		return value, false
+	}
+	result := append([]bson.RawValue(nil), values[:index]...)
+	result = append(result, values[index+1:]...)
+	return jsonRawArray(result), true
+}
+
 func jsonMergePatch(target, patch any) any {
 	patchObject, ok := patch.(bson.D)
 	if !ok {
@@ -1036,6 +1603,57 @@ func jsonMergePreserve(a, b any) any {
 	return append(aa, b)
 }
 
+func jsonRawMergePatch(target, patch bson.RawValue) bson.RawValue {
+	if patch.Type != bson.TypeEmbeddedDocument {
+		return patch
+	}
+	if target.Type != bson.TypeEmbeddedDocument {
+		target = jsonRawDocument(nil)
+	}
+	for _, element := range mustBSONElements(patch) {
+		key := decodeBSONKey(element.Key())
+		patchValue := element.Value()
+		path := []jsonPathLeg{{kind: jsonPathKey, key: key}}
+		if patchValue.Type == bson.TypeNull {
+			target, _ = jsonRawRemove(target, path)
+			continue
+		}
+		value := patchValue
+		if old, err := target.Document().LookupErr(element.Key()); err == nil {
+			value = jsonRawMergePatch(old, patchValue)
+		}
+		target, _ = jsonRawModify(target, path, value, 's')
+	}
+	return target
+}
+
+func jsonRawMergePreserve(a, b bson.RawValue) bson.RawValue {
+	if a.Type == bson.TypeArray && b.Type == bson.TypeArray {
+		values := append([]bson.RawValue(nil), mustBSONValues(a)...)
+		return jsonRawArray(append(values, mustBSONValues(b)...))
+	}
+	if a.Type == bson.TypeEmbeddedDocument && b.Type == bson.TypeEmbeddedDocument {
+		result := a
+		for _, element := range mustBSONElements(b) {
+			key := decodeBSONKey(element.Key())
+			value := element.Value()
+			if old, err := result.Document().LookupErr(element.Key()); err == nil {
+				value = jsonRawMergePreserve(old, value)
+			}
+			result, _ = jsonRawModify(result, []jsonPathLeg{{kind: jsonPathKey, key: key}}, value, 's')
+		}
+		return result
+	}
+	left := []bson.RawValue{a}
+	if a.Type == bson.TypeArray {
+		left = mustBSONValues(a)
+	}
+	if b.Type == bson.TypeArray {
+		return jsonRawArray(append(append([]bson.RawValue(nil), left...), mustBSONValues(b)...))
+	}
+	return jsonRawArray(append(append([]bson.RawValue(nil), left...), b))
+}
+
 func jsonSQLLike(value, pattern, escape string) bool {
 	var expression strings.Builder
 	expression.WriteByte('^')
@@ -1073,6 +1691,24 @@ func jsonSearchPaths(value any, pattern, escape, path string, result *[]string) 
 		for _, pair := range value {
 			key, _ := json.Marshal(pair.Key)
 			jsonSearchPaths(pair.Value, pattern, escape, path+"."+string(key), result)
+		}
+	}
+}
+
+func jsonRawSearchPaths(value bson.RawValue, pattern, escape, path string, result *[]string) {
+	switch value.Type {
+	case bson.TypeString:
+		if jsonSQLLike(value.StringValue(), pattern, escape) {
+			*result = append(*result, path)
+		}
+	case bson.TypeArray:
+		for i, child := range mustBSONValues(value) {
+			jsonRawSearchPaths(child, pattern, escape, path+"["+strconv.Itoa(i)+"]", result)
+		}
+	case bson.TypeEmbeddedDocument:
+		for _, element := range mustBSONElements(value) {
+			key := appendJSONString(nil, decodeBSONKey(element.Key()))
+			jsonRawSearchPaths(element.Value(), pattern, escape, path+"."+string(key), result)
 		}
 	}
 }
@@ -1123,6 +1759,40 @@ func jsonScalarResult(value any, returning string) Scmer {
 	}
 }
 
+func jsonRawScalarResult(value bson.RawValue, returning string) Scmer {
+	if value.Type == bson.TypeNull {
+		return NewNil()
+	}
+	bsonValue := NewBSONValue(value.Type, value.Value)
+	switch strings.ToUpper(returning) {
+	case "SIGNED", "INTEGER", "INT", "BIGINT", "UNSIGNED":
+		return NewInt(bsonValue.Int())
+	case "FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC":
+		return NewFloat(bsonValue.Float())
+	case "BOOLEAN", "BOOL":
+		return NewBool(bsonValue.Bool())
+	case "JSON":
+		return bsonValue
+	default:
+		switch value.Type {
+		case bson.TypeString:
+			return NewString(value.StringValue())
+		case bson.TypeBoolean:
+			return NewString(strconv.FormatBool(value.Boolean()))
+		case bson.TypeInt32:
+			return NewString(strconv.FormatInt(int64(value.Int32()), 10))
+		case bson.TypeInt64:
+			return NewString(strconv.FormatInt(value.Int64(), 10))
+		case bson.TypeDouble:
+			return NewString(strconv.FormatFloat(value.Double(), 'g', -1, 64))
+		case bson.TypeDecimal128:
+			return NewString(value.Decimal128().String())
+		default:
+			panic("JSON_VALUE result is not scalar")
+		}
+	}
+}
+
 func declareJSON(name, description string, fn func(...Scmer) Scmer) {
 	Declare(&Globalenv, &Declaration{
 		Name: name,
@@ -1147,24 +1817,22 @@ func init_json_functions() {
 		return value
 	})
 	declareJSON("json_array", "creates a MySQL-compatible JSON array", func(args ...Scmer) Scmer {
-		array := make(bson.A, len(args))
-		for i := range args {
-			array[i] = jsonConstructorArgument(args[i])
-		}
-		return jsonResult(array)
+		return bsonArrayFromValues(args, 0)
 	})
 	declareJSON("json_object", "creates a MySQL-compatible JSON object", func(args ...Scmer) Scmer {
 		if len(args)%2 != 0 {
 			panic("JSON_OBJECT expects key/value pairs")
 		}
-		document := make(bson.D, 0, len(args)/2)
+		pairs := make([]bsonJSONPair, 0, len(args)/2)
 		for i := 0; i < len(args); i += 2 {
 			if args[i].IsNil() {
 				panic("JSON_OBJECT key cannot be NULL")
 			}
-			document, _ = jsonObjectSet(document, args[i].String(), jsonConstructorArgument(args[i+1]), false, false)
+			value, err := bsonFromSQLScalar(args[i+1])
+			jsonPanic(err)
+			pairs = append(pairs, bsonJSONPair{key: args[i].String(), value: bsonRawValue(value)})
 		}
-		return jsonResult(document)
+		return bsonDocumentFromPairs(pairs, 0)
 	})
 	declareJSON("json_quote", "quotes a string as JSON", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_QUOTE", args, 1)
@@ -1180,9 +1848,9 @@ func init_json_functions() {
 			return NewNil()
 		}
 		if args[0].IsBSON() {
-			decoded := bsonDecoded(args[0])
-			if text, ok := decoded.(string); ok {
-				return NewString(text)
+			raw := bsonRawValue(args[0])
+			if raw.Type == bson.TypeString {
+				return NewString(raw.StringValue())
 			}
 			return NewString(bsonText(args[0]))
 		}
@@ -1207,83 +1875,92 @@ func init_json_functions() {
 	})
 	declareJSON("json_type", "returns the MySQL JSON type name", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_TYPE", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		return NewString(jsonTypeName(value))
+		return NewString(jsonRawTypeName(bsonRawValue(value)))
 	})
 	declareJSON("json_depth", "returns maximum JSON document depth", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_DEPTH", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		return NewInt(jsonDepthValue(value))
+		return NewInt(jsonRawDepth(bsonRawValue(value)))
 	})
 	declareJSON("json_length", "returns JSON object or array length", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_LENGTH", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
+		raw := bsonRawValue(value)
 		if len(args) > 1 {
-			matches, _ := jsonExtractValues(value, args[1:2])
+			matches, _ := jsonExtractBSONValues(value, args[1:2])
 			if len(matches) == 0 {
 				return NewNil()
 			}
-			value = matches[0]
+			raw = matches[0]
 		}
-		switch value := value.(type) {
-		case bson.A:
-			return NewInt(int64(len(value)))
-		case bson.D:
-			return NewInt(int64(len(value)))
+		switch raw.Type {
+		case bson.TypeArray:
+			values, err := raw.Array().Values()
+			jsonPanic(err)
+			return NewInt(int64(len(values)))
+		case bson.TypeEmbeddedDocument:
+			elements, err := raw.Document().Elements()
+			jsonPanic(err)
+			return NewInt(int64(len(elements)))
 		default:
 			return NewInt(1)
 		}
 	})
 	declareJSON("json_extract", "extracts one or more JSON paths", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_EXTRACT", args, 2)
-		document, ok := jsonDocumentArgument(args[0])
+		document, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		matches, multiple := jsonExtractValues(document, args[1:])
+		matches, multiple := jsonExtractBSONValues(document, args[1:])
 		if len(matches) == 0 {
 			return NewNil()
 		}
 		if multiple {
-			return jsonResult(bson.A(matches))
+			return bsonArrayFromRawValues(matches, 0)
 		}
-		return jsonResult(matches[0])
+		return NewBSONValue(matches[0].Type, matches[0].Value)
 	})
 	declareJSON("json_keys", "returns object member names", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_KEYS", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
+		raw := bsonRawValue(value)
 		if len(args) > 1 {
-			matches, _ := jsonExtractValues(value, args[1:2])
+			matches, _ := jsonExtractBSONValues(value, args[1:2])
 			if len(matches) == 0 {
 				return NewNil()
 			}
-			value = matches[0]
+			raw = matches[0]
 		}
-		document, ok := value.(bson.D)
-		if !ok {
+		if raw.Type != bson.TypeEmbeddedDocument {
 			return NewNil()
 		}
-		keys := make(bson.A, len(document))
-		for i := range document {
-			keys[i] = document[i].Key
+		elements, err := raw.Document().Elements()
+		jsonPanic(err)
+		keys := make([]Scmer, len(elements))
+		for i := range elements {
+			key, err := elements[i].KeyErr()
+			jsonPanic(err)
+			keys[i] = NewString(decodeBSONKey(key))
 		}
-		return jsonResult(keys)
+		return bsonArrayFromValues(keys, 0)
 	})
 	declareJSON("json_contains_path", "tests whether one or all JSON paths exist", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_CONTAINS_PATH", args, 3)
-		document, ok := jsonDocumentArgument(args[0])
+		document, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() {
 			return NewNil()
 		}
@@ -1298,7 +1975,7 @@ func init_json_functions() {
 			}
 			legs, err := parseJSONPath(path.String())
 			jsonPanic(err)
-			exists := len(jsonPathMatches([]any{document}, legs)) > 0
+			exists := len(jsonRawPathMatches([]bson.RawValue{bsonRawValue(document)}, legs)) > 0
 			if mode == "one" && exists {
 				return NewBool(true)
 			}
@@ -1310,74 +1987,76 @@ func init_json_functions() {
 	})
 	declareJSON("json_contains", "tests JSON containment", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_CONTAINS", args, 2)
-		target, ok := jsonDocumentArgument(args[0])
+		target, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		candidate, ok := jsonDocumentArgument(args[1])
+		candidate, ok := jsonBSONDocumentArgument(args[1])
 		if !ok {
 			return NewNil()
 		}
+		targetRaw := bsonRawValue(target)
 		if len(args) > 2 {
-			matches, _ := jsonExtractValues(target, args[2:3])
+			matches, _ := jsonExtractBSONValues(target, args[2:3])
 			if len(matches) == 0 {
 				return NewBool(false)
 			}
-			target = matches[0]
+			targetRaw = matches[0]
 		}
-		return NewBool(jsonContainsValue(target, candidate))
+		return NewBool(jsonRawContainsValue(targetRaw, bsonRawValue(candidate)))
 	})
 	declareJSON("json_overlaps", "tests whether JSON values overlap", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_OVERLAPS", args, 2)
-		left, ok := jsonDocumentArgument(args[0])
+		left, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		right, ok := jsonDocumentArgument(args[1])
+		right, ok := jsonBSONDocumentArgument(args[1])
 		if !ok {
 			return NewNil()
 		}
-		if la, ok := left.(bson.A); ok {
-			for _, lv := range la {
-				if ra, rok := right.(bson.A); rok {
-					for _, rv := range ra {
-						if jsonEqual(lv, rv) {
+		leftRaw, rightRaw := bsonRawValue(left), bsonRawValue(right)
+		if leftRaw.Type == bson.TypeArray {
+			for _, lv := range mustBSONValues(leftRaw) {
+				if rightRaw.Type == bson.TypeArray {
+					for _, rv := range mustBSONValues(rightRaw) {
+						if bsonRawEqual(lv, rv) {
 							return NewBool(true)
 						}
 					}
-				} else if jsonEqual(lv, right) {
+				} else if bsonRawEqual(lv, rightRaw) {
 					return NewBool(true)
 				}
 			}
 			return NewBool(false)
 		}
-		if ld, ok := left.(bson.D); ok {
-			rd, rok := right.(bson.D)
-			if !rok {
+		if leftRaw.Type == bson.TypeEmbeddedDocument {
+			if rightRaw.Type != bson.TypeEmbeddedDocument {
 				return NewBool(false)
 			}
-			for _, pair := range ld {
-				if rv, found := jsonObjectLookup(rd, pair.Key); found && jsonEqual(pair.Value, rv) {
+			for _, element := range mustBSONElements(leftRaw) {
+				if rv, err := rightRaw.Document().LookupErr(element.Key()); err == nil && bsonRawEqual(element.Value(), rv) {
 					return NewBool(true)
 				}
 			}
 			return NewBool(false)
 		}
-		return NewBool(jsonEqual(left, right))
+		return NewBool(bsonRawEqual(leftRaw, rightRaw))
 	})
 	declareJSON("json_member_of", "tests whether a JSON scalar is a member of an array", func(args ...Scmer) Scmer {
 		requireJSONArgs("MEMBER OF", args, 2)
-		left := jsonConstructorArgument(args[0])
-		right, ok := jsonDocumentArgument(args[1])
+		left, err := bsonFromSQLScalar(args[0])
+		jsonPanic(err)
+		right, ok := jsonBSONDocumentArgument(args[1])
 		if !ok {
 			return NewNil()
 		}
-		array, ok := right.(bson.A)
-		if !ok {
+		raw := bsonRawValue(right)
+		if raw.Type != bson.TypeArray {
 			panic("MEMBER OF requires a JSON array")
 		}
-		for _, item := range array {
-			if jsonEqual(left, item) {
+		for _, item := range mustBSONValues(raw) {
+			if bsonRawEqual(bsonRawValue(left), item) {
 				return NewBool(true)
 			}
 		}
@@ -1385,11 +2064,11 @@ func init_json_functions() {
 	})
 	declareJSON("json_pretty", "pretty-prints JSON", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_PRETTY", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		encoded, err := appendOrdinaryJSON(nil, value, true, "")
+		encoded, err := appendBSONText(nil, value, true, "")
 		jsonPanic(err)
 		return NewString(string(encoded))
 	})
@@ -1429,7 +2108,8 @@ func init_json_functions() {
 		}
 		valid, validationError := jsonSchemaValidation(args[0], args[1])
 		if valid {
-			return jsonResult(bson.D{{Key: "valid", Value: true}})
+			value, _ := bsonFromSQLScalar(NewBool(true))
+			return bsonDocumentFromPairs([]bsonJSONPair{{key: "valid", value: bsonRawValue(value)}}, 0)
 		}
 		leaf := deepestJSONSchemaError(validationError)
 		keywordPath := leaf.ErrorKind.KeywordPath()
@@ -1437,20 +2117,28 @@ func init_json_functions() {
 		if len(keywordPath) > 0 {
 			keyword = keywordPath[len(keywordPath)-1]
 		}
-		return jsonResult(bson.D{
-			{Key: "valid", Value: false},
-			{Key: "reason", Value: leaf.Error()},
-			{Key: "schema-location", Value: jsonPointer(keywordPath[:max(0, len(keywordPath)-1)])},
-			{Key: "document-location", Value: jsonPointer(leaf.InstanceLocation)},
-			{Key: "schema-failed-keyword", Value: keyword},
-		})
+		values := []Scmer{
+			NewBool(false),
+			NewString(leaf.Error()),
+			NewString(jsonPointer(keywordPath[:max(0, len(keywordPath)-1)])),
+			NewString(jsonPointer(leaf.InstanceLocation)),
+			NewString(keyword),
+		}
+		keys := []string{"valid", "reason", "schema-location", "document-location", "schema-failed-keyword"}
+		pairs := make([]bsonJSONPair, len(keys))
+		for i := range keys {
+			value, err := bsonFromSQLScalar(values[i])
+			jsonPanic(err)
+			pairs[i] = bsonJSONPair{key: keys[i], value: bsonRawValue(value)}
+		}
+		return bsonDocumentFromPairs(pairs, 0)
 	})
 	modify := func(mode byte, name string, args ...Scmer) Scmer {
 		requireJSONArgs(name, args, 3)
 		if (len(args)-1)%2 != 0 {
 			panic("JSON modification expects path/value pairs")
 		}
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
@@ -1460,9 +2148,12 @@ func init_json_functions() {
 			}
 			legs, err := parseJSONPath(args[i].String())
 			jsonPanic(err)
-			value, _ = jsonModify(value, legs, jsonConstructorArgument(args[i+1]), mode)
+			replacement, err := bsonFromSQLScalar(args[i+1])
+			jsonPanic(err)
+			modified, _ := jsonRawModify(bsonRawValue(value), legs, bsonRawValue(replacement), mode)
+			value = NewBSONValue(modified.Type, modified.Value)
 		}
-		return jsonResult(value)
+		return value
 	}
 	declareJSON("json_set", "sets or inserts JSON path values", func(args ...Scmer) Scmer {
 		return modify('s', "JSON_SET", args...)
@@ -1475,7 +2166,7 @@ func init_json_functions() {
 	})
 	declareJSON("json_remove", "removes JSON path values", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_REMOVE", args, 2)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
@@ -1485,41 +2176,45 @@ func init_json_functions() {
 			}
 			legs, err := parseJSONPath(path.String())
 			jsonPanic(err)
-			value, _ = jsonRemoveValue(value, legs)
+			modified, _ := jsonRawRemove(bsonRawValue(value), legs)
+			value = NewBSONValue(modified.Type, modified.Value)
 		}
-		return jsonResult(value)
+		return value
 	})
 	declareJSON("json_array_append", "appends values to JSON arrays", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_ARRAY_APPEND", args, 3)
 		if (len(args)-1)%2 != 0 {
 			panic("JSON_ARRAY_APPEND expects path/value pairs")
 		}
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
 		for i := 1; i < len(args); i += 2 {
 			legs, err := parseJSONPath(args[i].String())
 			jsonPanic(err)
-			matches := jsonPathMatches([]any{value}, legs)
+			matches := jsonRawPathMatches([]bson.RawValue{bsonRawValue(value)}, legs)
 			if len(matches) == 0 {
 				continue
 			}
-			array, arrayOK := matches[0].(bson.A)
-			if !arrayOK {
-				array = bson.A{matches[0]}
+			array := []bson.RawValue{matches[0]}
+			if matches[0].Type == bson.TypeArray {
+				array = mustBSONValues(matches[0])
 			}
-			array = append(array, jsonConstructorArgument(args[i+1]))
-			value, _ = jsonModify(value, legs, array, 's')
+			appended, err := bsonFromSQLScalar(args[i+1])
+			jsonPanic(err)
+			array = append(append([]bson.RawValue(nil), array...), bsonRawValue(appended))
+			modified, _ := jsonRawModify(bsonRawValue(value), legs, jsonRawArray(array), 's')
+			value = NewBSONValue(modified.Type, modified.Value)
 		}
-		return jsonResult(value)
+		return value
 	})
 	declareJSON("json_array_insert", "inserts values into JSON arrays", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_ARRAY_INSERT", args, 3)
 		if (len(args)-1)%2 != 0 {
 			panic("JSON_ARRAY_INSERT expects path/value pairs")
 		}
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
@@ -1530,14 +2225,14 @@ func init_json_functions() {
 				panic("JSON_ARRAY_INSERT path must end in an array index")
 			}
 			parentLegs := legs[:len(legs)-1]
-			matches := jsonPathMatches([]any{value}, parentLegs)
+			matches := jsonRawPathMatches([]bson.RawValue{bsonRawValue(value)}, parentLegs)
 			if len(matches) == 0 {
 				continue
 			}
-			array, ok := matches[0].(bson.A)
-			if !ok {
+			if matches[0].Type != bson.TypeArray {
 				continue
 			}
+			array := mustBSONValues(matches[0])
 			index := legs[len(legs)-1].index
 			if index < 0 {
 				index = len(array) + index
@@ -1548,47 +2243,52 @@ func init_json_functions() {
 			if index > len(array) {
 				index = len(array)
 			}
-			inserted := make(bson.A, 0, len(array)+1)
+			inserted := make([]bson.RawValue, 0, len(array)+1)
 			inserted = append(inserted, array[:index]...)
-			inserted = append(inserted, jsonConstructorArgument(args[i+1]))
+			newValue, err := bsonFromSQLScalar(args[i+1])
+			jsonPanic(err)
+			inserted = append(inserted, bsonRawValue(newValue))
 			inserted = append(inserted, array[index:]...)
-			value, _ = jsonModify(value, parentLegs, inserted, 's')
+			modified, _ := jsonRawModify(bsonRawValue(value), parentLegs, jsonRawArray(inserted), 's')
+			value = NewBSONValue(modified.Type, modified.Value)
 		}
-		return jsonResult(value)
+		return value
 	})
 	declareJSON("json_merge_patch", "merges documents using RFC 7396 semantics", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_MERGE_PATCH", args, 2)
-		result, ok := jsonDocumentArgument(args[0])
+		result, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
 		for _, arg := range args[1:] {
-			patch, ok := jsonDocumentArgument(arg)
+			patch, ok := jsonBSONDocumentArgument(arg)
 			if !ok {
 				return NewNil()
 			}
-			result = jsonMergePatch(result, patch)
+			merged := jsonRawMergePatch(bsonRawValue(result), bsonRawValue(patch))
+			result = NewBSONValue(merged.Type, merged.Value)
 		}
-		return jsonResult(result)
+		return result
 	})
 	declareJSON("json_merge_preserve", "merges documents while preserving values", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_MERGE_PRESERVE", args, 2)
-		result, ok := jsonDocumentArgument(args[0])
+		result, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
 		for _, arg := range args[1:] {
-			next, ok := jsonDocumentArgument(arg)
+			next, ok := jsonBSONDocumentArgument(arg)
 			if !ok {
 				return NewNil()
 			}
-			result = jsonMergePreserve(result, next)
+			merged := jsonRawMergePreserve(bsonRawValue(result), bsonRawValue(next))
+			result = NewBSONValue(merged.Type, merged.Value)
 		}
-		return jsonResult(result)
+		return result
 	})
 	declareJSON("json_search", "searches JSON string values", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_SEARCH", args, 3)
-		document, ok := jsonDocumentArgument(args[0])
+		document, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() || args[2].IsNil() {
 			return NewNil()
 		}
@@ -1601,17 +2301,17 @@ func init_json_functions() {
 			escape = args[3].String()
 		}
 		roots := []struct {
-			value any
+			value bson.RawValue
 			path  string
-		}{{document, "$"}}
+		}{{bsonRawValue(document), "$"}}
 		if len(args) > 4 {
 			roots = roots[:0]
 			for _, path := range args[4:] {
 				legs, err := parseJSONPath(path.String())
 				jsonPanic(err)
-				for _, match := range jsonPathMatches([]any{document}, legs) {
+				for _, match := range jsonRawPathMatches([]bson.RawValue{bsonRawValue(document)}, legs) {
 					roots = append(roots, struct {
-						value any
+						value bson.RawValue
 						path  string
 					}{match, path.String()})
 				}
@@ -1619,27 +2319,29 @@ func init_json_functions() {
 		}
 		paths := make([]string, 0)
 		for _, root := range roots {
-			jsonSearchPaths(root.value, args[2].String(), escape, root.path, &paths)
+			jsonRawSearchPaths(root.value, args[2].String(), escape, root.path, &paths)
 		}
 		if len(paths) == 0 {
 			return NewNil()
 		}
 		if mode == "one" {
-			return jsonResult(paths[0])
+			value, err := bsonFromSQLScalar(NewString(paths[0]))
+			jsonPanic(err)
+			return value
 		}
-		array := make(bson.A, len(paths))
+		array := make([]Scmer, len(paths))
 		for i := range paths {
-			array[i] = paths[i]
+			array[i] = NewString(paths[i])
 		}
-		return jsonResult(array)
+		return bsonArrayFromValues(array, 0)
 	})
 	declareJSON("json_value", "extracts a scalar JSON value", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_VALUE", args, 2)
-		document, ok := jsonDocumentArgument(args[0])
+		document, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() {
 			return NewNil()
 		}
-		matches, _ := jsonExtractValues(document, args[1:2])
+		matches, _ := jsonExtractBSONValues(document, args[1:2])
 		if len(matches) == 0 {
 			return NewNil()
 		}
@@ -1647,56 +2349,57 @@ func init_json_functions() {
 		if len(args) > 2 {
 			returning = args[2].String()
 		}
-		return jsonScalarResult(matches[0], returning)
+		return jsonRawScalarResult(matches[0], returning)
 	})
 	declareJSON("pg_to_json", "implements PostgreSQL to_json and to_jsonb", func(args ...Scmer) Scmer {
 		requireJSONArgs("to_json", args, 1)
-		return jsonResult(jsonConstructorArgument(args[0]))
+		value, err := bsonFromSQLScalar(args[0])
+		jsonPanic(err)
+		return value
 	})
 	declareJSON("pg_row_to_json", "implements PostgreSQL row_to_json", func(args ...Scmer) Scmer {
 		requireJSONArgs("row_to_json", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		array, ok := value.(bson.A)
-		if !ok {
-			return jsonResult(value)
+		raw := bsonRawValue(value)
+		if raw.Type != bson.TypeArray {
+			return value
 		}
-		document := make(bson.D, len(array))
+		array := mustBSONValues(raw)
+		pairs := make([]bsonJSONPair, len(array))
 		for i := range array {
-			document[i] = bson.E{Key: fmt.Sprintf("f%d", i+1), Value: array[i]}
+			pairs[i] = bsonJSONPair{key: fmt.Sprintf("f%d", i+1), value: array[i]}
 		}
-		return jsonResult(document)
+		return bsonDocumentFromPairs(pairs, 0)
 	})
 	declareJSON("pg_json_build_array", "implements PostgreSQL JSON array builders", func(args ...Scmer) Scmer {
-		array := make(bson.A, len(args))
-		for i := range args {
-			array[i] = jsonConstructorArgument(args[i])
-		}
-		return jsonResult(array)
+		return bsonArrayFromValues(args, 0)
 	})
 	declareJSON("pg_json_array_absent", "implements SQL/JSON ARRAY ABSENT ON NULL", func(args ...Scmer) Scmer {
-		array := make(bson.A, 0, len(args))
+		array := make([]Scmer, 0, len(args))
 		for _, arg := range args {
 			if !arg.IsNil() {
-				array = append(array, jsonConstructorArgument(arg))
+				array = append(array, arg)
 			}
 		}
-		return jsonResult(array)
+		return bsonArrayFromValues(array, 0)
 	})
 	declareJSON("pg_json_build_object", "implements PostgreSQL JSON object builders", func(args ...Scmer) Scmer {
 		if len(args)%2 != 0 {
 			panic("json_build_object expects key/value pairs")
 		}
-		document := bson.D{}
+		pairs := make([]bsonJSONPair, 0, len(args)/2)
 		for i := 0; i < len(args); i += 2 {
 			if args[i].IsNil() {
 				panic("JSON object key cannot be NULL")
 			}
-			document, _ = jsonObjectSet(document, args[i].String(), jsonConstructorArgument(args[i+1]), false, false)
+			value, err := bsonFromSQLScalar(args[i+1])
+			jsonPanic(err)
+			pairs = append(pairs, bsonJSONPair{key: args[i].String(), value: bsonRawValue(value)})
 		}
-		return jsonResult(document)
+		return bsonDocumentFromPairs(pairs, 0)
 	})
 	declareJSON("pg_json_object", "implements PostgreSQL json_object and jsonb_object array forms", func(args ...Scmer) Scmer {
 		requireJSONArgs("json_object", args, 1)
@@ -1718,32 +2421,36 @@ func init_json_functions() {
 		if len(keys) != len(values) {
 			panic("json_object key and value arrays have different lengths")
 		}
-		document := bson.D{}
+		pairs := make([]bsonJSONPair, len(keys))
 		for i := range keys {
-			document, _ = jsonObjectSet(document, keys[i], values[i], false, false)
+			value, err := bsonFromSQLScalar(NewString(values[i]))
+			jsonPanic(err)
+			pairs[i] = bsonJSONPair{key: keys[i], value: bsonRawValue(value)}
 		}
-		return jsonResult(document)
+		return bsonDocumentFromPairs(pairs, 0)
 	})
 	declareJSON("pg_json_serialize", "implements PostgreSQL json_serialize", func(args ...Scmer) Scmer {
 		requireJSONArgs("json_serialize", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		encoded, err := appendOrdinaryJSON(nil, value, false, "")
+		encoded, err := appendBSONText(nil, value, false, "")
 		jsonPanic(err)
 		return NewString(string(encoded))
 	})
 	declareJSON("pg_json_array_length", "implements PostgreSQL json_array_length", func(args ...Scmer) Scmer {
 		requireJSONArgs("json_array_length", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		array, ok := value.(bson.A)
-		if !ok {
+		raw := bsonRawValue(value)
+		if raw.Type != bson.TypeArray {
 			panic("json_array_length requires an array")
 		}
+		array, err := raw.Array().Values()
+		jsonPanic(err)
 		return NewInt(int64(len(array)))
 	})
 	declareJSON("pg_json_extract_path", "implements PostgreSQL json_extract_path", func(args ...Scmer) Scmer {
@@ -1756,7 +2463,7 @@ func init_json_functions() {
 	})
 	declareJSON("pg_jsonb_set", "implements PostgreSQL jsonb_set", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb_set", args, 3)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
@@ -1765,12 +2472,12 @@ func init_json_functions() {
 		if !create {
 			mode = 'r'
 		}
-		replacement, replacementOK := jsonDocumentArgument(args[2])
+		replacement, replacementOK := jsonBSONDocumentArgument(args[2])
 		if !replacementOK {
 			return NewNil()
 		}
-		value, _ = jsonModify(value, pgPathLegs(args[1]), replacement, mode)
-		return jsonResult(value)
+		modified, _ := jsonRawModify(bsonRawValue(value), pgPathLegs(args[1]), bsonRawValue(replacement), mode)
+		return NewBSONValue(modified.Type, modified.Value)
 	})
 	declareJSON("pg_jsonb_set_lax", "implements PostgreSQL jsonb_set_lax", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb_set_lax", args, 3)
@@ -1787,12 +2494,12 @@ func init_json_functions() {
 		case "return_target":
 			return args[0]
 		case "delete_key":
-			value, ok := jsonDocumentArgument(args[0])
+			value, ok := jsonBSONDocumentArgument(args[0])
 			if !ok {
 				return NewNil()
 			}
-			value, _ = jsonRemoveValue(value, pgPathLegs(args[1]))
-			return jsonResult(value)
+			modified, _ := jsonRawRemove(bsonRawValue(value), pgPathLegs(args[1]))
+			return NewBSONValue(modified.Type, modified.Value)
 		case "use_json_null":
 			replacement, _ := bsonFromGo(nil)
 			forward := append([]Scmer(nil), args...)
@@ -1804,11 +2511,11 @@ func init_json_functions() {
 	})
 	declareJSON("pg_jsonb_insert", "implements PostgreSQL jsonb_insert", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb_insert", args, 3)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		replacement, replacementOK := jsonDocumentArgument(args[2])
+		replacement, replacementOK := jsonBSONDocumentArgument(args[2])
 		if !replacementOK {
 			return NewNil()
 		}
@@ -1817,15 +2524,15 @@ func init_json_functions() {
 			return args[0]
 		}
 		last, parentLegs := legs[len(legs)-1], legs[:len(legs)-1]
-		parents := jsonPathMatches([]any{value}, parentLegs)
+		parents := jsonRawPathMatches([]bson.RawValue{bsonRawValue(value)}, parentLegs)
 		if len(parents) == 0 {
 			return args[0]
 		}
 		if last.kind == jsonPathIndex {
-			array, arrayOK := parents[0].(bson.A)
-			if !arrayOK {
+			if parents[0].Type != bson.TypeArray {
 				return args[0]
 			}
+			array := mustBSONValues(parents[0])
 			index := last.index
 			if index < 0 {
 				index += len(array)
@@ -1839,28 +2546,33 @@ func init_json_functions() {
 			if index > len(array) {
 				index = len(array)
 			}
-			result := append(append(append(bson.A(nil), array[:index]...), replacement), array[index:]...)
-			value, _ = jsonModify(value, parentLegs, result, 's')
+			result := append([]bson.RawValue(nil), array[:index]...)
+			result = append(result, bsonRawValue(replacement))
+			result = append(result, array[index:]...)
+			modified, _ := jsonRawModify(bsonRawValue(value), parentLegs, jsonRawArray(result), 's')
+			value = NewBSONValue(modified.Type, modified.Value)
 		} else {
-			value, _ = jsonModify(value, legs, replacement, 'i')
+			modified, _ := jsonRawModify(bsonRawValue(value), legs, bsonRawValue(replacement), 'i')
+			value = NewBSONValue(modified.Type, modified.Value)
 		}
-		return jsonResult(value)
+		return value
 	})
 	declareJSON("pg_json_strip_nulls", "implements PostgreSQL json_strip_nulls", func(args ...Scmer) Scmer {
 		requireJSONArgs("json_strip_nulls", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		return jsonResult(pgStripJSONNulls(value, len(args) > 1 && args[1].Bool()))
+		stripped := pgRawStripJSONNulls(bsonRawValue(value), len(args) > 1 && args[1].Bool())
+		return NewBSONValue(stripped.Type, stripped.Value)
 	})
 	declareJSON("pg_json_typeof", "implements PostgreSQL json_typeof", func(args ...Scmer) Scmer {
 		requireJSONArgs("json_typeof", args, 1)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok {
 			return NewNil()
 		}
-		typeName := jsonTypeName(value)
+		typeName := jsonRawTypeName(bsonRawValue(value))
 		if typeName == "INTEGER" || typeName == "DOUBLE" || typeName == "DECIMAL" {
 			typeName = "NUMBER"
 		}
@@ -1868,44 +2580,45 @@ func init_json_functions() {
 	})
 	declareJSON("pg_jsonb_populate_record_valid", "validates PostgreSQL jsonb_populate_record input shape", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb_populate_record_valid", args, 2)
-		value, ok := jsonDocumentArgument(args[1])
+		value, ok := jsonBSONDocumentArgument(args[1])
 		if !ok {
 			return NewNil()
 		}
-		_, objectOK := value.(bson.D)
-		return NewBool(objectOK)
+		return NewBool(bsonRawValue(value).Type == bson.TypeEmbeddedDocument)
 	})
 	declareJSON("pg_jsonb_concat", "implements PostgreSQL jsonb concatenation", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb concatenation", args, 2)
-		left, leftOK := jsonDocumentArgument(args[0])
-		right, rightOK := jsonDocumentArgument(args[1])
+		left, leftOK := jsonBSONDocumentArgument(args[0])
+		right, rightOK := jsonBSONDocumentArgument(args[1])
 		if !leftOK || !rightOK {
 			return NewNil()
 		}
-		return jsonResult(pgJSONBConcat(left, right))
+		result := pgRawJSONBConcat(bsonRawValue(left), bsonRawValue(right))
+		return NewBSONValue(result.Type, result.Value)
 	})
 	declareJSON("pg_jsonb_delete", "implements PostgreSQL jsonb deletion", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb deletion", args, 2)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() {
 			return NewNil()
 		}
-		return jsonResult(pgJSONBDelete(value, args[1]))
+		result := pgRawJSONBDelete(bsonRawValue(value), args[1])
+		return NewBSONValue(result.Type, result.Value)
 	})
 	declareJSON("pg_jsonb_delete_path", "implements PostgreSQL jsonb path deletion", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb path deletion", args, 2)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() {
 			return NewNil()
 		}
-		value, _ = jsonRemoveValue(value, pgPathLegs(args[1]))
-		return jsonResult(value)
+		result, _ := jsonRawRemove(bsonRawValue(value), pgPathLegs(args[1]))
+		return NewBSONValue(result.Type, result.Value)
 	})
 	declareJSON("pg_subtract", "dispatches PostgreSQL numeric and jsonb subtraction", func(args ...Scmer) Scmer {
 		requireJSONArgs("subtraction", args, 2)
 		if args[0].IsBSON() {
-			value, _ := jsonDocumentArgument(args[0])
-			return jsonResult(pgJSONBDelete(value, args[1]))
+			result := pgRawJSONBDelete(bsonRawValue(args[0]), args[1])
+			return NewBSONValue(result.Type, result.Value)
 		}
 		if args[0].IsInt() && args[1].IsInt() {
 			return NewInt(args[0].Int() - args[1].Int())
@@ -1914,7 +2627,7 @@ func init_json_functions() {
 	})
 	declareJSON("pg_jsonb_exists", "implements PostgreSQL jsonb top-level existence", func(args ...Scmer) Scmer {
 		requireJSONArgs("jsonb existence", args, 2)
-		value, ok := jsonDocumentArgument(args[0])
+		value, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() {
 			return NewNil()
 		}
@@ -1926,11 +2639,13 @@ func init_json_functions() {
 		matches := 0
 		for _, key := range keys {
 			found := false
-			if object, objectOK := value.(bson.D); objectOK {
-				_, found = jsonObjectLookup(object, key)
-			} else if array, arrayOK := value.(bson.A); arrayOK {
-				for _, item := range array {
-					if text, textOK := item.(string); textOK && text == key {
+			raw := bsonRawValue(value)
+			if raw.Type == bson.TypeEmbeddedDocument {
+				_, err := raw.Document().LookupErr(encodeBSONKey(key))
+				found = err == nil
+			} else if raw.Type == bson.TypeArray {
+				for _, item := range mustBSONValues(raw) {
+					if item.Type == bson.TypeString && item.StringValue() == key {
 						found = true
 						break
 					}
@@ -1945,17 +2660,17 @@ func init_json_functions() {
 		}
 		return NewBool(matches > 0)
 	})
-	pathQuery := func(name string, args []Scmer) ([]any, bool, bool) {
+	pathQuery := func(name string, args []Scmer) ([]bson.RawValue, bool, bool) {
 		requireJSONArgs(name, args, 2)
-		document, ok := jsonDocumentArgument(args[0])
+		document, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() {
 			return nil, false, false
 		}
-		var vars any = bson.D{}
+		vars := bsonDocumentFromPairs(nil, 0)
 		if len(args) > 2 && !args[2].IsNil() {
-			vars, _ = jsonDocumentArgument(args[2])
+			vars, _ = jsonBSONDocumentArgument(args[2])
 		}
-		values, predicate := pgJSONPathQuery(document, args[1].String(), vars)
+		values, predicate := pgRawJSONPathQuery(bsonRawValue(document), args[1].String(), bsonRawValue(vars))
 		return values, predicate, true
 	}
 	declareJSON("pg_jsonb_path_exists", "implements PostgreSQL jsonb_path_exists", func(args ...Scmer) Scmer {
@@ -1974,8 +2689,8 @@ func init_json_functions() {
 			return NewBool(len(values) > 0)
 		}
 		if len(values) == 1 {
-			if result, resultOK := values[0].(bool); resultOK {
-				return NewBool(result)
+			if values[0].Type == bson.TypeBoolean {
+				return NewBool(values[0].Boolean())
 			}
 		}
 		return NewNil()
@@ -1985,14 +2700,14 @@ func init_json_functions() {
 		if !ok {
 			return NewNil()
 		}
-		return jsonResult(bson.A(values))
+		return bsonArrayFromRawValues(values, 0)
 	})
 	declareJSON("pg_jsonb_path_query_first", "implements PostgreSQL jsonb_path_query_first", func(args ...Scmer) Scmer {
 		values, _, ok := pathQuery("jsonb_path_query_first", args)
 		if !ok || len(values) == 0 {
 			return NewNil()
 		}
-		return jsonResult(values[0])
+		return NewBSONValue(values[0].Type, values[0].Value)
 	})
 	declareJSON("pg_json_value", "implements PostgreSQL SQL/JSON JSON_VALUE", func(args ...Scmer) Scmer {
 		values, _, ok := pathQuery("JSON_VALUE", args)
@@ -2005,73 +2720,88 @@ func init_json_functions() {
 		if len(values) != 1 {
 			panic("JSON_VALUE path returned more than one item")
 		}
-		return jsonScalarResult(values[0], "CHAR")
+		return jsonRawScalarResult(values[0], "CHAR")
 	})
 	declareJSON("json_get", "implements PostgreSQL JSON object and array extraction", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON extraction operator", args, 2)
-		document, ok := jsonDocumentArgument(args[0])
+		document, ok := jsonBSONDocumentArgument(args[0])
 		if !ok || args[1].IsNil() {
 			return NewNil()
 		}
-		var value any
+		root := bsonRawValue(document)
+		var value bson.RawValue
 		var found bool
 		if args[1].IsInt() || args[1].IsFloat() {
-			if array, arrayOK := document.(bson.A); arrayOK {
+			if root.Type == bson.TypeArray {
+				array := root.Array()
 				index := int(args[1].Int())
 				if index < 0 {
-					index = len(array) + index
-				}
-				if index >= 0 && index < len(array) {
-					value, found = array[index], true
+					values, err := array.Values()
+					jsonPanic(err)
+					index = len(values) + index
+					if index >= 0 && index < len(values) {
+						value, found = values[index], true
+					}
+				} else if child, err := array.IndexErr(uint(index)); err == nil {
+					value, found = child, true
 				}
 			}
-		} else {
-			value, found = jsonObjectLookup(document, args[1].String())
+		} else if root.Type == bson.TypeEmbeddedDocument {
+			var err error
+			value, err = root.Document().LookupErr(encodeBSONKey(args[1].String()))
+			found = err == nil
 		}
 		if !found {
 			return NewNil()
 		}
 		if len(args) > 2 && args[2].Bool() {
-			return jsonScalarResult(value, "CHAR")
+			if value.Type == bson.TypeArray || value.Type == bson.TypeEmbeddedDocument {
+				encoded, err := appendBSONJSON(nil, value, false, "", 0)
+				jsonPanic(err)
+				return NewString(string(encoded))
+			}
+			return jsonRawScalarResult(value, "CHAR")
 		}
-		return jsonResult(value)
+		return NewBSONValue(value.Type, value.Value)
 	})
 	declareJSON("json_arrayagg_entry", "wraps one JSON_ARRAYAGG input value", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_ARRAYAGG", args, 1)
 		if len(args) > 1 && args[1].Bool() && args[0].IsNil() {
-			return jsonAggregateResult(bson.A{}, bsonFlagArrayAgg)
+			return bsonArrayFromValues(nil, bsonFlagArrayAgg)
 		}
-		return jsonAggregateResult(bson.A{jsonConstructorArgument(args[0])}, bsonFlagArrayAgg)
+		return bsonArrayFromValues(args[:1], bsonFlagArrayAgg)
 	})
 	declareJSON("json_arrayagg_reduce", "JSON_ARRAYAGG reducer", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_ARRAYAGG reducer", args, 2)
-		var leftState, rightState bson.A
 		leftIsState := bsonHasFlag(args[0], bsonFlagArrayAgg)
 		rightIsState := bsonHasFlag(args[1], bsonFlagArrayAgg)
-		if leftIsState {
-			leftState, leftIsState = bsonDecoded(args[0]).(bson.A)
-		}
-		if rightIsState {
-			rightState, rightIsState = bsonDecoded(args[1]).(bson.A)
-		}
 		switch {
 		case args[0].IsNil() && rightIsState:
 			return args[1]
 		case args[1].IsNil() && leftIsState:
 			return args[0]
 		case args[0].IsNil():
-			return jsonAggregateResult(bson.A{jsonConstructorArgument(args[1])}, bsonFlagArrayAgg)
+			return bsonArrayFromValues(args[1:2], bsonFlagArrayAgg)
 		case args[1].IsNil():
-			return jsonAggregateResult(bson.A{jsonConstructorArgument(args[0])}, bsonFlagArrayAgg)
-		case leftIsState && rightIsState:
-			return jsonAggregateResult(append(append(bson.A(nil), leftState...), rightState...), bsonFlagArrayAgg)
-		case leftIsState:
-			return jsonAggregateResult(append(append(bson.A(nil), leftState...), jsonConstructorArgument(args[1])), bsonFlagArrayAgg)
-		case rightIsState:
-			return jsonAggregateResult(append(append(bson.A(nil), rightState...), jsonConstructorArgument(args[0])), bsonFlagArrayAgg)
-		default:
-			return jsonAggregateResult(bson.A{jsonConstructorArgument(args[0]), jsonConstructorArgument(args[1])}, bsonFlagArrayAgg)
+			return bsonArrayFromValues(args[:1], bsonFlagArrayAgg)
 		}
+		left := []bson.RawValue(nil)
+		if leftIsState {
+			left = mustBSONValues(bsonRawValue(args[0]))
+		} else {
+			value, err := bsonFromSQLScalar(args[0])
+			jsonPanic(err)
+			left = []bson.RawValue{bsonRawValue(value)}
+		}
+		right := []bson.RawValue(nil)
+		if rightIsState {
+			right = mustBSONValues(bsonRawValue(args[1]))
+		} else {
+			value, err := bsonFromSQLScalar(args[1])
+			jsonPanic(err)
+			right = []bson.RawValue{bsonRawValue(value)}
+		}
+		return newBSONValueFlags(bson.TypeArray, jsonRawArray(append(append([]bson.RawValue(nil), left...), right...)).Value, bsonFlagArrayAgg)
 	})
 	declareJSON("json_objectagg_entry", "constructs a JSON_OBJECTAGG key/value entry", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_OBJECTAGG", args, 2)
@@ -2079,9 +2809,9 @@ func init_json_functions() {
 			panic("JSON_OBJECTAGG key cannot be NULL")
 		}
 		if len(args) > 2 && args[2].Bool() && args[1].IsNil() {
-			return jsonAggregateResult(bson.D{}, bsonFlagObjectAgg)
+			return bsonDocumentFromPairs(nil, bsonFlagObjectAgg)
 		}
-		return jsonResult(bson.A{args[0].String(), jsonConstructorArgument(args[1])})
+		return bsonArrayFromValues([]Scmer{NewString(args[0].String()), args[1]}, 0)
 	})
 	declareJSON("json_objectagg_reduce", "JSON_OBJECTAGG reducer", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_OBJECTAGG reducer", args, 2)
@@ -2091,77 +2821,75 @@ func init_json_functions() {
 		if args[1].IsNil() && bsonHasFlag(args[0], bsonFlagObjectAgg) {
 			return args[0]
 		}
-		var left, right any
-		if bsonHasFlag(args[0], bsonFlagObjectAgg) || args[0].IsBSON() {
-			left = bsonDecoded(args[0])
+		leftState := bsonHasFlag(args[0], bsonFlagObjectAgg)
+		rightState := bsonHasFlag(args[1], bsonFlagObjectAgg)
+		document := jsonRawDocument(nil)
+		if leftState {
+			document = bsonRawValue(args[0])
+		} else if rightState {
+			document = bsonRawValue(args[1])
 		}
-		if bsonHasFlag(args[1], bsonFlagObjectAgg) || args[1].IsBSON() {
-			right = bsonDecoded(args[1])
-		}
-		document, leftDocument := left.(bson.D)
-		if !leftDocument {
-			document, _ = right.(bson.D)
-		}
-		if document == nil {
-			document = bson.D{}
-		}
-		if other, ok := right.(bson.D); ok && leftDocument && bsonHasFlag(args[0], bsonFlagObjectAgg) && bsonHasFlag(args[1], bsonFlagObjectAgg) {
-			for _, pair := range other {
-				document, _ = jsonObjectSet(document, pair.Key, pair.Value, false, false)
+		if leftState && rightState {
+			for _, element := range mustBSONElements(bsonRawValue(args[1])) {
+				document, _ = jsonRawModify(document, []jsonPathLeg{{kind: jsonPathKey, key: decodeBSONKey(element.Key())}}, element.Value(), 's')
 			}
-			return jsonAggregateResult(document, bsonFlagObjectAgg)
+			return newBSONValueFlags(bson.TypeEmbeddedDocument, document.Value, bsonFlagObjectAgg)
 		}
-		entry, entryOK := left.(bson.A)
-		if !entryOK {
-			entry, entryOK = right.(bson.A)
+		entryValue := args[0]
+		if args[0].IsNil() || leftState {
+			entryValue = args[1]
+		} else if args[1].IsNil() || rightState {
+			entryValue = args[0]
 		}
-		if !entryOK || len(entry) != 2 {
+		if !entryValue.IsBSON() || bsonRawValue(entryValue).Type != bson.TypeArray {
 			panic("invalid JSON_OBJECTAGG entry")
 		}
-		document, _ = jsonObjectSet(document, fmt.Sprint(entry[0]), entry[1], false, false)
-		return jsonAggregateResult(document, bsonFlagObjectAgg)
+		entry := mustBSONValues(bsonRawValue(entryValue))
+		if len(entry) != 2 || entry[0].Type != bson.TypeString {
+			panic("invalid JSON_OBJECTAGG entry")
+		}
+		document, _ = jsonRawModify(document, []jsonPathLeg{{kind: jsonPathKey, key: entry[0].StringValue()}}, entry[1], 's')
+		return newBSONValueFlags(bson.TypeEmbeddedDocument, document.Value, bsonFlagObjectAgg)
 	})
 	declareJSON("pg_json_table_rows", "materializes a PostgreSQL JSON table function as rows", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON table function", args, 2)
 		kind := args[0].String()
-		document, ok := jsonDocumentArgument(args[1])
+		document, ok := jsonBSONDocumentArgument(args[1])
 		if !ok {
 			return NewSlice(nil)
 		}
 		rows := make([]Scmer, 0)
-		singleColumnRows := func(values []any, text bool) {
+		rawDocument := bsonRawValue(document)
+		singleColumnRows := func(values []bson.RawValue, text bool) {
 			for _, value := range values {
-				rows = append(rows, NewSlice([]Scmer{pgJSONTableCell(value, text)}))
+				rows = append(rows, NewSlice([]Scmer{pgRawJSONTableCell(value, text)}))
 			}
 		}
 		switch kind {
 		case "array", "array_text":
-			array, arrayOK := document.(bson.A)
-			if !arrayOK {
+			if rawDocument.Type != bson.TypeArray {
 				panic("json_array_elements requires an array")
 			}
-			singleColumnRows(array, kind == "array_text")
+			singleColumnRows(mustBSONValues(rawDocument), kind == "array_text")
 		case "each", "each_text":
-			object, objectOK := document.(bson.D)
-			if !objectOK {
+			if rawDocument.Type != bson.TypeEmbeddedDocument {
 				panic("json_each requires an object")
 			}
-			for _, pair := range object {
-				rows = append(rows, NewSlice([]Scmer{NewString(pair.Key), pgJSONTableCell(pair.Value, kind == "each_text")}))
+			for _, element := range mustBSONElements(rawDocument) {
+				rows = append(rows, NewSlice([]Scmer{NewString(decodeBSONKey(element.Key())), pgRawJSONTableCell(element.Value(), kind == "each_text")}))
 			}
 		case "keys":
-			object, objectOK := document.(bson.D)
-			if !objectOK {
+			if rawDocument.Type != bson.TypeEmbeddedDocument {
 				panic("json_object_keys requires an object")
 			}
-			for _, pair := range object {
-				rows = append(rows, NewSlice([]Scmer{NewString(pair.Key)}))
+			for _, element := range mustBSONElements(rawDocument) {
+				rows = append(rows, NewSlice([]Scmer{NewString(decodeBSONKey(element.Key()))}))
 			}
 		case "path":
 			if len(args) < 3 {
 				panic("jsonb_path_query requires a path")
 			}
-			values, _ := pgJSONPathQuery(document, args[2].String(), bson.D{})
+			values, _ := pgRawJSONPathQuery(rawDocument, args[2].String(), jsonRawDocument(nil))
 			singleColumnRows(values, false)
 		case "record", "recordset":
 			if len(args) < 3 || !args[2].IsSlice() {
@@ -2173,29 +2901,26 @@ func init_json_functions() {
 				columns[i] = columnValues[i].String()
 			}
 			if kind == "record" {
-				object, objectOK := document.(bson.D)
-				if !objectOK {
+				if rawDocument.Type != bson.TypeEmbeddedDocument {
 					panic("JSON record input requires an object")
 				}
-				rows = append(rows, pgJSONRecordRow(object, columns))
+				rows = append(rows, pgRawJSONRecordRow(rawDocument, columns))
 			} else {
-				array, arrayOK := document.(bson.A)
-				if !arrayOK {
+				if rawDocument.Type != bson.TypeArray {
 					panic("JSON recordset input requires an array")
 				}
-				for _, value := range array {
-					object, objectOK := value.(bson.D)
-					if !objectOK {
+				for _, value := range mustBSONValues(rawDocument) {
+					if value.Type != bson.TypeEmbeddedDocument {
 						panic("JSON recordset element requires an object")
 					}
-					rows = append(rows, pgJSONRecordRow(object, columns))
+					rows = append(rows, pgRawJSONRecordRow(value, columns))
 				}
 			}
 		case "json_table":
 			if len(args) < 4 || !args[3].IsSlice() {
 				panic("JSON_TABLE requires a row path and column definitions")
 			}
-			values, _ := pgJSONPathQuery(document, args[2].String(), bson.D{})
+			values, _ := pgRawJSONPathQuery(rawDocument, args[2].String(), jsonRawDocument(nil))
 			definitions := args[3].Slice()
 			for rowIndex, value := range values {
 				row := make([]Scmer, len(definitions))
@@ -2205,7 +2930,7 @@ func init_json_functions() {
 						row[columnIndex] = NewInt(int64(rowIndex + 1))
 						continue
 					}
-					matches, _ := pgJSONPathQuery(value, definition[2].String(), bson.D{})
+					matches, _ := pgRawJSONPathQuery(value, definition[2].String(), jsonRawDocument(nil))
 					if len(matches) == 0 {
 						row[columnIndex] = NewNil()
 					} else {
@@ -2213,7 +2938,7 @@ func init_json_functions() {
 						if len(definition) > 3 {
 							returning = definition[3].String()
 						}
-						row[columnIndex] = jsonScalarResult(matches[0], returning)
+						row[columnIndex] = jsonRawScalarResult(matches[0], returning)
 					}
 				}
 				rows = append(rows, NewSlice(row))

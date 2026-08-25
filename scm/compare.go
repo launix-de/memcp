@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2023  Carl-Philip Hänsch
+Copyright (C) 2023-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -186,7 +186,7 @@ func Equal(a, b Scmer) bool {
 			}
 			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
 		case tagBSON:
-			return jsonEqual(bsonDecoded(a), bsonDecoded(b))
+			return bsonRawEqual(bsonRawValue(a), bsonRawValue(b))
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -285,7 +285,7 @@ func Equal(a, b Scmer) bool {
 		return a.String() == b.String()
 	case tagBSON:
 		if tb == tagBSON {
-			return jsonEqual(bsonDecoded(a), bsonDecoded(b))
+			return bsonRawEqual(bsonRawValue(a), bsonRawValue(b))
 		}
 		return a.String() == b.String()
 	case tagSlice:
@@ -413,7 +413,7 @@ func EqualSQL(a, b Scmer) Scmer {
 			}
 			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
 		case tagBSON:
-			return NewBool(jsonEqual(bsonDecoded(a), bsonDecoded(b)))
+			return NewBool(bsonRawEqual(bsonRawValue(a), bsonRawValue(b)))
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -504,7 +504,7 @@ func EqualSQL(a, b Scmer) Scmer {
 		return NewBool(strings.EqualFold(a.String(), b.String()))
 	case tagBSON:
 		if tb == tagBSON {
-			return NewBool(jsonEqual(bsonDecoded(a), bsonDecoded(b)))
+			return NewBool(bsonRawEqual(bsonRawValue(a), bsonRawValue(b)))
 		}
 		return NewBool(a.String() == b.String())
 	case tagBool:
@@ -566,7 +566,7 @@ func Less(a, b Scmer) bool {
 	case tagBSON:
 		switch tb {
 		case tagBSON:
-			return jsonLess(bsonDecoded(a), bsonDecoded(b))
+			return bsonRawLess(bsonRawValue(a), bsonRawValue(b))
 		case tagDate, tagInt, tagFloat:
 			return a.Float() < b.Float()
 		case tagBool:
