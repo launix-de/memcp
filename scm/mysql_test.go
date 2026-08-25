@@ -18,11 +18,30 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"strings"
 	"testing"
 
 	querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 	"github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
 )
+
+func TestMySQLClientErrorMessageDropsInternalStackAndFitsCommandBuffer(t *testing.T) {
+	stack := strings.Repeat("runtime stack frame\n", 1000)
+	got := mysqlClientErrorMessage("NthLocalVar(2) out of range (len=0)\n" + stack)
+	if got != "NthLocalVar(2) out of range (len=0)" {
+		t.Fatalf("unexpected client error %q", got)
+	}
+	if len(got) > mysqlClientErrorMessageLimit {
+		t.Fatalf("client error uses %d bytes, limit is %d", len(got), mysqlClientErrorMessageLimit)
+	}
+}
+
+func TestMySQLClientErrorMessageBoundsSingleLineErrors(t *testing.T) {
+	got := mysqlClientErrorMessage(strings.Repeat("x", mysqlClientErrorMessageLimit+100))
+	if len(got) != mysqlClientErrorMessageLimit {
+		t.Fatalf("client error uses %d bytes, want %d", len(got), mysqlClientErrorMessageLimit)
+	}
+}
 
 func TestAppendMySQLResultRowDuplicateAliasUsesLastValueType(t *testing.T) {
 	result := sqltypes.Result{}

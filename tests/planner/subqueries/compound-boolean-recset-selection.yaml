@@ -234,6 +234,35 @@ test_cases:
         - text: "__memcp_tx"
           count: 1
 
+  - name: "observed boolean carrier closes invariant EXISTS and NOT probes"
+    sql: |
+      SELECT i.id
+      FROM cbr_large_item i
+      WHERE COALESCE((
+        SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM cbr_global_acl global_acl
+          WHERE global_acl.actor = @cbr_actor
+            AND global_acl.allowed = TRUE
+          LIMIT 1
+        ) THEN TRUE ELSE NOT EXISTS (
+          SELECT TRUE FROM cbr_global_acl denied_acl
+          WHERE denied_acl.actor = @cbr_actor
+            AND denied_acl.allowed = FALSE
+          LIMIT 1
+        ) END
+        FROM cbr_scope s
+        WHERE s.id = i.scope_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - {id: 5000}
+        - {id: 4999}
+        - {id: 4998}
+
   - name: "compound scalar boolean filter selects a projected RecSet driver"
     sql: |
       EXPLAIN SELECT COUNT(*) FROM cbr_item i
@@ -323,6 +352,120 @@ test_cases:
       result_occurrences:
         - text: "get_or_compute_scoped"
           count: 1
+
+  - name: "shared boolean carrier keeps driver lookup bound across joined projections"
+    sql: |
+      SELECT i.id, joined_scope.direct_flag,
+        COALESCE((
+          SELECT CASE WHEN scalar_scope.direct_flag = 1 THEN TRUE ELSE EXISTS (
+            SELECT TRUE FROM cbr_exists_acl ea
+            WHERE ea.scope_id = scalar_scope.id AND ea.allowed = TRUE
+            LIMIT 1
+          ) END
+          FROM cbr_scope scalar_scope
+          WHERE scalar_scope.id = i.scope_id
+          LIMIT 1
+        ), FALSE) AS can_view,
+        COALESCE((
+          SELECT CASE WHEN scalar_scope.direct_flag = 1 THEN TRUE ELSE EXISTS (
+            SELECT TRUE FROM cbr_exists_acl ea
+            WHERE ea.scope_id = scalar_scope.id AND ea.allowed = TRUE
+            LIMIT 1
+          ) END
+          FROM cbr_scope scalar_scope
+          WHERE scalar_scope.id = i.scope_id
+          LIMIT 1
+        ), FALSE) AS can_edit
+      FROM cbr_large_item i
+      LEFT JOIN cbr_scope joined_scope ON joined_scope.id = i.scope_id
+      WHERE COALESCE((
+        SELECT CASE WHEN scalar_scope.direct_flag = 1 THEN TRUE ELSE EXISTS (
+          SELECT TRUE FROM cbr_exists_acl ea
+          WHERE ea.scope_id = scalar_scope.id AND ea.allowed = TRUE
+          LIMIT 1
+        ) END
+        FROM cbr_scope scalar_scope
+        WHERE scalar_scope.id = i.scope_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.id
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - {id: 1, direct_flag: 1, can_view: true, can_edit: true}
+        - {id: 2, direct_flag: 0, can_view: true, can_edit: true}
+        - {id: 5, direct_flag: 1, can_view: true, can_edit: true}
+
+  - name: "driver boolean carrier stays closed beside a derived boolean projection"
+    sql: |
+      SELECT i.id, joined_scope.joined_can_view,
+        COALESCE((
+          SELECT (CASE WHEN driver_scope.direct_flag = 1 THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM cbr_exists_acl driver_acl
+              WHERE driver_acl.scope_id = driver_scope.id
+                AND driver_acl.allowed = TRUE
+              LIMIT 1
+            ) END) AND COALESCE((
+              SELECT (nested_scope.direct_flag = 1) OR EXISTS (
+                SELECT TRUE FROM cbr_fallback_acl nested_acl
+                WHERE nested_acl.scope_id = nested_scope.id
+                  AND nested_acl.allowed = TRUE
+                LIMIT 1
+              )
+              FROM cbr_scope nested_scope
+              WHERE nested_scope.id = driver_scope.id
+              LIMIT 1
+            ), FALSE)
+          FROM cbr_scope driver_scope
+          WHERE driver_scope.id = i.scope_id
+          LIMIT 1
+        ), FALSE) AS driver_can_view
+      FROM cbr_large_item i
+      LEFT JOIN (
+        SELECT joined_base.id,
+          COALESCE((
+            SELECT CASE WHEN joined_acl_scope.direct_flag = 1 THEN TRUE ELSE EXISTS (
+              SELECT TRUE FROM cbr_exists_acl joined_acl
+              WHERE joined_acl.scope_id = joined_acl_scope.id
+                AND joined_acl.allowed = TRUE
+              LIMIT 1
+            ) END
+            FROM cbr_scope joined_acl_scope
+            WHERE joined_acl_scope.id = joined_base.id
+            LIMIT 1
+          ), FALSE) AS joined_can_view
+        FROM cbr_scope joined_base
+      ) joined_scope ON joined_scope.id = i.scope_id
+      WHERE COALESCE((
+        SELECT (CASE WHEN driver_scope.direct_flag = 1 THEN TRUE ELSE EXISTS (
+            SELECT TRUE FROM cbr_exists_acl driver_acl
+            WHERE driver_acl.scope_id = driver_scope.id
+              AND driver_acl.allowed = TRUE
+            LIMIT 1
+          ) END) AND COALESCE((
+            SELECT (nested_scope.direct_flag = 1) OR EXISTS (
+              SELECT TRUE FROM cbr_fallback_acl nested_acl
+              WHERE nested_acl.scope_id = nested_scope.id
+                AND nested_acl.allowed = TRUE
+              LIMIT 1
+            )
+            FROM cbr_scope nested_scope
+            WHERE nested_scope.id = driver_scope.id
+            LIMIT 1
+          ), FALSE)
+        FROM cbr_scope driver_scope
+        WHERE driver_scope.id = i.scope_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.id
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - {id: 1, joined_can_view: true, driver_can_view: true}
+        - {id: 5, joined_can_view: true, driver_can_view: true}
+        - {id: 9, joined_can_view: true, driver_can_view: true}
 
   - name: "nullable join node costs its own scalar probe work"
     sql: |

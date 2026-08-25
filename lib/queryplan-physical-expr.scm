@@ -681,6 +681,18 @@ bound once outside row callbacks; a column reference would make that unsafe. */
 			(map (lowering_catalog_stages stages) (lambda (stage)
 				(stage_with_query_invariant_probe_binding_using binding_keys stage)))))))
 
+/* A closed physical producer cannot capture the main plan's lexical invariant
+binding. Mark only its invariant stages for an inline query-scoped probe; the
+ordinary scalar lowerer keeps its established outer-binding behavior. */
+(define stage_lookup_with_inline_query_invariant_probes (lambda (stages)
+	(make_lowering_catalog
+		(map (lowering_catalog_stages stages) (lambda (stage)
+			(if (query_invariant_presence_stage? stage)
+				(group_stage_with_facts stage
+					(qassoc_set (gs_facts stage)
+						(quote inline_query_invariant_probe) true))
+				stage))))))
+
 (define query_invariant_probe_sources (lambda (stages sources)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(begin
@@ -1209,6 +1221,17 @@ and RecSet carriers additionally verify its uniqueness below. */
 					idx
 					nil))))))
 
+/* A request-local carrier has already bound session-domain expressions while
+building its rows. Only the remaining row-varying key belongs to a RecSet key
+index or a projection onto another base table. Keeping this projection shape
+canonical prevents session keys from becoming fake target columns. */
+(define scalar_first_probe_recset_row_keys (lambda (stage src)
+	(begin
+		(define keys (gs_keys stage))
+		(define idx (if (nil? src) nil
+			(scalar_first_probe_row_key_index stage src keys)))
+		(if (nil? idx) '() (list (nth keys idx))))))
+
 /* stage_direct_probe_cost_preferred? only weighs the two costs against each
 other when probe_work_rows is a known number; planner_direct_presence_probe_preferred?
 short-circuits to false otherwise, purely because (number? probe_rows) fails,
@@ -1260,7 +1283,7 @@ through to reach the base table -- src already is it. */
 		(define cache_schema (group_cache_schema cache))
 		(define cache_relation (group_cache_relation cache))
 		(list (quote begin)
-			(lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true nil)
 			(list (quote scan_order)
 				'(session "__memcp_tx")
 				(list (quote table) cache_schema cache_relation)
@@ -1294,49 +1317,49 @@ membership set. */
 (define scalar_first_probe_recset_cost_preferred? (lambda (stage probe_work_rows carrier_work_rows)
 	(and (number? (planner_literal_value probe_work_rows))
 		(and (number? (planner_literal_value carrier_work_rows))
-		(begin
-			(define probe_rows (planner_literal_value probe_work_rows))
-			(define carrier_rows (planner_literal_value carrier_work_rows))
-			(define input_rows (planner_stage_input_rows (gs_input stage)))
-			(and (number? input_rows)
-				(begin
-					(define recset_cost (planner_recset_carrier_cost input_rows carrier_rows))
-					(define direct_cost (planner_direct_presence_probe_cost probe_rows))
-					(define keytable_cost (planner_presence_carrier_cost input_rows probe_rows))
-					(define chosen (if (planner_cost_better? recset_cost direct_cost)
-						(if (planner_cost_better? recset_cost keytable_cost)
-							(quote recset_carrier)
-							(quote group_keytable))
-						(if (planner_cost_better? direct_cost keytable_cost)
-							(quote direct_subscan)
-							(quote group_keytable))))
-					(planner_record_physical_decision
-						(list
-							(list "decision_id" (concat "scalar_presence_carrier:" (gs_id stage)))
-							(list "decision" "scalar_presence_carrier")
-							(list "stage" (gs_id stage))
-							(list "chosen" (string chosen))
-							(list "reason" "lowest_total_ns")
-							(list "inputs" (list
-								(list "domain_rows" input_rows)
-								(list "probe_rows" probe_rows)
-								(list "carrier_rows" carrier_rows)))
-							(list "alternatives" (map
-								(list
-									(list (quote recset_carrier) recset_cost)
-									(list (quote group_keytable) keytable_cost)
-									(list (quote direct_subscan) direct_cost))
-								(lambda (candidate)
+			(begin
+				(define probe_rows (planner_literal_value probe_work_rows))
+				(define carrier_rows (planner_literal_value carrier_work_rows))
+				(define input_rows (planner_stage_input_rows (gs_input stage)))
+				(and (number? input_rows)
+					(begin
+						(define recset_cost (planner_recset_carrier_cost input_rows carrier_rows))
+						(define direct_cost (planner_direct_presence_probe_cost probe_rows))
+						(define keytable_cost (planner_presence_carrier_cost input_rows probe_rows))
+						(define chosen (if (planner_cost_better? recset_cost direct_cost)
+							(if (planner_cost_better? recset_cost keytable_cost)
+								(quote recset_carrier)
+								(quote group_keytable))
+							(if (planner_cost_better? direct_cost keytable_cost)
+								(quote direct_subscan)
+								(quote group_keytable))))
+						(planner_record_physical_decision
+							(list
+								(list "decision_id" (concat "scalar_presence_carrier:" (gs_id stage)))
+								(list "decision" "scalar_presence_carrier")
+								(list "stage" (gs_id stage))
+								(list "chosen" (string chosen))
+								(list "reason" "lowest_total_ns")
+								(list "inputs" (list
+									(list "domain_rows" input_rows)
+									(list "probe_rows" probe_rows)
+									(list "carrier_rows" carrier_rows)))
+								(list "alternatives" (map
 									(list
-										(list "plan" (string (car candidate)))
-										(list "status" (if (equal? (car candidate) chosen) "chosen" "rejected"))
-										(list "reason" (if (equal? (car candidate) chosen) "lowest_total_ns" "higher_total_ns_or_memory_tiebreak"))
-										(list "cost" (planner_cost_explain (cadr candidate)))))))))
-					(and
-						(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
-						(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows))))))))))
+										(list (quote recset_carrier) recset_cost)
+										(list (quote group_keytable) keytable_cost)
+										(list (quote direct_subscan) direct_cost))
+									(lambda (candidate)
+										(list
+											(list "plan" (string (car candidate)))
+											(list "status" (if (equal? (car candidate) chosen) "chosen" "rejected"))
+											(list "reason" (if (equal? (car candidate) chosen) "lowest_total_ns" "higher_total_ns_or_memory_tiebreak"))
+											(list "cost" (planner_cost_explain (cadr candidate)))))))))
+						(and
+							(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
+							(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows))))))))))
 
-(define scalar_first_probe_recset_eligible? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col)
+(define scalar_first_probe_recset_eligible? (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col)
 	(and (single_real_source? (qb_sources src))
 		(and (source_is_base_table? (single_real_source (qb_sources src)))
 			(and (empty_list? (qb_group src))
@@ -1345,7 +1368,8 @@ membership set. */
 						(and (nil? (qb_limit src)) (nil? (qb_offset src))
 							(and (not (nil? (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys)))
 								(and (stage_boolean_shaped? graph stage requested_col)
-									(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows)))))))))))
+									(and (direct_boolean_recset_input_ownership_closed? stages stage)
+										(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows))))))))))))
 
 (define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col)
 	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
@@ -1372,10 +1396,75 @@ membership set. */
 		(stage_prepare_key stage)
 		(list (quote lambda) '()
 			(list (quote !begin)
-				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true)
+				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 				true)))))
 
-(define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col)
+(define direct_boolean_recset_query_scope_dependency? (lambda (stage)
+	(and (empty_list? (gs_domain stage))
+		(empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))))
+
+(define direct_boolean_recset_input_ownership_closed? (lambda (stage_catalog stage)
+	(begin
+		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
+		(define direct_stages (unique_stages_by_id (merge (list
+			(stage_outputs_from_sources_using stage_catalog (qb_sources (gs_input stage)))
+			(if (nil? owner_handle) '()
+				(filter (lowering_catalog_stages stage_catalog) (lambda (candidate)
+					(equal? (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil)
+						owner_handle))))))))
+		(define has_invariant (reduce direct_stages (lambda (found dependency)
+			(or found (direct_boolean_recset_query_scope_dependency? dependency))) false))
+		(define has_correlated (reduce direct_stages (lambda (found dependency)
+			(or found (not (direct_boolean_recset_query_scope_dependency? dependency)))) false))
+		(not (and has_invariant has_correlated)))))
+
+(define direct_boolean_recset_stage_eligible? (lambda (stage_catalog graph stage requested_col)
+	(and (query_block? (gs_input stage))
+		(and (scalar_value_stage? stage)
+			(and (equal? (count (gs_aggregates stage)) 1)
+				(and (stage_boolean_shaped? graph stage requested_col)
+					(begin
+						/* Correlated child stages are closed by this producer; invariant child
+						stages belong to the enclosing query scope. Either ownership model is
+						exact alone, including transitive mixtures already closed by a child.
+						Direct siblings using both models would cross a lexical boundary, so
+						leave that operator-infeasible shape on the ordinary exact carrier.
+						This is a scope proof, never a SQL-shape or cardinality heuristic. */
+						(define carrier_src (scalar_first_probe_carrier_source (gs_input stage)))
+						(and (direct_boolean_recset_input_ownership_closed? stage_catalog stage)
+							(not (nil? (boolean_recset_domain_source
+								(gs_input stage)
+								(scalar_first_probe_recset_row_keys stage carrier_src))))))))))))
+
+(define lower_direct_boolean_stage_recset_expr (lambda (stage_catalog stage share_result)
+	(begin
+		(define decision_id (concat "boolean_stage_recset:" (gs_id stage)))
+		(planner_record_physical_decision (list
+			(list "decision_id" decision_id)
+			(list "decision" "boolean_stage_recset")
+			(list "decision_site" "group_stage_result_sink")
+			(list "chosen" "direct_recset")
+			(list "selection" "dominance")
+			(list "reason" "single_exact_boolean_consumer_needs_no_group_relation")
+			(list "alternatives" (list
+				(list (list "plan" "direct_recset") (list "status" "chosen"))
+				(list (list "plan" "group_cache_recset") (list "status" "rejected")
+					(list "reason" "redundant_mutable_materialization"))))))
+		/* RecSet algebra closes every nested stage producer before the domain scan.
+		The resulting expression has no lexical outer-row dependency and is therefore
+		safe to share between filters and projections in this query generation. */
+		(define producer (lower_group_stage_prepare_using
+			stage_catalog stage_catalog stage true (quote boolean-recset)))
+		(if share_result
+			(list
+				(physical_query_session_symbol)
+				"get_or_compute_scoped"
+				(physical_query_scope_symbol)
+				(concat "__direct_boolean_recset_" (fnv_hash (gs_id stage)))
+				(list (quote lambda) '() producer))
+			producer))))
+
+(define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col share_result)
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
@@ -1383,53 +1472,99 @@ membership set. */
 		(define physical_stage (if (empty_list? probe_catalog)
 			stage
 			(group_stage_with_stage_catalog stage stage_catalog)))
-		(define cache (group_stage_cache physical_stage))
-		(define cache_schema (group_cache_schema cache))
-		(define cache_relation (group_cache_relation cache))
-		(list
-			(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
-			(list (quote scan_recset)
-				(list (quote session) "__memcp_tx")
-				(list (quote table) cache_schema cache_relation)
-				(quoted_runtime_list (list requested_col))
-				(list (quote lambda) (list (symbol requested_col))
-					(list (quote equal??) (symbol requested_col) true)))))))
+		(define graph (stage_dependency_graph stage_catalog))
+		(if (direct_boolean_recset_stage_eligible?
+			stage_catalog graph physical_stage requested_col)
+			(begin
+				(define carrier_src (scalar_first_probe_carrier_source
+					(gs_input physical_stage)))
+				(define row_keys (scalar_first_probe_recset_row_keys
+					physical_stage carrier_src))
+				(define domain_src (boolean_recset_domain_source
+					(gs_input physical_stage) row_keys))
+				(list true
+					(lower_direct_boolean_stage_recset_expr
+						stage_catalog physical_stage share_result)
+					(map row_keys (lambda (key)
+						(direct_column_name_for_alias domain_src key)))))
+			(begin
+				(define cache (group_stage_cache physical_stage))
+				(define cache_schema (group_cache_schema cache))
+				(define cache_relation (group_cache_relation cache))
+				(define carrier_src (scalar_first_probe_carrier_source
+					(gs_input physical_stage)))
+				(define row_keys (scalar_first_probe_recset_row_keys
+					physical_stage carrier_src))
+				(define row_key_index (if (empty_list? row_keys) nil
+					(group_key_expr_index (gs_keys physical_stage) (car row_keys))))
+				(if (nil? row_key_index)
+					(neumann_fail "build_queryplan" "scalar RecSet carrier has no row-domain key")
+					true)
+				(list
+					(if share_result
+						(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
+						(lower_group_stage_prepare_using
+							stage_catalog stage_catalog physical_stage true nil))
+					(list (quote scan_recset)
+						(list (quote session) "__memcp_tx")
+						(list (quote table) cache_schema cache_relation)
+						(quoted_runtime_list (list requested_col))
+						(list (quote lambda) (list (symbol requested_col))
+							(list (quote equal??) (symbol requested_col) true)))
+					(list (nth (group_key_cols (gs_keys physical_stage)) row_key_index))))))))
 
 (define lower_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key)
 	(begin
 		(define source_parts
-			(scalar_first_probe_recset_source_parts all_stages stage requested_col))
+			(scalar_first_probe_recset_source_parts all_stages stage requested_col true))
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
-		(list (quote begin)
-			(car source_parts)
-			(list (quote apply)
-				(list
-					(physical_query_session_symbol)
-					"get_or_compute_scoped"
-					(physical_query_scope_symbol)
-					lookup_key
-					(list (quote lambda) '()
-						(list (quote recset_key_index)
-							(list (quote session) "__memcp_tx")
-							(cadr source_parts)
-							(quoted_runtime_list (list "k0")))))
-				(list (quote list) resolved_lookup_key))))))
+		(define lookup_value (symbol (concat "__recset_lookup_value_"
+			(fnv_hash (gs_id stage)))))
+		/* Bind the consumer-row key before entering the producer begin. begin owns a
+			shared numbered scope, while scan adapters may close the producer callbacks
+			independently. Lowering the row key inside that scope would bake its extra
+			outer hop into the cached producer and can escape the actual row closure when
+			several correlated projections share one continuation. The explicit value
+			parameter keeps producer construction closed and makes lexical ownership
+			independent of the surrounding projection shape. */
+		(list
+			(list (quote lambda) (list lookup_value)
+				(list (quote begin)
+					(car source_parts)
+					(list (quote apply)
+						(list
+							(physical_query_session_symbol)
+							"get_or_compute_scoped"
+							(physical_query_scope_symbol)
+							lookup_key
+							(list (quote lambda) '()
+								(list (quote recset_key_index)
+									(list (quote session) "__memcp_tx")
+									(cadr source_parts)
+									(quoted_runtime_list (nth source_parts 2)))))
+						(list (quote list) lookup_value))))
+			resolved_lookup_key))))
 
 /* Once the consuming scan has selected the RecSet alternative, project the
 true group keys directly onto that scan's base-table record positions. This
 is the carrier itself, not another membership decision: the group-stage
 preparation, truth RecSet, and key projection all belong to the same physical
 choice at the consuming join edge. */
-(define lower_projected_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col target_src target_col)
+(define lower_projected_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col target_src target_col share_result)
 	(begin
 		(define source_parts
-			(scalar_first_probe_recset_source_parts all_stages stage requested_col))
+			(scalar_first_probe_recset_source_parts
+				all_stages stage requested_col share_result))
+		(define source_key_cols (nth source_parts 2))
+		(if (not (equal? (count source_key_cols) 1))
+			(neumann_fail "build_queryplan" "projected scalar RecSet has no resolved row-domain key")
+			true)
 		(list (quote begin)
 			(car source_parts)
 			(list (quote recset_project_join)
 				(list (quote session) "__memcp_tx")
 				(cadr source_parts)
-				(quoted_runtime_list (list "k0"))
+				(quoted_runtime_list source_key_cols)
 				(source_table_expr target_src)
 				(quoted_runtime_list (list target_col)))))))
 
@@ -1446,29 +1581,29 @@ growth belongs in the calibrated comparison above and must retain the planner's
 recompile gate. A segment-invariant scalar is the proof case here: one cached
 scalar value replaces the same value for every segment row, while a carrier
 would still have to project that value over the segment. */
-(define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics)
+(define scalar_first_probe_physical_operator (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics)
 	(if (union_block? src)
 		(quote union-probe)
 		(if (query_block? src)
 			(if (qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
 				(quote query-scan)
 				(if (and (equal? probe_semantics (quote truth))
-				(scalar_first_probe_recset_eligible?
-					graph stage src keys probe_work_rows carrier_work_rows requested_col))
-				(quote recset)
-				(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
-					(quote keytable)
-					(quote query-scan))))
+					(scalar_first_probe_recset_eligible?
+						stages graph stage src keys probe_work_rows carrier_work_rows requested_col))
+					(quote recset)
+					(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
+						(quote keytable)
+						(quote query-scan))))
 			(if (source_is_base_table? src)
 				(if (qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
 					(quote table-scan)
 					(if (and (equal? probe_semantics (quote truth))
-					(scalar_first_probe_recset_eligible_base?
-						graph stage src keys probe_work_rows carrier_work_rows requested_col))
-					(quote recset)
-					(if (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows)
-						(quote keytable)
-						(quote table-scan))))
+						(scalar_first_probe_recset_eligible_base?
+							graph stage src keys probe_work_rows carrier_work_rows requested_col))
+						(quote recset)
+						(if (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows)
+							(quote keytable)
+							(quote table-scan))))
 				(quote unsupported))))))
 
 (define scalar_first_probe_carrier_source (lambda (src)
@@ -1478,7 +1613,8 @@ would still have to project that value over the segment. */
 
 (define scalar_first_probe_query_invariant? (lambda (stage requested_col)
 	(and (presence_probe_stage? stage)
-		(not (nil? (query_invariant_probe_binding_for_col stage requested_col))))))
+		(or (qassoc_get (gs_facts stage) (quote inline_query_invariant_probe) false)
+			(not (nil? (query_invariant_probe_binding_for_col stage requested_col)))))))
 
 (define query_invariant_scalar_first_probe_key (lambda (stage requested_col)
 	(concat
@@ -1567,7 +1703,7 @@ would still have to project that value over the segment. */
 		(define lowered_lookup_keys (map lookup_keys (lambda (key)
 			(lower_column_expr_for_join sources default_alias key))))
 		(define operator (scalar_first_probe_physical_operator
-			graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics))
+			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics))
 		(define lowered (match operator
 			(symbol union-probe)
 			(list (quote if)
@@ -2393,7 +2529,7 @@ cache identity or a logical fallback. */
 			(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
 				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 		(list (quote begin)
-			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 			(list (quote scan_exists)
 				'(session "__memcp_tx")
 				(list (quote table) (group_stage_cache_schema stage) (group_stage_cache_relation stage))
@@ -2887,7 +3023,7 @@ alternative is a raw RecSet or direct probe. */
 			(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
 				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 		(list (quote begin)
-			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 			carrier))))
 
 (define prepared_group_cache_recset_expr (lambda (stage)
@@ -2922,7 +3058,7 @@ alternative is a raw RecSet or direct probe. */
 					(merge_stage_catalogs (list stamped_catalog (nested_stage_catalog stage)
 						(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 				(list (quote begin)
-					(lower_group_stage_prepare_using stage_catalog stage_catalog stage true)
+					(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 					(list (quote recset_project_join)
 						'(session "__memcp_tx")
 						(list (quote scan_recset)
@@ -4972,12 +5108,8 @@ ever-larger subtrees. */
 expressions. Persistent column identity was selected from the original logical
 stage before that rewrite; thread it through unchanged to keep create and fill
 on the same columns. */
-(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags aggregate_cols)
+(define build_query_grouped_assoc_plan (lambda (input keys key_names ags)
 	(begin
-		(if (not (equal? (count ags) (count aggregate_cols)))
-			(neumann_fail "build_queryplan" "query-input aggregate columns do not match aggregate descriptors")
-			true)
-		(define schema (qb_schema input))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
 		(define value_cols (map (produceN (count ags)) (lambda (i) (concat "__agg" i))))
 		(define row_fields (merge (list
@@ -5000,24 +5132,234 @@ on the same columns. */
 				(aggregate_map_value_expr (nth ags i) (nth value_symbols i)))))))
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr ags 0)))
-		(define finish_expr (group_insert_finish_expr schema grouptbl key_names aggregate_cols false))
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
+		(lower_query_block_as_dataset_reduce
+			input
+			row_fields
+			(list (quote lambda)
+				(extract_assoc row_fields (lambda (title _expr) (symbol title)))
+				(runtime_cons_list_expr (list key_expr payload_expr)))
+			(list (quote lambda) (list (quote acc) (quote rowvals))
+				(list (quote set_assoc)
+					(quote acc)
+					(list (quote car) (quote rowvals))
+					(list (quote cadr) (quote rowvals))
+					merge_payload))
+			(list (quote list))
+			combine_grouped))))
+
+(define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags aggregate_cols)
+	(begin
+		(if (not (equal? (count ags) (count aggregate_cols)))
+			(neumann_fail "build_queryplan" "query-input aggregate columns do not match aggregate descriptors")
+			true)
 		(list
-			(list (quote lambda) (list (quote grouped)) finish_expr)
-			(lower_query_block_as_dataset_reduce
-				input
-				row_fields
-				(list (quote lambda)
-					(extract_assoc row_fields (lambda (title _expr) (symbol title)))
-					(runtime_cons_list_expr (list key_expr payload_expr)))
-				(list (quote lambda) (list (quote acc) (quote rowvals))
-					(list (quote set_assoc)
-						(quote acc)
-						(list (quote car) (quote rowvals))
-						(list (quote cadr) (quote rowvals))
-						merge_payload))
-				(list (quote list))
-				combine_grouped)))))
+			(list (quote lambda) (list (quote grouped))
+				(group_insert_finish_expr (qb_schema input) grouptbl key_names aggregate_cols false))
+			(build_query_grouped_assoc_plan input keys key_names ags)))))
+
+/* Produce a domain RecSet for a scalar probe leaf before entering the domain
+scan. scan_recset callbacks are batch-parallel filters, so a nested scan cannot
+serve as their synchronous scalar return value. Projecting the already exact
+stage carrier keeps that work outside the callback and preserves the stage's
+ordinary physical carrier choice. */
+(define boolean_recset_probe_leaf_plan (lambda (stage_catalog domain_src expr)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col)
+		(begin
+			(define carrier_src (scalar_first_probe_carrier_source (gs_input stage)))
+			(define row_keys (scalar_first_probe_recset_row_keys stage carrier_src))
+			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+			(define target_cols (filter (map lookup_keys (lambda (lookup_key)
+				(direct_column_name_for_alias domain_src lookup_key)))
+				(lambda (col) (not (nil? col)))))
+			(define target_col (if (equal? (count target_cols) 1)
+				(car target_cols) nil))
+			(if (or (query_invariant_presence_stage? stage)
+				(empty_list? row_keys))
+				/* A session-only leaf is constant for this request. The ordinary
+				scalar lowerer memoizes it once; scanning the small domain with that
+				bound value yields the exact full-or-empty truth set. */
+				(boolean_recset_domain_scan_plan domain_src expr)
+				(if (nil? target_col)
+				(neumann_fail "build_queryplan" "boolean RecSet probe requires one direct domain lookup key")
+				(lower_projected_recset_scalar_first_probe_expr
+					stage_catalog stage requested_col domain_src target_col false))))
+		((symbol scalar_first_probe) stage requested_col _dependencies)
+		(boolean_recset_probe_leaf_plan stage_catalog domain_src
+			(list (quote scalar_first_probe) stage requested_col))
+		((quote scalar_first_probe) stage requested_col)
+		(boolean_recset_probe_leaf_plan stage_catalog domain_src
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((quote scalar_first_probe) stage requested_col dependencies)
+		(boolean_recset_probe_leaf_plan stage_catalog domain_src
+			(list (symbol "scalar_first_probe") stage requested_col dependencies))
+		_ nil)))
+
+(define boolean_recset_combine (lambda (operator plans)
+	(if (equal? (count plans) 1)
+		(car plans)
+		(list operator (cons (quote list) plans)))))
+
+/* RecSet complement represents FALSE as "not in the TRUE set" and is exact
+only for a two-valued operand. SQL NOT must retain UNKNOWN, so nullable probe
+values cannot use this identity. Null-safe equality/nil tests and comparisons
+of values protected by COALESCE are the common generated two-valued forms. */
+(define boolean_recset_nonnull_value? (lambda (expr)
+	(match expr
+		((symbol coalesceNil) _inner default) (not (nil? default))
+		((quote coalesceNil) _inner default) (not (nil? default))
+		((symbol equal??) _left _right) true
+		((quote equal??) _left _right) true
+		((symbol nil?) _inner) true
+		((quote nil?) _inner) true
+		_ (or (number? expr)
+			(or (string? expr) (or (equal? expr true) (equal? expr false)))))))
+
+(define boolean_recset_two_valued? (lambda (expr)
+	(match expr
+		((symbol equal??) _left _right) true
+		((quote equal??) _left _right) true
+		((symbol nil?) _inner) true
+		((quote nil?) _inner) true
+		((symbol >) left right) (and
+			(boolean_recset_nonnull_value? left)
+			(boolean_recset_nonnull_value? right))
+		((quote >) left right) (boolean_recset_two_valued?
+			(list (symbol ">") left right))
+		((symbol sql_not) inner) (boolean_recset_two_valued? inner)
+		((quote sql_not) inner) (boolean_recset_two_valued? inner)
+		((symbol not) inner) (boolean_recset_two_valued? inner)
+		((quote not) inner) (boolean_recset_two_valued? inner)
+		(cons head items) (if (or (equal? head (quote and))
+			(equal? head (symbol "and")))
+			(reduce items (lambda (ok item)
+				(and ok (boolean_recset_two_valued? item))) true)
+			(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+				(reduce items (lambda (ok item)
+					(and ok (boolean_recset_two_valued? item))) true)
+				(boolean_recset_nonnull_value? expr)))
+		_ (boolean_recset_nonnull_value? expr))))
+
+/* Compile true-row sets recursively. AND/OR are exact set intersection/union.
+CASE is a disjoint union of its true and false-condition branches; SQL treats a
+NULL WHEN condition like false, which is exactly the complement of its true-row
+set. COALESCE(x,FALSE) preserves x's true rows. Leaves without stage probes stay
+one ordinary scan_recset, while stage leaves use the carrier projection above. */
+(define boolean_recset_expr_plan (lambda (stage_catalog domain_src expr)
+	(begin
+		(define probe_leaf (boolean_recset_probe_leaf_plan stage_catalog domain_src expr))
+		(if (not (nil? probe_leaf))
+			probe_leaf
+			(match expr
+				((symbol sql_not) inner)
+				(if (boolean_recset_two_valued? inner)
+					(list (quote recset_not)
+						(boolean_recset_expr_plan stage_catalog domain_src inner))
+					(neumann_fail "build_queryplan"
+						"boolean RecSet complement requires a two-valued operand"))
+				((quote sql_not) inner)
+				(boolean_recset_expr_plan stage_catalog domain_src
+					(list (symbol "sql_not") inner))
+				((symbol not) inner)
+				(boolean_recset_expr_plan stage_catalog domain_src
+					(list (symbol "sql_not") inner))
+				((quote not) inner)
+				(boolean_recset_expr_plan stage_catalog domain_src
+					(list (symbol "sql_not") inner))
+				((symbol equal??) inner true)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((quote equal??) inner true)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((symbol coalesceNil) inner false)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((quote coalesceNil) inner false)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((symbol coalesceNil) inner 0)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((quote coalesceNil) inner 0)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((symbol coalesceNil) inner nil)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((quote coalesceNil) inner nil)
+				(boolean_recset_expr_plan stage_catalog domain_src inner)
+				((symbol >) inner 0)
+				(if (empty_list? (expr_probe_stages inner))
+					(boolean_recset_domain_scan_plan domain_src expr)
+					(boolean_recset_expr_plan stage_catalog domain_src inner))
+				((quote >) inner 0)
+				(boolean_recset_expr_plan stage_catalog domain_src
+					(list (symbol ">") inner 0))
+				((symbol if) condition then_expr else_expr)
+				(begin
+					(define condition_set
+						(boolean_recset_expr_plan stage_catalog domain_src condition))
+					(define then_set
+						(boolean_recset_expr_plan stage_catalog domain_src then_expr))
+					(define else_set
+						(boolean_recset_expr_plan stage_catalog domain_src else_expr))
+					(boolean_recset_combine (quote recset_union) (list
+						(boolean_recset_combine (quote recset_intersect)
+							(list condition_set then_set))
+						(boolean_recset_combine (quote recset_intersect)
+							(list (list (quote recset_not) condition_set) else_set)))))
+				((quote if) condition then_expr else_expr)
+				(boolean_recset_expr_plan stage_catalog domain_src
+					(list (symbol "if") condition then_expr else_expr))
+				(cons head items) (if (or (equal? head (quote and))
+					(equal? head (symbol "and")))
+					(boolean_recset_combine (quote recset_intersect)
+						(map items (lambda (item)
+							(boolean_recset_expr_plan stage_catalog domain_src item))))
+					(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+						(boolean_recset_combine (quote recset_union)
+							(map items (lambda (item)
+								(boolean_recset_expr_plan stage_catalog domain_src item))))
+						(if (empty_list? (expr_probe_stages expr))
+							(boolean_recset_domain_scan_plan domain_src expr)
+							(neumann_fail "build_queryplan"
+								(concat "boolean RecSet expression contains an unsupported probe shape: "
+									(serialize expr))))))
+				_ (if (empty_list? (expr_probe_stages expr))
+					(boolean_recset_domain_scan_plan domain_src expr)
+					(neumann_fail "build_queryplan"
+						(concat "boolean RecSet expression contains an unsupported probe shape: "
+							(serialize expr)))))))))
+
+(define boolean_recset_domain_scan_plan (lambda (domain_src expr)
+	(begin
+		(define alias (source_alias domain_src))
+		(define filtercols (extract_columns_for_alias domain_src expr))
+		(list (quote scan_recset)
+			'(session "__memcp_tx")
+			(source_table_expr domain_src)
+			(cons (quote list) filtercols)
+			(list (quote lambda)
+				(map filtercols (lambda (col)
+					(scan_callback_symbol_for_alias alias col)))
+				(lower_column_expr_for_alias domain_src expr))))))
+
+/* A boolean scalar grouped by a unique key needs no mutable query-group table.
+The boolean tree is lowered to RecSet algebra, so every nested carrier is built
+once and every base-only leaf remains a vectorized domain scan. */
+(define build_query_boolean_recset_plan (lambda (stage_catalog input domain_src keys ags)
+	(begin
+		(define alias (source_alias domain_src))
+		(define key_cols (map keys (lambda (key)
+			(direct_column_name_for_alias domain_src key))))
+		(if (or (not (equal? (count ags) 1))
+			(reduce key_cols (lambda (invalid col) (or invalid (nil? col))) false))
+			(neumann_fail "build_queryplan" "boolean RecSet sink requires one value and direct domain keys")
+			true)
+		(if (or (not (equal? (count (qb_sources input)) 1))
+			(not (equal? (source_alias (car (qb_sources input))) alias)))
+			(neumann_fail "build_queryplan" "boolean RecSet sink requires one fully lowered domain source")
+			true)
+		(define bool_expr (car (scalar_first_probe_parts (car ags))))
+		(define condition (combine_where
+			(combine_where (qb_where input) (source_join_expr domain_src))
+			(list (quote equal??) bool_expr true)))
+		(boolean_recset_expr_plan stage_catalog domain_src condition))))
 
 (define union_branch_group_row_fields (lambda (candidate_alias branch keys key_names ags value_cols)
 	(begin
