@@ -1652,11 +1652,12 @@ physical membership probe. */
 
 (define scalar_once_supported? (lambda (inner)
 	(and (query_block? inner)
-		(and (scalar_source_shape_supported? (qb_sources inner))
-			(and (empty_list? (qb_group inner))
-				(and (nil? (qb_having inner))
-					(and (or (nil? (qb_offset inner)) (not (empty_list? (qb_order inner))))
-						(equal? (qb_limit inner) 1))))))))
+		(and (not (empty_list? (qb_sources inner)))
+			(and (or (scalar_source_shape_supported? (qb_sources inner)) (nil? (qb_offset inner)))
+				(and (empty_list? (qb_group inner))
+					(and (nil? (qb_having inner))
+						(and (or (nil? (qb_offset inner)) (not (empty_list? (qb_order inner))))
+							(equal? (qb_limit inner) 1)))))))))
 
 (define single_row_derived_supported? (lambda (inner)
 	(and (query_block? inner)
@@ -2954,7 +2955,7 @@ without separately proving two-valued semantics. */
 				(decorrelate_expr_with_pairs inner_default lookup_pairs expr)) dir)))))
 		(define ags (dedupe_aggregates_by_col (map values_for_inner (lambda (value_for_inner)
 			(scalar_once_descriptor value_for_inner order_for_inner (qb_offset inner))))))
-		(define stage_input (if (empty_list? (qb_stages inner))
+		(define stage_input (if (and (single_source? local_sources) (empty_list? (qb_stages inner)))
 			inner_src
 			(make_query_block
 				(qb_schema inner)
