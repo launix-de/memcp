@@ -300,19 +300,68 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 				(concat "window:" (nth stage 1))
 				nil)))))
 
-(define unique_stages_by_id_acc (lambda (stages seen)
+(define logical_append_unique (lambda (items item)
+	(if (contains? (coalesceNil items '()) item)
+		(coalesceNil items '())
+		(merge (coalesceNil items '()) (list item)))))
+
+(define logical_merge_unique (lambda (parts)
+	(reduce (merge (coalesceNil parts '())) (lambda (items item)
+		(logical_append_unique items item)) '())))
+
+/* A shared group-stage ID denotes one logical carrier which may be discovered
+through several consumers. Later consumers can extend that carrier with more
+aggregate columns. Keep the complete extending variant as the carrier template
+and add aggregates found by the other variants. Dropping those extensions leaves
+physical readers pointing at columns which no retained prepare stage creates. */
+(define merge_same_id_stage_variants (lambda (retained candidate)
+	(if (and (group_stage? retained) (group_stage? candidate))
+		(begin
+			(define aggregates (logical_merge_unique
+				(list (gs_aggregates retained) (gs_aggregates candidate))))
+			(define base (if (> (count aggregates) (count (gs_aggregates retained)))
+				candidate
+				retained))
+			(make_group_stage
+				(gs_id base)
+				(gs_input base)
+				(gs_domain base)
+				(gs_keys base)
+				aggregates
+				(gs_having base)
+				(gs_output base)
+				(gs_order base)
+				(gs_limit base)
+				(gs_offset base)
+				(gs_facts base)))
+		retained)))
+
+(define collect_stage_variants_by_id (lambda (stages variants)
+	(match (coalesceNil stages '())
+		(cons stage rest) (begin
+			(define key (logical_stage_key stage))
+			(if (nil? key)
+				(collect_stage_variants_by_id rest variants)
+				(collect_stage_variants_by_id rest
+					(set_assoc variants key
+						(if (has_assoc? variants key)
+							(merge_same_id_stage_variants (variants key) stage)
+							stage)))))
+		_ variants)))
+
+(define unique_stages_by_id_acc (lambda (stages variants seen)
 	(match (coalesceNil stages '())
 		(cons stage rest) (begin
 			(define key (logical_stage_key stage))
 			(if (and (not (nil? key)) (has_assoc? seen key))
-				(unique_stages_by_id_acc rest seen)
-				(cons stage
-					(unique_stages_by_id_acc rest
+				(unique_stages_by_id_acc rest variants seen)
+				(cons (if (nil? key) stage (variants key))
+					(unique_stages_by_id_acc rest variants
 						(if (nil? key) seen (set_assoc seen key true))))))
 		_ '())))
 
 (define unique_stages_by_id (lambda (stages)
-	(unique_stages_by_id_acc stages '())))
+	(unique_stages_by_id_acc stages (collect_stage_variants_by_id stages '()) '())))
 
 (define qb_schema (lambda (node) (nth node 1)))
 (define qb_sources (lambda (node) (nth node 2)))

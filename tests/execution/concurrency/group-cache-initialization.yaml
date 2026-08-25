@@ -29,6 +29,23 @@ setup:
       )
 
 test_cases:
+  - name: "Duplicate logical stage IDs retain every aggregate extension"
+    scm: |
+      (begin
+        (define narrow (make_group_stage "shared-window-carrier"
+          (list "src" "memcp-tests" "aggregate_source" false nil)
+          (list) (list 1) (list "count-aggregate") nil
+          (list "count" "count-expression") (list) nil nil (list)))
+        (define extended (make_group_stage "shared-window-carrier"
+          (list "src" "memcp-tests" "aggregate_source" false nil)
+          (list) (list 1) (list "count-aggregate" "sum-aggregate") nil
+          (list "count" "count-expression" "sum" "sum-expression") (list) nil nil (list)))
+        (define retained (unique_stages_by_id (list narrow extended)))
+        (if (and (equal? (count retained) 1)
+            (equal? (count (gs_aggregates (car retained))) 2))
+          true
+          (error "deduplicating a shared stage discarded aggregate columns")))
+
   - name: "Creator waits for existing table initialization 1/2"
     parallel: existing_creation_barrier
     scm: &create_with_initializer |
