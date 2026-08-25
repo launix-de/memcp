@@ -591,6 +591,170 @@ test_cases:
         - id: 39993
         - id: 39989
 
+  - name: "broad ordered ACL compares exact RecSet consumers"
+    sql: |
+      EXPLAIN PHYSICAL SELECT d.id
+      FROM bqm_document d
+      WHERE COALESCE((
+        SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+          EXISTS (
+            SELECT TRUE FROM bqm_mandant_assignment ma
+            WHERE ma.standort_id = s.id
+              AND ma.actor_id = 7
+              AND ma.allowed = TRUE
+            LIMIT 1
+          ) OR COALESCE((
+            SELECT sa.allowed FROM bqm_standort_assignment sa
+            WHERE sa.standort_id = s.id
+              AND sa.actor_id = 7
+            LIMIT 1
+          ), FALSE)
+        ) END
+        FROM bqm_standort s
+        WHERE s.id = d.standort_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY d.id DESC
+      LIMIT 3
+    expect:
+      result_contains:
+        - "boolean_stage_recset"
+        - "ordered_recset_consumer"
+        - "ordered_base_membership"
+        - "ordered_direct_recset"
+        - "chosen ordered_base_membership"
+
+  - name: "broad ordered ACL preserves direct RecSet results"
+    max_time: 1
+    sql: |
+      SELECT d.id
+      FROM bqm_document d
+      WHERE COALESCE((
+        SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+          EXISTS (
+            SELECT TRUE FROM bqm_mandant_assignment ma
+            WHERE ma.standort_id = s.id
+              AND ma.actor_id = 7
+              AND ma.allowed = TRUE
+            LIMIT 1
+          ) OR COALESCE((
+            SELECT sa.allowed FROM bqm_standort_assignment sa
+            WHERE sa.standort_id = s.id
+              AND sa.actor_id = 7
+            LIMIT 1
+          ), FALSE)
+        ) END
+        FROM bqm_standort s
+        WHERE s.id = d.standort_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY d.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 39999
+        - id: 39998
+        - id: 39997
+
+  - name: "joined broad ordered ACL compares the same RecSet consumers"
+    sql: |
+      EXPLAIN PHYSICAL SELECT d.id, sorter.label
+      FROM bqm_document d
+      LEFT JOIN bqm_unused_lookup sorter
+        ON sorter.id = d.standort_id
+      WHERE COALESCE((
+        SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+          EXISTS (
+            SELECT TRUE FROM bqm_mandant_assignment ma
+            WHERE ma.standort_id = s.id
+              AND ma.actor_id = 7
+              AND ma.allowed = TRUE
+            LIMIT 1
+          ) OR COALESCE((
+            SELECT sa.allowed FROM bqm_standort_assignment sa
+            WHERE sa.standort_id = s.id
+              AND sa.actor_id = 7
+            LIMIT 1
+          ), FALSE)
+        ) END
+        FROM bqm_standort s
+        WHERE s.id = d.standort_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY d.id DESC
+      LIMIT 3
+    expect:
+      result_contains:
+        - "boolean_stage_recset"
+        - "ordered_recset_consumer"
+        - "ordered_base_membership"
+        - "ordered_direct_recset"
+        - "chosen ordered_base_membership"
+
+  - name: "joined broad ordered ACL preserves LEFT JOIN results"
+    max_time: 1
+    sql: |
+      SELECT d.id, sorter.label
+      FROM bqm_document d
+      LEFT JOIN bqm_unused_lookup sorter
+        ON sorter.id = d.standort_id
+      WHERE COALESCE((
+        SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+          EXISTS (
+            SELECT TRUE FROM bqm_mandant_assignment ma
+            WHERE ma.standort_id = s.id
+              AND ma.actor_id = 7
+              AND ma.allowed = TRUE
+            LIMIT 1
+          ) OR COALESCE((
+            SELECT sa.allowed FROM bqm_standort_assignment sa
+            WHERE sa.standort_id = s.id
+              AND sa.actor_id = 7
+            LIMIT 1
+          ), FALSE)
+        ) END
+        FROM bqm_standort s
+        WHERE s.id = d.standort_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY d.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - {id: 39999, label: "three"}
+        - {id: 39998, label: "two"}
+        - {id: 39997, label: "one"}
+
+  - name: "bind actor for row-domain projection test"
+    session_id: "bqm_row_domain"
+    sql: "SET @bqm_row_actor = 7"
+
+  - name: "ordered scalar carrier projects only its row-domain key"
+    session_id: "bqm_row_domain"
+    max_time: 1
+    sql: |
+      SELECT d.id
+      FROM bqm_document d
+      WHERE COALESCE((
+        SELECT CASE
+          WHEN @bqm_row_actor = 7 THEN TRUE
+          ELSE s.direct_flag = 1
+        END
+        FROM bqm_standort s
+        WHERE s.id = d.standort_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY d.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 40000
+        - id: 39999
+        - id: 39998
+
   - name: "unbounded equality count retains the segmented ACL carrier"
     sql: |
       EXPLAIN PHYSICAL SELECT COUNT(*) AS total

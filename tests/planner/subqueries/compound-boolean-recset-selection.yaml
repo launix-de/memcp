@@ -234,6 +234,35 @@ test_cases:
         - text: "__memcp_tx"
           count: 1
 
+  - name: "observed boolean carrier closes invariant EXISTS and NOT probes"
+    sql: |
+      SELECT i.id
+      FROM cbr_large_item i
+      WHERE COALESCE((
+        SELECT CASE WHEN EXISTS (
+          SELECT TRUE FROM cbr_global_acl global_acl
+          WHERE global_acl.actor = @cbr_actor
+            AND global_acl.allowed = TRUE
+          LIMIT 1
+        ) THEN TRUE ELSE NOT EXISTS (
+          SELECT TRUE FROM cbr_global_acl denied_acl
+          WHERE denied_acl.actor = @cbr_actor
+            AND denied_acl.allowed = FALSE
+          LIMIT 1
+        ) END
+        FROM cbr_scope s
+        WHERE s.id = i.scope_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - {id: 5000}
+        - {id: 4999}
+        - {id: 4998}
+
   - name: "compound scalar boolean filter selects a projected RecSet driver"
     sql: |
       EXPLAIN SELECT COUNT(*) FROM cbr_item i

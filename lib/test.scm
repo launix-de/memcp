@@ -841,7 +841,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		nested_catalog_input
 		'() '(1) '() nil '() '() nil nil
 		(list (list 'stage_catalog (list nested_catalog_stage)))))
-	(assert (list? (lower_group_stage_prepare_using (list outer_catalog_stage) (list outer_catalog_stage) outer_catalog_stage))
+	(assert (list? (lower_group_stage_prepare_using (list outer_catalog_stage) (list outer_catalog_stage) outer_catalog_stage true nil))
 		true "group-stage lowering keeps nested stage-output metadata from the full catalog")
 	(define catalog_root (make_query_block
 		"memcp-tests"

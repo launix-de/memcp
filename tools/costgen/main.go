@@ -130,6 +130,7 @@ type calibrationRow struct {
 	LowerBoundNS                     float64  `json:"lower_bound_ns"`
 	CandidateInputRows               *float64 `json:"candidate_input_rows"`
 	CandidateRows                    *float64 `json:"candidate_rows"`
+	CarrierRows                      *float64 `json:"carrier_rows"`
 	CandidateDensity                 *float64 `json:"candidate_density"`
 	ProjectedDriverRows              *float64 `json:"projected_driver_rows"`
 	DriverInputRows                  *float64 `json:"driver_input_rows"`
@@ -248,7 +249,11 @@ func main() {
 			fatal(err)
 		}
 	}
-	training := filterObservations(observations, false)
+	// Coefficient fitting remains scoped to the membership-carrier family. Other
+	// calibrated decision families are executed and result-checked above, but
+	// must not be mistaken for additional equations of this coefficient model.
+	membershipObservations := filterDecisionObservations(observations, "membership_carrier")
+	training := filterObservations(membershipObservations, false)
 	carrierTraining := filterCarrierObservations(training)
 	fitTraining := filterCompleteExactPairs(carrierTraining)
 	if err := validateMeasurementSignal(fitTraining); err != nil {
@@ -268,7 +273,7 @@ func main() {
 		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS, c.scalarPresenceProbeRowNS,
 		c.membershipDirectProbeRowNS)
 	printModelComparison("training", training, c)
-	holdout := filterObservations(observations, true)
+	holdout := filterObservations(membershipObservations, true)
 	if len(holdout) > 0 {
 		printModelComparison("holdout", holdout, c)
 		if err := validateDecisionOrdering(holdout, c); err != nil {
@@ -278,7 +283,7 @@ func main() {
 			fatal(fmt.Errorf("holdout: %w", err))
 		}
 	}
-	printDecisionOrdering(observations, c)
+	printDecisionOrdering(membershipObservations, c)
 	if *patch {
 		if err := patchQueryplan(queryplanPath, c); err != nil {
 			fatal(err)
@@ -870,10 +875,18 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 	if row.DecisionID != decisionID || row.Plan != plan || !row.OperatorConsistent || row.OperatorFamily != plan {
 		return fmt.Errorf("forced race variant did not emit the requested operator: %+v", row)
 	}
-	if row.EstimatedNS == nil || row.CandidateInputRows == nil || row.CandidateRows == nil ||
-		row.DriverInputRows == nil || row.DriverRows == nil || row.ExpectedDriverRowsVisited == nil ||
-		row.WholeQueryExecutionNS <= 0 {
+	if row.EstimatedNS == nil || row.WholeQueryExecutionNS <= 0 {
 		return fmt.Errorf("forced race variant has incomplete measurements: %+v", row)
+	}
+	if row.Decision == "ordered_recset_consumer" {
+		if row.CarrierRows == nil || row.DriverInputRows == nil || row.Limit == nil {
+			return fmt.Errorf("ordered RecSet variant has incomplete measurements: %+v", row)
+		}
+		return nil
+	}
+	if row.CandidateInputRows == nil || row.CandidateRows == nil ||
+		row.DriverInputRows == nil || row.DriverRows == nil || row.ExpectedDriverRowsVisited == nil {
+		return fmt.Errorf("membership variant has incomplete measurements: %+v", row)
 	}
 	return nil
 }
@@ -1027,6 +1040,16 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	// Ordered scalar-RecSet consumer observations validate a second physical
+	// decision family. They deliberately reuse the membership coefficients but
+	// do not participate in fitting them: both alternatives share the (possibly
+	// complex) carrier producer, while this decision measures only its consumer.
+	if row.Decision == "ordered_recset_consumer" {
+		if row.CarrierRows == nil || row.DriverInputRows == nil || row.Limit == nil {
+			return nil, fmt.Errorf("ordered RecSet consumer contains nil inputs: %+v", row)
+		}
+		return make([]float64, 17), nil
+	}
 	scanInvocations := *row.CandidateScanInvocations + *row.DriverScanInvocations
 	driverWorkRows := *row.DriverInputRows
 	if row.Plan == "driver_order_membership_probe" || row.Plan == "scan_order" {
@@ -1510,6 +1533,16 @@ func filterRankObservations(rows []observation) []observation {
 	filtered := make([]observation, 0, len(rows))
 	for _, row := range rows {
 		if row.component == "" {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
+}
+
+func filterDecisionObservations(rows []observation, decision string) []observation {
+	filtered := make([]observation, 0, len(rows))
+	for _, row := range rows {
+		if row.decision == decision {
 			filtered = append(filtered, row)
 		}
 	}
