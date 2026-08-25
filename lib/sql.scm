@@ -27,6 +27,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (set psql_queryplan_cache (newcachemap))
 (set sql_literal_shape_cache (newcachemap))
 
+/* Statistics guards deliberately specialize physical plans, but exact row
+counts can change after every small write. Keep only the newest regimes: old
+variants remain correct only while their guards match, and can be recompiled
+if an old regime returns. Bounding the list prevents large plans from growing
+the dispatch formula and retained ASTs without limit. */
+(set sql_queryplan_max_variants 4)
+
+(define sql_queryplan_recent_variants (lambda (variants)
+	(map (produceN (min sql_queryplan_max_variants (count variants)))
+		(lambda (idx) (nth variants idx)))))
+
 /* Keep exact SQL variants out of the parser while sharing their compiled plan.
 Only parameterized results enter the small front cache; exact-only statements
 continue to occupy just their existing query-plan entry. The third result item
@@ -303,8 +314,9 @@ otherwise side-effect-free guard. */
 
 (define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
 	(begin
-		(entry "variants" variants)
-		(entry "formula" (sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy variants))
+		(define recent_variants (sql_queryplan_recent_variants variants))
+		(entry "variants" recent_variants)
+		(entry "formula" (sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants))
 		(entry "formula"))))
 
 (define sql_queryplan_new_entry (lambda (queryplan_cache cache_key parse_fn schema parse_query policy source_session)

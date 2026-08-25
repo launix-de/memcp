@@ -431,6 +431,41 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Guarded plan cache bounds obsolete statistics variants"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (define compiles (newsession))
+        (compiles "count" 0)
+        (define parser (lambda (_schema _query _policy) (begin
+          (define value (planner_literal_value (list (quote session) "v1")))
+          (planner_record_guard_condition
+            (list (quote equal?) (list (quote session) "v1") value))
+          (compiles "count" (+ (compiles "count") 1))
+          (list (quote quote) value))))
+        (define query "SELECT id FROM ps_test WHERE EXISTS (SELECT id FROM ps_test) LIMIT ?")
+        (define results (map (produceN 12) (lambda (value) (begin
+          (sess "v1" value)
+          (with_session sess (lambda ()
+            (eval (cached_parse cache parser "memcp-tests" query nil "root" sess true))))))))
+        (define entry (car (cache (car (cache)))))
+        (define bounded_count (count (entry "variants")))
+        (sess "v1" 0)
+        (define revisited (with_session sess (lambda ()
+          (eval (cached_parse cache parser "memcp-tests" query nil "root" sess true)))))
+        (if (and
+          (equal? results (produceN 12))
+          (equal? revisited 0)
+          (<= bounded_count 4)
+          (<= (count (entry "variants")) 4)
+          (equal? (compiles "count") 13))
+          "ok"
+          (error (concat "guarded cache retained obsolete variants: count=" bounded_count
+            " final=" (count (entry "variants")) " compiles=" (compiles "count")))))
+    expect:
+      data: ["ok"]
+
   - name: "Cancelled guarded-plan waiter never compiles after the gate opens"
     steps:
       - scm: |
