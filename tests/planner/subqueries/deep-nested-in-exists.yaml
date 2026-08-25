@@ -57,6 +57,38 @@ setup:
 
 test_cases:
 
+  - name: "Deep correlated EXISTS lowering remains bounded"
+    fail_comment: "physical lowering must prepare the nested stage dependency chain once, not rebuild every suffix"
+    max_planner_time_ms: 3000
+    sql: |
+      SELECT t0.id
+      FROM dn_tags t0
+      WHERE EXISTS (
+        SELECT 1 FROM dn_tags t1 WHERE t1.ref_id = t0.id AND EXISTS (
+          SELECT 1 FROM dn_tags t2 WHERE t2.ref_id = t1.id AND EXISTS (
+            SELECT 1 FROM dn_tags t3 WHERE t3.ref_id = t2.id AND EXISTS (
+              SELECT 1 FROM dn_tags t4 WHERE t4.ref_id = t3.id AND EXISTS (
+                SELECT 1 FROM dn_tags t5 WHERE t5.ref_id = t4.id AND EXISTS (
+                  SELECT 1 FROM dn_tags t6 WHERE t6.ref_id = t5.id AND EXISTS (
+                    SELECT 1 FROM dn_tags t7 WHERE t7.ref_id = t6.id AND EXISTS (
+                      SELECT 1 FROM dn_tags t8 WHERE t8.ref_id = t7.id AND EXISTS (
+                        SELECT 1 FROM dn_tags t9 WHERE t9.ref_id = t8.id AND EXISTS (
+                          SELECT 1 FROM dn_tags t10 WHERE t10.ref_id = t9.id
+                        )
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    expect:
+      rows: 1
+      data:
+        - id: 1
+
   # ============================================================
   # EXISTS inside scalar subselect nesting
   # ============================================================
