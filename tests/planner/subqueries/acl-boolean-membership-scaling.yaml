@@ -520,6 +520,109 @@ test_cases:
         - "recset_project_join"
         - ".grp:union"
 
+  - name: "bounded equality and order keep the base table as ACL driver"
+    sql: |
+      EXPLAIN PHYSICAL SELECT d.id
+      FROM bqm_document d
+      WHERE d.standort_id = 1
+        AND COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM bqm_mandant_assignment ma
+              WHERE ma.standort_id = s.id
+                AND ma.actor_id = 7
+                AND ma.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT sa.allowed FROM bqm_standort_assignment sa
+              WHERE sa.standort_id = s.id
+                AND sa.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM bqm_standort s
+          WHERE s.id = d.standort_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.id DESC
+      LIMIT 3
+    expect:
+      result_contains:
+        - "scalar_presence_carrier"
+        - "chosen direct_subscan"
+        - "probe_rows 1"
+        - "carrier_rows 40000"
+        - "scan_order"
+        - "bound:"
+      result_not_contains:
+        - "scan_order_recset_part"
+
+  - name: "bounded equality and order preserve ACL results"
+    max_time: 1
+    sql: |
+      SELECT d.id
+      FROM bqm_document d
+      WHERE d.standort_id = 1
+        AND COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM bqm_mandant_assignment ma
+              WHERE ma.standort_id = s.id
+                AND ma.actor_id = 7
+                AND ma.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT sa.allowed FROM bqm_standort_assignment sa
+              WHERE sa.standort_id = s.id
+                AND sa.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM bqm_standort s
+          WHERE s.id = d.standort_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.id DESC
+      LIMIT 3
+    expect:
+      rows: 3
+      data:
+        - id: 39997
+        - id: 39993
+        - id: 39989
+
+  - name: "unbounded equality count retains the segmented ACL carrier"
+    sql: |
+      EXPLAIN PHYSICAL SELECT COUNT(*) AS total
+      FROM bqm_document d
+      WHERE d.standort_id = 1
+        AND COALESCE((
+          SELECT CASE WHEN s.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM bqm_mandant_assignment ma
+              WHERE ma.standort_id = s.id
+                AND ma.actor_id = 7
+                AND ma.allowed = TRUE
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT sa.allowed FROM bqm_standort_assignment sa
+              WHERE sa.standort_id = s.id
+                AND sa.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM bqm_standort s
+          WHERE s.id = d.standort_id
+          LIMIT 1
+        ), FALSE)
+    expect:
+      result_contains:
+        - "scalar_presence_carrier"
+        - "chosen recset_carrier"
+        - "recset_project_join"
+      result_not_contains:
+        - "bound:"
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS bqm_file"
   - sql: "DROP TABLE IF EXISTS bqm_unused_lookup"

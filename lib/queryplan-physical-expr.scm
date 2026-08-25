@@ -1291,14 +1291,16 @@ RecSet's per-driving-row cost is folded entirely into its one-pass build --
 unlike the keytable carrier, there is no separate per-row read term because
 recset_project_join already visits every driving row once while building the
 membership set. */
-(define scalar_first_probe_recset_cost_preferred? (lambda (stage probe_work_rows)
+(define scalar_first_probe_recset_cost_preferred? (lambda (stage probe_work_rows carrier_work_rows)
 	(and (number? (planner_literal_value probe_work_rows))
+		(and (number? (planner_literal_value carrier_work_rows))
 		(begin
 			(define probe_rows (planner_literal_value probe_work_rows))
+			(define carrier_rows (planner_literal_value carrier_work_rows))
 			(define input_rows (planner_stage_input_rows (gs_input stage)))
 			(and (number? input_rows)
 				(begin
-					(define recset_cost (planner_recset_carrier_cost input_rows probe_rows))
+					(define recset_cost (planner_recset_carrier_cost input_rows carrier_rows))
 					(define direct_cost (planner_direct_presence_probe_cost probe_rows))
 					(define keytable_cost (planner_presence_carrier_cost input_rows probe_rows))
 					(define chosen (if (planner_cost_better? recset_cost direct_cost)
@@ -1317,7 +1319,8 @@ membership set. */
 							(list "reason" "lowest_total_ns")
 							(list "inputs" (list
 								(list "domain_rows" input_rows)
-								(list "probe_rows" probe_rows)))
+								(list "probe_rows" probe_rows)
+								(list "carrier_rows" carrier_rows)))
 							(list "alternatives" (map
 								(list
 									(list (quote recset_carrier) recset_cost)
@@ -1331,9 +1334,9 @@ membership set. */
 										(list "cost" (planner_cost_explain (cadr candidate)))))))))
 					(and
 						(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
-						(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows)))))))))
+						(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows))))))))))
 
-(define scalar_first_probe_recset_eligible? (lambda (graph stage src keys probe_work_rows requested_col)
+(define scalar_first_probe_recset_eligible? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col)
 	(and (single_real_source? (qb_sources src))
 		(and (source_is_base_table? (single_real_source (qb_sources src)))
 			(and (empty_list? (qb_group src))
@@ -1342,12 +1345,12 @@ membership set. */
 						(and (nil? (qb_limit src)) (nil? (qb_offset src))
 							(and (not (nil? (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys)))
 								(and (stage_boolean_shaped? graph stage requested_col)
-									(scalar_first_probe_recset_cost_preferred? stage probe_work_rows)))))))))))
+									(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows)))))))))))
 
-(define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows requested_col)
+(define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col)
 	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
 		(and (stage_boolean_shaped? graph stage requested_col)
-			(scalar_first_probe_recset_cost_preferred? stage probe_work_rows)))))
+			(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows)))))
 
 (define recset_scalar_first_probe_lookup_key (lambda (stage)
 	(concat "__recset_probe_" (fnv_hash (gs_id stage)))))
@@ -1435,25 +1438,29 @@ Logical decorrelation contributes the stage shape; the current scan node
 contributes its work estimate. Emitters below only implement the selected
 operator and do not repeat policy gates, so future carriers join this one
 choice table instead of adding another promotion path. */
-(define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows requested_col probe_semantics)
+(define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics)
 	(if (union_block? src)
 		(quote union-probe)
 		(if (query_block? src)
-			(if (and (equal? probe_semantics (quote truth))
+			(if (qassoc_get (gs_facts stage) (quote memoize_bound_scalar_probe) false)
+				(quote query-scan)
+				(if (and (equal? probe_semantics (quote truth))
 				(scalar_first_probe_recset_eligible?
-					graph stage src keys probe_work_rows requested_col))
+					graph stage src keys probe_work_rows carrier_work_rows requested_col))
 				(quote recset)
 				(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
 					(quote keytable)
-					(quote query-scan)))
+					(quote query-scan))))
 			(if (source_is_base_table? src)
-				(if (and (equal? probe_semantics (quote truth))
+				(if (qassoc_get (gs_facts stage) (quote memoize_bound_scalar_probe) false)
+					(quote table-scan)
+					(if (and (equal? probe_semantics (quote truth))
 					(scalar_first_probe_recset_eligible_base?
-						graph stage src keys probe_work_rows requested_col))
+						graph stage src keys probe_work_rows carrier_work_rows requested_col))
 					(quote recset)
 					(if (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows)
 						(quote keytable)
-						(quote table-scan)))
+						(quote table-scan))))
 				(quote unsupported))))))
 
 (define scalar_first_probe_carrier_source (lambda (src)
@@ -1549,8 +1556,10 @@ choice table instead of adding another promotion path. */
 					'())
 				(list stage)))))
 		(define graph (stage_dependency_graph probe_stages))
+		(define lowered_lookup_keys (map lookup_keys (lambda (key)
+			(lower_column_expr_for_join sources default_alias key))))
 		(define operator (scalar_first_probe_physical_operator
-			graph stage src keys effective_probe_work_rows requested_col probe_semantics))
+			graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics))
 		(define lowered (match operator
 			(symbol union-probe)
 			(list (quote if)
@@ -1582,7 +1591,7 @@ choice table instead of adding another promotion path. */
 				stage
 				value_expr
 				keys
-				(map lookup_keys (lambda (key) (lower_column_expr_for_join sources default_alias key)))
+				lowered_lookup_keys
 				probe_work_rows
 				effective_probe_work_rows)
 			(symbol table-scan)
@@ -1600,9 +1609,20 @@ choice table instead of adding another promotion path. */
 					sources default_alias src stage value_expr keys lookup_keys
 					order_exprs dirs offset_value partition_limit))
 			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator")))
+		(define memoized_lowered (if
+			(qassoc_get (gs_facts stage) (quote memoize_bound_scalar_probe) false)
+			(list
+				(physical_query_session_symbol)
+				"get_or_compute_scoped"
+				(physical_query_scope_symbol)
+				(list (quote concat)
+					(concat (query_invariant_scalar_first_probe_key stage requested_col) ":bound:")
+					(list (quote serialize) (cons (quote list) lowered_lookup_keys)))
+				(list (quote lambda) '() lowered))
+			lowered))
 		(if (scalar_first_probe_query_invariant? stage requested_col)
-			(lower_query_invariant_scalar_first_probe_expr stage requested_col lowered)
-			lowered)))
+			(lower_query_invariant_scalar_first_probe_expr stage requested_col memoized_lowered)
+			memoized_lowered)))
 )
 
 (define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
@@ -5680,9 +5700,9 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
 		(* domain_rows 8) 0 domain_rows 0.65)))
 
-(define planner_recset_carrier_cost (lambda (domain_rows probe_rows)
-	(planner_cost 365607 0 0 0 0 (* probe_rows 17681)
-		(* probe_rows 1) 0 probe_rows 0.6)))
+(define planner_recset_carrier_cost (lambda (domain_rows carrier_rows)
+	(planner_cost 365607 0 0 0 0 (* carrier_rows 17681)
+		(* carrier_rows 1) 0 carrier_rows 0.6)))
 
 (define planner_membership_scan_invocation_ns 122080)
 (define planner_membership_scan_row_ns 1)
