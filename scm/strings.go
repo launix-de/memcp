@@ -19,6 +19,7 @@ package scm
 import "io"
 import "fmt"
 import "html"
+import "bytes"
 import "sync"
 import "regexp"
 import "unicode"
@@ -10442,6 +10443,29 @@ func init_strings() {
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to encode"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const:  true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "json_quote",
+		Desc: "quotes a string as a JSON string literal without HTML escaping",
+		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || !a[0].IsString() {
+				return NewNil()
+			}
+			var encoded bytes.Buffer
+			encoder := json.NewEncoder(&encoded)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(a[0].String()); err != nil {
+				panic(err)
+			}
+			return NewString(strings.TrimSuffix(encoded.String(), "\n"))
+		},
+		Type: &TypeDescriptor{
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "string to quote"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 

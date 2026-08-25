@@ -366,37 +366,33 @@ arithmetic; leave expressions containing columns or functions untouched. */
 											(cons h t) (cons (transform_new_old h) (map t transform_new_old))
 											expr)))
 										(define inner_t (transform_new_old inner))
-										/* Extract SELECT field names from the 9-tuple (fields is a flat assoc list) */
-										(define select_fields (match inner_t
+										/* UNION output names are defined by its first branch. Extract
+										them recursively instead of mistaking a UNION for a SELECT
+										without FROM and synthesizing one empty row. */
+										(define trigger_select_fields (lambda (query) (match query
 											((symbol query-block) _ _ fields _ _ _ _ _ _ _ _ _) fields
 											'(_ _ fields _ _ _ _ _ _) fields
-											_ '()))
+											((symbol union-block) _ (cons first _) _ _ _ _) (trigger_select_fields first)
+											((symbol union_all) (cons first _) _ _ _) (trigger_select_fields first)
+											((symbol union_distinct) (cons first _) _ _ _) (trigger_select_fields first)
+											_ (error "trigger INSERT SELECT has no output fields"))))
+										(define select_fields (trigger_select_fields inner_t))
 										(define select_names (extract_assoc select_fields (lambda (k v) k)))
-										(define select_values (extract_assoc select_fields (lambda (_k v) v)))
-										(define select_sources (match inner_t
-											((symbol query-block) _ tables _ _ _ _ _ _ _ _ _ _) tables
-											'(_ tables _ _ _ _ _ _ _) tables
-											_ '()))
-										(if (empty_list? select_sources)
-											(list (list (symbol "insert") (list (symbol "table") schema tbl)
-												(cons (symbol "list") cols)
-												(list (symbol "list") (cons (symbol "list") select_values))
-												(list (symbol "list"))
-												(if ignore (list (symbol "lambda") '() 0) nil)
-												false nil))
-											/* Generate code: set resultrow + build_queryplan_term */
-											(list (list (symbol "begin")
-												(list (symbol "set") (symbol "resultrow")
-													(list (symbol "lambda") (list (symbol "item"))
-														(list (symbol "insert") (list (symbol "table") schema tbl)
-															(cons (symbol "list") cols)
-															(list (symbol "list")
-																(cons (symbol "list")
-																	(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
-															(list (symbol "list"))
-															(if ignore (list (symbol "lambda") '() 0) nil)
-															false nil)))
-												(build_queryplan_term (sql_expand_views inner_t policy))))))
+										/* Use the relational plan for every SELECT shape, including
+										SELECT literals without FROM. It alone owns whether zero, one,
+										or many rows are emitted. */
+										(list (list (symbol "begin")
+											(list (symbol "set") (symbol "resultrow")
+												(list (symbol "lambda") (list (symbol "item"))
+													(list (symbol "insert") (list (symbol "table") schema tbl)
+														(cons (symbol "list") cols)
+														(list (symbol "list")
+															(cons (symbol "list")
+																(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
+														(list (symbol "list"))
+														(if ignore (list (symbol "lambda") '() 0) nil)
+														false nil)))
+											(build_queryplan_term (sql_expand_views inner_t policy)))))
 									(if (equal? tag '!update)
 										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin

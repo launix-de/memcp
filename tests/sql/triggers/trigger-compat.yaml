@@ -20,6 +20,13 @@ setup:
   - sql: "DROP TABLE IF EXISTS trig_invoice"
   - sql: "DROP TABLE IF EXISTS trig_invitem"
   - sql: "DROP TABLE IF EXISTS trig_year"
+  - sql: "DROP TABLE IF EXISTS json_quote_log"
+  - sql: "DROP TABLE IF EXISTS json_quote_src"
+  - sql: "DROP TABLE IF EXISTS trigger_union_event"
+  - sql: "DROP TABLE IF EXISTS trigger_union_log"
+  - sql: "DROP TABLE IF EXISTS trigger_union_src"
+  - sql: "DROP TABLE IF EXISTS trigger_literal_log"
+  - sql: "DROP TABLE IF EXISTS trigger_literal_src"
   - sql: "DROP TRIGGER IF EXISTS after_items_insert"
   - sql: "DROP TRIGGER IF EXISTS after_bill_insert"
   - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
@@ -27,6 +34,9 @@ setup:
   - sql: "DROP TRIGGER IF EXISTS `trig_year.ia`"
   - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
   - sql: "DROP TRIGGER IF EXISTS `derived_src.au`"
+  - sql: "DROP TRIGGER IF EXISTS json_quote_src_ai"
+  - sql: "DROP TRIGGER IF EXISTS trigger_union_src_ai"
+  - sql: "DROP TRIGGER IF EXISTS trigger_literal_src_ai"
   - sql: "CREATE TABLE derived_src (id INT PRIMARY KEY, group_id INT)"
   - sql: "CREATE TABLE derived_assoc (id INT PRIMARY KEY, src_id INT, marker INT)"
   - sql: "CREATE TABLE derived_target (assoc_id INT PRIMARY KEY, marker INT)"
@@ -46,6 +56,13 @@ setup:
   - sql: "CREATE TABLE trig_invoice (ID INT AUTO_INCREMENT PRIMARY KEY, rnr TEXT, rdate INT)"
   - sql: "CREATE TABLE trig_invitem (ID INT AUTO_INCREMENT PRIMARY KEY, invoice INT, amount DECIMAL(10,2))"
   - sql: "CREATE TABLE trig_year (ID INT AUTO_INCREMENT PRIMARY KEY, xstart INT, xend INT, mode INT)"
+  - sql: "CREATE TABLE json_quote_src (id INT PRIMARY KEY, payload TEXT)"
+  - sql: "CREATE TABLE json_quote_log (id INT PRIMARY KEY, payload TEXT)"
+  - sql: "CREATE TABLE trigger_union_event (kind TEXT, payload TEXT)"
+  - sql: "CREATE TABLE trigger_union_log (method TEXT, payload TEXT)"
+  - sql: "CREATE TABLE trigger_union_src (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE trigger_literal_log (method TEXT, payload TEXT)"
+  - sql: "CREATE TABLE trigger_literal_src (id INT PRIMARY KEY)"
 
 cleanup:
   - sql: "DROP TRIGGER IF EXISTS `derived_src.ai`"
@@ -56,6 +73,9 @@ cleanup:
   - sql: "DROP TRIGGER IF EXISTS trig_no_begin"
   - sql: "DROP TRIGGER IF EXISTS `trig_main.ia`"
   - sql: "DROP TRIGGER IF EXISTS `trig_year.ia`"
+  - sql: "DROP TRIGGER IF EXISTS json_quote_src_ai"
+  - sql: "DROP TRIGGER IF EXISTS trigger_union_src_ai"
+  - sql: "DROP TRIGGER IF EXISTS trigger_literal_src_ai"
   - sql: "DROP TABLE IF EXISTS derived_target"
   - sql: "DROP TABLE IF EXISTS derived_assoc"
   - sql: "DROP TABLE IF EXISTS derived_src"
@@ -71,8 +91,104 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS trig_invoice"
   - sql: "DROP TABLE IF EXISTS trig_invitem"
   - sql: "DROP TABLE IF EXISTS trig_year"
+  - sql: "DROP TABLE IF EXISTS json_quote_log"
+  - sql: "DROP TABLE IF EXISTS json_quote_src"
+  - sql: "DROP TABLE IF EXISTS trigger_union_event"
+  - sql: "DROP TABLE IF EXISTS trigger_union_log"
+  - sql: "DROP TABLE IF EXISTS trigger_union_src"
+  - sql: "DROP TABLE IF EXISTS trigger_literal_log"
+  - sql: "DROP TABLE IF EXISTS trigger_literal_src"
 
 test_cases:
+
+  # --- JSON string quoting used by generated event triggers ---
+
+  - name: "JSON_QUOTE preserves SQL NULL and escapes JSON string content"
+    sql: |
+      SELECT JSON_QUOTE('a"b') AS quoted, JSON_QUOTE(NULL) AS null_value
+    expect:
+      rows: 1
+      data:
+        - {quoted: '"a\"b"', null_value: null}
+
+  - name: "CREATE TRIGGER containing JSON_QUOTE"
+    sql: |
+      CREATE TRIGGER json_quote_src_ai
+      AFTER INSERT ON json_quote_src
+      FOR EACH ROW
+      BEGIN
+        INSERT INTO json_quote_log (id, payload)
+        VALUES (NEW.id, CONCAT('[', JSON_QUOTE(NEW.payload), ']'));
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "Trigger executes JSON_QUOTE"
+    sql: "INSERT INTO json_quote_src (id, payload) VALUES (1, 'a\"b')"
+    expect:
+      affected_rows: 1
+
+  - name: "Trigger stored valid quoted JSON string"
+    sql: "SELECT id, payload FROM json_quote_log WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {id: 1, payload: '["a\"b"]'}
+
+  - name: "CREATE event trigger with empty UNION ALL alternatives"
+    sql: |
+      CREATE TRIGGER trigger_union_src_ai
+      AFTER INSERT ON trigger_union_src
+      FOR EACH ROW
+      BEGIN
+        INSERT INTO trigger_union_log (method, payload)
+        SELECT
+          CASE WHEN kind = 'webhook' THEN 'run_webhook' ELSE 'fallback' END,
+          CONCAT('[', NEW.id, ', ', JSON_QUOTE(payload), ']')
+        FROM trigger_union_event
+        WHERE kind = 'created'
+        UNION ALL
+        SELECT
+          CASE WHEN kind = 'webhook' THEN 'run_webhook' ELSE 'fallback' END,
+          CONCAT('[', NEW.id, ', ', JSON_QUOTE(payload), ']')
+        FROM trigger_union_event
+        WHERE kind = 'changed';
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "Fire event trigger without matching events"
+    sql: "INSERT INTO trigger_union_src (id) VALUES (7)"
+    expect:
+      affected_rows: 1
+
+  - name: "Empty UNION ALL trigger does not synthesize NULL row"
+    sql: "SELECT COUNT(*) AS cnt FROM trigger_union_log"
+    expect:
+      rows: 1
+      data:
+        - {cnt: 0}
+
+  - name: "CREATE trigger with SELECT literals without FROM"
+    sql: |
+      CREATE TRIGGER trigger_literal_src_ai
+      AFTER INSERT ON trigger_literal_src
+      FOR EACH ROW
+      BEGIN
+        INSERT INTO trigger_literal_log (method, payload)
+        SELECT 'literal', CONCAT('[', NEW.id, ']');
+      END
+    expect:
+      affected_rows: 1
+
+  - name: "SELECT literals trigger emits exactly one row"
+    setup:
+      - sql: "INSERT INTO trigger_literal_src (id) VALUES (11)"
+    sql: "SELECT method, payload FROM trigger_literal_log"
+    expect:
+      rows: 1
+      data:
+        - {method: literal, payload: '[11]'}
 
   # --- Basic trigger with backtick-quoted table names (Bug 4a) ---
 
