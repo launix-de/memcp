@@ -1859,9 +1859,9 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
 		(* domain_rows 8) 0 domain_rows 0.65)))
 
-(define planner_recset_carrier_cost (lambda (domain_rows probe_rows)
-	(planner_cost 365607 0 0 0 0 (* probe_rows 17681)
-		(* probe_rows 1) 0 probe_rows 0.6)))
+(define planner_recset_carrier_cost (lambda (domain_rows carrier_rows)
+	(planner_cost 365607 0 0 0 0 (* carrier_rows 17681)
+		(* carrier_rows 1) 0 carrier_rows 0.6)))
 
 (define planner_membership_scan_invocation_ns %d)
 (define planner_membership_scan_row_ns %d)
