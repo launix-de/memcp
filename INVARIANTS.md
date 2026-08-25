@@ -264,6 +264,18 @@ per guard evaluation. If a useful generalized inequality is unavailable, an
 exact parameter/statistics-input guard is the conservative fallback; an old
 specialized plan must never be selected after an unguarded cost input changes.
 
+When an unknown cardinality interval crosses a costly operator boundary, the
+cache formula may execute one query-local observation *before* guard dispatch.
+That preparation is not part of the guard: it produces a physical value such
+as an exact RecSet plus a scalar metric, and every alternative in the request
+must reuse the same value and visibility snapshot. Only the scalar metric may
+enter the isolated compile session after a guard miss; opaque native values and
+the request transaction must remain in the executing session. Preparations
+must be deduplicated by physical decision, must not persist beyond the query,
+and are justified only when the cost model says their value of information can
+change an otherwise expensive choice. Cheap plans still need ordinary growth
+and statistics guards, but must not pay for exact relational observations.
+
 The cache value must keep the complete Scheme guard/plan formula visible to the
 existing cachemap size accounting and eviction mechanism. A `newsession` may
 hold the entry's compile lock and metadata, but it must not hide the plan tree
