@@ -1,0 +1,145 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Run with:
+#   PERF_TEST=1 python3 run_sql_tests.py tests/performance/json-functions.yaml --log-times
+#
+# Calibrate repeatedly until every case reaches the runner's 10-20 second
+# target window:
+#   PERF_TEST=1 PERF_CALIBRATE=1 python3 run_sql_tests.py tests/performance/json-functions.yaml --log-times
+#
+# The JSON and TEXT columns contain byte-for-byte equivalent documents. This
+# keeps BSON traversal and parse-on-access costs directly comparable.
+
+metadata:
+  version: "1.0"
+  description: "JSON storage, path, computed ordering, and serialization performance"
+  isolated: true
+
+x-json-setup: &json_setup
+  - sql: "DROP TABLE IF EXISTS json_perf_documents"
+  - scm: "(rebuild)"
+  - sql: |
+      CREATE TABLE json_perf_documents (
+        id INT PRIMARY KEY,
+        doc JSON NOT NULL,
+        doc_text TEXT NOT NULL
+      ) ENGINE=memory
+  - scm: |
+      (begin
+        (define rows
+          (map (produceN {rows}) (lambda (i)
+            (begin
+              (define tenant (mod i 64))
+              (define rank (mod (* i 7919) 1000003))
+              (define status (if (equal? (mod i 4) 0) "active" "archived"))
+              (define text
+                (concat "{\"tenant\":" tenant
+                  ",\"rank\":" rank
+                  ",\"status\":\"" status "\""
+                  ",\"nested\":{\"score\":" (* i 17) ",\"label\":\"item-" i "\"}"
+                  ",\"tags\":[\"tag-" (mod i 16) "\",\"tenant-" tenant "\"]"
+                  ",\"items\":[{\"sku\":\"sku-" (mod i 1024) "\",\"qty\":1},"
+                  "{\"sku\":\"sku-" (mod (+ i 1) 1024) "\",\"qty\":2},"
+                  "{\"sku\":\"sku-" (mod (+ i 2) 1024) "\",\"qty\":3}]}"))
+              (list (+ i 1) (json_parse_bson text) text)))))
+        (define inserted
+          (insert (table "{database}" "json_perf_documents")
+            '("id" "doc" "doc_text") rows))
+        (rebuild)
+        (define mem (memstats))
+        (list inserted (mem "heap_alloc")))
+
+test_cases:
+  - name: "Perf JSON: BSON nested path traversal"
+    setup: *json_setup
+    sql: |
+      SELECT SUM(JSON_VALUE(doc, '$.nested.score' RETURNING SIGNED)) AS total
+      FROM json_perf_documents
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  - name: "Perf JSON: TEXT parse and nested path traversal"
+    setup: *json_setup
+    sql: |
+      SELECT SUM(JSON_VALUE(doc_text, '$.nested.score' RETURNING SIGNED)) AS total
+      FROM json_perf_documents
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  - name: "Perf JSON: computed path filter"
+    setup: *json_setup
+    sql: |
+      SELECT COUNT(*) AS matches
+      FROM json_perf_documents
+      WHERE JSON_VALUE(doc, '$.tenant' RETURNING UNSIGNED) = 17
+        AND JSON_VALUE(doc, '$.status' RETURNING CHAR) = 'active'
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+  - name: "Perf JSON: computed path ORDER BY LIMIT"
+    setup: *json_setup
+    sql: |
+      SELECT id, JSON_VALUE(doc, '$.rank' RETURNING SIGNED) AS rank_value
+      FROM json_perf_documents
+      ORDER BY JSON_VALUE(doc, '$.rank' RETURNING SIGNED) DESC, id DESC
+      LIMIT 100
+    threshold_ms: 30000
+    expect:
+      rows: 100
+
+  - name: "Perf JSON: JSON_ARRAYAGG object serialization"
+    setup: *json_setup
+    sql: |
+      SELECT id % 64 AS tenant,
+        JSON_ARRAYAGG(JSON_OBJECT(
+          'id', id,
+          'rank', JSON_VALUE(doc, '$.rank' RETURNING SIGNED),
+          'label', JSON_VALUE(doc, '$.nested.label' RETURNING CHAR)
+        )) AS documents
+      FROM json_perf_documents
+      GROUP BY id % 64
+    threshold_ms: 30000
+    expect:
+      rows: 64
+
+  - name: "Perf JSON PostgreSQL: extraction operator ORDER BY LIMIT"
+    syntax: postgresql
+    setup: *json_setup
+    sql: |
+      SELECT id, (doc->>'rank')::integer AS rank_value
+      FROM json_perf_documents
+      ORDER BY (doc->>'rank')::integer DESC, id DESC
+      LIMIT 100
+    threshold_ms: 30000
+    expect:
+      rows: 100
+
+  - name: "Perf JSON PostgreSQL: JSONPath predicate scan"
+    syntax: postgresql
+    setup: *json_setup
+    sql: |
+      SELECT COUNT(*) AS matches
+      FROM json_perf_documents
+      WHERE jsonb_path_exists(doc, '$.items[*] ? (@.qty >= 2)')
+    threshold_ms: 30000
+    expect:
+      rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS json_perf_documents"
