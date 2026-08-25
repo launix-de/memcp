@@ -145,3 +145,84 @@ func TestCompileCacheAdmissionAccountsForProducerWeight(t *testing.T) {
 	}
 	callers.Wait()
 }
+
+func TestCompileCacheAdmissionLetsLightProducerBypassQueuedHeavyProducer(t *testing.T) {
+	limit := (runtime.GOMAXPROCS(0) + 1) / 2
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 4 {
+		limit = 4
+	}
+	if limit == 1 {
+		t.Skip("one admission slot cannot retain spare capacity")
+	}
+
+	cache := NewCacheMap(scm.NewString("compile"))
+	firstStarted := make(chan struct{}, 1)
+	firstRelease := make(chan struct{})
+	queuedStarted := make(chan struct{}, 1)
+	queuedRelease := make(chan struct{})
+	lightStarted := make(chan struct{}, 1)
+	var callers sync.WaitGroup
+	startProducer := func(key string, weight int, started chan<- struct{}, release <-chan struct{}) {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			producer := scm.NewFunc(func(_ ...scm.Scmer) scm.Scmer {
+				started <- struct{}{}
+				if release != nil {
+					<-release
+				}
+				return scm.NewString(key)
+			})
+			scm.Apply(cache,
+				scm.NewString("get_or_compute"),
+				scm.NewString(key),
+				producer,
+				scm.NewInt(int64(weight)),
+			)
+		}()
+	}
+
+	startProducer("first-heavy", limit-1, firstStarted, firstRelease)
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		close(firstRelease)
+		callers.Wait()
+		t.Fatal("first weighted producer did not start")
+	}
+
+	startProducer("queued-heavy", limit, queuedStarted, queuedRelease)
+	select {
+	case <-queuedStarted:
+		close(firstRelease)
+		close(queuedRelease)
+		callers.Wait()
+		t.Fatal("full-weight producer started without enough capacity")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	startProducer("light", 1, lightStarted, nil)
+	select {
+	case <-lightStarted:
+	case <-time.After(time.Second):
+		close(firstRelease)
+		<-queuedStarted
+		close(queuedRelease)
+		callers.Wait()
+		t.Fatal("light producer was blocked behind a queued full-weight producer")
+	}
+
+	close(firstRelease)
+	select {
+	case <-queuedStarted:
+	case <-time.After(time.Second):
+		close(queuedRelease)
+		callers.Wait()
+		t.Fatal("queued full-weight producer did not start after capacity was released")
+	}
+	close(queuedRelease)
+	callers.Wait()
+}

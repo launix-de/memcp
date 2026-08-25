@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/launix-de/memcp/scm"
-	"golang.org/x/sync/semaphore"
 )
 
 // Per-entry overhead: cacheMapEntry struct (~80 bytes) + map bucket slot (~128 bytes) + softItem (~120 bytes)
@@ -33,8 +32,10 @@ const cacheMapEntryOverhead = 328
 var queryCompileAdmission = newCacheMapAdmission()
 
 type cacheMapAdmission struct {
-	limit  int64
-	tokens *semaphore.Weighted
+	mu      sync.Mutex
+	limit   int64
+	used    int64
+	changed chan struct{}
 }
 
 func newCacheMapAdmission() *cacheMapAdmission {
@@ -46,8 +47,8 @@ func newCacheMapAdmission() *cacheMapAdmission {
 		limit = 4
 	}
 	return &cacheMapAdmission{
-		limit:  int64(limit),
-		tokens: semaphore.NewWeighted(int64(limit)),
+		limit:   int64(limit),
+		changed: make(chan struct{}),
 	}
 }
 
@@ -62,11 +63,31 @@ func (a *cacheMapAdmission) boundedWeight(weight int64) int64 {
 }
 
 func (a *cacheMapAdmission) acquire(ctx context.Context, weight int64) bool {
-	return a.tokens.Acquire(ctx, a.boundedWeight(weight)) == nil
+	weight = a.boundedWeight(weight)
+	for {
+		a.mu.Lock()
+		if a.used+weight <= a.limit {
+			a.used += weight
+			a.mu.Unlock()
+			return true
+		}
+		changed := a.changed
+		a.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 func (a *cacheMapAdmission) release(weight int64) {
-	a.tokens.Release(a.boundedWeight(weight))
+	weight = a.boundedWeight(weight)
+	a.mu.Lock()
+	a.used -= weight
+	close(a.changed)
+	a.changed = make(chan struct{})
+	a.mu.Unlock()
 }
 
 type cacheMapEntry struct {

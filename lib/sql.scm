@@ -27,13 +27,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (set psql_queryplan_cache (newcachemap "compile"))
 (set sql_literal_shape_cache (newcachemap))
 
-/* Keep several small cold plans concurrent while preventing a single very
-wide generated query from competing with three equally allocation-heavy
-producers. The admission remains outside parsing and does not affect hits. */
+/* Keep several small cold plans concurrent while preventing generated queries
+whose formula trees amplify their source size from compiling beside equally
+allocation-heavy producers. The admission remains outside parsing and does not
+affect hits. */
 (define sql_query_compile_weight (lambda (query)
-	(if (> (strlen query) 65536)
+	(if (> (strlen query) 32768)
 		3
-		(if (> (strlen query) 32768) 2 1))))
+		(if (> (strlen query) 16384) 2 1))))
 
 /* Keep exact SQL variants out of the parser while sharing their compiled plan.
 Only parameterized results enter the small front cache; exact-only statements
