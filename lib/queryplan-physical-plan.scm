@@ -5156,7 +5156,13 @@ base-index segment even though the logical expression remains correlated. */
 					(merge_stage_catalogs (list stages dependencies
 						(qassoc_get (gs_facts raw_stage) (quote probe_catalog) '())
 						(list raw_stage)))))
-				(define effective_probe_work_rows (if (nil? bound_stage) probe_work_rows 1))
+				/* LIMIT bounds returned rows, not necessarily rejected candidates. Only a
+				segment-constant probe is guaranteed to execute once. A row-varying ACL may
+				inspect the complete segment before filling the window, so retain the full
+				carrier workload for that comparison. */
+				(define effective_probe_work_rows (if (nil? bound_stage)
+					(if bounded_direct_context carrier_work_rows probe_work_rows)
+					1))
 				(define operator (if (nil? target_col) (quote unsupported)
 					(scalar_first_probe_physical_operator
 						(stage_dependency_graph probe_stages)
