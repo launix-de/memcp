@@ -666,11 +666,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		dedicated correlated-subquery marker for NOT EXISTS. */
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
 		(parser '((atom "NOT" true) (define expr sql_expression2)) '('sql_not expr))
-		(parser '((define value sql_expression3) (atom "MEMBER" true) (atom "OF" true) "(" (define array sql_expression) ")") '('json_member_of value array))
 		(parser '((atom "MATCH" true) "(" (define cols (+ sql_expression ",")) ")" (atom "AGAINST" true) "(" (define needle sql_expression) (? (atom "IN" true) (atom "NATURAL" true) (atom "LANGUAGE" true) (atom "MODE" true)) ")")
 			(begin
 				(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
 				(if (equal? (count terms) 1) (car terms) (cons (quote or) terms))))
+		(parser '((define value sql_expression3) (atom "MEMBER" true) (atom "OF" true) "(" (define array sql_expression) ")") '('json_member_of value array))
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
@@ -935,6 +935,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (define t tabledef) '(t))
 	)))
 	(define tabledef (parser (or
+		(parser '((atom "JSON_TABLE" true) "(" (define doc sql_expression) "," (define row_path sql_expression)
+			(atom "COLUMNS" true) "(" (define definitions (+ (parser (or
+				(parser '((define name sql_identifier) (atom "FOR" true) (atom "ORDINALITY" true)) (list name "ordinality" nil))
+				(parser '((define name sql_identifier) (define typ sql_column_type) (atom "PATH" true) (define path sql_expression)) (list name "path" path typ)))) ",")) ")" ")"
+			(atom "AS" true) (define id sql_identifier))
+			(begin
+				(define columns (map definitions (lambda (definition) (car definition))))
+				(list id schema (list (quote table-function) "json_table"
+					(list doc row_path (list (quote quote) definitions)) columns) false nil)))
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")
 			(list id schema (sql_apply_derived_column_aliases query aliases) false nil)) /* inner select with relation and column aliases */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")

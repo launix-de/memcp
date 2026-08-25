@@ -98,7 +98,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	'((quote +) a b))))
 (define psql_sub_expr (lambda (a b) (if (and (number? a) (number? b))
 	(sql_sub_numeric_literals a b)
-	'((quote -) a b))))
+	'((quote pg_subtract) a b))))
 
 (define psql_fold_additive_term (lambda (acc term)
 	(match term
@@ -196,6 +196,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* SQL prefix NOT binds below comparison predicates and above AND/OR. */
 		(parser '((atom "NOT" true) (atom "EXISTS" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_exists) sub)))
 		(parser '((atom "NOT" true) (define expr psql_expression2)) '('sql_not expr))
+		/* PostgreSQL jsonb operators. */
+		(parser '((define a psql_expression3) "@>" (define b psql_expression2)) '('json_contains a b))
+		(parser '((define a psql_expression3) "<@" (define b psql_expression2)) '('json_contains b a))
+		(parser '((define a psql_expression3) "?|" (define b psql_expression2)) '('pg_jsonb_exists a b "one"))
+		(parser '((define a psql_expression3) "?&" (define b psql_expression2)) '('pg_jsonb_exists a b "all"))
+		(parser '((define a psql_expression3) "@?" (define b psql_expression2)) '('pg_jsonb_path_exists a b))
+		(parser '((define a psql_expression3) "@@" (define b psql_expression2)) '('pg_jsonb_path_match a b))
+		(parser '((define a psql_expression3) "?" (define b psql_expression2)) '('pg_jsonb_exists a b "one"))
+		(parser '((define a psql_expression3) "||" (define b psql_expression2)) '('pg_jsonb_concat a b))
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a psql_expression3) (atom "IN" true) "(" (define sub psql_select) ")") '('inner_select_in a sub))
 		(parser '((define a psql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub psql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
@@ -258,6 +267,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr psql_expression6)) '((quote -) 0 expr))
 		/* PostgreSQL json/jsonb field and array extraction operators. */
+		(parser '((define expr psql_expression6) "#>>" (define path psql_expression7)) '('pg_json_extract_path_text expr path))
+		(parser '((define expr psql_expression6) "#>" (define path psql_expression7)) '('pg_json_extract_path expr path))
+		(parser '((define expr psql_expression6) "#-" (define path psql_expression7)) '('pg_jsonb_delete_path expr path))
 		(parser '((define expr psql_expression6) "->>" (define key psql_expression7)) '('json_get expr key true))
 		(parser '((define expr psql_expression6) "->" (define key psql_expression7)) '('json_get expr key false))
 		(parser '((define expr psql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
@@ -272,6 +284,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 		/* EXISTS (SELECT ...) */
 		(parser '((atom "EXISTS" true) "(" (define sub psql_select) ")") '('inner_select_exists sub))
+		(parser '((atom "ARRAY" true) "[" (define values (* psql_expression ",")) "]") (cons (quote pg_json_build_array) values))
+		(parser '((atom "ROW" true) "(" (define values (* psql_expression ",")) ")") (cons (quote pg_json_build_array) values))
 		(parser '((atom "CASE" true) (define conditions (+ (parser '((atom "WHEN" true) (define a psql_expression) (atom "THEN" true) (define b psql_expression)) '(a b)))) (? (atom "ELSE" true) (define elsebranch psql_expression)) (atom "END" true)) (merge '((quote if)) (merge conditions) '(elsebranch)))
 
 		(parser '((atom "COUNT" true) "(" "*" ")") '((quote aggregate) 1 (quote +) 0))
@@ -285,6 +299,28 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
 		(parser '((atom "MIN" true) "(" (define s psql_expression) ")") '('aggregate s 'min nil))
 		(parser '((atom "MAX" true) "(" (define s psql_expression) ")") '('aggregate s 'max nil))
+		/* PostgreSQL JSON aggregates. Strict variants encode skipped SQL NULLs as
+		an empty tagged aggregate state, preserving nil as the reducer neutral. */
+		(parser '((or (atom "JSON_AGG_STRICT" true) (atom "JSONB_AGG_STRICT" true)) "(" (define value psql_expression) ")")
+			'('aggregate '('json_arrayagg_entry value true) 'json_arrayagg_reduce nil))
+		(parser '((or (atom "JSON_AGG" true) (atom "JSONB_AGG" true)) "(" (define value psql_expression) ")")
+			'('aggregate '('json_arrayagg_entry value false) 'json_arrayagg_reduce nil))
+		(parser '((atom "JSON_ARRAYAGG" true) "(" (define value psql_expression) (atom "ORDER" true) (atom "BY" true) psql_expression (atom "ABSENT" true) (atom "ON" true) (atom "NULL" true) (atom "RETURNING" true) psql_type ")")
+			'('aggregate '('json_arrayagg_entry value true) 'json_arrayagg_reduce nil))
+		(parser '((or
+			(atom "JSON_OBJECT_AGG_UNIQUE_STRICT" true) (atom "JSONB_OBJECT_AGG_UNIQUE_STRICT" true)
+			(atom "JSON_OBJECT_AGG_STRICT" true) (atom "JSONB_OBJECT_AGG_STRICT" true))
+			"(" (define key psql_expression) "," (define value psql_expression) ")")
+			'('aggregate '('json_objectagg_entry key value true) 'json_objectagg_reduce nil))
+		(parser '((or
+			(atom "JSON_OBJECT_AGG" true) (atom "JSONB_OBJECT_AGG" true)
+			(atom "JSON_OBJECT_AGG_UNIQUE" true) (atom "JSONB_OBJECT_AGG_UNIQUE" true))
+			"(" (define key psql_expression) "," (define value psql_expression) ")")
+			'('aggregate '('json_objectagg_entry key value false) 'json_objectagg_reduce nil))
+		(parser '((atom "JSON_OBJECTAGG" true) "(" (define key psql_expression) (atom "VALUE" true) (define value psql_expression)
+			(atom "ABSENT" true) (atom "ON" true) (atom "NULL" true) (atom "WITH" true) (atom "UNIQUE" true) (atom "KEYS" true)
+			(atom "RETURNING" true) psql_type ")")
+			'('aggregate '('json_objectagg_entry key value true) 'json_objectagg_reduce nil))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s psql_expression) (atom "SEPARATOR" true) (define sep psql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a sep 'b))) nil))
 		(parser '((atom "GROUP_CONCAT" true) "(" (define s psql_expression) ")") '('aggregate '('concat s) '('lambda '('a 'b) '('if '('nil? 'a) 'b '('concat 'a "," 'b))) nil))
 
@@ -304,6 +340,28 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* DATE_ADD(expr, INTERVAL n UNIT) / DATE_SUB(expr, INTERVAL n UNIT) */
 		(parser '((atom "DATE_ADD" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_add e n unit))
 		(parser '((atom "DATE_SUB" true) "(" (define e psql_expression) "," (atom "INTERVAL" true) (define n psql_expression) (define unit psql_identifier_unquoted) ")") '('date_sub e n unit))
+		(parser '((atom "JSON_OBJECT" true) "(" (atom "ARRAY" true) "[" (define values (* psql_expression ",")) "]" ")") (list (quote pg_json_object) (cons (quote pg_json_build_array) values)))
+		(parser '((atom "JSON_ARRAY" true) "(" (define values (* psql_expression ",")) (atom "ABSENT" true) (atom "ON" true) (atom "NULL" true) (atom "RETURNING" true) psql_type ")")
+			(cons (quote pg_json_array_absent) values))
+		(parser '((atom "JSON_ARRAY" true) "(" (define values (* psql_expression ",")) (atom "NULL" true) (atom "ON" true) (atom "NULL" true) (? (atom "RETURNING" true) psql_type) ")")
+			(cons (quote pg_json_build_array) values))
+		(parser '((atom "JSON_OBJECT" true) "(" (define pairs (* (parser '((define key psql_expression) (or (atom "VALUE" true) ":") (define value psql_expression)) '(key value)) ","))
+			(? (or (parser '((atom "WITH" true) (atom "UNIQUE" true) (atom "KEYS" true)) true) (parser '((atom "WITHOUT" true) (atom "UNIQUE" true) (atom "KEYS" true)) false)))
+			(? (atom "RETURNING" true) psql_type) ")")
+			(cons (quote pg_json_build_object) (merge pairs)))
+		(parser '((atom "JSON_EXISTS" true) "(" (define doc psql_expression) "," (define path psql_expression)
+			(atom "PASSING" true) (define variable psql_expression) (atom "AS" true) (define variable_name psql_identifier)
+			(atom "FALSE" true) (atom "ON" true) (atom "ERROR" true) ")")
+			'('pg_jsonb_path_exists doc path '('pg_json_build_object variable_name variable)))
+		(parser '((atom "JSON_EXISTS" true) "(" (define doc psql_expression) "," (define path psql_expression) ")") '('pg_jsonb_path_exists doc path))
+		(parser '((atom "JSON_QUERY" true) "(" (define doc psql_expression) "," (define path psql_expression)
+			(atom "WITH" true) (atom "CONDITIONAL" true) (atom "ARRAY" true) (atom "WRAPPER" true)
+			(atom "KEEP" true) (atom "QUOTES" true) (atom "ON" true) (atom "SCALAR" true) (atom "STRING" true) ")")
+			'('pg_jsonb_path_query_first doc path))
+		(parser '((atom "JSON_VALUE" true) "(" (define doc psql_expression) "," (define path psql_expression)
+			(atom "RETURNING" true) psql_type (atom "DEFAULT" true) (define fallback psql_expression) (atom "ON" true) (atom "EMPTY" true)
+			(atom "ERROR" true) (atom "ON" true) (atom "ERROR" true) ")") '('simplify '('pg_json_value doc path nil fallback)))
+		(parser '((atom "JSON_SERIALIZE" true) "(" (define value psql_expression) (atom "RETURNING" true) psql_type ")") '('pg_json_serialize value))
 		/* DATE('str') - parse date string; DATE(expr) - truncate to day */
 		(parser '((atom "DATE" true) (define s psql_string)) '('date_trunc_day '('parse_date s)))
 		(parser '((atom "DATE" true) "(" (define e psql_expression) ")") '('date_trunc_day e))
@@ -376,6 +434,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((define a psql_expression7) "::" (atom "date" true)) '('concat a))
 		(parser '((define a psql_expression7) "::" (atom "timestamp" true)) '('concat a))
 		(parser '((define a psql_expression7) "::" (atom "timestamptz" true)) '('parse_date a))
+		(parser '((define a psql_expression7) "::" (atom "jsonb" true)) '('json_parse_bson a))
+		(parser '((define a psql_expression7) "::" (atom "json" true)) '('json_parse_bson a))
 		(parser '((define a psql_expression7) "::" psql_identifier) a) /* unknown cast types: pass through */
 		/* PostgreSQL AT TIME ZONE postfix operator */
 		(parser '((define a psql_expression7) (atom "AT" true) (atom "TIME" true) (atom "ZONE" true) (define tz psql_expression7)) '('at_time_zone a tz))
@@ -416,6 +476,49 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (define t tabledef) '(t))
 	)))
 	(define tabledef (parser (or
+		/* PostgreSQL set-returning JSON functions remain logical relation
+		descriptors until physical lowering streams their row lists. */
+		(parser '((atom "JSON_TABLE" true) "(" (define doc psql_expression) "," (define row_path psql_expression)
+			(atom "COLUMNS" true) "(" (define definitions (+ (parser (or
+				(parser '((define name psql_identifier) (atom "FOR" true) (atom "ORDINALITY" true)) (list name "ordinality" nil))
+				(parser '((define name psql_identifier) (define typ psql_type) (atom "PATH" true) (define path psql_expression)) (list name "path" path typ)))) ",")) ")" ")"
+			(atom "AS" true) (define id psql_identifier))
+			(begin
+				(define columns (map definitions (lambda (definition) (car definition))))
+				(list id schema (list (quote table-function) "json_table"
+					(list doc row_path (list (quote quote) definitions)) columns) false nil)))
+		(parser '((or (atom "JSON_ARRAY_ELEMENTS" true) (atom "JSONB_ARRAY_ELEMENTS" true)) "(" (define doc psql_expression) ")")
+			(list "json_array_elements" schema (list (quote table-function) "array" (list doc) (list "value")) false nil))
+		(parser '((or (atom "JSON_ARRAY_ELEMENTS_TEXT" true) (atom "JSONB_ARRAY_ELEMENTS_TEXT" true)) "(" (define doc psql_expression) ")")
+			(list "json_array_elements_text" schema (list (quote table-function) "array_text" (list doc) (list "value")) false nil))
+		(parser '((or (atom "JSON_EACH" true) (atom "JSONB_EACH" true)) "(" (define doc psql_expression) ")")
+			(list "json_each" schema (list (quote table-function) "each" (list doc) (list "key" "value")) false nil))
+		(parser '((or (atom "JSON_EACH_TEXT" true) (atom "JSONB_EACH_TEXT" true)) "(" (define doc psql_expression) ")")
+			(list "json_each_text" schema (list (quote table-function) "each_text" (list doc) (list "key" "value")) false nil))
+		(parser '((atom "JSON_OBJECT_KEYS" true) "(" (define doc psql_expression) ")")
+			(list "json_object_keys" schema (list (quote table-function) "keys" (list doc) (list "json_object_keys")) false nil))
+		(parser '((atom "JSONB_OBJECT_KEYS" true) "(" (define doc psql_expression) ")")
+			(list "jsonb_object_keys" schema (list (quote table-function) "keys" (list doc) (list "jsonb_object_keys")) false nil))
+		(parser '((atom "JSONB_PATH_QUERY_TZ" true) "(" (define doc psql_expression) "," (define path psql_expression) ")")
+			(list "jsonb_path_query_tz" schema (list (quote table-function) "path" (list doc path) (list "jsonb_path_query_tz")) false nil))
+		(parser '((atom "JSONB_PATH_QUERY" true) "(" (define doc psql_expression) "," (define path psql_expression) ")")
+			(list "jsonb_path_query" schema (list (quote table-function) "path" (list doc path) (list "jsonb_path_query")) false nil))
+		(parser '((or (atom "JSON_POPULATE_RECORD" true) (atom "JSONB_POPULATE_RECORD" true)) "("
+			(atom "NULL" true) "::" (define record_type psql_identifier) "," (define doc psql_expression) ")")
+			(begin
+				(define columns (map (get_schema schema record_type) (lambda (column) (column "Field"))))
+				(list "json_populate_record" schema (list (quote table-function) "record" (list doc (list (quote quote) columns)) columns) false nil)))
+		(parser '((or (atom "JSON_POPULATE_RECORDSET" true) (atom "JSONB_POPULATE_RECORDSET" true)) "("
+			(atom "NULL" true) "::" (define record_type psql_identifier) "," (define doc psql_expression) ")")
+			(begin
+				(define columns (map (get_schema schema record_type) (lambda (column) (column "Field"))))
+				(list "json_populate_recordset" schema (list (quote table-function) "recordset" (list doc (list (quote quote) columns)) columns) false nil)))
+		(parser '((or (atom "JSON_TO_RECORD" true) (atom "JSONB_TO_RECORD" true)) "(" (define doc psql_expression) ")"
+			(atom "AS" true) (define id psql_identifier) "(" (define definitions (+ (parser '((define name psql_identifier) psql_type) name) ",")) ")")
+			(list id schema (list (quote table-function) "record" (list doc (list (quote quote) definitions)) definitions) false nil))
+		(parser '((or (atom "JSON_TO_RECORDSET" true) (atom "JSONB_TO_RECORDSET" true)) "(" (define doc psql_expression) ")"
+			(atom "AS" true) (define id psql_identifier) "(" (define definitions (+ (parser '((define name psql_identifier) psql_type) name) ",")) ")")
+			(list id schema (list (quote table-function) "recordset" (list doc (list (quote quote) definitions)) definitions) false nil))
 		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (atom "AS" true) (define id psql_identifier) "(" (define aliases (+ psql_identifier ",")) ")")
 			(list id schema (psql_apply_derived_column_aliases query aliases) false nil)) /* inner select with relation and column aliases */
 		(parser '((atom "(" true) (define query psql_select) (atom ")" true) (define id psql_identifier) "(" (define aliases (+ psql_identifier ",")) ")")

@@ -333,6 +333,11 @@ metric, and makes them visible to a recompilation of the same request. */
 (define orc_stage? (lambda (node) (equal? (logical_op node) (quote orc-stage))))
 (define window_stage? (lambda (node) (equal? (logical_op node) (quote window-stage))))
 (define stage_output_relation? (lambda (relation) (equal? (logical_op relation) (quote stage-output))))
+(define table_function_relation? (lambda (relation) (equal? (logical_op relation) (quote table-function))))
+(define table_function_columns (lambda (relation)
+	(match relation
+		((symbol table-function) _kind _args columns) columns
+		_ '())))
 (define stage_output_relation_id (lambda (relation)
 	(match relation
 		'(_ stage_id) stage_id
@@ -4514,7 +4519,9 @@ source alias is the stable identity consumed by all later planner phases. */
 		(define relation (normalize_query_ast (source_relation src)))
 		(if (string? relation)
 			(map (get_schema (source_schema src) relation) (lambda (column) (column "Field")))
-			(binding_field_titles (logical_relation_fields relation))))))
+			(if (table_function_relation? relation)
+				(table_function_columns relation)
+				(binding_field_titles (logical_relation_fields relation)))))))
 
 (define binding_column_name (lambda (columns col col_ignorecase)
 	(reduce (coalesceNil columns '()) (lambda (found candidate)
@@ -5072,7 +5079,7 @@ that actually owns the title consumes the reference. */
 			(define tail_rewrites (nth tail 1))
 			(define tail_wheres (nth tail 2))
 			(define tail_stages (nth tail 3))
-			(if (string? relation)
+			(if (or (string? relation) (table_function_relation? relation))
 				(begin
 					(list
 						(cons (untangle_flattened_base_source src ctx) tail_sources)

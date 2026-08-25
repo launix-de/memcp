@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -393,6 +394,368 @@ func jsonLess(a, b any) bool {
 		rightJSON, _ := appendOrdinaryJSON(nil, b, false, "")
 		return string(leftJSON) < string(rightJSON)
 	}
+}
+
+func jsonSchemaValidation(schemaArg, documentArg Scmer) (bool, *jsonschema.ValidationError) {
+	schemaValue, ok := jsonDocumentArgument(schemaArg)
+	if !ok {
+		return false, nil
+	}
+	if _, objectOK := schemaValue.(bson.D); !objectOK {
+		panic("JSON schema must be an object")
+	}
+	documentValue, ok := jsonDocumentArgument(documentArg)
+	if !ok {
+		return false, nil
+	}
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft4)
+	if err := compiler.AddResource("memcp://mysql-json-schema", bsonToJSONGo(schemaValue)); err != nil {
+		panic(err)
+	}
+	compiled, err := compiler.Compile("memcp://mysql-json-schema")
+	if err != nil {
+		panic(err)
+	}
+	if err := compiled.Validate(bsonToJSONGo(documentValue)); err != nil {
+		validationError, ok := err.(*jsonschema.ValidationError)
+		if !ok {
+			panic(err)
+		}
+		return false, validationError
+	}
+	return true, nil
+}
+
+func deepestJSONSchemaError(err *jsonschema.ValidationError) *jsonschema.ValidationError {
+	for len(err.Causes) > 0 {
+		err = err.Causes[0]
+	}
+	return err
+}
+
+func jsonPointer(parts []string) string {
+	escaped := make([]string, len(parts))
+	for i, part := range parts {
+		escaped[i] = strings.ReplaceAll(strings.ReplaceAll(part, "~", "~0"), "/", "~1")
+	}
+	if len(escaped) == 0 {
+		return "#"
+	}
+	return "#/" + strings.Join(escaped, "/")
+}
+
+func pgTextArray(value Scmer) []string {
+	if value.IsBSON() {
+		if array, ok := bsonDecoded(value).(bson.A); ok {
+			result := make([]string, len(array))
+			for i := range array {
+				result[i] = fmt.Sprint(array[i])
+			}
+			return result
+		}
+	}
+	text := strings.TrimSpace(value.String())
+	if len(text) < 2 || text[0] != '{' || text[len(text)-1] != '}' {
+		return []string{text}
+	}
+	text = text[1 : len(text)-1]
+	if text == "" {
+		return nil
+	}
+	parts := make([]string, 0, strings.Count(text, ",")+1)
+	var current strings.Builder
+	quoted, escaped := false, false
+	for _, r := range text {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == '"':
+			quoted = !quoted
+		case r == ',' && !quoted:
+			parts = append(parts, strings.TrimSpace(current.String()))
+			current.Reset()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	parts = append(parts, strings.TrimSpace(current.String()))
+	return parts
+}
+
+func pgPathLegs(value Scmer) []jsonPathLeg {
+	parts := pgTextArray(value)
+	legs := make([]jsonPathLeg, len(parts))
+	for i, part := range parts {
+		if index, err := strconv.Atoi(part); err == nil {
+			legs[i] = jsonPathLeg{kind: jsonPathIndex, index: index}
+		} else {
+			legs[i] = jsonPathLeg{kind: jsonPathKey, key: part}
+		}
+	}
+	return legs
+}
+
+func pgExtractPath(document Scmer, paths []Scmer, textResult bool) Scmer {
+	value, ok := jsonDocumentArgument(document)
+	if !ok {
+		return NewNil()
+	}
+	if len(paths) == 1 && !paths[0].IsInt() && !paths[0].IsFloat() && strings.HasPrefix(strings.TrimSpace(paths[0].String()), "{") {
+		parts := pgTextArray(paths[0])
+		paths = make([]Scmer, len(parts))
+		for i, part := range parts {
+			paths[i] = NewString(part)
+		}
+	}
+	legs := make([]jsonPathLeg, len(paths))
+	for i, path := range paths {
+		if path.IsInt() || path.IsFloat() {
+			legs[i] = jsonPathLeg{kind: jsonPathIndex, index: int(path.Int())}
+		} else if index, err := strconv.Atoi(path.String()); err == nil {
+			legs[i] = jsonPathLeg{kind: jsonPathIndex, index: index}
+		} else {
+			legs[i] = jsonPathLeg{kind: jsonPathKey, key: path.String()}
+		}
+	}
+	matches := jsonPathMatches([]any{value}, legs)
+	if len(matches) == 0 {
+		return NewNil()
+	}
+	if textResult {
+		return jsonScalarResult(matches[0], "CHAR")
+	}
+	return jsonResult(matches[0])
+}
+
+func pgStripJSONNulls(value any, arrays bool) any {
+	switch value := value.(type) {
+	case bson.D:
+		result := make(bson.D, 0, len(value))
+		for _, pair := range value {
+			if pair.Value != nil {
+				result = append(result, bson.E{Key: pair.Key, Value: pgStripJSONNulls(pair.Value, arrays)})
+			}
+		}
+		return result
+	case bson.A:
+		result := make(bson.A, 0, len(value))
+		for _, item := range value {
+			if item != nil || !arrays {
+				result = append(result, pgStripJSONNulls(item, arrays))
+			}
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+func pgJSONBConcat(left, right any) any {
+	if leftObject, ok := left.(bson.D); ok {
+		if rightObject, rightOK := right.(bson.D); rightOK {
+			result := append(bson.D(nil), leftObject...)
+			for _, pair := range rightObject {
+				result, _ = jsonObjectSet(result, pair.Key, pair.Value, false, false)
+			}
+			return result
+		}
+	}
+	leftArray, leftOK := left.(bson.A)
+	if !leftOK {
+		leftArray = bson.A{left}
+	}
+	rightArray, rightOK := right.(bson.A)
+	if !rightOK {
+		rightArray = bson.A{right}
+	}
+	return append(append(bson.A(nil), leftArray...), rightArray...)
+}
+
+func pgJSONBDelete(value any, operand Scmer) any {
+	if document, ok := value.(bson.D); ok {
+		keys := pgTextArray(operand)
+		remove := make(map[string]bool, len(keys))
+		for _, key := range keys {
+			remove[key] = true
+		}
+		result := make(bson.D, 0, len(document))
+		for _, pair := range document {
+			if !remove[pair.Key] {
+				result = append(result, pair)
+			}
+		}
+		return result
+	}
+	if array, ok := value.(bson.A); ok {
+		if operand.IsInt() || operand.IsFloat() {
+			index := int(operand.Int())
+			if index < 0 {
+				index += len(array)
+			}
+			if index < 0 || index >= len(array) {
+				return array
+			}
+			return append(append(bson.A(nil), array[:index]...), array[index+1:]...)
+		}
+		remove := make(map[string]bool)
+		for _, text := range pgTextArray(operand) {
+			remove[text] = true
+		}
+		result := make(bson.A, 0, len(array))
+		for _, item := range array {
+			text, ok := item.(string)
+			if !ok || !remove[text] {
+				result = append(result, item)
+			}
+		}
+		return result
+	}
+	panic("jsonb deletion requires an object or array")
+}
+
+func pgJSONPathVariable(vars any, name string) (any, bool) {
+	if document, ok := vars.(bson.D); ok {
+		return jsonObjectLookup(document, name)
+	}
+	return nil, false
+}
+
+func pgJSONPathLiteral(text string, vars any) (any, bool) {
+	text = strings.TrimSpace(strings.ReplaceAll(text, ".datetime()", ""))
+	if strings.HasPrefix(text, "$") && len(text) > 1 {
+		return pgJSONPathVariable(vars, text[1:])
+	}
+	if value, err := parseJSONText(text); err == nil {
+		return normalizeBSONInput(value), true
+	}
+	return strings.Trim(text, `"`), true
+}
+
+func pgJSONPathCompare(left any, operator string, right any) bool {
+	if operator == "==" {
+		return jsonEqual(left, right)
+	}
+	if operator == "!=" || operator == "<>" {
+		return !jsonEqual(left, right)
+	}
+	if jsonEqual(left, right) {
+		return operator == ">=" || operator == "<="
+	}
+	less := jsonLess(left, right)
+	switch operator {
+	case "<", "<=":
+		return less
+	case ">", ">=":
+		return !less
+	default:
+		return false
+	}
+}
+
+func pgJSONPathPredicate(value any, predicate string, vars any) bool {
+	predicate = strings.TrimSpace(predicate)
+	if strings.HasPrefix(predicate, "!") {
+		return !pgJSONPathPredicate(value, strings.TrimSpace(strings.TrimPrefix(predicate, "!")), vars)
+	}
+	if parts := strings.Split(predicate, "||"); len(parts) > 1 {
+		for _, part := range parts {
+			if pgJSONPathPredicate(value, part, vars) {
+				return true
+			}
+		}
+		return false
+	}
+	if parts := strings.Split(predicate, "&&"); len(parts) > 1 {
+		for _, part := range parts {
+			if !pgJSONPathPredicate(value, part, vars) {
+				return false
+			}
+		}
+		return true
+	}
+	if strings.HasPrefix(predicate, "(") && strings.HasSuffix(predicate, ")") {
+		predicate = strings.TrimSpace(predicate[1 : len(predicate)-1])
+	}
+	predicate = strings.ReplaceAll(predicate, "@.datetime()", "@")
+	comparison := regexp.MustCompile(`^@\s*(==|!=|<>|>=|<=|>|<)\s*(.+)$`).FindStringSubmatch(predicate)
+	if comparison == nil {
+		return false
+	}
+	right, ok := pgJSONPathLiteral(comparison[2], vars)
+	return ok && pgJSONPathCompare(value, comparison[1], right)
+}
+
+func pgJSONPathQuery(document any, path string, vars any) ([]any, bool) {
+	path = strings.TrimSpace(path)
+	path = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(path, "lax "), "strict "))
+	predicateResult := false
+	if strings.HasPrefix(path, "exists(") && strings.HasSuffix(path, ")") {
+		predicateResult = true
+		path = strings.TrimSpace(path[len("exists(") : len(path)-1])
+	}
+	if match := regexp.MustCompile(`^(.*?)\s*\?\s*\((.*)\)$`).FindStringSubmatch(path); match != nil {
+		legs, err := parseJSONPath(strings.TrimSpace(match[1]))
+		if err != nil {
+			panic(err)
+		}
+		candidates := jsonPathMatches([]any{document}, legs)
+		result := make([]any, 0, len(candidates))
+		for _, candidate := range candidates {
+			if pgJSONPathPredicate(candidate, match[2], vars) {
+				result = append(result, candidate)
+			}
+		}
+		return result, predicateResult
+	}
+	if match := regexp.MustCompile(`^(\$.*?)(==|!=|<>|>=|<=|>|<)\s*(.+)$`).FindStringSubmatch(path); match != nil {
+		legs, err := parseJSONPath(strings.TrimSpace(match[1]))
+		if err != nil {
+			panic(err)
+		}
+		right, ok := pgJSONPathLiteral(match[3], vars)
+		if !ok {
+			return nil, true
+		}
+		for _, candidate := range jsonPathMatches([]any{document}, legs) {
+			if pgJSONPathCompare(candidate, match[2], right) {
+				return []any{true}, true
+			}
+		}
+		return []any{false}, true
+	}
+	legs, err := parseJSONPath(path)
+	if err != nil {
+		panic(err)
+	}
+	return jsonPathMatches([]any{document}, legs), predicateResult
+}
+
+func pgJSONTableCell(value any, text bool) Scmer {
+	if value == nil {
+		return NewNil()
+	}
+	if text {
+		if scalar := jsonScalarResult(value, "CHAR"); !scalar.IsBSON() {
+			return scalar
+		}
+		encoded, err := appendOrdinaryJSON(nil, value, false, "")
+		jsonPanic(err)
+		return NewString(string(encoded))
+	}
+	return jsonResult(value)
+}
+
+func pgJSONRecordRow(document bson.D, columns []string) Scmer {
+	row := make([]Scmer, len(columns))
+	for i, column := range columns {
+		value, _ := jsonObjectLookup(document, column)
+		row[i] = pgJSONTableCell(value, false)
+	}
+	return NewSlice(row)
 }
 
 func jsonContainsValue(target, candidate any) bool {
@@ -1051,6 +1414,37 @@ func init_json_functions() {
 		}
 		return NewInt(0)
 	})
+	declareJSON("json_schema_valid", "validates a document against a MySQL Draft 4 JSON schema", func(args ...Scmer) Scmer {
+		requireJSONArgs("JSON_SCHEMA_VALID", args, 2)
+		if args[0].IsNil() || args[1].IsNil() {
+			return NewNil()
+		}
+		valid, _ := jsonSchemaValidation(args[0], args[1])
+		return NewBool(valid)
+	})
+	declareJSON("json_schema_validation_report", "reports MySQL Draft 4 JSON schema validation", func(args ...Scmer) Scmer {
+		requireJSONArgs("JSON_SCHEMA_VALIDATION_REPORT", args, 2)
+		if args[0].IsNil() || args[1].IsNil() {
+			return NewNil()
+		}
+		valid, validationError := jsonSchemaValidation(args[0], args[1])
+		if valid {
+			return jsonResult(bson.D{{Key: "valid", Value: true}})
+		}
+		leaf := deepestJSONSchemaError(validationError)
+		keywordPath := leaf.ErrorKind.KeywordPath()
+		keyword := ""
+		if len(keywordPath) > 0 {
+			keyword = keywordPath[len(keywordPath)-1]
+		}
+		return jsonResult(bson.D{
+			{Key: "valid", Value: false},
+			{Key: "reason", Value: leaf.Error()},
+			{Key: "schema-location", Value: jsonPointer(keywordPath[:max(0, len(keywordPath)-1)])},
+			{Key: "document-location", Value: jsonPointer(leaf.InstanceLocation)},
+			{Key: "schema-failed-keyword", Value: keyword},
+		})
+	})
 	modify := func(mode byte, name string, args ...Scmer) Scmer {
 		requireJSONArgs(name, args, 3)
 		if (len(args)-1)%2 != 0 {
@@ -1255,6 +1649,364 @@ func init_json_functions() {
 		}
 		return jsonScalarResult(matches[0], returning)
 	})
+	declareJSON("pg_to_json", "implements PostgreSQL to_json and to_jsonb", func(args ...Scmer) Scmer {
+		requireJSONArgs("to_json", args, 1)
+		return jsonResult(jsonConstructorArgument(args[0]))
+	})
+	declareJSON("pg_row_to_json", "implements PostgreSQL row_to_json", func(args ...Scmer) Scmer {
+		requireJSONArgs("row_to_json", args, 1)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok {
+			return NewNil()
+		}
+		array, ok := value.(bson.A)
+		if !ok {
+			return jsonResult(value)
+		}
+		document := make(bson.D, len(array))
+		for i := range array {
+			document[i] = bson.E{Key: fmt.Sprintf("f%d", i+1), Value: array[i]}
+		}
+		return jsonResult(document)
+	})
+	declareJSON("pg_json_build_array", "implements PostgreSQL JSON array builders", func(args ...Scmer) Scmer {
+		array := make(bson.A, len(args))
+		for i := range args {
+			array[i] = jsonConstructorArgument(args[i])
+		}
+		return jsonResult(array)
+	})
+	declareJSON("pg_json_array_absent", "implements SQL/JSON ARRAY ABSENT ON NULL", func(args ...Scmer) Scmer {
+		array := make(bson.A, 0, len(args))
+		for _, arg := range args {
+			if !arg.IsNil() {
+				array = append(array, jsonConstructorArgument(arg))
+			}
+		}
+		return jsonResult(array)
+	})
+	declareJSON("pg_json_build_object", "implements PostgreSQL JSON object builders", func(args ...Scmer) Scmer {
+		if len(args)%2 != 0 {
+			panic("json_build_object expects key/value pairs")
+		}
+		document := bson.D{}
+		for i := 0; i < len(args); i += 2 {
+			if args[i].IsNil() {
+				panic("JSON object key cannot be NULL")
+			}
+			document, _ = jsonObjectSet(document, args[i].String(), jsonConstructorArgument(args[i+1]), false, false)
+		}
+		return jsonResult(document)
+	})
+	declareJSON("pg_json_object", "implements PostgreSQL json_object and jsonb_object array forms", func(args ...Scmer) Scmer {
+		requireJSONArgs("json_object", args, 1)
+		keys := pgTextArray(args[0])
+		values := []string(nil)
+		if len(args) > 1 {
+			values = pgTextArray(args[1])
+		} else {
+			if len(keys)%2 != 0 {
+				panic("json_object array must contain an even number of values")
+			}
+			pairs := keys
+			keys = make([]string, len(pairs)/2)
+			values = make([]string, len(pairs)/2)
+			for i := range keys {
+				keys[i], values[i] = pairs[i*2], pairs[i*2+1]
+			}
+		}
+		if len(keys) != len(values) {
+			panic("json_object key and value arrays have different lengths")
+		}
+		document := bson.D{}
+		for i := range keys {
+			document, _ = jsonObjectSet(document, keys[i], values[i], false, false)
+		}
+		return jsonResult(document)
+	})
+	declareJSON("pg_json_serialize", "implements PostgreSQL json_serialize", func(args ...Scmer) Scmer {
+		requireJSONArgs("json_serialize", args, 1)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok {
+			return NewNil()
+		}
+		encoded, err := appendOrdinaryJSON(nil, value, false, "")
+		jsonPanic(err)
+		return NewString(string(encoded))
+	})
+	declareJSON("pg_json_array_length", "implements PostgreSQL json_array_length", func(args ...Scmer) Scmer {
+		requireJSONArgs("json_array_length", args, 1)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok {
+			return NewNil()
+		}
+		array, ok := value.(bson.A)
+		if !ok {
+			panic("json_array_length requires an array")
+		}
+		return NewInt(int64(len(array)))
+	})
+	declareJSON("pg_json_extract_path", "implements PostgreSQL json_extract_path", func(args ...Scmer) Scmer {
+		requireJSONArgs("json_extract_path", args, 2)
+		return pgExtractPath(args[0], args[1:], false)
+	})
+	declareJSON("pg_json_extract_path_text", "implements PostgreSQL json_extract_path_text", func(args ...Scmer) Scmer {
+		requireJSONArgs("json_extract_path_text", args, 2)
+		return pgExtractPath(args[0], args[1:], true)
+	})
+	declareJSON("pg_jsonb_set", "implements PostgreSQL jsonb_set", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb_set", args, 3)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok {
+			return NewNil()
+		}
+		create := len(args) < 4 || args[3].Bool()
+		mode := byte('s')
+		if !create {
+			mode = 'r'
+		}
+		replacement, replacementOK := jsonDocumentArgument(args[2])
+		if !replacementOK {
+			return NewNil()
+		}
+		value, _ = jsonModify(value, pgPathLegs(args[1]), replacement, mode)
+		return jsonResult(value)
+	})
+	declareJSON("pg_jsonb_set_lax", "implements PostgreSQL jsonb_set_lax", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb_set_lax", args, 3)
+		if !args[2].IsNil() {
+			return Globalenv.Vars[Symbol("pg_jsonb_set")].Func()(args...)
+		}
+		treatment := "use_json_null"
+		if len(args) > 4 {
+			treatment = strings.ToLower(args[4].String())
+		}
+		switch treatment {
+		case "raise_exception":
+			panic("jsonb_set_lax new value is SQL NULL")
+		case "return_target":
+			return args[0]
+		case "delete_key":
+			value, ok := jsonDocumentArgument(args[0])
+			if !ok {
+				return NewNil()
+			}
+			value, _ = jsonRemoveValue(value, pgPathLegs(args[1]))
+			return jsonResult(value)
+		case "use_json_null":
+			replacement, _ := bsonFromGo(nil)
+			forward := append([]Scmer(nil), args...)
+			forward[2] = replacement
+			return Globalenv.Vars[Symbol("pg_jsonb_set")].Func()(forward...)
+		default:
+			panic("invalid jsonb_set_lax null_value_treatment")
+		}
+	})
+	declareJSON("pg_jsonb_insert", "implements PostgreSQL jsonb_insert", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb_insert", args, 3)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok {
+			return NewNil()
+		}
+		replacement, replacementOK := jsonDocumentArgument(args[2])
+		if !replacementOK {
+			return NewNil()
+		}
+		legs := pgPathLegs(args[1])
+		if len(legs) == 0 {
+			return args[0]
+		}
+		last, parentLegs := legs[len(legs)-1], legs[:len(legs)-1]
+		parents := jsonPathMatches([]any{value}, parentLegs)
+		if len(parents) == 0 {
+			return args[0]
+		}
+		if last.kind == jsonPathIndex {
+			array, arrayOK := parents[0].(bson.A)
+			if !arrayOK {
+				return args[0]
+			}
+			index := last.index
+			if index < 0 {
+				index += len(array)
+			}
+			if len(args) > 3 && args[3].Bool() {
+				index++
+			}
+			if index < 0 {
+				index = 0
+			}
+			if index > len(array) {
+				index = len(array)
+			}
+			result := append(append(append(bson.A(nil), array[:index]...), replacement), array[index:]...)
+			value, _ = jsonModify(value, parentLegs, result, 's')
+		} else {
+			value, _ = jsonModify(value, legs, replacement, 'i')
+		}
+		return jsonResult(value)
+	})
+	declareJSON("pg_json_strip_nulls", "implements PostgreSQL json_strip_nulls", func(args ...Scmer) Scmer {
+		requireJSONArgs("json_strip_nulls", args, 1)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok {
+			return NewNil()
+		}
+		return jsonResult(pgStripJSONNulls(value, len(args) > 1 && args[1].Bool()))
+	})
+	declareJSON("pg_json_typeof", "implements PostgreSQL json_typeof", func(args ...Scmer) Scmer {
+		requireJSONArgs("json_typeof", args, 1)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok {
+			return NewNil()
+		}
+		typeName := jsonTypeName(value)
+		if typeName == "INTEGER" || typeName == "DOUBLE" || typeName == "DECIMAL" {
+			typeName = "NUMBER"
+		}
+		return NewString(strings.ToLower(typeName))
+	})
+	declareJSON("pg_jsonb_populate_record_valid", "validates PostgreSQL jsonb_populate_record input shape", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb_populate_record_valid", args, 2)
+		value, ok := jsonDocumentArgument(args[1])
+		if !ok {
+			return NewNil()
+		}
+		_, objectOK := value.(bson.D)
+		return NewBool(objectOK)
+	})
+	declareJSON("pg_jsonb_concat", "implements PostgreSQL jsonb concatenation", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb concatenation", args, 2)
+		left, leftOK := jsonDocumentArgument(args[0])
+		right, rightOK := jsonDocumentArgument(args[1])
+		if !leftOK || !rightOK {
+			return NewNil()
+		}
+		return jsonResult(pgJSONBConcat(left, right))
+	})
+	declareJSON("pg_jsonb_delete", "implements PostgreSQL jsonb deletion", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb deletion", args, 2)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok || args[1].IsNil() {
+			return NewNil()
+		}
+		return jsonResult(pgJSONBDelete(value, args[1]))
+	})
+	declareJSON("pg_jsonb_delete_path", "implements PostgreSQL jsonb path deletion", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb path deletion", args, 2)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok || args[1].IsNil() {
+			return NewNil()
+		}
+		value, _ = jsonRemoveValue(value, pgPathLegs(args[1]))
+		return jsonResult(value)
+	})
+	declareJSON("pg_subtract", "dispatches PostgreSQL numeric and jsonb subtraction", func(args ...Scmer) Scmer {
+		requireJSONArgs("subtraction", args, 2)
+		if args[0].IsBSON() {
+			value, _ := jsonDocumentArgument(args[0])
+			return jsonResult(pgJSONBDelete(value, args[1]))
+		}
+		if args[0].IsInt() && args[1].IsInt() {
+			return NewInt(args[0].Int() - args[1].Int())
+		}
+		return NewFloat(args[0].Float() - args[1].Float())
+	})
+	declareJSON("pg_jsonb_exists", "implements PostgreSQL jsonb top-level existence", func(args ...Scmer) Scmer {
+		requireJSONArgs("jsonb existence", args, 2)
+		value, ok := jsonDocumentArgument(args[0])
+		if !ok || args[1].IsNil() {
+			return NewNil()
+		}
+		keys := pgTextArray(args[1])
+		mode := "one"
+		if len(args) > 2 {
+			mode = args[2].String()
+		}
+		matches := 0
+		for _, key := range keys {
+			found := false
+			if object, objectOK := value.(bson.D); objectOK {
+				_, found = jsonObjectLookup(object, key)
+			} else if array, arrayOK := value.(bson.A); arrayOK {
+				for _, item := range array {
+					if text, textOK := item.(string); textOK && text == key {
+						found = true
+						break
+					}
+				}
+			}
+			if found {
+				matches++
+			}
+		}
+		if mode == "all" {
+			return NewBool(matches == len(keys))
+		}
+		return NewBool(matches > 0)
+	})
+	pathQuery := func(name string, args []Scmer) ([]any, bool, bool) {
+		requireJSONArgs(name, args, 2)
+		document, ok := jsonDocumentArgument(args[0])
+		if !ok || args[1].IsNil() {
+			return nil, false, false
+		}
+		var vars any = bson.D{}
+		if len(args) > 2 && !args[2].IsNil() {
+			vars, _ = jsonDocumentArgument(args[2])
+		}
+		values, predicate := pgJSONPathQuery(document, args[1].String(), vars)
+		return values, predicate, true
+	}
+	declareJSON("pg_jsonb_path_exists", "implements PostgreSQL jsonb_path_exists", func(args ...Scmer) Scmer {
+		values, _, ok := pathQuery("jsonb_path_exists", args)
+		if !ok {
+			return NewNil()
+		}
+		return NewBool(len(values) > 0)
+	})
+	declareJSON("pg_jsonb_path_match", "implements PostgreSQL jsonb_path_match", func(args ...Scmer) Scmer {
+		values, predicate, ok := pathQuery("jsonb_path_match", args)
+		if !ok {
+			return NewNil()
+		}
+		if predicate {
+			return NewBool(len(values) > 0)
+		}
+		if len(values) == 1 {
+			if result, resultOK := values[0].(bool); resultOK {
+				return NewBool(result)
+			}
+		}
+		return NewNil()
+	})
+	declareJSON("pg_jsonb_path_query_array", "implements PostgreSQL jsonb_path_query_array", func(args ...Scmer) Scmer {
+		values, _, ok := pathQuery("jsonb_path_query_array", args)
+		if !ok {
+			return NewNil()
+		}
+		return jsonResult(bson.A(values))
+	})
+	declareJSON("pg_jsonb_path_query_first", "implements PostgreSQL jsonb_path_query_first", func(args ...Scmer) Scmer {
+		values, _, ok := pathQuery("jsonb_path_query_first", args)
+		if !ok || len(values) == 0 {
+			return NewNil()
+		}
+		return jsonResult(values[0])
+	})
+	declareJSON("pg_json_value", "implements PostgreSQL SQL/JSON JSON_VALUE", func(args ...Scmer) Scmer {
+		values, _, ok := pathQuery("JSON_VALUE", args)
+		if !ok || len(values) == 0 {
+			if len(args) > 3 {
+				return args[3]
+			}
+			return NewNil()
+		}
+		if len(values) != 1 {
+			panic("JSON_VALUE path returned more than one item")
+		}
+		return jsonScalarResult(values[0], "CHAR")
+	})
 	declareJSON("json_get", "implements PostgreSQL JSON object and array extraction", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON extraction operator", args, 2)
 		document, ok := jsonDocumentArgument(args[0])
@@ -1286,6 +2038,9 @@ func init_json_functions() {
 	})
 	declareJSON("json_arrayagg_entry", "wraps one JSON_ARRAYAGG input value", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_ARRAYAGG", args, 1)
+		if len(args) > 1 && args[1].Bool() && args[0].IsNil() {
+			return jsonAggregateResult(bson.A{}, bsonFlagArrayAgg)
+		}
 		return jsonAggregateResult(bson.A{jsonConstructorArgument(args[0])}, bsonFlagArrayAgg)
 	})
 	declareJSON("json_arrayagg_reduce", "JSON_ARRAYAGG reducer", func(args ...Scmer) Scmer {
@@ -1322,6 +2077,9 @@ func init_json_functions() {
 		requireJSONArgs("JSON_OBJECTAGG", args, 2)
 		if args[0].IsNil() {
 			panic("JSON_OBJECTAGG key cannot be NULL")
+		}
+		if len(args) > 2 && args[2].Bool() && args[1].IsNil() {
+			return jsonAggregateResult(bson.D{}, bsonFlagObjectAgg)
 		}
 		return jsonResult(bson.A{args[0].String(), jsonConstructorArgument(args[1])})
 	})
@@ -1362,5 +2120,107 @@ func init_json_functions() {
 		}
 		document, _ = jsonObjectSet(document, fmt.Sprint(entry[0]), entry[1], false, false)
 		return jsonAggregateResult(document, bsonFlagObjectAgg)
+	})
+	declareJSON("pg_json_table_rows", "materializes a PostgreSQL JSON table function as rows", func(args ...Scmer) Scmer {
+		requireJSONArgs("JSON table function", args, 2)
+		kind := args[0].String()
+		document, ok := jsonDocumentArgument(args[1])
+		if !ok {
+			return NewSlice(nil)
+		}
+		rows := make([]Scmer, 0)
+		singleColumnRows := func(values []any, text bool) {
+			for _, value := range values {
+				rows = append(rows, NewSlice([]Scmer{pgJSONTableCell(value, text)}))
+			}
+		}
+		switch kind {
+		case "array", "array_text":
+			array, arrayOK := document.(bson.A)
+			if !arrayOK {
+				panic("json_array_elements requires an array")
+			}
+			singleColumnRows(array, kind == "array_text")
+		case "each", "each_text":
+			object, objectOK := document.(bson.D)
+			if !objectOK {
+				panic("json_each requires an object")
+			}
+			for _, pair := range object {
+				rows = append(rows, NewSlice([]Scmer{NewString(pair.Key), pgJSONTableCell(pair.Value, kind == "each_text")}))
+			}
+		case "keys":
+			object, objectOK := document.(bson.D)
+			if !objectOK {
+				panic("json_object_keys requires an object")
+			}
+			for _, pair := range object {
+				rows = append(rows, NewSlice([]Scmer{NewString(pair.Key)}))
+			}
+		case "path":
+			if len(args) < 3 {
+				panic("jsonb_path_query requires a path")
+			}
+			values, _ := pgJSONPathQuery(document, args[2].String(), bson.D{})
+			singleColumnRows(values, false)
+		case "record", "recordset":
+			if len(args) < 3 || !args[2].IsSlice() {
+				panic("record JSON table function requires a column list")
+			}
+			columnValues := args[2].Slice()
+			columns := make([]string, len(columnValues))
+			for i := range columnValues {
+				columns[i] = columnValues[i].String()
+			}
+			if kind == "record" {
+				object, objectOK := document.(bson.D)
+				if !objectOK {
+					panic("JSON record input requires an object")
+				}
+				rows = append(rows, pgJSONRecordRow(object, columns))
+			} else {
+				array, arrayOK := document.(bson.A)
+				if !arrayOK {
+					panic("JSON recordset input requires an array")
+				}
+				for _, value := range array {
+					object, objectOK := value.(bson.D)
+					if !objectOK {
+						panic("JSON recordset element requires an object")
+					}
+					rows = append(rows, pgJSONRecordRow(object, columns))
+				}
+			}
+		case "json_table":
+			if len(args) < 4 || !args[3].IsSlice() {
+				panic("JSON_TABLE requires a row path and column definitions")
+			}
+			values, _ := pgJSONPathQuery(document, args[2].String(), bson.D{})
+			definitions := args[3].Slice()
+			for rowIndex, value := range values {
+				row := make([]Scmer, len(definitions))
+				for columnIndex, definitionValue := range definitions {
+					definition := definitionValue.Slice()
+					if definition[1].String() == "ordinality" {
+						row[columnIndex] = NewInt(int64(rowIndex + 1))
+						continue
+					}
+					matches, _ := pgJSONPathQuery(value, definition[2].String(), bson.D{})
+					if len(matches) == 0 {
+						row[columnIndex] = NewNil()
+					} else {
+						returning := "CHAR"
+						if len(definition) > 3 {
+							returning = definition[3].String()
+						}
+						row[columnIndex] = jsonScalarResult(matches[0], returning)
+					}
+				}
+				rows = append(rows, NewSlice(row))
+			}
+		default:
+			panic("unknown JSON table function: " + kind)
+		}
+		return NewSlice(rows)
 	})
 }

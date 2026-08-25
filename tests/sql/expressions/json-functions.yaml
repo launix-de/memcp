@@ -409,13 +409,31 @@ test_cases:
     sql: "SELECT JSON_REMOVE('{\"a\":1}', '$') AS value"
     expect: {error: true}
 
-  - name: "JSON_TABLE is explicitly unsupported until relational lowering exists"
+  - name: "JSON_TABLE projects array elements as rows"
     sql: "SELECT * FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS (value INT PATH '$')) AS jt"
-    expect: {error: true}
+    expect:
+      rows: 2
+      data:
+        - {value: 1}
+        - {value: 2}
 
-  - name: "JSON schema validation is explicitly unsupported in PR1"
-    sql: "SELECT JSON_SCHEMA_VALID('{\"type\":\"integer\"}', '1') AS value"
-    expect: {error: true}
+  - name: "JSON_SCHEMA_VALID accepts and rejects Draft 4 documents"
+    sql: |
+      SELECT JSON_SCHEMA_VALID('{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}', '{"name":"Ada"}') AS valid_doc,
+             JSON_SCHEMA_VALID('{"type":"object","required":["name"]}', '{}') AS invalid_doc
+    expect:
+      rows: 1
+      data:
+        - {valid_doc: true, invalid_doc: false}
+
+  - name: "JSON_SCHEMA_VALIDATION_REPORT identifies the failed keyword"
+    sql: |
+      SELECT JSON_EXTRACT(JSON_SCHEMA_VALIDATION_REPORT('{"type":"number","maximum":10}', '11'), '$.valid') AS valid,
+             JSON_UNQUOTE(JSON_EXTRACT(JSON_SCHEMA_VALIDATION_REPORT('{"type":"number","maximum":10}', '11'), '$."schema-failed-keyword"')) AS failed_keyword
+    expect:
+      rows: 1
+      data:
+        - {valid: false, failed_keyword: "maximum"}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS json_documents"

@@ -1867,11 +1867,48 @@ get_column refs to the source) are excluded automatically too. */
 		'()
 		(qb_facts block))))
 
+/* A table-function relation is a logical source descriptor. Its physical
+lowering streams the produced row lists directly through the ordinary bound
+column expressions, without creating a temporary storage table. */
+(define table_function_column_index (lambda (columns name index)
+	(match columns
+		(cons column rest) (if (equal?? column name) index
+			(table_function_column_index rest name (+ index 1)))
+		_ (neumann_fail "build_queryplan" (concat "unknown table-function column: " name)))))
+
+(define lower_table_function_expr (lambda (src columns row expr)
+	(match expr
+		((symbol get_column) tblvar _ col _) (if (or (nil? tblvar) (equal?? tblvar (source_alias src)))
+			(list (quote nth) row (table_function_column_index columns col 0)) expr)
+		((quote get_column) tblvar _ col _) (lower_table_function_expr src columns row
+			(list (quote get_column) tblvar false col false))
+		(cons head tail) (cons head (map tail (lambda (item) (lower_table_function_expr src columns row item))))
+		_ expr)))
+
+(define lower_table_function_query_block (lambda (block src)
+	(match (source_relation src)
+		((symbol table-function) kind args columns) (begin
+			(if (or (not (empty_list? (qb_group block)))
+				(or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
+				(neumann_fail "build_queryplan" "aggregate over table function is not implemented") true)
+			(define fields (expand_query_block_fields (list src) (qb_fields block)))
+			(define row (quote __table_function_row))
+			(define condition (lower_table_function_expr src columns row
+				(combine_where (qb_where block) (source_join_expr src))))
+			(define emit (list (quote resultrow) (cons (quote list)
+				(map_assoc fields (lambda (_title expr) (lower_table_function_expr src columns row expr))))))
+			(list (quote map)
+				(cons (quote pg_json_table_rows) (cons kind args))
+				(list (quote lambda) (list row) (list (quote if) condition emit nil))))
+		_ (neumann_fail "build_queryplan" "invalid table-function relation"))))
+
 (define lower_query_block_core (lambda (block)
 	(if (empty_list? (qb_sources block))
 		(lower_zero_source_query_block block)
 		(if (single_source? (qb_sources block))
-			(lower_single_source_query_block block)
+			(if (table_function_relation? (source_relation (car (qb_sources block))))
+				(lower_table_function_query_block block (car (qb_sources block)))
+				(lower_single_source_query_block block))
 			(lower_multi_source_query_block block)))))
 
 (define row_number_stage_consumed_by_source? (lambda (stage src)
@@ -2275,7 +2312,9 @@ probes remain recipes and still execute after root braking. */
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
 
 (define table_column_names (lambda (schema tbl)
-	(map (get_schema schema tbl) (lambda (col) (col "Field")))))
+	(if (table_function_relation? tbl)
+		(table_function_columns tbl)
+		(map (get_schema schema tbl) (lambda (col) (col "Field"))))))
 
 (define star_expr_alias (lambda (expr)
 	(match expr
