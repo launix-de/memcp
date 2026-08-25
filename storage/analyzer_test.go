@@ -134,6 +134,119 @@ func TestBoundaryRange(t *testing.T) {
 	}
 }
 
+func TestComputedBoundaryUsesDeclarationMetadataWithQueryBinding(t *testing.T) {
+	jsonValue := scm.Globalenv.Vars[scm.Symbol("json_value")]
+	if declaration := scm.DeclarationForValue(jsonValue); declaration == nil || !declaration.IsFoldable() {
+		t.Fatal("json_value must expose Const metadata through DeclarationForValue")
+	}
+	path := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("session"),
+		scm.NewString("v1"),
+	})
+	extraction := scm.NewSlice([]scm.Scmer{
+		jsonValue,
+		scm.NewSymbol("payload"),
+		path,
+		scm.NewString("UNSIGNED"),
+	})
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		extraction,
+		scm.NewInt(17),
+	})
+	condition := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("payload")}),
+		Body:   body,
+		En:     &scm.Globalenv,
+	})
+
+	bounds := extractBoundaries([]string{"payload"}, condition)
+	if len(bounds) != 1 {
+		t.Fatalf("computed JSON condition produced %d boundaries, want 1", len(bounds))
+	}
+	bound := bounds[0]
+	if bound.matcher != EqualMatcher || bound.mapFn.IsNil() {
+		t.Fatalf("computed boundary = %#v, want an equality map function", bound)
+	}
+	if len(bound.mapCols) != 1 || bound.mapCols[0] != "payload" {
+		t.Fatalf("computed map columns = %v, want [payload]", bound.mapCols)
+	}
+	keys := extractSessionKeys(bound.mapFn)
+	if len(keys) != 1 || keys[0] != "v1" {
+		t.Fatalf("computed map function session keys = %v, want [v1]", keys)
+	}
+}
+
+func TestComputedBoundaryRejectsNonConstDeclaredCall(t *testing.T) {
+	params := []scm.Scmer{scm.NewSymbol("payload")}
+	expression := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("concat"),
+		scm.NewSymbol("payload"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("uuid")}),
+	})
+	if isRawDataset(params, expression) {
+		t.Fatal("row expression containing non-Const uuid call must not be indexable")
+	}
+}
+
+func TestParameterizedBooleanFallbackDoesNotCreateVariantIndex(t *testing.T) {
+	params := scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")})
+	values := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("v1")}),
+	})
+	body := scm.NewSlice([]scm.Scmer{
+		scm.Globalenv.Vars[scm.Symbol("sql_in")],
+		values,
+		scm.NewSymbol("id"),
+	})
+	condition := scm.NewProcStruct(scm.Proc{Params: params, Body: body, En: &scm.Globalenv})
+
+	if bounds := extractBoundaries([]string{"id"}, condition); len(bounds) != 0 {
+		t.Fatalf("parameterized boolean fallback produced computed bounds: %#v", bounds)
+	}
+}
+
+func TestSessionIndexSavingsAreTrackedPerVariant(t *testing.T) {
+	index := &StorageIndex{sessionKeys: []string{"v1"}}
+	first := &storageIndexState{}
+	second := &storageIndexState{}
+
+	if got := index.addSavings(first, 1.25); got != 1.25 {
+		t.Fatalf("first variant savings = %v, want 1.25", got)
+	}
+	if got := index.addSavings(second, 0.5); got != 0.5 {
+		t.Fatalf("second variant inherited savings: got %v, want 0.5", got)
+	}
+	if got := index.addSavings(first, 0.75); got != 2.0 {
+		t.Fatalf("first variant accumulated savings = %v, want 2", got)
+	}
+	if index.Savings != 0 {
+		t.Fatalf("session-variant usage changed base savings to %v", index.Savings)
+	}
+}
+
+func TestBindSessionReadsSpecializesComputedProcedure(t *testing.T) {
+	read := scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("v1")})
+	proc := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("value")}),
+		Body:   scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewSymbol("value"), read}),
+		En:     &scm.Globalenv,
+	})
+
+	bound := bindSessionReads(proc, nil)
+	if !bound.IsProc() {
+		t.Fatalf("specialized value is %T, want procedure", bound.Any())
+	}
+	body := bound.Proc().Body.Slice()
+	if len(body) != 3 || !body[2].IsNil() {
+		t.Fatalf("specialized body = %s, want nil query binding", bound.Proc().Body.String())
+	}
+	if !proc.Proc().Body.Slice()[2].IsSlice() {
+		t.Fatal("specialization mutated the reusable source procedure")
+	}
+}
+
 func TestScanBufferSizeUsesSmallBufferOnlyForBoundUniqueKey(t *testing.T) {
 	tbl := &table{Unique: []uniqueKey{{Id: "PRIMARY", Cols: []string{"tenant_id", "id"}}}}
 	point := func(col string, value scm.Scmer) columnboundaries {

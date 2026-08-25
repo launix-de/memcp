@@ -686,7 +686,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		} else if v[0].SymbolEquals("or") {
 			// If the whole OR is a pure row-column expression, index as computed bool col.
 			// This avoids range-merging that would span too wide.
-			if len(params) > 0 && isRawDataset(params, node) {
+			if len(params) > 0 && !hasSessionRead(node) && isRawDataset(params, node) {
 				canon := canonicalColName(node, params, conditionCols)
 				mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 				if !mf.IsNil() && mc != nil {
@@ -718,7 +718,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		// Fallback: if the whole expression is a pure function of row columns
 		// (no comparison operator matched above), treat it as a computed bool column.
 		// Boundary {true, true} means: only scan rows where the expression is true.
-		if len(params) > 0 && isRawDataset(params, node) {
+		if len(params) > 0 && !hasSessionRead(node) && isRawDataset(params, node) {
 			canon := canonicalColName(node, params, conditionCols)
 			mc, mf := buildComputedFn(node, p.Params, p.En, conditionCols)
 			if !mf.IsNil() && mc != nil {

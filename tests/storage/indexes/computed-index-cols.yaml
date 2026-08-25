@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 # Computed/expression columns used in ORDER BY, WHERE, GROUP BY.
 # Covers MySQL-style YEAR()/MONTH()/DAY() shorthand functions and their
 # use as sort/filter keys (the building blocks for expression-index optimisation).
@@ -8,6 +23,7 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS ci_events"
+  - sql: "DROP TABLE IF EXISTS ci_json_docs"
   - sql: |
       CREATE TABLE ci_events (
         id   INT,
@@ -24,9 +40,34 @@ setup:
         (6, 'Zeta',    '2024-06-30 23:59:00'),
         (7, 'Eta',     '2024-12-31 00:00:00'),
         (8, 'Theta',   NULL)
+  - sql: |
+      CREATE TABLE ci_json_docs (
+        id INT PRIMARY KEY,
+        payload JSON NOT NULL
+      ) ENGINE=memory
+  - sql: |
+      INSERT INTO ci_json_docs VALUES
+        (0,  '{"tenant":0,"rank":0}'),
+        (1,  '{"tenant":1,"rank":1}'),
+        (2,  '{"tenant":2,"rank":2}'),
+        (3,  '{"tenant":3,"rank":3}'),
+        (4,  '{"tenant":0,"rank":4}'),
+        (5,  '{"tenant":1,"rank":5}'),
+        (6,  '{"tenant":2,"rank":6}'),
+        (7,  '{"tenant":3,"rank":7}'),
+        (8,  '{"tenant":0,"rank":8}'),
+        (9,  '{"tenant":1,"rank":9}'),
+        (10, '{"tenant":2,"rank":10}'),
+        (11, '{"tenant":3,"rank":11}'),
+        (12, '{"tenant":0,"rank":12}'),
+        (13, '{"tenant":1,"rank":13}'),
+        (14, '{"tenant":2,"rank":14}'),
+        (15, '{"tenant":3,"rank":15}')
+  - scm: "(rebuild)"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ci_events"
+  - sql: "DROP TABLE IF EXISTS ci_json_docs"
 
 test_cases:
 
@@ -312,3 +353,101 @@ test_cases:
     sql: "CREATE INDEX idx_year ON ci_events (YEAR(dt))"
     expect:
       error: true
+
+  # === Adaptive computed indexes over query-bound JSON paths ===
+
+  - name: "Warm computed JSON_VALUE equality index"
+    setup:
+      - scm: '(settings "ScanDebugging" true)'
+      - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'ci_json_docs'"
+      - sql: "SELECT id FROM ci_json_docs WHERE JSON_VALUE(payload, '$.tenant' RETURNING UNSIGNED) = 3"
+      - sql: "SELECT id FROM ci_json_docs WHERE JSON_VALUE(payload, '$.tenant' RETURNING UNSIGNED) = 3"
+      - sql: "SELECT id FROM ci_json_docs WHERE JSON_VALUE(payload, '$.tenant' RETURNING UNSIGNED) = 3"
+      - sql: "SELECT id FROM ci_json_docs WHERE JSON_VALUE(payload, '$.tenant' RETURNING UNSIGNED) = 3"
+      - scm: '(sleep 0.1)'
+    sql: |
+      SELECT id
+      FROM ci_json_docs
+      WHERE JSON_VALUE(payload, '$.tenant' RETURNING UNSIGNED) = 3
+    expect:
+      rows: 4
+      data:
+        - id: 3
+        - id: 7
+        - id: 11
+        - id: 15
+
+  - name: "Computed JSON_VALUE scan uses selective candidates"
+    setup:
+      - scm: '(sleep 0.1)'
+    sql: |
+      SELECT inputCount, candidateCount, outputCount,
+        CASE WHEN candidateCount < inputCount AND index_cols LIKE '.%json_value%' THEN 'ok' ELSE 'FAIL' END AS result
+      FROM system_statistic.scans
+      WHERE schema = 'memcp-tests' AND `table` = 'ci_json_docs'
+      ORDER BY timestamp DESC
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - inputCount: 16
+          candidateCount: 4
+          outputCount: 4
+          result: ok
+
+  - name: "Computed JSON index separates query-binding variants"
+    sql: |
+      SELECT id
+      FROM ci_json_docs
+      WHERE JSON_VALUE(payload, '$.rank' RETURNING UNSIGNED) = 3
+      ORDER BY id
+    expect:
+      rows: 1
+      data:
+        - id: 3
+
+  - repeat: 4
+    tests:
+      - name: "Warm PostgreSQL computed JSON extraction index"
+        syntax: postgresql
+        sql: "SELECT id FROM ci_json_docs WHERE (payload->>'tenant')::integer = 2"
+        expect:
+          rows: 4
+          data:
+            - id: 2
+            - id: 6
+            - id: 10
+            - id: 14
+
+  - name: "Probe warmed PostgreSQL computed JSON extraction index"
+    syntax: postgresql
+    setup:
+      - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'ci_json_docs'"
+    sql: "SELECT id FROM ci_json_docs WHERE (payload->>'tenant')::integer = 2"
+    expect:
+      rows: 4
+      data:
+        - id: 2
+        - id: 6
+        - id: 10
+        - id: 14
+
+  - name: "PostgreSQL computed JSON scan uses selective candidates"
+    setup:
+      - scm: '(sleep 0.1)'
+    sql: |
+      SELECT inputCount, candidateCount, outputCount,
+        CASE WHEN candidateCount < inputCount THEN 'ok' ELSE 'FAIL' END AS result
+      FROM system_statistic.scans
+      WHERE schema = 'memcp-tests' AND `table` = 'ci_json_docs'
+      ORDER BY timestamp DESC
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - inputCount: 16
+          candidateCount: 4
+          outputCount: 4
+          result: ok
+    cleanup:
+      - scm: '(settings "ScanDebugging" false)'

@@ -38,6 +38,7 @@ type storageIndexState struct {
 	mainIndexes      StorageInt
 	deltaBtree       *btree.BTreeG[indexPair]
 	active           bool
+	savings          float64
 	minVals          []scm.Scmer
 	maxVals          []scm.Scmer
 	indexHooks       []IndexHook
@@ -200,7 +201,11 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 					sessionKeys = mergeSessionKeys(sessionKeys, proxy.sessionKeys)
 				}
 			}
-			fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[i])
+			mapFn := s.ColMapFn[i]
+			if hasSessionRead(mapFn) {
+				mapFn = bindSessionReads(mapFn, tx)
+			}
+			fn := scm.OptimizeProcToSerialFunction(mapFn)
 			getters[i] = colGetter{mapCols: mapColReaders, mapFn: fn}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
@@ -259,6 +264,22 @@ func (idx *StorageIndex) stateForTx(tx *TxContext, create bool) *storageIndexSta
 		idx.variants[key] = state
 	}
 	return state
+}
+
+// addSavings records reuse against the data variant that would actually be
+// built. A frequently reused prepared value must not prewarm every new value
+// of the same query shape into an immediate full index build.
+func (idx *StorageIndex) addSavings(state *storageIndexState, usageWeight float64) float64 {
+	if len(idx.sessionKeys) == 0 {
+		if usageWeight > 0 {
+			idx.Savings += usageWeight
+		}
+		return idx.Savings
+	}
+	if usageWeight > 0 {
+		state.savings += usageWeight
+	}
+	return state.savings
 }
 
 func (idx *StorageIndex) markVariantsDirty() {
@@ -655,8 +676,11 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		index.ColOrderFast = make([]func(scm.Scmer, scm.Scmer) bool, len(lower))
 		for i := range lower {
 			index.Cols[i] = cols[i].col
-			index.ColMapCols[i] = cols[i].mapCols  // nil for raw columns
-			index.ColMapFn[i] = cols[i].mapFn      // IsNil() for raw columns
+			index.ColMapCols[i] = cols[i].mapCols // nil for raw columns
+			index.ColMapFn[i] = cols[i].mapFn     // IsNil() for raw columns
+			if !cols[i].mapFn.IsNil() {
+				index.sessionKeys = mergeSessionKeys(index.sessionKeys, extractSessionKeys(cols[i].mapFn))
+			}
 			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
 			if cols[i].matcher.IsSorted() {
 				index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
@@ -738,8 +762,9 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
 	for _, idx := range indexes {
 		clone := new(StorageIndex)
 		clone.Cols = append([]string(nil), idx.Cols...)
-		clone.ColMapCols = idx.ColMapCols   // shallow copy OK (immutable per-col slices)
-		clone.ColMapFn = idx.ColMapFn       // shallow copy OK
+		clone.ColMapCols = idx.ColMapCols // shallow copy OK (immutable per-col slices)
+		clone.ColMapFn = idx.ColMapFn     // shallow copy OK
+		clone.sessionKeys = append([]string(nil), idx.sessionKeys...)
 		clone.ColMatchers = idx.ColMatchers // shallow copy OK (singletons)
 		clone.ColOrder = append([]func(...scm.Scmer) scm.Scmer(nil), idx.ColOrder...)
 		clone.ColOrderMeta = append([]string(nil), idx.ColOrderMeta...)
@@ -1145,12 +1170,10 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 	// no collation-specific helpers in the current implementation
 
 	savingsThreshold := 2.0 // building an index costs 1x the time as traversing the list
-	if usageWeight > 0 {
-		s.Savings += usageWeight
-	}
+	savings := s.addSavings(state, usageWeight)
 	if !state.active {
 		// index is not built yet
-		if s.Savings < savingsThreshold && !forceBuild {
+		if savings < savingsThreshold && !forceBuild {
 			// iterate over all items because we don't want to store the index
 			if selected != nil {
 				selected(s, false)
