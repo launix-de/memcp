@@ -750,6 +750,8 @@ test_cases:
       - sql: "DROP TABLE IF EXISTS in_dv_acl"
       - sql: "DROP TABLE IF EXISTS in_batch_doc"
       - sql: "DROP TABLE IF EXISTS in_batch_file"
+      - sql: "DROP TABLE IF EXISTS in_skew_doc"
+      - sql: "DROP TABLE IF EXISTS in_skew_acl"
       - sql: |
           CREATE TABLE in_dv_file (
             ID INT PRIMARY KEY,
@@ -771,6 +773,8 @@ test_cases:
           )
       - sql: "CREATE TABLE in_batch_file (ID INT PRIMARY KEY, flag INT, search VARCHAR(8192))"
       - sql: "CREATE TABLE in_batch_doc (ID INT PRIMARY KEY, file_id INT, sort_key INT)"
+      - sql: "CREATE TABLE in_skew_doc (ID INT PRIMARY KEY, file_id INT, sort_key INT)"
+      - sql: "CREATE TABLE in_skew_acl (ID INT PRIMARY KEY, document_id INT UNIQUE, allowed INT)"
       - sql: |
           INSERT INTO in_dv_file (ID, filename, search) VALUES
           (10, 'invoice-hit.pdf', 'other'),
@@ -803,8 +807,19 @@ test_cases:
             (insert (table "memcp-tests" "in_batch_doc") '("ID" "file_id" "sort_key")
               (map (produceN 10000) (lambda (i)
                 (list (+ i 1) (if (< i 8000) (+ i 1) (- i 7999)) (- 10000 i)))))
+            /* All candidate keys match flag=1, but none occurs in this driver.
+            This deliberately breaks the uniform-FK assumption which cannot be
+            repaired by more accurate source-local selectivity statistics. */
+            (insert (table "memcp-tests" "in_skew_doc") '("ID" "file_id" "sort_key")
+              (map (produceN 100000) (lambda (i)
+                (list (+ i 1) 9000 (- 100000 i)))))
+            (insert (table "memcp-tests" "in_skew_acl") '("ID" "document_id" "allowed")
+              (map (produceN 10000) (lambda (i)
+                (list (+ i 1) (+ i 1) 1))))
             (rebuild (table "memcp-tests" "in_batch_file") true false)
             (rebuild (table "memcp-tests" "in_batch_doc") true false)
+            (rebuild (table "memcp-tests" "in_skew_doc") true false)
+            (rebuild (table "memcp-tests" "in_skew_acl") true false)
             true)
     steps:
       - sql: |
@@ -1338,6 +1353,46 @@ test_cases:
             - "ordered_batch_accept"
             - "candidate_keyset"
             - "driver_order_membership_probe"
+      - sql: |
+          EXPLAIN PHYSICAL
+          SELECT d.ID
+          FROM in_skew_doc d
+          WHERE d.file_id IN (
+              SELECT f.ID FROM in_batch_file f WHERE f.search LIKE '%common%'
+              UNION
+              SELECT f.ID FROM in_batch_file f WHERE f.search LIKE '%unmatched%'
+            )
+            AND COALESCE((
+              SELECT a.allowed FROM in_skew_acl a
+              WHERE a.document_id = d.ID
+              LIMIT 1
+            ), 0) = 0
+          ORDER BY d.sort_key
+          LIMIT 72
+        expect:
+          contains:
+            - "adaptive_observation_required true"
+            - "projection_interval_lower_rows 0"
+            - "projection_crossover_rows"
+      - name: "Projected membership skew is observed once before expensive probes"
+        sql: |
+          SELECT d.ID
+          FROM in_skew_doc d
+          WHERE d.file_id IN (
+              SELECT f.ID FROM in_batch_file f WHERE f.search LIKE '%common%'
+              UNION
+              SELECT f.ID FROM in_batch_file f WHERE f.search LIKE '%unmatched%'
+            )
+            AND COALESCE((
+              SELECT a.allowed FROM in_skew_acl a
+              WHERE a.document_id = d.ID
+              LIMIT 1
+            ), 0) = 0
+          ORDER BY d.sort_key
+          LIMIT 72
+        max_time: 10.0
+        expect:
+          rows: 0
       - sql: |
           EXPLAIN
           SELECT t.ID

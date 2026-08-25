@@ -3486,6 +3486,25 @@ either bound a real row or supplied the synthetic NULL row. */
 (define recset_contains_call_expr (lambda (recset_expr)
 	(list recset_contains_callback_symbol recset_expr)))
 
+/* A carrier selected for one conjunct changes the work seen by every later
+conjunct. Exact query-local observations are the strongest fact; otherwise the
+ordinary probe context remains the conservative input. This keeps AND
+short-circuit ordering in the physical tree instead of encoding SQL shapes. */
+(define membership_plan_residual_work_rows (lambda (src membership plan fallback)
+	(if (nil? plan)
+		fallback
+		(begin
+			(define strategy (car plan))
+			(define decision_id (concat "membership_carrier:" (gs_id (nth membership 0))))
+			(define observed_rows (planner_queryplan_observed_metric decision_id))
+			(if (and (number? observed_rows)
+				(or (equal? strategy "candidate_keyset")
+					(equal? strategy "prefiltered_candidate_keyset")))
+				observed_rows
+				(if (equal? strategy "ordered_batch_accept")
+					(batch_membership_survivor_rows (list membership) fallback)
+					fallback))))))
+
 (define special_scan_col_expr? (lambda (expr)
 	(or (equal? expr recset_contains_callback_symbol)
 		(equal? expr (symbol "$recset_contains")))))
@@ -4271,6 +4290,25 @@ exact parameter value. */
 				(not row_number_membership_consumer))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
+		(define residual_probe_work_rows (membership_plan_residual_work_rows
+			src membership membership_plan
+			(probe_work_context_rows_for_alias probe_context alias)))
+		/* A preceding membership carrier may radically reduce this leaf. Choose
+		the scalar/EXISTS carrier only now, with that node-local cardinality. An
+		adaptive batch keeps the marker inside its batch predicate so each batch
+		runs the same lowerer with its own work estimate. */
+		(define effective_scalar_carrier (if (not (nil? scalar_carrier))
+			scalar_carrier
+			/* Without a preceding membership carrier, retain the established
+			leaf-condition lowering. It owns nullable LEFT-JOIN cardinality and must
+			not be pre-empted by a driver-context estimate from another tree node. */
+			(if (or (nil? membership_plan) use_batch_accept) nil
+				(physical_scalar_truth_carrier all_sources src default_alias condition
+					residual_probe_work_rows stages))))
+		(define local_scalar_probe (if (nil? effective_scalar_carrier)
+			nil (nth effective_scalar_carrier 2)))
+		(define carrier_condition (if (nil? local_scalar_probe) condition
+			(rewrite_physical_scalar_probe_as_true local_scalar_probe condition)))
 		(define membership_table_expr (if (and
 			(not (nil? membership_plan))
 			(or (equal? membership_strategy "candidate_keyset")
@@ -4304,8 +4342,8 @@ exact parameter value. */
 		(define effective_membership (if (or use_batch_accept
 			(not (nil? membership_table_expr))) membership nil))
 		(define effective_condition (if use_membership_keyset
-			(replace_driver_membership_keyset_markers condition membership_keysets)
-			(strip_driver_membership_for_source src condition effective_membership)))
+			(replace_driver_membership_keyset_markers carrier_condition membership_keysets)
+			(strip_driver_membership_for_source src carrier_condition effective_membership)))
 		(define row_number_stage_filter (row_number_stage_for_source stages src effective_condition))
 		/* A candidate-keyset choice makes the projected row positions this leaf's
 		scan carrier even when later join leaves are continuations. A supported
@@ -4358,8 +4396,8 @@ exact parameter value. */
 			(join_cols_for_alias all_sources default_alias alias needed_exprs)
 			recipe_mapcols))
 		(define mapcols raw_mapcols)
-		(define scalar_carrier_driver (and (not (nil? scalar_carrier))
-			(equal? alias (car scalar_carrier))))
+		(define scalar_carrier_driver (and (not (nil? effective_scalar_carrier))
+			(equal? alias (car effective_scalar_carrier))))
 		(define base_table_expr (if membership_driver membership_table_expr
 			(if (not access_path_selected)
 				(source_table_expr_using stages src)
@@ -4367,10 +4405,10 @@ exact parameter value. */
 		(define table_expr (if (not scalar_carrier_driver)
 			base_table_expr
 			(if (equal? base_table_expr (source_table_expr_using stages src))
-				(nth scalar_carrier 1)
+				(nth effective_scalar_carrier 1)
 				(list (quote recset_intersect)
 					(cons (quote list) (list
-						(nth scalar_carrier 1)
+						(nth effective_scalar_carrier 1)
 						base_table_expr))))))
 		(define lowered_filter_condition (mark_outer_join_symbols
 			all_sources
@@ -5000,8 +5038,15 @@ source of that driver leaf. */
 		(define filter_probe_work_rows (membership_probe_work_rows facts final_condition
 			(planner_row_count_after_selectivity
 				driver_source sources default_alias final_condition nil)))
-		(define scalar_carrier (physical_scalar_truth_carrier
-			sources driver_source default_alias final_condition filter_probe_work_rows stages))
+		/* Membership is an AND-carrier alternative, not merely a predicate leaf.
+		When present at the driver, its physical choice must establish the rows
+		seen by an expensive scalar/EXISTS conjunct before that conjunct chooses
+		between probes and a complete RecSet. The leaf owns that second choice. */
+		(define defer_scalar_carrier
+			(not (nil? (driver_membership_for_source driver_source final_condition))))
+		(define scalar_carrier (if defer_scalar_carrier nil
+			(physical_scalar_truth_carrier
+				sources driver_source default_alias final_condition filter_probe_work_rows stages)))
 		(define scalar_probe (if (nil? scalar_carrier) nil (nth scalar_carrier 2)))
 		(define effective_condition (if (nil? scalar_probe) final_condition
 			(rewrite_physical_scalar_probe_as_true scalar_probe final_condition)))

@@ -2785,20 +2785,29 @@ rows outside the current batch. */
 		(define stage (nth membership 0))
 		(define target_col (nth membership 2))
 		(define input (gs_input stage))
-		(if (union_block? input)
-			(begin
-				(define branches (map (union_branches input) (lambda (branch)
-					(batch_membership_branch_expr target_src branch target_col batch_expr))))
-				(if (reduce branches (lambda (unsupported branch_expr)
-					(or unsupported (nil? branch_expr))) false)
-					nil
-					(list (quote recset_intersect)
-						(cons (quote list) (list
-							batch_expr
-							(if (single_source? branches)
-								(car branches)
-								(list (quote recset_union) (cons (quote list) branches))))))))
-			(batch_membership_base_expr target_src stage target_col batch_expr)))))
+		(define decision_id (concat "membership_carrier:" (gs_id stage)))
+		(if (planner_queryplan_observation_registered? decision_id)
+			/* The preparation already projected the complete candidate onto this
+			driver. Intersecting a batch with that immutable RecSet is exact and avoids
+			repeating text scans and FK projection for every expanded window. */
+			(list (quote recset_intersect)
+				(cons (quote list) (list batch_expr
+					(list (quote session)
+						(planner_queryplan_observation_value_key decision_id)))))
+			(if (union_block? input)
+				(begin
+					(define branches (map (union_branches input) (lambda (branch)
+						(batch_membership_branch_expr target_src branch target_col batch_expr))))
+					(if (reduce branches (lambda (unsupported branch_expr)
+						(or unsupported (nil? branch_expr))) false)
+						nil
+						(list (quote recset_intersect)
+							(cons (quote list) (list
+								batch_expr
+								(if (single_source? branches)
+									(car branches)
+									(list (quote recset_union) (cons (quote list) branches))))))))
+				(batch_membership_base_expr target_src stage target_col batch_expr))))))
 
 /* A stage's own group-cache is keyed positionally by its gs_keys, named
 k0, k1, ... regardless of what those key expressions look like -- so the
@@ -2935,6 +2944,60 @@ the auto-index chooses the concrete access path on both tables. */
 					(exists_recset_project_join_expr src stage)
 					nil))))))
 
+/* A source-local estimate cannot describe cardinality after an FK projection:
+matching most keys may still reach only a handful of driver rows. Translate an
+observed driver cardinality back into the established membership density so all
+alternatives continue to use the generated/calibrated cost model. */
+(define membership_candidate_rows_for_projected_rows (lambda (candidate_input_rows projected_rows driver_input_rows facts)
+	(begin
+		(define branches (max 1
+			(qassoc_get facts (quote membership_candidate_probe_branches) 1)))
+		(if (or (<= driver_input_rows 0) (<= candidate_input_rows 0))
+			0
+			(min candidate_input_rows
+				(/ (* projected_rows candidate_input_rows)
+					(* driver_input_rows branches)))))))
+
+(define membership_observed_carrier_costs (lambda (candidate_input_rows projected_rows driver_rows facts)
+	(begin
+		(define driver_input_rows (membership_driver_input_rows driver_rows facts))
+		(define effective_candidate_rows (membership_candidate_rows_for_projected_rows
+			candidate_input_rows projected_rows driver_input_rows facts))
+		(define observed_facts (merge (list
+			(list
+				(list (quote membership_candidate_input_rows) candidate_input_rows)
+				(list (quote membership_candidate_estimated_rows) effective_candidate_rows)
+				(list (quote membership_driver_rows) driver_rows)
+				(list (quote membership_driver_input_rows) driver_input_rows))
+			facts)))
+		(list
+			(membership_projection_cost
+				candidate_input_rows effective_candidate_rows driver_rows observed_facts)
+			(ordered_batch_accept_cost observed_facts)))))
+
+(define membership_observed_candidate_preferred? (lambda (candidate_input_rows projected_rows driver_rows facts)
+	(begin
+		(define costs (membership_observed_carrier_costs
+			candidate_input_rows projected_rows driver_rows facts))
+		(planner_cost_better? (car costs) (cadr costs)))))
+
+(define membership_observed_crossover_search (lambda (candidate_input_rows driver_rows facts low high iterations)
+	(if (or (<= iterations 0) (<= (- high low) 1))
+		low
+		(begin
+			(define middle (floor (/ (+ low high) 2)))
+			(if (membership_observed_candidate_preferred?
+				candidate_input_rows middle driver_rows facts)
+				(membership_observed_crossover_search
+					candidate_input_rows driver_rows facts middle high (- iterations 1))
+				(membership_observed_crossover_search
+					candidate_input_rows driver_rows facts low middle (- iterations 1)))))))
+
+/* This is a value-of-information budget, not an operator coefficient. Plans
+below it remain guarded, but do not precompute an exact projection merely to
+choose between alternatives whose complete runtime is already negligible. */
+(define planner_adaptive_observation_budget_ns 100000000)
+
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
@@ -3009,6 +3072,17 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list (quote coverage) estimate_coverage))
 						candidate_input_rows candidate_input_rows)))
 				(define source_rows (planner_source_row_count src))
+				(if (and (number? source_rows) (source_is_base_table? src))
+					/* Static sub-100-ms choices still depend on table size. Keep their
+					cache entry only while that O(1) statistics snapshot remains valid. */
+					(planner_record_guard_condition
+						(list (quote equal?)
+							(list
+								(list (quote table_planner_statistics)
+									(list (quote table) (source_schema src) (source_relation src)))
+								"row_count")
+							source_rows))
+					nil)
 				/* Ordered LIMIT consumes only its local window before downstream
 				operators. Cost this edge with that workload instead of a global
 				driver cardinality; it is the relevant side of the plan inequality. */
@@ -3093,7 +3167,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(reduce (cdr cost_choices) (lambda (best choice)
 						(if (planner_cost_better? (cadr choice) (cadr best)) choice best))
 						(car cost_choices))))
-				(define normal_choice (if (and guarded_broad_order_driver driver_probe_supported)
+				(define estimated_normal_choice (if (and guarded_broad_order_driver driver_probe_supported)
 					driver_strategy
 					(if (nil? cost_choice)
 						/* With no cardinality facts, adaptive batching is the only bounded
@@ -3106,6 +3180,57 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 								(or owns_requirement branch_not_implied))
 								driver_strategy "candidate_keyset"))
 						(car cost_choice))))
+				/* Guards remain mandatory for small plans as well: growth or refined
+				statistics must invalidate their assumptions. Exact preparation is the
+				additional step reserved for an expensive interval which crosses the
+				candidate/batch cost boundary. */
+				(define observation_supported (and allow_ordered_batch
+					(and known (and (number? source_rows) (> source_rows 0)))))
+				(define lower_costs (if observation_supported
+					(membership_observed_carrier_costs
+						candidate_input_rows 0 driver_rows batch_cost_facts)
+					nil))
+				(define upper_costs (if observation_supported
+					(membership_observed_carrier_costs
+						candidate_input_rows source_rows driver_rows batch_cost_facts)
+					nil))
+				(define interval_crosses (and observation_supported
+					(and (planner_cost_better? (car lower_costs) (cadr lower_costs))
+						(not (planner_cost_better? (car upper_costs) (cadr upper_costs))))))
+				(define interval_worst_ns (if interval_crosses
+					(max
+						(qassoc_get (car lower_costs) (quote total_ns) 0)
+						(qassoc_get (cadr lower_costs) (quote total_ns) 0)
+						(qassoc_get (car upper_costs) (quote total_ns) 0)
+						(qassoc_get (cadr upper_costs) (quote total_ns) 0))
+					0))
+				(define observe_projection (and interval_crosses
+					(> interval_worst_ns planner_adaptive_observation_budget_ns)))
+				(define observation_keys (if observe_projection
+					(planner_register_queryplan_observation decision_id raw_expr
+						(list (quote recset_count) (symbol "__queryplan_observed_value")))
+					nil))
+				(define crossover (if (not observe_projection)
+					nil
+					(membership_observed_crossover_search
+						candidate_input_rows driver_rows batch_cost_facts 0 source_rows 32)))
+				(define observed_rows (if (nil? observation_keys)
+					nil
+					(planner_queryplan_observed_metric decision_id)))
+				(define planning_projected_rows (if (number? observed_rows)
+					observed_rows
+					(membership_projected_driver_rows candidate_input_rows candidate_rows
+						(membership_driver_input_rows driver_rows facts) facts)))
+				(define observed_candidate_choice (and (number? crossover)
+					(<= planning_projected_rows crossover)))
+				(if (nil? observation_keys)
+					nil
+					(planner_record_guard_condition
+						(list (if observed_candidate_choice (quote <=) (quote >))
+							(list (quote session) (cadr observation_keys)) crossover)))
+				(define normal_choice (if (nil? observation_keys)
+					estimated_normal_choice
+					(if observed_candidate_choice "candidate_keyset" "ordered_batch_accept")))
 				(define alternatives (merge (list
 					(cons "candidate_keyset"
 						(if driver_probe_supported (list driver_strategy) '()))
@@ -3138,9 +3263,15 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "projected_driver_rows"
 								(membership_projected_driver_rows candidate_input_rows candidate_rows
 									(membership_driver_input_rows driver_rows facts) facts))
+							(list "observed_projected_driver_rows" observed_rows)
 							(list "driver_input_rows" source_rows)
 							(list "driver_rows" driver_rows)
 							(list "prefiltered_driver_rows" prefiltered_driver_rows)
+							(list "projection_interval_lower_rows" (if observation_supported 0 nil))
+							(list "projection_interval_upper_rows" (if observation_supported source_rows nil))
+							(list "projection_crossover_rows" crossover)
+							(list "adaptive_observation_required" observe_projection)
+							(list "adaptive_observation_budget_ns" planner_adaptive_observation_budget_ns)
 							(list "expected_driver_rows_visited" (membership_expected_driver_rows_visited
 								candidate_input_rows candidate_rows driver_rows facts))
 							(list "probe_rows" driver_rows)
@@ -3197,8 +3328,10 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(list "reason" (if (equal? chosen "prefiltered_candidate_keyset") "selected" "higher_total_ns_or_forced_alternative"))
 									(list "cost" (planner_cost_explain prefiltered_cost)))
 								nil)) (lambda (alternative) (not (nil? alternative)))))))
-				(list chosen (if (equal? chosen "prefiltered_candidate_keyset")
-					prefiltered_expr raw_expr)))))))
+				(list chosen (if (not (nil? observation_keys))
+					(list (quote session) (car observation_keys))
+					(if (equal? chosen "prefiltered_candidate_keyset")
+						prefiltered_expr raw_expr))))))))
 
 /* General expression callers preserve the established contract: only a
 candidate-keyset choice replaces the marker with a projected RecSet carrier. */
