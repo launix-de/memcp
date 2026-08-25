@@ -92,6 +92,15 @@ test_cases:
     expect:
       rows: 1
 
+  - name: "Perf JSON: indexed selective row projection"
+    setup: *json_setup
+    sql: |
+      SELECT id
+      FROM json_perf_documents
+      WHERE JSON_VALUE(doc, '$.tenant' RETURNING UNSIGNED) = 17
+    threshold_ms: 30000
+    expect: {}
+
   - name: "Perf JSON: computed path ORDER BY LIMIT"
     setup: *json_setup
     sql: |

@@ -18,6 +18,63 @@ package storage
 
 import "github.com/launix-de/memcp/scm"
 
+// sessionReadKey recognizes the planner's runtime representation of a
+// read-only query binding. Mutating session calls have a third argument and
+// are deliberately not query-invariant values.
+func sessionReadKey(expr scm.Scmer) (string, bool) {
+	if !expr.IsSlice() {
+		return "", false
+	}
+	items := expr.Slice()
+	if len(items) != 2 || !items[0].IsSymbol() || items[0].String() != "session" || !items[1].IsString() {
+		return "", false
+	}
+	return items[1].String(), true
+}
+
+func hasSessionRead(expr scm.Scmer) bool {
+	if _, ok := sessionReadKey(expr); ok {
+		return true
+	}
+	if expr.IsProc() {
+		return hasSessionRead(expr.Proc().Body)
+	}
+	if expr.IsSlice() {
+		for _, item := range expr.Slice() {
+			if hasSessionRead(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bindSessionReads specializes query-invariant bindings once before a computed
+// function enters the row loop. The original procedure remains immutable and
+// reusable for other session variants.
+func bindSessionReads(expr scm.Scmer, tx *TxContext) scm.Scmer {
+	if key, ok := sessionReadKey(expr); ok {
+		if tx == nil {
+			return scm.NewNil()
+		}
+		return tx.SessionValue(key)
+	}
+	if expr.IsProc() {
+		proc := *expr.Proc()
+		proc.Body = bindSessionReads(proc.Body, tx)
+		return scm.NewProcStruct(proc)
+	}
+	if !expr.IsSlice() {
+		return expr
+	}
+	items := expr.Slice()
+	bound := make([]scm.Scmer, len(items))
+	for i, item := range items {
+		bound[i] = bindSessionReads(item, tx)
+	}
+	return scm.NewSlice(bound)
+}
+
 func extractSessionKeys(expr scm.Scmer) []string {
 	seen := make(map[string]bool)
 	var out []string
@@ -34,13 +91,10 @@ func extractSessionKeys(expr scm.Scmer) []string {
 		if len(items) == 0 {
 			return
 		}
-		if items[0].IsSymbol() && items[0].String() == "session" {
-			if len(items) >= 2 && items[1].IsString() {
-				key := items[1].String()
-				if !seen[key] {
-					seen[key] = true
-					out = append(out, key)
-				}
+		if key, ok := sessionReadKey(node); ok {
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, key)
 			}
 		}
 		for _, it := range items {
@@ -115,6 +169,12 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 	// NthLocalVar param reference
 	if expr.IsNthLocalVar() {
 		return int(expr.NthLocalVar()) >= 0 && int(expr.NthLocalVar()) < len(params)
+	}
+	// SQL literals and prepared parameters are lowered to read-only query
+	// bindings before the physical scan is built. They are invariant for one
+	// index variant and are tracked by extractSessionKeys.
+	if _, ok := sessionReadKey(expr); ok {
+		return true
 	}
 	// function call: look up declaration and require Foldable.
 	// DeclarationForValue handles both unoptimized (symbol) and
