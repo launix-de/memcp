@@ -1,3 +1,19 @@
+/*
+Copyright (C) 2026  Carl-Philip Hänsch
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
 package storage
 
 import (
@@ -707,4 +723,42 @@ func TestConstishZerosAndNulls(t *testing.T) {
 	}
 	t.Logf("After roundtrip: %T (%s)", col2, col2.String())
 	verifyStorage(t, col2, n, gen)
+}
+
+func TestStorageSCMERPreservesBSONTag(t *testing.T) {
+	value, err := scm.NewBSONFromJSON(`{"name":"Ada","values":[1,true,null]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := &StorageSCMER{values: []scm.Scmer{value, scm.NewNil()}}
+	var serialized bytes.Buffer
+	storage.Serialize(&serialized)
+	if magic, err := serialized.ReadByte(); err != nil || magic != 1 {
+		t.Fatalf("magic = %d, err=%v; want 1", magic, err)
+	}
+
+	var decoded StorageSCMER
+	if count := decoded.Deserialize(&serialized); count != 2 {
+		t.Fatalf("decoded count = %d, want 2", count)
+	}
+	if got := decoded.GetValue(0); !got.IsBSON() || got.String() != value.String() {
+		t.Fatalf("BSON value lost its tag during SCMER roundtrip: tag=%d value=%s", got.GetTag(), got.String())
+	}
+	if !decoded.GetValue(1).IsNil() {
+		t.Fatal("SQL NULL did not survive SCMER roundtrip")
+	}
+}
+
+func TestStorageSCMERKeepsBSONUncompressed(t *testing.T) {
+	value, err := scm.NewBSONFromJSON(`{"a":1}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := new(StorageSCMER)
+	storage.prepare()
+	storage.scan(0, value)
+	storage.scan(1, scm.NewNil())
+	if proposed := storage.proposeCompression(2); proposed != nil {
+		t.Fatalf("BSON must remain in StorageSCMER, got %T", proposed)
+	}
 }

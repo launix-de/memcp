@@ -257,6 +257,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define psql_expression5 (parser (or
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr psql_expression6)) '((quote -) 0 expr))
+		/* PostgreSQL json/jsonb field and array extraction operators. */
+		(parser '((define expr psql_expression6) "->>" (define key psql_expression7)) '('json_get expr key true))
+		(parser '((define expr psql_expression6) "->" (define key psql_expression7)) '('json_get expr key false))
 		(parser '((define expr psql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
 		(parser '((define expr psql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
 		psql_expression6

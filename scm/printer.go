@@ -84,7 +84,7 @@ func String(v Scmer) string {
 		return "nil"
 	case tagBool, tagInt, tagFloat:
 		return v.String()
-	case tagString, tagCString, tagBString:
+	case tagString, tagCString, tagBString, tagBSON:
 		return v.String()
 	case tagSymbol:
 		return v.String()
@@ -161,7 +161,7 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 	switch v.GetTag() {
 	case tagNil:
 		w.WriteString("nil")
-	case tagBool, tagString, tagCString, tagBString, tagSymbol:
+	case tagBool, tagString, tagCString, tagBString, tagBSON, tagSymbol:
 		w.WriteString(v.String())
 	case tagInt:
 		var buffer [32]byte
@@ -302,6 +302,10 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteByte('"')
 		b.WriteString(schemeStringEscaper.Replace(v.String()))
 		b.WriteByte('"')
+	case tagBSON:
+		b.WriteString("(json_parse_bson \"")
+		b.WriteString(schemeStringEscaper.Replace(v.String()))
+		b.WriteString("\")")
 	case tagSymbol:
 		sym := v.String()
 		if strings.ContainsAny(sym, " \"()") {

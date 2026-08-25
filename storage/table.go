@@ -1707,6 +1707,14 @@ func (c *column) UpdateSanitizer() {
 			}
 			return scm.NewFloat(f)
 		}
+	case "JSON", "JSONB":
+		inner = func(v scm.Scmer) scm.Scmer {
+			result, err := scm.NewBSONFromScmer(v)
+			if err != nil {
+				panic("cannot convert value to JSON for column " + name + ": " + err.Error())
+			}
+			return result
+		}
 	case "DATE", "DATETIME", "TIMESTAMP":
 		inner = func(v scm.Scmer) scm.Scmer {
 			if v.GetTag() == scm.TagDate {

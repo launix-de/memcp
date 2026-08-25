@@ -363,6 +363,8 @@ func scmerToGo(v Scmer) any {
 		return v.Float()
 	case tagString, tagSymbol:
 		return v.String()
+	case tagBSON:
+		return json.RawMessage(bsonText(v))
 	case tagSlice:
 		list := v.Slice()
 		out := make([]any, len(list))

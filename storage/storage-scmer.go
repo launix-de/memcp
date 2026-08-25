@@ -19,6 +19,7 @@ package storage
 import "io"
 import "math"
 import "bufio"
+import "encoding/base64"
 import "encoding/json"
 import "encoding/binary"
 import "github.com/launix-de/memcp/scm"
@@ -31,6 +32,7 @@ type StorageSCMER struct {
 	//   0 = pure ints, -2 = 2 decimal places, 2 = multiples of 100
 	//   math.MinInt8 = not representable as scaled int
 	hasString    bool
+	hasBSON      bool
 	longStrings  int
 	null         uint  // amount of NULL values (sparse map!)
 	numSeq       uint  // sequence statistics
@@ -63,11 +65,13 @@ func (s *StorageSCMER) String() string {
 // Version history:
 //
 //	v0 (original, no version byte): layout as above.  This type had no padding
-//	byte in v0.1.0.  StorageSCMER is never the final storage type on disk
-//	(proposeCompression always returns a more specific type), so in practice
-//	no persisted files exist with magic 1.  Still, format changes require a
-//	NEW magic byte in storages[] (storage.go); keep magic 1 as a legacy
-//	reader forever.
+//	byte in v0.1.0. Historically StorageSCMER was not a final storage type;
+//	BSON values intentionally remain in it. Format changes still require a NEW
+//	magic byte in storages[] (storage.go); keep magic 1 as a legacy reader
+//	forever.
+//	BSON values use a reserved JSON object envelope inside their existing JSONL
+//	line. This adds a representation for the new Scmer tag without changing the
+//	legacy framing or the decoding of any previously supported Scmer value.
 func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 			var idxInt scm.JITValueDesc
@@ -172,7 +176,19 @@ func (s *StorageSCMER) Serialize(f io.Writer) {
 	binary.Write(f, binary.LittleEndian, uint8(1)) // 1 = StorageSCMER
 	binary.Write(f, binary.LittleEndian, uint64(len(s.values)))
 	for i := 0; i < len(s.values); i++ {
-		v, err := json.Marshal(s.values[i])
+		value := s.values[i]
+		var v []byte
+		var err error
+		if value.IsBSON() {
+			typ, payload := value.BSONRaw()
+			v, err = json.Marshal(map[string]any{
+				"$memcp.scmer": "bson-v1",
+				"type":         typ,
+				"payload":      base64.RawStdEncoding.EncodeToString(payload),
+			})
+		} else {
+			v, err = json.Marshal(value)
+		}
 		if err != nil {
 			panic(err)
 		}
@@ -187,10 +203,22 @@ func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &l)
 	s.values = make([]scm.Scmer, l)
 	scanner := bufio.NewScanner(f)
+	// BSON documents may be substantially larger than Scanner's 64 KiB default.
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
 	for i := uint64(0); i < l; i++ {
 		if scanner.Scan() {
 			var v any
 			json.Unmarshal(scanner.Bytes(), &v)
+			if envelope, ok := v.(map[string]any); ok && len(envelope) == 3 && envelope["$memcp.scmer"] == "bson-v1" {
+				typ, typeOK := envelope["type"].(float64)
+				payload, payloadOK := envelope["payload"].(string)
+				decoded, err := base64.RawStdEncoding.DecodeString(payload)
+				if typeOK && typ >= 0 && typ <= 255 && typ == math.Trunc(typ) && payloadOK && err == nil {
+					s.values[i] = scm.NewBSONRaw(byte(typ), decoded)
+					continue
+				}
+				panic("invalid BSON envelope in StorageSCMER")
+			}
 			s.values[i] = scm.TransformFromJSON(v)
 		}
 	}
@@ -264,6 +292,11 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 		s.null++
 		return
 	}
+	if value.IsBSON() {
+		s.hasBSON = true
+		s.minIntScale = math.MinInt8
+		return
+	}
 	if value.GetTag() == scm.TagDate {
 		v2 := value.Int()
 		if v2-s.last1 == s.last1-s.last2 {
@@ -321,6 +354,7 @@ func (s *StorageSCMER) scan(i uint32, value scm.Scmer) {
 func (s *StorageSCMER) prepare() {
 	s.minIntScale = math.MaxInt8 // neutral, gets driven down by scan
 	s.hasString = false
+	s.hasBSON = false
 	s.enumK = 0
 }
 func (s *StorageSCMER) init(i uint32) {
@@ -336,6 +370,9 @@ func (s *StorageSCMER) finish() {
 
 // soley to StorageSCMER
 func (s *StorageSCMER) proposeCompression(i uint32) ColumnStorage {
+	if s.hasBSON {
+		return nil
+	}
 	// const: all values identical — store only the single value (beats everything incl. sparse)
 	if s.enumK == 1 && s.longStrings <= 2 {
 		c := new(StorageConst)

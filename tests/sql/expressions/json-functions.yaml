@@ -1,0 +1,421 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "MySQL 8.4 JSON function, operator, BSON value, and composition semantics"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS json_documents"
+  - sql: |
+      CREATE TABLE json_documents (
+        id INT PRIMARY KEY,
+        category VARCHAR(20),
+        doc JSON
+      )
+  - sql: |
+      INSERT INTO json_documents (id, category, doc) VALUES
+        (1, 'customer', '{"customer":{"name":"Ada","rank":2},"tags":["sql","fast"],"active":true}'),
+        (2, 'customer', '{"customer":{"name":"Bob","rank":1},"tags":["go"],"active":false}'),
+        (3, 'event', '{"customer":{"name":"Cy","rank":3},"tags":[],"active":true}')
+
+test_cases:
+  - name: "JSON_ARRAY constructs and embeds BSON values"
+    sql: "SELECT JSON_ARRAY(1, 'two', NULL, TRUE, JSON_OBJECT('nested', 3)) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: [1, "two", null, true, {nested: 3}]
+
+  - name: "JSON_OBJECT replaces duplicate keys and sorts deterministically"
+    sql: "SELECT JSON_OBJECT('z', 1, 'a', 2, 'z', 3) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: 2, z: 3}
+
+  - name: "JSON_OBJECT rejects odd arguments"
+    sql: "SELECT JSON_OBJECT('a') AS value"
+    expect: {error: true}
+
+  - name: "JSON_OBJECT rejects NULL keys"
+    sql: "SELECT JSON_OBJECT(NULL, 1) AS value"
+    expect: {error: true}
+
+  - name: "JSON_QUOTE and JSON_UNQUOTE escapes"
+    sql: "SELECT JSON_UNQUOTE(JSON_QUOTE('line\\nquote\"')) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: "line\nquote\""
+
+  - name: "JSON_VALID valid and invalid"
+    sql: "SELECT JSON_VALID('{\"a\":[1,true,null]}') AS valid_doc, JSON_VALID('{bad') AS invalid_doc"
+    expect:
+      rows: 1
+      data:
+        - valid_doc: true
+          invalid_doc: false
+
+  - name: "JSON_VALID SQL NULL remains SQL NULL"
+    sql: "SELECT JSON_VALID(NULL) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: null
+
+  - name: "JSON_TYPE covers every JSON family"
+    sql: |
+      SELECT JSON_TYPE('{}') AS object_type,
+             JSON_TYPE('[]') AS array_type,
+             JSON_TYPE('null') AS null_type,
+             JSON_TYPE('true') AS boolean_type,
+             JSON_TYPE('42') AS integer_type,
+             JSON_TYPE('2.5') AS decimal_type,
+             JSON_TYPE('"x"') AS string_type
+    expect:
+      rows: 1
+      data:
+        - object_type: "OBJECT"
+          array_type: "ARRAY"
+          null_type: "NULL"
+          boolean_type: "BOOLEAN"
+          integer_type: "INTEGER"
+          decimal_type: "DECIMAL"
+          string_type: "STRING"
+
+  - name: "JSON_DEPTH scalar and nested document"
+    sql: "SELECT JSON_DEPTH('1') AS scalar_depth, JSON_DEPTH('{\"a\":[{\"b\":1}]}') AS nested_depth"
+    expect:
+      rows: 1
+      data:
+        - scalar_depth: 1
+          nested_depth: 4
+
+  - name: "JSON_LENGTH object array scalar and path"
+    sql: |
+      SELECT JSON_LENGTH('{"a":1,"b":2}') AS object_length,
+             JSON_LENGTH('[1,2,3]') AS array_length,
+             JSON_LENGTH('true') AS scalar_length,
+             JSON_LENGTH('{"a":[1,2]}', '$.a') AS path_length
+    expect:
+      rows: 1
+      data:
+        - object_length: 2
+          array_length: 3
+          scalar_length: 1
+          path_length: 2
+
+  - name: "JSON_EXTRACT object array and missing paths"
+    sql: |
+      SELECT JSON_EXTRACT('{"a":{"b":[10,20]}}', '$.a.b[1]') AS found,
+             JSON_EXTRACT('{"a":1}', '$.missing') AS missing
+    expect:
+      rows: 1
+      data:
+        - found: 20
+          missing: null
+
+  - name: "JSON_EXTRACT multiple paths returns an array"
+    sql: "SELECT JSON_EXTRACT('{\"a\":1,\"b\":2}', '$.b', '$.a') AS value"
+    expect:
+      rows: 1
+      data:
+        - value: [2, 1]
+
+  - name: "JSON_EXTRACT wildcard and recursive descent"
+    sql: |
+      SELECT JSON_EXTRACT('{"a":{"x":1},"b":{"x":2}}', '$.*.x') AS wildcard,
+             JSON_EXTRACT('{"a":{"deep":{"name":"Ada"}}}', '$**.name') AS recursive
+    expect:
+      rows: 1
+      data:
+        - wildcard: [1, 2]
+          recursive: "Ada"
+
+  - name: "JSON path last array indexes"
+    sql: "SELECT JSON_EXTRACT('[10,20,30]', '$[last]') AS last_value, JSON_EXTRACT('[10,20,30]', '$[last-1]') AS previous_value"
+    expect:
+      rows: 1
+      data:
+        - last_value: 30
+          previous_value: 20
+
+  - name: "JSON_KEYS root and nested object"
+    sql: "SELECT JSON_KEYS('{\"z\":1,\"a\":{\"y\":2,\"x\":3}}') AS root_keys, JSON_KEYS('{\"a\":{\"y\":2,\"x\":3}}', '$.a') AS nested_keys"
+    expect:
+      rows: 1
+      data:
+        - root_keys: ["a", "z"]
+          nested_keys: ["x", "y"]
+
+  - name: "JSON_CONTAINS_PATH one and all"
+    sql: |
+      SELECT JSON_CONTAINS_PATH('{"a":1,"b":{"c":2}}', 'one', '$.missing', '$.b.c') AS one_match,
+             JSON_CONTAINS_PATH('{"a":1,"b":{"c":2}}', 'all', '$.a', '$.b.c') AS all_match,
+             JSON_CONTAINS_PATH('{"a":1}', 'all', '$.a', '$.b') AS not_all
+    expect:
+      rows: 1
+      data:
+        - one_match: true
+          all_match: true
+          not_all: false
+
+  - name: "JSON_CONTAINS object array scalar and path"
+    sql: |
+      SELECT JSON_CONTAINS('{"a":1,"b":2}', '{"a":1}') AS object_contains,
+             JSON_CONTAINS('[1,2,3]', '2') AS array_contains,
+             JSON_CONTAINS('{"a":[1,2]}', '2', '$.a') AS path_contains
+    expect:
+      rows: 1
+      data:
+        - object_contains: true
+          array_contains: true
+          path_contains: true
+
+  - name: "JSON_OVERLAPS arrays objects and scalars"
+    sql: |
+      SELECT JSON_OVERLAPS('[1,2]', '[2,3]') AS arrays_overlap,
+             JSON_OVERLAPS('{"a":1}', '{"a":1,"b":2}') AS objects_overlap,
+             JSON_OVERLAPS('1', '2') AS scalars_overlap
+    expect:
+      rows: 1
+      data:
+        - arrays_overlap: true
+          objects_overlap: true
+          scalars_overlap: false
+
+  - name: "MEMBER OF operator"
+    sql: "SELECT 2 MEMBER OF('[1,2,3]') AS found, 4 MEMBER OF('[1,2,3]') AS missing"
+    expect:
+      rows: 1
+      data:
+        - found: true
+          missing: false
+
+  - name: "JSON_VALUE default and numeric RETURNING"
+    sql: |
+      SELECT JSON_VALUE('{"name":"Ada","rank":7}', '$.name') AS name,
+             JSON_VALUE('{"rank":7}', '$.rank' RETURNING SIGNED) AS rank
+    expect:
+      rows: 1
+      data:
+        - name: "Ada"
+          rank: 7
+
+  - name: "JSON_SET inserts and replaces paths left to right"
+    sql: "SELECT JSON_SET('{\"a\":1}', '$.a', 2, '$.b', JSON_ARRAY(3,4)) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: 2, b: [3, 4]}
+
+  - name: "JSON_INSERT preserves existing values"
+    sql: "SELECT JSON_INSERT('{\"a\":1}', '$.a', 9, '$.b', 2) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: 1, b: 2}
+
+  - name: "JSON_REPLACE ignores missing paths"
+    sql: "SELECT JSON_REPLACE('{\"a\":1}', '$.a', 9, '$.b', 2) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: 9}
+
+  - name: "JSON_REMOVE object member and array element"
+    sql: "SELECT JSON_REMOVE('{\"a\":[10,20,30],\"b\":1}', '$.a[1]', '$.b') AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: [10, 30]}
+
+  - name: "JSON_ARRAY_APPEND array and scalar autowrap"
+    sql: "SELECT JSON_ARRAY_APPEND('{\"a\":[1],\"b\":2}', '$.a', 3, '$.b', 4) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: [1, 3], b: [2, 4]}
+
+  - name: "JSON_ARRAY_INSERT"
+    sql: "SELECT JSON_ARRAY_INSERT('{\"a\":[1,3]}', '$.a[1]', 2) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: [1, 2, 3]}
+
+  - name: "JSON_MERGE_PATCH removes null object members"
+    sql: "SELECT JSON_MERGE_PATCH('{\"a\":1,\"b\":2}', '{\"a\":9,\"b\":null,\"c\":3}') AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {a: 9, c: 3}
+
+  - name: "JSON_MERGE_PRESERVE and deprecated JSON_MERGE alias"
+    sql: |
+      SELECT JSON_MERGE_PRESERVE('{"a":1}', '{"a":2,"b":3}') AS preserved,
+             JSON_MERGE('[1]', '[2,3]') AS alias_value
+    expect:
+      rows: 1
+      data:
+        - preserved: {a: [1, 2], b: 3}
+          alias_value: [1, 2, 3]
+
+  - name: "JSON_SEARCH one and all"
+    sql: |
+      SELECT JSON_SEARCH('{"a":"Ada","nested":{"b":"Ada"}}', 'one', 'Ada') AS one_path,
+             JSON_SEARCH('{"a":"Ada","nested":{"b":"Ada"}}', 'all', 'Ada') AS all_paths
+    expect:
+      rows: 1
+      data:
+        - one_path: "$.\"a\""
+          all_paths: ["$.\"a\"", "$.\"nested\".\"b\""]
+
+  - name: "JSON_PRETTY result remains valid JSON"
+    sql: "SELECT JSON_VALID(JSON_PRETTY('{\"a\":[1,2]}')) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: true
+
+  - name: "JSON storage utility values"
+    sql: "SELECT JSON_STORAGE_SIZE('{\"a\":1}') > 0 AS has_size, JSON_STORAGE_FREE('{\"a\":1}') AS free_space"
+    expect:
+      rows: 1
+      data:
+        - has_size: true
+          free_space: 0
+
+  - name: "JSON column validates inserted text"
+    sql: "INSERT INTO json_documents (id, category, doc) VALUES (10, 'invalid', '{bad')"
+    expect: {error: true}
+
+  - name: "JSON column validates updated text"
+    sql: "UPDATE json_documents SET doc = '{bad' WHERE id = 1"
+    expect: {error: true}
+
+  - name: "JSON column extraction operators"
+    sql: |
+      SELECT doc->'$.customer.rank' AS json_rank,
+             doc->>'$.customer.name' AS customer_name
+      FROM json_documents
+      WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - json_rank: 2
+          customer_name: "Ada"
+
+  - name: "JSON functions compose in table predicates and ordering"
+    sql: |
+      SELECT id, JSON_VALUE(doc, '$.customer.name') AS name
+      FROM json_documents
+      WHERE JSON_CONTAINS(doc, '"sql"', '$.tags')
+      ORDER BY JSON_VALUE(doc, '$.customer.rank' RETURNING SIGNED)
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          name: "Ada"
+
+  - name: "ORDER BY computed JSON path"
+    sql: |
+      SELECT id, JSON_VALUE(doc, '$.customer.rank' RETURNING SIGNED) AS rank_value
+      FROM json_documents
+      ORDER BY JSON_VALUE(doc, '$.customer.rank' RETURNING SIGNED), id
+    expect:
+      rows: 3
+      data:
+        - id: 2
+          rank_value: 1
+        - id: 1
+          rank_value: 2
+        - id: 3
+          rank_value: 3
+
+  - name: "JSON_ARRAYAGG over a subquery"
+    sql: |
+      SELECT JSON_ARRAYAGG(name) AS names
+      FROM (
+        SELECT JSON_VALUE(doc, '$.customer.name') AS name
+        FROM json_documents
+        ORDER BY id
+      ) AS ordered_names
+    expect:
+      rows: 1
+      data:
+        - names: ["Ada", "Bob", "Cy"]
+
+  - name: "JSON_ARRAYAGG preserves SQL NULL as JSON null"
+    sql: "SELECT JSON_ARRAYAGG(value) AS values_array FROM (SELECT IF(id = 2, NULL, id) AS value FROM json_documents ORDER BY id) AS nullable_values"
+    expect:
+      rows: 1
+      data:
+        - values_array: [1, null, 3]
+
+  - name: "JSON_OBJECTAGG over table rows"
+    sql: "SELECT JSON_OBJECTAGG(id, JSON_VALUE(doc, '$.customer.name')) AS names FROM json_documents"
+    expect:
+      rows: 1
+      data:
+        - names: {"1": "Ada", "2": "Bob", "3": "Cy"}
+
+  - name: "PostgreSQL JSON object extraction operators"
+    syntax: postgresql
+    sql: |
+      SELECT '{"customer":{"name":"Ada"}}'::jsonb->'customer' AS customer,
+             ('{"customer":{"name":"Ada"}}'::jsonb->'customer')->>'name' AS name
+    expect:
+      rows: 1
+      data:
+        - customer: {name: "Ada"}
+          name: "Ada"
+
+  - name: "PostgreSQL JSON array extraction supports negative indexes"
+    syntax: postgresql
+    sql: "SELECT '[10,20,30]'::jsonb->0 AS first_value, '[10,20,30]'::jsonb->>-1 AS last_value"
+    expect:
+      rows: 1
+      data:
+        - first_value: 10
+          last_value: "30"
+
+  - name: "ORDER BY a BSON numeric path uses numeric ordering"
+    setup:
+      - sql: "INSERT INTO json_documents (id, category, doc) VALUES (4, 'customer', '{\"customer\":{\"name\":\"Dee\",\"rank\":10},\"tags\":[]}')"
+    sql: "SELECT id, doc->'$.customer.rank' AS rank_value FROM json_documents ORDER BY doc->'$.customer.rank', id"
+    expect:
+      rows: 4
+      data:
+        - {id: 2, rank_value: 1}
+        - {id: 1, rank_value: 2}
+        - {id: 3, rank_value: 3}
+        - {id: 4, rank_value: 10}
+
+  - name: "invalid JSON document raises in strict functions"
+    sql: "SELECT JSON_EXTRACT('{bad', '$.a') AS value"
+    expect: {error: true}
+
+  - name: "invalid JSON path raises"
+    sql: "SELECT JSON_EXTRACT('{\"a\":1}', 'a') AS value"
+    expect: {error: true}
+
+  - name: "JSON_REMOVE rejects root removal"
+    sql: "SELECT JSON_REMOVE('{\"a\":1}', '$') AS value"
+    expect: {error: true}
+
+  - name: "JSON_TABLE is explicitly unsupported until relational lowering exists"
+    sql: "SELECT * FROM JSON_TABLE('[1,2]', '$[*]' COLUMNS (value INT PATH '$')) AS jt"
+    expect: {error: true}
+
+  - name: "JSON schema validation is explicitly unsupported in PR1"
+    sql: "SELECT JSON_SCHEMA_VALID('{\"type\":\"integer\"}', '1') AS value"
+    expect: {error: true}
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS json_documents"
