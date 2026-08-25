@@ -285,9 +285,10 @@ type ColumnStorage interface {
 //	31  OverlayBlob    – large binary/blob overlay
 //	40  StorageEnum    – rANS-entropy-coded enum         (no version byte — see above)
 //	41  StorageConst   – single constant value column
+//	42  StorageSCMER   – tagged binary Scmer values
 //	50  StorageComputeProxy – computed/cached column
 var storages = map[uint8]reflect.Type{
-	1:  reflect.TypeOf(StorageSCMER{}),
+	1:  reflect.TypeOf(StorageSCMERLegacy{}),
 	2:  reflect.TypeOf(StorageSparse{}),
 	10: reflect.TypeOf(StorageInt{}),
 	11: reflect.TypeOf(StorageSeq{}),
@@ -299,6 +300,7 @@ var storages = map[uint8]reflect.Type{
 	31: reflect.TypeOf(OverlayBlob{}),
 	40: reflect.TypeOf(StorageEnum{}),
 	41: reflect.TypeOf(StorageConst{}),
+	42: reflect.TypeOf(StorageSCMER{}),
 	50: reflect.TypeOf(StorageComputeProxy{}),
 }
 

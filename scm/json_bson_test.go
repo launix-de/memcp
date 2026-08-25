@@ -71,6 +71,52 @@ func TestBSONScmerScalarConversions(t *testing.T) {
 	}
 }
 
+func TestBSONAppendStringUsesCallerBuffer(t *testing.T) {
+	value, err := NewBSONFromJSON(`{"escaped":"line\n\u0001","nested":[true,2.5,null]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 7, 256)
+	text, appended := value.AppendString(buffer)
+	if got, want := string(appended[7:]), `{"escaped":"line\n\u0001","nested":[true,2.5,null]}`; got != want || text != want {
+		t.Fatalf("AppendString text=%q appended=%q want=%q", text, got, want)
+	}
+}
+
+func TestJSONExtractedBSONScalarCoercions(t *testing.T) {
+	document, err := NewBSONFromJSON(`{"integer":41,"floating":1.5,"yes":true,"no":false,"numeric":"2.25","zero":"0","false_string":"false","empty":""}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		path     string
+		integer  int64
+		floating float64
+		boolean  bool
+	}{
+		{"$.integer", 41, 41, true},
+		{"$.floating", 1, 1.5, true},
+		{"$.yes", 1, 1, true},
+		{"$.no", 0, 0, false},
+		{"$.numeric", 2, 2.25, true},
+		{"$.zero", 0, 0, false},
+		{"$.false_string", 0, 0, false},
+		{"$.empty", 0, 0, false},
+	}
+	for _, test := range tests {
+		extracted := callJSONTest(t, "json_extract", document, NewString(test.path))
+		if !extracted.IsBSON() {
+			t.Fatalf("%s did not preserve tagBSON", test.path)
+		}
+		if extracted.Int() != test.integer || extracted.Float() != test.floating || extracted.Bool() != test.boolean {
+			t.Fatalf("%s conversions int=%d float=%v bool=%v", test.path, extracted.Int(), extracted.Float(), extracted.Bool())
+		}
+		if got := NewFloat(extracted.Float() + 1).Float(); got != test.floating+1 {
+			t.Fatalf("%s + 1 = %v, want %v", test.path, got, test.floating+1)
+		}
+	}
+}
+
 func TestJSONFunctionsPreserveNestedBSON(t *testing.T) {
 	document, err := NewBSONFromJSON(`{"user":{"name":"Ada"},"tags":["sql","go"]}`)
 	if err != nil {
@@ -122,5 +168,23 @@ func TestBSONEscapesJSONKeysContainingNUL(t *testing.T) {
 	extracted := callJSONTest(t, "json_extract", value, NewString("$.\"a\\u0000b\""))
 	if extracted.Int() != 7 {
 		t.Fatalf("NUL key extraction = %s, want 7", extracted.String())
+	}
+}
+
+func BenchmarkBSONAppendString(b *testing.B) {
+	value, err := NewBSONFromJSON(`{"customer":{"name":"Ada","rank":7},"items":[{"sku":"A","qty":2},{"sku":"B","qty":3}],"active":true}`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	buffer := make([]byte, 0, 256)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(value.String())))
+	b.ResetTimer()
+	for range b.N {
+		text, appended := value.AppendString(buffer[:0])
+		if len(text) == 0 {
+			b.Fatal("empty BSON serialization")
+		}
+		buffer = appended[:0]
 	}
 }
