@@ -5530,7 +5530,7 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_direct_presence_probe_cost (lambda (probe_rows)
 	(planner_cost 0 0 (* probe_rows planner_scalar_presence_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
-(define planner_membership_direct_probe_row_ns 28470)
+(define planner_membership_direct_probe_row_ns 28965)
 (define planner_membership_direct_probe_cost (lambda (probe_rows)
 	(planner_cost 0 0 (* probe_rows planner_membership_direct_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
@@ -5552,10 +5552,10 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_recset_startup_ns 1)
 (define planner_membership_recset_build_row_ns 1)
 (define planner_membership_recset_probe_row_ns 1)
-(define planner_membership_recset_aggregate_row_ns 149)
-(define planner_membership_group_cache_startup_ns 4825882)
+(define planner_membership_recset_aggregate_row_ns 129)
+(define planner_membership_group_cache_startup_ns 4924972)
 (define planner_membership_group_cache_build_row_ns 1)
 (define planner_membership_group_cache_probe_row_ns 1)
 (define planner_membership_ordered_driver_input_row_ns 1)
-(define planner_membership_ordered_scan_invocation_ns 2784159)
+(define planner_membership_ordered_scan_invocation_ns 3027639)
 /* END GENERATED COST CONSTANTS */

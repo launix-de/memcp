@@ -2777,48 +2777,113 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 						(list (nth marker 0) (nth marker 1) target_col term)))))))
 		(lambda (membership) (not (nil? membership))))))
 
+(define scan_input_recset_for_condition (lambda (sources default_alias src input condition probe_work_rows)
+	(if (equal? condition true)
+		input
+		(begin
+			(define cols (extract_columns_for_alias src condition))
+			(list (quote scan_recset)
+				'(session "__memcp_tx")
+				input
+				(cons (quote list) cols)
+				(list (quote lambda)
+					(map cols (lambda (col)
+						(scan_callback_symbol_for_alias (source_alias src) col)))
+					(lower_column_expr_for_join_truth_context
+						sources default_alias condition probe_work_rows)))))))
+
+/* Estimate the rows which reach the residual predicate from the exact same
+membership facts used to choose the outer carrier. The residual lowerer can
+therefore choose RecSet, keytable, or direct probes for the smaller batch just
+as it would for an ordinary scan input. */
+(define batch_membership_survivor_rows (lambda (memberships probe_work_rows)
+	(reduce memberships (lambda (rows membership)
+		(if (not (number? (planner_literal_value rows)))
+			rows
+			(begin
+				(define stage (nth membership 0))
+				(define facts (merge (list
+					(membership_candidate_work_facts stage)
+					(gs_facts stage))))
+				(define candidate_input_rows (coalesceNil
+					(qassoc_get facts (quote membership_candidate_input_rows) nil)
+					(planner_stage_input_rows (gs_input stage))))
+				(define candidate_rows (qassoc_get facts
+					(quote membership_candidate_estimated_rows) candidate_input_rows))
+				(if (or (not (number? candidate_input_rows))
+					(not (number? candidate_rows)))
+					rows
+					(begin
+						/* For an ordered LIMIT, rows is the requested survivor count,
+						not the number of driver rows visited. Use the same adaptive
+						visit estimate as ordered_batch_accept_cost before applying the
+						candidate density. Otherwise a 10%-dense candidate for LIMIT 72
+						would incorrectly lower the residual as seven probes even though
+						the batch expands to roughly 720 driver rows and 72 survivors. */
+						(define visited_rows (membership_expected_driver_rows_visited
+							candidate_input_rows candidate_rows
+							(planner_literal_value rows) facts))
+						(* visited_rows
+						(membership_candidate_density
+							candidate_input_rows candidate_rows facts)))))))
+		probe_work_rows)))
+
+/* Compile one exact predicate pipeline over an arbitrary RecSet input. The
+ordered_batch_accept alternative specifically represents candidate-first
+execution; the separately costed prefiltered_candidate_keyset alternative owns
+driver-predicate-first execution. Keeping those alternatives distinct makes
+the emitted work agree with the cost comparison. All residual conditions then
+re-enter the ordinary expression lowerer with the candidate-reduced row count,
+so complex ACL trees receive the same per-node physical choices as any scan. */
 (define ordered_batch_filter_expr (lambda (sources default_alias src condition memberships probe_work_rows acceptance_cols acceptance_probe)
 	(begin
 		(define input_batch (symbol "__ordered_input_batch"))
-		(define local_batch (symbol "__ordered_local_batch"))
 		(define residual (reduce memberships (lambda (remaining membership)
 			(strip_driver_membership_for_source src remaining membership)) condition))
-		(define residual_cols (extract_columns_for_alias src residual))
-		(define locally_filtered (if (equal? residual true)
-			input_batch
-			(list (quote scan_recset)
-				'(session "__memcp_tx")
-				input_batch
-				(cons (quote list) residual_cols)
-				(list (quote lambda)
-					(map residual_cols (lambda (col)
-						(scan_callback_symbol_for_alias (source_alias src) col)))
-					(lower_column_expr_for_join_truth_context
-						sources default_alias residual probe_work_rows)))))
+		(define membership_batch (symbol "__ordered_membership_batch"))
+		(define late_batch (symbol "__ordered_late_batch"))
 		(define membership_exprs (map memberships (lambda (membership)
-			(batch_membership_expr src membership local_batch))))
+			(batch_membership_expr src membership input_batch))))
 		(if (reduce membership_exprs (lambda (unsupported expr)
 			(or unsupported (nil? expr))) false)
 			nil
-			(list (quote lambda) (list input_batch)
-				(list
-					(list (quote lambda) (list local_batch)
-						(begin
-							(define accepted (if (empty_list? membership_exprs)
-							local_batch
-							(list (quote recset_intersect)
-								(cons (quote list) (cons local_batch membership_exprs)))))
-							(if (equal? acceptance_probe true)
-								accepted
-								(list (quote scan_recset)
-									'(session "__memcp_tx")
-									accepted
-									(cons (quote list) acceptance_cols)
-									(list (quote lambda)
-										(map acceptance_cols (lambda (col)
-											(scan_callback_symbol_for_alias (source_alias src) col)))
-										acceptance_probe)))))
-					locally_filtered))))))
+			(begin
+				(define membership_expr (if (empty_list? membership_exprs)
+					input_batch
+					(list (quote recset_intersect)
+						(cons (quote list) (cons input_batch membership_exprs)))))
+				(define residual_probe_work_rows
+					(batch_membership_survivor_rows memberships probe_work_rows))
+				(planner_record_physical_decision (list
+					(list "decision" "batch_predicate_lowering")
+					(list "chosen" "candidate_then_residual")
+					(list "reason" "selected_ordered_batch_carrier_cost")
+					(list "inputs" (list
+						(list "input_rows" (planner_literal_value probe_work_rows))
+						(list "residual_probe_rows"
+							(planner_literal_value residual_probe_work_rows))
+						(list "membership_count" (count memberships))
+						(list "residual_probe_count" (count (expr_probe_stages residual)))))))
+				(define late_expr (scan_input_recset_for_condition
+					sources default_alias src membership_batch residual
+					residual_probe_work_rows))
+				(define accepted_expr (if (equal? acceptance_probe true)
+					late_batch
+					(list (quote scan_recset)
+						'(session "__memcp_tx")
+						late_batch
+						(cons (quote list) acceptance_cols)
+						(list (quote lambda)
+							(map acceptance_cols (lambda (col)
+								(scan_callback_symbol_for_alias (source_alias src) col)))
+							acceptance_probe))))
+				(list (quote lambda) (list input_batch)
+					(list
+						(list (quote lambda) (list membership_batch)
+							(list
+								(list (quote lambda) (list late_batch) accepted_expr)
+								late_expr))
+						membership_expr)))))))
 
 /* Produce the exact driver subset shared by a prefiltered membership tree.
 Every remaining top-level conjunct is evaluated once while building the driver
@@ -3115,13 +3180,13 @@ RecSet; membership edges retain their own physical operators. */
 				residual expression and lower through the ordinary probe machinery. This
 				makes adaptive ordered batching a property of the consuming scan, not of
 				one privileged predicate shape. */
-				(define batch_filter (if (equal? table_expr source_table)
+				(define use_batch_accept (and (equal? table_expr source_table)
+					(reduce membership_plans (lambda (chosen entry)
+						(or chosen (equal? (car (nth entry 1)) "ordered_batch_accept"))) false)))
+				(define batch_filter (if use_batch_accept
 					(ordered_batch_filter_expr (list src) alias src filter_condition
 						remaining_batch_memberships (probe_context_row_count (list src)) '() true)
 					nil))
-				(define use_batch_accept (and (not (nil? batch_filter))
-					(reduce membership_plans (lambda (chosen entry)
-						(or chosen (equal? (car (nth entry 1)) "ordered_batch_accept"))) false)))
 				(define raw_map_row (list (quote resultrow)
 					(cons (quote list) (map_assoc bundled_fields (lambda (title expr)
 						(lower_column_expr_for_alias src expr))))))

@@ -1025,6 +1025,43 @@ test_cases:
           contains:
             - "scan_order_batch_accept"
       - sql: |
+          EXPLAIN PHYSICAL
+          SELECT d.ID
+          FROM in_batch_doc d
+          WHERE d.ID > 0
+            AND d.file_id IN (
+              SELECT f.ID FROM in_batch_file f WHERE f.flag = 0
+              UNION
+              SELECT f.ID FROM in_batch_file f WHERE f.flag = 1
+            )
+          ORDER BY d.sort_key
+          LIMIT 5
+        expect:
+          contains:
+            - "ordered_batch_accept"
+            - "batch_predicate_lowering"
+            - "candidate_then_residual"
+            - "residual_probe_rows"
+      - sql: |
+          SELECT d.ID
+          FROM in_batch_doc d
+          WHERE d.ID > 0
+            AND d.file_id IN (
+              SELECT f.ID FROM in_batch_file f WHERE f.flag = 0
+              UNION
+              SELECT f.ID FROM in_batch_file f WHERE f.flag = 1
+            )
+          ORDER BY d.sort_key
+          LIMIT 5
+        expect:
+          rows: 5
+          data:
+            - ID: 10000
+            - ID: 9999
+            - ID: 9998
+            - ID: 9997
+            - ID: 9996
+      - sql: |
           EXPLAIN
           SELECT d.ID
           FROM in_dv_doc d
