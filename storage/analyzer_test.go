@@ -264,6 +264,27 @@ func TestBoundaryLikeNonPrefix(t *testing.T) {
 	}
 }
 
+func TestRecSetFilterBoundariesKeepLikeAndMembershipHooks(t *testing.T) {
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("strlike"),
+		scm.NewSymbol("text"),
+		scm.NewString("%needle%"),
+	})
+	condition := buildProc([]string{"text"}, body)
+	owner := &recSet{}
+	bounds := recSetFilterBoundaries(owner, []string{"search"}, condition)
+	if len(bounds) != 2 {
+		t.Fatalf("combined RecSet/LIKE boundaries = %d, want 2", len(bounds))
+	}
+	if bounds[0].matcher != LikeMatcher || bounds[1].matcher != RecSetMatcher {
+		t.Fatalf("combined matcher order = (%s, %s), want (like, recset)",
+			bounds[0].matcher.Kind(), bounds[1].matcher.Kind())
+	}
+	if !bounds[1].lower.IsCustom(TagRecSet) || RecSetFromScmer(bounds[1].lower) != owner {
+		t.Fatal("RecSet boundary did not retain the exact input membership")
+	}
+}
+
 // TestMatcherIsPointLike verifies IsPointLike for all matcher types.
 func TestMatcherIsPointLike(t *testing.T) {
 	if !EqualMatcher.IsPointLike() {

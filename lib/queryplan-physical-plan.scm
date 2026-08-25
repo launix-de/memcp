@@ -1949,6 +1949,19 @@ get_column refs to the source) are excluded automatically too. */
 							(not (scalar_aggregate_probe_stage? stage))
 							(contains? stage_output_ids (gs_id stage))))))))))
 
+/* A physical membership marker is the exclusive owner of its carrier. Stop at
+the marker instead of walking into the embedded logical stage; cache-backed
+alternatives prepare themselves, while raw RecSet and direct-probe alternatives
+must not pay for an unused group cache. */
+(define physical_membership_probe_stage_ids (lambda (expr)
+	(match expr
+		((symbol driver_membership_probe) stage _probe) (list (gs_id stage))
+		((quote driver_membership_probe) stage _probe) (list (gs_id stage))
+		((symbol driver_membership_subscan_probe) stage _probe) (list (gs_id stage))
+		((quote driver_membership_subscan_probe) stage _probe) (list (gs_id stage))
+		(cons _head tail) (merge_unique (map tail physical_membership_probe_stage_ids))
+		_ '())))
+
 (define query_block_stages_to_prepare_base_using (lambda (all_stages block)
 	(begin
 		(define sources (qb_sources block))
@@ -1957,10 +1970,14 @@ get_column refs to the source) are excluded automatically too. */
 		(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block
 			all_stages sources default_alias (qb_limit block) (qb_where block) (query_block_probe_consumers block))))
 		(define stage_output_ids (stage_output_source_ids sources))
+		(define physical_membership_stage_ids
+			(physical_membership_probe_stage_ids (query_block_probe_consumers block)))
 		(define direct (filter (qb_stages block) (lambda (stage)
 			(and
-				(stage_direct_prepare_source_visible? block sources default_alias stage)
-				(stage_direct_prepare_semantic_candidate? consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)))))
+				(not (contains? physical_membership_stage_ids (gs_id stage)))
+				(and
+					(stage_direct_prepare_source_visible? block sources default_alias stage)
+					(stage_direct_prepare_semantic_candidate? consumed_probe_ids consumed_source_probe_ids stage_output_ids stage))))))
 		direct)))
 
 (define selected_group_cache_keys (lambda (stages)
@@ -2127,8 +2144,7 @@ probes remain recipes and still execute after root braking. */
 	(prepare_simple_query_block_physical_core_chosen
 		(query_block_with_physical_membership_choices
 			(query_block_with_physical_membership_using
-				(query_block_stage_lookup block)
-				(query_block_with_physical_requirement_choices block))))))
+				(query_block_stage_lookup block) block)))))
 
 (define lower_simple_query_block_with_cataloged_stages (lambda (block)
 	(begin
@@ -2558,6 +2574,30 @@ path. */
 							(source_table_expr (nth first_descriptor 0)))
 							(equal? (nth descriptor 1) (nth first_descriptor 1))))) true))))))
 
+/* Computed membership keys are already stored canonically as k0 in the group
+cache. Probing that keytable is cheaper than first copying its rows into a
+query-local RecSet index. This selected carrier prepares its cache once before
+returning the closure; the closure then performs only the indexed presence
+lookup for each ordered driver candidate. */
+(define membership_cache_key_probe_expr (lambda (stage)
+	(begin
+		(define cache (group_stage_cache stage))
+		(define probe_var (symbol "__membership_probe"))
+		(define key_name "k0")
+		(define value_col (aggregate_col_name_using (gs_input stage) (car (gs_aggregates stage))))
+		(define filtercols (list key_name value_col))
+		(prepared_group_cache_expr stage
+			(list (quote lambda) (list probe_var)
+				(list (quote scan_exists)
+					'(session "__memcp_tx")
+					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
+					(cons (quote list) filtercols)
+					(list (quote lambda) (map filtercols symbol)
+						(list (quote and)
+							(list (quote equal??) (symbol key_name)
+								(list (quote outer) probe_var))
+							(stage_recset_value_filter_term stage value_col)))))))))
+
 (define membership_keyset_parts (lambda (membership)
 	(begin
 		(define descriptor (membership_keyset_descriptor membership))
@@ -2566,7 +2606,17 @@ path. */
 				(define stage (nth membership 0))
 				(define input (gs_input stage))
 				(if (not (union_block? input))
-					nil
+					(if (and (group_stage? stage)
+						(equal? (count (gs_keys stage)) 1))
+						(begin
+							(define cache (group_stage_cache stage))
+							(list
+								(list (quote table)
+									(group_cache_schema cache) (group_cache_relation cache))
+								"k0"
+								(membership_cache_key_probe_expr stage)
+								(quote group_cache_probe)))
+						nil)
 					(begin
 						(define carriers (map (union_branches input) candidate_recset_branch_carrier))
 						(define supported (and (not (empty_list? carriers))
@@ -2616,27 +2666,45 @@ path. */
 				(and same
 					(and (equal? (nth item 0) (nth (car parts) 0))
 						(equal? (nth item 1) (nth (car parts) 1))))) true)))
-		(if (not compatible)
+		(if (not supported)
 			'()
+			(if (not compatible)
+				(merge (map memberships (lambda (membership)
+					(membership_keyset_bindings (list membership)))))
 			(begin
-				(define keyset_var (symbol "__membership_keyset"))
+				(define keyset_var (symbol (concat "__membership_keyset_"
+					(stable_structural_hash (map memberships (lambda (membership)
+						(gs_id (nth membership 0)))) true))))
+				(define group_cache_probe (and (single_source? parts)
+					(equal? (count (car parts)) 4)))
 				(define candidate_recsets (map parts (lambda (item) (nth item 2))))
 				(define candidate_recset (if (single_source? candidate_recsets)
 					(car candidate_recsets)
 					(list (quote recset_union) (cons (quote list) candidate_recsets))))
-				(define keyset_expr (list (quote recset_key_index)
-					'(session "__memcp_tx")
-					candidate_recset
-					(quoted_runtime_list (list (nth (car parts) 1)))))
+				(define keyset_expr (if group_cache_probe
+					(nth (car parts) 2)
+					(list (quote recset_key_index)
+						'(session "__memcp_tx")
+						candidate_recset
+						(quoted_runtime_list (list (nth (car parts) 1))))))
 				(map memberships (lambda (membership)
-					(list membership keyset_var keyset_expr))))))))
+					(list membership keyset_var keyset_expr)))))))))
+
+(define unique_membership_keyset_bindings (lambda (bindings)
+	(reduce bindings (lambda (unique binding)
+		(if (reduce unique (lambda (found existing)
+			(or found (equal? (nth existing 1) (nth binding 1)))) false)
+			unique
+			(cons binding unique))) '())))
 
 (define wrap_membership_keyset_bindings (lambda (bindings body)
 	(if (empty_list? bindings)
 		body
-		(list
-			(list (quote lambda) (list (nth (car bindings) 1)) body)
-			(nth (car bindings) 2)))))
+		(begin
+			(define unique (reverse (unique_membership_keyset_bindings bindings)))
+			(cons
+				(list (quote lambda) (map unique (lambda (binding) (nth binding 1))) body)
+				(map unique (lambda (binding) (nth binding 2))))))))
 
 (define replace_driver_membership_keyset_markers (lambda (expr bindings)
 	(begin
@@ -2709,7 +2777,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 						(list (nth marker 0) (nth marker 1) target_col term)))))))
 		(lambda (membership) (not (nil? membership))))))
 
-(define ordered_batch_filter_expr (lambda (src condition memberships)
+(define ordered_batch_filter_expr (lambda (sources default_alias src condition memberships probe_work_rows acceptance_cols acceptance_probe)
 	(begin
 		(define input_batch (symbol "__ordered_input_batch"))
 		(define local_batch (symbol "__ordered_local_batch"))
@@ -2725,7 +2793,8 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				(list (quote lambda)
 					(map residual_cols (lambda (col)
 						(scan_callback_symbol_for_alias (source_alias src) col)))
-					(lower_column_expr_for_alias src residual)))))
+					(lower_column_expr_for_join_truth_context
+						sources default_alias residual probe_work_rows)))))
 		(define membership_exprs (map memberships (lambda (membership)
 			(batch_membership_expr src membership local_batch))))
 		(if (reduce membership_exprs (lambda (unsupported expr)
@@ -2734,10 +2803,21 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 			(list (quote lambda) (list input_batch)
 				(list
 					(list (quote lambda) (list local_batch)
-						(if (empty_list? membership_exprs)
+						(begin
+							(define accepted (if (empty_list? membership_exprs)
 							local_batch
 							(list (quote recset_intersect)
 								(cons (quote list) (cons local_batch membership_exprs)))))
+							(if (equal? acceptance_probe true)
+								accepted
+								(list (quote scan_recset)
+									'(session "__memcp_tx")
+									accepted
+									(cons (quote list) acceptance_cols)
+									(list (quote lambda)
+										(map acceptance_cols (lambda (col)
+											(scan_callback_symbol_for_alias (source_alias src) col)))
+										acceptance_probe)))))
 					locally_filtered))))))
 
 /* Produce the exact driver subset shared by a prefiltered membership tree.
@@ -2791,6 +2871,16 @@ RecSet; membership edges retain their own physical operators. */
 			(qassoc_get facts (quote membership_candidate_scan_invocations) probe_branches)))
 		(define driver_scan_invocations (max 1
 			(qassoc_get facts (quote membership_driver_scan_invocations) 1)))
+		/* scan_order_batch_accept requests disjoint windows, but the current
+		ordered primitive has no resumable cursor. Every window therefore pays
+		for another ordered traversal of the driver, irrespective of how few
+		rows that window returns. Keep this explicit so calibration can price
+		the implementation that is actually emitted. */
+		/* Reuse the calibrated scan_order work unit. Without a resumable cursor,
+		each batch repeats the same quadratic ordered traversal; a separate linear
+		coefficient would describe the same operator inconsistently. */
+		(define ordered_driver_work_units (* batches
+			(/ (* driver_input_rows driver_input_rows) 1000000)))
 		(define candidate_fraction (if (and (number? driver_input_rows) (> driver_input_rows 0))
 			(min 1 (/ visited_rows driver_input_rows)) 1))
 		/* Disjoint driver batches may contain the same foreign-key value. In the
@@ -2807,11 +2897,13 @@ RecSet; membership edges retain their own physical operators. */
 		(define broad_text_bytes (*
 			(qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0)
 			candidate_repeat_fraction))
-		(planner_cost
-			(+ planner_ordered_batch_accept_startup_ns
-				(* (+ driver_scan_invocations (* batches candidate_scan_invocations))
-					planner_membership_scan_invocation_ns))
+		(planner_cost_add (planner_cost
+			(+ (* (+ driver_scan_invocations (* batches candidate_scan_invocations))
+					planner_membership_scan_invocation_ns)
+				(* batches driver_scan_invocations
+					planner_membership_ordered_scan_invocation_ns))
 			(+
+				(* ordered_driver_work_units planner_membership_ordered_driver_input_row_ns)
 				(* (+ visited_rows candidate_work_rows projection_rows)
 					planner_membership_scan_row_ns)
 				(* candidate_work_rows
@@ -2826,7 +2918,19 @@ RecSet; membership edges retain their own physical operators. */
 			(* projection_rows
 				planner_membership_recset_build_row_ns)
 			(* projection_rows 8)
-			0 visited_rows 0.55))))
+			0 visited_rows 0.55)
+			(planner_membership_direct_probe_cost
+				(* visited_rows
+					(membership_candidate_density candidate_input_rows candidate_rows facts)
+					(qassoc_get facts (quote membership_downstream_probe_branches) 0)))
+			visited_rows 0.55))))
+
+(define membership_row_number_consumer? (lambda (membership direct_order_limit)
+	(and (not (nil? membership))
+		(and (not direct_order_limit)
+			(equal? (qassoc_get (gs_facts (nth membership 0))
+				(quote membership_consumer) nil)
+				(quote order_limit))))))
 
 (define lower_single_source_query_block (lambda (block)
 	(begin
@@ -2866,38 +2970,21 @@ RecSet; membership edges retain their own physical operators. */
 				(define scan_order_supported (order_items_belong_to_source? src order_items))
 				(define bounded (query_limit_active? (qb_offset block) (qb_limit block)))
 				(define memberships (driver_memberships_for_source src condition))
-				/* For a bounded ordered driver, union branch-local source candidates
-				before building one immutable key index. The driver stays a scan_order
-				and probes that index in its filter, so Top-K braking remains effective
-				without projecting every candidate into a target RecSet. */
-				(define keyset_membership_probe (ordered_driver_membership_keyset? (qb_facts block)))
-				(define membership_keysets (if keyset_membership_probe
-					(membership_keyset_bindings memberships)
-					'()))
-				(define use_membership_keysets (and keyset_membership_probe
-					(equal? (count membership_keysets) (count memberships))))
+				/* A derived Top-K has already moved ORDER/LIMIT into its row-number
+				consumer. The logical membership requirement retains that ownership even
+				when this block no longer carries a direct ORDER/LIMIT pair. */
+				(define row_number_membership_consumer
+					(membership_row_number_consumer? (if (empty_list? memberships)
+						nil (car memberships)) (and scan_order_supported bounded)))
 				(define allow_ordered_batch_binding (and scan_order_supported
 					(and bounded
-						(and (equal? (count memberships) 1)
-							(and (not (membership_expr_has_driver_alternative? condition))
-								(and (or (empty_list? order_items)
-									(not (empty_list? (source_primary_key_columns src))))
-									(ordered_batch_stage_supported? (nth (car memberships) 0))))))))
-				(define forced_candidate_membership (reduce memberships (lambda (forced membership)
-					(begin
-						(define override (planner_physical_override
-							(concat "membership_carrier:" (gs_id (nth membership 0)))))
-						(or forced (or (equal? override "candidate_keyset")
-							(or (equal? override "ordered_batch_accept")
-								(equal? override "prefiltered_candidate_keyset")))))) false))
-				(define prefer_membership_filter (and scan_order_supported
-					(and bounded
-						(and (not forced_candidate_membership)
-							(and (qassoc_get (qb_facts block) (quote membership_driver_alternative) false)
-								(membership_estimate_broad? (qb_facts block)))))))
-				(define membership_plans (if (or keyset_membership_probe prefer_membership_filter)
-					'()
-					(filter (map memberships (lambda (membership)
+						(or (empty_list? order_items)
+							(not (empty_list? (source_primary_key_columns src)))))))
+				/* This node-local lowering is the sole carrier decision. Older code
+				selected a keyset from block-level broadness facts before reaching this
+				point; that duplicate choice could label an alternative as selected while
+				emitting the correlated subscan fallback. */
+				(define membership_plans (filter (map memberships (lambda (membership)
 						(begin
 							(define plan (recset_project_join_plan_for_membership_using
 								src membership
@@ -2905,10 +2992,24 @@ RecSet; membership edges retain their own physical operators. */
 								(if (and scan_order_supported bounded)
 									(probe_limit_work_rows (qb_limit block)) nil)
 								allow_ordered_batch_binding
-								(prefiltered_driver_recset_expr_for_membership
-									src source_table condition membership)))
+							(prefiltered_driver_recset_expr_for_membership
+								src source_table condition membership)
+								(+ (count (acceptance_required_sources
+									(membership_downstream_sources (qb_sources block) src membership)
+									alias raw_condition))
+									(count (expr_probe_stages raw_condition)))
+								(not row_number_membership_consumer)))
 							(if (nil? plan) nil (list membership plan)))))
-						(lambda (entry) (not (nil? entry))))))
+					(lambda (entry) (not (nil? entry)))))
+				(define driver_memberships (map (filter membership_plans (lambda (entry)
+					(equal? (car (nth entry 1)) "driver_order_membership_probe")))
+					(lambda (entry) (nth entry 0))))
+				/* For a bounded ordered driver, union branch-local candidates into one
+				immutable key index. The chosen physical plans, not a logical fact or
+				expression-shape heuristic, are the authority for this binding. */
+				(define membership_keysets (membership_keyset_bindings driver_memberships))
+				(define use_membership_keysets (and (not (empty_list? driver_memberships))
+					(equal? (count membership_keysets) (count driver_memberships))))
 				(define membership_bindings (filter (map membership_plans (lambda (entry)
 					(begin
 						(define membership (nth entry 0))
@@ -2919,18 +3020,15 @@ RecSet; membership edges retain their own physical operators. */
 							nil))))
 					(lambda (binding) (not (nil? binding)))))
 				(define bound_memberships (map membership_bindings (lambda (binding) (nth binding 0))))
-				(define membership_formula (if keyset_membership_probe
-					nil
-					(driver_membership_recset_formula src condition membership_bindings)))
+				(define membership_formula
+					(driver_membership_recset_formula src condition membership_bindings))
 				/* A membership predicate which is implied by the whole WHERE clause is
 				eligible to become the scan driver. A branch-local predicate below OR is
 				not: its RecSet must remain a probe or rows accepted by sibling branches
 				would disappear. This distinction also preserves the established fast
 				single-IN path while allowing several guarded RecSets in one scan. */
 				(define direct_membership (driver_membership_for_source src condition))
-				(define membership_formula_driver (and
-					(not (nil? membership_formula))
-					(not prefer_membership_filter)))
+				(define membership_formula_driver (not (nil? membership_formula)))
 				(define membership_formula_residual (if membership_formula_driver
 					(strip_driver_membership_formula_terms condition (car membership_formula))
 					condition))
@@ -2956,20 +3054,21 @@ RecSet; membership edges retain their own physical operators. */
 				(define membership_driver (and
 					(not membership_formula_driver)
 					(and (not (nil? direct_membership))
-						(and (not prefer_membership_filter)
-							(and (not (empty_list? membership_bindings))
+						(and (not (empty_list? membership_bindings))
 								(and (empty_list? (cdr membership_bindings))
-									(equal? direct_membership (car bound_memberships))))))))
+									(equal? direct_membership (car bound_memberships)))))))
 				(define membership_filter (and
 					(not (or membership_driver membership_formula_driver))
 					(not (empty_list? membership_bindings))))
-				(define filter_condition (if use_membership_keysets
-					(replace_driver_membership_keyset_markers condition membership_keysets)
-					(if membership_formula_driver
+				(define candidate_filter_condition (if membership_formula_driver
 						(if membership_formula_difference_driver true membership_formula_residual)
 						(if membership_driver
 							(strip_driver_membership_for_source src condition direct_membership)
-							(replace_driver_membership_markers src condition bound_memberships)))))
+							(replace_driver_membership_markers src condition bound_memberships))))
+				(define filter_condition (if use_membership_keysets
+					(replace_driver_membership_keyset_markers
+						candidate_filter_condition membership_keysets)
+					candidate_filter_condition))
 				(define filtercols (merge_unique (list
 					(if membership_filter (list "$recset_contains") '())
 					(extract_columns_for_alias src filter_condition))))
@@ -3009,11 +3108,16 @@ RecSet; membership edges retain their own physical operators. */
 				(define filter_expr (list (quote lambda)
 					(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 					(lower_column_expr_for_alias src filter_condition)))
-				(define remaining_memberships (driver_memberships_for_source src filter_condition))
-				(define remaining_batch_memberships (ordered_batch_membership_terms src filter_condition))
-				(define batch_filter (if (and (equal? table_expr source_table)
-					(equal? (count remaining_memberships) (count remaining_batch_memberships)))
-					(ordered_batch_filter_expr src filter_condition remaining_batch_memberships)
+				(define remaining_batch_memberships (filter
+					(ordered_batch_membership_terms src filter_condition)
+					(lambda (membership) (ordered_batch_stage_supported? (nth membership 0)))))
+				/* Membership markers which cannot project a batch RecSet remain in the
+				residual expression and lower through the ordinary probe machinery. This
+				makes adaptive ordered batching a property of the consuming scan, not of
+				one privileged predicate shape. */
+				(define batch_filter (if (equal? table_expr source_table)
+					(ordered_batch_filter_expr (list src) alias src filter_condition
+						remaining_batch_memberships (probe_context_row_count (list src)) '() true)
 					nil))
 				(define use_batch_accept (and (not (nil? batch_filter))
 					(reduce membership_plans (lambda (chosen entry)
@@ -3361,6 +3465,18 @@ either bound a real row or supplied the synthetic NULL row. */
 		(filter (coalesceNil sources '()) (lambda (src)
 			(contains? required (source_alias src)))))))
 
+/* Carrier costing happens at one scan-tree edge, but rejecting LEFT JOIN
+sources may already sit in its continuation. Derive them from the complete
+source catalog; exclude only the driver and the membership stage whose carrier
+is being compared. acceptance_required_sources retains SQL NULL-extension
+semantics and drops projection-only nullable lookups. */
+(define membership_downstream_sources (lambda (sources driver_src membership)
+	(filter (coalesceNil sources '()) (lambda (candidate)
+		(and (not (equal? (source_alias candidate) (source_alias driver_src)))
+			(not (and (stage_output_relation? (source_relation candidate))
+				(equal? (stage_output_relation_id (source_relation candidate))
+					(gs_id (nth membership 0))))))))))
+
 /* The ordered root remains the storage driver while its continuation may emit
 zero, one, or many complete values. stream_window_reduce owns SQL OFFSET/LIMIT
 over those values, so neither driver cardinality nor a scalar-purpose tag can
@@ -3371,44 +3487,69 @@ move the window to the wrong tree level. */
 		(define ordered_sources (join_optimizer_sources_for_order all_sources ordered_aliases))
 		(define src (car ordered_sources))
 		(define remaining_sources (cdr ordered_sources))
+		(define alias (source_alias src))
 		(define offset (coalesceNil offset_value 0))
 		(define limit (coalesceNil limit_value -1))
 		(define target (if (< limit 0) -1 (+ offset limit)))
 		(define acceptance_probe_work_rows (coalesceNil
 			(probe_limit_work_rows limit_value)
 			(if (< target 0) nil target)))
-		(define scalar_carrier (physical_scalar_truth_carrier
-			all_sources src default_alias final_condition acceptance_probe_work_rows stages))
-		(define scalar_probe (if (nil? scalar_carrier) nil (nth scalar_carrier 2)))
-		(define carrier_condition (if (nil? scalar_probe) final_condition
-			(rewrite_physical_scalar_probe_as_true scalar_probe final_condition)))
-		(define carrier_needed_exprs (if (nil? scalar_probe) needed_exprs
-			(rewrite_physical_scalar_probe_as_true scalar_probe needed_exprs)))
 		/* The ordered driver is consumed here. Preserve the optimizer's remaining
 		subtree instead of rebuilding a left-deep tree from the source catalog. */
 		(define remaining_plan (join_optimizer_tree_without_aliases
 			plan (list (source_alias src))))
-		(define alias (source_alias src))
-		(define condition_parts (physical_partition_condition default_alias src remaining_sources carrier_condition))
-		(define local_condition (nth condition_parts 0))
-		(define remaining_condition (combine_where
-			(nth condition_parts 2)
-			(join_optimizer_node_condition (join_optimizer_tree_predicates plan))))
-		(define condition (combine_where (source_join_expr src) local_condition))
+		(define raw_condition_parts (physical_partition_condition
+			default_alias src remaining_sources final_condition))
+		(define raw_condition (combine_where
+			(source_join_expr src) (nth raw_condition_parts 0)))
 		(define order_parts (split_order_items_for_join_driver
-			ordered_sources default_alias src order_items stages carrier_condition '()))
+			ordered_sources default_alias src order_items stages final_condition '()))
 		(define driver_order_items (nth order_parts 0))
 		(define remaining_order_items (nth order_parts 1))
-		(define membership (driver_membership_for_source src condition))
+		(define membership (driver_membership_for_source src raw_condition))
+		/* A RecSet batch represents driver membership, not join multiplicity. The
+		consumer is therefore available exactly when the remaining join tree is a
+		chain of 0:1/1:1 lookups. Predicate complexity is deliberately not a gate:
+		the ordinary expression and probe lowerers run inside the smaller batch. */
+		(define allow_ordered_batch (and (not (nil? membership))
+			(and (>= target 0)
+				(and (not (empty_list? driver_order_items))
+					(and (ordered_batch_stage_supported? (nth membership 0))
+						(and (not (expr_refs_stage_output_alias? final_condition))
+							(downstream_sources_at_most_one_driver_row?
+								ordered_sources default_alias final_condition stages)))))))
 		(define membership_plan (if (nil? membership) nil
 			(recset_project_join_plan_for_membership_using src membership
 				(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter))
 				(if (query_limit_active? offset_value limit_value)
 					(probe_limit_work_rows limit_value) nil)
-				false
+				allow_ordered_batch
 				(prefiltered_driver_recset_expr_for_membership
-					src (source_table_expr_using stages src) condition membership))))
+					src (source_table_expr_using stages src) raw_condition membership)
+				(+ (count (acceptance_required_sources
+					remaining_sources default_alias final_condition))
+					(count (expr_probe_stages final_condition)))
+				true)))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
+		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
+		/* A scalar truth carrier over the complete driver would defeat adaptive
+		batching. When the batch alternative wins, keep the scalar marker in the
+		predicate and lower it with the batch cardinality inside scan_recset. */
+		(define scalar_carrier (if use_batch_accept nil
+			(physical_scalar_truth_carrier
+				all_sources src default_alias final_condition acceptance_probe_work_rows stages)))
+		(define scalar_probe (if (nil? scalar_carrier) nil (nth scalar_carrier 2)))
+		(define carrier_condition (if (nil? scalar_probe) final_condition
+			(rewrite_physical_scalar_probe_as_true scalar_probe final_condition)))
+		(define carrier_needed_exprs (if (nil? scalar_probe) needed_exprs
+			(rewrite_physical_scalar_probe_as_true scalar_probe needed_exprs)))
+		(define condition_parts (physical_partition_condition
+			default_alias src remaining_sources carrier_condition))
+		(define local_condition (nth condition_parts 0))
+		(define remaining_condition (combine_where
+			(nth condition_parts 2)
+			(join_optimizer_node_condition (join_optimizer_tree_predicates plan))))
+		(define condition (combine_where (source_join_expr src) local_condition))
 		(define membership_table_expr (if (and
 			(not (nil? membership_plan))
 			(or (equal? membership_strategy "candidate_keyset")
@@ -3423,7 +3564,8 @@ move the window to the wrong tree level. */
 			(membership_keyset_bindings (list membership))
 			'()))
 		(define use_membership_keyset (not (empty_list? membership_keysets)))
-		(define effective_membership (if (nil? membership_table_expr) nil membership))
+		(define effective_membership (if (or use_batch_accept
+			(not (nil? membership_table_expr))) membership nil))
 		(define effective_condition (if use_membership_keyset
 			(replace_driver_membership_keyset_markers condition membership_keysets)
 			(strip_driver_membership_for_source src condition effective_membership)))
@@ -3433,13 +3575,11 @@ move the window to the wrong tree level. */
 		query-scoped key index; unsupported computed keys retain the established probe
 		fallback and its separately calibrated cost. */
 		(define filter_condition effective_condition)
-		/* A scalar probe already owns a nested relational callback. Copying it into
-		the scan_order acceptance callback adds another outer scope and would make
-		that copy disagree with the projection continuation. Evaluate it once in
-		the complete join and let stream_window_reduce count emitted rows. */
+		/* Stage-output column references require a relational source and cannot be
+		read directly from the driver callback. Scalar/EXISTS probe markers are not
+		deferred: lowering them at batch cardinality is the purpose of this path. */
 		(define defer_complex_acceptance
-			(or (expr_refs_stage_output_alias? remaining_condition)
-				(not (empty_list? (expr_probe_stages remaining_condition)))))
+			(expr_refs_stage_output_alias? remaining_condition))
 		/* Acceptance runs before OFFSET/LIMIT and therefore contains only joins
 		which can reject a driver row. Projection-only nullable lookups belong to
 		the map callback after the native window and must not be probed twice. */
@@ -3479,6 +3619,13 @@ move the window to the wrong tree level. */
 		(define acceptance_expr (list (quote lambda)
 			(map acceptance_cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			acceptance_probe))
+		(define batch_filter (if use_batch_accept
+			(ordered_batch_filter_expr all_sources default_alias src condition
+				(list membership) acceptance_probe_work_rows acceptance_cols acceptance_probe)
+			nil))
+		(if (and use_batch_accept (nil? batch_filter))
+			(neumann_fail "build_queryplan" "chosen ordered batch membership has no executable filter")
+			true)
 		(define projection_probe_work_rows (coalesceNil
 			(probe_limit_work_rows limit_value)
 			acceptance_probe_work_rows))
@@ -3487,28 +3634,45 @@ move the window to the wrong tree level. */
 			(value_builder projection_probe_work_rows scalar_probe)))
 		(define mapcols (join_cols_for_alias all_sources default_alias alias carrier_needed_exprs))
 		(define projection (build_join_scan_pipeline_using_recipe
-			schema all_sources remaining_plan default_alias carrier_needed_exprs remaining_condition row_expr
+			schema all_sources remaining_plan default_alias carrier_needed_exprs
+			(if use_batch_accept true remaining_condition) row_expr
 			remaining_order_items 0 -1 true projection_probe_work_rows nil stages nil))
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			projection))
-		(define scan_expr (list (quote scan_order)
-			'(session "__memcp_tx")
-			(if (nil? scalar_carrier)
-				(coalesceNil membership_table_expr (source_table_expr_using stages src))
-				(nth scalar_carrier 1))
-			(cons (quote list) filtercols)
-			filter_expr
-			(cons (quote list) (scan_order_sort_columns_for_join_driver
-				ordered_sources default_alias src driver_order_items stages carrier_condition))
-			(cons (quote list) (order_relations_for_source src driver_order_items))
-			0 0 (if defer_complex_acceptance -1 target)
-			(cons (quote list) mapcols)
-			map_expr nil nil false nil
-			(cons (quote list) acceptance_cols)
-			acceptance_expr))
+		(define ordercols (scan_order_sort_columns_for_join_driver
+			ordered_sources default_alias src driver_order_items stages carrier_condition))
+		(define tiebreaker_cols (if use_batch_accept
+			(filter (source_primary_key_columns src)
+				(lambda (col) (not (contains? ordercols col)))) '()))
+		(define physical_ordercols (merge (list ordercols tiebreaker_cols)))
+		(define physical_orderdirs (merge (list
+			(order_relations_for_source src driver_order_items)
+			(map tiebreaker_cols (lambda (col)
+				(canonical_order_relation < (source_column_order_collation src col)))))))
+		(define table_expr (if (nil? scalar_carrier)
+			(coalesceNil membership_table_expr (source_table_expr_using stages src))
+			(nth scalar_carrier 1)))
+		(define scan_expr (if use_batch_accept
+			(list (quote scan_order_batch_accept)
+				'(session "__memcp_tx") table_expr batch_filter
+				(cons (quote list) physical_ordercols)
+				(cons (quote list) physical_orderdirs)
+				0 offset limit
+				(cons (quote list) mapcols) map_expr nil nil false)
+			(list (quote scan_order)
+				'(session "__memcp_tx") table_expr
+				(cons (quote list) filtercols) filter_expr
+				(cons (quote list) physical_ordercols)
+				(cons (quote list) physical_orderdirs)
+				0 0 (if defer_complex_acceptance -1 target)
+				(cons (quote list) mapcols)
+				map_expr nil nil false nil
+				(cons (quote list) acceptance_cols)
+				acceptance_expr)))
 		(define window_expr (list (quote stream_window_reduce)
-			offset limit reduce_expr neutral_expr
+			(if use_batch_accept 0 offset) (if use_batch_accept -1 limit)
+			reduce_expr neutral_expr
 			(list (quote lambda) (list emit_value) scan_expr)))
 		(if use_membership_keyset
 			(wrap_membership_keyset_bindings membership_keysets window_expr)
@@ -4007,18 +4171,41 @@ exact parameter value. */
 		(define delay_limit_after_join (ordered_join_limit_requires_complete_rows?
 			(join_optimizer_sources_for_order all_sources (cons alias future_aliases))
 			default_alias final_condition offset_value limit_value stages))
+		(define allow_ordered_batch (and (not (nil? membership))
+			(and (not delay_limit_after_join)
+				(and (not (empty_list? current_order_items))
+					(and (query_limit_active? offset_value limit_value)
+						(and (ordered_batch_stage_supported? (nth membership 0))
+							(downstream_sources_at_most_one_driver_row?
+								ordered_sources default_alias final_condition stages)))))))
+		/* A row-number pipeline owns the order/limit continuation itself. Its
+		logical requirement survives ORC/window lowering, whereas the stage may no
+		longer be present in this leaf's local catalog. It can consume a projected
+		RecSet but cannot execute a separate ordered-driver membership probe without
+		first materializing the derived window. */
+		(define direct_order_limit (and (not (empty_list? current_order_items))
+			(query_limit_active? offset_value limit_value)))
+		(define row_number_membership_consumer
+			(membership_row_number_consumer? membership direct_order_limit))
 		(define membership_plan (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
 			nil
 			(recset_project_join_plan_for_membership_using src membership
 				(if (join_scan_reduce? result_mode) (quote aggregate)
-					(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter)))
+					(if (or direct_order_limit row_number_membership_consumer)
+						(quote order_limit) (quote filter)))
 				(if (and (not (empty_list? current_order_items))
 					(query_limit_active? offset_value limit_value))
 					(probe_limit_work_rows limit_value) nil)
-				false
+				allow_ordered_batch
 				(prefiltered_driver_recset_expr_for_membership
-					src (source_table_expr_using stages src) condition membership))))
+					src (source_table_expr_using stages src) condition membership)
+				(+ (count (acceptance_required_sources
+					(membership_downstream_sources all_sources src membership)
+					default_alias final_condition))
+					(count (expr_probe_stages final_condition)))
+				(not row_number_membership_consumer))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
+		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		(define membership_table_expr (if (and
 			(not (nil? membership_plan))
 			(or (equal? membership_strategy "candidate_keyset")
@@ -4049,7 +4236,8 @@ exact parameter value. */
 					(list "limit_delayed" delay_limit_after_join)
 					(list "projection_built" (not (nil? membership_table_expr)))))))
 			nil)
-		(define effective_membership (if (nil? membership_table_expr) nil membership))
+		(define effective_membership (if (or use_batch_accept
+			(not (nil? membership_table_expr))) membership nil))
 		(define effective_condition (if use_membership_keyset
 			(replace_driver_membership_keyset_markers condition membership_keysets)
 			(strip_driver_membership_for_source src condition effective_membership)))
@@ -4128,6 +4316,10 @@ exact parameter value. */
 		(define filter_expr (list (quote lambda)
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			lowered_filter_condition))
+		(define batch_filter (if use_batch_accept
+			(ordered_batch_filter_expr all_sources default_alias src condition
+				(list membership) (probe_work_context_rows_for_alias probe_context alias) '() true)
+			nil))
 		(define continuation_expr (continuation remaining_condition row_expr remaining_order_items))
 		(define map_body (if (equal? post_outer_condition true)
 			continuation_expr
@@ -4145,7 +4337,26 @@ exact parameter value. */
 		(define scan_expr
 			(if (not (nil? row_number_stage_filter))
 				(build_join_row_number_scan_pipeline schema all_sources src default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe stages result_mode probe_context combines_state continuation outer_scan)
-				(if (and (empty_list? current_order_items) (not (query_limit_active? offset_value limit_value)))
+				(if use_batch_accept
+					(begin
+						(define ordercols (scan_order_sort_columns_for_join_driver
+							ordered_sources default_alias src current_order_items stages final_condition))
+						(define tiebreaker_cols (filter (source_primary_key_columns src)
+							(lambda (col) (not (contains? ordercols col)))))
+						(list (quote scan_order_batch_accept)
+							'(session "__memcp_tx")
+							table_expr batch_filter
+							(cons (quote list) (merge (list ordercols tiebreaker_cols)))
+							(cons (quote list) (merge (list
+								(order_relations_for_source src current_order_items)
+								(map tiebreaker_cols (lambda (col)
+									(canonical_order_relation <
+										(source_column_order_collation src col)))))))
+							0 (coalesceNil offset_value 0) (coalesceNil limit_value -1)
+							(cons (quote list) mapcols) map_expr reduce_expr
+							(join_scan_neutral_expr result_mode)
+							(or outer_scan (source_outer? src))))
+					(if (and (empty_list? current_order_items) (not (query_limit_active? offset_value limit_value)))
 					(list (quote scan)
 						'(session "__memcp_tx")
 						table_expr
@@ -4172,7 +4383,7 @@ exact parameter value. */
 						map_expr
 						reduce_expr
 						(join_scan_neutral_expr result_mode)
-						(or outer_scan (source_outer? src))))))
+						(or outer_scan (source_outer? src)))))))
 		(define membership_bound_scan (if membership_filter
 			(list
 				(list (quote lambda) (list membership_var) scan_expr)
@@ -6198,8 +6409,9 @@ ordering run. Storage artifacts begin in build_queryplan. */
 	(match expr
 		(cons head tail) (or
 			(physical_head_matches? head target)
-			(reduce tail (lambda (found item)
-				(or found (physical_expr_has_head? item target))) false))
+			(or (physical_expr_has_head? head target)
+				(reduce tail (lambda (found item)
+					(or found (physical_expr_has_head? item target))) false)))
 		_ false)))
 
 (define physical_prefiltered_membership_expr? (lambda (expr)
@@ -6210,8 +6422,15 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		((quote scan_recset) _tx source _cols _filter)
 		(or (physical_expr_has_head? source (quote recset_project_join))
 			(physical_prefiltered_membership_expr? source))
-		(cons _head tail) (reduce tail (lambda (found item)
-			(or found (physical_prefiltered_membership_expr? item))) false)
+		(cons head tail) (or
+			/* Prefiltered candidates are encoded as an immediately applied lambda:
+			the body projects membership over the RecSet supplied by its argument.
+			A list-valued call head is executable AST and must be traversed too. */
+			(and (physical_expr_has_head? head (quote recset_project_join))
+				(physical_expr_has_head? tail (quote scan_recset)))
+			(or (physical_prefiltered_membership_expr? head)
+				(reduce tail (lambda (found item)
+					(or found (physical_prefiltered_membership_expr? item))) false)))
 		_ false)))
 
 (define physical_membership_operator_family (lambda (plan)
@@ -6227,7 +6446,7 @@ ordering run. Storage artifacts begin in build_queryplan. */
 				"driver_order_membership_probe"
 				(if (physical_expr_has_head? plan (quote recset_project_join))
 					"candidate_keyset"
-					"driver_order_membership_probe"))))))
+					"driver_filter_join_probe"))))))
 
 (define physical_operator_family_for_decision (lambda (plan decision)
 	(begin
@@ -6362,6 +6581,7 @@ potentially large calibrated SELECT result. */
 							"projected_driver_rows" (physical_calibration_input decision "projected_driver_rows")
 							"driver_input_rows" (physical_calibration_input decision "driver_input_rows")
 							"driver_rows" (physical_calibration_input decision "driver_rows")
+							"prefiltered_driver_rows" (physical_calibration_input decision "prefiltered_driver_rows")
 							"expected_driver_rows_visited" (physical_calibration_input decision "expected_driver_rows_visited")
 							"limit" (physical_calibration_input decision "limit")
 							"offset" (physical_calibration_input decision "offset")
@@ -6370,6 +6590,7 @@ potentially large calibrated SELECT result. */
 							"candidate_filter_columns" (physical_calibration_input decision "candidate_filter_columns")
 							"candidate_map_columns" (physical_calibration_input decision "candidate_map_columns")
 							"candidate_cache_map_columns" (physical_calibration_input decision "candidate_cache_map_columns")
+							"candidate_cache_backed" (physical_calibration_input decision "candidate_cache_backed")
 							"candidate_expression_operations" (physical_calibration_input decision "candidate_expression_operations")
 							"candidate_expression_depth" (physical_calibration_input decision "candidate_expression_depth")
 							"candidate_broad_text_match_rows" (physical_calibration_input decision "candidate_broad_text_match_rows")
@@ -6402,8 +6623,9 @@ potentially large calibrated SELECT result. */
 					variant_decision
 					variant
 					(qassoc_get variant_cost "total_ns" nil)
-					(physical_operator_family_for_decision
-						(nth compilation 0) variant_decision)
+					/* compile_physical_explain_variant records this before the generic
+					AST optimizer can fold a carrier wrapper into its consumer. */
+					(nth compilation 2)
 					suite_var)))))))
 
 (define physical_decision_has_costed_alternatives? (lambda (decision)
@@ -6468,7 +6690,7 @@ potentially large calibrated SELECT result. */
 						decision
 						variant
 						(qassoc_get (qassoc_get alternative "cost" '()) "total_ns" nil)
-						(physical_operator_family_for_decision (nth compilation 0) decision)
+						(nth compilation 2)
 						suite_var)))))))
 
 (define explain_queryplan_physical_calibrate (lambda (query)
