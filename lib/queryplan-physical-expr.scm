@@ -1359,7 +1359,7 @@ membership set. */
 							(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
 							(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows))))))))))
 
-(define scalar_first_probe_recset_eligible? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col)
+(define scalar_first_probe_recset_eligible? (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col)
 	(and (single_real_source? (qb_sources src))
 		(and (source_is_base_table? (single_real_source (qb_sources src)))
 			(and (empty_list? (qb_group src))
@@ -1368,7 +1368,8 @@ membership set. */
 						(and (nil? (qb_limit src)) (nil? (qb_offset src))
 							(and (not (nil? (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys)))
 								(and (stage_boolean_shaped? graph stage requested_col)
-									(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows)))))))))))
+									(and (direct_boolean_recset_input_ownership_closed? stages stage)
+										(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows))))))))))))
 
 (define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col)
 	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
@@ -1398,16 +1399,42 @@ membership set. */
 				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 				true)))))
 
-(define direct_boolean_recset_stage_eligible? (lambda (graph stage requested_col)
+(define direct_boolean_recset_query_scope_dependency? (lambda (stage)
+	(and (empty_list? (gs_domain stage))
+		(empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))))
+
+(define direct_boolean_recset_input_ownership_closed? (lambda (stage_catalog stage)
+	(begin
+		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
+		(define direct_stages (unique_stages_by_id (merge (list
+			(stage_outputs_from_sources_using stage_catalog (qb_sources (gs_input stage)))
+			(if (nil? owner_handle) '()
+				(filter (lowering_catalog_stages stage_catalog) (lambda (candidate)
+					(equal? (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil)
+						owner_handle))))))))
+		(define has_invariant (reduce direct_stages (lambda (found dependency)
+			(or found (direct_boolean_recset_query_scope_dependency? dependency))) false))
+		(define has_correlated (reduce direct_stages (lambda (found dependency)
+			(or found (not (direct_boolean_recset_query_scope_dependency? dependency)))) false))
+		(not (and has_invariant has_correlated)))))
+
+(define direct_boolean_recset_stage_eligible? (lambda (stage_catalog graph stage requested_col)
 	(and (query_block? (gs_input stage))
 		(and (scalar_value_stage? stage)
 			(and (equal? (count (gs_aggregates stage)) 1)
 				(and (stage_boolean_shaped? graph stage requested_col)
 					(begin
+						/* Correlated child stages are closed by this producer; invariant child
+						stages belong to the enclosing query scope. Either ownership model is
+						exact alone, including transitive mixtures already closed by a child.
+						Direct siblings using both models would cross a lexical boundary, so
+						leave that operator-infeasible shape on the ordinary exact carrier.
+						This is a scope proof, never a SQL-shape or cardinality heuristic. */
 						(define carrier_src (scalar_first_probe_carrier_source (gs_input stage)))
-						(not (nil? (boolean_recset_domain_source
-							(gs_input stage)
-							(scalar_first_probe_recset_row_keys stage carrier_src)))))))))))
+						(and (direct_boolean_recset_input_ownership_closed? stage_catalog stage)
+							(not (nil? (boolean_recset_domain_source
+								(gs_input stage)
+								(scalar_first_probe_recset_row_keys stage carrier_src))))))))))))
 
 (define lower_direct_boolean_stage_recset_expr (lambda (stage_catalog stage share_result)
 	(begin
@@ -1446,7 +1473,8 @@ membership set. */
 			stage
 			(group_stage_with_stage_catalog stage stage_catalog)))
 		(define graph (stage_dependency_graph stage_catalog))
-		(if (direct_boolean_recset_stage_eligible? graph physical_stage requested_col)
+		(if (direct_boolean_recset_stage_eligible?
+			stage_catalog graph physical_stage requested_col)
 			(begin
 				(define carrier_src (scalar_first_probe_carrier_source
 					(gs_input physical_stage)))
@@ -1490,20 +1518,32 @@ membership set. */
 		(define source_parts
 			(scalar_first_probe_recset_source_parts all_stages stage requested_col true))
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
-		(list (quote begin)
-			(car source_parts)
-			(list (quote apply)
-				(list
-					(physical_query_session_symbol)
-					"get_or_compute_scoped"
-					(physical_query_scope_symbol)
-					lookup_key
-					(list (quote lambda) '()
-						(list (quote recset_key_index)
-							(list (quote session) "__memcp_tx")
-							(cadr source_parts)
-							(quoted_runtime_list (nth source_parts 2)))))
-				(list (quote list) resolved_lookup_key))))))
+		(define lookup_value (symbol (concat "__recset_lookup_value_"
+			(fnv_hash (gs_id stage)))))
+		/* Bind the consumer-row key before entering the producer begin. begin owns a
+			shared numbered scope, while scan adapters may close the producer callbacks
+			independently. Lowering the row key inside that scope would bake its extra
+			outer hop into the cached producer and can escape the actual row closure when
+			several correlated projections share one continuation. The explicit value
+			parameter keeps producer construction closed and makes lexical ownership
+			independent of the surrounding projection shape. */
+		(list
+			(list (quote lambda) (list lookup_value)
+				(list (quote begin)
+					(car source_parts)
+					(list (quote apply)
+						(list
+							(physical_query_session_symbol)
+							"get_or_compute_scoped"
+							(physical_query_scope_symbol)
+							lookup_key
+							(list (quote lambda) '()
+								(list (quote recset_key_index)
+									(list (quote session) "__memcp_tx")
+									(cadr source_parts)
+									(quoted_runtime_list (nth source_parts 2)))))
+						(list (quote list) lookup_value))))
+			resolved_lookup_key))))
 
 /* Once the consuming scan has selected the RecSet alternative, project the
 true group keys directly onto that scan's base-table record positions. This
@@ -1541,7 +1581,7 @@ growth belongs in the calibrated comparison above and must retain the planner's
 recompile gate. A segment-invariant scalar is the proof case here: one cached
 scalar value replaces the same value for every segment row, while a carrier
 would still have to project that value over the segment. */
-(define scalar_first_probe_physical_operator (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics)
+(define scalar_first_probe_physical_operator (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics)
 	(if (union_block? src)
 		(quote union-probe)
 		(if (query_block? src)
@@ -1549,7 +1589,7 @@ would still have to project that value over the segment. */
 				(quote query-scan)
 				(if (and (equal? probe_semantics (quote truth))
 					(scalar_first_probe_recset_eligible?
-						graph stage src keys probe_work_rows carrier_work_rows requested_col))
+						stages graph stage src keys probe_work_rows carrier_work_rows requested_col))
 					(quote recset)
 					(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
 						(quote keytable)
@@ -1663,7 +1703,7 @@ would still have to project that value over the segment. */
 		(define lowered_lookup_keys (map lookup_keys (lambda (key)
 			(lower_column_expr_for_join sources default_alias key))))
 		(define operator (scalar_first_probe_physical_operator
-			graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics))
+			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics))
 		(define lowered (match operator
 			(symbol union-probe)
 			(list (quote if)

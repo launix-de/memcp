@@ -257,6 +257,21 @@ func (s ErrorWrapper) Error() string {
 	return string(s)
 }
 
+const mysqlClientErrorMessageLimit = 2048
+
+// mysqlClientErrorMessage keeps protocol errors below mysqlnd's fixed command
+// buffer. Internal panics include their full stack for the server log, but the
+// first line contains the actionable cause and is the only part clients need.
+func mysqlClientErrorMessage(message string) string {
+	if lineEnd := strings.IndexByte(message, '\n'); lineEnd >= 0 {
+		message = message[:lineEnd]
+	}
+	if len(message) <= mysqlClientErrorMessageLimit {
+		return message
+	}
+	return message[:mysqlClientErrorMessageLimit]
+}
+
 func updateMySQLFieldMetadata(field *querypb.Field, val sqltypes.Value) {
 	field.Type = val.Type()
 	switch val.Type() {
@@ -415,7 +430,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				} else {
 					errMsg := fmt.Sprint(r)
 					PrintError("error in mysql connection: " + errMsg)
-					myerr = ErrorWrapper(errMsg)
+					myerr = ErrorWrapper(mysqlClientErrorMessage(errMsg))
 				}
 			}
 		}()

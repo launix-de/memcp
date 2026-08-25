@@ -5488,6 +5488,7 @@ physical decision and preserve its runtime recompile gate. */
 					1))
 				(define operator (if (nil? target_col) (quote unsupported)
 					(scalar_first_probe_physical_operator
+						probe_stages
 						(stage_dependency_graph probe_stages)
 						raw_stage src keys effective_probe_work_rows carrier_work_rows requested_col (quote truth))))
 				(if (and (not (equal? operator (quote recset))) (nil? bound_stage))
