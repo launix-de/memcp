@@ -26,6 +26,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS ua_fop_files"
   - sql: "DROP TABLE IF EXISTS ua_order_a"
   - sql: "DROP TABLE IF EXISTS ua_order_b"
+  - sql: "DROP TABLE IF EXISTS ua_event"
   - sql: |
       CREATE TABLE ua_fop_files (
         ID INT PRIMARY KEY,
@@ -47,6 +48,8 @@ setup:
   - sql: "CREATE TABLE ua_order_b (value VARCHAR(20) COLLATE utf8mb4_unicode_ci)"
   - sql: "INSERT INTO ua_order_a VALUES (NULL), ('beta')"
   - sql: "INSERT INTO ua_order_b VALUES ('alpha'), (NULL)"
+  - sql: "CREATE TABLE ua_event (id INT PRIMARY KEY, occurred_at INT)"
+  - sql: "INSERT INTO ua_event VALUES (1, 5), (2, 15), (3, 25)"
 
 test_cases:
 
@@ -569,6 +572,44 @@ test_cases:
       data:
         - file_id: 1
 
+  - name: "Derived UNION value relations support correlated scalar aggregates"
+    sql: |
+      SELECT
+        history.idx AS history_idx,
+        params.idx AS param_idx,
+        COALESCE((
+          SELECT COUNT(*)
+          FROM ua_event event
+          WHERE event.occurred_at BETWEEN history.start_at AND history.end_at
+        ), 0) AS event_count
+      FROM (
+        SELECT 0 AS idx, 0 AS start_at, 10 AS end_at
+        UNION
+        SELECT 1, 11, 20
+      ) AS history
+      CROSS JOIN (
+        SELECT 0 AS idx
+        UNION
+        SELECT 1
+      ) AS params
+      ORDER BY history_idx, param_idx
+    timeout: 2
+    expect:
+      rows: 4
+      data:
+        - history_idx: 0
+          param_idx: 0
+          event_count: 1
+        - history_idx: 0
+          param_idx: 1
+          event_count: 1
+        - history_idx: 1
+          param_idx: 0
+          event_count: 1
+        - history_idx: 1
+          param_idx: 1
+          event_count: 1
+
   - name: "EXPLAIN IR top-level UNION without ALL keeps distinct semantics"
     steps:
       - sql: |
@@ -594,3 +635,4 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ua_fop_files"
   - sql: "DROP TABLE IF EXISTS ua_order_a"
   - sql: "DROP TABLE IF EXISTS ua_order_b"
+  - sql: "DROP TABLE IF EXISTS ua_event"
