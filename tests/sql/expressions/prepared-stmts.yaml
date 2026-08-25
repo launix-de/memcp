@@ -431,6 +431,67 @@ test_cases:
     expect:
       data: ["ok"]
 
+  - name: "Cancelled guarded-plan waiter never compiles after the gate opens"
+    steps:
+      - scm: |
+          (begin
+            (define cache (newcachemap))
+            (define entry (newsession))
+            (define state (newsession))
+            (entry "compile_lock" (mutex))
+            (entry "variants" (list (list false nil)))
+            (globalvars "guarded_plan_cancel_cache" cache)
+            (globalvars "guarded_plan_cancel_entry" entry)
+            (globalvars "guarded_plan_cancel_state" state)
+            (globalvars "guarded_plan_cancel_parser"
+              (lambda (_schema _query _policy) (begin
+                (state "cancelled_waiter_compiled" true)
+                (list (quote quote) "compiled"))))
+            "ready")
+        expect:
+          rows: 1
+          contains: "ready"
+      - scm: |
+          (begin
+            (define entry (globalvars "guarded_plan_cancel_entry"))
+            (define state (globalvars "guarded_plan_cancel_state"))
+            ((entry "compile_lock") (lambda () (begin
+              (state "holder" true)
+              (sleep 2)))))
+        background: true
+        timeout: 5
+        expect:
+          rows: 1
+      - scm: |
+          (begin
+            (define cache (globalvars "guarded_plan_cancel_cache"))
+            (define entry (globalvars "guarded_plan_cancel_entry"))
+            (define parser (globalvars "guarded_plan_cancel_parser"))
+            (sleep 0.2)
+            (sql_queryplan_variant_miss cache "cancel-test" entry parser
+              "memcp-tests" "SELECT 1" nil))
+        background: true
+        timeout: 1
+        expect:
+          interrupted_ok: true
+      - scm: "(sleep 2.5)"
+        timeout: 4
+        expect:
+          rows: 1
+      - wait_for_background: true
+        timeout: 5
+      - scm: |
+          (begin
+            (define state (globalvars "guarded_plan_cancel_state"))
+            (if (and
+              (equal? (state "holder") true)
+              (nil? (state "cancelled_waiter_compiled")))
+              "ok"
+              (error "cancelled guarded-plan waiter ran after its request ended")))
+        expect:
+          rows: 1
+          contains: "ok"
+
   - name: "Variadic concat uses the same broad class at compile and runtime"
     scm: |
       (begin

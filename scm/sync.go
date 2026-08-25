@@ -389,7 +389,10 @@ func Context(a ...Scmer) (result Scmer) {
 		case "check":
 			ctxVal, ok := mgr.GetValue("context")
 			if !ok {
-				panic("no context set")
+				// Startup compilation and Scheme self-tests have no request to
+				// cancel. Treat that environment as live while preserving prompt
+				// cancellation whenever a request context exists.
+				return NewBool(true)
 			}
 			e := ctxVal.(context.Context).Err()
 			if e != nil {
@@ -754,13 +757,28 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "mutex",
-		Desc: "Creates a mutex. The return value is a function that takes one parameter which is a parameterless function. The mutex is guaranteed that all calls to that mutex get serialized.",
+		Desc: "Creates a context-aware mutex. The return value serializes calls to parameterless functions and stops waiting when the current request is cancelled.",
 		Fn: func(a ...Scmer) Scmer {
-			var mutex sync.Mutex
+			token := make(chan struct{}, 1)
+			token <- struct{}{}
 			return NewFunc(func(a ...Scmer) Scmer {
-				mutex.Lock()
+				ctx := context.Background()
+				if value, ok := GetGLSValue("context"); ok {
+					if current, ok := value.(context.Context); ok {
+						ctx = current
+					}
+				}
+				select {
+				case <-token:
+					if err := ctx.Err(); err != nil {
+						token <- struct{}{}
+						panic(err)
+					}
+				case <-ctx.Done():
+					panic(ctx.Err())
+				}
 				defer func() {
-					mutex.Unlock() // free after return or panic, so we don't get into deadlocks
+					token <- struct{}{} // free after return or panic, so we don't get into deadlocks
 					/* this code happens automatically
 					if r := recover(); r != nil {
 						// rethrow panics
