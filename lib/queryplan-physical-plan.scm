@@ -1092,14 +1092,30 @@ key-fill recipe per carrier. */
 
 (define lower_unique_stage_prepares_using (lambda (all_stages lookup_stages stages)
 	(lower_unique_stage_prepares stages (lambda (stage)
-		(lower_stage_prepare_using all_stages lookup_stages stage)))))
+		(lower_stage_prepare_using all_stages lookup_stages stage true)))))
 
 (define lower_unique_stage_prepares_with_graph (lambda (dependency_graph stage_lookup stages)
 	(lower_unique_stage_prepares stages (lambda (stage)
 		(lower_stage_prepare_using
 			(stage_dependency_closure_using_graph dependency_graph stage)
 			stage_lookup
-			stage)))))
+			stage
+			true)))))
+
+(define lower_presence_stage_prepares_with_graph (lambda (dependency_graph stage_lookup stages)
+	(begin
+		/* Pure presence chains have complete logical dependency edges. Emit their
+		closure once, dependency-first; every local body then consumes the already
+		prepared relational output instead of copying the remaining probe suffix. */
+		(define ordered (reverse (stage_dependency_closure_many_using_graph
+			dependency_graph (collect_stage_prepares stages))))
+		(define plans (lower_unique_stage_prepares ordered (lambda (stage)
+			(lower_stage_prepare_using
+				(stage_dependency_closure_using_graph dependency_graph stage)
+				stage_lookup
+				stage
+				false))))
+		(if (empty_list? plans) '() (list (cons (quote !begin) plans))))))
 
 /* Restores the group-cache partitioning hint that existed in the pre-Neumann
 planner (see df66a5831, "Queryplan: add table repartitioning hint in GROUP
@@ -1129,10 +1145,17 @@ get_column refs to the source) are excluded automatically too. */
 			nil
 			(list (quote partitiontable) (list (quote table) schema grouptbl) (cons (quote list) hints))))))
 
-(define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage)
+(define lower_group_stage_prepare_using (lambda (all_stages lookup_stages stage include_nested_prepares)
 	(begin
 		(define src (gs_input stage))
 		(define prepare_catalog (unique_stages_by_id (merge (list (list stage) all_stages))))
+		(define prepare_dependency_graph (stage_dependency_graph prepare_catalog))
+		(define prepare_dependencies
+			(stage_dependency_closure_using_graph prepare_dependency_graph stage))
+		(define relational_presence_chain (and (> (count prepare_dependencies) 2)
+			(reduce prepare_dependencies (lambda (eligible dependency)
+				(and eligible (and (group_stage? dependency)
+					(presence_probe_stage? dependency)))) true)))
 		(define fact_lookup (group_stage_lowering_catalog stage))
 		(define raw_stage_lookup (if (lowering_catalog? lookup_stages)
 			lookup_stages
@@ -1176,8 +1199,14 @@ get_column refs to the source) are excluded automatically too. */
 			(not (nil? membership_requirement)))
 			(query_block_with_physical_membership_using stage_lookup src)
 			src))
+		/* A nested presence chain represented as correlated scalar probes copies
+		the complete remaining probe suffix into every parent prepare. Its stage
+		caches are already dependency-ordered here, so consume those relational
+		outputs directly once the chain contains more than one dependency. */
 		(define rewritten_src (if (query_block? membership_src)
-			(query_block_with_presence_probes_using stage_lookup membership_src)
+			(if relational_presence_chain
+				membership_src
+				(query_block_with_presence_probes_using stage_lookup membership_src))
 			membership_src))
 		(define rewrite_sources (if (query_block? membership_src) (qb_sources membership_src) '()))
 		(define rewrite_default_alias (if (query_block? src)
@@ -1265,10 +1294,14 @@ get_column refs to the source) are excluded automatically too. */
 							(and
 								(not (equal? candidate_handle owner_handle))
 								(not (contains? owner_ancestors candidate_handle))))))))))
-		(define nested_prepare (if (query_block? rewritten_src)
-			(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages)
+		(define nested_prepare (if (and include_nested_prepares (query_block? rewritten_src))
+			(if relational_presence_chain
+				(lower_presence_stage_prepares_with_graph
+					prepare_dependency_graph stage_lookup nested_stages)
+				(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages))
 			'()))
-		(define nested_materialize (if (query_block? rewritten_src) (lower_stage_materialize_all nested_stages) '()))
+		(define nested_materialize (if (and include_nested_prepares (query_block? rewritten_src))
+			(lower_stage_materialize_all nested_stages) '()))
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
 			nil
 			(cons (quote !begin) (merge (list nested_prepare nested_materialize)))))
@@ -1472,9 +1505,9 @@ get_column refs to the source) are excluded automatically too. */
 	(filter (map (coalesceNil stages '()) lower_stage_materialize)
 		(lambda (plan) (not (nil? plan))))))
 
-(define lower_stage_prepare_using (lambda (all_stages lookup_stages stage)
+(define lower_stage_prepare_using (lambda (all_stages lookup_stages stage include_nested_prepares)
 	(if (group_stage? stage)
-		(lower_group_stage_prepare_using all_stages lookup_stages stage)
+		(lower_group_stage_prepare_using all_stages lookup_stages stage include_nested_prepares)
 		(if (orc_stage? stage)
 			(lower_orc_stage_prepare stage)
 			(if (window_stage? stage)
@@ -1532,7 +1565,7 @@ get_column refs to the source) are excluded automatically too. */
 				(nested_stage_catalog stage)
 				(if (query_block? src) (query_block_stage_catalog src) '())))))
 		(list (quote begin)
-			(lower_group_stage_prepare_using stage_catalog stage_catalog stage)
+			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true)
 			(lower_query_block_core
 				(group_stage_final_block stage (group_stage_final_extra_sources_using stage_catalog stage)))))))
 
@@ -1816,7 +1849,7 @@ get_column refs to the source) are excluded automatically too. */
 							Window and ORC stages still require their explicit materialization. */
 							(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup outer_prepare_stages)
 							(lower_stage_materialize_all outer_prepare_stages)
-							(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage))
+							(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage true))
 							(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources))))))))))))
 
 (define query_block_without_stages (lambda (block)
@@ -2218,7 +2251,7 @@ probes remain recipes and still execute after root braking. */
 					'()
 					(list (quote !begin)
 						(cons (quote !begin) (map direct_dependencies stage_prepare_call_expr))
-						(lower_stage_prepare_using dependencies stage_catalog stage)
+						(lower_stage_prepare_using dependencies stage_catalog stage true)
 						true)))))))
 
 (define lazy_stage_prepare_bindings (lambda (stages selected)
@@ -5560,7 +5593,7 @@ every title. */
 				(define stage (make_group_stage_for_block branch src))
 				(define final_block (group_stage_final_block stage (group_stage_final_extra_sources stage)))
 				(if (union_ordered_branch_supported? final_block)
-					(list (list (lower_group_stage_prepare_using (list stage) (list stage) stage)) final_block nil)
+					(list (list (lower_group_stage_prepare_using (list stage) (list stage) stage true)) final_block nil)
 					nil))))))
 
 (define union_semijoin_equal_parts (lambda (driver lookup expr)
@@ -6114,7 +6147,7 @@ recipe in one zero-argument helper. */
 				(list (quote !begin)
 					(lower_stage_prepare_using
 						(stage_dependency_closure_using_graph dependency_graph stage)
-						catalog stage)
+						catalog stage true)
 					true))))))
 
 (define shared_prepare_alias_binding (lambda (stage)
