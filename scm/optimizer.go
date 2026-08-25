@@ -1131,6 +1131,8 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		return val, TypeInfo{kind: KindFloat, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagString:
 		return val, TypeInfo{kind: KindString, flags: FlagTransfer | FlagConst, length: UnknownLength}
+	case tagBSON:
+		return val, TypeInfo{kind: KindAny, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagSymbol:
 		sym := mustSymbol(val)
 		varType := ome.variableTypes[sym]
@@ -1232,7 +1234,7 @@ func optimizeExCompat(val Scmer, env *Env, ome *optimizerMetainfo, useResult boo
 func canEliminateFromBegin(val Scmer) bool {
 	// Literals are always safe to eliminate
 	switch val.GetTag() {
-	case tagNil, tagBool, tagInt, tagFloat, tagString:
+	case tagNil, tagBool, tagInt, tagFloat, tagString, tagBSON:
 		return true
 	}
 	// For function call results that were constant-folded: check the original

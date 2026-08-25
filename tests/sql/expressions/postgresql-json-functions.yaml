@@ -1,0 +1,521 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  syntax: postgresql
+  description: "PostgreSQL 18 documented JSON functions and operators"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS pg_json_docs"
+  - sql: "CREATE TABLE pg_json_docs (id INT PRIMARY KEY, key_name VARCHAR(20), value_num INT, doc JSONB)"
+  - sql: |
+      INSERT INTO pg_json_docs (id, key_name, value_num, doc) VALUES
+        (1, 'a', 10, '{"rank":2,"tags":["sql","go"]}'),
+        (2, 'b', NULL, '{"rank":1,"tags":["json"]}'),
+        (3, 'c', 30, '{"rank":10,"tags":[]}')
+
+test_cases:
+  # PostgreSQL 18, Table 9.47: json/jsonb extraction operators.
+  - name: "json and jsonb arrow extraction operators"
+    sql: |
+      SELECT '{"a":{"b":"foo"}}'::json->'a' AS json_field,
+             '{"a":{"b":"foo"}}'::jsonb->'a' AS jsonb_field,
+             '[1,2,3]'::json->>-1 AS json_last_text,
+             '[1,2,3]'::jsonb->0 AS jsonb_first
+    expect:
+      rows: 1
+      data:
+        - json_field: {b: "foo"}
+          jsonb_field: {b: "foo"}
+          json_last_text: "3"
+          jsonb_first: 1
+
+  - name: "json path extraction operators"
+    sql: |
+      SELECT '{"a":{"b":["foo","bar"]}}'::json #> '{a,b,1}' AS json_path,
+             '{"a":{"b":["foo","bar"]}}'::jsonb #>> '{a,b,1}' AS jsonb_path_text
+    expect:
+      rows: 1
+      data:
+        - json_path: "bar"
+          jsonb_path_text: "bar"
+
+  # PostgreSQL 18, Table 9.48: additional jsonb operators.
+  - name: "jsonb containment operators"
+    sql: |
+      SELECT '{"a":1,"b":2}'::jsonb @> '{"b":2}'::jsonb AS contains,
+             '{"b":2}'::jsonb <@ '{"a":1,"b":2}'::jsonb AS contained
+    expect:
+      rows: 1
+      data:
+        - {contains: true, contained: true}
+
+  - name: "jsonb top level existence operators"
+    sql: |
+      SELECT '{"a":1,"b":2}'::jsonb ? 'b' AS has_key,
+             '{"a":1,"b":2}'::jsonb ?| ARRAY['x','b'] AS has_any,
+             '["a","b","c"]'::jsonb ?& ARRAY['a','b'] AS has_all
+    expect:
+      rows: 1
+      data:
+        - {has_key: true, has_any: true, has_all: true}
+
+  - name: "jsonb concatenation operator"
+    sql: "SELECT '{\"a\":1}'::jsonb || '{\"b\":2}'::jsonb AS merged, '[1,2]'::jsonb || '3'::jsonb AS appended"
+    expect:
+      rows: 1
+      data:
+        - merged: {a: 1, b: 2}
+          appended: [1, 2, 3]
+
+  - name: "jsonb deletion operators"
+    sql: |
+      SELECT '{"a":1,"b":2}'::jsonb - 'a' AS without_key,
+             '["a","b","c"]'::jsonb - 1 AS without_index,
+             '{"a":1,"b":2}'::jsonb - ARRAY['a','b'] AS without_keys,
+             '[1,{"b":2}]'::jsonb #- '{1,b}' AS without_path
+    expect:
+      rows: 1
+      data:
+        - without_key: {b: 2}
+          without_index: ["a", "c"]
+          without_keys: {}
+          without_path: [1, {}]
+
+  - name: "jsonb JSONPath operators"
+    sql: |
+      SELECT '{"a":[1,2,3,4,5]}'::jsonb @? '$.a[*] ? (@ > 2)' AS path_exists,
+             '{"a":[1,2,3,4,5]}'::jsonb @@ '$.a[*] > 2' AS path_match
+    expect:
+      rows: 1
+      data:
+        - {path_exists: true, path_match: true}
+
+  # PostgreSQL 18, Table 9.49: creation and conversion functions.
+  - name: "to_json and to_jsonb"
+    sql: "SELECT to_json(42) AS as_json, to_jsonb('Fred said \"Hi.\"'::text) AS as_jsonb"
+    expect:
+      rows: 1
+      data:
+        - as_json: 42
+          as_jsonb: "Fred said \"Hi.\""
+
+  - name: "array_to_json and row_to_json"
+    sql: "SELECT array_to_json(ARRAY[1,2,3]) AS array_value, row_to_json(ROW(1,'foo')) AS row_value"
+    expect:
+      rows: 1
+      data:
+        - array_value: [1, 2, 3]
+          row_value: {f1: 1, f2: "foo"}
+
+  - name: "json and jsonb build array"
+    sql: "SELECT json_build_array(1,2,'foo') AS json_value, jsonb_build_array(1,2,'foo') AS jsonb_value"
+    expect:
+      rows: 1
+      data:
+        - json_value: [1, 2, "foo"]
+          jsonb_value: [1, 2, "foo"]
+
+  - name: "json and jsonb build object"
+    sql: "SELECT json_build_object('foo',1,'bar',2) AS json_value, jsonb_build_object('foo',1,'bar',2) AS jsonb_value"
+    expect:
+      rows: 1
+      data:
+        - json_value: {bar: 2, foo: 1}
+          jsonb_value: {bar: 2, foo: 1}
+
+  - name: "SQL JSON_ARRAY constructor clauses"
+    sql: "SELECT JSON_ARRAY(1, NULL, 2 ABSENT ON NULL RETURNING jsonb) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: [1, 2]
+
+  - name: "SQL JSON_OBJECT constructor clauses"
+    sql: "SELECT JSON_OBJECT('code' VALUE 'P123', 'title': 'Jaws' WITH UNIQUE KEYS RETURNING jsonb) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: {code: "P123", title: "Jaws"}
+
+  - name: "postgresql json and jsonb object array forms"
+    sql: "SELECT json_object(ARRAY['a','1','b','2']) AS json_value, jsonb_object(ARRAY['a','1','b','2']) AS jsonb_value"
+    expect:
+      rows: 1
+      data:
+        - json_value: {a: "1", b: "2"}
+          jsonb_value: {a: "1", b: "2"}
+
+  - name: "json validation constructor"
+    sql: "SELECT json('{\"a\":1,\"a\":2}' WITH UNIQUE KEYS) AS value"
+    expect: {error: true}
+
+  - name: "json_scalar"
+    sql: "SELECT json_scalar(123.45) AS number_value, json_scalar('abc') AS string_value"
+    expect:
+      rows: 1
+      data:
+        - {number_value: 123.45, string_value: "abc"}
+
+  - name: "json_serialize"
+    sql: "SELECT json_serialize('{\"a\":1}'::jsonb RETURNING text) AS value"
+    expect:
+      rows: 1
+      data:
+        - value: '{"a":1}'
+
+  # PostgreSQL 18, Table 9.51: processing functions.
+  - name: "json and jsonb array length"
+    sql: "SELECT json_array_length('[1,2,3]') AS json_len, jsonb_array_length('[]') AS jsonb_len"
+    expect:
+      rows: 1
+      data:
+        - {json_len: 3, jsonb_len: 0}
+
+  - name: "json and jsonb extract path functions"
+    sql: |
+      SELECT json_extract_path('{"f4":{"f6":"foo"}}','f4','f6') AS json_value,
+             jsonb_extract_path('{"f4":{"f6":"foo"}}','f4','f6') AS jsonb_value,
+             json_extract_path_text('{"f4":{"f6":"foo"}}','f4','f6') AS json_text,
+             jsonb_extract_path_text('{"f4":{"f6":"foo"}}','f4','f6') AS jsonb_text
+    expect:
+      rows: 1
+      data:
+        - {json_value: "foo", jsonb_value: "foo", json_text: "foo", jsonb_text: "foo"}
+
+  - name: "jsonb_set and jsonb_set_lax"
+    sql: |
+      SELECT jsonb_set('{"a":{"b":1}}','{a,b}','2',false) AS strict_set,
+             jsonb_set_lax('{"a":1}','{a}',NULL,true,'delete_key') AS lax_set
+    expect:
+      rows: 1
+      data:
+        - strict_set: {a: {b: 2}}
+          lax_set: {}
+
+  - name: "jsonb_insert before and after"
+    sql: |
+      SELECT jsonb_insert('{"a":[0,1,2]}','{a,1}','"x"') AS before_value,
+             jsonb_insert('{"a":[0,1,2]}','{a,1}','"x"',true) AS after_value
+    expect:
+      rows: 1
+      data:
+        - before_value: {a: [0, "x", 1, 2]}
+          after_value: {a: [0, 1, "x", 2]}
+
+  - name: "json and jsonb strip nulls"
+    sql: |
+      SELECT json_strip_nulls('[{"a":1,"b":null},null]') AS json_value,
+             jsonb_strip_nulls('[{"a":1,"b":null},null]',true) AS jsonb_value
+    expect:
+      rows: 1
+      data:
+        - json_value: [{a: 1}, null]
+          jsonb_value: [{a: 1}]
+
+  - name: "jsonb pretty and json type functions"
+    sql: |
+      SELECT JSON_VALID(jsonb_pretty('[{"a":1}]')) AS pretty_valid,
+             json_typeof('-123.4') AS json_type,
+             jsonb_typeof('null'::jsonb) AS jsonb_type
+    expect:
+      rows: 1
+      data:
+        - {pretty_valid: true, json_type: "number", jsonb_type: "null"}
+
+  # Set-returning processing functions.
+  - name: "json and jsonb array elements"
+    sql: "SELECT * FROM json_array_elements('[1,true,[2,false]]')"
+    expect:
+      rows: 3
+      data:
+        - {value: 1}
+        - {value: true}
+        - {value: [2, false]}
+
+  - name: "jsonb_array_elements"
+    sql: "SELECT * FROM jsonb_array_elements('[1,2]')"
+    expect:
+      rows: 2
+      data:
+        - {value: 1}
+        - {value: 2}
+
+  - name: "json and jsonb array elements text"
+    sql: "SELECT * FROM jsonb_array_elements_text('[\"foo\",\"bar\"]')"
+    expect:
+      rows: 2
+      data:
+        - {value: "foo"}
+        - {value: "bar"}
+
+  - name: "json_array_elements_text"
+    sql: "SELECT * FROM json_array_elements_text('[\"foo\",\"bar\"]')"
+    expect:
+      rows: 2
+      data:
+        - {value: "foo"}
+        - {value: "bar"}
+
+  - name: "json and jsonb each"
+    sql: "SELECT * FROM json_each('{\"a\":1,\"b\":2}') ORDER BY key"
+    expect:
+      rows: 2
+      data:
+        - {key: "a", value: 1}
+        - {key: "b", value: 2}
+
+  - name: "jsonb_each"
+    sql: "SELECT * FROM jsonb_each('{\"a\":1,\"b\":2}') ORDER BY key"
+    expect:
+      rows: 2
+      data:
+        - {key: "a", value: 1}
+        - {key: "b", value: 2}
+
+  - name: "json and jsonb each text"
+    sql: "SELECT * FROM jsonb_each_text('{\"a\":\"foo\",\"b\":\"bar\"}') ORDER BY key"
+    expect:
+      rows: 2
+      data:
+        - {key: "a", value: "foo"}
+        - {key: "b", value: "bar"}
+
+  - name: "json_each_text"
+    sql: "SELECT * FROM json_each_text('{\"a\":\"foo\",\"b\":\"bar\"}') ORDER BY key"
+    expect:
+      rows: 2
+      data:
+        - {key: "a", value: "foo"}
+        - {key: "b", value: "bar"}
+
+  - name: "json and jsonb object keys"
+    sql: "SELECT * FROM json_object_keys('{\"f1\":1,\"f2\":2}') ORDER BY json_object_keys"
+    expect:
+      rows: 2
+      data:
+        - {json_object_keys: "f1"}
+        - {json_object_keys: "f2"}
+
+  - name: "jsonb_object_keys"
+    sql: "SELECT * FROM jsonb_object_keys('{\"f1\":1,\"f2\":2}') ORDER BY jsonb_object_keys"
+    expect:
+      rows: 2
+      data:
+        - {jsonb_object_keys: "f1"}
+        - {jsonb_object_keys: "f2"}
+
+  - name: "json and jsonb populate record"
+    sql: "SELECT * FROM json_populate_record(NULL::pg_json_docs, '{\"id\":7,\"key_name\":\"x\"}')"
+    expect:
+      rows: 1
+      data:
+        - {id: 7, key_name: "x", value_num: null, doc: null}
+
+  - name: "jsonb_populate_record"
+    sql: "SELECT * FROM jsonb_populate_record(NULL::pg_json_docs, '{\"id\":7,\"key_name\":\"x\"}')"
+    expect:
+      rows: 1
+      data:
+        - {id: 7, key_name: "x", value_num: null, doc: null}
+
+  - name: "jsonb_populate_record_valid"
+    sql: "SELECT jsonb_populate_record_valid(NULL::pg_json_docs, '{\"id\":7}') AS value"
+    expect:
+      rows: 1
+      data:
+        - {value: true}
+
+  - name: "json and jsonb populate recordset"
+    sql: "SELECT * FROM jsonb_populate_recordset(NULL::pg_json_docs, '[{\"id\":7,\"key_name\":\"x\"},{\"id\":8,\"key_name\":\"y\"}]') ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - {id: 7, key_name: "x", value_num: null, doc: null}
+        - {id: 8, key_name: "y", value_num: null, doc: null}
+
+  - name: "json_populate_recordset"
+    sql: "SELECT * FROM json_populate_recordset(NULL::pg_json_docs, '[{\"id\":7,\"key_name\":\"x\"},{\"id\":8,\"key_name\":\"y\"}]') ORDER BY id"
+    expect:
+      rows: 2
+      data:
+        - {id: 7, key_name: "x", value_num: null, doc: null}
+        - {id: 8, key_name: "y", value_num: null, doc: null}
+
+  - name: "json and jsonb to record"
+    sql: "SELECT * FROM json_to_record('{\"a\":1,\"b\":\"foo\"}') AS x(a INT, b TEXT)"
+    expect:
+      rows: 1
+      data:
+        - {a: 1, b: "foo"}
+
+  - name: "jsonb_to_record"
+    sql: "SELECT * FROM jsonb_to_record('{\"a\":1,\"b\":\"foo\"}') AS x(a INT, b TEXT)"
+    expect:
+      rows: 1
+      data:
+        - {a: 1, b: "foo"}
+
+  - name: "json and jsonb to recordset"
+    sql: "SELECT * FROM jsonb_to_recordset('[{\"a\":1,\"b\":\"foo\"},{\"a\":2}]') AS x(a INT, b TEXT) ORDER BY a"
+    expect:
+      rows: 2
+      data:
+        - {a: 1, b: "foo"}
+        - {a: 2, b: null}
+
+  - name: "json_to_recordset"
+    sql: "SELECT * FROM json_to_recordset('[{\"a\":1,\"b\":\"foo\"},{\"a\":2}]') AS x(a INT, b TEXT) ORDER BY a"
+    expect:
+      rows: 2
+      data:
+        - {a: 1, b: "foo"}
+        - {a: 2, b: null}
+
+  # JSONPath functions, including every documented _tz name.
+  - name: "jsonb path exists and match"
+    sql: |
+      SELECT jsonb_path_exists('{"a":[1,2,3,4,5]}','$.a[*] ? (@ >= $min && @ <= $max)','{"min":2,"max":4}') AS exists_value,
+             jsonb_path_match('{"a":[1,2,3]}','exists($.a[*] ? (@ > 2))') AS match_value
+    expect:
+      rows: 1
+      data:
+        - {exists_value: true, match_value: true}
+
+  - name: "jsonb path query variants"
+    sql: |
+      SELECT jsonb_path_query_array('{"a":[1,2,3,4]}','$.a[*] ? (@ > 2)') AS array_value,
+             jsonb_path_query_first('{"a":[1,2,3,4]}','$.a[*] ? (@ > 2)') AS first_value
+    expect:
+      rows: 1
+      data:
+        - {array_value: [3, 4], first_value: 3}
+
+  - name: "jsonb_path_query set returning"
+    sql: "SELECT * FROM jsonb_path_query('{\"a\":[1,2,3,4]}','$.a[*] ? (@ > 2)')"
+    expect:
+      rows: 2
+      data:
+        - {jsonb_path_query: 3}
+        - {jsonb_path_query: 4}
+
+  - name: "jsonb path timezone variants"
+    sql: |
+      SELECT jsonb_path_exists_tz('["2015-08-01 12:00:00-05"]','$[*] ? (@.datetime() < "2015-08-02".datetime())') AS exists_tz,
+             jsonb_path_match_tz('["2015-08-01"]','exists($[*] ? (@.datetime() == "2015-08-01".datetime()))') AS match_tz,
+             jsonb_path_query_array_tz('["2015-08-01"]','$[*] ? (@.datetime() == "2015-08-01".datetime())') AS array_tz,
+             jsonb_path_query_first_tz('["2015-08-01"]','$[*] ? (@.datetime() == "2015-08-01".datetime())') AS first_tz
+    expect:
+      rows: 1
+      data:
+        - exists_tz: true
+          match_tz: true
+          array_tz: ["2015-08-01"]
+          first_tz: "2015-08-01"
+
+  - name: "jsonb_path_query_tz set returning"
+    sql: "SELECT * FROM jsonb_path_query_tz('[\"2015-08-01\"]','$[*] ? (@.datetime() == \"2015-08-01\".datetime())')"
+    expect:
+      rows: 1
+      data:
+        - {jsonb_path_query_tz: "2015-08-01"}
+
+  # PostgreSQL aggregate JSON functions.
+  - name: "json and jsonb aggregate arrays"
+    sql: |
+      SELECT json_agg(value_num) AS json_values,
+             jsonb_agg(value_num) AS jsonb_values,
+             json_agg_strict(value_num) AS json_strict,
+             jsonb_agg_strict(value_num) AS jsonb_strict
+      FROM pg_json_docs
+    expect:
+      rows: 1
+      data:
+        - json_values: [10, null, 30]
+          jsonb_values: [10, null, 30]
+          json_strict: [10, 30]
+          jsonb_strict: [10, 30]
+
+  - name: "SQL json_arrayagg clauses"
+    sql: "SELECT json_arrayagg(value_num ORDER BY id ABSENT ON NULL RETURNING jsonb) AS values_array FROM pg_json_docs"
+    expect:
+      rows: 1
+      data:
+        - values_array: [10, 30]
+
+  - name: "json and jsonb object aggregate variants"
+    sql: |
+      SELECT json_object_agg(key_name,value_num) AS json_object_value,
+             jsonb_object_agg(key_name,value_num) AS jsonb_object_value,
+             json_object_agg_strict(key_name,value_num) AS json_strict,
+             jsonb_object_agg_strict(key_name,value_num) AS jsonb_strict,
+             json_object_agg_unique(key_name,value_num) AS json_unique,
+             jsonb_object_agg_unique(key_name,value_num) AS jsonb_unique,
+             json_object_agg_unique_strict(key_name,value_num) AS json_unique_strict,
+             jsonb_object_agg_unique_strict(key_name,value_num) AS jsonb_unique_strict
+      FROM pg_json_docs
+    expect:
+      rows: 1
+      data:
+        - json_object_value: {a: 10, b: null, c: 30}
+          jsonb_object_value: {a: 10, b: null, c: 30}
+          json_strict: {a: 10, c: 30}
+          jsonb_strict: {a: 10, c: 30}
+          json_unique: {a: 10, b: null, c: 30}
+          jsonb_unique: {a: 10, b: null, c: 30}
+          json_unique_strict: {a: 10, c: 30}
+          jsonb_unique_strict: {a: 10, c: 30}
+
+  - name: "SQL json_objectagg clauses"
+    sql: "SELECT json_objectagg(key_name VALUE value_num ABSENT ON NULL WITH UNIQUE KEYS RETURNING jsonb) AS value FROM pg_json_docs"
+    expect:
+      rows: 1
+      data:
+        - value: {a: 10, c: 30}
+
+  # SQL/JSON query functions and relational projection.
+  - name: "JSON_EXISTS passing and on error"
+    sql: "SELECT JSON_EXISTS(doc, 'strict $.tags[*] ? (@ == $tag)' PASSING 'sql' AS tag FALSE ON ERROR) AS value FROM pg_json_docs WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {value: true}
+
+  - name: "JSON_QUERY wrapper and quotes clauses"
+    sql: "SELECT JSON_QUERY(doc, 'lax $.tags' WITH CONDITIONAL ARRAY WRAPPER KEEP QUOTES ON SCALAR STRING) AS value FROM pg_json_docs WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - value: ["sql", "go"]
+
+  - name: "PostgreSQL JSON_VALUE passing and on error"
+    sql: "SELECT JSON_VALUE(doc, 'strict $.rank' RETURNING integer DEFAULT 0 ON EMPTY ERROR ON ERROR) AS value FROM pg_json_docs WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - {value: 2}
+
+  - name: "PostgreSQL JSON_TABLE"
+    sql: |
+      SELECT jt.ord, jt.name
+      FROM JSON_TABLE(
+        '[{"name":"Ada"},{"name":"Bob"}]',
+        'lax $[*]' COLUMNS (
+          ord FOR ORDINALITY,
+          name TEXT PATH 'lax $.name'
+        )
+      ) AS jt
+      ORDER BY jt.ord
+    expect:
+      rows: 2
+      data:
+        - {ord: 1, name: "Ada"}
+        - {ord: 2, name: "Bob"}
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS pg_json_docs"

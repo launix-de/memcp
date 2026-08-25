@@ -559,7 +559,7 @@ restart:
 	case tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise:
 		// Optimizer-resolved native callables.
 		return expression
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagBSON:
 		// Self-evaluating literals.
 		return expression
 	case tagNthLocalVar:
@@ -2505,6 +2505,7 @@ Patterns can be any of:
 
 	init_alu()
 	init_strings()
+	init_json_functions()
 	init_streams()
 	init_list()
 	init_list_assoc_extra()
@@ -2573,6 +2574,12 @@ func ComputeSize(v Scmer) uint {
 			return base
 		}
 		return base + goAllocOverhead + align8(ln)
+	case tagBSON:
+		_, payload := bsonTypeAndBytes(v)
+		if len(payload) == 0 {
+			return base
+		}
+		return base + goAllocOverhead + align8(uint(len(payload)))
 	case tagSlice:
 		slice := v.Slice()
 		sz := base

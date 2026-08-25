@@ -185,6 +185,8 @@ func Equal(a, b Scmer) bool {
 				return false
 			}
 			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
+		case tagBSON:
+			return jsonEqual(bsonDecoded(a), bsonDecoded(b))
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -279,6 +281,11 @@ func Equal(a, b Scmer) bool {
 				return false
 			}
 			return unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen)
+		}
+		return a.String() == b.String()
+	case tagBSON:
+		if tb == tagBSON {
+			return jsonEqual(bsonDecoded(a), bsonDecoded(b))
 		}
 		return a.String() == b.String()
 	case tagSlice:
@@ -405,6 +412,8 @@ func EqualSQL(a, b Scmer) Scmer {
 				return NewBool(false)
 			}
 			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
+		case tagBSON:
+			return NewBool(jsonEqual(bsonDecoded(a), bsonDecoded(b)))
 		case tagSlice:
 			as := a.Slice()
 			bs := b.Slice()
@@ -493,6 +502,11 @@ func EqualSQL(a, b Scmer) Scmer {
 			return NewBool(unsafe.String(a.ptr, aLen) == unsafe.String(b.ptr, bLen))
 		}
 		return NewBool(strings.EqualFold(a.String(), b.String()))
+	case tagBSON:
+		if tb == tagBSON {
+			return NewBool(jsonEqual(bsonDecoded(a), bsonDecoded(b)))
+		}
+		return NewBool(a.String() == b.String())
 	case tagBool:
 		return NewBool(a.Bool() == b.Bool())
 	case tagSlice:
@@ -549,6 +563,17 @@ func Less(a, b Scmer) bool {
 		return float64(a.Int()) < b.Float()
 	case tagFloat:
 		return a.Float() < b.Float()
+	case tagBSON:
+		switch tb {
+		case tagBSON:
+			return jsonLess(bsonDecoded(a), bsonDecoded(b))
+		case tagDate, tagInt, tagFloat:
+			return a.Float() < b.Float()
+		case tagBool:
+			return a.Int() < b.Int()
+		default:
+			return a.String() < b.String()
+		}
 	case tagString, tagSymbol, tagCString, tagBString:
 		switch tb {
 		case tagDate:
@@ -560,7 +585,7 @@ func Less(a, b Scmer) bool {
 			return a.Float() < b.Float()
 		case tagFloat:
 			return a.Float() < b.Float()
-		case tagString, tagSymbol, tagCString, tagBString:
+		case tagString, tagSymbol, tagCString, tagBString, tagBSON:
 			return a.String() < b.String()
 		default:
 			// Fallback: compare by string representation to avoid panics on mixed types

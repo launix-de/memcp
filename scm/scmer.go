@@ -79,6 +79,7 @@ const (
 	tagBString // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
 	tagClosure // lightweight id-carrying closure; ptr=*func(uint32,...Scmer)Scmer, aux=(id<<8)|tagClosure
 	tagPromise // tagPromise Scmer; ptr points to cells[0] of a [2]Scmer backing (auxVal==0 heap, auxVal==1 list-backed)
+	tagBSON    // raw BSON value; ptr=payload bytes, aux packs BSON type and payload length
 	// custom tags >= 100
 )
 
@@ -95,6 +96,7 @@ const (
 	TagDate     = tagDate
 	TagCString  = tagCString
 	TagBString  = tagBString
+	TagBSON     = tagBSON
 )
 
 // CStringDecompress is set by the storage package to materialize a compressed string.
@@ -515,6 +517,14 @@ func (s Scmer) IsBString() bool {
 	return auxTag(s.aux) == tagBString
 }
 
+// IsBSON reports whether s contains a raw BSON value used by SQL JSON.
+func (s Scmer) IsBSON() bool {
+	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
+		return false
+	}
+	return auxTag(s.aux) == tagBSON
+}
+
 func (s Scmer) IsSymbol() bool {
 	if s.ptr == &scmerIntSentinel || s.ptr == &scmerFloatSentinel {
 		return false
@@ -573,6 +583,8 @@ func (s Scmer) Bool() bool {
 			return n != 0.0
 		}
 		return true
+	case tagBSON:
+		return bsonBool(s)
 	case tagSlice:
 		return len(s.Slice()) > 0
 	case tagVector:
@@ -671,6 +683,8 @@ func (s Scmer) Int() int64 {
 		return int64(math.Float64frombits(s.aux))
 	case tagString, tagSymbol, tagCString, tagBString:
 		return numericPrefixInt(s.String())
+	case tagBSON:
+		return bsonInt(s)
 	case tagDate:
 		return TagDateDecodeUnix(auxVal(s.aux))
 	case tagBool:
@@ -696,6 +710,8 @@ func (s Scmer) Float() float64 {
 		return float64(int64(s.aux))
 	case tagString, tagSymbol, tagCString, tagBString:
 		return numericPrefixFloat(s.String())
+	case tagBSON:
+		return bsonFloat(s)
 	case tagDate:
 		return float64(TagDateDecodeUnix(auxVal(s.aux)))
 	case tagBool:
@@ -749,6 +765,8 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 			return base64.URLEncoding.EncodeToString(b), dst
 		}
 		return base64.StdEncoding.EncodeToString(b), dst
+	case tagBSON:
+		return bsonText(s), dst
 	case tagBool:
 		if auxVal(s.aux) != 0 {
 			return "true", dst
@@ -1020,6 +1038,8 @@ func (s Scmer) Any() any {
 		return s.String()
 	case tagBString:
 		return s.String()
+	case tagBSON:
+		return bsonAny(s)
 	case tagAny:
 		return *(*any)(unsafe.Pointer(s.ptr))
 	default:
@@ -1107,6 +1127,8 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 			return arr
 		case tagSourceInfo:
 			return toJSONable(v.SourceInfo().value)
+		case tagBSON:
+			return json.RawMessage(bsonText(v))
 		case tagJIT:
 			jep := v.JIT()
 			p := jep.Proc
@@ -1156,6 +1178,8 @@ func (s *Scmer) Write(w io.Writer) {
 		io.WriteString(w, DateToDisplay(*s, GetCurrentSessionLocation()))
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
+	case tagBSON:
+		io.WriteString(w, bsonText(*s))
 	case tagFunc:
 		io.WriteString(w, "[func]")
 	case tagSlice:

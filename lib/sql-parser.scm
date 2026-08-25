@@ -666,6 +666,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(begin
 				(define terms (map cols (lambda (col) '('strlike col '('concat "%" needle "%") "utf8mb4_general_ci"))))
 				(if (equal? (count terms) 1) (car terms) (cons (quote or) terms))))
+		(parser '((define value sql_expression3) (atom "MEMBER" true) (atom "OF" true) "(" (define array sql_expression) ")") '('json_member_of value array))
 		/* IN (SELECT ...) and NOT IN (SELECT ...) -> pseudo operator, planner will lower or reject */
 		(parser '((define a sql_expression3) (atom "IN" true) "(" (define sub sql_select) ")") '('inner_select_in a sub))
 		(parser '((define a sql_expression3) (atom "NOT" true) (atom "IN" true) "(" (define sub sql_select) ")") (list (quote not) (list (quote inner_select_in) a sub)))
@@ -728,6 +729,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_expression5 (parser (or
 		/* unary minus: -(expr) */
 		(parser '("-" (define expr sql_expression6)) '((quote -) 0 expr))
+		/* MySQL JSON path operators. Test the longer token first. */
+		(parser '((define expr sql_expression6) "->>" (define path sql_string)) '('json_unquote '('json_extract expr path)))
+		(parser '((define expr sql_expression6) "->" (define path sql_string)) '('json_extract expr path))
 		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NULL" true)) '('nil? expr))
 		(parser '((define expr sql_expression6) (atom "IS" true) (atom "NOT" true) (atom "NULL" true)) '('not '('nil? expr)))
 		sql_expression6
@@ -865,6 +869,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "LEFT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote sql_substr) s 1 n))
 		/* RIGHT(str, n) -- special case because RIGHT is a reserved keyword */
 		(parser '((atom "RIGHT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
+		/* JSON_VALUE has a SQL type clause inside its argument list. */
+		(parser '((atom "JSON_VALUE" true) "(" (define doc sql_expression) "," (define path sql_expression) (atom "RETURNING" true) (define typ sql_identifier) (? "(" sql_int (? "," sql_int) ")") ")") '('json_value doc path typ))
+		/* Wrap every JSON_ARRAYAGG input so SQL NULL remains a JSON null rather than the reducer neutral value. */
+		(parser '((atom "JSON_ARRAYAGG" true) "(" (define value sql_expression) ")") '('aggregate '('json_arrayagg_entry value) 'json_arrayagg_reduce nil))
+		/* JSON_OBJECTAGG has two input expressions. */
+		(parser '((atom "JSON_OBJECTAGG" true) "(" (define key sql_expression) "," (define value sql_expression) ")") '('aggregate '('json_objectagg_entry key value) 'json_objectagg_reduce nil))
 		/* window functions: parse OVER(...) clause and emit AST node */
 		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func (toUpper fn) args _over))
 		/* fallback: user-registered aggregates or builtins */
@@ -921,6 +931,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (define t tabledef) '(t))
 	)))
 	(define tabledef (parser (or
+		(parser '((atom "JSON_TABLE" true) "(" (define doc sql_expression) "," (define row_path sql_expression)
+			(atom "COLUMNS" true) "(" (define definitions (+ (parser (or
+				(parser '((define name sql_identifier) (atom "FOR" true) (atom "ORDINALITY" true)) (list name "ordinality" nil))
+				(parser '((define name sql_identifier) (define typ sql_column_type) (atom "PATH" true) (define path sql_expression)) (list name "path" path typ)))) ",")) ")" ")"
+			(atom "AS" true) (define id sql_identifier))
+			(begin
+				(define columns (map definitions (lambda (definition) (car definition))))
+				(list id schema (list (quote table-function) "json_table"
+					(list doc row_path (list (quote quote) definitions)) columns) false nil)))
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (atom "AS" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")
 			(list id schema (sql_apply_derived_column_aliases query aliases) false nil)) /* inner select with relation and column aliases */
 		(parser '((atom "(" true) (define query sql_select) (atom ")" true) (define id sql_identifier) "(" (define aliases (+ sql_identifier ",")) ")")
