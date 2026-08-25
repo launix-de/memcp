@@ -3197,12 +3197,21 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define interval_crosses (and observation_supported
 					(and (planner_cost_better? (car lower_costs) (cadr lower_costs))
 						(not (planner_cost_better? (car upper_costs) (cadr upper_costs))))))
+				/* Value of information is bounded by the plan we would actually run at
+				each end of the interval. A discarded full-materialization alternative
+				must not force exact observation when the bounded plan is cheap. */
+				(define lower_best_cost (if interval_crosses
+					(if (planner_cost_better? (car lower_costs) (cadr lower_costs))
+						(car lower_costs) (cadr lower_costs))
+					nil))
+				(define upper_best_cost (if interval_crosses
+					(if (planner_cost_better? (car upper_costs) (cadr upper_costs))
+						(car upper_costs) (cadr upper_costs))
+					nil))
 				(define interval_worst_ns (if interval_crosses
 					(max
-						(qassoc_get (car lower_costs) (quote total_ns) 0)
-						(qassoc_get (cadr lower_costs) (quote total_ns) 0)
-						(qassoc_get (car upper_costs) (quote total_ns) 0)
-						(qassoc_get (cadr upper_costs) (quote total_ns) 0))
+						(qassoc_get lower_best_cost (quote total_ns) 0)
+						(qassoc_get upper_best_cost (quote total_ns) 0))
 					0))
 				(define observe_projection (and interval_crosses
 					(> interval_worst_ns planner_adaptive_observation_budget_ns)))
