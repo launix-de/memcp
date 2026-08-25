@@ -164,7 +164,7 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 			s := shards[i]
 			defer topology.releaseOperation()
 			defer s.activeScanners.Add(-1)
-			release := s.GetRead()
+			release := s.acquireReadForScan(currentTx)
 			defer release()
 			callback(s, synchronous)
 		})
@@ -211,13 +211,23 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 			s := relevant[0]
 			defer topology.releaseOperation()
 			defer s.activeScanners.Add(-1)
-			release := s.GetRead()
+			release := s.acquireReadForScan(currentTx)
 			defer release()
 			callback(s, true)
 			return nil
 		}
 		return runWorkers(relevant, topology)
 	}
+}
+
+// acquireReadForScan obtains shard access unless this worker already owns the
+// stronger write lock. Re-entering GetRead while holding shard.mu for a
+// mutation would make its lazy-load checks deadlock on their own RLock.
+func (s *storageShard) acquireReadForScan(currentTx *TxContext) func() {
+	if s.hasWriteOwnerForTx(currentTx) {
+		return func() {}
+	}
+	return s.GetRead()
 }
 
 func collectRelevantShards(schema []shardDimension, boundaries []columnboundaries, shards []*storageShard) []*storageShard {

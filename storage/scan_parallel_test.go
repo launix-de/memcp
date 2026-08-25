@@ -487,6 +487,32 @@ func TestShardWriteOwnershipUsesExplicitTransactionState(t *testing.T) {
 	}
 }
 
+func TestIterateShardsParallelReusesOwnedWriteAccess(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tscanownedread")
+	shard := tbl.Shards[0]
+	tx := NewTxContext(TxCursorStability)
+
+	shard.mu.Lock()
+	shard.enterWriteOwner()
+	tx.EnterShardWrite(shard)
+	defer func() {
+		tx.ExitShardWrite(shard)
+		shard.exitWriteOwner()
+		shard.mu.Unlock()
+	}()
+
+	called := false
+	done := tbl.iterateShardsParallel(tx, nil, func(got *storageShard, solo bool) {
+		called = got == shard && solo
+	})
+	if done != nil {
+		<-done
+	}
+	if !called {
+		t.Fatal("nested scan did not reuse the worker's existing shard write access")
+	}
+}
+
 func TestShardWriteOwnershipIsLocalToParallelTransactionWorker(t *testing.T) {
 	shard := &storageShard{}
 	tx := NewTxContext(TxCursorStability)

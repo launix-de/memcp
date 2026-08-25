@@ -1,3 +1,10 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
 # Complex UPDATE and DELETE operations
 # Targets table.go UpdateSanitizer, shard.go UpdateFunction, trigger paths,
 # ProcessUniqueCollision, and partition.go repartition after heavy DML.
@@ -255,8 +262,53 @@ test_cases:
     expect:
       affected_rows: 0
 
+  # === Correlated DELETE against a derived self-scan ===
+
+  - name: "Create membership table for correlated delete"
+    sql: "CREATE TABLE ud_membership (id INT PRIMARY KEY, owner_id INT, member_id INT)"
+
+  - name: "Insert overlapping memberships"
+    sql: |
+      INSERT INTO ud_membership VALUES
+        (1, 1, 10),
+        (2, 1, 20),
+        (3, 2, 10),
+        (4, 2, 30)
+    expect:
+      affected_rows: 4
+
+  - name: "DELETE with correlated EXISTS over derived self-scan"
+    sql: |
+      DELETE FROM ud_membership
+      WHERE owner_id = 2
+        AND EXISTS (
+          SELECT 1
+          FROM (
+            SELECT member_id
+            FROM ud_membership
+            WHERE owner_id = 1
+          ) AS retained
+          WHERE retained.member_id = ud_membership.member_id
+        )
+    timeout: 2
+    expect:
+      affected_rows: 1
+
+  - name: "Correlated delete preserves non-overlapping memberships"
+    sql: "SELECT owner_id, member_id FROM ud_membership ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - owner_id: 1
+          member_id: 10
+        - owner_id: 1
+          member_id: 20
+        - owner_id: 2
+          member_id: 30
+
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS ud_membership"
   - sql: "DROP TABLE IF EXISTS ud_child"
   - sql: "DROP TABLE IF EXISTS ud_parent"
   - sql: "DROP TABLE IF EXISTS ud_main"
