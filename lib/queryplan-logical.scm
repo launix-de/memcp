@@ -5272,10 +5272,38 @@ that actually owns the title consumes the reference. */
 					nil))))
 		nil)))
 
+(define expr_has_local_aggregates? (lambda (expr)
+	(match expr
+		((symbol inner_select) _subquery) false
+		((quote inner_select) _subquery) false
+		((symbol inner_select_exists) _subquery) false
+		((quote inner_select_exists) _subquery) false
+		((symbol inner_select_in) _probe _subquery) false
+		((quote inner_select_in) _probe _subquery) false
+		((symbol dependent-subquery) _kind _probe _subquery _outer_sources) false
+		((quote dependent-subquery) _kind _probe _subquery _outer_sources) false
+		((symbol count_distinct) _agg_expr) true
+		((quote count_distinct) _agg_expr) true
+		((symbol group_concat_distinct) _agg_expr _separator) true
+		((quote group_concat_distinct) _agg_expr _separator) true
+		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) true
+		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) true
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (expr_has_local_aggregates? item))) false)
+		_ false)))
+
+/* Aggregates owned by scalar subqueries do not aggregate their containing
+query block. Keeping this scope boundary explicit lets a derived UNION be
+distributed first; the ordinary subquery pass can then decorrelate each
+branch against its concrete value-relation row. */
+(define query_block_has_local_aggregates? (lambda (block)
+	(reduce (coalesceNil (qb_fields block) '()) (lambda (found item)
+		(or found (expr_has_local_aggregates? item))) false)))
+
 (define union_wrapper_rewrite_allowed? (lambda (block)
 	(and (empty_list? (qb_group block))
 		(and (nil? (qb_having block))
-			(and (not (query_block_has_aggregates? block))
+			(and (not (query_block_has_local_aggregates? block))
 				(empty_list? (qb_hidden block)))))))
 
 (define union_count_projection_title (lambda (fields)
@@ -5306,12 +5334,54 @@ that actually owns the title consumes the reference. */
 				true
 				'() nil '() nil nil '() '() '())))))
 
-(define wrap_union_branch_query (lambda (outer alias branch)
+(define logical_union_projection_with_titles (lambda (canonical_fields branch_fields)
+	(match (coalesceNil canonical_fields '())
+		(cons title (cons _canonical_expr canonical_rest))
+		(match (coalesceNil branch_fields '())
+			(cons _branch_title (cons branch_expr branch_rest))
+			(cons title (cons branch_expr
+				(logical_union_projection_with_titles canonical_rest branch_rest)))
+			_ (neumann_fail "untangle_query" "UNION branch column count mismatch"))
+		_ (if (empty_list? (coalesceNil branch_fields '()))
+			'()
+			(neumann_fail "untangle_query" "UNION branch column count mismatch")))))
+
+/* SQL derives the output column names of a UNION from its first branch. Apply
+that schema before a derived UNION is distributed; later branches commonly use
+unnamed literals, but outer references must still bind to the first branch's
+names in projections, predicates, and correlated subqueries. */
+(define logical_union_align_branch (lambda (branch canonical_fields)
 	(begin
 		(define inner (normalize_query_ast branch))
 		(if (not (query_block? inner))
 			(neumann_fail "untangle_query" "FROM UNION wrapper expects query-block branches")
 			true)
+		(make_query_block
+			(qb_schema inner)
+			(qb_sources inner)
+			(logical_union_projection_with_titles canonical_fields (qb_fields inner))
+			(qb_where inner)
+			(qb_group inner)
+			(qb_having inner)
+			(qb_order inner)
+			(qb_limit inner)
+			(qb_offset inner)
+			(qb_hidden inner)
+			(qb_stages inner)
+			(qb_facts inner)))))
+
+(define union_canonical_fields (lambda (relation)
+	(match (coalesceNil (union_branches relation) '())
+		(cons first_branch _rest) (begin
+			(define normalized (normalize_query_ast first_branch))
+			(if (query_block? normalized)
+				(qb_fields normalized)
+				(neumann_fail "untangle_query" "FROM UNION wrapper expects query-block branches")))
+		_ '())))
+
+(define wrap_union_branch_query (lambda (outer alias branch canonical_fields)
+	(begin
+		(define inner (logical_union_align_branch branch canonical_fields))
 		(define projection (qb_fields inner))
 		(make_query_block
 			(qb_schema inner)
@@ -5333,10 +5403,11 @@ that actually owns the title consumes the reference. */
 			nil
 			(begin
 				(define relation (normalize_query_ast (source_relation src)))
+				(define canonical_fields (union_canonical_fields relation))
 				(make_union_block
 					(union_mode relation)
 					(map (union_branches relation) (lambda (branch)
-						(wrap_union_branch_query block (source_alias src) branch)))
+						(wrap_union_branch_query block (source_alias src) branch canonical_fields)))
 					(if (empty_list? (qb_order block)) (union_order relation) (qb_order block))
 					(coalesceNil (qb_limit block) (union_limit relation))
 					(coalesceNil (qb_offset block) (union_offset relation))
@@ -5348,10 +5419,11 @@ that actually owns the title consumes the reference. */
 			(source_with_relation src branch)
 			src)))))
 
-(define wrap_embedded_union_branch_query (lambda (outer union_src branch)
+(define wrap_embedded_union_branch_query (lambda (outer union_src branch canonical_fields)
 	(make_query_block
 		(qb_schema outer)
-		(replace_union_source_branch (qb_sources outer) union_src (normalize_query_ast branch))
+		(replace_union_source_branch (qb_sources outer) union_src
+			(logical_union_align_branch branch canonical_fields))
 		(qb_fields outer)
 		(qb_where outer)
 		(qb_group outer)
@@ -5369,10 +5441,11 @@ that actually owns the title consumes the reference. */
 			nil
 			(begin
 				(define relation (normalize_query_ast (source_relation src)))
+				(define canonical_fields (union_canonical_fields relation))
 				(make_union_block
 					(union_mode relation)
 					(map (union_branches relation) (lambda (branch)
-						(wrap_embedded_union_branch_query block src branch)))
+						(wrap_embedded_union_branch_query block src branch canonical_fields)))
 					(union_order relation)
 					(union_limit relation)
 					(union_offset relation)
@@ -5496,14 +5569,35 @@ that actually owns the title consumes the reference. */
 									(make_uctx child_ctx (list
 										(list (quote outer-resolution-sources) nested_outer_resolution_sources)))))))))))))
 
+(define canonical_union_mode (lambda (mode)
+	(if (equal? mode (quote distinct)) (quote union_distinct) mode)))
+
+(define flattenable_nested_union? (lambda (outer_mode branch)
+	(and (union_block? branch)
+		(and (empty_list? (union_order branch))
+			(and (nil? (union_limit branch))
+				(and (nil? (union_offset branch))
+					(or (equal? outer_mode (quote union_distinct))
+						(equal? (canonical_union_mode (union_mode branch)) (quote all)))))))))
+
+(define flatten_untangled_union_branches (lambda (outer_mode branches)
+	(merge (map branches (lambda (branch)
+		(if (flattenable_nested_union? outer_mode branch)
+			(union_branches branch)
+			(list branch)))))))
+
 (define untangle_union_block (lambda (block ctx)
-	(make_union_block
-		(if (equal? (union_mode block) (quote distinct)) (quote union_distinct) (union_mode block))
-		(map (union_branches block) (lambda (branch) (untangle_query (normalize_query_ast branch) ctx)))
-		(union_order block)
-		(union_limit block)
-		(union_offset block)
-		(union_facts block))))
+	(begin
+		(define mode (canonical_union_mode (union_mode block)))
+		(define branches (map (union_branches block) (lambda (branch)
+			(untangle_query (normalize_query_ast branch) ctx))))
+		(make_union_block
+			mode
+			(flatten_untangled_union_branches mode branches)
+			(union_order block)
+			(union_limit block)
+			(union_offset block)
+			(union_facts block)))))
 
 (define untangle_query (lambda (query ctx)
 	(begin
