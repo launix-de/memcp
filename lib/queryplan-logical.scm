@@ -309,31 +309,47 @@ catalog for every comparison. The binding catalog is compile-local as well. */
 	(reduce (merge (coalesceNil parts '())) (lambda (items item)
 		(logical_append_unique items item)) '())))
 
+(define logical_contains_all? (lambda (items required)
+	(reduce (coalesceNil required '()) (lambda (contains_all item)
+		(and contains_all (contains? (coalesceNil items '()) item))) true)))
+
+(define same_group_carrier_backbone? (lambda (left right)
+	(and (equal? (gs_input left) (gs_input right))
+		(equal? (gs_domain left) (gs_domain right))
+		(equal? (gs_keys left) (gs_keys right))
+		(equal? (gs_having left) (gs_having right))
+		(equal? (gs_order left) (gs_order right))
+		(equal? (gs_limit left) (gs_limit right))
+		(equal? (gs_offset left) (gs_offset right)))))
+
+(define group_stage_merges_aggregate_extensions? (lambda (stage)
+	(equal? (qassoc_get (gs_facts stage) (quote merge-aggregate-extensions) false) true)))
+
 /* A shared group-stage ID denotes one logical carrier which may be discovered
 through several consumers. Later consumers can extend that carrier with more
-aggregate columns. Keep the complete extending variant as the carrier template
-and add aggregates found by the other variants. Dropping those extensions leaves
-physical readers pointing at columns which no retained prepare stage creates. */
+aggregate columns. Preserve the first stage's domain and output contract and add
+only aggregates from a compatible superset variant which explicitly declares
+this extension contract. Same-ID scalar carriers remain independent. Dropping
+true extensions leaves physical readers pointing at columns which no retained
+prepare stage creates. */
 (define merge_same_id_stage_variants (lambda (retained candidate)
-	(if (and (group_stage? retained) (group_stage? candidate))
-		(begin
-			(define aggregates (logical_merge_unique
-				(list (gs_aggregates retained) (gs_aggregates candidate))))
-			(define base (if (> (count aggregates) (count (gs_aggregates retained)))
-				candidate
-				retained))
-			(make_group_stage
-				(gs_id base)
-				(gs_input base)
-				(gs_domain base)
-				(gs_keys base)
-				aggregates
-				(gs_having base)
-				(gs_output base)
-				(gs_order base)
-				(gs_limit base)
-				(gs_offset base)
-				(gs_facts base)))
+	(if (and (group_stage? retained) (group_stage? candidate)
+		(group_stage_merges_aggregate_extensions? retained)
+		(group_stage_merges_aggregate_extensions? candidate)
+		(same_group_carrier_backbone? retained candidate)
+		(logical_contains_all? (gs_aggregates candidate) (gs_aggregates retained)))
+		(make_group_stage
+			(gs_id retained)
+			(gs_input retained)
+			(gs_domain retained)
+			(gs_keys retained)
+			(logical_merge_unique (list (gs_aggregates retained) (gs_aggregates candidate)))
+			(gs_having retained)
+			(gs_output retained)
+			(gs_order retained)
+			(gs_limit retained)
+			(gs_offset retained)
+			(gs_facts retained))
 		retained)))
 
 (define collect_stage_variants_by_id (lambda (stages variants)
@@ -3710,6 +3726,7 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list
 				(list (quote condition) true)
 				(list (quote purpose) (quote window_partition_aggregate))
+				(list (quote merge-aggregate-extensions) true)
 				(list (quote domain) outer_domain)
 				(list (quote lookup-keys) outer_domain)
 				(list (quote preserve_empty_domain) false)
