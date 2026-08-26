@@ -1188,7 +1188,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition
 			(if distinct (extract_assoc (merge cols) (lambda (_title expr) expr)) group)
 			having order limit offset '() '()
-			(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '()))))
+			(merge (list
+				(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '())
+				(if distinct (list (list (quote select_distinct) true)) '()))))))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)
