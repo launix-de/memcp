@@ -272,16 +272,22 @@ func bsonFromSQLScalar(value Scmer) (Scmer, error) {
 }
 
 func bsonArrayFromValues(values []Scmer, flags uint64) Scmer {
-	index, payload := bsoncore.AppendArrayStart(nil)
+	payloadSize := bsoncore.EmptyDocumentLength
 	for i := range values {
-		value, err := bsonFromSQLScalar(values[i])
-		if err != nil {
-			panic(err)
+		_, valueSize := bsonSQLScalarTypeAndSize(values[i])
+		payloadSize += 1 + decimalDigits(i) + 1 + valueSize
+		if payloadSize > math.MaxInt32 {
+			panic("BSON array exceeds the 32-bit BSON size limit")
 		}
-		raw := bsonRawValue(value)
-		payload = bsoncore.AppendValueElement(payload, strconv.Itoa(i), bsoncore.Value{
-			Type: bsoncore.Type(raw.Type), Data: raw.Value,
-		})
+	}
+	payload := make([]byte, 0, payloadSize)
+	index, payload := bsoncore.AppendArrayStart(payload)
+	for i := range values {
+		typ, _ := bsonSQLScalarTypeAndSize(values[i])
+		payload = append(payload, byte(typ))
+		payload = strconv.AppendInt(payload, int64(i), 10)
+		payload = append(payload, 0)
+		payload = appendBSONSQLScalarPayload(payload, values[i])
 	}
 	var err error
 	payload, err = bsoncore.AppendArrayEnd(payload, index)
@@ -289,6 +295,72 @@ func bsonArrayFromValues(values []Scmer, flags uint64) Scmer {
 		panic(err)
 	}
 	return newBSONValueFlags(bson.TypeArray, payload, flags)
+}
+
+func bsonSQLScalarTypeAndSize(value Scmer) (bson.Type, int) {
+	switch {
+	case value.IsBSON():
+		typ, payload := bsonTypeAndBytes(value)
+		return typ, len(payload)
+	case value.IsNil():
+		return bson.TypeNull, 0
+	case value.IsBool():
+		return bson.TypeBoolean, 1
+	case value.IsInt():
+		if integer := value.Int(); integer >= math.MinInt32 && integer <= math.MaxInt32 {
+			return bson.TypeInt32, 4
+		}
+		return bson.TypeInt64, 8
+	case value.IsFloat():
+		return bson.TypeDouble, 8
+	case value.IsString() || value.IsSymbol():
+		return bson.TypeString, 4 + len(value.String()) + 1
+	default:
+		converted, err := bsonFromSQLScalar(value)
+		if err != nil {
+			panic(err)
+		}
+		typ, payload := bsonTypeAndBytes(converted)
+		return typ, len(payload)
+	}
+}
+
+func appendBSONSQLScalarPayload(payload []byte, value Scmer) []byte {
+	switch {
+	case value.IsBSON():
+		_, raw := bsonTypeAndBytes(value)
+		return append(payload, raw...)
+	case value.IsNil():
+		return payload
+	case value.IsBool():
+		return bsoncore.AppendBoolean(payload, value.Bool())
+	case value.IsInt():
+		integer := value.Int()
+		if integer >= math.MinInt32 && integer <= math.MaxInt32 {
+			return bsoncore.AppendInt32(payload, int32(integer))
+		}
+		return bsoncore.AppendInt64(payload, integer)
+	case value.IsFloat():
+		return bsoncore.AppendDouble(payload, value.Float())
+	case value.IsString() || value.IsSymbol():
+		return bsoncore.AppendString(payload, value.String())
+	default:
+		converted, err := bsonFromSQLScalar(value)
+		if err != nil {
+			panic(err)
+		}
+		_, raw := bsonTypeAndBytes(converted)
+		return append(payload, raw...)
+	}
+}
+
+func decimalDigits(value int) int {
+	digits := 1
+	for value >= 10 {
+		value /= 10
+		digits++
+	}
+	return digits
 }
 
 func bsonArrayFromRawValues(values []bson.RawValue, flags uint64) Scmer {

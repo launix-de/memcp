@@ -18,6 +18,7 @@ package scm
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"testing"
@@ -195,6 +196,46 @@ func TestBSONEscapesJSONKeysContainingNUL(t *testing.T) {
 	}
 }
 
+func TestJSONArrayAggFinalizeBuildsOneExactBSONArray(t *testing.T) {
+	values := make([]Scmer, 105)
+	for i := range values {
+		switch i % 3 {
+		case 0:
+			values[i] = NewNil()
+		case 1:
+			values[i] = NewInt(int64(i))
+		case 2:
+			values[i] = bsonDocumentFromPairs([]bsonJSONPair{{
+				key: "nested", value: bsonRawValue(NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, "value"))),
+			}}, 0)
+		}
+	}
+	result := callJSONTest(t, "json_arrayagg_finalize", NewSlice(values))
+	if !result.IsBSON() {
+		t.Fatal("JSON_ARRAYAGG finalizer did not return BSON")
+	}
+	typ, payload := result.BSONRaw()
+	if bson.Type(typ) != bson.TypeArray {
+		t.Fatalf("BSON type = %v, want array", bson.Type(typ))
+	}
+	if declared := int(binary.LittleEndian.Uint32(payload[:4])); declared != len(payload) {
+		t.Fatalf("BSON header length = %d, payload length = %d", declared, len(payload))
+	}
+	items, err := bson.Raw(payload).Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != len(values) {
+		t.Fatalf("array length = %d, want %d", len(items), len(values))
+	}
+}
+
+func TestJSONArrayAggFinalizePreservesEmptyAggregate(t *testing.T) {
+	if result := callJSONTest(t, "json_arrayagg_finalize", NewNil()); !result.IsNil() {
+		t.Fatalf("empty JSON_ARRAYAGG = %s, want SQL NULL", result.String())
+	}
+}
+
 func BenchmarkBSONAppendString(b *testing.B) {
 	value, err := NewBSONFromJSON(`{"customer":{"name":"Ada","rank":7},"items":[{"sku":"A","qty":2},{"sku":"B","qty":3}],"active":true}`)
 	if err != nil {
@@ -246,6 +287,38 @@ func BenchmarkJSONArrayAggReduce8(b *testing.B) {
 
 func BenchmarkJSONArrayAggReduce1000(b *testing.B) {
 	benchmarkJSONArrayAggReduce(b, 1000)
+}
+
+func benchmarkJSONArrayAggCollectFinalize(b *testing.B, count int) {
+	values := make([]Scmer, count)
+	for i := range values {
+		values[i] = bsonDocumentFromPairs([]bsonJSONPair{
+			{key: "id", value: bsonRawValue(NewBSONValue(bson.TypeInt64, bsoncore.AppendInt64(nil, int64(i))))},
+			{key: "serialNumber", value: bsonRawValue(NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, "SN-1000000")))},
+		}, 0)
+	}
+	collected := NewSlice(values)
+	finalize := Globalenv.Vars[Symbol("json_arrayagg_finalize")].Func()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		result := finalize(collected)
+		if !result.IsBSON() {
+			b.Fatal("JSON_ARRAYAGG did not return BSON")
+		}
+	}
+}
+
+func BenchmarkJSONArrayAggCollectFinalize3(b *testing.B) {
+	benchmarkJSONArrayAggCollectFinalize(b, 3)
+}
+
+func BenchmarkJSONArrayAggCollectFinalize8(b *testing.B) {
+	benchmarkJSONArrayAggCollectFinalize(b, 8)
+}
+
+func BenchmarkJSONArrayAggCollectFinalize1000(b *testing.B) {
+	benchmarkJSONArrayAggCollectFinalize(b, 1000)
 }
 
 func BenchmarkBSONSerializeNested1000(b *testing.B) {

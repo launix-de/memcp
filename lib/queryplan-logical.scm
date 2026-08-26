@@ -1167,6 +1167,8 @@ instead of capturing whichever session populated the cache first. */
 	(match expr
 		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) false
 		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) false
+		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) false
+		((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) false
 		((symbol count_distinct) _agg_expr) false
 		((quote count_distinct) _agg_expr) false
 		((symbol group_concat_distinct) _agg_expr _separator) false
@@ -3405,6 +3407,10 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(list (list agg_expr agg_reduce agg_neutral))
 			((quote aggregate) agg_expr agg_reduce agg_neutral)
 			(list (list agg_expr agg_reduce agg_neutral))
+			((symbol aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+			(list (list agg_expr agg_reduce agg_neutral agg_finalize))
+			((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+			(list (list agg_expr agg_reduce agg_neutral agg_finalize))
 			_ (begin
 				(define descriptor (sql_aggregates "SUM"))
 				(list (list (car args) (car descriptor) (cadr descriptor)))))
@@ -5316,6 +5322,8 @@ that actually owns the title consumes the reference. */
 		((quote group_concat_distinct) _agg_expr _separator) true
 		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) true
 		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) true
+		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) true
+		((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) true
 		(cons _head tail) (reduce tail (lambda (found item)
 			(or found (expr_has_local_aggregates? item))) false)
 		_ false)))

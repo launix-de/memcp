@@ -448,6 +448,13 @@ test_cases:
       data:
         - values_array: [10, 30]
 
+  - name: "strict JSON array aggregate with only NULL inputs returns SQL NULL"
+    sql: "SELECT jsonb_agg_strict(NULL) AS strict_values FROM pg_json_docs"
+    expect:
+      rows: 1
+      data:
+        - strict_values: null
+
   - name: "json and jsonb object aggregate variants"
     sql: |
       SELECT json_object_agg(key_name,value_num) AS json_object_value,
