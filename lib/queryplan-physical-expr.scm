@@ -366,14 +366,14 @@ partner. */
 					raw_probe))
 			nil))))
 
-(define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages inline_presence_stages partition_limit)
+(define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages inline_probe_stages partition_limit inline_nested_probes)
 	(begin
 		(define input (gs_input stage))
-		(define inline_presence_ids (stage_id_set inline_presence_stages))
-		(define inline_presence_sources (filter (qb_sources input) (lambda (src)
+		(define inline_probe_ids (stage_id_set inline_probe_stages))
+		(define inline_probe_sources (filter (qb_sources input) (lambda (src)
 			(and (stage_output_relation? (source_relation src))
-				(has_assoc? inline_presence_ids (stage_output_relation_id (source_relation src)))))))
-		(define inline_presence_aliases (map inline_presence_sources source_alias))
+				(has_assoc? inline_probe_ids (stage_output_relation_id (source_relation src)))))))
+		(define inline_probe_aliases (map inline_probe_sources source_alias))
 		(define keyed_terms (map (produceN (count keys)) (lambda (i)
 			(list (query_key_term_alias (qb_sources input) (nth keys i))
 				(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
@@ -386,7 +386,7 @@ partner. */
 		(define where_key_terms (map
 			(filter keyed_terms (lambda (term)
 				(and (not (nil? (nth term 0)))
-					(not (contains? inline_presence_aliases (nth term 0))))))
+					(not (contains? inline_probe_aliases (nth term 0))))))
 			(lambda (term) (nth term 1))))
 		(define keyed_input (make_query_block
 			(qb_schema input)
@@ -401,20 +401,33 @@ partner. */
 			(qb_hidden input)
 			(qb_stages input)
 			(qb_facts input)))
-		(define probe_input (if (empty_list? inline_presence_sources)
+		(define probe_input (if (empty_list? inline_probe_sources)
 			keyed_input
-			(query_block_with_presence_probe_sources_using
-				nested_stages inline_presence_sources keyed_input)))
-		(define probe_value_expr (if (empty_list? inline_presence_sources)
+			(query_block_with_selected_probe_sources_using
+				nested_stages inline_probe_sources keyed_input)))
+		(define probe_value_expr (if (empty_list? inline_probe_sources)
 			value_expr
 			(begin
 				(define default_alias (qassoc_get (qb_facts keyed_input) (quote default_alias)
 					(if (empty_list? (qb_sources keyed_input)) nil (source_alias (car (qb_sources keyed_input))))))
 				(rewrite_scalar_first_probe_expr
-					nested_stages inline_presence_sources default_alias value_expr))))
-		(define raw_prepared_input
-			(query_block_without_stages_after_eager_prepare_using nested_stages probe_input))
-		(define prepared_input (if (empty_list? prepare_stages)
+					nested_stages inline_probe_sources default_alias value_expr))))
+		/* Re-enter the ordinary probe-selection pass for dependencies that remain
+		after the explicit bounded dominance choices above. Accept that alternative
+		only when it consumes every relational stage source and every stage-output
+		column. This structural proof prevents a partially rewritten plan from
+		dropping the LEFT-JOIN NULL extension of an unresolved dependency. */
+		(define recursively_prepared_input (if inline_nested_probes
+			(query_block_without_stages_after_prepare_using nested_stages probe_input)
+			nil))
+		(define recursively_consumed (and inline_nested_probes
+			(and (single_source? (qb_sources recursively_prepared_input))
+				(not (expr_refs_stage_output_alias? recursively_prepared_input)))))
+		(define effective_prepare_stages (if recursively_consumed '() prepare_stages))
+		(define raw_prepared_input (if recursively_consumed
+			recursively_prepared_input
+			(query_block_without_stages_after_eager_prepare_using nested_stages probe_input)))
+		(define prepared_input (if (empty_list? effective_prepare_stages)
 			(query_block_with_stage_catalog raw_prepared_input '())
 			raw_prepared_input))
 		(define bounded_prepared_input (make_query_block
@@ -430,7 +443,7 @@ partner. */
 			(qb_hidden prepared_input)
 			(qb_stages prepared_input)
 			(qb_facts prepared_input)))
-		(define direct_probe (if (empty_list? prepare_stages)
+		(define direct_probe (if (empty_list? effective_prepare_stages)
 			(lower_direct_scalar_query_probe prepared_input probe_value_expr partition_limit
 				(qassoc_get (gs_facts stage) (quote on_overflow) nil))
 			nil))
@@ -459,7 +472,7 @@ partner. */
 			(or (not (nil? (qb_limit input))) (not (nil? (qb_offset input)))))
 			(neumann_fail "build_queryplan" "scalar-first query probe cannot preserve nested ORDER/LIMIT yet")
 			(begin
-				(define raw_probe (if (not (empty_list? prepare_stages))
+				(define raw_probe (if (not (empty_list? effective_prepare_stages))
 					(cons (quote !begin)
 						(merge (list
 							(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
@@ -551,7 +564,8 @@ partner. */
 			nested_stages
 			prepare_stages
 			inline_presence_stages
-			(stage_partition_limit stage)))))
+			(stage_partition_limit stage)
+			false))))
 
 (define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 	(begin
@@ -940,16 +954,26 @@ still receives every transitive dependency through this compact catalog. */
 				(and (has_assoc? direct_source_ids (gs_id nested_stage))
 					(and (or (presence_probe_stage? nested_stage)
 						(not (stage_shared_prepare? nested_stage)))
-						(and (scalar_or_presence_probe_stage? nested_stage)
-							(not (stage_has_residual_outer_refs? nested_stage))))))))
-			/* Bounded consumers execute selected presence checks after root braking.
+						(or
+							(and (scalar_or_presence_probe_stage? nested_stage)
+								(not (stage_has_residual_outer_refs? nested_stage)))
+							/* This is a direct dependency of a bounded, key-memoized projection
+							recipe, and shared carriers were excluded above. Materializing a
+							query-local group table therefore cannot add reuse: it evaluates the
+							same aggregate for the same outer key, then additionally writes and
+							reads the carrier. Direct aggregate probing strictly dominates that
+							operator here. Cardinality-dependent aggregate choices outside this
+							bounded ownership context remain costed and guarded. */
+							(and (scalar_aggregate_probe_stage? nested_stage)
+								(scalar_aggregate_probe_stage_safe? nested_stage))))))))
+			/* Bounded consumers execute selected nested probes after root braking.
 			Every other base-table group without residual outer references has a
 			closed initializer. Hoist those initializers to the shared recipe scope,
 			where canonical carrier collection can merge duplicate key fills and
 			aggregate-column extensions before code emission. */
-			(define inline_presence_stages (if bounded_consumer inline_candidates '()))
+			(define inline_probe_stages (if bounded_consumer inline_candidates '()))
 			(define inline_owned_stages
-				(scalar_first_query_probe_nested_stages_using_index inline_presence_stages closure_index))
+				(scalar_first_query_probe_nested_stages_using_index inline_probe_stages closure_index))
 			(define inline_owned_ids (stage_id_set inline_owned_stages))
 			(define hoisted_stages (filter nested_stages (lambda (nested_stage)
 				(and (group_stage? nested_stage)
@@ -970,7 +994,7 @@ still receives every transitive dependency through this compact catalog. */
 				compact_nested_stages
 				(map hoisted_stages compact_stage_for)
 				(map prepare_stages compact_stage_for)
-				(map inline_presence_stages compact_stage_for)
+				(map inline_probe_stages compact_stage_for)
 				bounded_consumer))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe seed"))))
 
@@ -1027,7 +1051,7 @@ both names therefore bind to the same parameter. */
 
 (define scalar_query_probe_recipe_binding (lambda (plan)
 	(match plan
-		'(stage requested_col nested_stages _hoisted_stages prepare_stages inline_presence_stages bounded_consumer) (begin
+		'(stage requested_col nested_stages _hoisted_stages prepare_stages inline_probe_stages bounded_consumer) (begin
 			(define raw_keys (gs_keys stage))
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
 			(define logical_lookup_keys
@@ -1076,14 +1100,14 @@ both names therefore bind to the same parameter. */
 			(define bound_prepare_stages (map prepare_stages (lambda (prepare_stage)
 				(rewrite_bound_stage
 					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id prepare_stage)) prepare_stage)))))
-			(define bound_inline_presence_stages (map inline_presence_stages (lambda (presence_stage)
+			(define bound_inline_probe_stages (map inline_probe_stages (lambda (probe_stage)
 				(rewrite_bound_stage
-					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id presence_stage)) presence_stage)))))
+					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id probe_stage)) probe_stage)))))
 			(define probe_expr
 				(rewrite_query_invariant_probe_symbols invariant_symbol_index
 					(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr bound_keys params
-						bound_nested_stages bound_prepare_stages bound_inline_presence_stages
-						(stage_partition_limit bound_stage))))
+						bound_nested_stages bound_prepare_stages bound_inline_probe_stages
+						(stage_partition_limit bound_stage) bounded_consumer)))
 			(define memoized_probe_expr (if bounded_consumer
 				(list
 					(physical_query_session_symbol)
@@ -1106,7 +1130,7 @@ both names therefore bind to the same parameter. */
 (define scalar_query_probe_recipe_hoisted_stages (lambda (plans)
 	(unique_stages_by_id (merge (map (coalesceNil plans '()) (lambda (plan)
 		(match plan
-			'(_stage _requested_col _nested_stages hoisted_stages _prepare_stages _inline_presence_stages _bounded_consumer) hoisted_stages
+			'(_stage _requested_col _nested_stages hoisted_stages _prepare_stages _inline_probe_stages _bounded_consumer) hoisted_stages
 			_ '())))))))
 
 (define scalar_query_probe_recipe_prepare_exprs (lambda (plans)
@@ -1114,7 +1138,7 @@ both names therefore bind to the same parameter. */
 		(define stages (scalar_query_probe_recipe_hoisted_stages plans))
 		(define stage_catalog (unique_stages_by_id (merge (map (coalesceNil plans '()) (lambda (plan)
 			(match plan
-				'(_stage _requested_col nested_stages _hoisted_stages _prepare_stages _inline_presence_stages _bounded_consumer) nested_stages
+				'(_stage _requested_col nested_stages _hoisted_stages _prepare_stages _inline_probe_stages _bounded_consumer) nested_stages
 				_ '()))))))
 		(define shared_stages (filter stages stage_shared_prepare?))
 		(define direct_stages (filter stages (lambda (stage) (not (stage_shared_prepare? stage)))))

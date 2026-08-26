@@ -755,7 +755,7 @@ only partitioned FROM source would erase the block's row multiplicity
 	(query_block_with_scalar_first_probes_using_graph
 		stages (stage_dependency_graph stages) block)))
 
-(define query_block_with_presence_probe_sources_using (lambda (stages probe_sources block)
+(define query_block_with_selected_probe_sources_using (lambda (stages probe_sources block)
 	(begin
 		(define sources (qb_sources block))
 		(define selected_probe_sources
@@ -784,9 +784,9 @@ only partitioned FROM source would erase the block's row multiplicity
 			(join_optimizer_facts_without_aliases
 				(qassoc_set
 					(qb_facts block)
-					(quote consumed_presence_probe_stage_ids)
+					(quote consumed_probe_stage_ids)
 					(merge_unique (list
-						(qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '())
+						(qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '())
 						(stage_output_source_ids selected_probe_sources))))
 				(map selected_probe_sources source_alias))))))
 
@@ -794,7 +794,7 @@ only partitioned FROM source would erase the block's row multiplicity
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(query_block_with_presence_probe_sources_using
+		(query_block_with_selected_probe_sources_using
 			stages
 			(presence_probe_output_sources stages sources default_alias allow_unbounded)
 			block))))
@@ -2163,7 +2163,7 @@ must not pay for an unused group cache. */
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '()))
+		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '()))
 		(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block
 			all_stages sources default_alias (qb_limit block) (qb_where block) (query_block_probe_consumers block))))
 		(define stage_output_ids (stage_output_source_ids sources))
