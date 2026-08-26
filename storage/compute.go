@@ -78,9 +78,15 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 	// preparation and repair instead.
 	t.schema.schemalock.Lock()
 	metadataLocked := true
+	ddlLocked := true
 	defer func() {
 		if metadataLocked {
 			t.schema.schemalock.Unlock()
+		}
+		// The caller owns ddlMu and must always receive it back, including when a
+		// shard computor panics while the materialization window is unlocked.
+		if !ddlLocked {
+			t.ddlMu.Lock()
 		}
 	}()
 	for i, c := range t.Columns {
@@ -106,6 +112,12 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			}
 			t.schema.schemalock.Unlock()
 			metadataLocked = false
+			// Computors may lazily prepare another physical column on this table.
+			// Keep metadata publication serialized, but do not hold the table DDL
+			// mutex while executing arbitrary computors and waiting for shard jobs:
+			// a nested createcolumn would otherwise wait for its own parent forever.
+			t.ddlMu.Unlock()
+			ddlLocked = false
 			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
 			currentTx := CurrentTx()
@@ -144,6 +156,8 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 				GlobalCache.UpdateSize(c, totalRows*16) // ~16 bytes per value estimate
 			}
 			if metadataChanged {
+				t.ddlMu.Lock()
+				ddlLocked = true
 				t.schema.schemalock.Lock()
 				metadataLocked = true
 				mode := t.schemaSaveMode()
@@ -152,6 +166,10 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 				}
 				t.finishSchemaMutationLocked(mode)
 				metadataLocked = false
+			}
+			if !ddlLocked {
+				t.ddlMu.Lock()
+				ddlLocked = true
 			}
 			return
 		}
@@ -725,7 +743,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 }
 
 func stripSourceInfo(expr scm.Scmer) scm.Scmer {
-	return expr
+	return expr.WithoutSourceInfo()
 }
 
 func callHeadIs(head scm.Scmer, names ...string) bool {
@@ -1659,9 +1677,46 @@ func buildSelectiveORCInvalidationBody(targetSchema, targetTable, colName string
 	}
 }
 
+func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable *table, colName string, acquire func() bool, release func()) string {
+	triggerName := prefix + targetTable.Name + ":" + colName + "|" + srcTable.Name + "|" + AfterInvalidate.String()
+	targetKey := targetTable.schema.Name + "\x00" + targetTable.Name + "\x00" + colName
+	propagationAcquire := func() bool {
+		if value, ok := scm.GetGLSValue(computeInvalidationWaveKey); ok && value.(map[string]bool)[targetKey] {
+			return false
+		}
+		return acquire()
+	}
+	for _, tr := range srcTable.Triggers {
+		if tr.Name == triggerName {
+			srcTable.SetTriggerTarget(triggerName, propagationAcquire, release)
+			return triggerName
+		}
+	}
+	tblExpr := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("table"),
+		scm.NewString(targetTable.schema.Name),
+		scm.NewString(targetTable.Name),
+	})
+	srcTable.AddTrigger(TriggerDescription{
+		Name:     triggerName,
+		Timing:   AfterInvalidate,
+		IsSystem: true,
+		Priority: 100,
+		Func: buildFKProc(scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("invalidatecolumn"),
+			tblExpr,
+			scm.NewString(colName),
+		})),
+		Acquire: propagationAcquire,
+		Release: release,
+	})
+	return triggerName
+}
+
 // registerComputeTriggers installs AfterInsert/AfterUpdate/AfterDelete triggers
 // on source tables so that changes automatically invalidate the computed column.
-// Also installs AfterDropTable so that dropping a source table cascades to the target.
+// AfterInvalidate edges propagate changes through nested computed caches. It also
+// installs AfterDropTable so that dropping a source table cascades to the target.
 func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 	refs := extractScanJoinInfo(computor)
 	targetSchema := t.schema.Name
@@ -1680,6 +1735,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 	// Collect trigger names placed on source tables for self-cleanup
 	type triggerRef struct{ schema, name string }
 	var registeredNames []triggerRef
+	registeredInvalidationSources := make(map[*table]bool)
 	for refIdx, ref := range refs {
 		srcDB := GetDatabase(ref.schema)
 		if srcDB == nil {
@@ -1759,6 +1815,12 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			}
 			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
 		}
+		if !registeredInvalidationSources[srcTable] {
+			registeredInvalidationSources[srcTable] = true
+			triggerName := registerInvalidationPropagationTrigger(
+				".cache:", srcTable, t, name, acquireTarget, releaseTarget)
+			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
+		}
 		// AfterDropTable: when source table is dropped, drop the target table too
 		// Only for internal temp tables (dot-prefixed) — never drop user base tables
 		if strings.HasPrefix(t.Name, ".") {
@@ -1832,6 +1894,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 	releaseTarget := func() { t.releaseColumnCacheUse(col) }
 	type triggerRef struct{ schema, name string }
 	var registeredNames []triggerRef
+	registeredInvalidationSources := make(map[*table]bool)
 	for refIdx, ref := range refs {
 		srcDB := GetDatabase(ref.schema)
 		if srcDB == nil {
@@ -1880,6 +1943,12 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 			if srcTable != t {
 				registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
 			}
+		}
+		if srcTable != t && !registeredInvalidationSources[srcTable] {
+			registeredInvalidationSources[srcTable] = true
+			triggerName := registerInvalidationPropagationTrigger(
+				".orcdep:", srcTable, t, name, acquireTarget, releaseTarget)
+			registeredNames = append(registeredNames, triggerRef{ref.schema, triggerName})
 		}
 	}
 	if len(registeredNames) == 0 {

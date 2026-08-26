@@ -1521,12 +1521,12 @@ membership set. */
 		(define lookup_value (symbol (concat "__recset_lookup_value_"
 			(fnv_hash (gs_id stage)))))
 		/* Bind the consumer-row key before entering the producer begin. begin owns a
-			shared numbered scope, while scan adapters may close the producer callbacks
-			independently. Lowering the row key inside that scope would bake its extra
-			outer hop into the cached producer and can escape the actual row closure when
-			several correlated projections share one continuation. The explicit value
-			parameter keeps producer construction closed and makes lexical ownership
-			independent of the surrounding projection shape. */
+		shared numbered scope, while scan adapters may close the producer callbacks
+		independently. Lowering the row key inside that scope would bake its extra
+		outer hop into the cached producer and can escape the actual row closure when
+		several correlated projections share one continuation. The explicit value
+		parameter keeps producer construction closed and makes lexical ownership
+		independent of the surrounding projection shape. */
 		(list
 			(list (quote lambda) (list lookup_value)
 				(list (quote begin)
@@ -2956,7 +2956,7 @@ rows outside the current batch. */
 			repeating text scans and FK projection for every expanded window. */
 			(list (quote recset_intersect)
 				(cons (quote list) (list batch_expr
-					(list (quote session)
+					(planner_queryplan_observation_read_expr
 						(planner_queryplan_observation_value_key decision_id)))))
 			(if (union_block? input)
 				(begin
@@ -3502,7 +3502,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(list "cost" (planner_cost_explain prefiltered_cost)))
 								nil)) (lambda (alternative) (not (nil? alternative)))))))
 				(list chosen (if (not (nil? observation_keys))
-					(list (quote session) (car observation_keys))
+					(planner_queryplan_observation_read_expr (car observation_keys))
 					(if (equal? chosen "prefiltered_candidate_keyset")
 						prefiltered_expr raw_expr))))))))
 
@@ -5244,9 +5244,9 @@ ordinary physical carrier choice. */
 				bound value yields the exact full-or-empty truth set. */
 				(boolean_recset_domain_scan_plan domain_src expr)
 				(if (nil? target_col)
-				(neumann_fail "build_queryplan" "boolean RecSet probe requires one direct domain lookup key")
-				(lower_projected_recset_scalar_first_probe_expr
-					stage_catalog stage requested_col domain_src target_col false))))
+					(neumann_fail "build_queryplan" "boolean RecSet probe requires one direct domain lookup key")
+					(lower_projected_recset_scalar_first_probe_expr
+						stage_catalog stage requested_col domain_src target_col false))))
 		((symbol scalar_first_probe) stage requested_col _dependencies)
 		(boolean_recset_probe_leaf_plan stage_catalog domain_src
 			(list (quote scalar_first_probe) stage requested_col))

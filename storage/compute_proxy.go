@@ -64,7 +64,20 @@ type computeProxyReader struct {
 func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 	if fn.IsProc() {
 		proc := *fn.Proc()
-		proc.En = bindSessionEnv(proc.En, txSessionScmer(tx))
+		runtimeSession := txSessionScmer(tx)
+		proc.En = bindSessionEnv(proc.En, runtimeSession)
+		// Physical computed-column lambdas can outlive the query which created
+		// them. Never let their captured physical context pin a stale snapshot or
+		// request-local carrier: reads and lazy repairs use the current consumer.
+		// The fresh binding environment is procedure-local, so concurrent readers
+		// do not mutate the shared closure.
+		physicalTx := scm.NewNil()
+		if tx != nil {
+			physicalTx = scm.NewAny(tx)
+		}
+		proc.En.Vars[scm.Symbol("__physical_query_session")] = runtimeSession
+		proc.En.Vars[scm.Symbol("__physical_query_scope")] = scm.NewInt(int64(scm.CurrentQuerySeq()))
+		proc.En.Vars[scm.Symbol("__physical_query_tx")] = physicalTx
 		fn = scm.NewProcStruct(proc)
 	}
 	if tx == nil || tx.Session.IsNil() {

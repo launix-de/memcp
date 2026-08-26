@@ -245,6 +245,30 @@ metric, and makes them visible to a recompilation of the same request. */
 (define planner_queryplan_observation_metric_key (lambda (decision_id)
 	(concat "__memcp_queryplan_observation_metric_" (fnv_hash decision_id))))
 
+/* Adaptive values are executable request-local objects (often RecSets), not
+connection state. The outer session owns their concurrent flight, while the
+query generation is the scope that releases them after execution. */
+(define planner_queryplan_observation_session_expr (lambda ()
+	(list
+		(list (quote context) "session")
+		"get_or_compute_scoped"
+		(list (quote context) "query")
+		"__memcp_queryplan_observations"
+		(list (quote lambda) '() (list (quote newsession))))))
+
+(define planner_queryplan_observation_read_expr (lambda (key)
+	(list
+		(list
+			(physical_query_session_symbol)
+			"get_or_compute_scoped"
+			(physical_query_scope_symbol)
+			"__memcp_queryplan_observations"
+			(list (quote lambda) '() (list (quote newsession))))
+		key)))
+
+(define planner_queryplan_observation_current_read_expr (lambda (key)
+	(list (planner_queryplan_observation_session_expr) key)))
+
 (define planner_register_queryplan_observation (lambda (decision_id producer metric_expr)
 	(begin
 		(define preparations (try
@@ -276,8 +300,11 @@ metric, and makes them visible to a recompilation of the same request. */
 
 (define planner_queryplan_observed_metric (lambda (decision_id)
 	(try
-		(lambda () ((context "session")
-			(planner_queryplan_observation_metric_key decision_id)))
+		(lambda () (begin
+			(define compile_observations ((context "session") "__memcp_queryplan_observation_scope"))
+			(if (nil? compile_observations)
+				nil
+				(compile_observations (planner_queryplan_observation_metric_key decision_id)))))
 		(lambda (_e) nil))))
 
 (define empty_list? (lambda (xs)
