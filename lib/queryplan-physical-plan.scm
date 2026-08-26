@@ -59,9 +59,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
 					(or
 						(and (equal?? (direct_column_name_for_alias src left) col)
-							(not (expr_refs_alias? (source_alias src) (source_alias src) right)))
+							(not (expr_contains_column_ref? right)))
 						(and (equal?? (direct_column_name_for_alias src right) col)
-							(not (expr_refs_alias? (source_alias src) (source_alias src) left))))
+							(not (expr_contains_column_ref? left))))
 					false)
 				_ false)))
 		false)))
@@ -2569,14 +2569,13 @@ probes remain recipes and still execute after root braking. */
 	(begin
 		(define compile_offset (planner_literal_value offset_value))
 		(define compile_limit (planner_literal_value limit_value))
-		(define rows (if (empty_list? sources) nil
-			(if (source_unique_point_condition? (car sources) final_condition)
-				1
-				/* A selectivity estimate is not an upper bound. Native LIMIT may
-				stop at the driver only when its complete relation is provably
-				inside the window; downstream 0:1 predicates can still reject an
-				estimatedly selective driver row. */
-				(planner_source_row_count (car sources)))))
+		/* Row-count statistics are estimates, not upper bounds, and may lag
+		concurrent inserts. They can rank plans but cannot prove that LIMIT covers
+		the complete driver. A unique point predicate is the available structural
+		upper bound; every wider scan must let the completed-row consumer own the
+		window. */
+		(define rows (if (and (not (empty_list? sources))
+			(source_unique_point_condition? (car sources) final_condition)) 1 nil))
 		(and (or (nil? compile_offset) (equal? compile_offset 0))
 			(and (number? compile_limit)
 				(and (>= compile_limit 0)
