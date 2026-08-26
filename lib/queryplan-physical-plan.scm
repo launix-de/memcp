@@ -5080,13 +5080,34 @@ ownership remain available until the physical scans are emitted. */
 							(not (empty_list? (prejoin_primary_key_columns src)))))))
 				true)))))
 
+(define prejoin_expr_contains_count_distinct? (lambda (expr)
+	(match expr
+		((symbol count_distinct) _expr) true
+		((quote count_distinct) _expr) true
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (prejoin_expr_contains_count_distinct? item))) false)
+		_ false)))
+
+(define prejoin_block_contains_count_distinct? (lambda (block)
+	(reduce (merge (list
+		(extract_assoc (qb_fields block) (lambda (_title expr) expr))
+		(if (nil? (qb_having block)) '() (list (qb_having block)))
+		(order_exprs (qb_order block))
+		(extract_assoc (qb_hidden block) (lambda (_title expr) expr))))
+		(lambda (found expr) (or found (prejoin_expr_contains_count_distinct? expr))) false)))
+
+/* COUNT DISTINCT state cannot be maintained from a prejoin row whose lazily
+computed non-key values are repaired after the downstream group cache. Keep
+that aggregate on the direct joined-group path until prejoin dependency repair
+can publish upstream values before invalidating downstream caches. */
 (define physical_prejoin_supported? (lambda (block)
 	(and (query_block? block)
 		(and (empty_list? (qb_stages block))
 			(and (> (count (qb_sources block)) 1)
 				(and (prejoin_sources_supported? (qb_sources block))
-					(and (not (equal? (prejoin_join_condition block) true))
-						(not (expr_contains_session_dependency? (prejoin_join_condition block))))))))))
+					(and (not (prejoin_block_contains_count_distinct? block))
+						(and (not (equal? (prejoin_join_condition block) true))
+							(not (expr_contains_session_dependency? (prejoin_join_condition block)))))))))))
 
 (define prejoin_query_exprs (lambda (block fields)
 	(merge (list
