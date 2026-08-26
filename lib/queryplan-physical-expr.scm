@@ -1382,13 +1382,17 @@ membership set. */
 	(concat "__recset_probe_" (fnv_hash (gs_id stage)))))
 
 (define physical_query_session_symbol (lambda ()
-	(symbol "__physical_query_session")))
+	(quote __physical_query_session)))
 
 (define physical_query_scope_symbol (lambda ()
-	(symbol "__physical_query_scope")))
+	(quote __physical_query_scope)))
 
 (define physical_query_tx_symbol (lambda ()
-	(symbol "__physical_query_tx")))
+	(quote __physical_query_tx)))
+
+(define physical_query_symbol_named? (lambda (expr expected_name)
+	(and (symbol? expr)
+		(equal? (string expr) expected_name))))
 
 (define lower_recset_stage_prepare_once_expr (lambda (stage_catalog stage)
 	(list

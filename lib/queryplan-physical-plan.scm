@@ -3250,11 +3250,11 @@ cost decision with an exact request-local observation and a crossover guard. */
 not live inside with_physical_query_context's lexical bindings. Rebind only the
 three physical context symbols; quoted data remains opaque. */
 (define ordered_recset_observation_expr (lambda (expr)
-	(if (equal? expr (physical_query_session_symbol))
+	(if (physical_query_symbol_named? expr "__physical_query_session")
 		(list (quote context) "session")
-		(if (equal? expr (physical_query_scope_symbol))
+		(if (physical_query_symbol_named? expr "__physical_query_scope")
 			(list (quote context) "query")
-			(if (equal? expr (physical_query_tx_symbol))
+			(if (physical_query_symbol_named? expr "__physical_query_tx")
 				(list (list (quote context) "session") "__memcp_tx")
 				(match expr
 					((symbol quote) _value) expr
@@ -6833,7 +6833,7 @@ though both handles are constant for the complete query generation. */
 		(define rewritten (rewrite_physical_transaction_reads plan))
 		(if (not (physical_plan_uses_query_scope? rewritten))
 			rewritten
-			(cons (quote !begin) (merge (list
+			(cons (quote begin) (merge (list
 				(list (list (quote define) (physical_query_session_symbol)
 					(list (quote context) "session")))
 				(list (list (quote define) (physical_query_scope_symbol)
