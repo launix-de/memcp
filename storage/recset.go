@@ -999,14 +999,21 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 	return result
 }
 
-// hasEqualityIndexPrefix reports whether an existing index already covers
-// cols as an equality prefix, without triggering a build. The sparse
+// hasEqualityIndexPrefix reports whether an active index already covers cols
+// as an equality prefix, without triggering a build. The sparse
 // per-key lookup path below is only cheap when such an index already
 // exists; forcing one into existence for a single ad-hoc query can cost far
 // more than the linear scan it was meant to avoid.
-func (t *storageShard) hasEqualityIndexPrefix(cols []string) bool {
+func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []string) bool {
 	for _, index := range t.Indexes {
 		if len(index.Cols) < len(cols) {
+			continue
+		}
+		state := index.stateForTx(currentTx, false)
+		index.mu.Lock()
+		active := state != nil && state.active
+		index.mu.Unlock()
+		if !active {
 			continue
 		}
 		match := true
@@ -1015,7 +1022,11 @@ func (t *storageShard) hasEqualityIndexPrefix(cols []string) bool {
 				match = false
 				break
 			}
-			if len(index.ColMatchers) > i && !matcherKindEqual(EqualMatcher, index.ColMatchers[i]) {
+			var indexedMatcher IndexAnalyzer
+			if len(index.ColMatchers) > i {
+				indexedMatcher = index.ColMatchers[i]
+			}
+			if !indexMatcherCompatible(EqualMatcher, indexedMatcher) {
 				match = false
 				break
 			}
@@ -1064,7 +1075,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	visibleUpper := t.main_count + uint32(maxInsertIndex)
 	numericDense := numeric && len(targetCols) == 1 && projectJoinNumericColumn(targetCols[0])
 	dense := projectJoinDensePreferred(keys.count(), int(visibleUpper), numericDense,
-		t.hasEqualityIndexPrefix(targetKeyCols))
+		t.hasEqualityIndexPrefix(currentTx, targetKeyCols))
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	if dense {
 		builder := newRecSetShardBuilder(t, visibleUpper, true, t.main_count)

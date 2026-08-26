@@ -472,7 +472,11 @@ func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds boundarie
 		if i >= effectiveCols || i >= len(index.Cols) || i >= len(index.ColOrder) {
 			return false
 		}
-		if index.Cols[i] != boundary.col || !sameOrderRelation(index.ColOrder[i], boundary.order) {
+		orderMeta := boundary.orderMeta
+		if orderMeta == "" {
+			orderMeta = orderRelationMeta(boundary.order)
+		}
+		if index.Cols[i] != boundary.col || i >= len(index.ColOrderMeta) || index.ColOrderMeta[i] != orderMeta {
 			return false
 		}
 	}

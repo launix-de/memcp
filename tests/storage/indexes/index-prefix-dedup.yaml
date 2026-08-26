@@ -82,7 +82,7 @@ test_cases:
         (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
-        (if (equal? cols "a(equal)|b(equal)") "ok"
+        (if (equal? cols "a|b") "ok"
           (error (concat "expected a|b, got " cols))))
 
   - name: "Compound index has accumulated savings from prefix queries"
@@ -118,7 +118,7 @@ test_cases:
         (set indexes ((show "memcp-tests" "idx_nopfx" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
-        (if (equal? cols "a(equal)|b(equal)") "ok"
+        (if (equal? cols "a|b") "ok"
           (error (concat "expected a|b after rebuild, got " cols))))
 
   - name: "Post-rebuild: savings decayed (< pre-rebuild value)"
@@ -225,7 +225,7 @@ test_cases:
         (set indexes ((show "memcp-tests" "idx_rev" 0 true) "indexes"))
         (set idx (nth indexes 0))
         (set cols (get_assoc idx "cols"))
-        (if (equal? cols "p(equal)|q(equal)") "ok"
+        (if (equal? cols "p|q") "ok"
           (error (concat "expected p|q, got " cols))))
 
   - name: "Post-rebuild: merged savings from both indexes"
@@ -617,7 +617,46 @@ test_cases:
         - ID: 8
         - ID: 9
 
+  # ==============================================================
+  # Phase 8: equal/range query boundaries share one sorted index
+  # ==============================================================
+
+  - name: "Setup matcher-independent sorted index table"
+    setup:
+      - sql: "DROP TABLE IF EXISTS idx_matcher_reuse"
+    sql: "CREATE TABLE idx_matcher_reuse (a INT, b INT)"
+
+  - name: "Populate matcher-independent sorted index table"
+    sql: |
+      INSERT INTO idx_matcher_reuse VALUES
+        (1, 10), (2, 20), (3, 30), (4, 40),
+        (5, 50), (6, 60), (7, 70), (8, 80)
+
+  - name: "Create compound index through equal and range boundaries"
+    sql: "SELECT b FROM idx_matcher_reuse WHERE a = 4 AND b > 0"
+    expect:
+      data:
+        - b: 40
+
+  - name: "Range boundary reuses equal prefix"
+    sql: "SELECT a FROM idx_matcher_reuse WHERE a > 6 ORDER BY a"
+    expect:
+      data:
+        - a: 7
+        - a: 8
+
+  - name: "Sorted matcher metadata is omitted and no prefix index is created"
+    scm: |
+      (begin
+        (set indexes ((show "memcp-tests" "idx_matcher_reuse" 0 true) "indexes"))
+        (if (and (equal? (count indexes) 1)
+                 (equal? (get_assoc (nth indexes 0) "cols") "a|b"))
+          "ok"
+          (error "expected one matcher-independent a|b index")))
+
 cleanup:
+
+  - sql: "DROP TABLE IF EXISTS idx_matcher_reuse"
   - sql: "DROP TABLE IF EXISTS idx_prefix_or_range"
   - sql: "DROP TABLE IF EXISTS idx_desc_delta_prefix"
   - sql: "DROP TABLE IF EXISTS idx_nopfx"

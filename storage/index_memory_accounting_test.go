@@ -50,6 +50,12 @@ func TestPlannerIndexProbeDoesNotIncreaseIndexSavings(t *testing.T) {
 	if shard.Indexes[0].Savings != 0 {
 		t.Fatalf("estimate must not count as index usage, savings = %v", shard.Indexes[0].Savings)
 	}
+	if len(shard.Indexes[0].ColMatchers) != 0 {
+		t.Fatalf("sorted index persisted redundant matcher metadata: %#v", shard.Indexes[0].ColMatchers)
+	}
+	if got := shard.Indexes[0].String(); got != "id" {
+		t.Fatalf("sorted index description = %q, want %q", got, "id")
+	}
 	if shard.Indexes[0].baseState.active {
 		t.Fatal("estimate must not materialize a cold auto-index before real usage")
 	}
