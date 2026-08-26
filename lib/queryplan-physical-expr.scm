@@ -3429,13 +3429,15 @@ candidate RecSet. */
 		executing a potentially nested ACL filter during cold planning. */
 		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 1))
 		(define text_prior (expr_text_pattern_expr condition))
-		(list (quote planner_estimated_matching_rows)
-			(if (nil? text_prior)
-				estimate_expr
-				(list (quote qassoc_set) estimate_expr
-					(list (quote quote) (quote fallback_selectivity))
-					(list (quote text_pattern_selectivity_prior) text_prior)))
-			fallback_rows fallback_rows))))
+		(if (nil? text_prior)
+			(list (quote planner_estimated_matching_rows)
+				estimate_expr fallback_rows fallback_rows)
+			/* A zero-match text probe must inspect the complete source even with a
+			one-match cap. Text predicates already have a calibrated cardinality
+			prior, so use it directly instead of executing a cold planning scan. */
+			(list (quote max) 1
+				(list (quote *) fallback_rows
+					(list (quote text_pattern_selectivity_prior) text_prior)))))))
 
 (define membership_runtime_stage_rows_expr (lambda (input fallback_rows)
 	(if (union_block? input)

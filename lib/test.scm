@@ -656,6 +656,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		"single-character text patterns use a broad prior")
 	(assert (text_pattern_selectivity_prior "%needle%") 0.01
 		"long text patterns use the selective prior floor")
+	(assert (membership_runtime_source_rows_expr
+		(list "f" "memcp-tests" "membership_text_source" false nil)
+		(list (quote strlike) "filename" "%alternate%" "utf8mb4_general_ci")
+		20000)
+		(list (quote max) 1
+			(list (quote *) 20000
+				(list (quote text_pattern_selectivity_prior) "%alternate%")))
+		"membership text guards use the prior without emitting a zero-hit scan")
 	(assert (planner_estimated_matching_rows
 		(list
 			(list (quote rows) 512)
