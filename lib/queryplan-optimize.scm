@@ -2824,6 +2824,29 @@ their tighter direct bound; this product is only an additional candidate. */
 				(planner_source_row_count input)
 				nil)))))
 
+/* Equality bindings for every column of a unique key are a cardinality proof,
+not a selectivity guess: the branch can return at most one row for any runtime
+binding. Runtime sampling may still report the table-wide fallback before the
+corresponding autoindex exists. Cap that estimate here so UNION membership
+planning preserves the proven bound without consulting index availability. */
+(define planner_unique_point_filter_estimate (lambda (src condition estimate)
+	(if (not (join_optimizer_source_constant_unique_point?
+		(list src) (source_alias src) src condition))
+		estimate
+		(begin
+			(define input_rows (planner_source_row_count src))
+			(define base (coalesceNil estimate (list
+				(list (quote input) input_rows)
+				(list (quote population) (quote table_rows))
+				(list (quote coverage) (quote exact)))))
+			(qassoc_set
+				(qassoc_set
+					(qassoc_set base (quote rows)
+						(min 1 (coalesceNil (qassoc_get base (quote rows) nil) 1)))
+					(quote estimated_rows)
+					(min 1 (coalesceNil (qassoc_get base (quote estimated_rows) nil) 1)))
+				(quote capped) false)))))
+
 (define planner_stage_filter_estimate (lambda (input max_rows)
 	(if (union_block? input)
 		(begin
@@ -2858,7 +2881,9 @@ their tighter direct bound; this product is only an additional candidate. */
 			(if (single_source? (qb_sources input))
 				(begin
 					(define src (car (qb_sources input)))
-					(planner_source_filter_estimate src (combine_where (qb_where input) (source_join_expr src)) max_rows))
+					(define condition (combine_where (qb_where input) (source_join_expr src)))
+					(planner_unique_point_filter_estimate src condition
+						(planner_source_filter_estimate src condition max_rows)))
 				nil)
 			nil))))
 
@@ -3076,6 +3101,39 @@ either physical alternative or sampling the table again. */
 			(qassoc_set profile (quote map_columns)
 				(max (qassoc_get profile (quote map_columns) 0) (count (qb_fields block))))))))
 
+/* Count row-rejecting relations which remain after the membership carrier.
+This fact must be captured while the complete logical source set is still
+available: physical membership rewriting removes the candidate relation and
+probe promotion may replace a correlated LEFT JOIN by an expression marker.
+Each surviving non-membership relation is one downstream probe unit; nested
+work remains part of that relation's calibrated per-probe cost. Sibling
+membership stages are alternatives within the same canonical predicate and
+are already represented by membership_candidate_probe_branches. Counting them
+again here would make one carrier choice recursively tax the others.
+Projection-only LEFT JOINs do not reject rows and therefore do not affect the
+carrier crossover. */
+(define membership_downstream_probe_branches (lambda (stage driver sources block)
+	(if (nil? driver)
+		0
+		(begin
+			(define default_alias (qassoc_get (qb_facts block)
+				(quote default_alias) (source_alias driver)))
+			(count (filter (coalesceNil sources '()) (lambda (src)
+				(begin
+					(define relation (source_relation src))
+					(define downstream_stage (if (stage_output_relation? relation)
+						(stage_by_id (qb_stages block) (stage_output_relation_id relation)) nil))
+					(define downstream_purpose (if (group_stage? downstream_stage)
+						(qassoc_get (gs_facts downstream_stage) (quote purpose) nil) nil))
+					(and (not (equal? (source_alias src) (source_alias driver)))
+						(and (not (and (stage_output_relation? relation)
+							(equal? (stage_output_relation_id relation) (gs_id stage))))
+							(and (not (contains? (list (quote in_membership) (quote in_candidate))
+								downstream_purpose))
+								(or (not (source_outer? src))
+									(expr_refs_alias? default_alias (source_alias src)
+										(qb_where block)))))))))))))))
+
 (define candidate_reorder_telemetry (lambda (stage sources block)
 	(begin
 		(define driver (reduce (coalesceNil sources '()) (lambda (found src)
@@ -3139,6 +3197,8 @@ either physical alternative or sampling the table again. */
 			(list (quote membership_candidate_estimate_population) estimate_population)
 			(list (quote membership_candidate_estimate_coverage) estimate_coverage)
 			(list (quote membership_candidate_probe_branches) candidate_probe_branches)
+			(list (quote membership_downstream_probe_branches)
+				(membership_downstream_probe_branches stage driver sources block))
 			(list (quote membership_candidate_scan_invocations) (qassoc_get candidate_work (quote scan_invocations) candidate_probe_branches))
 			(list (quote membership_candidate_filter_columns) (qassoc_get candidate_work (quote filter_columns) 0))
 			(list (quote membership_candidate_map_columns) (qassoc_get candidate_work (quote map_columns) (count (gs_keys stage))))
@@ -3447,6 +3507,18 @@ physical alternative. */
 				(* candidate_rows planner_membership_group_cache_build_row_ns)
 				(* candidate_rows 8) 0 candidate_rows 0.65)
 			(planner_zero_cost candidate_rows 0.65)))
+		/* A projected RecSet is not free to consume under ORDER/LIMIT. Unlike an
+		ordered base scan it must fetch the ordering columns at the projected row
+		positions and order the complete carrier before LIMIT can brake. Keep this
+		consumer term in the same candidate-vs-driver decision: a later shape-specific
+		selector would compare two incomplete plans and could mask the calibrated
+		carrier inequality. */
+		(define ordered_recset_consumer_cost (if
+			(membership_work_value work (quote membership_order_limit_driver) false)
+			(planner_cost 0
+				(* projected_rows planner_membership_ordered_recset_row_ns)
+				0 0 0 0 0 0 projected_rows 0.75)
+			(planner_zero_cost projected_rows 0.75)))
 		(define base_cost (planner_cost_add (planner_cost_add
 			(planner_cost_add
 				(membership_common_scan_cost candidate_input_rows candidate_rows projection_rows
@@ -3464,10 +3536,12 @@ physical alternative. */
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
 			projection_rows 0.65)
 			candidate_cache_cost projection_rows 0.65))
-		(define downstream_cost (planner_membership_direct_probe_cost
+		(define downstream_cost (planner_membership_downstream_probe_cost
 			(* projected_rows
 				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
-		(define carrier_cost (planner_cost_add base_cost downstream_cost projected_rows 0.65))
+		(define carrier_cost (planner_cost_add
+			(planner_cost_add base_cost ordered_recset_consumer_cost projected_rows 0.65)
+			downstream_cost projected_rows 0.65))
 		(if (equal? (membership_work_value work (quote membership_consumer) (quote filter))
 			(quote aggregate))
 			(planner_cost_add carrier_cost
@@ -3480,8 +3554,10 @@ physical alternative. */
 membership edge before an expensive candidate predicate runs. The emitted
 tree scans the driver once, projects its exact RecSet to the candidate source,
 filters only that subset, projects matches back, and intersects with the
-original driver RecSet. Cost it entirely from the same calibrated scan,
-expression, and RecSet components used by the other membership carriers. */
+original driver RecSet. Independent downstream predicates are planned for the
+complete local driver subset before that intersection, so candidate density
+must not discount their work. Cost the exact emitted order from the same
+calibrated components used by the other membership carriers. */
 (define membership_prefiltered_candidate_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
 	(begin
 		(define driver_input_rows (membership_driver_input_rows driver_rows work))
@@ -3531,18 +3607,22 @@ expression, and RecSet components used by the other membership carriers. */
 			(* projection_rows planner_membership_recset_build_row_ns)
 			(* projection_rows 8)
 			0 driver_rows 0.65)
-			(planner_membership_direct_probe_cost
-				(* driver_rows candidate_density
+			(planner_membership_downstream_probe_cost
+				(* driver_rows
 					(membership_work_value work (quote membership_downstream_probe_branches) 0)))
 			driver_rows 0.65))))
 
-(define membership_driver_probe_cost (lambda (driver_rows probe_branches)
+(define membership_driver_probe_cost (lambda (driver_rows probe_branches downstream_probe_branches)
 	(begin
 		(define probes (* driver_rows probe_branches))
 		/* A driver membership check lowers each candidate branch to an indexed
 		point-presence probe. Keep that storage subscan distinct from the ordered
 		candidate-key index calibrated below. */
-		(planner_membership_direct_probe_cost probes))))
+		(planner_cost_add
+			(planner_membership_direct_probe_cost probes)
+			(planner_membership_downstream_probe_cost
+				(* driver_rows downstream_probe_branches))
+			driver_rows 0.75))))
 
 (define membership_ordered_driver_probe_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
 	(begin
@@ -3568,7 +3648,7 @@ expression, and RecSet components used by the other membership carriers. */
 					(* candidate_rows 8) 0 (+ candidate_rows visited_rows) 0.65))
 			visited_rows 0.65))
 		(define carrier_cost (planner_cost_add base_cost
-			(planner_membership_direct_probe_cost
+			(planner_membership_downstream_probe_cost
 				(* visited_rows
 					(membership_work_value work (quote membership_downstream_probe_branches) 0)))
 			visited_rows 0.65))
@@ -3590,7 +3670,8 @@ expression, and RecSet components used by the other membership carriers. */
 			(list driver_strategy
 				(if (equal? driver_strategy (quote driver_order_membership_probe))
 					(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows work)
-					(membership_driver_probe_cost driver_rows probe_branches)))))))
+					(membership_driver_probe_cost driver_rows probe_branches
+						(membership_work_value work (quote membership_downstream_probe_branches) 0))))))))
 
 (define membership_cost_options_for_telemetry (lambda (telemetry)
 	(begin

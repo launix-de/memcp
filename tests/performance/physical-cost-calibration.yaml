@@ -24,6 +24,9 @@ setup:
   - sql: "DROP TABLE IF EXISTS pc_docs_large"
   - sql: "DROP TABLE IF EXISTS pc_docs_million"
   - sql: "DROP TABLE IF EXISTS pc_doc_meta"
+  - sql: "DROP TABLE IF EXISTS pc_acl_domain"
+  - sql: "DROP TABLE IF EXISTS pc_acl_assignment"
+  - sql: "DROP TABLE IF EXISTS pc_acl_override"
   # String-key membership prevents the target-side prefiltered projection and
   # isolates candidate startup from direct probe work.
   - sql: "DROP TABLE IF EXISTS pc_events"
@@ -42,6 +45,9 @@ setup:
   - sql: "CREATE TABLE pc_docs_large (id INT PRIMARY KEY, file_id INT, sort_key INT, p1 INT, p2 INT, p3 INT, p4 INT, p5 INT, p6 INT, p7 INT, p8 INT)"
   - sql: "CREATE TABLE pc_docs_million (id INT PRIMARY KEY, file_id INT, sort_key INT, p1 INT) ENGINE=sloppy"
   - sql: "CREATE TABLE pc_doc_meta (id INT PRIMARY KEY, label VARCHAR(32))"
+  - sql: "CREATE TABLE pc_acl_domain (id INT PRIMARY KEY, direct_flag INT)"
+  - sql: "CREATE TABLE pc_acl_assignment (domain_id INT, actor_id INT, allowed INT)"
+  - sql: "CREATE TABLE pc_acl_override (domain_id INT, actor_id INT, allowed INT)"
   - sql: "CREATE TABLE pc_events (id INT PRIMARY KEY, entity_key VARCHAR(32), event_time INT, kind VARCHAR(16))"
   - sql: "CREATE TABLE pc_keys (id INT PRIMARY KEY, enabled INT)"
   - sql: "CREATE TABLE pc_files_text (id INT PRIMARY KEY, filename VARCHAR(255), search VARCHAR(255)) ENGINE=memory"
@@ -62,6 +68,12 @@ setup:
         (insert (table "memcp-tests" "pc_docs_large") '("id" "file_id" "sort_key" "p1" "p2" "p3" "p4" "p5" "p6" "p7" "p8") (make_docs 20000 5000))
         (insert (table "memcp-tests" "pc_doc_meta") '("id" "label")
           (map (produceN 5000) (lambda (i) (list i (concat "meta-" (string i))))))
+        (insert (table "memcp-tests" "pc_acl_domain") '("id" "direct_flag")
+          (map (produceN 5000) (lambda (i) (list i (if (equal? (mod i 11) 0) 1 0)))))
+        (insert (table "memcp-tests" "pc_acl_assignment") '("domain_id" "actor_id" "allowed")
+          (map (produceN 2500) (lambda (i) (list (* i 2) 7 1))))
+        (insert (table "memcp-tests" "pc_acl_override") '("domain_id" "actor_id" "allowed")
+          (map (produceN 1667) (lambda (i) (list (* i 3) 7 1))))
         (insert (table "memcp-tests" "pc_events") '("id" "entity_key" "event_time" "kind")
           (map (produceN 10000) (lambda (i)
             (list i (if (>= i 9990) "key:1" (concat "noise:" (string i))) i
@@ -111,6 +123,9 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS pc_docs_large"
   - sql: "DROP TABLE IF EXISTS pc_docs_million"
   - sql: "DROP TABLE IF EXISTS pc_doc_meta"
+  - sql: "DROP TABLE IF EXISTS pc_acl_domain"
+  - sql: "DROP TABLE IF EXISTS pc_acl_assignment"
+  - sql: "DROP TABLE IF EXISTS pc_acl_override"
   - sql: "DROP TABLE IF EXISTS pc_events"
   - sql: "DROP TABLE IF EXISTS pc_keys"
   - sql: "DROP TABLE IF EXISTS pc_files_text"
@@ -513,6 +528,74 @@ test_cases:
         SELECT f.id FROM pc_files_wide f
         WHERE MATCH(f.search) AGAINST ('c' IN NATURAL LANGUAGE MODE)
       )
+      ORDER BY d.sort_key, d.p1, d.id, d.file_id
+      LIMIT 72
+
+  # A tiny exact candidate set must remain eligible to drive the ordered scan.
+  # This holdout prevents a coefficient learned from broad/compound consumers
+  # from turning the cost model into an unconditional base-table preference.
+  - name: "production-scale tiny ordered membership holdout"
+    physical_calibration: true
+    calibration_decision: "membership_carrier"
+    calibration_holdout: true
+    race: true
+    race_grace: 0.5
+    cache_state: "cold_operator_state_race"
+    compile_state: "variant_compile_and_execute"
+    expected_driver_input_rows: 1000000
+    warmup: 0
+    repetitions: 1
+    sql: |
+      SELECT d.id, d.p1
+      FROM pc_docs_million d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_large f WHERE f.id = 4999
+        UNION
+        SELECT f.id FROM pc_files_large f WHERE f.id = -1
+      )
+      ORDER BY d.sort_key, d.p1, d.id, d.file_id
+      LIMIT 72
+
+  # Reproduce the complete expensive suffix rather than calibrating membership
+  # in isolation. The candidate-vs-ordered-driver inequality must include the
+  # compound scalar/EXISTS work which follows the projected search RecSet.
+  - name: "ordered membership with compound ACL suffix"
+    physical_calibration: true
+    calibration_decision: "membership_carrier"
+    cache_state: "warm_operator_state"
+    compile_state: "cached_plan_execution_only"
+    expected_driver_input_rows: 4000
+    warmup: 1
+    repetitions: 3
+    sql: |
+      SELECT d.id, d.p1
+      FROM pc_docs_small d
+      WHERE d.file_id IN (
+        SELECT f.id FROM pc_files_small f WHERE f.filename LIKE '%hit%'
+        UNION
+        SELECT f.id FROM pc_files_small f WHERE f.search LIKE '%hit%'
+      )
+        AND COALESCE((
+          SELECT CASE WHEN acl.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pc_acl_assignment assignment
+              WHERE assignment.domain_id = acl.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pc_acl_override override
+              WHERE override.domain_id = acl.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pc_acl_domain acl
+          WHERE acl.id = d.file_id
+          LIMIT 1
+        ), FALSE)
       ORDER BY d.sort_key, d.p1, d.id, d.file_id
       LIMIT 72
 
