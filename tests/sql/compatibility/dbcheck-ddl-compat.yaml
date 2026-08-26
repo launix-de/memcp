@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
 metadata:
   version: "1.0"
   description: "DDL compatibility for dbcheck.php migration tool"
@@ -11,6 +13,14 @@ test_cases:
   # --- Table creation with full MySQL syntax ---
   - name: "CREATE TABLE with CHARSET COLLATE ENGINE"
     sql: "CREATE TABLE dbc_t (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(100) NOT NULL, email VARCHAR(200) COLLATE utf8mb4_unicode_ci, notes TEXT, active BOOLEAN DEFAULT true) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE=InnoDB"
+
+  - name: "CREATE TABLE accepts DEFAULT CHARACTER SET and prefix keys"
+    sql: "CREATE TABLE dbc_prefix_key (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, meta_key VARCHAR(255) DEFAULT NULL, PRIMARY KEY (id), KEY meta_key (meta_key(191))) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_520_ci"
+
+  - name: "Malformed prefix key remains rejected"
+    sql: "CREATE TABLE dbc_bad_prefix (id BIGINT, KEY bad (id(foo)))"
+    expect:
+      error: true
 
   - name: "CREATE TABLE with DOUBLE PRECISION and ENGINE equals spacing"
     sql: "CREATE TABLE dbc_double_precision (id INT PRIMARY KEY AUTO_INCREMENT, val DOUBLE PRECISION) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci ENGINE = INNODB"

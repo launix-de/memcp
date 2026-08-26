@@ -3953,6 +3953,20 @@ working on the original values. */
 			'()
 			(list (canonical_column_expr_for_alias default_alias expr))))))))
 
+/* MySQL permits ORDER BY expressions which are neither projected aggregates
+nor GROUP BY keys. Preserve the grouping cardinality by selecting one value
+per group instead of silently widening the group key. */
+(define group_order_items_for_alias (lambda (default_alias keys order_items)
+	(map (coalesceNil order_items '()) (lambda (item) (match item
+		'(expr dir) (begin
+			(define resolved (canonical_column_expr_for_alias default_alias expr))
+			(if (or (contains? keys resolved) (expr_has_aggregates? expr))
+				(list expr dir)
+				(list
+					(list (quote aggregate) resolved (scalar_once_reduce_first) nil)
+					dir)))
+		_ item)))))
+
 (define group_key_col_name (lambda (i)
 	(concat "k" i)))
 
@@ -4306,17 +4320,21 @@ self-joins of the same base table still describe two distinct row roles. */
 
 (define make_group_stage_for_block (lambda (block src)
 	(begin
-		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
-		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
-		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
-			(merge (list visible_ags having_ags))
-			(merge (list visible_ags having_ags (list aggregate_count_descriptor))))))
 		(define alias (source_alias src))
 		(define session_keys (query_expr_session_reads block))
 		(define explicit_keys (map (coalesceNil (qb_group block) '()) (lambda (expr)
 			(canonical_column_expr_for_alias alias expr))))
 		(define keys (merge (list explicit_keys (filter session_keys (lambda (expr)
 			(not (contains? explicit_keys expr)))))))
+		(define group_order (group_order_items_for_alias alias keys (qb_order block)))
+		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
+		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
+		(define order_ags (merge (map group_order (lambda (item) (match item
+			'(expr _dir) (extract_aggregates expr)
+			_ '())))))
+		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
+			(merge (list visible_ags having_ags order_ags))
+			(merge (list visible_ags having_ags order_ags (list aggregate_count_descriptor))))))
 		(make_group_stage
 			(concat "group:" (source_relation src) ":" (stable_structural_hash (list keys ags) false))
 			src
@@ -4325,7 +4343,7 @@ self-joins of the same base table still describe two distinct row roles. */
 			ags
 			(qb_having block)
 			(qb_fields block)
-			(qb_order block)
+			group_order
 			(qb_limit block)
 			(qb_offset block)
 			(list
@@ -4335,17 +4353,21 @@ self-joins of the same base table still describe two distinct row roles. */
 
 (define make_group_stage_for_query_block (lambda (block)
 	(begin
-		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
-		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
-		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
-			(merge (list visible_ags having_ags))
-			(merge (list visible_ags having_ags (list aggregate_count_descriptor))))))
 		(define alias (source_alias (car (qb_sources block))))
 		(define group_keys (map (coalesceNil (qb_group block) '()) (lambda (expr) (canonical_column_expr_for_alias alias expr))))
 		(define field_passthrough_keys (field_passthrough_keys_for_alias alias (qb_fields block)))
 		(define passthrough_keys (external_column_refs_for_alias alias (coalesceNil (qb_having block) true)))
 		(define session_keys (query_expr_session_reads block))
 		(define keys (merge_unique (list group_keys field_passthrough_keys passthrough_keys session_keys)))
+		(define group_order (group_order_items_for_alias alias keys (qb_order block)))
+		(define visible_ags (stage_aggregates_for_fields (qb_fields block)))
+		(define having_ags (extract_aggregates (coalesceNil (qb_having block) true)))
+		(define order_ags (merge (map group_order (lambda (item) (match item
+			'(expr _dir) (extract_aggregates expr)
+			_ '())))))
+		(define ags (dedupe_aggregates_by_col (if (empty_list? (qb_group block))
+			(merge (list visible_ags having_ags order_ags))
+			(merge (list visible_ags having_ags order_ags (list aggregate_count_descriptor))))))
 		(define input (make_query_block
 			(qb_schema block)
 			(qb_sources block)
@@ -4364,7 +4386,7 @@ self-joins of the same base table still describe two distinct row roles. */
 			ags
 			(qb_having block)
 			(qb_fields block)
-			(qb_order block)
+			group_order
 			(qb_limit block)
 			(qb_offset block)
 			(list

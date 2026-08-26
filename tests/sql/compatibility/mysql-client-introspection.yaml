@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
 # MySQL Client Introspection — DBeaver/CLI probes
 
 metadata:
@@ -37,6 +39,28 @@ test_cases:
 
   - name: "SET session variable to DEFAULT"
     sql: "SET optimizer_switch=DEFAULT"
+
+  - name: "SET NAMES accepts a connection collation"
+    sql: "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_520_ci'"
+
+  - name: "Leading whitespace is ignored over the MySQL frontend"
+    sql: "\n\t SELECT 1 AS value"
+    expect:
+      rows: 1
+      data:
+        - value: 1
+
+  - name: "SQL_CALC_FOUND_ROWS modifier is accepted"
+    sql: "SELECT SQL_CALC_FOUND_ROWS 1 AS value LIMIT 1"
+    expect:
+      rows: 1
+      data:
+        - value: 1
+
+  - name: "Misspelled SQL_CALC_FOUND_ROWS modifier is rejected"
+    sql: "SELECT SQL_CALC_FOUND_ROW 1 AS value"
+    expect:
+      error: true
 
   - name: "mysqldump database collation probe is non-null"
     sql: "SELECT @@collation_database AS collation_database"

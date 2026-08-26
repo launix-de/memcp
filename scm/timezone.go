@@ -148,6 +148,9 @@ func GetCurrentSessionLocation() *time.Location {
 // If the value's zone_id != 0, displays in that zone; otherwise uses sessionLoc.
 func DateToDisplay(v Scmer, sessionLoc *time.Location) string {
 	unix := TagDateDecodeUnix(auxVal(v.aux))
+	if unix == mysqlZeroDateUnix {
+		return "0000-00-00 00:00:00"
+	}
 	zoneID := TagDateDecodeZone(auxVal(v.aux))
 	loc := sessionLoc
 	if loc == nil {

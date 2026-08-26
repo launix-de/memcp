@@ -36,3 +36,22 @@ func TestSQLTemporalOutputPreservesNilAndUnknownType(t *testing.T) {
 		t.Fatalf("unknown temporal type changed value: got %v, want %v", got, value)
 	}
 }
+
+func TestSQLTemporalOutputPreservesMySQLZeroDates(t *testing.T) {
+	for _, test := range []struct {
+		input   string
+		sqlType string
+		want    string
+	}{
+		{input: "0000-00-00", sqlType: "DATE", want: "0000-00-00"},
+		{input: "0000-00-00 00:00:00", sqlType: "DATETIME", want: "0000-00-00 00:00:00"},
+	} {
+		unix, ok := ParseDateString(test.input)
+		if !ok {
+			t.Fatalf("ParseDateString(%q) rejected a MySQL zero date", test.input)
+		}
+		if got := sqlTemporalOutput(NewDate(unix), test.sqlType).String(); got != test.want {
+			t.Fatalf("%s output = %q, want %q", test.sqlType, got, test.want)
+		}
+	}
+}
