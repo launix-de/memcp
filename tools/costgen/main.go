@@ -50,6 +50,11 @@ const (
 	beginMarker = "/* BEGIN GENERATED COST CONSTANTS."
 	endMarker   = "/* END GENERATED COST CONSTANTS */"
 	database    = "memcp-tests"
+	// This mirrors planner_adaptive_observation_budget_ns: below this complete
+	// query cost, picking either measured alternative satisfies the planner's
+	// risk contract. Costgen still reports duration error, but does not reject a
+	// model merely for interchanging two sub-budget variants.
+	calibrationDecisionRiskBudgetNS = float64(100 * time.Millisecond)
 	// BenchmarkRecSetBoundaryCrossover measures the storage operator's runtime
 	// kernel switch. Costgen uses the same dimensionless inequality to describe
 	// the work actually emitted; fitted planner coefficients still price that
@@ -531,6 +536,7 @@ func runSuites(server *memcpServer, suites []suite) ([]observation, []calibratio
 					currentSuite.Path, err, tail(server.out.String(), 8000))
 			}
 		}
+		var deferredAdaptiveCases []testCase
 		for _, test := range currentSuite.TestCases {
 			if !test.PhysicalCalibration {
 				continue
@@ -544,6 +550,18 @@ func runSuites(server *memcpServer, suites []suite) ([]observation, []calibratio
 			query := strings.TrimSpace(test.SQL)
 			if query == "" || test.SCM != "" {
 				return nil, nil, fmt.Errorf("%s/%s: calibration cases require SQL", currentSuite.Path, test.Name)
+			}
+			// This protected regression predates the adaptive RecSet scan kernel. Its
+			// two former alternatives are now one storage operator selected from exact
+			// runtime cardinalities, so there is no planner variant to force or fit.
+			// Keep executing the query and require stable output; the storage benchmark
+			// owns the equivalent-kernel crossover calibration.
+			if test.CalibrationDecision == "ordered_recset_consumer" {
+				// Execute after all fitted cases so this broad ordered query cannot warm
+				// their tables, indexes or group caches and contaminate race ordering.
+				deferredAdaptiveCases = append(deferredAdaptiveCases, test)
+				logStep("deferred adaptive storage case %s", test.Name)
+				continue
 			}
 			if !strings.HasPrefix(strings.ToUpper(query), "EXPLAIN PHYSICAL CALIBRATE") {
 				query = "EXPLAIN PHYSICAL CALIBRATE\n" + query
@@ -631,6 +649,11 @@ func runSuites(server *memcpServer, suites []suite) ([]observation, []calibratio
 			}
 			logStep("measured %s", test.Name)
 		}
+		for _, test := range deferredAdaptiveCases {
+			if err := validateAdaptiveStorageCase(server, currentSuite.Path, test); err != nil {
+				return nil, nil, err
+			}
+		}
 		for _, cleanup := range currentSuite.Cleanup {
 			if err := server.runStep(cleanup); err != nil {
 				return nil, nil, fmt.Errorf("%s cleanup: %w", currentSuite.Path, err)
@@ -638,6 +661,32 @@ func runSuites(server *memcpServer, suites []suite) ([]observation, []calibratio
 		}
 	}
 	return observations, allRows, nil
+}
+
+func validateAdaptiveStorageCase(server *memcpServer, suitePath string, test testCase) error {
+	query := strings.TrimSpace(test.SQL)
+	warmup, repetitions := test.Warmup, test.Repetitions
+	if repetitions <= 0 {
+		repetitions = 5
+	}
+	var expected []byte
+	for run := 0; run < warmup+repetitions; run++ {
+		output, err := server.execute("/sql/"+database, query, 10*time.Minute)
+		if err != nil {
+			return fmt.Errorf("%s/%s adaptive execution: %w", suitePath, test.Name, err)
+		}
+		if run < warmup {
+			continue
+		}
+		if expected == nil {
+			expected = append([]byte(nil), output...)
+		} else if !bytes.Equal(expected, output) {
+			return fmt.Errorf("%s/%s adaptive executions returned different results",
+				suitePath, test.Name)
+		}
+	}
+	logStep("validated adaptive storage case %s", test.Name)
+	return nil
 }
 
 func tail(value string, limit int) string {
@@ -1937,8 +1986,18 @@ func plansStatisticallyEquivalent(plans map[string]observation, left, right stri
 	if !leftOK || !rightOK || leftRow.censored || rightRow.censored {
 		return false
 	}
+	if math.Max(leftRow.y, rightRow.y) <= calibrationDecisionRiskBudgetNS {
+		return true
+	}
 	difference := math.Abs(leftRow.y - rightRow.y)
 	noise := 3 * (leftRow.noiseNS + rightRow.noiseNS)
+	// A one-repetition race has no sample distribution and therefore reports a
+	// zero MAD. Do not pretend that this makes two wall-clock measurements exact:
+	// a narrow relative floor keeps an incidental winner flip from rejecting an
+	// otherwise valid model, while materially different alternatives still fail.
+	if noise == 0 {
+		noise = 0.05 * math.Min(leftRow.y, rightRow.y)
+	}
 	return difference <= noise
 }
 

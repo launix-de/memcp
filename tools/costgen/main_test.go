@@ -379,9 +379,9 @@ func TestValidateDecisionOrderingIncludesOrderedBatch(t *testing.T) {
 		return values
 	}
 	rows := []observation{
-		{caseName: "three-way", plan: "candidate_keyset", y: 10, x: features(1)},
-		{caseName: "three-way", plan: "driver_order_membership_probe", y: 20, x: features(2)},
-		{caseName: "three-way", plan: "ordered_batch_accept", y: 5, x: features(100)},
+		{caseName: "three-way", plan: "candidate_keyset", y: 1e9, x: features(1)},
+		{caseName: "three-way", plan: "driver_order_membership_probe", y: 2e9, x: features(2)},
+		{caseName: "three-way", plan: "ordered_batch_accept", y: 500e6, x: features(100)},
 	}
 	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
 		t.Fatal("three-way validation accepted an incorrectly ranked ordered batch plan")
@@ -395,15 +395,55 @@ func TestDecisionOrderingAcceptsOnlyMeasuredNoiseTies(t *testing.T) {
 		return values
 	}
 	rows := []observation{
-		{caseName: "tie", plan: "candidate_keyset", y: 100, noiseNS: 10, x: features(2)},
-		{caseName: "tie", plan: "driver_order_membership_probe", y: 120, noiseNS: 10, x: features(1)},
+		{caseName: "tie", plan: "candidate_keyset", y: 200e6, noiseNS: 10e6, x: features(2)},
+		{caseName: "tie", plan: "driver_order_membership_probe", y: 220e6, noiseNS: 10e6, x: features(1)},
 	}
 	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err != nil {
 		t.Fatalf("noise-equivalent alternatives rejected: %v", err)
 	}
-	rows[1].y = 200
+	rows[1].y = 400e6
 	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
 		t.Fatal("materially slower estimated winner accepted as a noise tie")
+	}
+}
+
+func TestDecisionOrderingAllowsNarrowSingleRaceUncertainty(t *testing.T) {
+	features := func(first float64) []float64 {
+		values := make([]float64, 19)
+		values[0] = first
+		return values
+	}
+	rows := []observation{
+		{caseName: "single-race", plan: "candidate_keyset", y: 200e6, x: features(2)},
+		{caseName: "single-race", plan: "driver_order_membership_probe", y: 400e6, x: features(200)},
+		{caseName: "single-race", plan: "ordered_batch_accept", y: 208e6, x: features(1)},
+	}
+	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err != nil {
+		t.Fatalf("narrow single-race uncertainty rejected: %v", err)
+	}
+	rows[2].y = 212e6
+	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
+		t.Fatal("material single-race difference accepted as uncertainty")
+	}
+}
+
+func TestDecisionOrderingAllowsOnlyCompleteSubBudgetAlternatives(t *testing.T) {
+	features := func(first float64) []float64 {
+		values := make([]float64, 19)
+		values[0] = first
+		return values
+	}
+	rows := []observation{
+		{caseName: "low-risk", plan: "candidate_keyset", y: 10e6, x: features(2)},
+		{caseName: "low-risk", plan: "driver_order_membership_probe", y: 200e6, x: features(200)},
+		{caseName: "low-risk", plan: "ordered_batch_accept", y: 90e6, x: features(1)},
+	}
+	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err != nil {
+		t.Fatalf("sub-budget alternative ordering rejected: %v", err)
+	}
+	rows[2].y = 101e6
+	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
+		t.Fatal("over-budget alternative ordering accepted")
 	}
 }
 
@@ -414,8 +454,8 @@ func TestResidualRefinementMustImproveDecisionPool(t *testing.T) {
 		return values
 	}
 	rows := []observation{
-		{caseName: "stable", plan: "candidate_keyset", y: 10, x: features(1, 0)},
-		{caseName: "stable", plan: "driver_order_membership_probe", y: 20, x: features(0, 1)},
+		{caseName: "stable", plan: "candidate_keyset", y: 200e6, x: features(1, 0)},
+		{caseName: "stable", plan: "driver_order_membership_probe", y: 400e6, x: features(0, 1)},
 	}
 	current := constants{scanInvocationNS: 1, orderedScanInvocationNS: 2}
 	trial := current
@@ -427,7 +467,7 @@ func TestResidualRefinementMustImproveDecisionPool(t *testing.T) {
 	wrong := current
 	better := wrong
 	better.orderedScanInvocationNS = 0
-	rows[0].y, rows[1].y = 20, 10
+	rows[0].y, rows[1].y = 400e6, 200e6
 	if got := acceptDecisionImprovingRefinement(rows, wrong, better); got != better {
 		t.Fatalf("decision-improving residual fit was rejected: %+v", got)
 	}
