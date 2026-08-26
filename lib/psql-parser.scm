@@ -299,14 +299,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(sql_avg_expr s (sql_aggregates "SUM") (sql_aggregates "COUNT")))
 		(parser '((atom "MIN" true) "(" (define s psql_expression) ")") '('aggregate s 'min nil))
 		(parser '((atom "MAX" true) "(" (define s psql_expression) ")") '('aggregate s 'max nil))
-		/* PostgreSQL JSON aggregates. Strict variants encode skipped SQL NULLs as
-		an empty tagged aggregate state, preserving nil as the reducer neutral. */
+		/* PostgreSQL strict JSON aggregates omit SQL NULL before collection. */
 		(parser '((or (atom "JSON_AGG_STRICT" true) (atom "JSONB_AGG_STRICT" true)) "(" (define value psql_expression) ")")
-			'('aggregate '('json_arrayagg_entry value true) 'json_arrayagg_reduce nil))
+			(json_arrayagg_expr value true))
 		(parser '((or (atom "JSON_AGG" true) (atom "JSONB_AGG" true)) "(" (define value psql_expression) ")")
-			'('aggregate '('json_arrayagg_entry value false) 'json_arrayagg_reduce nil))
+			(json_arrayagg_expr value false))
 		(parser '((atom "JSON_ARRAYAGG" true) "(" (define value psql_expression) (atom "ORDER" true) (atom "BY" true) psql_expression (atom "ABSENT" true) (atom "ON" true) (atom "NULL" true) (atom "RETURNING" true) psql_type ")")
-			'('aggregate '('json_arrayagg_entry value true) 'json_arrayagg_reduce nil))
+			(json_arrayagg_expr value true))
 		(parser '((or
 			(atom "JSON_OBJECT_AGG_UNIQUE_STRICT" true) (atom "JSONB_OBJECT_AGG_UNIQUE_STRICT" true)
 			(atom "JSON_OBJECT_AGG_STRICT" true) (atom "JSONB_OBJECT_AGG_STRICT" true))

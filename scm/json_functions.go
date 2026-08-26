@@ -2803,6 +2803,13 @@ func init_json_functions() {
 		}
 		return bsonArrayFromRawParts(left, leftIsState, right, rightIsState, bsonFlagArrayAgg)
 	})
+	declareJSON("json_arrayagg_finalize", "builds one BSON array from a collected JSON_ARRAYAGG value list", func(args ...Scmer) Scmer {
+		requireJSONArgs("JSON_ARRAYAGG finalizer", args, 1)
+		if args[0].IsNil() {
+			return NewNil()
+		}
+		return bsonArrayFromValues(args[0].Slice(), 0)
+	})
 	declareJSON("json_objectagg_entry", "constructs a JSON_OBJECTAGG key/value entry", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_OBJECTAGG", args, 2)
 		if args[0].IsNil() {

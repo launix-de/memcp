@@ -372,6 +372,31 @@ test_cases:
       data:
         - values_array: [1, null, 3]
 
+  - name: "JSON_ARRAYAGG over empty input returns SQL NULL"
+    sql: "SELECT (SELECT JSON_ARRAYAGG(id) FROM json_documents WHERE id = 999) AS values_array"
+    expect:
+      rows: 1
+      data:
+        - values_array: null
+
+  - name: "JSON_ARRAYAGG finalizes each GROUP BY state independently"
+    sql: "SELECT category, JSON_ARRAYAGG(id) AS values_array FROM json_documents GROUP BY category ORDER BY category"
+    expect:
+      rows: 2
+      data:
+        - category: customer
+          values_array: [1, 2]
+        - category: event
+          values_array: [3]
+
+  - name: "JSON_ARRAYAGG finalizes every UNION ALL branch"
+    sql: "SELECT JSON_ARRAYAGG(id) AS values_array FROM json_documents WHERE id <= 2 UNION ALL SELECT JSON_ARRAYAGG(id) AS values_array FROM json_documents WHERE id = 3"
+    expect:
+      rows: 2
+      data:
+        - values_array: [1, 2]
+        - values_array: [3]
+
   - name: "nested delivery-note JSON embeds item and serial-number arrays"
     setup:
       - sql: "DROP TABLE IF EXISTS json_delivery_serial_numbers"

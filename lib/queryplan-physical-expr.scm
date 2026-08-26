@@ -195,6 +195,8 @@ partner. */
 		(list value_expr (list order_expr) (list dir) 0)
 		'(value_expr _reduce _neutral)
 		(list value_expr '() '() 0)
+		'(value_expr _reduce _neutral _finalize)
+		(list value_expr '() '() 0)
 		_ (neumann_fail "build_queryplan" "scalar-first probe expects aggregate descriptor"))))
 
 (define scalar_first_probe_aggregate (lambda (stage requested_col)
@@ -1408,8 +1410,8 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 (define direct_base_presence_recset_source_parts (lambda (stage)
 	(if (or (not (qassoc_get (gs_facts stage) (quote direct_presence_recset_context) false))
 		(or (not (presence_probe_stage? stage))
-		(or (not (source_is_base_table? (gs_input stage)))
-			(stage_has_residual_outer_refs? stage))))
+			(or (not (source_is_base_table? (gs_input stage)))
+				(stage_has_residual_outer_refs? stage))))
 		nil
 		(begin
 			(define src (gs_input stage))
@@ -1537,46 +1539,46 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 			direct_presence_parts
 			(if (direct_boolean_recset_stage_eligible?
 				stage_catalog graph physical_stage requested_col)
-			(begin
-				(define carrier_src (scalar_first_probe_carrier_source
-					(gs_input physical_stage)))
-				(define row_keys (scalar_first_probe_recset_row_keys
-					physical_stage carrier_src))
-				(define domain_src (boolean_recset_domain_source
-					(gs_input physical_stage) row_keys))
-				(list true
-					(lower_direct_boolean_stage_recset_expr
-						stage_catalog physical_stage share_result allow_direct_presence)
-					(map row_keys (lambda (key)
-						(direct_column_name_for_alias domain_src key)))))
-			(begin
-				(define cache (group_stage_cache physical_stage))
-				(define cache_schema (group_cache_schema cache))
-				(define cache_relation (group_cache_relation cache))
-				(define carrier_src (scalar_first_probe_carrier_source
-					(gs_input physical_stage)))
-				(define row_keys (scalar_first_probe_recset_row_keys
-					physical_stage carrier_src))
-				(define row_key_index (if (empty_list? row_keys) nil
-					(group_key_expr_index (gs_keys physical_stage) (car row_keys))))
-				(if (nil? row_key_index)
-					(neumann_fail "build_queryplan" "scalar RecSet carrier has no row-domain key")
-					true)
-				(list
-					(if share_result
-						(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
-						(lower_group_stage_prepare_using
-							stage_catalog stage_catalog physical_stage true nil))
-					(list (quote scan_recset)
-						(list (quote session) "__memcp_tx")
-						(list (quote table) cache_schema cache_relation)
-						(quoted_runtime_list (list requested_col))
-						(list (quote lambda) (list (symbol requested_col))
-							(if (presence_probe_stage? physical_stage)
-								(list (quote >)
-									(list (quote coalesceNil) (symbol requested_col) 0) 0)
-								(list (quote equal??) (symbol requested_col) true))))
-					(list (nth (group_key_cols (gs_keys physical_stage)) row_key_index)))))))))
+				(begin
+					(define carrier_src (scalar_first_probe_carrier_source
+						(gs_input physical_stage)))
+					(define row_keys (scalar_first_probe_recset_row_keys
+						physical_stage carrier_src))
+					(define domain_src (boolean_recset_domain_source
+						(gs_input physical_stage) row_keys))
+					(list true
+						(lower_direct_boolean_stage_recset_expr
+							stage_catalog physical_stage share_result allow_direct_presence)
+						(map row_keys (lambda (key)
+							(direct_column_name_for_alias domain_src key)))))
+				(begin
+					(define cache (group_stage_cache physical_stage))
+					(define cache_schema (group_cache_schema cache))
+					(define cache_relation (group_cache_relation cache))
+					(define carrier_src (scalar_first_probe_carrier_source
+						(gs_input physical_stage)))
+					(define row_keys (scalar_first_probe_recset_row_keys
+						physical_stage carrier_src))
+					(define row_key_index (if (empty_list? row_keys) nil
+						(group_key_expr_index (gs_keys physical_stage) (car row_keys))))
+					(if (nil? row_key_index)
+						(neumann_fail "build_queryplan" "scalar RecSet carrier has no row-domain key")
+						true)
+					(list
+						(if share_result
+							(lower_recset_stage_prepare_once_expr stage_catalog physical_stage)
+							(lower_group_stage_prepare_using
+								stage_catalog stage_catalog physical_stage true nil))
+						(list (quote scan_recset)
+							(list (quote session) "__memcp_tx")
+							(list (quote table) cache_schema cache_relation)
+							(quoted_runtime_list (list requested_col))
+							(list (quote lambda) (list (symbol requested_col))
+								(if (presence_probe_stage? physical_stage)
+									(list (quote >)
+										(list (quote coalesceNil) (symbol requested_col) 0) 0)
+									(list (quote equal??) (symbol requested_col) true))))
+						(list (nth (group_key_cols (gs_keys physical_stage)) row_key_index)))))))))
 
 (define lower_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key)
 	(begin
@@ -1854,7 +1856,7 @@ would still have to project that value over the segment. */
 		(define value_expr (nth ag 0))
 		(define reduce_expr (nth ag 1))
 		(define neutral_expr (nth ag 2))
-		(if (query_block? src)
+		(aggregate_finalize_expr ag (if (query_block? src)
 			(lower_scalar_aggregate_query_probe_expr
 				(stage_catalog_with_nested (merge_stage_catalogs (list
 					(qassoc_get (gs_facts stage) (quote probe_catalog) '())
@@ -1889,7 +1891,7 @@ would still have to project that value over the segment. */
 					reduce_expr
 					neutral_expr
 					nil
-					false))))))
+					false)))))))
 
 (define lower_scalar_cardinality_probe_expr (lambda (sources default_alias stage requested_col)
 	(begin
@@ -3623,6 +3625,8 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 	(match expr
 		((symbol aggregate) _expr _reduce _neutral) true
 		((quote aggregate) _expr _reduce _neutral) true
+		((symbol aggregate) _expr _reduce _neutral _finalize) true
+		((quote aggregate) _expr _reduce _neutral _finalize) true
 		((symbol count_distinct) _expr) true
 		((quote count_distinct) _expr) true
 		((symbol group_concat_distinct) _expr _separator) true
@@ -3683,8 +3687,20 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 		((quote group_concat_distinct) agg_expr _separator) (list (count_distinct_descriptor agg_expr))
 		((symbol aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
 		((quote aggregate) agg_expr agg_reduce agg_neutral) (list (list agg_expr agg_reduce agg_neutral))
+		((symbol aggregate) agg_expr agg_reduce agg_neutral agg_finalize) (list (list agg_expr agg_reduce agg_neutral agg_finalize))
+		((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize) (list (list agg_expr agg_reduce agg_neutral agg_finalize))
 		(cons head tail) (dedupe_aggregates_by_col (merge (map tail extract_aggregates)))
 		_ '())))
+
+(define aggregate_finalize_expr (lambda (ag value_expr)
+	(if (> (count ag) 3)
+		(list (nth ag 3) value_expr)
+		value_expr)))
+
+(define aggregates_need_finalize? (lambda (ags)
+	(reduce ags (lambda (needed ag)
+		(or needed (or (> (count ag) 3)
+			(not (nil? (scalar_order_aggregate_parts ag)))))) false)))
 
 /* DECIMAL is currently represented as float64 at runtime. Keep calculations
 unmodified, but normalize visible aggregate results to the declared scale of
@@ -3917,6 +3933,8 @@ working on the original values. */
 		((quote group_concat_distinct) _agg_expr _separator) '()
 		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral) '()
 		((quote aggregate) _agg_expr _agg_reduce _agg_neutral) '()
+		((symbol aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) '()
+		((quote aggregate) _agg_expr _agg_reduce _agg_neutral _agg_finalize) '()
 		((symbol get_column) tblvar ignorecase col col_ignorecase)
 		(if (or (nil? tblvar) (equal? (resolve_column_alias tblvar default_alias) default_alias))
 			'()
@@ -4530,6 +4548,10 @@ ever-larger subtrees. */
 				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
 				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
+				((symbol aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral agg_finalize))
+				((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+				(group_aggregate_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral agg_finalize))
 				((symbol get_column) _tblvar _ _col _)
 				(if (equal?? (resolve_column_alias _tblvar alias) alias)
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
@@ -4583,6 +4605,10 @@ ever-larger subtrees. */
 				(group_aggregate_order_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
 				(group_aggregate_order_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral))
+				((symbol aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+				(group_aggregate_order_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral agg_finalize))
+				((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+				(group_aggregate_order_read_expr input grouptbl (list agg_expr agg_reduce agg_neutral agg_finalize))
 				(cons head tail) (cons head
 					(replace_group_order_expr_tail_indexed input alias grouptbl keys key_names ags key_index tail (cdr resolved)))
 				_ expr)))))
@@ -4784,7 +4810,7 @@ ever-larger subtrees. */
 		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
 		'(((quote scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
 		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
-		'(agg_expr agg_reduce agg_neutral) (begin
+		(cons agg_expr (cons agg_reduce (cons agg_neutral _rest))) (begin
 			(define src (list alias schema tbl false nil))
 			(define agg_col (aggregate_col_name_using src ag))
 			(define membership_parts (base_group_membership_parts src condition))
@@ -4815,7 +4841,7 @@ ever-larger subtrees. */
 					(and (not (reduce keys (lambda (has_columns key)
 						(or has_columns (expr_contains_column_ref? key))) false))
 						(aggregate_counts_every_input_row? ag)))))
-			(define aggregate_value_expr (if direct_recset_count
+			(define aggregate_state_expr (if direct_recset_count
 				(list (quote recset_count)
 					(list
 						(physical_query_session_symbol)
@@ -4840,6 +4866,7 @@ ever-larger subtrees. */
 					agg_neutral
 					(aggregate_shard_combine ag)
 					false)))
+			(define aggregate_value_expr (aggregate_finalize_expr ag aggregate_state_expr))
 			(list (quote createcolumn)
 				(list (quote table) schema grouptbl)
 				agg_col
@@ -4884,6 +4911,10 @@ ever-larger subtrees. */
 				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral))
 				((quote aggregate) agg_expr agg_reduce agg_neutral)
 				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral))
+				((symbol aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral agg_finalize))
+				((quote aggregate) agg_expr agg_reduce agg_neutral agg_finalize)
+				(direct_group_aggregate_read_expr (list agg_expr agg_reduce agg_neutral agg_finalize))
 				((symbol get_column) _tblvar _ _col _)
 				(if (equal?? (resolve_column_alias _tblvar alias) alias)
 					(neumann_fail "build_queryplan" (concat "non-aggregate output must be a GROUP BY key: " (serialize expr)))
@@ -4930,7 +4961,7 @@ ever-larger subtrees. */
 		(define condition_cols (extract_columns_for_alias src condition))
 		(define agg_value_cols (merge_unique (map ags (lambda (ag)
 			(match ag
-				'(agg_expr _agg_reduce _agg_neutral)
+				(cons agg_expr (cons _agg_reduce (cons _agg_neutral _rest)))
 				(if (equal? ag aggregate_count_descriptor)
 					'()
 					(extract_columns_for_alias src agg_expr))
@@ -4940,7 +4971,7 @@ ever-larger subtrees. */
 		(define key_expr (runtime_cons_list_expr (map keys (lambda (expr) (lower_column_expr_for_alias src expr)))))
 		(define payload_expr (runtime_cons_list_expr (map ags (lambda (ag)
 			(match ag
-				'(agg_expr _agg_reduce _agg_neutral)
+				(cons agg_expr (cons _agg_reduce (cons _agg_neutral _rest)))
 				(if (equal? ag aggregate_count_descriptor)
 					1
 					(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr)))
@@ -5002,7 +5033,7 @@ ever-larger subtrees. */
 					(list (quote lambda) (list (quote grouped))
 						(group_insert_finish_expr schema grouptbl key_names
 							(map ags (lambda (ag) (aggregate_col_name_using src ag))) true))
-					grouped_expr))
+					(finalize_query_grouped_assoc_expr ags grouped_expr)))
 			grouped_scan))
 		(if (nil? membership_expr)
 			plan
@@ -5076,17 +5107,18 @@ ever-larger subtrees. */
 				(list (quote begin)
 					(list (quote reduce_assoc) (quote grouped) group_reduce 0)
 					nil))
-			(if (nil? membership_table_expr)
-				grouped_scan
-				(list
-					(list (quote lambda) (list membership_var) grouped_scan)
-					membership_table_expr))))))
+			(finalize_query_grouped_assoc_expr ags
+				(if (nil? membership_table_expr)
+					grouped_scan
+					(list
+						(list (quote lambda) (list membership_var) grouped_scan)
+						membership_table_expr)))))))
 
 (define aggregate_payload_merge_expr (lambda (ags idx)
 	(if (>= idx (count ags))
 		(quoted_runtime_list '())
 		(match (nth ags idx)
-			'(_agg_expr agg_reduce _agg_neutral)
+			(cons _agg_expr (cons agg_reduce (cons _agg_neutral _rest)))
 			(list (quote cons)
 				(list agg_reduce
 					(list (quote nth) (quote old) idx)
@@ -5226,22 +5258,25 @@ on the same columns. */
 		(begin
 			(define parts (scalar_order_aggregate_parts (nth ags idx)))
 			(define stored (list (quote nth) (quote payload) idx))
+			(define ordered_value (if (nil? parts)
+				stored
+				(list (quote if) (list (quote nil?) stored) nil
+					(list (quote nth) stored (count (nth parts 1))))))
 			(cons (quote cons) (list
-				(if (nil? parts)
-					stored
-					(list (quote if) (list (quote nil?) stored) nil
-						(list (quote nth) stored (count (nth parts 1)))))
+				(aggregate_finalize_expr (nth ags idx) ordered_value)
 				(query_group_final_payload_expr ags (+ idx 1))))))))
 
 (define finalize_query_grouped_assoc_expr (lambda (ags grouped_expr)
-	(list
-		(list (quote lambda) (list (quote grouped))
-			(list (quote reduce_assoc) (quote grouped)
-				(list (quote lambda) (list (quote acc) (quote key) (quote payload))
-					(list (quote set_assoc) (quote acc) (quote key)
-						(query_group_final_payload_expr ags 0)))
-				(list (quote list))))
-		grouped_expr)))
+	(if (not (aggregates_need_finalize? ags))
+		grouped_expr
+		(list
+			(list (quote lambda) (list (quote grouped))
+				(list (quote reduce_assoc) (quote grouped)
+					(list (quote lambda) (list (quote acc) (quote key) (quote payload))
+						(list (quote set_assoc) (quote acc) (quote key)
+							(query_group_final_payload_expr ags 0)))
+					(list (quote list))))
+			grouped_expr))))
 
 (define build_query_grouped_assoc_plan (lambda (input keys key_names ags)
 	(begin
@@ -5253,7 +5288,7 @@ on the same columns. */
 				(list (nth row_key_names i) (nth keys i)))))
 			(merge (map (produceN (count ags)) (lambda (i)
 				(match (nth runtime_ags i)
-					'(agg_expr _agg_reduce _agg_neutral)
+					(cons agg_expr (cons _agg_reduce (cons _agg_neutral _rest)))
 					(list (nth value_cols i)
 						(if (equal? (nth ags i) aggregate_count_descriptor)
 							(car keys)
@@ -5506,7 +5541,7 @@ once and every base-only leaf remains a vectorized domain scan. */
 				(rewrite_derived_ref candidate_alias projection (nth keys i))))))
 		(define value_fields (map (produceN (count ags)) (lambda (i)
 			(match (nth ags i)
-				'(agg_expr _agg_reduce _agg_neutral)
+				(cons agg_expr (cons _agg_reduce (cons _agg_neutral _rest)))
 				(list (nth value_cols i)
 					(if (equal? (nth ags i) aggregate_count_descriptor)
 						(if (empty_list? keys) 1 (rewrite_derived_ref candidate_alias projection (car keys)))
@@ -5556,8 +5591,9 @@ once and every base-only leaf remains a vectorized domain scan. */
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
 		(list
 			(list (quote lambda) (list (quote grouped)) finish_expr)
-			(lower_union_block_as_dataset_reduce
-				input keys row_key_names ags value_cols row_mapper reduce_expr neutral_expr combine_grouped)))))
+			(finalize_query_grouped_assoc_expr ags
+				(lower_union_block_as_dataset_reduce
+					input keys row_key_names ags value_cols row_mapper reduce_expr neutral_expr combine_grouped))))))
 
 (define build_scalar_single_query_stage_fill_plan (lambda (input grouptbl keys key_names value_ag count_ag value_col count_col)
 	(match value_ag '(value_expr _value_reduce _value_neutral) (begin
@@ -6113,6 +6149,8 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			neutral))
 		'(expr reduce neutral)
 		(list (rewrite_scalar_first_probe_expr stages sources default_alias expr) reduce neutral)
+		'(expr reduce neutral finalize)
+		(list (rewrite_scalar_first_probe_expr stages sources default_alias expr) reduce neutral finalize)
 		_ ag)))
 
 (define rewrite_scalar_first_probe_aggregates (lambda (stages sources default_alias ags)

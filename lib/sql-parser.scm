@@ -46,6 +46,22 @@ would collapse it with parser-level "no value" and optional-clause defaults. */
 (define sql_null_literal (lambda ()
 	(list (sql_builtins "SQL_NULL"))))
 
+/* JSON_ARRAYAGG keeps its growing state as a list of completed values. The
+finalizer emits one contiguous BSON array after the aggregate has seen every
+row, avoiding a copy of the complete prefix for each input value. */
+(define json_arrayagg_expr (lambda (value skip_null)
+	(list (quote aggregate)
+		(if skip_null
+			(list (quote if) (list (quote nil?) value) nil
+				(list (quote list) value))
+			(list (quote list) value))
+		(list (quote lambda) (list (quote a) (quote b))
+			(list (quote if) (list (quote nil?) (quote a)) (quote b)
+				(list (quote if) (list (quote nil?) (quote b)) (quote a)
+					(list (quote merge) (quote a) (quote b)))))
+		nil
+		(quote json_arrayagg_finalize))))
+
 (define sql_identifier_unquoted (parser (not
 	(regex "[a-zA-Z_][a-zA-Z0-9_]*")
 	/* exceptions for things that can't be identifiers */
@@ -871,8 +887,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "RIGHT" true) "(" (define s sql_expression) "," (define n sql_expression) ")") '((quote if) '((quote nil?) s) nil '((quote sql_substr) s '((quote +) 1 '((quote -) '((quote strlen) s) n)) n)))
 		/* JSON_VALUE has a SQL type clause inside its argument list. */
 		(parser '((atom "JSON_VALUE" true) "(" (define doc sql_expression) "," (define path sql_expression) (atom "RETURNING" true) (define typ sql_identifier) (? "(" sql_int (? "," sql_int) ")") ")") '('json_value doc path typ))
-		/* Wrap every JSON_ARRAYAGG input so SQL NULL remains a JSON null rather than the reducer neutral value. */
-		(parser '((atom "JSON_ARRAYAGG" true) "(" (define value sql_expression) ")") '('aggregate '('json_arrayagg_entry value) 'json_arrayagg_reduce nil))
+		(parser '((atom "JSON_ARRAYAGG" true) "(" (define value sql_expression) ")")
+			(json_arrayagg_expr value false))
 		/* JSON_OBJECTAGG has two input expressions. */
 		(parser '((atom "JSON_OBJECTAGG" true) "(" (define key sql_expression) "," (define value sql_expression) ")") '('aggregate '('json_objectagg_entry key value) 'json_objectagg_reduce nil))
 		/* window functions: parse OVER(...) clause and emit AST node */

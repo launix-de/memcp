@@ -5099,6 +5099,7 @@ so generated aliases and dependency IDs do not hide equivalent stage graphs. */
 			(stage_semantic_rewrite_expr alias_map signatures order_exprs)
 			dirs offset_value reduce neutral)
 		'(_value_expr reduce neutral) (list (quote aggregate) reduce neutral)
+		'(_value_expr reduce neutral finalize) (list (quote aggregate) reduce neutral finalize)
 		_ (stage_semantic_rewrite_expr alias_map signatures ag))))
 
 (define stage_semantic_facts (lambda (alias_map signatures facts)
