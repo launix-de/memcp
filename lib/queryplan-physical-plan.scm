@@ -2508,19 +2508,23 @@ columns cannot change group cardinality because the primary key is unique. */
 			'()))))))
 
 (define expand_grouped_query_block (lambda (block)
-	(make_query_block
-		(qb_schema block)
-		(qb_sources block)
-		(expand_query_block_fields (qb_sources block) (qb_fields block))
-		(qb_where block)
-		(merge_unique (list (qb_group block) (functional_dependency_star_group_keys block)))
-		(qb_having block)
-		(qb_order block)
-		(qb_limit block)
-		(qb_offset block)
-		(qb_hidden block)
-		(qb_stages block)
-		(qb_facts block))))
+	(begin
+		(define dependency_keys (functional_dependency_star_group_keys block))
+		(if (empty_list? dependency_keys)
+			block
+			(make_query_block
+				(qb_schema block)
+				(qb_sources block)
+				(expand_query_block_fields (qb_sources block) (qb_fields block))
+				(qb_where block)
+				(merge_unique (list (qb_group block) dependency_keys))
+				(qb_having block)
+				(qb_order block)
+				(qb_limit block)
+				(qb_offset block)
+				(qb_hidden block)
+				(qb_stages block)
+				(qb_facts block))))))
 
 (define query_limit_active? (lambda (offset_value limit_value)
 	(or (and (not (nil? offset_value)) (not (equal? offset_value 0)))
