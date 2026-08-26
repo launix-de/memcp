@@ -23,6 +23,9 @@ metadata:
   description: "Doubly-nested correlated scalar subquery returns NULL instead of value"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nc_multi_outer"
+  - sql: "DROP TABLE IF EXISTS nc_multi_history"
+  - sql: "DROP TABLE IF EXISTS nc_multi_value"
   - sql: "DROP TABLE IF EXISTS nc_scope_state"
   - sql: "DROP TABLE IF EXISTS nc_scope_outer"
   - sql: "DROP TABLE IF EXISTS nc_scope_lookup"
@@ -38,6 +41,12 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS nc_config"
 
 setup:
+  - sql: "CREATE TABLE nc_multi_outer (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nc_multi_history (ID INT PRIMARY KEY, outer_id INT, value_id INT, created INT)"
+  - sql: "CREATE TABLE nc_multi_value (ID INT PRIMARY KEY, label VARCHAR(40))"
+  - sql: "INSERT INTO nc_multi_outer VALUES (8), (9)"
+  - sql: "INSERT INTO nc_multi_history VALUES (1, 8, 20, 100), (2, 9, 19, 100)"
+  - sql: "INSERT INTO nc_multi_value VALUES (19, 'second'), (20, 'first')"
   - sql: "CREATE TABLE nc_scope_lookup (ID INT PRIMARY KEY, value INT)"
   - sql: "CREATE TABLE nc_scope_outer (ID INT PRIMARY KEY, nc_scope_lookup INT, state_id INT)"
   - sql: "CREATE TABLE nc_scope_state (ID INT PRIMARY KEY, label VARCHAR(20), nc_scope_lookup INT)"
@@ -66,6 +75,26 @@ setup:
   - sql: "INSERT INTO nc_config VALUES (1, 99)"
 
 test_cases:
+  - name: "Nested scalar key preserves every outer domain row"
+    sql: |
+      SELECT o.ID,
+        (SELECT v.label
+          FROM nc_multi_value v
+          WHERE v.ID = (
+            SELECT h.value_id
+            FROM nc_multi_history h
+            WHERE h.outer_id = o.ID
+            ORDER BY h.created DESC, h.ID DESC
+            LIMIT 1)
+          LIMIT 1) AS label
+      FROM nc_multi_outer o
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 8, label: "first"}
+        - {ID: 9, label: "second"}
+
   - name: "Derived join hides non-projected column from correlated scope"
     sql: |
       SELECT o.ID,

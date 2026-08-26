@@ -659,6 +659,40 @@ parent stages are merged into a multi-output stage. */
 		(make_query_block schema sources fields where group having order limit offset '() '() '())
 		_ query)))
 
+/* Binding must still validate every referenced column, even below a constant
+truth guard. Once binding has succeeded, an absorbing AND FALSE / OR TRUE can
+discard its siblings before decorrelation constructs stages for them. Inspect
+only the connective's immediate children: this keeps the check proportional to
+the shallow guard instead of walking the wide expression it is about to drop. */
+(define fold_bound_truth_guard (lambda (expr)
+	(match expr
+		(cons head tail) (if (expr_head_and? head)
+			(if (reduce tail (lambda (found term)
+				(or found (literal_false? term))) false)
+				false
+				expr)
+			(if (expr_head_or? head)
+				(if (reduce tail (lambda (found term)
+					(or found (literal_true? term))) false)
+					true
+					expr)
+				expr))
+		_ expr)))
+
+(define fold_bound_query_truth_guards (lambda (query)
+	(begin
+		(define normalized (normalize_query_ast query))
+		(if (query_block? normalized)
+			(make_query_block
+				(qb_schema normalized) (qb_sources normalized) (qb_fields normalized)
+				(fold_bound_truth_guard (qb_where normalized))
+				(qb_group normalized)
+				(if (nil? (qb_having normalized)) nil
+					(fold_bound_truth_guard (qb_having normalized)))
+				(qb_order normalized) (qb_limit normalized) (qb_offset normalized)
+				(qb_hidden normalized) (qb_stages normalized) (qb_facts normalized))
+			normalized))))
+
 (define query_block_no_from? (lambda (node)
 	(and (query_block? node)
 		(empty_list? (qb_sources node))
@@ -5659,7 +5693,8 @@ names in projections, predicates, and correlated subqueries. */
 (define untangle_query_term (lambda (query ctx)
 	(begin
 		(define bound_query (bind_query_names query '()))
-		(define root (require_unnested_node "untangle_query" (untangle_query bound_query ctx)))
+		(define guarded_query (fold_bound_query_truth_guards bound_query))
+		(define root (require_unnested_node "untangle_query" (untangle_query guarded_query ctx)))
 		(define ir (make_ir (if (union_block? root) (quote union) (quote select))
 			root
 			(if (query_block? root) (qb_stages root) '())

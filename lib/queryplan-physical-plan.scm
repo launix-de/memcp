@@ -59,9 +59,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
 					(or
 						(and (equal?? (direct_column_name_for_alias src left) col)
-							(not (expr_refs_alias? (source_alias src) (source_alias src) right)))
+							(not (expr_contains_column_ref? right)))
 						(and (equal?? (direct_column_name_for_alias src right) col)
-							(not (expr_refs_alias? (source_alias src) (source_alias src) left))))
+							(not (expr_contains_column_ref? left))))
 					false)
 				_ false)))
 		false)))
@@ -2624,14 +2624,13 @@ columns cannot change group cardinality because the primary key is unique. */
 	(begin
 		(define compile_offset (planner_literal_value offset_value))
 		(define compile_limit (planner_literal_value limit_value))
-		(define rows (if (empty_list? sources) nil
-			(if (source_unique_point_condition? (car sources) final_condition)
-				1
-				/* A selectivity estimate is not an upper bound. Native LIMIT may
-				stop at the driver only when its complete relation is provably
-				inside the window; downstream 0:1 predicates can still reject an
-				estimatedly selective driver row. */
-				(planner_source_row_count (car sources)))))
+		/* Row-count statistics are estimates, not upper bounds, and may lag
+		concurrent inserts. They can rank plans but cannot prove that LIMIT covers
+		the complete driver. A unique point predicate is the available structural
+		upper bound; every wider scan must let the completed-row consumer own the
+		window. */
+		(define rows (if (and (not (empty_list? sources))
+			(source_unique_point_condition? (car sources) final_condition)) 1 nil))
 		(and (or (nil? compile_offset) (equal? compile_offset 0))
 			(and (number? compile_limit)
 				(and (>= compile_limit 0)
@@ -3305,11 +3304,11 @@ cost decision with an exact request-local observation and a crossover guard. */
 not live inside with_physical_query_context's lexical bindings. Rebind only the
 three physical context symbols; quoted data remains opaque. */
 (define ordered_recset_observation_expr (lambda (expr)
-	(if (equal? expr (physical_query_session_symbol))
+	(if (physical_query_symbol_named? expr "__physical_query_session")
 		(list (quote context) "session")
-		(if (equal? expr (physical_query_scope_symbol))
+		(if (physical_query_symbol_named? expr "__physical_query_scope")
 			(list (quote context) "query")
-			(if (equal? expr (physical_query_tx_symbol))
+			(if (physical_query_symbol_named? expr "__physical_query_tx")
 				(list (list (quote context) "session") "__memcp_tx")
 				(match expr
 					((symbol quote) _value) expr
@@ -7032,7 +7031,7 @@ though both handles are constant for the complete query generation. */
 		(define rewritten (rewrite_physical_transaction_reads plan))
 		(if (not (physical_plan_uses_query_scope? rewritten))
 			rewritten
-			(cons (quote !begin) (merge (list
+			(cons (quote begin) (merge (list
 				(list (list (quote define) (physical_query_session_symbol)
 					(list (quote context) "session")))
 				(list (list (quote define) (physical_query_scope_symbol)

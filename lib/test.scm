@@ -182,7 +182,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (ir_context_get (ir_context_of simple_ir) 'compile-budget-ms nil) 1000) true "untangle_query carries compile budget in context")
 	(assert (equal? (join_reorder simple_ir) simple_ir) true "join_reorder is an IR-only phase")
 	(define simple_physical_plan (build_queryplan_term simple_select_ast))
-	(assert (equal? (logical_op simple_physical_plan) '!begin) true "build_queryplan adds the physical query context boundary")
+	(assert (equal? (logical_op simple_physical_plan) 'begin) true "build_queryplan adds a lexical physical query context boundary")
 	(assert (equal? (logical_op (nth simple_physical_plan 4)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
 	(assert (physical_relational_list_collector?
 		(list 'sort 'arbitrarily_renamed_rows (list 'lambda '(a b) true)))
@@ -823,7 +823,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		true nil nil nil nil nil))
 	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
 	(define scalar_no_from_plan (build_queryplan_term scalar_no_from_ast))
-	(assert (equal? (logical_op scalar_no_from_plan) '!begin) true "zero-domain subqueries retain the physical query context boundary")
+	(assert (equal? (ordered_recset_observation_expr true) true) true "ordered RecSet observation preserves boolean literals")
+	(assert (equal? (logical_op scalar_no_from_plan) 'begin) true "zero-domain subqueries retain the lexical physical query context boundary")
 	(assert (equal? (serialize (nth scalar_no_from_plan 4))
 		"(resultrow '(\"x\" 8 \"in_ok\" (if (nil? 8) nil (if (nil? 8) nil (equal?? 8 8))) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
 	(define nested_catalog_stage (make_group_stage

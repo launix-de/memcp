@@ -1,0 +1,76 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Constant-false guards bound compilation of wide generated predicates"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS compile_schedule"
+  - sql: |
+      CREATE TABLE compile_schedule (
+        id INT PRIMARY KEY,
+        mode VARCHAR(32),
+        first_execution BIGINT,
+        last_execution BIGINT
+      )
+  - sql: "INSERT INTO compile_schedule VALUES (1, 'daily', 1700000000, 0)"
+
+test_cases:
+  - name: "A false guard discards a wide schedule predicate before decorrelation"
+    max_time: 5.0
+    scm: |
+      (begin
+        (define branch (lambda (i)
+          (concat
+            "(mode = 'yearly-date'"
+            " AND MONTH(FROM_UNIXTIME(first_execution)) = " (+ 1 (mod i 12))
+            " AND DAY(FROM_UNIXTIME(first_execution)) = " (+ 1 (mod i 28))
+            " AND first_execution <= CASE WHEN 1800000000 >= first_execution + " i
+            " THEN first_execution + " i " ELSE first_execution - " i " END"
+            " AND COALESCE(last_execution, 0) < CASE WHEN 1800000000 >= first_execution + " i
+            " THEN first_execution + " i " ELSE first_execution - " i " END)")))
+        (define predicate (reduce (produceN 400) (lambda (sql i)
+          (concat sql (if (equal? i 0) "" " OR ") (branch i))) ""))
+        (define query (concat
+          "SELECT id FROM compile_schedule WHERE (" predicate ") AND FALSE"))
+        (define session (newsession))
+        (session "username" "root")
+        (session "schema" "memcp-tests")
+        (define started (nanotime))
+        (cached_parse (newcachemap) parse_sql "memcp-tests" query
+          (lambda (_schema _table _write) true) "root" session false)
+        (define elapsed (- (nanotime) started))
+        (if (< elapsed 1200000000)
+          "ok"
+          (error (concat "constant-false wide predicate compiled in " elapsed "ns"))))
+    expect:
+      data: ["ok"]
+
+  - name: "Constant-false wide predicate returns no rows"
+    sql: |
+      SELECT id
+      FROM compile_schedule
+      WHERE (
+        mode = 'daily'
+        OR mode = 'monthly-day'
+        OR mode = 'yearly-date'
+      ) AND FALSE
+    expect:
+      rows: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS compile_schedule"
