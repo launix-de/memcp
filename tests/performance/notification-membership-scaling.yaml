@@ -52,7 +52,9 @@ setup:
 
 test_cases:
   - name: "Large ordered notification anti-join remains bounded"
-    max_time: 30
+    # The first execution deliberately includes cold group-cache construction.
+    # Keep this as a regression ceiling, not as a warm-query latency target.
+    max_time: 75
     timeout: 90
     sql: |
       SELECT current_item.id

@@ -134,12 +134,23 @@ test_cases:
       min_rows: 1
       result_contains:
         - "dbc_unique_external_key"
+  - name: "SHOW INDEXES WHERE filters by MySQL key name"
+    sql: "SHOW INDEXES FROM `memcp-tests`.dbc_unique_lifecycle WHERE Key_name = 'dbc_unique_external_key'"
+    expect:
+      rows: 1
+      data:
+        - Key_name: "dbc_unique_external_key"
+          Column_name: "external_key"
   - name: "Created unique index rejects a later duplicate"
     sql: "INSERT INTO dbc_unique_lifecycle VALUES (3, 7)"
     expect:
       error: true
   - name: "Drop unique index removes the constraint"
     sql: "DROP INDEX dbc_unique_external_key ON dbc_unique_lifecycle"
+  - name: "Dropped unique index disappears from SHOW INDEXES"
+    sql: "SHOW INDEXES FROM dbc_unique_lifecycle WHERE Key_name = 'dbc_unique_external_key'"
+    expect:
+      rows: 0
   - name: "Duplicate insert succeeds after dropping unique index"
     sql: "INSERT INTO dbc_unique_lifecycle VALUES (3, 7)"
     expect:
