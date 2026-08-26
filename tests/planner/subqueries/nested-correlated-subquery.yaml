@@ -23,6 +23,9 @@ metadata:
   description: "Doubly-nested correlated scalar subquery returns NULL instead of value"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS nc_chain_revision"
+  - sql: "DROP TABLE IF EXISTS nc_chain_files"
+  - sql: "DROP TABLE IF EXISTS nc_chain_outer"
   - sql: "DROP TABLE IF EXISTS nc_scope_state"
   - sql: "DROP TABLE IF EXISTS nc_scope_outer"
   - sql: "DROP TABLE IF EXISTS nc_scope_lookup"
@@ -38,6 +41,12 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS nc_config"
 
 setup:
+  - sql: "CREATE TABLE nc_chain_outer (ID INT PRIMARY KEY)"
+  - sql: "CREATE TABLE nc_chain_revision (ID INT PRIMARY KEY, outer_id INT, file_id INT, created INT)"
+  - sql: "CREATE TABLE nc_chain_files (ID INT PRIMARY KEY, kind VARCHAR(30))"
+  - sql: "INSERT INTO nc_chain_outer VALUES (8), (9)"
+  - sql: "INSERT INTO nc_chain_revision VALUES (7, 8, 15, 100), (8, 9, 16, 100)"
+  - sql: "INSERT INTO nc_chain_files VALUES (15, 'application/pdf'), (16, 'application/pdf')"
   - sql: "CREATE TABLE nc_scope_lookup (ID INT PRIMARY KEY, value INT)"
   - sql: "CREATE TABLE nc_scope_outer (ID INT PRIMARY KEY, nc_scope_lookup INT, state_id INT)"
   - sql: "CREATE TABLE nc_scope_state (ID INT PRIMARY KEY, label VARCHAR(20), nc_scope_lookup INT)"
@@ -66,6 +75,49 @@ setup:
   - sql: "INSERT INTO nc_config VALUES (1, 99)"
 
 test_cases:
+  - name: "Nested scalar lookup preserves every outer row"
+    sql: |
+      SELECT o.ID,
+        (SELECT f.kind
+          FROM nc_chain_files AS f
+          WHERE f.ID = (
+            SELECT r.file_id
+            FROM nc_chain_revision AS r
+            WHERE r.outer_id = o.ID
+            ORDER BY r.created DESC, r.ID DESC
+            LIMIT 1
+          )
+          LIMIT 1) AS kind
+      FROM nc_chain_outer AS o
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 8, kind: "application/pdf"}
+        - {ID: 9, kind: "application/pdf"}
+
+  - name: "Nested scalar predicate preserves every matching outer row"
+    sql: |
+      SELECT o.ID
+      FROM nc_chain_outer AS o
+      WHERE o.ID IN (8, 9)
+        AND (SELECT f.kind
+          FROM nc_chain_files AS f
+          WHERE f.ID = (
+            SELECT r.file_id
+            FROM nc_chain_revision AS r
+            WHERE r.outer_id = o.ID
+            ORDER BY r.created DESC, r.ID DESC
+            LIMIT 1
+          )
+          LIMIT 1) = 'application/pdf'
+      ORDER BY o.ID
+    expect:
+      rows: 2
+      data:
+        - {ID: 8}
+        - {ID: 9}
+
   - name: "Derived join hides non-projected column from correlated scope"
     sql: |
       SELECT o.ID,
