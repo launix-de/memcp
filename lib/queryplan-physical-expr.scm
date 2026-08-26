@@ -3424,8 +3424,8 @@ candidate RecSet. */
 	(begin
 		/* Membership carrier selection needs a directional selectivity estimate,
 		not hundreds of successful executions of a potentially nested ACL filter.
-		64 matches retain a useful sample while bounding cold-plan work. */
-		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 64))
+		16 matches retain a useful directional sample while bounding cold-plan work. */
+		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 16))
 		(define text_prior (expr_text_pattern_expr condition))
 		(list (quote planner_estimated_matching_rows)
 			(if (nil? text_prior)
