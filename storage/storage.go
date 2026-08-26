@@ -1030,7 +1030,7 @@ func Init(en scm.Env) {
 				return rs.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
 			}
 
-			t := TableFromScmer(a[layout.tableIdx])
+			t := TableFromScmer(tableArg)
 
 			aggregate := scm.NewNil()
 			if len(a) > layout.reduceIdx {
@@ -1141,7 +1141,14 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			t := TableFromScmer(a[layout.tableIdx])
+			var source *recSet
+			var t *table
+			if tableArg.IsCustom(TagRecSet) {
+				source = RecSetFromScmer(tableArg)
+				t = source.table
+			} else {
+				t = TableFromScmer(tableArg)
+			}
 
 			aggregate := scm.NewNil()
 			if len(a) > layout.reduceIdx+sbShift {
@@ -1155,7 +1162,7 @@ func Init(en scm.Env) {
 			if len(a) > layout.reduce2Idx+sbShift {
 				reduce2 = a[layout.reduce2Idx+sbShift]
 			}
-			return t.scanWithBatch(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
+			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{

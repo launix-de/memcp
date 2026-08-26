@@ -145,6 +145,10 @@ type columnboundaries struct {
 	// for computed index columns (col starts with ".")
 	mapCols []string  // source columns needed to compute the value
 	mapFn   scm.Scmer // function: mapFn(mapCols values...) → index value
+	// mandatory marks a physical source constraint which has no duplicate in
+	// the residual SQL predicate. Optimizations may discard advisory candidate
+	// hooks after a unique point lookup, but must retain mandatory boundaries.
+	mandatory bool
 }
 
 type boundaries []columnboundaries

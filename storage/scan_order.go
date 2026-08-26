@@ -644,6 +644,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		bounds := extractBoundaries(spec.conditionCols, spec.condition)
 		reorderByFrequency(bounds, t)
 		bounds, _ = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
+		bounds = appendRecSetBoundary(bounds, spec.recset)
 		lower, upperLast := indexFromBoundaries(bounds)
 
 		if Settings.ScanDebugging {
@@ -700,7 +701,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 										q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 									}
 								}()
-								res := part.shard.scan_order_recset_part(&part, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+								res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 								res.callbackCols = callbackCols
 								res.callback = callback
 								res.tableIdx = tableIdx
@@ -730,7 +731,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 						if ss != nil && ss.IsKilledSeq(querySeq) {
 							panic("query killed")
 						}
-						res := part.shard.scan_order_recset_part(&part, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+						res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 						res.callbackCols = callbackCols
 						res.callback = callback
 						res.tableIdx = tableIdx
@@ -1273,7 +1274,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// GetValue call per row per column.
 		var survivedBuf, mainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
-		t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, func(index *StorageIndex, active bool) {
+		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, limit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
 				resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
 			}
