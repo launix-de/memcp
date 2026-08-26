@@ -2471,6 +2471,57 @@ probes remain recipes and still execute after root braking. */
 				(cons title (cons expr (expand_query_block_fields sources rest)))))
 		_ '())))
 
+/* SQL permits columns functionally dependent on a grouped primary key. Expand
+qualified stars before group lowering and carry the selected source columns as
+keys when that source's complete primary key is already grouped. Adding those
+columns cannot change group cardinality because the primary key is unique. */
+(define fields_request_star_for_source? (lambda (fields src)
+	(reduce (coalesceNil fields '()) (lambda (requested title_or_expr)
+		(if requested
+			true
+			(if (string? title_or_expr)
+				false
+				(and (star_expr? title_or_expr)
+					(begin
+						(define requested_alias (star_expr_alias title_or_expr))
+						(or (nil? requested_alias)
+							(equal? requested_alias (source_alias src)))))))) false)))
+
+(define source_primary_key_grouped? (lambda (block src)
+	(begin
+		(define primary_key (source_primary_key_columns src))
+		(define default_alias (source_alias (car (qb_sources block))))
+		(define grouped (map (coalesceNil (qb_group block) '()) (lambda (expr)
+			(canonical_column_expr_for_alias default_alias expr))))
+		(and (not (empty_list? primary_key))
+			(reduce primary_key (lambda (complete col)
+				(and complete (contains? grouped
+					(canonical_column_expr_for_alias default_alias
+						(list (quote get_column) (source_alias src) false col false))))) true)))))
+
+(define functional_dependency_star_group_keys (lambda (block)
+	(merge (map (qb_sources block) (lambda (src)
+		(if (and (fields_request_star_for_source? (qb_fields block) src)
+			(source_primary_key_grouped? block src))
+			(map (table_column_names (source_schema src) (source_relation src)) (lambda (col)
+				(list (quote get_column) (source_alias src) false col false)))
+			'()))))))
+
+(define expand_grouped_query_block (lambda (block)
+	(make_query_block
+		(qb_schema block)
+		(qb_sources block)
+		(expand_query_block_fields (qb_sources block) (qb_fields block))
+		(qb_where block)
+		(merge_unique (list (qb_group block) (functional_dependency_star_group_keys block)))
+		(qb_having block)
+		(qb_order block)
+		(qb_limit block)
+		(qb_offset block)
+		(qb_hidden block)
+		(qb_stages block)
+		(qb_facts block))))
+
 (define query_limit_active? (lambda (offset_value limit_value)
 	(or (and (not (nil? offset_value)) (not (equal? offset_value 0)))
 		(and (not (nil? limit_value)) (not (equal? limit_value -1))))))
@@ -3330,6 +3381,7 @@ dependent choices must pass through this function and retain their guard. */
 	(begin
 		(define src (car (qb_sources block)))
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
+		(define grouped_block (expand_grouped_query_block block))
 		(if (not (source_is_base_table? src))
 			(neumann_fail "build_queryplan" "single-source query-block lowering only supports base tables")
 			true)
@@ -3338,7 +3390,7 @@ dependent choices must pass through this function and retain their guard. */
 			true)
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(begin
-				(define group_stage (make_group_stage_for_block block src))
+				(define group_stage (make_group_stage_for_block grouped_block src))
 				(if (direct_base_group_plan_preferred? group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
 					(lower_group_stage group_stage)))
@@ -5736,10 +5788,11 @@ physical decision and preserve its runtime recompile gate. */
 (define lower_multi_source_query_block (lambda (block)
 	(begin
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
+		(define grouped_block (expand_grouped_query_block block))
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-			(if (physical_prejoin_supported? block)
-				(lower_query_block_through_prejoin block)
-				(lower_group_stage (make_group_stage_for_query_block block)))
+			(if (physical_prejoin_supported? grouped_block)
+				(lower_query_block_through_prejoin grouped_block)
+				(lower_group_stage (make_group_stage_for_query_block grouped_block)))
 			(begin
 				(define sources (qb_sources block))
 				(define first_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))

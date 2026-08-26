@@ -860,6 +860,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesceNil) args))
 		/* MySQL IFNULL(val, default) — alias for COALESCE with 2 args */
 		(parser '((atom "IFNULL" true) "(" (define a sql_expression) "," (define b sql_expression) ")") '((quote coalesceNil) a b))
+		/* SQL NULLIF(a, b) returns NULL when the values compare equal, otherwise a. */
+		(parser '((atom "NULLIF" true) "(" (define a sql_expression) "," (define b sql_expression) ")") '((quote if) '((quote equal??) a b) nil a))
 		(parser '((atom "MOD" true) "(" (define a sql_expression) "," (define b sql_expression) ")") (sql_mod_expr a b))
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
 		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))

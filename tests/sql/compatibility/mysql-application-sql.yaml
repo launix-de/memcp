@@ -15,6 +15,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS wpcompat_options"
   - sql: "DROP TABLE IF EXISTS wpcompat_mysql_leading"
   - sql: "DROP TABLE IF EXISTS wpcompat_no_primary_key"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_usermeta"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_users"
   - sql: |
       CREATE TABLE wpcompat_posts (
         ID BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -36,12 +38,16 @@ setup:
   - sql: "CREATE TABLE wpcompat_term_relationships (object_id BIGINT, term_taxonomy_id BIGINT)"
   - sql: "CREATE TABLE wpcompat_options (option_id BIGINT PRIMARY KEY, option_name VARCHAR(191), option_value TEXT)"
   - sql: "CREATE TABLE wpcompat_no_primary_key (value INT)"
-  - sql: "INSERT INTO wpcompat_posts VALUES (1, '2026-08-20 10:00:00', '2026-08-20 10:00:00', 'first', 'post', 'publish'), (2, '2026-08-21 10:00:00', '2026-08-21 10:00:00', 'second', 'post', 'publish'), (3, '2026-08-22 10:00:00', '2026-08-22 10:00:00', 'third', 'post', 'publish')"
+  - sql: "CREATE TABLE sqlcompat_users (ID BIGINT PRIMARY KEY)"
+  - sql: "CREATE TABLE sqlcompat_usermeta (umeta_id BIGINT PRIMARY KEY, user_id BIGINT, meta_key VARCHAR(255), meta_value TEXT)"
+  - sql: "INSERT INTO wpcompat_posts VALUES (1, '2026-08-20 10:00:00', '2026-08-20 10:00:00', 'first', 'post', 'publish'), (2, '2026-08-21 10:00:00', '2026-08-21 10:00:00', 'second', 'post', 'publish'), (3, '2026-08-22 10:00:00', '2026-08-22 10:00:00', 'third', 'post', 'publish'), (4, '2026-08-23 10:00:00', '2026-08-23 10:00:00', 'header', 'wp_template', 'publish'), (5, '2026-08-24 10:00:00', '2026-08-24 10:00:00', 'footer', 'wp_template_part', 'publish')"
   - sql: "INSERT INTO wpcompat_comments VALUES (1, '1', 'comment', '2026-08-22 10:00:00'), (2, '0', 'comment', '2026-08-22 11:00:00'), (3, '1', 'note', '2026-08-22 12:00:00')"
   - sql: "INSERT INTO wpcompat_terms VALUES (1, 'twentytwentyfive')"
   - sql: "INSERT INTO wpcompat_term_taxonomy VALUES (10, 1, 'wp_theme'), (11, 1, 'category')"
-  - sql: "INSERT INTO wpcompat_term_relationships VALUES (5, 11)"
+  - sql: "INSERT INTO wpcompat_term_relationships VALUES (5, 11), (5, 15), (5, 15)"
   - sql: "INSERT INTO wpcompat_options VALUES (1, '_transient_sample', 'cached'), (2, '_transient_timeout_sample', '1'), (3, 'keep', 'value')"
+  - sql: "INSERT INTO sqlcompat_users VALUES (1)"
+  - sql: "INSERT INTO sqlcompat_usermeta VALUES (1, 1, 'capabilities', 'a:1:{s:13:\"administrator\";b:1;}')"
 
 test_cases:
   - name: "SET NAMES with COLLATE and leading whitespace work over MySQL"
@@ -136,6 +142,69 @@ test_cases:
         - ID: 3
         - ID: 2
 
+  - name: "Grouping by a primary key permits selecting every source column"
+    sql: |
+      SELECT wpcompat_posts.*
+      FROM wpcompat_posts
+      WHERE wpcompat_posts.post_type = 'wp_template'
+      GROUP BY wpcompat_posts.ID
+      ORDER BY wpcompat_posts.post_date DESC
+    expect:
+      rows: 1
+      data:
+        - ID: 4
+          post_date: "2026-08-23 10:00:00"
+          post_date_gmt: "2026-08-23 10:00:00"
+          post_name: header
+          post_type: wp_template
+          post_status: publish
+
+  - name: "Grouping by a primary key permits every source column after a LEFT JOIN"
+    sql: |
+      SELECT wpcompat_posts.*
+      FROM wpcompat_posts
+      LEFT JOIN wpcompat_term_relationships
+        ON wpcompat_posts.ID = wpcompat_term_relationships.object_id
+      WHERE wpcompat_term_relationships.term_taxonomy_id IN (15)
+        AND wpcompat_posts.post_type = 'wp_template_part'
+      GROUP BY wpcompat_posts.ID
+      ORDER BY wpcompat_posts.post_date DESC
+    expect:
+      rows: 1
+      data:
+        - ID: 5
+          post_date: "2026-08-24 10:00:00"
+          post_date_gmt: "2026-08-24 10:00:00"
+          post_name: footer
+          post_type: wp_template_part
+          post_status: publish
+
+  - name: "Selecting every source column without a grouped key remains invalid"
+    sql: |
+      SELECT wpcompat_posts.*
+      FROM wpcompat_posts
+      GROUP BY wpcompat_posts.post_type
+    expect:
+      error: true
+
+  - name: "NULLIF composes with boolean expressions inside COUNT"
+    sql: |
+      SELECT
+        COUNT(NULLIF(meta_value LIKE '%\"administrator\"%', false)) AS administrators,
+        COUNT(NULLIF(meta_value LIKE '%\"editor\"%', false)) AS editors,
+        COUNT(NULLIF(meta_value = 'a:0:{}', false)) AS empty_roles,
+        COUNT(*) AS total
+      FROM sqlcompat_usermeta
+      INNER JOIN sqlcompat_users ON user_id = ID
+      WHERE meta_key = 'capabilities'
+    expect:
+      rows: 1
+      data:
+        - administrators: 1
+          editors: 0
+          empty_roles: 0
+          total: 1
+
   - name: "INSERT accepts a MySQL zero datetime"
     sql: "INSERT INTO wpcompat_posts (post_date, post_date_gmt, post_name, post_type, post_status) VALUES ('2026-08-26 10:00:00', '0000-00-00 00:00:00', 'auto-draft', 'post', 'auto-draft')"
 
@@ -227,3 +296,5 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS wpcompat_options"
   - sql: "DROP TABLE IF EXISTS wpcompat_mysql_leading"
   - sql: "DROP TABLE IF EXISTS wpcompat_no_primary_key"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_usermeta"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_users"
