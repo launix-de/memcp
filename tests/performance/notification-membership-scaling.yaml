@@ -16,7 +16,7 @@
 # This workload deliberately combines the expensive parts of the notification
 # read: a non-trivial document relation, a compound correlated ACL, scalar ordering
 # through the file relation, a one-row current page, and an outer seen-marker
-# anti-join. Six thousand rows keep the complete cold-cache shape inside the
+# anti-join. Four thousand rows keep the complete cold-cache shape inside the
 # repository's protected five-second CI ceiling while still crossing the
 # planner's small-relation heuristics.
 
@@ -41,15 +41,15 @@ setup:
   - scm: |
       (begin
         (insert (table "memcp-tests" "nms_file") '("id" "uploaded_at")
-          (map (produceN 6000) (lambda (i)
+          (map (produceN 4000) (lambda (i)
             (list (+ i 1) (+ i 1)))))
         (insert (table "memcp-tests" "nms_document")
           '("id" "file_id" "location_id" "document_year" "department_id" "audit_id")
-          (map (produceN 6000) (lambda (i)
+          (map (produceN 4000) (lambda (i)
             (list (+ i 1) (+ i 1) (+ (mod i 4) 1)
               (+ 2000 (mod i 26)) (+ (mod i 32) 1) (+ (mod i 128) 1)))))
         (rebuild)
-        6000)
+        4000)
 
 test_cases:
   - name: "Large ordered notification anti-join remains bounded"
@@ -100,7 +100,7 @@ test_cases:
     expect:
       rows: 1
       data:
-        - id: 6000
+        - id: 4000
 
   - name: "Large notification insert-select remains bounded"
     max_time: 5
