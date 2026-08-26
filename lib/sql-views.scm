@@ -166,3 +166,28 @@ derived SELECT before untangle_query sees the complete query. */
 			(sql_view_catalog_changed)
 			removed)
 		(if if_exists 0 (error (concat "view " schema "." name " does not exist")))))))
+
+/* Drop the physical database before cleaning its catalog rows. This ordering
+prevents a refused or failed protected-schema drop from changing access or view
+metadata. */
+(define drop_sql_database (lambda (tx schema if_exists) (begin
+	(define dropped (dropdatabase schema if_exists))
+	(if dropped (begin
+		(scan tx (table "system" "access")
+			'("database")
+			(lambda (database) (equal?? database schema))
+			'("$update")
+			(lambda ($update) ($update))
+			+ 0)
+		(define removed_views (scan tx (table "system" "views")
+			'("database")
+			(lambda (database) (equal?? database schema))
+			'("$update")
+			(lambda ($update) ($update))
+			+ 0))
+		(if (> removed_views 0) (begin
+			(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed_views)))
+			(sql_view_catalog_changed)
+		) true)
+	) true)
+	dropped)))

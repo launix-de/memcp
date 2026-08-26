@@ -1,3 +1,7 @@
+<!--
+Copyright (C) 2026  Carl-Philip Hänsch
+SPDX-License-Identifier: GPL-3.0-or-later
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1522,7 +1526,8 @@ for(var k=0;k<without.length;k++)accessHtml+="<option value='"+esc(without[k].us
 accessHtml+="</select>";
 }
 var accessCell=isAdmin?"<td>"+accessHtml+"</td>":"";
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td>"+esc(d.backend||"filesystem")+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td>"+accessCell+"<td class='action-cell'><button class='btn-warn' data-querydb='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button></td></tr>";
+var destructiveActions=(d.can_truncate?" <button class='btn-warn' data-truncdb='"+esc(d.name)+"'>Truncate</button>":"")+(d.can_drop?" <button class='btn-danger' data-dropdb='"+esc(d.name)+"'>Drop</button>":"");
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dn+"'\">"+esc(d.name)+"</td><td>"+esc(d.backend||"filesystem")+"</td><td class='r'>"+d.tables+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td>"+accessCell+"<td class='action-cell'><button class='btn-warn' data-querydb='"+esc(d.name)+"'>Query</button>"+destructiveActions+"</td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='"+(isAdmin?6:5)+"' style='color:#888;text-align:center'>No databases</td></tr>";
 tb.querySelectorAll("[data-truncdb]").forEach(function(btn){
@@ -1577,7 +1582,9 @@ var h="";
 for(var i=0;i<data.length;i++){
 var d=data[i];
 var dbn=esc(encodeURIComponent(dbname)),tn=esc(encodeURIComponent(d.name));
-h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/@"+tn+"'\" title='"+esc(d.name)+"'>"+esc(truncName(d.name))+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button> <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button> <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button></td></tr>";
+var showTableMaintenance=d.maintenance_class==="user";
+var destructiveActions=(showTableMaintenance&&d.can_truncate?" <button class='btn-warn' data-trunctbl='"+esc(d.name)+"'>Truncate</button>":"")+(showTableMaintenance&&d.can_drop?" <button class='btn-danger' data-droptbl='"+esc(d.name)+"'>Drop</button>":"");
+h+="<tr><td class='clickable' onclick=\"location.hash='db/"+dbn+"/@"+tn+"'\" title='"+esc(d.name)+"'>"+esc(truncName(d.name))+"</td><td>"+esc(d.engine||"")+"</td><td class='r'>"+d.columns+"</td><td class='r'>"+d.shards+"</td><td class='r'>"+(d.rows===null?"<span style=\"color:#888\">N/A</span>":d.rows)+"</td><td class='r'>"+fmt(d.size_bytes||0)+"</td><td class='action-cell'><button class='btn-warn' data-querytbl='"+esc(d.name)+"'>Query</button>"+destructiveActions+"</td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='7' style='color:#888;text-align:center'>No tables</td></tr>";
 tb.querySelectorAll("[data-trunctbl]").forEach(function(btn){
@@ -1601,7 +1608,7 @@ var engines=[
 {v:"sloppy",sql:"SLOPPY"},
 {v:"memory",sql:"MEMORY"}
 ];
-var engSel="<select class='inline-select' id='engine-select'>";
+var engSel="<select class='inline-select' id='engine-select'"+(meta.can_change_engine?"":" disabled")+">";
 for(var i=0;i<engines.length;i++){
 engSel+="<option value='"+engines[i].v+"'"+(meta.engine===engines[i].v?" selected":"")+">"+engines[i].v+"</option>";
 }
@@ -1612,11 +1619,11 @@ var uniq=meta.uniques||[];
 mc+="<div class='meta-card'><div class='label'>Unique Keys</div><div class='val'>"+uniq.length+"</div></div>";
 var parts=meta.partitions||[];
 if(parts.length>0){var ps=parts.map(function(p){return p.n+"x"+p.column}).join(", ");mc+="<div class='meta-card'><div class='label'>Partition Schema</div><div class='val'>"+esc(ps)+"</div></div>";}
-mc+="<div class='meta-card'><button class='btn-warn' id='btn-query-tbl'>Query</button> <button class='btn-warn' id='btn-truncate-tbl'>Truncate Table</button></div>";
+mc+="<div class='meta-card'><button class='btn-warn' id='btn-query-tbl'>Query</button>"+(meta.can_truncate?" <button class='btn-warn' id='btn-truncate-tbl'>Truncate Table</button>":"")+"</div>";
 document.getElementById("detail-meta").innerHTML=mc;
 var engEl=document.getElementById("engine-select");
 var origEngine=engEl.value;
-engEl.addEventListener("change",function(){
+if(meta.can_change_engine)engEl.addEventListener("change",function(){
 var eng=this.value;
 var engSpec=engines.filter(function(e){return e.v===eng})[0];
 var engSql=engSpec?engSpec.sql:eng.toUpperCase();
@@ -1629,7 +1636,8 @@ return r.text();
 document.getElementById("btn-query-tbl").addEventListener("click",function(){
 openConsole(dbname,"SELECT * FROM `"+tblname+"` LIMIT 100");
 });
-document.getElementById("btn-truncate-tbl").addEventListener("click",function(){
+var truncateTableButton=document.getElementById("btn-truncate-tbl");
+if(truncateTableButton)truncateTableButton.addEventListener("click",function(){
 if(window.confirm("Truncate table '"+tblname+"'? All data will be deleted."))execSQL(dbname,"TRUNCATE TABLE `"+tblname+"`",function(){route()});
 });
 /* columns */
@@ -1640,7 +1648,8 @@ var c=cols[i];
 var keyBadge="";
 if(c.key==="PRI")keyBadge="<span class='badge badge-pri'>PRI</span>";
 else if(c.key==="UNI")keyBadge="<span class='badge badge-uni'>UNI</span>";
-ch+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.type)+"</td><td>"+(c.nullable?"<span class='badge badge-null'>NULL</span>":"NOT NULL")+"</td><td>"+keyBadge+"</td><td class='action-cell'><button class='btn-danger' data-dropcol='"+esc(c.name)+"'>Drop</button></td></tr>";
+var dropColumnAction=meta.can_alter?"<button class='btn-danger' data-dropcol='"+esc(c.name)+"'>Drop</button>":"";
+ch+="<tr><td>"+esc(c.name)+"</td><td>"+esc(c.type)+"</td><td>"+(c.nullable?"<span class='badge badge-null'>NULL</span>":"NOT NULL")+"</td><td>"+keyBadge+"</td><td class='action-cell'>"+dropColumnAction+"</td></tr>";
 }
 document.querySelector("#tbl-columns tbody").innerHTML=ch||"<tr><td colspan='5' style='color:#888;text-align:center'>No columns</td></tr>";
 document.querySelectorAll("#tbl-columns [data-dropcol]").forEach(function(btn){
@@ -1683,7 +1692,8 @@ var triggers=data.triggers||[];
 var trh="";
 for(var i=0;i<triggers.length;i++){
 var tr=triggers[i];
-trh+="<tr><td>"+esc(tr.name)+"</td><td>"+esc(tr.timing)+"</td><td>"+esc(tr.event)+"</td><td><code style='font-size:.8rem;white-space:pre-wrap;word-break:break-all'>"+esc(tr.body)+"</code></td><td class='action-cell'><button class='btn-danger' data-droptrigger='"+esc(tr.name)+"'>Drop</button></td></tr>";
+var dropTriggerAction=meta.can_alter?"<button class='btn-danger' data-droptrigger='"+esc(tr.name)+"'>Drop</button>":"";
+trh+="<tr><td>"+esc(tr.name)+"</td><td>"+esc(tr.timing)+"</td><td>"+esc(tr.event)+"</td><td><code style='font-size:.8rem;white-space:pre-wrap;word-break:break-all'>"+esc(tr.body)+"</code></td><td class='action-cell'>"+dropTriggerAction+"</td></tr>";
 }
 document.querySelector("#tbl-triggers tbody").innerHTML=trh||"<tr><td colspan='5' style='color:#888;text-align:center'>No triggers</td></tr>";
 document.querySelectorAll("#tbl-triggers [data-droptrigger]").forEach(function(btn){
@@ -2144,7 +2154,7 @@ for(var i=0;i<data.length;i++){
 var u=data[i];
 var permHtml="";
 if(u.admin){
-permHtml="<span class='badge badge-pri'>admin <a href='#' class='revoke-admin' data-user='"+esc(u.username)+"' style='color:#fff;text-decoration:none;margin-left:4px'>&times;</a></span>";
+permHtml="<span class='badge badge-pri'>admin"+(u.username==="root"?"":" <a href='#' class='revoke-admin' data-user='"+esc(u.username)+"' style='color:#fff;text-decoration:none;margin-left:4px'>&times;</a>")+"</span>";
 }else{
 var uDbs=u.databases||[];
 for(var j=0;j<uDbs.length;j++){
@@ -2161,7 +2171,7 @@ permHtml+=" <button class='btn-warn make-admin' data-user='"+esc(u.username)+"' 
 }
 var actHtml="";
 actHtml+="<button class='btn-warn change-pw' data-user='"+esc(u.username)+"'>Change PW</button> ";
-actHtml+="<button class='btn-danger remove-user' data-user='"+esc(u.username)+"'>Remove</button>";
+if(u.username!=="root")actHtml+="<button class='btn-danger remove-user' data-user='"+esc(u.username)+"'>Remove</button>";
 h+="<tr><td>"+esc(u.username)+"</td><td>"+permHtml+"</td><td class='action-cell'>"+actHtml+"</td></tr>";
 }
 tb.innerHTML=h||"<tr><td colspan='3' style='color:#888;text-align:center'>No users</td></tr>";
@@ -2211,7 +2221,7 @@ tb.querySelectorAll(".remove-user").forEach(function(btn){
 btn.addEventListener("click",function(){
 var user=btn.getAttribute("data-user");
 if(window.confirm("Remove user '"+user+"'? This cannot be undone!"))
-execSQL("system","DELETE FROM user WHERE username="+sqlStr(user),function(){fetchUsers(renderUsers)});
+execSQL("system","DROP USER "+sqlId(user),function(){fetchUsers(renderUsers)});
 });
 });
 });

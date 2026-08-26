@@ -397,6 +397,22 @@ func (db *database) dropTrigger(name string) bool {
 			t.ddlMu.Unlock()
 			continue
 		}
+		if !tableMaintenanceCapabilities(db.Name, t.Name).canAlter {
+			t.mu.Lock()
+			found := false
+			for _, trigger := range t.Triggers {
+				if trigger.Name == name {
+					found = true
+					break
+				}
+			}
+			t.mu.Unlock()
+			if found {
+				db.schemalock.Unlock()
+				t.ddlMu.Unlock()
+				requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
+			}
+		}
 		if t.RemoveTrigger(name) {
 			db.saveLockedAndUnlock(t.schemaSaveMode())
 			t.ddlMu.Unlock()

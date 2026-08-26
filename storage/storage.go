@@ -1560,6 +1560,40 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "checktablemaintenance",
+		Desc: "checks whether a user-initiated maintenance operation is allowed for a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			operation := maintenanceOperation(scm.String(a[2]))
+			requireTableMaintenance(scm.String(a[0]), scm.String(a[1]), operation)
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema"},
+				{Kind: "string", ParamName: "table"},
+				{Kind: "string", ParamName: "operation"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "maintenance_capabilities",
+		Desc: "returns the server-side maintenance capabilities for a database or table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if len(a) > 1 {
+				return maintenanceCapabilitiesScmer(tableMaintenanceCapabilities(scm.String(a[0]), scm.String(a[1])))
+			}
+			return maintenanceCapabilitiesScmer(databaseMaintenanceCapabilities(scm.String(a[0])))
+		},
+		Type: &scm.TypeDescriptor{
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", ParamName: "schema"},
+				{Kind: "string", ParamName: "table", Optional: true},
+			},
+			Return: &scm.TypeDescriptor{Kind: "list"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "createtable",
 		Desc: "creates a table, runs its oninit option and registered after-create-table lifecycle triggers synchronously, and returns only after initialization completes; concurrent if-not-exists callers wait for that same completion",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -2079,8 +2113,9 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			db := t.schema
+			operation := scm.String(a[1])
 
-			switch scm.String(a[1]) {
+			switch operation {
 			case "drop":
 				return scm.NewBool(t.DropColumn(scm.String(a[2])))
 			case "drop_if_exists":
@@ -2091,6 +2126,7 @@ func Init(en scm.Env) {
 				if oldMode == newMode {
 					return scm.NewBool(true) // no-op
 				}
+				requireTableMaintenance(db.Name, t.Name, maintenanceChangeEngine)
 
 				t.mu.Lock()
 
@@ -2129,6 +2165,7 @@ func Init(en scm.Env) {
 			case "owner":
 				return scm.NewBool(false) // ignore
 			case "auto_increment":
+				requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
 				next := uint64(scm.ToInt(a[2]))
 				if next > 0 {
 					t.mu.Lock()
@@ -2140,7 +2177,7 @@ func Init(en scm.Env) {
 				}
 				return scm.NewBool(true)
 			default:
-				panic("unimplemented alter table operation: " + scm.String(a[1]))
+				panic("unimplemented alter table operation: " + operation)
 			}
 		},
 		Type: &scm.TypeDescriptor{HasSideEffects: true,
@@ -2158,6 +2195,7 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			db := t.schema
+			requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
 			for i, c := range t.Columns {
 				if c.Name == scm.String(a[1]) {
 					switch scm.String(a[2]) {
@@ -2226,6 +2264,21 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", ParamName: "table"},
 				{Kind: "string", ParamName: "column", ParamDesc: "name of the column to drop"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "migratedropcolumn",
+		Desc: "drops a legacy system column during startup migration",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			t := TableFromScmer(a[0])
+			return scm.NewBool(t.dropColumnForMigration(scm.String(a[1])))
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", ParamName: "table"},
+				{Kind: "string", ParamName: "column", ParamDesc: "legacy column name"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3347,6 +3400,9 @@ func Init(en scm.Env) {
 			sourceSQL := scm.String(a[3])
 			body, deferredPlan := unwrapDeferredTriggerBody(a[4])
 			visible := scm.ToBool(a[5])
+			if visible {
+				requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
+			}
 
 			trigger := TriggerDescription{
 				Name:      name,
@@ -3973,6 +4029,7 @@ func plannerDistinctForColumns(t *table, columns []string) (float64, float64, st
 // multi-column planner statistics. All statistics are immutable snapshots.
 func showBuildMeta(db *database, t *table) scm.Scmer {
 	engine := showEngineStr(t)
+	maintenance := tableMaintenanceCapabilities(db.Name, t.Name)
 	t.mu.Lock()
 	nextAutoIncrement := t.Auto_increment + 1
 	t.mu.Unlock()
@@ -4064,6 +4121,12 @@ func showBuildMeta(db *database, t *table) scm.Scmer {
 		scm.NewString("Fanout"), scm.NewSlice(fanouts),
 		scm.NewString("MultiColumnDistinct"), scm.NewSlice(multiColumnDistinct),
 		scm.NewString("Partitions"), scm.NewSlice(partitions),
+		scm.NewString("MaintenanceClass"), scm.NewString(maintenance.class),
+		scm.NewString("CanDrop"), scm.NewBool(maintenance.canDrop),
+		scm.NewString("CanTruncate"), scm.NewBool(maintenance.canTruncate),
+		scm.NewString("CanRename"), scm.NewBool(maintenance.canRename),
+		scm.NewString("CanAlter"), scm.NewBool(maintenance.canAlter),
+		scm.NewString("CanChangeEngine"), scm.NewBool(maintenance.canChangeEngine),
 	})
 }
 

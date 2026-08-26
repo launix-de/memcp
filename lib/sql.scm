@@ -22,6 +22,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (import "queryplan.scm")
 (import "sql-views.scm")
 
+/* Root is the recovery identity for a fresh/local installation. User-facing
+maintenance commands may change its password, but may not remove the account
+or its administrator capability. */
+(define protect_sql_root_admin (lambda (username operation)
+	(if (equal?? username "root")
+		(error (concat "cannot " operation " protected user root"))
+		true)))
+
+(define protected_sql_admin_revoke_value (lambda (username) (begin
+	(protect_sql_root_admin username "remove administrator privileges from")
+	false)))
+
 /* query plan caches: separate cachemap per parser dialect */
 (set sql_queryplan_cache (newcachemap))
 (set psql_queryplan_cache (newcachemap))
@@ -487,7 +499,7 @@ if the user is not allowed to access this property, the function will throw an e
 (try (lambda () (begin
 	(if (has? (show "system") "user") (begin
 		(if (has? (map (show "system" "user") (lambda (col) (get_assoc col "Field"))) "id")
-			(dropcolumn (table "system" "user") "id")
+			(migratedropcolumn (table "system" "user") "id")
 			true)
 	) true)
 )) (lambda (e) true))
