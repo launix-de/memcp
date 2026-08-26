@@ -48,6 +48,7 @@ from run_sql_tests import (  # noqa: E402
     resolve_timing_samples,
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
+    suite_execution_mode,
 )
 
 
@@ -266,6 +267,32 @@ class FailFastParallelContractTest(unittest.TestCase):
             runner.run_test_case = run_case
             self.assertTrue(runner.run_test_spec(str(spec)))
             self.assertCountEqual(completed, ["first", "second"])
+
+
+class SuiteIsolationContractTest(unittest.TestCase):
+    def test_isolated_restart_suite_owns_a_managed_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "restart.yaml"
+            spec.write_text(
+                "metadata:\n"
+                "  isolated: true\n"
+                "test_cases:\n"
+                "  - name: restart\n"
+                "    sql: SHUTDOWN\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(suite_execution_mode(str(spec)), "managed_subprocess")
+
+    def test_shared_restart_suite_keeps_the_direct_managed_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "restart.yaml"
+            spec.write_text(
+                "test_cases:\n"
+                "  - name: restart\n"
+                "    sql: SHUTDOWN\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(suite_execution_mode(str(spec)), "direct")
 
 if __name__ == "__main__":
     unittest.main()
