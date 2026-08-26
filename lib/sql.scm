@@ -152,6 +152,11 @@ functional planner return value. */
 	(begin
 		(define planning_session (newsession))
 		(define compile_bindings (newsession))
+		(define observation_scope (source_session
+			"get_or_compute_scoped"
+			(context "query")
+			"__memcp_queryplan_observations"
+			(lambda () (newsession))))
 		(reduce (source_session) (lambda (_ key)
 			(if (match key (regex "^v[0-9]+$" _) true false)
 				(begin
@@ -165,6 +170,7 @@ functional planner return value. */
 					nil
 					(planning_session key (source_session key))))) nil)
 		(planning_session "__memcp_queryplan_compile_bindings" compile_bindings)
+		(planning_session "__memcp_queryplan_observation_scope" observation_scope)
 		(planning_session "__memcp_queryplan_guard_conditions" (newsession))
 		(planning_session "__memcp_queryplan_guard_condition_catalog" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_guard_bindings" (newsession))
@@ -204,8 +210,16 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 (define sql_queryplan_runtime_guard_expr (lambda (expr)
 	(match expr
 		((symbol quote) _value) expr
-		((symbol session) key) (list (list (quote context) "session") key)
-		((quote session) key) (list (list (quote context) "session") key)
+		((symbol session) key) (if (match key
+			(regex "^__memcp_queryplan_observation_(?:value|metric)_" _) true
+			_ false)
+			(planner_queryplan_observation_current_read_expr key)
+			(list (list (quote context) "session") key))
+		((quote session) key) (if (match key
+			(regex "^__memcp_queryplan_observation_(?:value|metric)_" _) true
+			_ false)
+			(planner_queryplan_observation_current_read_expr key)
+			(list (list (quote context) "session") key))
 		(cons head tail) (cons
 			(sql_queryplan_runtime_guard_expr head)
 			(map tail sql_queryplan_runtime_guard_expr))
@@ -258,25 +272,28 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 	(match preparation '(decision_id producer metric_expr) (begin
 		(define value_key (planner_queryplan_observation_value_key decision_id))
 		(define metric_key (planner_queryplan_observation_metric_key decision_id))
-		(define request_session (list (quote context) "session"))
+		(define observation_session (symbol "__queryplan_observation_session"))
 		(define prepared_value (symbol "__queryplan_prepared_value"))
-		(list (quote if)
-			(list (quote number?) (list request_session metric_key))
-			true
-			(list (quote !begin)
-				(list (quote context) "check")
-				(list
-					(list (quote lambda) (list prepared_value)
-						(list (quote !begin)
-							(list request_session value_key prepared_value)
-							(list request_session metric_key
-								(list
-									(list (quote lambda) (list (symbol "__queryplan_observed_value")) metric_expr)
-									prepared_value))
-							true))
-					(sql_queryplan_runtime_guard_expr producer))
-				(list (quote context) "check")
-				true))))))
+		(list
+			(list (quote lambda) (list observation_session)
+				(list (quote if)
+					(list (quote number?) (list observation_session metric_key))
+					true
+					(list (quote !begin)
+						(list (quote context) "check")
+						(list
+							(list (quote lambda) (list prepared_value)
+								(list (quote !begin)
+									(list observation_session value_key prepared_value)
+									(list observation_session metric_key
+										(list
+											(list (quote lambda) (list (symbol "__queryplan_observed_value")) metric_expr)
+											prepared_value))
+									true))
+							(sql_queryplan_runtime_guard_expr producer))
+						(list (quote context) "check")
+						true)))
+			(planner_queryplan_observation_session_expr))))))
 
 /* Walk variants in priority order. A cheap guarded variant can return before
 an older expensive observation is prepared. Once a variant needs an

@@ -45,6 +45,30 @@ func setupComputeConcurrencyTest(t *testing.T) func() {
 	}
 }
 
+func TestApplyWithTxRebindsCapturedPhysicalQueryTransaction(t *testing.T) {
+	staleTx := &TxContext{}
+	currentTx := &TxContext{}
+	computor := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice(nil),
+		Body:   scm.NewSymbol("__physical_query_tx"),
+		En: &scm.Env{
+			Vars: scm.Vars{
+				scm.Symbol("__physical_query_tx"): scm.NewAny(staleTx),
+			},
+			Outer: &scm.Globalenv,
+		},
+	})
+
+	got := applyWithTx(currentTx, computor)
+	if got.Any().(*TxContext) != currentTx {
+		t.Fatal("computed column reused the transaction captured by its creating query")
+	}
+	binding := computor.Proc().En.FindRead(scm.Symbol("__physical_query_tx"))
+	if binding.Vars[scm.Symbol("__physical_query_tx")].Any().(*TxContext) != staleTx {
+		t.Fatal("transaction rebinding mutated the shared computed-column closure")
+	}
+}
+
 func countCollapsedComputor() scm.Scmer {
 	filter := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{

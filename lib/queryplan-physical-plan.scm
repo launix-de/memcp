@@ -3310,7 +3310,7 @@ dependent choices must pass through this function and retain their guard. */
 					(list "status" (if (equal? chosen "ordered_base_membership") "chosen" "rejected"))
 					(list "cost" (planner_cost_explain base_cost)))))))
 		(list chosen (if (nil? observation_keys) carrier
-			(list (quote session) (car observation_keys)))))))
+			(planner_queryplan_observation_read_expr (car observation_keys)))))))
 
 (define lower_single_source_query_block (lambda (block)
 	(begin

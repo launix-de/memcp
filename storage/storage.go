@@ -551,6 +551,40 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 	}
 }
 
+const computeInvalidationWaveKey = "memcpComputeInvalidationWave"
+
+// invalidateComputedColumn propagates invalidation through computed-cache
+// dependency edges. A GLS-local visited set makes one synchronous invalidation
+// wave idempotent and prevents malformed cyclic computed definitions from
+// recursing forever without introducing a global lock or cross-query state.
+func invalidateComputedColumn(t *table, colName string) {
+	if value, ok := scm.GetGLSValue(computeInvalidationWaveKey); ok {
+		visited := value.(map[string]bool)
+		key := t.schema.Name + "\x00" + t.Name + "\x00" + colName
+		if visited[key] {
+			return
+		}
+		visited[key] = true
+		invalidated := false
+		for _, s := range t.maintenanceShards() {
+			s.mu.RLock()
+			col := s.columns[colName]
+			s.mu.RUnlock()
+			if proxy, isProxy := col.(*StorageComputeProxy); isProxy {
+				proxy.InvalidateAll()
+				invalidated = true
+			}
+		}
+		if invalidated {
+			t.ExecuteTriggers(AfterInvalidate, nil, nil)
+		}
+		return
+	}
+	scm.SetValues(map[string]any{computeInvalidationWaveKey: make(map[string]bool)}, func() {
+		invalidateComputedColumn(t, colName)
+	})
+}
+
 func Init(en scm.Env) {
 	const scanFilterColumnsDesc = "physical columns passed to filter before map/reduce; $recset_contains supplies a row-bound RecSet membership closure"
 	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
@@ -2195,14 +2229,7 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			colName := scm.String(a[1])
-			for _, s := range t.maintenanceShards() {
-				s.mu.RLock()
-				col := s.columns[colName]
-				s.mu.RUnlock()
-				if proxy, ok := col.(*StorageComputeProxy); ok {
-					proxy.InvalidateAll()
-				}
-			}
+			invalidateComputedColumn(t, colName)
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{

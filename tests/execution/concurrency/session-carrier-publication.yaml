@@ -1,0 +1,375 @@
+# Copyright (C) 2026  MemCP Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Concurrent request-local predicates remain isolated in a shared physical carrier"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS scp_late_access"
+  - sql: "DROP TABLE IF EXISTS scp_late_item"
+  - sql: "DROP TABLE IF EXISTS scp_late_domain"
+  - sql: "DROP TABLE IF EXISTS scp_outer_cache"
+  - sql: "DROP TABLE IF EXISTS scp_middle_cache"
+  - sql: "DROP TABLE IF EXISTS scp_source"
+  - sql: "DROP TABLE IF EXISTS scp_access"
+  - sql: "DROP TABLE IF EXISTS scp_item"
+  - sql: "DROP TABLE IF EXISTS scp_domain"
+  - sql: "CREATE TABLE scp_domain (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE scp_late_domain (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE scp_late_item (id INT PRIMARY KEY, domain_id INT, created_at INT)"
+  - sql: "CREATE TABLE scp_late_access (id INT PRIMARY KEY, actor_id INT, domain_id INT)"
+  - sql: "INSERT INTO scp_late_item VALUES (55, 1, 10)"
+  - sql: "CREATE TABLE scp_item (id INT PRIMARY KEY, domain_id INT, created_at INT)"
+  - sql: "CREATE TABLE scp_access (id INT PRIMARY KEY, actor_id INT, domain_id INT)"
+  - sql: "INSERT INTO scp_domain VALUES (1), (2), (3), (4)"
+  - sql: "INSERT INTO scp_item VALUES (11, 1, 40), (22, 2, 30), (33, 3, 20), (44, 4, 10)"
+  - sql: "INSERT INTO scp_access VALUES (1, 101, 1), (2, 202, 2)"
+  - sql: "CREATE TABLE scp_source (id INT PRIMARY KEY, amount INT)"
+  - sql: "CREATE TABLE scp_middle_cache (id INT PRIMARY KEY)"
+  - sql: "CREATE TABLE scp_outer_cache (id INT PRIMARY KEY)"
+  - sql: "INSERT INTO scp_source VALUES (1, 10)"
+  - sql: "INSERT INTO scp_middle_cache VALUES (1)"
+  - sql: "INSERT INTO scp_outer_cache VALUES (1)"
+
+test_cases:
+  - name: "Set request domain before the physical cache is prepared"
+    session_id: "scp_late_reader"
+    sql: "SET @scp_actor = 303"
+    expect:
+      rows_affected: 0
+
+  - &late_read
+    name: "Prepare an empty physical cache"
+    session_id: "scp_late_reader"
+    sql: |
+      SELECT i.id
+      FROM scp_late_item i
+      WHERE COALESCE((
+        SELECT EXISTS (
+          SELECT 1 FROM scp_late_access a
+          WHERE a.domain_id = d.id AND a.actor_id = @scp_actor
+        )
+        FROM scp_late_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.created_at DESC
+      LIMIT 72
+    expect:
+      rows: 0
+      data: []
+
+  - name: "Populate the domain after the empty cache was published"
+    sql: "INSERT INTO scp_late_domain VALUES (1)"
+    expect:
+      affected_rows: 1
+
+  - name: "Populate the access edge after the empty cache was published"
+    sql: "INSERT INTO scp_late_access VALUES (1, 303, 1)"
+    expect:
+      affected_rows: 1
+
+  - <<: *late_read
+    name: "The first read after population observes newly published cache keys"
+    expect:
+      rows: 1
+      data:
+        - id: 55
+
+  - name: "Set first request domain"
+    session_id: "scp_first"
+    sql: "SET @scp_actor = 101, @scp_role = 1"
+    expect:
+      rows_affected: 0
+
+  - name: "Set second request domain"
+    session_id: "scp_second"
+    sql: "SET @scp_actor = 202, @scp_role = 1"
+    expect:
+      rows_affected: 0
+
+  - name: "Compound scalar predicate lowers to an ordered projected carrier"
+    session_id: "scp_first"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT i.id
+      FROM scp_item i
+      WHERE COALESCE((
+        SELECT CASE
+          WHEN @scp_role = 1 THEN EXISTS (
+            SELECT 1 FROM scp_access a
+            WHERE a.domain_id = d.id AND a.actor_id = @scp_actor
+          )
+          ELSE TRUE
+        END
+        FROM scp_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.created_at DESC
+      LIMIT 72
+    expect:
+      result_contains:
+        - "recset_project_join"
+        - "scan_order_recset_part"
+
+  - &first_read
+    name: "First request reads only its permitted row"
+    session_id: "scp_first"
+    sql: |
+      SELECT i.id
+      FROM scp_item i
+      WHERE COALESCE((
+        SELECT CASE
+          WHEN @scp_role = 1 THEN EXISTS (
+            SELECT 1 FROM scp_access a
+            WHERE a.domain_id = d.id AND a.actor_id = @scp_actor
+          )
+          ELSE TRUE
+        END
+        FROM scp_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.created_at DESC
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - id: 11
+
+  - &second_read
+    name: "Second request reads only its permitted row"
+    session_id: "scp_second"
+    sql: |
+      SELECT i.id
+      FROM scp_item i
+      WHERE COALESCE((
+        SELECT CASE
+          WHEN @scp_role = 1 THEN EXISTS (
+            SELECT 1 FROM scp_access a
+            WHERE a.domain_id = d.id AND a.actor_id = @scp_actor
+          )
+          ELSE TRUE
+        END
+        FROM scp_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.created_at DESC
+      LIMIT 72
+    expect:
+      rows: 1
+      data:
+        - id: 22
+
+  - <<: *first_read
+    name: "First request stays isolated during concurrent carrier preparation A"
+    parallel: "scp_carrier"
+  - <<: *second_read
+    name: "Second request stays isolated during concurrent carrier preparation A"
+    parallel: "scp_carrier"
+  - <<: *first_read
+    name: "First request stays isolated during concurrent carrier preparation B"
+    parallel: "scp_carrier"
+  - <<: *second_read
+    name: "Second request stays isolated during concurrent carrier preparation B"
+    parallel: "scp_carrier"
+  - <<: *first_read
+    name: "First request stays isolated during concurrent carrier preparation C"
+    parallel: "scp_carrier"
+  - <<: *second_read
+    name: "Second request stays isolated during concurrent carrier preparation C"
+    parallel: "scp_carrier"
+
+  - name: "A source mutation extends only the first request domain"
+    session_id: "scp_writer"
+    sql: "INSERT INTO scp_access VALUES (3, 101, 3)"
+    expect:
+      affected_rows: 1
+
+  - name: "First request observes a fresh carrier after the commit"
+    session_id: "scp_first"
+    sql: |
+      SELECT i.id
+      FROM scp_item i
+      WHERE COALESCE((
+        SELECT CASE
+          WHEN @scp_role = 1 THEN EXISTS (
+            SELECT 1 FROM scp_access a
+            WHERE a.domain_id = d.id AND a.actor_id = @scp_actor
+          )
+          ELSE TRUE
+        END
+        FROM scp_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.created_at DESC
+      LIMIT 72
+    expect:
+      rows: 2
+      data:
+        - id: 11
+        - id: 33
+
+  - <<: *second_read
+    name: "Second request remains isolated after the commit"
+
+  - &shared_scalar_read
+    name: "A reused scalar predicate builds the materialized carrier"
+    session_id: "scp_first"
+    sql: |
+      SELECT i.id,
+        COALESCE((
+          SELECT CASE
+            WHEN @scp_role = 1 THEN EXISTS (
+              SELECT 1 FROM scp_access a
+              WHERE a.domain_id = d.id AND a.actor_id = @scp_actor
+            )
+            ELSE TRUE
+          END
+          FROM scp_domain d
+          WHERE d.id = i.domain_id
+          LIMIT 1
+        ), FALSE) AS permitted
+      FROM scp_item i
+      WHERE COALESCE((
+        SELECT CASE
+          WHEN @scp_role = 1 THEN EXISTS (
+            SELECT 1 FROM scp_access a
+            WHERE a.domain_id = d.id AND a.actor_id = @scp_actor
+          )
+          ELSE TRUE
+        END
+        FROM scp_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      ORDER BY i.created_at DESC
+      LIMIT 72
+    expect:
+      rows: 2
+      data:
+        - id: 11
+          permitted: 1
+        - id: 33
+          permitted: 1
+
+  - name: "A second source mutation extends the materialized request domain"
+    session_id: "scp_writer"
+    sql: "INSERT INTO scp_access VALUES (4, 101, 4)"
+    expect:
+      affected_rows: 1
+
+  - <<: *shared_scalar_read
+    name: "The reused scalar carrier observes transitive source invalidation"
+    expect:
+      rows: 3
+      data:
+        - id: 11
+          permitted: 1
+        - id: 33
+          permitted: 1
+        - id: 44
+          permitted: 1
+
+  - name: "Build a computed cache over a mutable source"
+    scm: |
+      (createcolumn
+        (table "memcp-tests" "scp_middle_cache")
+        "total" "INT" '() '("temp" true)
+        '("id")
+        (lambda (id)
+          (scan nil
+            (table "memcp-tests" "scp_source")
+            '() (lambda () true)
+            '("amount") (lambda (amount) amount)
+            + 0)))
+
+  - name: "Build a second computed cache over the first cache"
+    scm: |
+      (createcolumn
+        (table "memcp-tests" "scp_outer_cache")
+        "doubled_total" "INT" '() '("temp" true)
+        '("id")
+        (lambda (id)
+          (scan nil
+            (table "memcp-tests" "scp_middle_cache")
+            '() (lambda () true)
+            '("total") (lambda (total) (* total 2))
+            + 0)))
+
+  - name: "Nested computed cache has its initial value"
+    sql: "SELECT doubled_total FROM scp_outer_cache WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - doubled_total: 20
+
+  - name: "Mutate the transitive source"
+    sql: "INSERT INTO scp_source VALUES (2, 20)"
+    expect:
+      affected_rows: 1
+
+  - name: "The directly dependent cache is invalidated"
+    sql: "SELECT total FROM scp_middle_cache WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - total: 30
+
+  - name: "Invalidation propagates through computed cache dependencies"
+    sql: "SELECT doubled_total FROM scp_outer_cache WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - doubled_total: 60
+
+  - name: "A computed column may prepare a dependent column on the same table"
+    scm: |
+      (createcolumn
+        (table "memcp-tests" "scp_middle_cache")
+        "nested_outer" "INT" '() '("temp" true)
+        '("id")
+        (lambda (id)
+          (begin
+            (createcolumn
+              (table "memcp-tests" "scp_middle_cache")
+              "nested_inner" "INT" '() '("temp" true)
+              '("id")
+              (lambda (inner_id) (+ inner_id 1)))
+            (+ id 2))))
+
+  - name: "Nested same-table column preparation publishes both values"
+    sql: "SELECT nested_inner, nested_outer FROM scp_middle_cache WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - nested_inner: 2
+          nested_outer: 3
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS scp_late_access"
+  - sql: "DROP TABLE IF EXISTS scp_late_item"
+  - sql: "DROP TABLE IF EXISTS scp_late_domain"
+  - sql: "DROP TABLE IF EXISTS scp_outer_cache"
+  - sql: "DROP TABLE IF EXISTS scp_middle_cache"
+  - sql: "DROP TABLE IF EXISTS scp_source"
+  - sql: "DROP TABLE IF EXISTS scp_access"
+  - sql: "DROP TABLE IF EXISTS scp_item"
+  - sql: "DROP TABLE IF EXISTS scp_domain"
