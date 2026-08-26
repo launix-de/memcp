@@ -712,6 +712,25 @@ func Init(en scm.Env) {
 						scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(estimate.coverage)}),
 					})
 				}
+				// An ordinary index range examines only matching candidates. Its
+				// candidate count is the numerator of a shard sample, not the sample
+				// population itself. Scale it by the selected shard's visible row
+				// universe; using examined here turns every exact equality range into
+				// an apparent 100%-selective predicate.
+				if estimate.population == "index_candidates" && estimate.universe > 0 {
+					coverage := estimate.coverage
+					if len(shards) > 1 {
+						coverage = "sampled"
+					}
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(estimate.rows)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(estimate.capped)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(estimate.universe)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol("table_rows")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(coverage)}),
+					})
+				}
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(estimate.rows)}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(estimate.capped)}),
@@ -1030,7 +1049,7 @@ func Init(en scm.Env) {
 				return rs.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
 			}
 
-			t := TableFromScmer(a[layout.tableIdx])
+			t := TableFromScmer(tableArg)
 
 			aggregate := scm.NewNil()
 			if len(a) > layout.reduceIdx {
@@ -1141,7 +1160,14 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			t := TableFromScmer(a[layout.tableIdx])
+			var source *recSet
+			var t *table
+			if tableArg.IsCustom(TagRecSet) {
+				source = RecSetFromScmer(tableArg)
+				t = source.table
+			} else {
+				t = TableFromScmer(tableArg)
+			}
 
 			aggregate := scm.NewNil()
 			if len(a) > layout.reduceIdx+sbShift {
@@ -1155,7 +1181,7 @@ func Init(en scm.Env) {
 			if len(a) > layout.reduce2Idx+sbShift {
 				reduce2 = a[layout.reduce2Idx+sbShift]
 			}
-			return t.scanWithBatch(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
+			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
 		},
 		Type: &scm.TypeDescriptor{
 			Params: []*scm.TypeDescriptor{

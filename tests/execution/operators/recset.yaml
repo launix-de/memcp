@@ -486,11 +486,10 @@ test_cases:
       rows: 1
       result_contains:
         - "ordered_recset_iterator"
-        - "scan_order_recset_part"
-        - "recset_contains_probe"
-        - "direct_intersection_available"
-        - "chosen"
-        - "rejected"
+        - "chosen adaptive_recset_boundary"
+        - "ordered_inverse_recset"
+        - "ordered_base_membership"
+        - "status runtime"
 
   - name: "recset key index provides immutable scalar lookup"
     scm: |

@@ -407,6 +407,33 @@ test_cases:
       data:
         - {id: 1, direct_access: true, nested_access: true}
 
+  - name: "Collected nested scalar lookups preserve false results"
+    sql: |
+      SELECT page.id,
+        COALESCE((
+          SELECT actor.id = 10
+          FROM trace_actor actor
+          WHERE actor.id = page.lookup_id
+          LIMIT 1
+        ), FALSE) AS direct_access,
+        COALESCE((
+          SELECT COALESCE((
+            SELECT nested_actor.id = 10
+            FROM trace_actor nested_actor
+            WHERE nested_actor.id = item.lookup_id
+            LIMIT 1
+          ), FALSE)
+          FROM trace_lookup_many item
+          WHERE item.id = page.id
+          LIMIT 1
+        ), FALSE) AS nested_access
+      FROM trace_page page
+      WHERE page.id = 3
+    expect:
+      rows: 1
+      data:
+        - {id: 3, direct_access: true, nested_access: false}
+
   - name: "Equivalent grouped lookup stages are interned once"
     sql: |
       EXPLAIN IR

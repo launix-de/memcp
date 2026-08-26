@@ -452,11 +452,16 @@ func (t *table) hasBoundUniquePoint(boundaries boundaries) bool {
 }
 
 func (t *table) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
+	return t.scanExistsFrom(currentTx, nil, conditionCols, condition)
+}
+
+func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer) bool {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	touchTempColumns(t, conditionCols, nil)
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
+	boundaries = appendRecSetBoundary(boundaries, source)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	for _, b := range boundaries {
 		t.AddPartitioningScore([]string{b.col})
@@ -511,10 +516,14 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
-	return t.scanWithBatch(currentTx, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
+	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
 }
 
 func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
+	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, stride, batchdata)
+}
+
+func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	hasMutationCallback := false
@@ -540,6 +549,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 	/* analyze query */
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
+	boundaries = appendRecSetBoundary(boundaries, source)
 	lower, upperLast := indexFromBoundaries(boundaries)
 	if Settings.ScanDebugging {
 		dbg := fmt.Sprintf("[SCAN] %s.%s", t.schema.Name, t.Name)

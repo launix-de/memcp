@@ -366,14 +366,46 @@ partner. */
 					raw_probe))
 			nil))))
 
-(define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages inline_presence_stages partition_limit)
+(define physical_expr_refs_unconsumed_stage_output_alias? (lambda (expr)
+	(match expr
+		/* A physical probe owns the logical stage descriptor embedded in its marker.
+		Aliases inside that descriptor are inputs to the probe lowerer, not free
+		columns in the surrounding query block. */
+		((symbol scalar_first_probe) _stage _requested_col) false
+		((quote scalar_first_probe) _stage _requested_col) false
+		((symbol scalar_first_probe) _stage _requested_col _dependencies) false
+		((quote scalar_first_probe) _stage _requested_col _dependencies) false
+		((symbol scalar_aggregate_probe) _stage _requested_col) false
+		((quote scalar_aggregate_probe) _stage _requested_col) false
+		((symbol scalar_cardinality_probe) _stage _requested_col) false
+		((quote scalar_cardinality_probe) _stage _requested_col) false
+		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
+		((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (physical_expr_refs_unconsumed_stage_output_alias? item))) false)
+		_ false)))
+
+(define query_block_refs_unconsumed_stage_output_alias? (lambda (block)
+	(physical_expr_refs_unconsumed_stage_output_alias?
+		(list
+			(qb_fields block)
+			(qb_where block)
+			(qb_group block)
+			(qb_having block)
+			(qb_order block)
+			(qb_hidden block)
+			(source_join_exprs (qb_sources block))))))
+
+(define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages inline_probe_stages partition_limit inline_nested_probes)
 	(begin
 		(define input (gs_input stage))
-		(define inline_presence_ids (stage_id_set inline_presence_stages))
-		(define inline_presence_sources (filter (qb_sources input) (lambda (src)
+		(define inline_probe_ids (stage_id_set inline_probe_stages))
+		(define inline_probe_sources (filter (qb_sources input) (lambda (src)
 			(and (stage_output_relation? (source_relation src))
-				(has_assoc? inline_presence_ids (stage_output_relation_id (source_relation src)))))))
-		(define inline_presence_aliases (map inline_presence_sources source_alias))
+				(has_assoc? inline_probe_ids (stage_output_relation_id (source_relation src)))))))
+		(define inline_probe_aliases (map inline_probe_sources source_alias))
 		(define keyed_terms (map (produceN (count keys)) (lambda (i)
 			(list (query_key_term_alias (qb_sources input) (nth keys i))
 				(list (quote equal??) (nth keys i) (nth lookup_keys i))))))
@@ -386,7 +418,7 @@ partner. */
 		(define where_key_terms (map
 			(filter keyed_terms (lambda (term)
 				(and (not (nil? (nth term 0)))
-					(not (contains? inline_presence_aliases (nth term 0))))))
+					(not (contains? inline_probe_aliases (nth term 0))))))
 			(lambda (term) (nth term 1))))
 		(define keyed_input (make_query_block
 			(qb_schema input)
@@ -401,20 +433,58 @@ partner. */
 			(qb_hidden input)
 			(qb_stages input)
 			(qb_facts input)))
-		(define probe_input (if (empty_list? inline_presence_sources)
+		(define probe_input (if (empty_list? inline_probe_sources)
 			keyed_input
-			(query_block_with_presence_probe_sources_using
-				nested_stages inline_presence_sources keyed_input)))
-		(define probe_value_expr (if (empty_list? inline_presence_sources)
+			(query_block_with_selected_probe_sources_using
+				nested_stages inline_probe_sources keyed_input)))
+		(define probe_value_expr (if (empty_list? inline_probe_sources)
 			value_expr
 			(begin
 				(define default_alias (qassoc_get (qb_facts keyed_input) (quote default_alias)
 					(if (empty_list? (qb_sources keyed_input)) nil (source_alias (car (qb_sources keyed_input))))))
 				(rewrite_scalar_first_probe_expr
-					nested_stages inline_presence_sources default_alias value_expr))))
-		(define raw_prepared_input
-			(query_block_without_stages_after_eager_prepare_using nested_stages probe_input))
-		(define prepared_input (if (empty_list? prepare_stages)
+					nested_stages inline_probe_sources default_alias value_expr))))
+		/* Re-enter the ordinary probe-selection pass for dependencies that remain
+		after the explicit bounded dominance choices above. Accept that alternative
+		only when it consumes every relational stage source and every stage-output
+		column. This structural proof prevents a partially rewritten plan from
+		dropping the LEFT-JOIN NULL extension of an unresolved dependency. */
+		(define recursive_value_title "__recursive_probe_value")
+		/* The scalar value is a consumer too, but it normally lives outside the
+		input query block passed to the recursive rewrite. Carry it as a temporary
+		field so nested stage outputs are rewritten in the same scope as WHERE and
+		the sources. Inspecting the input block alone would otherwise falsely prove
+		that a dependency was consumed while leaving a free stage alias in value_expr. */
+		(define recursive_probe_input (if inline_nested_probes
+			(make_query_block
+				(qb_schema probe_input)
+				(qb_sources probe_input)
+				(list recursive_value_title probe_value_expr)
+				(qb_where probe_input)
+				(qb_group probe_input)
+				(qb_having probe_input)
+				(qb_order probe_input)
+				(qb_limit probe_input)
+				(qb_offset probe_input)
+				(qb_hidden probe_input)
+				(qb_stages probe_input)
+				(qb_facts probe_input))
+			nil))
+		(define recursively_prepared_input (if inline_nested_probes
+			(query_block_without_stages_after_prepare_using nested_stages recursive_probe_input)
+			nil))
+		(define recursively_consumed (and inline_nested_probes
+			(and (single_source? (qb_sources recursively_prepared_input))
+				(and (not (stage_output_relation? (source_relation (car (qb_sources recursively_prepared_input)))))
+					(not (query_block_refs_unconsumed_stage_output_alias? recursively_prepared_input))))))
+		(define effective_probe_value_expr (if recursively_consumed
+			(field_expr_by_title (qb_fields recursively_prepared_input) recursive_value_title false)
+			probe_value_expr))
+		(define effective_prepare_stages (if recursively_consumed '() prepare_stages))
+		(define raw_prepared_input (if recursively_consumed
+			recursively_prepared_input
+			(query_block_without_stages_after_eager_prepare_using nested_stages probe_input)))
+		(define prepared_input (if (empty_list? effective_prepare_stages)
 			(query_block_with_stage_catalog raw_prepared_input '())
 			raw_prepared_input))
 		(define bounded_prepared_input (make_query_block
@@ -430,15 +500,15 @@ partner. */
 			(qb_hidden prepared_input)
 			(qb_stages prepared_input)
 			(qb_facts prepared_input)))
-		(define direct_probe (if (empty_list? prepare_stages)
-			(lower_direct_scalar_query_probe prepared_input probe_value_expr partition_limit
+		(define direct_probe (if (empty_list? effective_prepare_stages)
+			(lower_direct_scalar_query_probe prepared_input effective_probe_value_expr partition_limit
 				(qassoc_get (gs_facts stage) (quote on_overflow) nil))
 			nil))
 		(define probe_expr (if (nil? direct_probe)
 			(begin
 				(define reduced (lower_query_block_as_dataset_reduce
 					bounded_prepared_input
-					(list "__value" probe_value_expr)
+					(list "__value" effective_probe_value_expr)
 					(list (quote lambda) (list (quote __value)) (quote __value))
 					(if (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
 						(scalar_query_probe_reduce_cardinality)
@@ -459,7 +529,7 @@ partner. */
 			(or (not (nil? (qb_limit input))) (not (nil? (qb_offset input)))))
 			(neumann_fail "build_queryplan" "scalar-first query probe cannot preserve nested ORDER/LIMIT yet")
 			(begin
-				(define raw_probe (if (not (empty_list? prepare_stages))
+				(define raw_probe (if (not (empty_list? effective_prepare_stages))
 					(cons (quote !begin)
 						(merge (list
 							(lazy_stage_prepare_bindings nested_stages (filter nested_stages group_stage?))
@@ -551,7 +621,8 @@ partner. */
 			nested_stages
 			prepare_stages
 			inline_presence_stages
-			(stage_partition_limit stage)))))
+			(stage_partition_limit stage)
+			false))))
 
 (define lower_scalar_aggregate_query_probe_expr (lambda (all_stages stage value_expr keys lookup_keys reduce_expr neutral_expr)
 	(begin
@@ -940,16 +1011,26 @@ still receives every transitive dependency through this compact catalog. */
 				(and (has_assoc? direct_source_ids (gs_id nested_stage))
 					(and (or (presence_probe_stage? nested_stage)
 						(not (stage_shared_prepare? nested_stage)))
-						(and (scalar_or_presence_probe_stage? nested_stage)
-							(not (stage_has_residual_outer_refs? nested_stage))))))))
-			/* Bounded consumers execute selected presence checks after root braking.
+						(or
+							(and (scalar_or_presence_probe_stage? nested_stage)
+								(not (stage_has_residual_outer_refs? nested_stage)))
+							/* This is a direct dependency of a bounded, key-memoized projection
+							recipe, and shared carriers were excluded above. Materializing a
+							query-local group table therefore cannot add reuse: it evaluates the
+							same aggregate for the same outer key, then additionally writes and
+							reads the carrier. Direct aggregate probing strictly dominates that
+							operator here. Cardinality-dependent aggregate choices outside this
+							bounded ownership context remain costed and guarded. */
+							(and (scalar_aggregate_probe_stage? nested_stage)
+								(scalar_aggregate_probe_stage_safe? nested_stage))))))))
+			/* Bounded consumers execute selected nested probes after root braking.
 			Every other base-table group without residual outer references has a
 			closed initializer. Hoist those initializers to the shared recipe scope,
 			where canonical carrier collection can merge duplicate key fills and
 			aggregate-column extensions before code emission. */
-			(define inline_presence_stages (if bounded_consumer inline_candidates '()))
+			(define inline_probe_stages (if bounded_consumer inline_candidates '()))
 			(define inline_owned_stages
-				(scalar_first_query_probe_nested_stages_using_index inline_presence_stages closure_index))
+				(scalar_first_query_probe_nested_stages_using_index inline_probe_stages closure_index))
 			(define inline_owned_ids (stage_id_set inline_owned_stages))
 			(define hoisted_stages (filter nested_stages (lambda (nested_stage)
 				(and (group_stage? nested_stage)
@@ -970,7 +1051,7 @@ still receives every transitive dependency through this compact catalog. */
 				compact_nested_stages
 				(map hoisted_stages compact_stage_for)
 				(map prepare_stages compact_stage_for)
-				(map inline_presence_stages compact_stage_for)
+				(map inline_probe_stages compact_stage_for)
 				bounded_consumer))
 		_ (neumann_fail "build_queryplan" "malformed scalar query probe recipe seed"))))
 
@@ -1027,7 +1108,7 @@ both names therefore bind to the same parameter. */
 
 (define scalar_query_probe_recipe_binding (lambda (plan)
 	(match plan
-		'(stage requested_col nested_stages _hoisted_stages prepare_stages inline_presence_stages bounded_consumer) (begin
+		'(stage requested_col nested_stages _hoisted_stages prepare_stages inline_probe_stages bounded_consumer) (begin
 			(define raw_keys (gs_keys stage))
 			(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
 			(define logical_lookup_keys
@@ -1076,14 +1157,14 @@ both names therefore bind to the same parameter. */
 			(define bound_prepare_stages (map prepare_stages (lambda (prepare_stage)
 				(rewrite_bound_stage
 					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id prepare_stage)) prepare_stage)))))
-			(define bound_inline_presence_stages (map inline_presence_stages (lambda (presence_stage)
+			(define bound_inline_probe_stages (map inline_probe_stages (lambda (probe_stage)
 				(rewrite_bound_stage
-					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id presence_stage)) presence_stage)))))
+					(coalesceNil (stage_by_id annotated_nested_lookup (gs_id probe_stage)) probe_stage)))))
 			(define probe_expr
 				(rewrite_query_invariant_probe_symbols invariant_symbol_index
 					(lower_scalar_first_query_probe_expr_using bound_stage bound_value_expr bound_keys params
-						bound_nested_stages bound_prepare_stages bound_inline_presence_stages
-						(stage_partition_limit bound_stage))))
+						bound_nested_stages bound_prepare_stages bound_inline_probe_stages
+						(stage_partition_limit bound_stage) bounded_consumer)))
 			(define memoized_probe_expr (if bounded_consumer
 				(list
 					(physical_query_session_symbol)
@@ -1106,7 +1187,7 @@ both names therefore bind to the same parameter. */
 (define scalar_query_probe_recipe_hoisted_stages (lambda (plans)
 	(unique_stages_by_id (merge (map (coalesceNil plans '()) (lambda (plan)
 		(match plan
-			'(_stage _requested_col _nested_stages hoisted_stages _prepare_stages _inline_presence_stages _bounded_consumer) hoisted_stages
+			'(_stage _requested_col _nested_stages hoisted_stages _prepare_stages _inline_probe_stages _bounded_consumer) hoisted_stages
 			_ '())))))))
 
 (define scalar_query_probe_recipe_prepare_exprs (lambda (plans)
@@ -1114,7 +1195,7 @@ both names therefore bind to the same parameter. */
 		(define stages (scalar_query_probe_recipe_hoisted_stages plans))
 		(define stage_catalog (unique_stages_by_id (merge (map (coalesceNil plans '()) (lambda (plan)
 			(match plan
-				'(_stage _requested_col nested_stages _hoisted_stages _prepare_stages _inline_presence_stages _bounded_consumer) nested_stages
+				'(_stage _requested_col nested_stages _hoisted_stages _prepare_stages _inline_probe_stages _bounded_consumer) nested_stages
 				_ '()))))))
 		(define shared_stages (filter stages stage_shared_prepare?))
 		(define direct_stages (filter stages (lambda (stage) (not (stage_shared_prepare? stage)))))
@@ -3233,10 +3314,167 @@ below it remain guarded, but do not precompute an exact projection merely to
 choose between alternatives whose complete runtime is already negligible. */
 (define planner_adaptive_observation_budget_ns 100000000)
 
+/* Return the cheapest executable carrier for one candidate cardinality. This
+single cost comparison is used both while lowering and by the query-cache
+guard. The guard therefore asserts the actual planner inequality instead of
+pinning one sampled row count: harmless estimate refinement keeps the cached
+plan, while an autoindex or data growth which changes the winner recompiles it. */
+(define membership_carrier_cost_choice (lambda (candidate_input_rows candidate_rows driver_rows facts
+		driver_probe_supported driver_strategy allow_ordered_batch prefiltered_supported prefiltered_driver_rows)
+	(begin
+		(define candidate_cost (membership_projection_cost
+			candidate_input_rows candidate_rows driver_rows facts))
+		(define driver_cost (if driver_probe_supported
+			(if (equal? driver_strategy "driver_order_membership_probe")
+				(membership_ordered_driver_probe_cost
+					candidate_input_rows candidate_rows driver_rows facts)
+				(membership_driver_probe_cost driver_rows
+					(qassoc_get facts (quote membership_candidate_probe_branches) 1)
+					(qassoc_get facts (quote membership_downstream_probe_branches) 0)))
+			nil))
+		(define batch_facts (merge (list
+			(list
+				(list (quote membership_candidate_input_rows) candidate_input_rows)
+				(list (quote membership_candidate_estimated_rows) candidate_rows)
+				(list (quote membership_driver_rows) driver_rows))
+			facts)))
+		(define batch_cost (if allow_ordered_batch
+			(ordered_batch_accept_cost batch_facts) nil))
+		(define prefiltered_cost (if prefiltered_supported
+			(membership_prefiltered_candidate_cost candidate_input_rows candidate_rows
+				prefiltered_driver_rows facts)
+			nil))
+		(define choices (filter (list
+			(list "candidate_keyset" candidate_cost)
+			(if (nil? driver_cost) nil (list driver_strategy driver_cost))
+			(if (nil? batch_cost) nil (list "ordered_batch_accept" batch_cost))
+			(if (nil? prefiltered_cost) nil
+				(list "prefiltered_candidate_keyset" prefiltered_cost)))
+			(lambda (choice) (not (nil? choice)))))
+		(car (reduce (cdr choices) (lambda (best choice)
+			(if (planner_cost_better? (cadr choice) (cadr best)) choice best))
+			(car choices))))))
+
+(define membership_carrier_candidate_choice (lambda (candidate_rows args)
+	(apply membership_carrier_cost_choice
+		(cons (nth args 0) (cons candidate_rows (cdr (cdr args)))))))
+
+/* Find the first integer cardinality at which the carrier winner either starts
+or stops matching `chosen`. The complete cost model runs only while compiling;
+the emitted cache guard is the resulting numeric interval, not another copy of
+the cost-model program in the query AST. */
+(define membership_carrier_choice_boundary (lambda (args chosen low high seek_match remaining)
+	(if (or (<= remaining 0) (<= (- high low) 1))
+		high
+		(begin
+			(define mid (floor (/ (+ low high) 2)))
+			(define matches (equal?
+				(membership_carrier_candidate_choice mid args) chosen))
+			(if (equal? matches seek_match)
+				(membership_carrier_choice_boundary args chosen low mid seek_match (- remaining 1))
+				(membership_carrier_choice_boundary args chosen mid high seek_match (- remaining 1)))))))
+
+(define membership_carrier_choice_interval (lambda (candidate_rows args chosen)
+	(begin
+		(define candidate_input_rows (nth args 0))
+		(define lower (if (equal?
+			(membership_carrier_candidate_choice 0 args) chosen)
+			0
+			(membership_carrier_choice_boundary
+				args chosen 0 candidate_rows true 32)))
+		(define upper (if (equal?
+			(membership_carrier_candidate_choice candidate_input_rows args) chosen)
+			(+ candidate_input_rows 1)
+			(membership_carrier_choice_boundary
+				args chosen candidate_rows candidate_input_rows false 32)))
+		(list lower upper))))
+
+/* A guard may reject a cached variant and compile another one in the same
+request. Source-local sampling is invariant across those alternatives: the
+table snapshot and request bindings are unchanged. Pin that observation in the
+query scope so a broad/no-hit predicate is sampled once, while a later request
+still rechecks current data and autoindex statistics. */
+(define query_scoped_source_filter_estimate_expr (lambda (src condition max_rows)
+	(begin
+		(define alias (source_alias src))
+		(define cols (extract_columns_for_alias src condition))
+		(define estimate_expr (list (quote scan_selectivity_estimate)
+			'(session "__memcp_tx")
+			(list (quote table) (source_schema src) (source_relation src))
+			(cons (quote list) cols)
+			(list (quote lambda)
+				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+				(lower_column_expr_for_alias src condition))
+			max_rows))
+		(define key (concat "__source_filter_estimate_"
+			(stable_structural_hash (list
+				(source_schema src) (source_relation src) cols condition max_rows) true)))
+		(list
+			(list (quote context) "session")
+			"get_or_compute_scoped"
+			(list (quote context) "query")
+			key
+			(list (quote lambda) '() estimate_expr)))))
+
+/* Recreate only the source-local statistic read used for carrier costing. The
+expression is emitted into the cache guard and evaluated against the current
+request bindings and current autoindex statistics. It never builds the
+candidate RecSet. */
+(define membership_runtime_source_rows_expr (lambda (src condition fallback_rows)
+	(begin
+		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 512))
+		(define text_prior (expr_text_pattern_expr condition))
+		(list (quote planner_estimated_matching_rows)
+			(if (nil? text_prior)
+				estimate_expr
+				(list (quote qassoc_set) estimate_expr
+					(list (quote quote) (quote fallback_selectivity))
+					(list (quote text_pattern_selectivity_prior) text_prior)))
+			fallback_rows fallback_rows))))
+
+(define membership_runtime_stage_rows_expr (lambda (input fallback_rows)
+	(if (union_block? input)
+		(begin
+			(define branch_exprs (map (union_branches input) (lambda (branch)
+				(membership_runtime_stage_rows_expr branch fallback_rows))))
+			(if (reduce branch_exprs (lambda (missing expr) (or missing (nil? expr))) false)
+				nil
+				(list (quote planner_add_estimates) (cons (quote list) branch_exprs))))
+		(if (and (query_block? input) (single_source? (qb_sources input)))
+			(begin
+				(define src (car (qb_sources input)))
+				(define condition (combine_where (qb_where input) (source_join_expr src)))
+				(define source_rows (coalesceNil (planner_source_row_count src) fallback_rows))
+				(define rows_expr (membership_runtime_source_rows_expr src condition source_rows))
+				(if (join_optimizer_source_constant_unique_point?
+					(list src) (source_alias src) src condition)
+					(list (quote min) 1 rows_expr)
+					rows_expr))
+			nil))))
+
+(define membership_record_stage_source_row_guards (lambda (input)
+	(if (union_block? input)
+		(reduce (union_branches input) (lambda (_ branch)
+			(membership_record_stage_source_row_guards branch)) nil)
+		(if (query_block? input)
+			(reduce (filter (qb_sources input) source_is_base_table?) (lambda (_ src)
+				(begin
+					(define rows (planner_source_row_count src))
+					(if (number? rows)
+						(planner_record_guard_condition
+							(list (quote equal?)
+								(list
+									(list (quote table_planner_statistics)
+										(list (quote table) (source_schema src) (source_relation src)))
+									"row_count")
+								rows))
+						nil))) nil)
+			nil))))
+
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe decision_scope)
 	(begin
 		(define stage (nth membership 0))
 		/* Some late RecSet consumers are introduced after reorder telemetry was
@@ -3333,7 +3571,12 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(coalesceNil
 						(qassoc_get facts (quote membership_driver_rows) nil)
 						source_rows)))
-				(define decision_id (concat "membership_carrier:" (gs_id stage)))
+				/* A logical stage can be considered by multiple physical tree nodes.
+				Scope the identifier to the consumer which can actually emit the choice;
+				otherwise an exploratory decision hides a different leaf decision from
+				EXPLAIN, calibration overrides and query-cache observations. */
+				(define decision_id (concat "membership_carrier:" (gs_id stage) ":"
+					decision_scope ":" (source_alias src) ":" (string consumer)))
 				(define known (and (number? candidate_rows) (number? driver_rows)))
 				(define owns_requirement (qassoc_get facts (quote physical_membership_requirement) false))
 				/* A membership below OR cannot become the scan driver without
@@ -3484,6 +3727,70 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define normal_choice (if (nil? observation_keys)
 					estimated_normal_choice
 					(if observed_candidate_choice "candidate_keyset" "ordered_batch_accept")))
+				/* Source-local estimates may become precise after the first execution
+				builds an autoindex. Re-evaluate the same complete carrier inequality in
+				the cache guard. This is intentionally outside the adaptive scan kernel:
+				it protects genuinely different physical trees. */
+				(define runtime_candidate_rows_expr
+					(membership_runtime_stage_rows_expr stage_input candidate_input_rows))
+				(membership_record_stage_source_row_guards stage_input)
+				(define estimate_sampled_rows (coalesceNil
+					(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
+					(qassoc_get measured_estimate (quote sampled) nil)))
+				/* A complete uncapped population scan is already exact for this table
+				generation. Source-row guards cover rebuild/data growth, and an autoindex
+				cannot refine an exact cardinality, so another selectivity guard would only
+				repeat the planning scan on every cache lookup. */
+				(define estimate_complete (and (not capped)
+					(and (number? estimate_sampled_rows)
+						(and (number? candidate_input_rows)
+							(>= estimate_sampled_rows candidate_input_rows)))))
+				(define driver_condition
+					(qassoc_get facts (quote membership_driver_condition) true))
+				/* A cache guard must read statistics, never execute the expensive side of
+				the decision it protects. Correlated probes and membership markers have no
+				source-local selectivity statistic; their compile-time row estimate remains
+				valid under the separately emitted source-row and session-value guards. */
+				(define driver_condition_source_local (and
+					(empty_list? (expr_probe_stages driver_condition))
+					(not (expr_contains_driver_membership? driver_condition))))
+				(define runtime_driver_rows_expr (if (number? driver_rows_override)
+					/* LIMIT-derived work is invariant under selectivity refinement. The
+					LIMIT/session guards own changes to that value. Comparing it with a
+					full-source estimate would reject every freshly compiled variant. */
+					driver_rows
+					(if (and (source_is_base_table? src) driver_condition_source_local)
+						(membership_runtime_source_rows_expr src driver_condition source_rows)
+						driver_rows)))
+				(define runtime_guard_costs (filter
+					(list candidate_cost driver_cost batch_cost prefiltered_cost)
+					(lambda (cost) (not (nil? cost)))))
+				(define runtime_choice_risky (reduce runtime_guard_costs (lambda (risky cost)
+					(or risky (> (qassoc_get cost (quote total_ns) 0)
+						planner_adaptive_observation_budget_ns))) false))
+				(define runtime_cost_guard_supported (and runtime_choice_risky
+					(and (not estimate_complete)
+					(and (nil? observation_keys)
+					(and known
+						(and (not guarded_broad_order_driver)
+							(and (not (nil? runtime_candidate_rows_expr))
+								(not (nil? runtime_driver_rows_expr)))))))))
+				(define runtime_cost_args (if runtime_cost_guard_supported (list
+					candidate_input_rows candidate_rows driver_rows cost_facts
+					driver_probe_supported driver_strategy allow_ordered_batch
+					prefiltered_supported prefiltered_driver_rows) '()))
+				(define runtime_candidate_interval (if runtime_cost_guard_supported
+					(membership_carrier_choice_interval
+						candidate_rows runtime_cost_args normal_choice) nil))
+				(if runtime_cost_guard_supported
+					(planner_record_guard_condition
+						(list (quote and)
+							(list (quote equal?) runtime_driver_rows_expr driver_rows)
+							(list (quote >=) runtime_candidate_rows_expr
+								(car runtime_candidate_interval))
+							(list (quote <) runtime_candidate_rows_expr
+								(cadr runtime_candidate_interval))))
+					nil)
 				(define alternatives (merge (list
 					(cons "candidate_keyset"
 						(if driver_probe_supported (list driver_strategy) '()))
@@ -3511,6 +3818,10 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "candidate_input_rows" candidate_input_rows)
 							(list "candidate_matching_rows" candidate_matching_rows)
 							(list "candidate_rows" candidate_rows)
+							(list "guard_candidate_lower_rows" (if runtime_cost_guard_supported
+								(car runtime_candidate_interval) nil))
+							(list "guard_candidate_upper_rows" (if runtime_cost_guard_supported
+								(cadr runtime_candidate_interval) nil))
 							(list "candidate_density" (membership_candidate_density
 								candidate_input_rows candidate_rows facts))
 							(list "projected_driver_rows"
@@ -3531,9 +3842,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "limit" (qassoc_get facts (quote membership_order_limit) nil))
 							(list "offset" (qassoc_get facts (quote membership_order_offset) 0))
 							(list "estimate_capped" capped)
-							(list "estimate_sampled_rows" (coalesceNil
-								(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
-								(qassoc_get measured_estimate (quote sampled) nil)))
+							(list "estimate_sampled_rows" estimate_sampled_rows)
 							(list "estimate_population" (string estimate_population))
 							(list "estimate_coverage" (string estimate_coverage))
 							(list "probe_branches" (qassoc_get facts (quote membership_candidate_probe_branches) 1))
@@ -3592,7 +3901,8 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
-			src membership consumer driver_rows_override allow_ordered_batch nil 0 true))
+			src membership consumer driver_rows_override allow_ordered_batch nil 0 true
+			(quote expression)))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
 			nil))))
@@ -6079,6 +6389,18 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 
 (define rewrite_scalar_first_probe_expr_using_index (lambda (stages index default_alias expr)
 	(match expr
+		/* Physical probe markers are atomic lowering results. Their embedded stage
+		descriptors describe the probe itself; recursively rewriting those logical
+		descriptors can change correlation keys and makes a second lowering pass
+		non-idempotent. */
+		((symbol scalar_first_probe) _stage _requested_col) expr
+		((quote scalar_first_probe) _stage _requested_col) expr
+		((symbol scalar_first_probe) _stage _requested_col _dependencies) expr
+		((quote scalar_first_probe) _stage _requested_col _dependencies) expr
+		((symbol scalar_aggregate_probe) _stage _requested_col) expr
+		((quote scalar_aggregate_probe) _stage _requested_col) expr
+		((symbol scalar_cardinality_probe) _stage _requested_col) expr
+		((quote scalar_cardinality_probe) _stage _requested_col) expr
 		((symbol if)
 			((symbol >) ((symbol coalesceNil) ((symbol get_column) count_alias count_tbl_ic count_col count_col_ic) 0) 1)
 			((symbol error) message)
@@ -6275,5 +6597,5 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_group_cache_probe_row_ns 1)
 (define planner_membership_ordered_driver_input_row_ns 1)
 (define planner_membership_ordered_scan_invocation_ns 3027639)
-(define planner_membership_ordered_recset_row_ns 1)
+(define planner_membership_ordered_recset_sort_unit_ns 1)
 /* END GENERATED COST CONSTANTS */

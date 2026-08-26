@@ -2633,6 +2633,7 @@ type filteredRowEstimate struct {
 	rows       int64
 	capped     bool
 	examined   int64
+	universe   int64
 	population string
 	coverage   string
 }
@@ -2674,16 +2675,18 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 
 	acidMode := currentTx != nil && currentTx.Mode == TxACID
 	mainCount := t.main_count
+	visibleUniverse := int64(mainCount) + int64(len(t.inserts)) - int64(t.deletions.Count())
 	count := int64(0)
 	sampled := int64(0)
 	capped := false
 	indexRestricted := false
+	candidateSpan := int64(-1)
 	hookCandidates := int64(-1)
 	hookUniverse := int64(0)
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	var buf [256]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 0, func(index *StorageIndex, active bool) {
+	t.iterateIndexEstimate(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
 		indexRestricted = active && len(lower) > 0
 		if active {
 			if candidates, universe, ok := index.estimateHookCandidates(currentTx, bounds); ok {
@@ -2741,6 +2744,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		return filteredRowEstimate{
 			rows:       hookCandidates,
 			examined:   hookUniverse,
+			universe:   visibleUniverse,
 			population: "index_hook_candidates",
 			coverage:   "upper_bound",
 		}
@@ -2754,6 +2758,15 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	if capped {
 		if population == "table_rows" {
 			coverage = "sampled"
+		} else if candidateSpan >= 0 {
+			// The active sorted index already located both ends of its range.
+			// That span is a conservative match upper bound even when residual
+			// evaluation stopped at the row budget.
+			if candidateSpan > count {
+				count = candidateSpan
+				coverage = "upper_bound"
+			}
+			capped = false
 		} else {
 			coverage = "lower_bound"
 		}
@@ -2762,6 +2775,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		rows:       count,
 		capped:     capped,
 		examined:   sampled,
+		universe:   visibleUniverse,
 		population: population,
 		coverage:   coverage,
 	}

@@ -1006,6 +1006,22 @@ test_cases:
             - "subscan_partition_limit"
             - ".grp:"
             - "touch_keytable"
+      - scm: |
+          (begin
+            (define cache (newcachemap))
+            (define sess (context "session"))
+            (define query "SELECT d.ID FROM in_dv_doc d WHERE d.file_id IN (SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%' UNION SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%') ORDER BY d.sort_key LIMIT 10")
+            (define formula (cached_parse cache parse_sql "memcp-tests" query
+              (sql_policy "root") "root" sess true))
+            (define cold_guard (eval (nth formula 1)))
+            (rebuild (table "memcp-tests" "in_dv_file") true false)
+            (define rebuilt_guard (eval (nth formula 1)))
+            (if (and cold_guard (not rebuilt_guard))
+              "ok"
+              (error (concat "membership carrier guard did not follow refined statistics: "
+                cold_guard "/" rebuilt_guard))))
+        expect:
+          data: ["ok"]
       - sql: |
           EXPLAIN
           SELECT d.ID
@@ -1621,13 +1637,11 @@ test_cases:
         expect:
           contains:
             - "chosen candidate_keyset"
-            - "chosen scan_order_recset_part"
-            - "recset_scan_source"
+            - "chosen adaptive_recset_boundary"
+            - "runtime_cardinality_and_index_span"
             - "recset_project_join"
           not_contains:
-            - "chosen recset_contains_probe"
-            - "base_table_scan_with_membership_filter"
-            - "source_is_base_table"
+            - "chosen ordered_base_membership"
             - "$recset_contains"
 
   - name: "IN UNION after derived ACL EXISTS keeps rows and lowers probes"
@@ -2666,7 +2680,8 @@ test_cases:
                 (list (+ i 1) (concat "asset-" i) (concat "broad needle text " i)))))
             (insert (table "memcp-tests" "in_prefilter_doc") '("ID" "file_id" "tenant" "sort_key")
               (map (produceN 20000) (lambda (i)
-                (list (+ i 1) (+ i 1) (if (>= i 19900) 7 9) i))))
+                (list (+ i 1) (+ i 1)
+                  (if (>= i 19900) 7 (if (>= i 19148) 8 9)) i))))
             (rebuild)
             true)
     steps:
@@ -2705,6 +2720,30 @@ test_cases:
             - "recset_project_join"
             - "recset_intersect"
             - "scan_order"
+      - sql: "SELECT d.ID FROM in_prefilter_doc d WHERE d.tenant = 8"
+        expect:
+          rows: 752
+      - sql: "SELECT d.ID FROM in_prefilter_doc d WHERE d.tenant = 8"
+        expect:
+          rows: 752
+      - sql: |
+          EXPLAIN PHYSICAL
+          SELECT d.ID
+          FROM in_prefilter_doc d
+          WHERE d.tenant = 8
+            AND d.file_id IN (
+            SELECT f.ID FROM in_prefilter_file f WHERE f.filename LIKE '%missing%'
+            UNION
+            SELECT f.ID FROM in_prefilter_file f WHERE f.search LIKE '%also-missing%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          rows: 1
+          contains:
+            - "membership_carrier"
+            - "prefiltered_driver_rows 752"
+            - "chosen prefiltered_candidate_keyset"
       - sql: |
           EXPLAIN PHYSICAL CALIBRATE
           SELECT d.ID

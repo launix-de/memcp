@@ -538,13 +538,14 @@ test_cases:
     physical_calibration: true
     calibration_decision: "membership_carrier"
     calibration_holdout: true
-    race: true
-    race_grace: 0.5
-    cache_state: "cold_operator_state_race"
+    # All carrier alternatives share the adaptive storage index. Measure their
+    # steady-state topology after one discarded pass; a serial cold pass would
+    # charge index construction only to whichever forced variant runs first.
+    cache_state: "warm_operator_state"
     compile_state: "variant_compile_and_execute"
     expected_driver_input_rows: 1000000
-    warmup: 0
-    repetitions: 1
+    warmup: 1
+    repetitions: 3
     sql: |
       SELECT d.id, d.p1
       FROM pc_docs_million d

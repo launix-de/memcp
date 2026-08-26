@@ -823,7 +823,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		true nil nil nil nil nil))
 	(assert (expr_contains_subquery? (untangle_query_term scalar_no_from_ast nil)) false "untangle_query unnests zero-domain expression subqueries")
 	(define scalar_no_from_plan (build_queryplan_term scalar_no_from_ast))
-	(assert (equal? (ordered_recset_observation_expr true) true) true "ordered RecSet observation preserves boolean literals")
+	(assert (equal? (nth (membership_adaptive_ordered_consumer
+		10000 1 72 200
+		(list
+			(list (quote membership_candidate_probe_branches) 2)
+			(list (quote membership_driver_input_rows) 1000000)
+			(list (quote membership_order_limit_driver) true))) 3)
+		(quote ordered_inverse_recset)) true
+		"sparse ordered RecSets use the adaptive inverse-position kernel")
+	(assert (equal? (nth (membership_adaptive_ordered_consumer
+		10000 5000 72 1000000
+		(list
+			(list (quote membership_candidate_probe_branches) 2)
+			(list (quote membership_driver_input_rows) 1000000)
+			(list (quote membership_order_limit_driver) true))) 3)
+		(quote ordered_base_membership)) true
+		"dense ordered RecSets retain the base-index membership kernel")
 	(assert (equal? (logical_op scalar_no_from_plan) 'begin) true "zero-domain subqueries retain the lexical physical query context boundary")
 	(assert (equal? (serialize (nth scalar_no_from_plan 4))
 		"(resultrow '(\"x\" 8 \"in_ok\" (if (nil? 8) nil (if (nil? 8) nil (equal?? 8 8))) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")

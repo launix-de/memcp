@@ -20,6 +20,56 @@ import "github.com/launix-de/memcp/scm"
 
 type recSetMatcher struct{}
 
+// appendRecSetBoundary turns a table-shaped RecSet source into an exact
+// non-ordering boundary on its backing table. Scan operators retain one common
+// table/index pipeline; choosing whether the base index or this RecSet drives
+// iteration is an execution-kernel decision, not a second relational shape.
+func appendRecSetBoundary(bounds boundaries, source *recSet) boundaries {
+	if source == nil {
+		return bounds
+	}
+	if source.table == nil {
+		panic("recset scan source has no backing table")
+	}
+	value := NewRecSetScmer(source)
+	return append(bounds, columnboundaries{
+		col:            "$recset_contains",
+		matcher:        RecSetMatcher,
+		lower:          value,
+		lowerInclusive: true,
+		upper:          value,
+		upperInclusive: true,
+		mandatory:      true,
+	})
+}
+
+// smallestRecSetBoundary returns the cheapest exact RecSet from a boundary
+// suffix. Other RecSet boundaries remain ordinary matchers and are intersected
+// by bindRowMatchers. This permits several independent RecSet hooks without
+// creating another scan-source shape.
+func smallestRecSetBoundary(bounds boundaries, shard *storageShard) (*recSetShard, bool) {
+	var smallest *recSetShard
+	found := false
+	for _, bound := range bounds {
+		if !matcherKindEqual(bound.matcher, RecSetMatcher) || !bound.lower.IsCustom(TagRecSet) {
+			continue
+		}
+		source := RecSetFromScmer(bound.lower)
+		if source == nil || source.table != shard.t {
+			continue
+		}
+		found = true
+		part := source.shardEntry(shard)
+		if part == nil {
+			return nil, true
+		}
+		if smallest == nil || part.count < smallest.count {
+			smallest = part
+		}
+	}
+	return smallest, found
+}
+
 func (m *recSetMatcher) Kind() string      { return "recset" }
 func (m *recSetMatcher) IsSorted() bool    { return false }
 func (m *recSetMatcher) IsPointLike() bool { return true }

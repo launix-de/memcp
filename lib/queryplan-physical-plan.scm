@@ -755,7 +755,12 @@ only partitioned FROM source would erase the block's row multiplicity
 	(query_block_with_scalar_first_probes_using_graph
 		stages (stage_dependency_graph stages) block)))
 
-(define query_block_with_presence_probe_sources_using (lambda (stages probe_sources block)
+/* This rewrite only consumes the probe sources selected by its caller. Selection
+is deliberately separate: dominance may choose a bounded owned probe immediately,
+while cardinality-dependent alternatives must arrive through their cost decision
+and recompile guard. Keeping this helper policy-free prevents a local query shape
+from silently overriding the physical planner. */
+(define query_block_with_selected_probe_sources_using (lambda (stages probe_sources block)
 	(begin
 		(define sources (qb_sources block))
 		(define selected_probe_sources
@@ -784,9 +789,9 @@ only partitioned FROM source would erase the block's row multiplicity
 			(join_optimizer_facts_without_aliases
 				(qassoc_set
 					(qb_facts block)
-					(quote consumed_presence_probe_stage_ids)
+					(quote consumed_probe_stage_ids)
 					(merge_unique (list
-						(qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '())
+						(qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '())
 						(stage_output_source_ids selected_probe_sources))))
 				(map selected_probe_sources source_alias))))))
 
@@ -794,7 +799,7 @@ only partitioned FROM source would erase the block's row multiplicity
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(query_block_with_presence_probe_sources_using
+		(query_block_with_selected_probe_sources_using
 			stages
 			(presence_probe_output_sources stages sources default_alias allow_unbounded)
 			block))))
@@ -2163,7 +2168,7 @@ must not pay for an unused group cache. */
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
-		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_presence_probe_stage_ids) '()))
+		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '()))
 		(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block
 			all_stages sources default_alias (qb_limit block) (qb_where block) (query_block_probe_consumers block))))
 		(define stage_output_ids (stage_output_source_ids sources))
@@ -3257,129 +3262,6 @@ RecSet; membership edges retain their own physical operators. */
 				(quote membership_consumer) nil)
 				(quote order_limit))))))
 
-/* An exact RecSet used by ORDER/LIMIT has two physical consumers. Scanning the
-RecSet directly is proportional to its cardinality. Scanning the ordered base
-table and probing membership is proportional to the expected prefix needed to
-fill the requested window. Neither dominates for all densities, so this is a
-cost decision with an exact request-local observation and a crossover guard. */
-(define ordered_recset_expected_base_rows (lambda (source_rows carrier_rows window_rows)
-	(if (or (not (number? source_rows)) (<= source_rows 0))
-		window_rows
-		(if (or (not (number? carrier_rows)) (<= carrier_rows 0))
-			source_rows
-			(min source_rows (max window_rows
-				(/ (* window_rows source_rows) carrier_rows)))))))
-
-(define ordered_direct_recset_cost (lambda (carrier_rows)
-	(planner_cost
-		planner_membership_ordered_scan_invocation_ns
-		(+
-			(* carrier_rows planner_membership_scan_row_ns)
-			(* (/ (* carrier_rows carrier_rows) 1000000)
-				planner_membership_ordered_driver_input_row_ns))
-		0 0 0 0 0 0 carrier_rows 0.95)))
-
-(define ordered_base_membership_cost (lambda (source_rows carrier_rows window_rows)
-	(begin
-		(define visited_rows
-			(ordered_recset_expected_base_rows source_rows carrier_rows window_rows))
-		(planner_cost
-			planner_membership_ordered_scan_invocation_ns
-			(* visited_rows (+ planner_membership_scan_row_ns
-				planner_membership_recset_probe_row_ns))
-			0 0 0 0 0 0 visited_rows 0.95))))
-
-(define ordered_recset_crossover_search (lambda (source_rows window_rows low high remaining)
-	(if (or (<= remaining 0) (>= low high))
-		low
-		(begin
-			(define mid (/ (+ low high) 2))
-			(if (planner_cost_better?
-				(ordered_direct_recset_cost mid)
-				(ordered_base_membership_cost source_rows mid window_rows))
-				(ordered_recset_crossover_search source_rows window_rows (+ mid 1) high (- remaining 1))
-				(ordered_recset_crossover_search source_rows window_rows low mid (- remaining 1)))))))
-
-/* Preparations execute immediately before the compiled plan and therefore do
-not live inside with_physical_query_context's lexical bindings. Rebind only the
-three physical context symbols; quoted data remains opaque. */
-(define ordered_recset_observation_expr (lambda (expr)
-	(if (physical_query_symbol_named? expr "__physical_query_session")
-		(list (quote context) "session")
-		(if (physical_query_symbol_named? expr "__physical_query_scope")
-			(list (quote context) "query")
-			(if (physical_query_symbol_named? expr "__physical_query_tx")
-				(list (list (quote context) "session") "__memcp_tx")
-				(match expr
-					((symbol quote) _value) expr
-					((quote quote) _value) expr
-					(cons head tail) (cons
-						(ordered_recset_observation_expr head)
-						(map tail ordered_recset_observation_expr))
-					_ expr))))))
-
-/* Return (chosen carrier). The carrier is replaced by the prepared observation
-when cached_parse is active, so preparing cardinality never duplicates its
-construction. Semantic dominance decisions are made elsewhere; cardinality-
-dependent choices must pass through this function and retain their guard. */
-(define ordered_scalar_recset_consumer_plan (lambda (src scalar_plan carrier offset limit)
-	(begin
-		(define source_rows (planner_source_row_count src))
-		(define window_rows (+ (coalesceNil offset 0) (coalesceNil limit 0)))
-		(define probe (physical_scalar_truth_plan_probe scalar_plan))
-		(define stage (if (nil? probe) nil (car probe)))
-		(define decision_id (concat "ordered_recset_consumer:"
-			(if (nil? stage) (source_alias src) (gs_id stage))))
-		/* Carrier producers are closed before reaching this consumer: direct boolean
-		stages are RecSet algebra and ordinary membership carriers are relational
-		plans. cached_parse can therefore observe the exact request-local cardinality
-		without changing an outer-row binding or constructing the carrier twice. */
-		(define observation_keys (planner_register_queryplan_observation decision_id
-			(ordered_recset_observation_expr carrier)
-			(list (quote recset_count) (symbol "__queryplan_observed_value"))))
-		(define observed_rows (if (nil? observation_keys) nil
-			(planner_queryplan_observed_metric decision_id)))
-		(define planning_rows (if (number? observed_rows) observed_rows source_rows))
-		(define direct_cost (ordered_direct_recset_cost planning_rows))
-		(define base_cost (ordered_base_membership_cost source_rows planning_rows window_rows))
-		(define normal_choice (if (planner_cost_better? direct_cost base_cost)
-			"ordered_direct_recset" "ordered_base_membership"))
-		(define crossover (if (number? source_rows)
-			(ordered_recset_crossover_search source_rows window_rows 0 source_rows 32)
-			nil))
-		(if (or (nil? observation_keys) (not (number? crossover)))
-			nil
-			(planner_record_guard_condition
-				(list (if (equal? normal_choice "ordered_direct_recset") (quote <) (quote >=))
-					(list (quote session) (cadr observation_keys)) crossover)))
-		(define chosen (planner_physical_choice decision_id normal_choice
-			(list "ordered_direct_recset" "ordered_base_membership")))
-		(define forced (planner_physical_override decision_id))
-		(planner_record_physical_decision (list
-			(list "decision_id" decision_id)
-			(list "decision" "ordered_recset_consumer")
-			(list "decision_site" "ordered_scan_lowering")
-			(list "chosen" chosen)
-			(list "selection" (if (nil? forced) "cost" "forced"))
-			(list "reason" (if (nil? forced) "lowest_total_ns" "calibration_override"))
-			(list "inputs" (list
-				(list "carrier_rows" planning_rows)
-				(list "driver_input_rows" source_rows)
-				(list "offset" offset)
-				(list "limit" limit)
-				(list "crossover_rows" crossover)))
-			(list "alternatives" (list
-				(list
-					(list "plan" "ordered_direct_recset")
-					(list "status" (if (equal? chosen "ordered_direct_recset") "chosen" "rejected"))
-					(list "cost" (planner_cost_explain direct_cost)))
-				(list
-					(list "plan" "ordered_base_membership")
-					(list "status" (if (equal? chosen "ordered_base_membership") "chosen" "rejected"))
-					(list "cost" (planner_cost_explain base_cost)))))))
-		(list chosen (if (nil? observation_keys) carrier
-			(planner_queryplan_observation_read_expr (car observation_keys)))))))
-
 (define lower_single_source_query_block (lambda (block)
 	(begin
 		(define src (car (qb_sources block)))
@@ -3410,22 +3292,69 @@ dependent choices must pass through this function and retain their guard. */
 					(coalesceNil (probe_limit_work_rows (qb_limit block))
 						(probe_context_row_count (list src)))
 					(probe_context_row_count (list src))))
-				(define scalar_plan (physical_scalar_truth_plan
-					(list src) src alias raw_condition
-					probe_work_rows (probe_context_row_count (list src))
-					(query_block_stage_catalog block)))
+				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
+				(define memberships (driver_memberships_for_source src raw_condition))
+				(define implied_membership (driver_membership_for_source src raw_condition))
+				/* Select the outer membership topology before attaching an independent
+				scalar carrier. A winning ordered batch consumes that carrier as a mandatory
+				batch boundary; it must not silently turn the carrier into the scan table and
+				make the selected batch physically unreachable. */
+				(define row_number_membership_consumer
+					(membership_row_number_consumer? (if (empty_list? memberships)
+						nil (car memberships)) (and scan_order_supported bounded)))
+				(define allow_ordered_batch_binding (and scan_order_supported
+					(and bounded
+						(or (empty_list? order_items)
+							(not (empty_list? (source_primary_key_columns src)))))))
+				(define membership_plans (filter (map memberships (lambda (membership)
+					(begin
+						(define plan (recset_project_join_plan_for_membership_using
+							src membership
+							(if bounded (quote order_limit) (quote filter))
+							(if (and scan_order_supported bounded)
+								(probe_limit_work_rows (qb_limit block)) nil)
+							allow_ordered_batch_binding
+							(prefiltered_driver_recset_expr_for_membership
+								src source_table raw_condition membership)
+							(+ (count (acceptance_required_sources
+								(membership_downstream_sources (qb_sources block) src membership)
+								alias raw_condition))
+								(count (expr_probe_stages raw_condition)))
+							(not row_number_membership_consumer)
+							(quote single_source)))
+						(if (nil? plan) nil (list membership plan)))))
+					(lambda (entry) (not (nil? entry)))))
+				(define batch_membership_entries (filter membership_plans (lambda (entry)
+					(equal? (car (nth entry 1)) "ordered_batch_accept"))))
+				(define batch_membership_selected (not (empty_list? batch_membership_entries)))
+				/* A branch-local membership may select batch evaluation, but cannot be
+				the batch's table: sibling OR branches do not imply it. Only a membership
+				implied by the whole predicate is an exact candidate driver. */
+				(define batch_driver_entries (filter batch_membership_entries (lambda (entry)
+					(and (not (nil? implied_membership))
+						(equal? (nth entry 0) implied_membership)))))
+				(define batch_driver_selected (not (empty_list? batch_driver_entries)))
+				(define batch_membership (if batch_driver_selected
+					(nth (car batch_driver_entries) 0) nil))
+				/* A batch choice must compile scalar truth inside the candidate batch.
+				Building its full-table carrier first is semantically valid, but defeats
+				the selected topology by evaluating every ACL row before LIMIT can brake. */
+				(define scalar_plan (if batch_membership_selected nil
+					(physical_scalar_truth_plan
+						(list src) src alias raw_condition
+						probe_work_rows (probe_context_row_count (list src))
+						(query_block_stage_catalog block))))
 				(define scalar_carrier (physical_scalar_truth_plan_carrier scalar_plan))
-				(define scalar_consumer_plan (if (and (not (nil? scalar_carrier))
-					(and scan_order_supported bounded))
-					(ordered_scalar_recset_consumer_plan src scalar_plan scalar_carrier
-						(qb_offset block) (qb_limit block))
-					nil))
-				(define scalar_consumer (if (nil? scalar_consumer_plan) nil
-					(car scalar_consumer_plan)))
-				(define effective_scalar_carrier (if (nil? scalar_consumer_plan)
-					scalar_carrier (cadr scalar_consumer_plan)))
-				(define scalar_membership_filter
-					(equal? scalar_consumer "ordered_base_membership"))
+				/* An exact scalar truth carrier is always attached as a scan boundary.
+				Storage chooses the ordered base-membership or inverse-RecSet kernel from
+				the exact runtime cardinality and index span; representing that kernel
+				choice as a second planner alternative would duplicate one operator. */
+				(define effective_scalar_carrier scalar_carrier)
+				/* RecSet scan sources now preserve the ordinary ORDER access path and
+				become mandatory boundaries inside storage. The exact scalar carrier can
+				therefore drive batch_accept directly; converting it back into a callback
+				would hide its cardinality from the adaptive scan kernel. */
+				(define scalar_membership_filter false)
 				(define scalar_membership_var (symbol (concat "__ordered_scalar_recset_"
 					(if (nil? (physical_scalar_truth_plan_probe scalar_plan))
 						(source_alias src)
@@ -3437,41 +3366,6 @@ dependent choices must pass through this function and retain their guard. */
 				(define bundled_fields (if (nil? projection_bundle)
 					effective_fields
 					(nth projection_bundle 1)))
-				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
-				(define memberships (driver_memberships_for_source src condition))
-				/* A derived Top-K has already moved ORDER/LIMIT into its row-number
-				consumer. The logical membership requirement retains that ownership even
-				when this block no longer carries a direct ORDER/LIMIT pair. */
-				(define row_number_membership_consumer
-					(membership_row_number_consumer? (if (empty_list? memberships)
-						nil (car memberships)) (and scan_order_supported bounded)))
-				(define allow_ordered_batch_binding (and scan_order_supported
-					(and bounded
-						(or (empty_list? order_items)
-							(not (empty_list? (source_primary_key_columns src)))))))
-				/* This node-local lowering is the sole carrier decision. Older code
-				selected a keyset from block-level broadness facts before reaching this
-				point; that duplicate choice could label an alternative as selected while
-				emitting the correlated subscan fallback. */
-				(define membership_plans (filter (map memberships (lambda (membership)
-					(begin
-						(define plan (recset_project_join_plan_for_membership_using
-							src membership
-							(if bounded (quote order_limit) (quote filter))
-							(if (and scan_order_supported bounded)
-								(probe_limit_work_rows (qb_limit block)) nil)
-							allow_ordered_batch_binding
-							(prefiltered_driver_recset_expr_for_membership
-								src source_table condition membership)
-							(+ (count (acceptance_required_sources
-								(membership_downstream_sources (qb_sources block) src membership)
-								alias raw_condition))
-								(count (merge_unique (list
-									(expr_probe_stages raw_condition)
-									(physical_scalar_truth_plan_stages scalar_plan)))))
-							(not row_number_membership_consumer)))
-						(if (nil? plan) nil (list membership plan)))))
-					(lambda (entry) (not (nil? entry)))))
 				(define driver_memberships (map (filter membership_plans (lambda (entry)
 					(equal? (car (nth entry 1)) "driver_order_membership_probe")))
 					(lambda (entry) (nth entry 0))))
@@ -3560,11 +3454,19 @@ dependent choices must pass through this function and retain their guard. */
 				(define membership_candidates (if membership_filter
 					(membership_or_candidate_recset src source_table condition membership_bindings)
 					nil))
-				(define membership_table_expr (if membership_formula_driver
-					membership_formula_expr
-					(if membership_driver
-						(nth (car membership_bindings) 2)
-						(coalesceNil membership_candidates source_table))))
+				/* ordered_batch_accept consumes the selected cheap membership as its
+				candidate table. The remaining predicate is lowered inside each batch.
+				Leaving this membership in the callback would repeat the complete ordered
+				driver scan for every growing window and discard the chosen topology. */
+				(define batch_membership_table_expr (if batch_driver_selected
+					(cadr (nth (car batch_driver_entries) 1)) nil))
+				(define membership_table_expr (if batch_driver_selected
+					batch_membership_table_expr
+					(if membership_formula_driver
+						membership_formula_expr
+						(if membership_driver
+							(nth (car membership_bindings) 2)
+							(coalesceNil membership_candidates source_table)))))
 				/* Independent scalar and membership edges may both select RecSet scan
 				sources. Their conjunction is the exact physical intersection; replacing
 				one with the other after either predicate was stripped would lose a WHERE
@@ -3585,18 +3487,19 @@ dependent choices must pass through this function and retain their guard. */
 							(recset_contains_call_expr scalar_membership_var)
 							(lower_column_expr_for_alias src filter_condition))
 						(lower_column_expr_for_alias src filter_condition))))
+				(define batch_residual_condition (if batch_driver_selected
+					(strip_driver_membership_for_source src filter_condition batch_membership)
+					filter_condition))
 				(define remaining_batch_memberships (filter
-					(ordered_batch_membership_terms src filter_condition)
+					(ordered_batch_membership_terms src batch_residual_condition)
 					(lambda (membership) (ordered_batch_stage_supported? (nth membership 0)))))
 				/* Membership markers which cannot project a batch RecSet remain in the
 				residual expression and lower through the ordinary probe machinery. This
 				makes adaptive ordered batching a property of the consuming scan, not of
 				one privileged predicate shape. */
-				(define use_batch_accept (and (equal? table_expr source_table)
-					(reduce membership_plans (lambda (chosen entry)
-						(or chosen (equal? (car (nth entry 1)) "ordered_batch_accept"))) false)))
+				(define use_batch_accept batch_membership_selected)
 				(define batch_filter (if use_batch_accept
-					(ordered_batch_filter_expr (list src) alias src filter_condition
+					(ordered_batch_filter_expr (list src) alias src batch_residual_condition
 						remaining_batch_memberships
 						(if scalar_membership_filter (list scalar_membership_var) '())
 						(probe_context_row_count (list src)) '() true)
@@ -4032,7 +3935,7 @@ move the window to the wrong tree level. */
 				(+ (count (acceptance_required_sources
 					remaining_sources default_alias final_condition))
 					(count (expr_probe_stages final_condition)))
-				true)))
+				true (quote ordered_join_stream))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		/* A scalar truth carrier over the complete driver would defeat adaptive
@@ -4421,7 +4324,7 @@ an operator, change join order, or remove a predicate. Adding a leaf-local
 "if this expression then use that scan" below the common selector is a code
 smell: add a descriptor here and let choose_scan_access_path compare it with
 every other carrier instead. Logical join order remains owned by join_plan. */
-(define scan_access_path_text_candidates (lambda (src all_sources default_alias condition)
+(define scan_access_path_text_candidates (lambda (src all_sources default_alias condition ordered_window_rows)
 	(begin
 		(define alias (source_alias src))
 		(define aliases (source_aliases all_sources))
@@ -4445,15 +4348,16 @@ every other carrier instead. Logical join order remains owned by join_plan. */
 									(list (quote predicate) term)
 									(list (quote rows) rows)
 									(list (quote input_rows) input_rows)
+									(list (quote ordered_window_rows) ordered_window_rows)
 									(list (quote work) work)
 									(list (quote estimate) estimate))
 								nil)))))
 				(lambda (item) (not (nil? item))))))))
 
-(define scan_access_path_candidates (lambda (src all_sources default_alias condition)
+(define scan_access_path_candidates (lambda (src all_sources default_alias condition ordered_window_rows)
 	/* Text-backed exact RecSets are the first descriptor kind. Index ranges,
 	persisted RecSets, or future scan primitives belong in this same list. */
-	(scan_access_path_text_candidates src all_sources default_alias condition)))
+	(scan_access_path_text_candidates src all_sources default_alias condition ordered_window_rows)))
 
 /* The text predicate itself is common work. The carrier decision determines
 whether the downstream join continuation is entered for every driver row or
@@ -4487,15 +4391,41 @@ this lowering boundary. */
 			(planner_join_work_cost input_rows 0.65)
 			(qassoc_get candidate (quote rows) input_rows) 0.65))))
 
+(define scan_access_path_adaptive_consumer (lambda (candidate)
+	(begin
+		(define input_rows (qassoc_get candidate (quote input_rows) 0))
+		(define rows (qassoc_get candidate (quote rows) input_rows))
+		(define window_rows (qassoc_get candidate (quote ordered_window_rows) nil))
+		(if (or (not (number? window_rows)) (<= window_rows 0))
+			(list rows 0 0 (quote unordered_recset))
+			(begin
+				(define visited_rows (if (<= rows 0)
+					input_rows
+					(min input_rows (max window_rows
+						(/ (* window_rows input_rows) rows)))))
+				(define sort_work (membership_ordered_recset_sort_work rows))
+				(define inverse_cost (* sort_work
+					planner_membership_ordered_recset_sort_unit_ns))
+				(define base_cost (* visited_rows (+
+					planner_membership_scan_row_ns
+					planner_membership_recset_probe_row_ns)))
+				(if (< inverse_cost base_cost)
+					(list rows sort_work 0 (quote ordered_inverse_recset))
+					(list visited_rows 0 visited_rows (quote ordered_base_membership))))))))
+
 (define scan_access_path_recset_cost (lambda (src candidate)
 	(begin
 		(define input_rows (qassoc_get candidate (quote input_rows) 0))
 		(define rows (qassoc_get candidate (quote rows) input_rows))
+		(define consumer (scan_access_path_adaptive_consumer candidate))
 		(planner_cost_add
 			(planner_cost_add
 				(scan_access_path_scan_cost src candidate)
 				(planner_cost planner_membership_recset_startup_ns
-					(* rows planner_membership_scan_row_ns) 0 0 0
+					(+ (* (nth consumer 0) planner_membership_scan_row_ns)
+						(* (nth consumer 1)
+							planner_membership_ordered_recset_sort_unit_ns))
+					(* (nth consumer 2) planner_membership_recset_probe_row_ns) 0 0
 					(* rows planner_membership_recset_build_row_ns)
 					(* rows 8) 0 rows 0.65)
 				rows 0.65)
@@ -4507,38 +4437,33 @@ this lowering boundary. */
 		(quote predicate_recset) (scan_access_path_recset_cost src candidate)
 		_ (neumann_fail "build_queryplan" "unsupported physical scan access-path descriptor"))))
 
-/* Both alternatives contain the same text scan. Solve the remaining linear
-cost inequality once and guard the cached plan by that crossover, not by an
-exact parameter value. */
+(define scan_access_path_crossover_search (lambda (src candidate base_cost low high remaining)
+	(if (or (<= remaining 0) (>= low high))
+		low
+		(begin
+			(define mid (/ (+ low high) 2))
+			(define mid_candidate (qassoc_set candidate (quote rows) mid))
+			(if (planner_cost_better?
+				(scan_access_path_recset_cost src mid_candidate) base_cost)
+				(scan_access_path_crossover_search src candidate base_cost
+					(+ mid 1) high (- remaining 1))
+				(scan_access_path_crossover_search src candidate base_cost
+					low mid (- remaining 1)))))))
+
+/* Both alternatives contain the same text scan. The adaptive RecSet consumer
+makes its remaining cost piecewise rather than linear, so solve the outer
+topology inequality by bounded binary search and guard that crossover. */
 (define scan_access_path_crossover_rows (lambda (src candidate)
 	(begin
-		(define zero_candidate (qassoc_set candidate (quote rows) 0))
-		(define one_candidate (qassoc_set candidate (quote rows) 1))
-		(define recset_zero (qassoc_get
-			(scan_access_path_recset_cost src zero_candidate) (quote total_ns) 0))
-		(define recset_one (qassoc_get
-			(scan_access_path_recset_cost src one_candidate) (quote total_ns) 0))
-		(define base_total (qassoc_get
-			(scan_access_path_base_cost src candidate) (quote total_ns) 0))
-		(define row_slope (- recset_one recset_zero))
-		(if (<= row_slope 0)
-			0
-			(max 0 (/ (- base_total recset_zero) row_slope))))))
+		(define input_rows (qassoc_get candidate (quote input_rows) 0))
+		(scan_access_path_crossover_search src candidate
+			(scan_access_path_base_cost src candidate) 0 input_rows 32))))
 
 (define scan_access_path_runtime_rows_expr (lambda (src candidate)
 	(begin
 		(define predicate (qassoc_get candidate (quote predicate) true))
-		(define alias (source_alias src))
-		(define cols (extract_columns_for_alias src predicate))
 		(define pattern_expr (expr_text_pattern_expr predicate))
-		(define estimate_expr (list (quote scan_selectivity_estimate)
-			'(session "__memcp_tx")
-			(list (quote table) (source_schema src) (source_relation src))
-			(cons (quote list) cols)
-			(list (quote lambda)
-				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-				(lower_column_expr_for_alias src predicate))
-			512))
+		(define estimate_expr (query_scoped_source_filter_estimate_expr src predicate 512))
 		(list (quote planner_estimated_matching_rows)
 			(if (nil? pattern_expr)
 				estimate_expr
@@ -4708,7 +4633,7 @@ exact parameter value. */
 					(count (merge_unique (list
 						(expr_probe_stages final_condition)
 						(physical_scalar_truth_plan_stages scalar_plan)))))
-				(not row_number_membership_consumer))))
+				(not row_number_membership_consumer) (quote join_leaf))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		(define residual_probe_work_rows (membership_plan_residual_work_rows
@@ -4730,24 +4655,13 @@ exact parameter value. */
 			(physical_scalar_truth_plan_carrier effective_scalar_plan))
 		(define scalar_carrier_driver (and (not (nil? effective_scalar_carrier))
 			(equal? alias (car effective_scalar_plan))))
-		/* An exact truth RecSet does not imply that iterating that RecSet is the
-		cheapest ordered access path. At the selected join-tree driver, compare the
-		complete projected carrier with the base index plus one membership test per
-		visited row. This is the same node-local choice used by a single-source
-		block; keeping it here makes added projection/LEFT-JOIN leaves irrelevant to
-		the operator decision. Cardinality-dependent choices retain the observation
-		and recompile guard installed by ordered_scalar_recset_consumer_plan. */
-		(define scalar_consumer_plan (if (and scalar_carrier_driver
-			(and direct_order_limit (not delay_limit_after_join)))
-			(ordered_scalar_recset_consumer_plan src effective_scalar_plan
-				effective_scalar_carrier offset_value limit_value)
-			nil))
-		(define scalar_consumer (if (nil? scalar_consumer_plan) nil
-			(car scalar_consumer_plan)))
-		(define consumed_scalar_carrier (if (nil? scalar_consumer_plan)
-			effective_scalar_carrier (cadr scalar_consumer_plan)))
-		(define scalar_membership_filter
-			(equal? scalar_consumer "ordered_base_membership"))
+		/* A truth carrier attached to this leaf is one exact scan boundary. The
+		join tree still decides whether the carrier is built at this node; storage
+		decides how that already-built boundary is traversed. Keeping the latter out
+		of physical lowering prevents a duplicate cardinality observation, guard and
+		plan-cache variant for two representations of the same adaptive operator. */
+		(define consumed_scalar_carrier effective_scalar_carrier)
+		(define scalar_membership_filter false)
 		(define scalar_membership_var (symbol (concat "__ordered_scalar_recset_"
 			(if (nil? (physical_scalar_truth_plan_probe effective_scalar_plan))
 				alias
@@ -4809,8 +4723,15 @@ exact parameter value. */
 			(nil? row_number_stage_filter)
 			(> (count all_sources) 1)
 			(equal? alias (probe_work_context_driver_alias probe_context))))
+		(define access_path_order_window (if (and
+			(not (empty_list? current_order_items))
+			(query_limit_active? offset_value limit_value))
+			(+ (coalesceNil (planner_literal_value offset_value) 0)
+				(coalesceNil (planner_literal_value limit_value) 0))
+			nil))
 		(define access_path_candidates_before_point_check (if access_path_build_allowed
-			(scan_access_path_candidates src all_sources default_alias effective_condition)
+			(scan_access_path_candidates src all_sources default_alias effective_condition
+				access_path_order_window)
 			'()))
 		/* A unique point lookup already bounds downstream work. This capability
 		check applies uniformly to every candidate; an enumerator must not hide a
@@ -7208,15 +7129,11 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		(if (not (or recset_source contains_probe))
 			nil
 			(begin
-				(define chosen (if recset_source
-					(quote scan_order_recset_part)
-					(quote recset_contains_probe)))
+				(define chosen (quote adaptive_recset_boundary))
 				(list
 					(list "decision" "ordered_recset_iterator")
 					(list "chosen" (string chosen))
-					(list "reason" (if recset_source
-						"recset_scan_source"
-						"base_table_scan_with_membership_filter"))
+					(list "reason" "runtime_cardinality_and_index_span")
 					(list "inputs" (list
 						(list "source" (pretty_print table_expr (settings "ExplainWidth")))
 						(list "sort_columns" (pretty_print (nth scan_expr 5) (settings "ExplainWidth")))
@@ -7224,13 +7141,13 @@ ordering run. Storage artifacts begin in build_queryplan. */
 						(list "limit" (nth scan_expr 9))))
 					(list "alternatives" (list
 						(list
-							(list "plan" "scan_order_recset_part")
-							(list "status" (if recset_source "chosen" "rejected"))
-							(list "reason" (if recset_source "recset_scan_source" "source_is_base_table")))
+							(list "plan" "ordered_inverse_recset")
+							(list "status" "runtime")
+							(list "reason" "sparse_recset_or_runtime_crossover"))
 						(list
-							(list "plan" "recset_contains_probe")
-							(list "status" (if recset_source "rejected" "chosen"))
-							(list "reason" (if recset_source "direct_intersection_available" "membership_is_filter")))))))))))
+							(list "plan" "ordered_base_membership")
+							(list "status" "runtime")
+							(list "reason" "dense_recset_or_narrow_index_span")))))))))))
 
 (define physical_ordered_recset_decisions (lambda (expr)
 	(match expr
@@ -7300,14 +7217,7 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		(define kind (qassoc_get decision "decision" nil))
 		(if (equal? kind "membership_carrier")
 			(physical_membership_operator_family plan)
-			(if (equal? kind "ordered_recset_consumer")
-				(begin
-					(define chosen (qassoc_get decision "chosen" nil))
-					(if (or (equal? chosen "ordered_direct_recset")
-						(equal? chosen "ordered_base_membership"))
-						chosen
-						"unknown"))
-				"unknown")))))
+			"unknown"))))
 
 /* recset_project_join is adaptive only inside the physical operator: actual
 source-key and per-shard target cardinalities are available there, while the
@@ -7376,8 +7286,7 @@ potentially large calibrated SELECT result. */
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" "unknown"))
 		(define decision_kind (qassoc_get decision "decision" nil))
-		(define expected_family (if (or (equal? decision_kind "membership_carrier")
-			(equal? decision_kind "ordered_recset_consumer"))
+		(define expected_family (if (equal? decision_kind "membership_carrier")
 			variant operator_family))
 		(define consistent (equal? operator_family expected_family))
 		(define baseline_hash_key (concat "hash:" decision_id))

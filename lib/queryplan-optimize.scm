@@ -2593,9 +2593,8 @@ source itself has no known row count (not a base table). */
 (define planner_column_distinct_estimate (lambda (src column)
 	(qassoc_get (planner_column_statistics src column) (quote distinct) nil)))
 
-(define planner_column_average_value_bytes (lambda (src column)
+(define planner_column_average_value_bytes_from_statistics (lambda (statistics)
 	(begin
-		(define statistics (planner_column_statistics src column))
 		(define measured (qassoc_get statistics (quote average_value_bytes) nil))
 		(if (not (nil? measured))
 			measured
@@ -2608,6 +2607,29 @@ source itself has no known row count (not a base table). */
 				(toLower (string (qassoc_get statistics (quote raw_type) ""))))
 				4096
 				0)))))
+
+(define planner_runtime_column_average_value_bytes (lambda (schema relation column)
+	(begin
+		(define stats (table_planner_statistics (table schema relation)))
+		(define columns (if (nil? stats) nil (stats "columns")))
+		(define column_stats (if (nil? columns) nil (columns column)))
+		(planner_column_average_value_bytes_from_statistics column_stats))))
+
+(define planner_column_average_value_bytes (lambda (src column)
+	(begin
+		(define measured (planner_column_average_value_bytes_from_statistics
+			(planner_column_statistics src column)))
+		(if (source_is_base_table? src)
+			/* Average width is a physical cost input refined by REBUILD. Keep the
+			cached plan while it is unchanged; a different width recompiles the full
+			cost inequality instead of making every guard walk the logical stage AST. */
+			(planner_record_guard_condition
+				(list (quote equal?)
+					(list (quote planner_runtime_column_average_value_bytes)
+						(source_schema src) (source_relation src) column)
+					measured))
+			nil)
+		measured)))
 
 (define planner_group_distinct_estimate (lambda (src keys row_count)
 	(reduce keys (lambda (estimate key)
@@ -3499,6 +3521,39 @@ physical alternative. */
 			(membership_projection_cost candidate_input_rows candidate_rows driver_rows work)
 			(membership_ordered_driver_probe_cost candidate_input_rows candidate_rows driver_rows work)))))
 
+(define membership_integer_log2_ceil_from (lambda (rows power bits)
+	(if (>= power rows)
+		bits
+		(membership_integer_log2_ceil_from rows (* power 2) (+ bits 1)))))
+
+(define membership_ordered_recset_sort_work (lambda (rows)
+	(if (<= rows 1)
+		rows
+		(* rows (membership_integer_log2_ceil_from rows 1 0)))))
+
+/* Once an exact target RecSet exists, storage adaptively chooses between
+sorting its inverse base-index positions and walking the ordered base-index
+prefix with membership checks. These are equivalent kernels of one scan
+operator, not planner alternatives. The carrier planner still needs their
+minimum estimated cost when comparing carrier construction with RHS probes or
+batching. A statistics-dependent change of that outer inequality is already
+owned by the membership-carrier guard; do not create another consumer guard. */
+(define membership_adaptive_ordered_consumer (lambda (candidate_input_rows candidate_rows driver_rows projected_rows work)
+	(if (not (membership_work_value work (quote membership_order_limit_driver) false))
+		(list projected_rows 0 0 (quote unordered_recset))
+		(begin
+			(define visited_rows (membership_expected_driver_rows_visited
+				candidate_input_rows candidate_rows driver_rows work))
+			(define sort_work (membership_ordered_recset_sort_work projected_rows))
+			(define inverse_cost (* sort_work
+				planner_membership_ordered_recset_sort_unit_ns))
+			(define base_cost (* visited_rows (+
+				planner_membership_scan_row_ns
+				planner_membership_recset_probe_row_ns)))
+			(if (< inverse_cost base_cost)
+				(list projected_rows sort_work 0 (quote ordered_inverse_recset))
+				(list visited_rows 0 visited_rows (quote ordered_base_membership)))))))
+
 (define membership_projection_cost (lambda (candidate_input_rows candidate_rows driver_rows work)
 	(begin
 		/* FK projection must visit the target relation even when the downstream
@@ -3512,21 +3567,18 @@ physical alternative. */
 				(* candidate_rows planner_membership_group_cache_build_row_ns)
 				(* candidate_rows 8) 0 candidate_rows 0.65)
 			(planner_zero_cost candidate_rows 0.65)))
-		/* A projected RecSet is not free to consume under ORDER/LIMIT. Unlike an
-		ordered base scan it must fetch the ordering columns at the projected row
-		positions and order the complete carrier before LIMIT can brake. Keep this
-		consumer term in the same candidate-vs-driver decision: a later shape-specific
-		selector would compare two incomplete plans and could mask the calibrated
-		carrier inequality. */
-		(define ordered_recset_consumer_cost (if
-			(membership_work_value work (quote membership_order_limit_driver) false)
-			(planner_cost 0
-				(* projected_rows planner_membership_ordered_recset_row_ns)
-				0 0 0 0 0 0 projected_rows 0.75)
-			(planner_zero_cost projected_rows 0.75)))
+		(define adaptive_consumer (membership_adaptive_ordered_consumer
+			candidate_input_rows candidate_rows driver_rows projected_rows work))
+		(define consumer_work_rows (nth adaptive_consumer 0))
+		(define consumer_sort_work (nth adaptive_consumer 1))
+		(define consumer_probe_rows (nth adaptive_consumer 2))
+		(define adaptive_consumer_cost (planner_cost 0
+			(* consumer_sort_work planner_membership_ordered_recset_sort_unit_ns)
+			(* consumer_probe_rows planner_membership_recset_probe_row_ns)
+			0 0 0 0 0 consumer_work_rows 0.75))
 		(define base_cost (planner_cost_add (planner_cost_add
 			(planner_cost_add
-				(membership_common_scan_cost candidate_input_rows candidate_rows projection_rows
+				(membership_common_scan_cost candidate_input_rows candidate_rows consumer_work_rows
 					(membership_work_value work (quote membership_candidate_map_columns) 1) work)
 				(planner_cost 0
 					(+
@@ -3536,7 +3588,7 @@ physical alternative. */
 							planner_membership_broad_text_match_byte_ns))
 					0 0 0 0 0 0 candidate_input_rows 0.55)
 				candidate_input_rows 0.55)
-			(planner_cost planner_membership_recset_startup_ns 0 (* driver_rows planner_membership_recset_probe_row_ns)
+			(planner_cost planner_membership_recset_startup_ns 0 0
 				0 0 (* (+ candidate_rows projected_rows) planner_membership_recset_build_row_ns)
 				(* (+ candidate_rows projected_rows) 8) 0 projection_rows 0.65)
 			projection_rows 0.65)
@@ -3545,7 +3597,7 @@ physical alternative. */
 			(* projected_rows
 				(membership_work_value work (quote membership_downstream_probe_branches) 0))))
 		(define carrier_cost (planner_cost_add
-			(planner_cost_add base_cost ordered_recset_consumer_cost projected_rows 0.65)
+			(planner_cost_add base_cost adaptive_consumer_cost projected_rows 0.65)
 			downstream_cost projected_rows 0.65))
 		(if (equal? (membership_work_value work (quote membership_consumer) (quote filter))
 			(quote aggregate))
@@ -3759,9 +3811,10 @@ ordered batch is executable and what its actual driver workload is. */
 		(define candidate_rows (planner_estimated_matching_rows
 			candidate_estimate candidate_input_rows candidate_input_rows))
 		(define driver_input_rows (if (nil? driver) nil (planner_source_row_count driver)))
+		(define driver_condition (membership_driver_filter (qb_where block)))
 		(define driver_estimate (if (nil? driver) nil
 			(planner_source_filter_estimate driver
-				(membership_driver_filter (qb_where block)) 512)))
+				driver_condition 512)))
 		(define driver_rows (membership_estimated_work_rows driver_estimate driver_input_rows))
 		(merge (list
 			(list
@@ -3780,6 +3833,7 @@ ordered batch is executable and what its actual driver workload is. */
 				(list (quote membership_candidate_estimate_coverage)
 					(planner_estimate_coverage candidate_estimate))
 				(list (quote membership_driver_input_rows) driver_input_rows)
+				(list (quote membership_driver_condition) driver_condition)
 				(list (quote membership_driver_rows) driver_rows))
 			(membership_candidate_work_facts stage)
 			(gs_facts stage))))))
