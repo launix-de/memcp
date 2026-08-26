@@ -160,10 +160,17 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(define dbs (dashboard_user_databases (req "username") is_admin))
 					(define items (map dbs (lambda (db) (begin
 						(define tables (show db))
+						(define maintenance (maintenance_capabilities db))
 						(define table_count (if (nil? tables) 0 (count tables)))
 						(define total_size (if (nil? tables) 0
 							(reduce (map tables (lambda (tbl) (dashboard_table_size db tbl))) (lambda (a b) (+ a b)) 0)))
-						(json_encode_assoc (list "name" db "tables" table_count "size_bytes" total_size))
+						(json_encode_assoc (list
+							"name" db
+							"tables" table_count
+							"size_bytes" total_size
+							"maintenance_class" (maintenance "Class")
+							"can_drop" (maintenance "CanDrop")
+							"can_truncate" (maintenance "CanTruncate")))
 					))))
 					(dashboard_send_json res (dashboard_json_array items))
 				))
@@ -267,6 +274,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						",\"triggers\":" trigger_items
 						",\"meta\":{\"engine\":" (json_encode (meta "Engine"))
 						",\"collation\":" (json_encode (meta "Collation"))
+						",\"maintenance_class\":" (json_encode (meta "MaintenanceClass"))
+						",\"can_drop\":" (json_encode (meta "CanDrop"))
+						",\"can_truncate\":" (json_encode (meta "CanTruncate"))
+						",\"can_rename\":" (json_encode (meta "CanRename"))
+						",\"can_alter\":" (json_encode (meta "CanAlter"))
+						",\"can_change_engine\":" (json_encode (meta "CanChangeEngine"))
 						",\"uniques\":" unique_items
 						",\"partitions\":" partition_items "}}"
 					))
@@ -295,6 +308,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 							"shards" shard_count
 							"rows" row_count
 							"size_bytes" total_size
+							"maintenance_class" (meta "MaintenanceClass")
+							"can_drop" (meta "CanDrop")
+							"can_truncate" (meta "CanTruncate")
+							"can_rename" (meta "CanRename")
+							"can_alter" (meta "CanAlter")
+							"can_change_engine" (meta "CanChangeEngine")
 						))
 					)))))
 					(dashboard_send_json res (dashboard_json_array items))

@@ -1193,7 +1193,15 @@ func DatabaseBackendName(schema string) string {
 }
 
 func DropDatabase(schema string, ifexists bool) bool {
-	db := databases.Remove(schema)
+	db := databases.Get(schema)
+	if db == nil {
+		if ifexists {
+			return false
+		}
+		panic("Database " + schema + " does not exist")
+	}
+	requireDatabaseMaintenance(schema, maintenanceDrop)
+	db = databases.Remove(schema)
 	if db == nil {
 		if ifexists {
 			return false
@@ -1312,6 +1320,10 @@ func DropTable(schema, name string, ifexists bool) {
 		}
 		panic("Table " + schema + "." + name + " does not exist")
 	}
+	if !tableMaintenanceCapabilities(schema, name).canDrop {
+		db.schemalock.Unlock()
+		requireTableMaintenance(schema, name, maintenanceDrop)
+	}
 	db.tables.Remove(name)
 	if name == ".blobs" {
 		db.blobRefState().table.Store(nil)
@@ -1353,6 +1365,14 @@ func RenameTable(schema, oldname, newname string) {
 	if t == nil {
 		db.schemalock.Unlock()
 		panic("Table " + schema + "." + oldname + " does not exist")
+	}
+	if !tableMaintenanceCapabilities(schema, oldname).canRename {
+		db.schemalock.Unlock()
+		requireTableMaintenance(schema, oldname, maintenanceRename)
+	}
+	if !tableMaintenanceCapabilities(schema, newname).canRename {
+		db.schemalock.Unlock()
+		requireTableMaintenance(schema, newname, maintenanceRename)
 	}
 	if db.tables.Get(newname) != nil {
 		db.schemalock.Unlock()
