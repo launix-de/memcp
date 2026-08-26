@@ -6994,15 +6994,11 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		(if (not (or recset_source contains_probe))
 			nil
 			(begin
-				(define chosen (if recset_source
-					(quote scan_order_recset_part)
-					(quote recset_contains_probe)))
+				(define chosen (quote adaptive_recset_boundary))
 				(list
 					(list "decision" "ordered_recset_iterator")
 					(list "chosen" (string chosen))
-					(list "reason" (if recset_source
-						"recset_scan_source"
-						"base_table_scan_with_membership_filter"))
+					(list "reason" "runtime_cardinality_and_index_span")
 					(list "inputs" (list
 						(list "source" (pretty_print table_expr (settings "ExplainWidth")))
 						(list "sort_columns" (pretty_print (nth scan_expr 5) (settings "ExplainWidth")))
@@ -7010,13 +7006,13 @@ ordering run. Storage artifacts begin in build_queryplan. */
 						(list "limit" (nth scan_expr 9))))
 					(list "alternatives" (list
 						(list
-							(list "plan" "scan_order_recset_part")
-							(list "status" (if recset_source "chosen" "rejected"))
-							(list "reason" (if recset_source "recset_scan_source" "source_is_base_table")))
+							(list "plan" "ordered_inverse_recset")
+							(list "status" "runtime")
+							(list "reason" "sparse_recset_or_runtime_crossover"))
 						(list
-							(list "plan" "recset_contains_probe")
-							(list "status" (if recset_source "rejected" "chosen"))
-							(list "reason" (if recset_source "direct_intersection_available" "membership_is_filter")))))))))))
+							(list "plan" "ordered_base_membership")
+							(list "status" "runtime")
+							(list "reason" "dense_recset_or_narrow_index_span")))))))))))
 
 (define physical_ordered_recset_decisions (lambda (expr)
 	(match expr

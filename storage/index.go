@@ -18,6 +18,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package storage
 
 import "fmt"
+import "math/bits"
 import "sort"
 import "sync"
 import "time"
@@ -35,15 +36,24 @@ type indexPair struct {
 }
 
 type storageIndexState struct {
-	mainIndexes      StorageInt
-	deltaBtree       *btree.BTreeG[indexPair]
-	active           bool
-	savings          float64
-	minVals          []scm.Scmer
-	maxVals          []scm.Scmer
-	indexHooks       []IndexHook
-	indexHookBytes   atomic.Int64
-	precomputedDelta bool
+	mainIndexes StorageInt
+	// mainIndexPositions is the compressed inverse permutation of mainIndexes:
+	// record ID -> position in this index. It is built only when a sparse RecSet
+	// repeatedly dominates an ordered scan and belongs to the same cache/variant
+	// lifecycle as the forward permutation.
+	mainIndexPositions StorageInt
+	deltaBtree         *btree.BTreeG[indexPair]
+	active             bool
+	savings            float64
+	minVals            []scm.Scmer
+	maxVals            []scm.Scmer
+	indexHooks         []IndexHook
+	indexHookBytes     atomic.Int64
+	precomputedDelta   bool
+}
+
+type indexIterationOptions struct {
+	orderedLimit int
 }
 
 // (no op) numeric helper removed; collations now use golang.org/x/text/collate for ordering
@@ -288,6 +298,7 @@ func (idx *StorageIndex) markVariantsDirty() {
 	for _, state := range idx.variants {
 		state.active = false
 		state.mainIndexes = StorageInt{}
+		state.mainIndexPositions = StorageInt{}
 		state.deltaBtree = nil
 		state.indexHooks = nil
 		freedHooks += state.indexHookBytes.Swap(0)
@@ -312,6 +323,9 @@ func (idx *StorageIndex) ComputeSize() uint {
 	for _, state := range states {
 		if !idx.Native {
 			sz += state.mainIndexes.ComputeSize()
+		}
+		if state.mainIndexPositions.count > 0 {
+			sz += state.mainIndexPositions.ComputeSize()
 		}
 		sz += uint(state.indexHookBytes.Load())
 		sz += idx.computeDeltaBtreeSize(state)
@@ -500,7 +514,11 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 // Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
 // for existence checks, large buffers (e.g. [1024]uint32) for full scans.
 func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, selected, callback)
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, nil, selected, callback)
+}
+
+func (t *storageShard) iterateIndexOrdered(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, limit int, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, &indexIterationOptions{orderedLimit: limit}, selected, callback)
 }
 
 func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
@@ -508,7 +526,7 @@ func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower [
 	if countUsage {
 		usageWeight = 1.0
 	}
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, true, nil, nil, callback)
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, true, nil, nil, nil, callback)
 }
 
 func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, exactMain *bool, callback func([]uint32) bool) {
@@ -516,7 +534,7 @@ func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols boundaries, lo
 	if countUsage {
 		usageWeight = 1.0
 	}
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, exactMain, nil, callback)
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, exactMain, nil, nil, callback)
 }
 
 func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, bool) {
@@ -531,7 +549,7 @@ func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, b
 	return true, true
 }
 
-func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 	if exactMain != nil {
 		*exactMain = false
 	}
@@ -545,7 +563,14 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 			sortedEnd++
 		}
 		if sortedEnd < len(cols) {
-			cols = cols[:sortedEnd]
+			kept := make(boundaries, 0, len(cols))
+			kept = append(kept, cols[:sortedEnd]...)
+			for _, bound := range cols[sortedEnd:] {
+				if bound.mandatory {
+					kept = append(kept, bound)
+				}
+			}
+			cols = kept
 			if len(lower) > sortedEnd {
 				lower = lower[:sortedEnd]
 			}
@@ -557,6 +582,15 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 	// flags from that effective last boundary, not from a later condition that
 	// is evaluated only by the scan predicate.
 	lowerIncl, upperIncl := effectiveBoundaryInclusiveness(cols, lower)
+	// Exact RecSet membership is a query-bound overlay. A prepared base index
+	// needs to cover only the sorted/access prefix; RecSetMatcher binds to that
+	// index at invocation time and must not create one index identity per source
+	// carrier. Retain a lone RecSet boundary so unordered scans can still use the
+	// common matcher machinery without a zero-column StorageIndex.
+	indexCols := len(lower)
+	for indexCols > 1 && indexCols <= len(cols) && matcherKindEqual(cols[indexCols-1].matcher, RecSetMatcher) {
+		indexCols--
+	}
 
 	// check if we found conditions
 	if len(lower) > 0 {
@@ -566,8 +600,8 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		old_indexes := t.Indexes
 		for _, index := range old_indexes {
 			// naive index search algo; TODO: improve
-			if len(index.Cols) >= len(lower) {
-				for i := 0; i < len(lower); i++ {
+			if len(index.Cols) >= indexCols {
+				for i := 0; i < indexCols; i++ {
 					if cols[i].col != index.Cols[i] {
 						goto skip_index // column mismatch
 					}
@@ -583,7 +617,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 					}
 				}
 				// this index fits!
-				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, selected, callback)
+				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, selected, callback)
 				return
 			}
 		skip_index:
@@ -597,9 +631,9 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		}
 		// check if an existing longer index already covers these columns as a prefix
 		for _, index := range t.Indexes {
-			if len(index.Cols) >= len(lower) {
+			if len(index.Cols) >= indexCols {
 				covered := true
-				for i := 0; i < len(lower); i++ {
+				for i := 0; i < indexCols; i++ {
 					if cols[i].col != index.Cols[i] {
 						covered = false
 						break
@@ -619,7 +653,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, selected, callback)
+					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, selected, callback)
 					return
 				}
 			}
@@ -667,14 +701,14 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 			return
 		}
 		index := new(StorageIndex)
-		index.Cols = make([]string, len(lower))
-		index.ColMapCols = make([][]string, len(lower))
-		index.ColMapFn = make([]scm.Scmer, len(lower))
-		index.ColMatchers = make([]IndexAnalyzer, len(lower))
-		index.ColOrder = make([]func(...scm.Scmer) scm.Scmer, len(lower))
-		index.ColOrderMeta = make([]string, len(lower))
-		index.ColOrderFast = make([]func(scm.Scmer, scm.Scmer) bool, len(lower))
-		for i := range lower {
+		index.Cols = make([]string, indexCols)
+		index.ColMapCols = make([][]string, indexCols)
+		index.ColMapFn = make([]scm.Scmer, indexCols)
+		index.ColMatchers = make([]IndexAnalyzer, indexCols)
+		index.ColOrder = make([]func(...scm.Scmer) scm.Scmer, indexCols)
+		index.ColOrderMeta = make([]string, indexCols)
+		index.ColOrderFast = make([]func(scm.Scmer, scm.Scmer) bool, indexCols)
+		for i := 0; i < indexCols; i++ {
 			index.Cols[i] = cols[i].col
 			index.ColMapCols[i] = cols[i].mapCols // nil for raw columns
 			index.ColMapFn[i] = cols[i].mapFn     // IsNil() for raw columns
@@ -699,7 +733,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		}
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, selected, callback)
+		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, selected, callback)
 		return
 	}
 
@@ -1067,6 +1101,251 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	state.active = true // mark as ready
 }
 
+// buildMainIndexPositionsLocked lazily constructs the inverse of mainIndexes
+// as a compressed StorageInt. The forward index remains the only mandatory
+// structure. Sparse ordered RecSet scans pay this O(N) pass only on their first
+// actual use, then share it through the normal index cache lifecycle.
+//
+// The caller holds s.mu. Decode uses StorageInt's allocation-free uint32 range
+// API into one reusable stack buffer; no Scmer boxing or per-row allocation is
+// introduced by the inversion pass.
+func (s *StorageIndex) buildMainIndexPositionsLocked(state *storageIndexState) uint {
+	if s.Native || state.mainIndexPositions.count > 0 || s.t.main_count == 0 {
+		return 0
+	}
+	count := s.t.main_count
+	state.mainIndexPositions.initValuesUInt32(count, 0, count-1)
+	var recids [1024]uint32
+	for base := uint32(0); base < count; {
+		chunkCount := count - base
+		if chunkCount > uint32(len(recids)) {
+			chunkCount = uint32(len(recids))
+		}
+		chunk := recids[:chunkCount]
+		state.mainIndexes.GetValuesUInt32Range(base, chunkCount, chunk, 1)
+		for offset, recid := range chunk {
+			state.mainIndexPositions.buildValueUInt32(recid, base+uint32(offset))
+		}
+		base += chunkCount
+	}
+	return state.mainIndexPositions.ComputeSize()
+}
+
+func recSetSortWork(rows int64) int64 {
+	if rows <= 1 {
+		return rows
+	}
+	return rows * int64(bits.Len64(uint64(rows-1)))
+}
+
+const (
+	// BenchmarkRecSetBoundaryCrossover measures about 4 ns per RecSet row/log2
+	// sorting unit and at least 6 ns per positive/range membership candidate on
+	// the reference CPU. Integer picoseconds keep this hot decision allocation-
+	// free and make its independently measured constants explicit.
+	orderedRecSetSortUnitPs     = int64(4_000)
+	orderedIndexMembershipRowPs = int64(6_000)
+)
+
+func orderedIndexExpectedRows(recsetRows, universeRows, indexSpanRows int64, limit int) int64 {
+	if recsetRows <= 0 || indexSpanRows <= 0 {
+		return 0
+	}
+	if limit <= 0 || int64(limit) >= recsetRows {
+		return indexSpanRows
+	}
+	expected := (int64(limit)*universeRows + recsetRows - 1) / recsetRows
+	if expected > indexSpanRows {
+		return indexSpanRows
+	}
+	return expected
+}
+
+func orderedRecSetSwitchRows(recsetRows int64) int64 {
+	workPs := recSetSortWork(recsetRows) * orderedRecSetSortUnitPs
+	return (workPs + orderedIndexMembershipRowPs - 1) / orderedIndexMembershipRowPs
+}
+
+// orderedRecSetDominates compares two execution kernels, not two relational
+// plans. The base-index side estimates how far an ordered iterator must walk
+// to find LIMIT hits at the RecSet's observed density, capped by the effective
+// access-bound min/max interval. The inverse side bulk-loads RecID positions
+// and sorts them. scan and scan_order deliberately use different crossovers.
+// Keep the constants synchronized with BenchmarkRecSetBoundaryCrossover.
+func orderedRecSetDominates(recsetRows, universeRows, indexSpanRows int64, limit int) bool {
+	if recsetRows <= 0 {
+		return true
+	}
+	if indexSpanRows <= 0 || recsetRows >= indexSpanRows {
+		return false
+	}
+	expectedRows := orderedIndexExpectedRows(recsetRows, universeRows, indexSpanRows, limit)
+	return orderedRecSetSwitchRows(recsetRows) < expectedRows
+}
+
+func unorderedRecSetDominates(recsetRows, indexSpanRows int64) bool {
+	return recsetRows >= 0 && recsetRows < indexSpanRows
+}
+
+// iterateRecSetFirst emits one exact RecSet boundary in this index's order.
+// The query-local buffers contain only uint32 values. For an active inverse
+// permutation the hot path bulk-decodes RecID -> index position, sorts those
+// positions, then bulk-decodes the forward permutation back to RecIDs. If no
+// inverse exists yet, the same bounded buffer is sorted by the index key
+// callbacks; this keeps a cold sparse query from degrading to a full scan.
+func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexState, part *recSetShard, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, mainStart int, mainEnd int, maxInsertIndex int, buf []uint32, cols []colGetter, persistent bool, ordered bool, exactMain *bool, callback func([]uint32) bool) {
+	if part == nil || part.count == 0 {
+		return
+	}
+	var localItems [1024]uint32
+	items := localItems[:0]
+	if part.count > int64(cap(localItems)) {
+		items = make([]uint32, 0, int(part.count))
+	}
+	visibleUpper := s.t.main_count + uint32(maxInsertIndex)
+	part.forEachID(func(recid uint32) bool {
+		if recid < visibleUpper {
+			items = append(items, recid)
+		}
+		return true
+	})
+	if len(items) == 0 {
+		return
+	}
+
+	usedInverse := ordered && persistent && !s.Native &&
+		state != nil && state.mainIndexPositions.count == uint64(s.t.main_count)
+	if usedInverse {
+		mainCount := sort.Search(len(items), func(i int) bool { return items[i] >= s.t.main_count })
+		mainItems := items[:mainCount]
+		deltaItems := items[mainCount:]
+		var localPositions [1024]uint32
+		positions := localPositions[:len(mainItems)]
+		if len(mainItems) > len(localPositions) {
+			positions = make([]uint32, len(mainItems))
+		}
+		state.mainIndexPositions.GetValuesUInt32Multi(mainItems, positions, 1)
+		// Access/equality bounds may cover only a narrow part of the ordered
+		// index. Compact before sorting so the RecSet kernel pays only for the
+		// same physical min/max interval as the sequential kernel.
+		kept := positions[:0]
+		for _, position := range positions {
+			if int(position) >= mainStart && int(position) < mainEnd {
+				kept = append(kept, position)
+			}
+		}
+		positions = kept
+		hybridsort.Slice(positions, func(i, j int) bool { return positions[i] < positions[j] })
+		mainItems = mainItems[:len(positions)]
+		state.mainIndexes.GetValuesUInt32Multi(positions, mainItems, 1)
+
+		valueAt := func(recid uint32, col int) scm.Scmer {
+			if recid < s.t.main_count {
+				return cols[col].get(recid)
+			}
+			return s.getDeltaColValueTx(tx, recid, s.t.inserts[recid-s.t.main_count], col)
+		}
+		lessRecID := func(leftID, rightID uint32) bool {
+			for col := range s.Cols {
+				if len(s.ColMatchers) > col && !s.ColMatchers[col].IsSorted() {
+					continue
+				}
+				left := valueAt(leftID, col)
+				right := valueAt(rightID, col)
+				if s.lessAt(col, left, right) {
+					return true
+				}
+				if s.lessAt(col, right, left) {
+					return false
+				}
+			}
+			return leftID < rightID
+		}
+		if len(deltaItems) > 0 {
+			cmpCols := len(lower)
+			if cmpCols > len(s.Cols) {
+				cmpCols = len(s.Cols)
+			}
+			keptDelta := deltaItems[:0]
+			for _, recid := range deltaItems {
+				inRange, _ := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(col int) scm.Scmer {
+					return valueAt(recid, col)
+				})
+				if inRange {
+					keptDelta = append(keptDelta, recid)
+				}
+			}
+			deltaItems = keptDelta
+			hybridsort.Slice(deltaItems, func(i, j int) bool {
+				return lessRecID(deltaItems[i], deltaItems[j])
+			})
+		}
+
+		// Main and delta orders are individually sorted but may interlace. Merge
+		// them into one reusable uint32 buffer so ORDER/LIMIT observes exactly the
+		// same sequence as the ordinary index+delta B-tree streaming merge.
+		var localMerged [1024]uint32
+		merged := localMerged[:0]
+		if len(mainItems)+len(deltaItems) > cap(localMerged) {
+			merged = make([]uint32, 0, len(mainItems)+len(deltaItems))
+		}
+		mainPos, deltaPos := 0, 0
+		for mainPos < len(mainItems) && deltaPos < len(deltaItems) {
+			if lessRecID(deltaItems[deltaPos], mainItems[mainPos]) {
+				merged = append(merged, deltaItems[deltaPos])
+				deltaPos++
+			} else {
+				merged = append(merged, mainItems[mainPos])
+				mainPos++
+			}
+		}
+		merged = append(merged, mainItems[mainPos:]...)
+		merged = append(merged, deltaItems[deltaPos:]...)
+		items = merged
+	} else if ordered {
+		valueAt := func(recid uint32, col int) scm.Scmer {
+			if recid < s.t.main_count {
+				return cols[col].get(recid)
+			}
+			return s.getDeltaColValueTx(tx, recid, s.t.inserts[recid-s.t.main_count], col)
+		}
+		hybridsort.Slice(items, func(i, j int) bool {
+			for col := range s.Cols {
+				if len(s.ColMatchers) > col && !s.ColMatchers[col].IsSorted() {
+					continue
+				}
+				left := valueAt(items[i], col)
+				right := valueAt(items[j], col)
+				if s.lessAt(col, left, right) {
+					return true
+				}
+				if s.lessAt(col, right, left) {
+					return false
+				}
+			}
+			return items[i] < items[j]
+		})
+	}
+
+	callback = s.bindRowMatchers(bounds, cols, func() []IndexHook {
+		if persistent && state != nil {
+			return state.indexHooks
+		}
+		return nil
+	}(), persistent, exactMain, callback)
+	for len(items) > 0 {
+		count := len(items)
+		if count > len(buf) {
+			count = len(buf)
+		}
+		copy(buf, items[:count])
+		if !callback(buf[:count]) {
+			return
+		}
+		items = items[count:]
+	}
+}
+
 // bindRowMatchers binds every non-ordering boundary once for this index run.
 // The returned callback applies the resulting functions in place to every
 // batch; no allocation or lock is added to the per-batch path.
@@ -1158,7 +1437,7 @@ func (s *StorageIndex) estimateHookCandidates(tx *TxContext, bounds boundaries) 
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -1168,12 +1447,43 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 	s.syncSessionKeys(sessionKeys)
 	state := s.stateForTx(tx, true)
 	// no collation-specific helpers in the current implementation
+	recsetPart, hasRecSetBoundary := smallestRecSetBoundary(bounds, s.t)
+	// An exact source with no rows in this shard is terminal. In particular,
+	// do not build either the forward or inverse index merely to prove that an
+	// empty RecSet produces no candidates.
+	if hasRecSetBoundary && (recsetPart == nil || recsetPart.count == 0) {
+		if selected != nil {
+			selected(s, options != nil)
+		}
+		return
+	}
+	indexSpanRows := int64(s.t.main_count) + int64(maxInsertIndex)
+	preferRecSet := false
+	if hasRecSetBoundary {
+		rows := int64(0)
+		if recsetPart != nil {
+			rows = recsetPart.count
+		}
+		if options != nil {
+			preferRecSet = orderedRecSetDominates(rows, int64(recsetPart.universe), indexSpanRows, options.orderedLimit)
+		} else {
+			preferRecSet = unorderedRecSetDominates(rows, indexSpanRows)
+		}
+	}
 
 	savingsThreshold := 2.0 // building an index costs 1x the time as traversing the list
 	savings := s.addSavings(state, usageWeight)
 	if !state.active {
 		// index is not built yet
 		if savings < savingsThreshold && !forceBuild {
+			if preferRecSet {
+				if selected != nil {
+					selected(s, options != nil)
+				}
+				s.iterateRecSetFirst(tx, nil, recsetPart, bounds, lower, upperLast,
+					upperInclusive, 0, int(s.t.main_count), maxInsertIndex, buf, cols, false, options != nil, exactMain, callback)
+				return
+			}
 			// iterate over all items because we don't want to store the index
 			if selected != nil {
 				selected(s, false)
@@ -1251,8 +1561,10 @@ start_scan:
 	// bisect where the lower bound is found
 	// Only compare as many columns as provided in 'lower' (index can have more cols)
 	cmpCols := len(lower)
+	if cmpCols > len(s.Cols) {
+		cmpCols = len(s.Cols)
+	}
 
-	callback = s.bindRowMatchers(bounds, cols, snapIndexHooks, true, exactMain, callback)
 	// Find the leading physical sort key. Non-sorted matchers such as LIKE are
 	// deliberately present in the logical boundary list but do not participate
 	// in buildIndex ordering and must never be used for binary search.
@@ -1319,9 +1631,69 @@ start_scan:
 		}
 	}
 
+	// Resolve the effective main-index min/max interval before choosing the
+	// RecSet traversal kernel. A narrow equality/range prefix can make an index
+	// membership walk cheaper even when the RecSet is small relative to the
+	// whole table; whole-table density is therefore the wrong crossover input.
+	mainEnd := int(s.t.main_count)
+	if lastSorted >= 0 && !upperLast.IsNil() && mainIdx < mainEnd {
+		mainEnd = mainIdx + sort.Search(mainEnd-mainIdx, func(offset int) bool {
+			recid := getRecid(mainIdx + offset)
+			_, beyond := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(col int) scm.Scmer {
+				return cols[col].get(recid)
+			})
+			return beyond
+		})
+	}
+	mainStart := mainIdx
+	indexSpanRows = int64(mainEnd-mainStart) + int64(maxInsertIndex)
+	if hasRecSetBoundary {
+		rows := int64(0)
+		if recsetPart != nil {
+			rows = recsetPart.count
+		}
+		if options != nil {
+			preferRecSet = orderedRecSetDominates(rows, int64(recsetPart.universe), indexSpanRows, options.orderedLimit)
+		} else {
+			preferRecSet = unorderedRecSetDominates(rows, indexSpanRows)
+		}
+	}
+	runRecSetKernel := func(start, end int, target func([]uint32) bool) {
+		var inverseBytes uint
+		s.mu.Lock()
+		if state.active && options != nil {
+			inverseBytes = s.buildMainIndexPositionsLocked(state)
+		}
+		sparseState := storageIndexState{
+			mainIndexes:        state.mainIndexes,
+			mainIndexPositions: state.mainIndexPositions,
+			indexHooks:         append([]IndexHook(nil), state.indexHooks...),
+		}
+		s.mu.Unlock()
+		if inverseBytes > 0 {
+			GlobalCache.UpdateSizeAsync(s, int64(inverseBytes))
+		}
+		s.iterateRecSetFirst(tx, &sparseState, recsetPart, bounds, lower, upperLast,
+			upperInclusive, start, end, maxInsertIndex, buf, cols, true, options != nil, exactMain, target)
+	}
+	if preferRecSet {
+		runRecSetKernel(mainIdx, mainEnd, callback)
+		return
+	}
+
+	rawCallback := callback
+	callback = s.bindRowMatchers(bounds, cols, snapIndexHooks, true, exactMain, callback)
+	adaptiveSwitchRows := int64(0)
+	if options != nil && hasRecSetBoundary && maxInsertIndex == 0 {
+		adaptiveSwitchRows = orderedRecSetSwitchRows(recsetPart.count)
+		if adaptiveSwitchRows >= indexSpanRows {
+			adaptiveSwitchRows = 0
+		}
+	}
+
 	nextMain := func() (uint32, bool) {
 		for {
-			if uint32(mainIdx) >= s.t.main_count {
+			if mainIdx >= mainEnd {
 				return 0, false
 			}
 			recid := getRecid(mainIdx)
@@ -1438,6 +1810,27 @@ start_scan:
 	for mainOk && !stopped {
 		emit(mainRecid)
 		mainRecid, mainOk = nextMain()
+		if adaptiveSwitchRows > 0 && int64(mainIdx-mainStart) >= adaptiveSwitchRows {
+			// Flush the already ordered prefix first. A false callback means the
+			// residual filter has filled LIMIT and no switch is necessary. A true
+			// callback proves that its real acceptance rate was lower than the
+			// optimistic LIMIT-only estimate, so continue from the next un-emitted
+			// index position through the inverse RecSet kernel.
+			if bufN > 0 {
+				if !callback(buf[:bufN]) {
+					stopped = true
+				}
+				bufN = 0
+			}
+			if !stopped {
+				remainingStart := mainIdx
+				if mainOk {
+					remainingStart-- // nextMain has prefetched this position
+				}
+				runRecSetKernel(remainingStart, mainEnd, rawCallback)
+			}
+			return
+		}
 	}
 	if bufN > 0 && !stopped {
 		callback(buf[:bufN])

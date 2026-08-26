@@ -125,7 +125,7 @@ test_cases:
     expect:
       result_contains:
         - "recset_project_join"
-        - "scan_order_recset_part"
+        - "chosen adaptive_recset_boundary"
 
   - &first_read
     name: "First request reads only its permitted row"

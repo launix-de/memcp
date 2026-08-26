@@ -1621,13 +1621,11 @@ test_cases:
         expect:
           contains:
             - "chosen candidate_keyset"
-            - "chosen scan_order_recset_part"
-            - "recset_scan_source"
+            - "chosen adaptive_recset_boundary"
+            - "runtime_cardinality_and_index_span"
             - "recset_project_join"
           not_contains:
-            - "chosen recset_contains_probe"
-            - "base_table_scan_with_membership_filter"
-            - "source_is_base_table"
+            - "chosen ordered_base_membership"
             - "$recset_contains"
 
   - name: "IN UNION after derived ACL EXISTS keeps rows and lowers probes"
