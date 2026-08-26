@@ -755,6 +755,11 @@ only partitioned FROM source would erase the block's row multiplicity
 	(query_block_with_scalar_first_probes_using_graph
 		stages (stage_dependency_graph stages) block)))
 
+/* This rewrite only consumes the probe sources selected by its caller. Selection
+is deliberately separate: dominance may choose a bounded owned probe immediately,
+while cardinality-dependent alternatives must arrive through their cost decision
+and recompile guard. Keeping this helper policy-free prevents a local query shape
+from silently overriding the physical planner. */
 (define query_block_with_selected_probe_sources_using (lambda (stages probe_sources block)
 	(begin
 		(define sources (qb_sources block))
