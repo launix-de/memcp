@@ -31,6 +31,10 @@ type database struct {
 	Name        string                                             `json:"name"`
 	persistence PersistenceEngine                                  `json:"-"`
 	tables      NonLockingReadMap.NonLockingReadMap[table, string] `json:"-"`
+	// loadOnce is the database-wide lazy-load barrier. The MySQL and HTTP
+	// listeners may issue the first queries concurrently; none may observe a
+	// partially decoded table catalog.
+	loadOnce sync.Once `json:"-"`
 	// schemalock protects only database-local schema membership and schema.json
 	// snapshots. It must never cover long rebuild/repartition/blob work. The
 	// lock order continues with table.ddlMu -> table.mu -> shard.mu.
@@ -475,59 +479,61 @@ func (db *database) saveLockedAndUnlock(mode schemaSaveMode) {
 
 // ensureLoaded loads schema.json into the database struct exactly once.
 func (db *database) ensureLoaded() {
-	if db.srState != COLD {
-		return
-	}
-	jsonbytes := db.persistence.ReadSchema()
-	if len(jsonbytes) == 0 {
-		// fresh/empty database
-		db.tables = NonLockingReadMap.New[table, string]()
+	db.loadOnce.Do(func() {
+		if db.srState != COLD {
+			return
+		}
+		jsonbytes := db.persistence.ReadSchema()
+		if len(jsonbytes) == 0 {
+			// fresh/empty database
+			db.tables = NonLockingReadMap.New[table, string]()
+			db.srState = SHARED
+			return
+		}
+		tmp := new(database)
+		if err := json.Unmarshal(jsonbytes, tmp); err != nil {
+			panic(err)
+		}
+		db.tables = tmp.tables
+		// restore back-references; do not touch on-disk columns yet
+		for _, t := range db.tables.GetAll() {
+			t.schema = db
+			if t.Name == ".blobs" {
+				db.blobRefState().table.Store(t)
+			}
+			for _, col := range t.Columns {
+				col.UpdateSanitizer()
+			}
+			// attach table pointer to existing shard stubs without loading them
+			if t.Shards != nil {
+				for _, s := range t.Shards {
+					if s != nil {
+						s.t = t
+					}
+				}
+			}
+			if t.PShards != nil {
+				for _, s := range t.PShards {
+					if s != nil {
+						s.t = t
+					}
+				}
+			}
+			// Derive ShardMode from shard presence for backward compatibility
+			// with schemas that don't yet have ShardMode persisted.
+			if t.PShards != nil && t.Shards == nil {
+				t.ShardMode = ShardModePartition
+			} else {
+				t.ShardMode = ShardModeFree
+			}
+			t.publishTopologyLocked()
+			t.initializeLegacyPlannerRowEstimate()
+			t.publishShowColumnsSnapshot()
+		}
+		// FK enforcement triggers are serializable Procs and persist with the table JSON.
+		// No re-installation needed on load.
 		db.srState = SHARED
-		return
-	}
-	tmp := new(database)
-	if err := json.Unmarshal(jsonbytes, tmp); err != nil {
-		panic(err)
-	}
-	db.tables = tmp.tables
-	// restore back-references; do not touch on-disk columns yet
-	for _, t := range db.tables.GetAll() {
-		t.schema = db
-		if t.Name == ".blobs" {
-			db.blobRefState().table.Store(t)
-		}
-		for _, col := range t.Columns {
-			col.UpdateSanitizer()
-		}
-		// attach table pointer to existing shard stubs without loading them
-		if t.Shards != nil {
-			for _, s := range t.Shards {
-				if s != nil {
-					s.t = t
-				}
-			}
-		}
-		if t.PShards != nil {
-			for _, s := range t.PShards {
-				if s != nil {
-					s.t = t
-				}
-			}
-		}
-		// Derive ShardMode from shard presence for backward compatibility
-		// with schemas that don't yet have ShardMode persisted.
-		if t.PShards != nil && t.Shards == nil {
-			t.ShardMode = ShardModePartition
-		} else {
-			t.ShardMode = ShardModeFree
-		}
-		t.publishTopologyLocked()
-		t.initializeLegacyPlannerRowEstimate()
-		t.publishShowColumnsSnapshot()
-	}
-	// FK enforcement triggers are serializable Procs and persist with the table JSON.
-	// No re-installation needed on load.
-	db.srState = SHARED
+	})
 }
 
 func triggerTimingSQL(timing TriggerTiming) string {

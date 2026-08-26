@@ -73,6 +73,20 @@ type blockingSchemaWritePersistence struct {
 	once    sync.Once
 }
 
+type blockingSchemaReadPersistence struct {
+	PersistenceEngine
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *blockingSchemaReadPersistence) ReadSchema() []byte {
+	p.calls.Add(1)
+	p.entered <- struct{}{}
+	<-p.release
+	return p.PersistenceEngine.ReadSchema()
+}
+
 func (p *blockingSchemaWritePersistence) WriteSchema(schema []byte) {
 	p.once.Do(func() {
 		close(p.entered)
@@ -112,6 +126,45 @@ func reloadTableFromPersistence(t *testing.T, name string, persistence Persisten
 		release()
 	}
 	return tbl
+}
+
+func TestConcurrentFirstDatabaseReadersShareOneSchemaLoad(t *testing.T) {
+	_, persistence := createDurabilityTestTable(t, "tconcurrentloadsource", 1)
+	blocking := &blockingSchemaReadPersistence{
+		PersistenceEngine: persistence,
+		entered:           make(chan struct{}, 2),
+		release:           make(chan struct{}),
+	}
+	db := newDatabase()
+	db.Name = "tconcurrentload"
+	db.persistence = blocking
+	db.srState = COLD
+
+	loaded := make(chan *table, 2)
+	go func() { loaded <- db.GetTable("items") }()
+	<-blocking.entered
+	go func() { loaded <- db.GetTable("items") }()
+
+	select {
+	case <-blocking.entered:
+		close(blocking.release)
+		t.Fatal("a concurrent reader started a second schema load")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(blocking.release)
+	for range 2 {
+		select {
+		case tbl := <-loaded:
+			if tbl == nil {
+				t.Fatal("concurrent reader did not observe the loaded table catalog")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("concurrent reader did not continue after schema load")
+		}
+	}
+	if calls := blocking.calls.Load(); calls != 1 {
+		t.Fatalf("schema loaded %d times, want 1", calls)
+	}
 }
 
 func waitForRepartitionDualWrite(t *testing.T, tbl *table) {

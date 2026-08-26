@@ -3138,12 +3138,11 @@ without separately proving two-valued semantics. */
 	(and (query_block? inner)
 		(and (not (empty_list? (qb_order inner)))
 			(and (not (nil? (qb_limit inner)))
-				(and (nil? (source_join_expr src))
-					(and (not (source_outer? src))
-						(and (empty_list? (qb_group inner))
-							(and (nil? (qb_having inner))
-								(and (not (query_block_has_aggregates? inner))
-									(scalar_source_shape_supported? (qb_sources inner))))))))))))
+				(and (not (source_outer? src))
+					(and (empty_list? (qb_group inner))
+						(and (nil? (qb_having inner))
+							(and (not (query_block_has_aggregates? inner))
+								(scalar_source_shape_supported? (qb_sources inner)))))))))))
 
 (define make_ordered_limited_derived_rewrite (lambda (src alias inner)
 	(begin
@@ -3196,8 +3195,12 @@ without separately proving two-valued semantics. */
 		(define lower_filter (if (> offset_value 0) (list (quote >) rn_expr offset_value) true))
 		(define limit_filter (combine_where lower_filter (list (quote <=) rn_expr upper_bound)))
 		(define derived_filter (combine_where inner_where limit_filter))
+		/* An INNER JOIN predicate belongs above the complete ordered/limited
+		derived relation. Keeping it on the rewritten source preserves the
+		subquery boundary while avoiding a scalar/correlated fallback. */
+		(define joined_filter (combine_where derived_filter (coalesceNil (source_join_expr src) true)))
 		(list
-			(cons (source_with_join_expr derived_src derived_filter) helper_sources)
+			(cons (source_with_join_expr derived_src joined_filter) helper_sources)
 			(requalify_single_source_fields inner_alias alias (qb_fields inner))
 			true
 			rn_stage))))

@@ -1727,6 +1727,9 @@ func (c *column) UpdateSanitizer() {
 				return scm.NewDate(int64(v.Float()))
 			}
 			if v.IsString() {
+				if ts, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
+					return scm.NewDate(ts)
+				}
 				if ts, ok := scm.ParseDateString(v.String()); ok {
 					return scm.NewDate(ts)
 				}

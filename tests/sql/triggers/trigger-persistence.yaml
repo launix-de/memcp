@@ -86,6 +86,26 @@ test_cases:
         - name: "Bob"
           total: 150
 
+  - name: "Multi-row INSERT maintains a materialized join aggregate"
+    sql: "INSERT INTO tp_orders VALUES (10, 2, 10), (11, 2, 20)"
+    expect:
+      affected_rows: 2
+
+  - name: "Materialized join aggregate includes every inserted row"
+    sql: "SELECT c.name, SUM(o.amount) AS total FROM tp_orders o JOIN tp_customers c ON o.customer_id = c.id GROUP BY c.name ORDER BY c.name"
+    expect:
+      rows: 2
+      data:
+        - name: "Alice"
+          total: 300
+        - name: "Bob"
+          total: 180
+
+  - name: "Remove multi-row trigger test data"
+    sql: "DELETE FROM tp_orders WHERE id IN (10, 11)"
+    expect:
+      affected_rows: 2
+
   - name: "Verify SHOW TRIGGERS does not expose internal prejoin triggers"
     sql: "SHOW TRIGGERS"
     expect:

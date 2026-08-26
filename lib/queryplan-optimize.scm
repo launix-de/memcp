@@ -2200,27 +2200,32 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(define segment sources)
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 			(if (empty_list? sources) nil (source_alias (car sources)))))
+		/* GROUP BY/DISTINCT materializes its own ordered result. Its input join is
+		unordered, so do not impose the downstream ORDER BY on the join driver. */
+		(define join_order_items (if (and (empty_list? (qb_group block))
+			(not (query_block_has_aggregates? block)))
+			(qb_order block) '()))
 		/* ORDER BY is a required physical property, not a reason to retain SQL
 		source order. Any source whose ordered scan can evaluate the complete
 		expression -- including unique lookup/scalar-subscan columns -- is an
 		eligible driver. Keeping that property in DP dominance prevents the later
 		lowerer from materializing and sorting an intermediate relation. */
-		(define ordered_drivers (if (empty_list? (qb_order block))
+		(define ordered_drivers (if (empty_list? join_order_items)
 			'()
 			(map (filter sources (lambda (src)
 				(and (join_optimizer_inner_source? stage_catalog src)
 					(order_items_supported_by_join_driver?
-						sources default_alias src (qb_order block) stage_catalog
+						sources default_alias src join_order_items stage_catalog
 						(coalesceNil (qb_where block) true)))))
 				source_alias)))
 		/* If no single scan can provide the complete ORDER expression, retain the
 		lexicographic source prefix as a required physical property. DP still costs
 		all valid trees; it merely stops discarding the best tree whose nested scan
 		order can produce the requested suffix without a sorting relation. */
-		(define raw_required_order_aliases (if (or (empty_list? (qb_order block))
+		(define raw_required_order_aliases (if (or (empty_list? join_order_items)
 			(not (empty_list? ordered_drivers)))
 			'()
-			(join_optimizer_required_order_aliases sources default_alias (qb_order block))))
+			(join_optimizer_required_order_aliases sources default_alias join_order_items)))
 		(define required_order_aliases (if (empty_list? raw_required_order_aliases)
 			'()
 			(merge_unique (list
