@@ -1,5 +1,5 @@
 /*
-	(c) 2019, 2023 Launix, Inh. Carl-Philip Hänsch
+	(c) 2019-2026 Launix, Inh. Carl-Philip Hänsch
 	Author: Tim Kluge
 	Author: Carl-Philip Hänsch
 
@@ -9,15 +9,15 @@
 package packrat
 
 import (
-	"sync"
 	"regexp"
+	"sync"
 	"unicode"
 )
 
 type MemoEntry[T any] struct {
 	Lr  *Lr[T]
 	Ans Node[T]
-	Ok bool
+	Ok  bool
 
 	Position int
 }
@@ -51,24 +51,25 @@ func (h *Head[T]) IsEvaluated(rule Parser[T]) bool {
 }
 
 type Lr[T any] struct {
-	seed Node[T]
+	seed   Node[T]
 	seedOk bool
-	rule Parser[T]
-	head *Head[T]
-	next *Lr[T]
+	rule   Parser[T]
+	head   *Head[T]
+	next   *Lr[T]
 }
 
 type Scanner[T any] struct {
-	input           string
-	remainingInput  string
-	position        int
-	memoization     []map[Parser[T]]*MemoEntry[T]
-	heads           map[int]*Head[T]
-	invocationStack *Lr[T]
-	breaks          []bool
+	input               string
+	remainingInput      string
+	position            int
+	memoization         []map[Parser[T]]*MemoEntry[T]
+	heads               map[int]*Head[T]
+	invocationStack     *Lr[T]
+	breaks              []bool
+	skipLeafMemoization bool
 
-	headpool        sync.Pool
-	lrPool          sync.Pool
+	headpool sync.Pool
+	lrPool   sync.Pool
 
 	skipRegex *regexp.Regexp
 }
@@ -77,24 +78,31 @@ type Scanner[T any] struct {
 // Pools are shared by copying the New functions.
 func (s *Scanner[T]) Copy() *Scanner[T] {
 	ns := &Scanner[T]{
-		input:           s.input,
-		remainingInput:  s.remainingInput,
-		position:        s.position,
-		memoization:     s.memoization,
-		heads:           s.heads,
-		invocationStack: s.invocationStack,
-		breaks:          s.breaks,
-		skipRegex:       s.skipRegex,
+		input:               s.input,
+		remainingInput:      s.remainingInput,
+		position:            s.position,
+		memoization:         s.memoization,
+		heads:               s.heads,
+		invocationStack:     s.invocationStack,
+		breaks:              s.breaks,
+		skipLeafMemoization: s.skipLeafMemoization,
+		skipRegex:           s.skipRegex,
 	}
 	ns.headpool.New = s.headpool.New
 	ns.lrPool.New = s.lrPool.New
 	return ns
 }
 
+// SkipLeafMemoization avoids retaining results for terminal parsers, which
+// cannot close a recursive grammar cycle. Composite and named grammar rules
+// remain memoized and continue to provide packrat recursion handling.
+func (s *Scanner[T]) SkipLeafMemoization() {
+	s.skipLeafMemoization = true
+}
+
 func (s *Scanner[T]) Recall(rule Parser[T], pos int) *MemoEntry[T] {
-	mmap := s.memoization[pos]
 	var m *MemoEntry[T]
-	if mmap != nil {
+	if mmap := s.memoization[pos]; mmap != nil {
 		m = mmap[rule]
 	}
 
@@ -181,7 +189,7 @@ var SkipWhitespaceAndCommentsRegex = regexp.MustCompile("^(?:/\\*.*?\\*/|[\r\n\t
 func NewScanner[T any](input string, skipper *regexp.Regexp) *Scanner[T] {
 	s := &Scanner[T]{input: input, position: 0,
 		memoization: make([]map[Parser[T]]*MemoEntry[T], len(input)+1),
-		heads: make(map[int]*Head[T])}
+		heads:       make(map[int]*Head[T])}
 	s.headpool.New = func() any {
 		return &Head[T]{nil, make(map[Parser[T]]bool), make(map[Parser[T]]bool)}
 	}

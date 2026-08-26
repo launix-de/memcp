@@ -1,0 +1,83 @@
+# Copyright (C) 2026  MemCP Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "SQL parser scaling for generated conditional updates"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS parser_scale_event"
+  - sql: |
+      CREATE TABLE parser_scale_event (
+        id INT PRIMARY KEY,
+        mode TEXT,
+        first_at BIGINT,
+        last_at BIGINT,
+        next_1 BIGINT,
+        next_2 BIGINT,
+        next_3 BIGINT,
+        next_4 BIGINT,
+        next_5 BIGINT,
+        next_6 BIGINT
+      )
+  - sql: |
+      INSERT INTO parser_scale_event
+        (id, mode, first_at, last_at, next_1, next_2, next_3, next_4, next_5, next_6)
+      VALUES (1, 'periodic', 100, 90, 1, 2, 3, 4, 5, 6)
+
+test_cases:
+  - name: "Large conditional no-op update remains correct"
+    timeout: 30
+    scm: |
+      (begin
+        (define branches (reduce (produceN 764) (lambda (sql i)
+          (begin
+            (concat sql
+              " WHEN mode = 'periodic' AND first_at <= (CASE WHEN 1800000000 >= first_at + " i
+              " THEN first_at + " i " ELSE first_at END)"
+              " AND COALESCE(last_at, 0) < (CASE WHEN 1800000000 >= first_at + " i
+              " THEN first_at + " i " ELSE first_at END)"
+              " THEN first_at + " i))) ""))
+        (define case_expr (concat "CASE" branches " ELSE last_at END"))
+        (define ids (reduce (produceN 764) (lambda (sql i)
+          (concat sql (if (equal? i 0) "" " OR ") "id = " (+ i 1000))) ""))
+        (define query (concat
+          "UPDATE parser_scale_event SET "
+          "next_1 = " case_expr ", next_2 = " case_expr ", next_3 = " case_expr
+          ", next_4 = " case_expr ", next_5 = " case_expr ", next_6 = " case_expr
+          " WHERE (" ids ") AND FALSE"))
+        (eval (parse_sql "memcp-tests" query (lambda (_schema _table _write) true)))
+        "ok")
+    expect:
+      data: ["ok"]
+
+  - name: "No-op update leaves the row unchanged"
+    sql: |
+      SELECT next_1, next_2, next_3, next_4, next_5, next_6
+      FROM parser_scale_event
+      WHERE id = 1
+    expect:
+      rows: 1
+      data:
+        - next_1: 1
+          next_2: 2
+          next_3: 3
+          next_4: 4
+          next_5: 5
+          next_6: 6
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS parser_scale_event"

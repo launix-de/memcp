@@ -1,5 +1,5 @@
 /*
-	(c) 2019 Launix, Inh. Carl-Philip Hänsch
+	(c) 2019-2026 Launix, Inh. Carl-Philip Hänsch
 	Author: Tim Kluge
 
 	Dual licensed with custom aggreements or GPLv3
@@ -19,13 +19,14 @@ type Parser[T any] interface {
 }
 
 func (s *Scanner[T]) applyRule(rule Parser[T]) (Node[T], bool) {
-	startPosition := s.position
-
-	memmap := s.memoization[startPosition]
-	if memmap == nil {
-		memmap = make(map[Parser[T]]*MemoEntry[T])
-		s.memoization[startPosition] = memmap
+	if s.skipLeafMemoization {
+		switch rule.(type) {
+		case *AtomParser[T], *EmptyParser[T], *EndParser[T], *RegexParser[T], *RestParser[T]:
+			return rule.Match(s)
+		}
 	}
+
+	startPosition := s.position
 
 	m := s.Recall(rule, startPosition)
 	if m == nil {
@@ -33,6 +34,11 @@ func (s *Scanner[T]) applyRule(rule Parser[T]) (Node[T], bool) {
 		*lr = Lr[T]{seed: Node[T]{}, seedOk: false, rule: rule, head: nil, next: s.invocationStack}
 		s.invocationStack = lr
 		m := &MemoEntry[T]{Lr: lr, Position: startPosition}
+		memmap := s.memoization[startPosition]
+		if memmap == nil {
+			memmap = make(map[Parser[T]]*MemoEntry[T])
+			s.memoization[startPosition] = memmap
+		}
 		memmap[rule] = m
 		ans, ok := rule.Match(s)
 		s.invocationStack = s.invocationStack.next
@@ -65,7 +71,7 @@ func (s *Scanner[T]) applyRule(rule Parser[T]) (Node[T], bool) {
 var emptyString = ""
 
 type Node[T any] struct {
-	Payload  T
+	Payload T
 }
 
 type ParserError[T any] struct {
@@ -182,8 +188,8 @@ func ParsePartial[T any](p Parser[T], originalScanner *Scanner[T]) (Node[T], *Pa
 		m := originalScanner.memoization[index]
 		if len(m) > 0 {
 			maxPos = index
-			for k := range m {
-				failedParsers = append(failedParsers, k)
+			for rule := range m {
+				failedParsers = append(failedParsers, rule)
 			}
 			break
 		}
@@ -221,8 +227,8 @@ func Parse[T any](p Parser[T], originalScanner *Scanner[T]) (Node[T], *ParserErr
 		m := originalScanner.memoization[index]
 		if len(m) > 0 {
 			maxPos = index
-			for k := range m {
-				failedParsers = append(failedParsers, k)
+			for rule := range m {
+				failedParsers = append(failedParsers, rule)
 			}
 			break
 		}

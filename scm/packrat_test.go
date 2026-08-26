@@ -37,6 +37,23 @@ func TestKleeneParserWithoutMemoization(t *testing.T) {
 	}
 }
 
+func TestSkippedLeafMemoizationKeepsNamedLeftRecursion(t *testing.T) {
+	parserValue := Eval(Read("leaf memo parser", `(begin
+		(define expression (parser (or
+			(parser '((define left expression) "+" (define right (regex "[0-9]+" false false)))
+				(concat left "+" right))
+			(regex "[0-9]+" false false))))
+		(parser '((define value expression) $) value "" true))`), &Globalenv)
+	parser := parserValue.Parser()
+
+	if !parser.SkipLeafMemoization {
+		t.Fatal("parser did not disable terminal-parser memoization")
+	}
+	if got := parser.Execute("1+2+3", &Globalenv).String(); got != "1+2+3" {
+		t.Fatalf("left-recursive parser returned %q", got)
+	}
+}
+
 func TestSharedParserConcurrentCaptures(t *testing.T) {
 	parserValue := Eval(Read("concurrent parser", `(parser '(
 		(define value (or

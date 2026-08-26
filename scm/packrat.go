@@ -28,11 +28,12 @@ type parserResult struct {
 }
 
 type ScmParser struct {
-	Root      packrat.Parser[*parserResult]
-	Syntax    Scmer
-	Generator Scmer
-	Outer     *Env
-	Skipper   *regexp.Regexp
+	Root                packrat.Parser[*parserResult]
+	Syntax              Scmer
+	Generator           Scmer
+	Outer               *Env
+	Skipper             *regexp.Regexp
+	SkipLeafMemoization bool
 }
 
 type ScmParserVariable struct {
@@ -164,6 +165,9 @@ func (b *ScmParser) Execute(str string, en *Env) Scmer {
 		skipper = packrat.SkipWhitespaceAndCommentsRegex // also skip C-style comments as whitespaces
 	}
 	scanner := packrat.NewScanner[*parserResult](str, skipper)
+	if b.SkipLeafMemoization {
+		scanner.SkipLeafMemoization()
+	}
 	node, err := packrat.Parse(b, scanner)
 	if err != nil {
 		panic(err)
@@ -252,10 +256,16 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 					Validate(list[3], "string")
 					skipper = list[3]
 				}
+				skipLeafMemoization := false
+				if len(list) > 4 {
+					skipLeafMemoization = list[4].Bool()
+				}
 				if ome != nil {
 					return nil
 				}
-				return NewParser(list[1], resulter, skipper, en, ignoreResult)
+				result := NewParser(list[1], resulter, skipper, en, ignoreResult)
+				result.SkipLeafMemoization = skipLeafMemoization
+				return result
 			case "atom":
 				caseInsensitive := false
 				if len(list) > 2 {
@@ -419,6 +429,7 @@ func init_parser() {
 	syntax can be one of:
 	(parser syntax scmerresult) will execute scmerresult after parsing syntax
 	(parser syntax scmerresult "skipper") will add a different whitespace skipper regex to the root parser
+	(parser syntax scmerresult "skipper" true) skips redundant terminal-parser memoization while keeping composite and named grammar rules memoized
 	(define var syntax) valid inside (parser...), stores the result of syntax into var for use in scmerresult
 	"str" AtomParser
 	(atom "str" caseinsensitive skipws) AtomParser
@@ -438,7 +449,7 @@ func init_parser() {
 	`,
 		Fn: nil,
 		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "syntax", ParamDesc: "syntax of the grammar (see docs)"}, &TypeDescriptor{Kind: "any", ParamName: "generator", ParamDesc: "(optional) expressions to evaluate. All captured variables are available in the scope.", Optional: true}, &TypeDescriptor{Kind: "string", ParamName: "skipper", ParamDesc: "(optional) string that defines the skip mechanism for whitespaces as regexp", Optional: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "syntax", ParamDesc: "syntax of the grammar (see docs)"}, &TypeDescriptor{Kind: "any", ParamName: "generator", ParamDesc: "(optional) expressions to evaluate. All captured variables are available in the scope.", Optional: true}, &TypeDescriptor{Kind: "string", ParamName: "skipper", ParamDesc: "(optional) string that defines the skip mechanism for whitespaces as regexp", Optional: true}, &TypeDescriptor{Kind: "bool", ParamName: "skip_leaf_memoization", ParamDesc: "(optional) retain packrat memoization only for composite and named grammar rules", Optional: true}},
 			Return: &TypeDescriptor{Kind: "func"},
 		},
 	})

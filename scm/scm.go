@@ -282,7 +282,11 @@ restart:
 				return val
 			case "parser":
 				if len(list) > 3 {
-					return NewScmParser(NewParser(list[1], list[2], list[3], en, true))
+					parser := NewParser(list[1], list[2], list[3], en, true)
+					if len(list) > 4 {
+						parser.SkipLeafMemoization = list[4].Bool()
+					}
+					return NewScmParser(parser)
 				} else if len(list) > 2 {
 					return NewScmParser(NewParser(list[1], list[2], NewNil(), en, true))
 				}

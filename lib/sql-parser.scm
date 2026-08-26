@@ -1941,7 +1941,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
 		"" /* comment only command */
 	)))
-	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
+	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+" true) s)
 )))
 
 (define load_sql (lambda (schema stream) (begin
