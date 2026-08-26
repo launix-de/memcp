@@ -308,5 +308,19 @@ class SuiteIsolationContractTest(unittest.TestCase):
             )
             self.assertEqual(suite_execution_mode(str(spec)), "direct")
 
+    def test_precommit_hook_delegates_managed_restart_suites_to_the_runner(self) -> None:
+        hook = (Path(__file__).resolve().parents[1] / "git-pre-commit").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn('if [ "$mode" = "managed_subprocess" ]; then', hook)
+        self.assertIn(
+            'python3 -u run_sql_tests.py "$tf" "${runner_args[@]}"',
+            hook,
+        )
+        self.assertIn(
+            'python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}"',
+            hook,
+        )
+
 if __name__ == "__main__":
     unittest.main()

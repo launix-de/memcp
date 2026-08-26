@@ -261,10 +261,9 @@ done
 #   the same state. The default is a port-scoped temporary store; callers may
 #   set MEMCP_TEST_DATA_DIR to pin a specific test store.
 # - The selected data directory must never be deleted by this hook.
-# - "isolated" means serialized execution on the same shared database, not
-#   storage isolation.
-# - restart/SHUTDOWN suites may temporarily stop the shared supervisor, but
-#   they must come back on the same data directory afterwards.
+# - ordinary "isolated" suites are serialized on the shared database.
+# - isolated restart/SHUTDOWN suites own a temporary MemCP process and data
+#   directory, so stopping their server cannot race the shared supervisor.
 
 run_memcp_forever() {
   trap 'kill $memcp_pid 2>/dev/null; exit 0' TERM INT
@@ -366,37 +365,24 @@ parallel_tests=()
 sequential_tests=()
 suite_mode() {
   python3 - "$1" <<'PY'
-import sys, yaml
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    spec = yaml.safe_load(f) or {}
-metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
-if metadata.get("isolated") or metadata.get("requires_mysql"):
-    print("isolated")
-    raise SystemExit(0)
-for test_case in spec.get("test_cases", []) if isinstance(spec, dict) else []:
-    if not isinstance(test_case, dict):
-        continue
-    if test_case.get("action") == "restart":
-        print("isolated")
-        raise SystemExit(0)
-    sql = test_case.get("sql")
-    if isinstance(sql, str) and sql.strip().upper() == "SHUTDOWN":
-        print("isolated")
-        raise SystemExit(0)
-print("shared")
+import sys
+
+from run_sql_tests import suite_execution_mode
+
+print(suite_execution_mode(sys.argv[1]))
 PY
 }
 
 # Scheduling contract:
 # - shared suites may run in parallel against the long-lived shared MemCP
 #   process
-# - isolated suites must run one after another, but still on the same ./data
-#   database state
+# - every other suite runs sequentially; managed_subprocess suites additionally
+#   own the MemCP process which their restart cases stop and replace
 for tf in "${test_files_arr[@]}"; do
-  if [ "$(suite_mode "$tf")" = "isolated" ]; then
-    sequential_tests+=("$tf")
-  else
+  if [ "$(suite_mode "$tf")" = "parallel" ]; then
     parallel_tests+=("$tf")
+  else
+    sequential_tests+=("$tf")
   fi
 done
 
@@ -413,21 +399,32 @@ run_one() {
   local tf="$1"
   local out="$2"
   local statusf="$3"
+  local mode
+  local managed_data_dir
+  local rc
   local -a runner_args=()
   if [ "$fail_fast_mode" -eq 1 ]; then
     runner_args+=("--fail-fast")
   fi
-  if ! wait_for_sql_ready 180 1; then
-    echo "FAIL" > "$statusf"
-    {
-      flock -x 9
-      echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
-      echo ""
-    } 9>>"$lockfile"
-    return
+  mode="$(suite_mode "$tf")"
+  if [ "$mode" = "managed_subprocess" ]; then
+    managed_data_dir="$tmpdir/managed-$(basename "$tf" .yaml)"
+    MEMCP_TEST_DATA_DIR="$managed_data_dir" \
+      python3 -u run_sql_tests.py "$tf" "${runner_args[@]}" > "$out" 2>&1
+    rc=$?
+  else
+    if ! wait_for_sql_ready 180 1; then
+      echo "FAIL" > "$statusf"
+      {
+        flock -x 9
+        echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
+        echo ""
+      } 9>>"$lockfile"
+      return
+    fi
+    python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}" > "$out" 2>&1
+    rc=$?
   fi
-  python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}" > "$out" 2>&1
-  rc=$?
   if [ $rc -eq 0 ]; then
     echo OK > "$statusf"
   else
