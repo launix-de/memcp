@@ -3320,7 +3320,7 @@ guard. The guard therefore asserts the actual planner inequality instead of
 pinning one sampled row count: harmless estimate refinement keeps the cached
 plan, while an autoindex or data growth which changes the winner recompiles it. */
 (define membership_carrier_cost_choice (lambda (candidate_input_rows candidate_rows driver_rows facts
-		driver_probe_supported driver_strategy allow_ordered_batch prefiltered_supported prefiltered_driver_rows)
+	driver_probe_supported driver_strategy allow_ordered_batch prefiltered_supported prefiltered_driver_rows)
 	(begin
 		(define candidate_cost (membership_projection_cost
 			candidate_input_rows candidate_rows driver_rows facts))
@@ -3770,11 +3770,11 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						planner_adaptive_observation_budget_ns))) false))
 				(define runtime_cost_guard_supported (and runtime_choice_risky
 					(and (not estimate_complete)
-					(and (nil? observation_keys)
-					(and known
-						(and (not guarded_broad_order_driver)
-							(and (not (nil? runtime_candidate_rows_expr))
-								(not (nil? runtime_driver_rows_expr)))))))))
+						(and (nil? observation_keys)
+							(and known
+								(and (not guarded_broad_order_driver)
+									(and (not (nil? runtime_candidate_rows_expr))
+										(not (nil? runtime_driver_rows_expr)))))))))
 				(define runtime_cost_args (if runtime_cost_guard_supported (list
 					candidate_input_rows candidate_rows driver_rows cost_facts
 					driver_probe_supported driver_strategy allow_ordered_batch
