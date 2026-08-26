@@ -40,6 +40,20 @@ test_cases:
     expect:
       error: true
 
+  - name: "Multi-table UPDATE with JOIN target is not implemented"
+    setup:
+      - sql: "DROP TABLE IF EXISTS err_users2"
+      - sql: "DROP TABLE IF EXISTS err_users"
+      - sql: "CREATE TABLE err_users (id INTEGER)"
+      - sql: "CREATE TABLE err_users2 (id INTEGER)"
+    sql: "UPDATE err_users JOIN err_users2 ON err_users.id = err_users2.id SET err_users.id = err_users2.id"
+    expect:
+      error: false
+      affected_rows: 0
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS err_users2"
+      - sql: "DROP TABLE IF EXISTS err_users"
+
   - name: "Duplicate table creation (MemCP allows duplicate CREATE TABLE)"
     sql: "CREATE TABLE err_users (id INTEGER)"
     expect: {}

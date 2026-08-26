@@ -292,6 +292,7 @@ test_cases:
       - sql: "SELECT COUNT(*) AS n FROM gs_distinct_attributes WHERE entity_id > 0"
       - scm: '(rebuild (table "memcp-tests" "gs_distinct_entities") true true)'
       - scm: '(rebuild (table "memcp-tests" "gs_distinct_attributes") true true)'
+      - scm: '(settings "ShardSize" 60000)'
     sql: |
       SELECT a.attribute_key,
              COUNT(*) AS rows_found,
