@@ -88,20 +88,18 @@ type StorageIndex struct {
 	Cols []string // sort equal-cols alphabetically, so similar conditions are canonical
 	// ColMapCols[i] and ColMapFn[i] are set for computed index columns (col starts with ".").
 	// Both are nil for raw columns.
-	ColMapCols  [][]string      // per-column source col names; nil entry means raw column
-	ColMapFn    []scm.Scmer     // per-column compute fn; IsNil() entry means raw column
-	ColMatchers []IndexAnalyzer // per-column analyzer (singleton: EqualMatcher/RangeMatcher/LikeMatcher)
+	ColMapCols [][]string  // per-column source col names; nil entry means raw column
+	ColMapFn   []scm.Scmer // per-column compute fn; IsNil() entry means raw column
+	// ColMatchers stores only custom, non-sorted analyzers. A nil entry (or an
+	// absent slice) denotes an ordinary sorted column; equal/range belong to the
+	// query boundary and are deliberately not persisted as index metadata.
+	ColMatchers []IndexAnalyzer
 	// ColOrder is the immutable per-column strict relation used by build, delta
 	// merge, lookup, and ordered scans. Each callback owns collation, direction,
 	// and NULL placement; storage must not infer or wrap those semantics.
-	ColOrder []func(...scm.Scmer) scm.Scmer
-	// ColOrderMeta is diagnostic metadata only. Equality and reuse are decided
-	// by canonical callback identity, never by reparsing this string.
+	ColOrder []func(scm.Scmer, scm.Scmer) bool
+	// ColOrderMeta identifies the source relation for equality and reuse checks.
 	ColOrderMeta []string
-	// ColOrderFast is derived once from ColOrder by the callback factory. It
-	// removes Scmer(bool) traffic from comparison loops without becoming a
-	// second source of ordering semantics.
-	ColOrderFast []func(scm.Scmer, scm.Scmer) bool
 	Savings      float64 // store the amount of time savings here -> add selectivity (outputted / size) on each
 	Native       bool    // true when data is physically sorted by this index (zero-cost)
 	t            *storageShard
@@ -125,14 +123,7 @@ func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
 	return fmt.Sprintf("callback:%x", scm.FunctionIdentity(order))
 }
 
-func sameOrderRelation(a, b func(...scm.Scmer) scm.Scmer) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return scm.FunctionIdentity(a) == scm.FunctionIdentity(b)
-}
-
-func canonicalColumnOrder(t *table, col string) (func(...scm.Scmer) scm.Scmer, string) {
+func canonicalColumnOrder(t *table, col string) (func(scm.Scmer, scm.Scmer) bool, string) {
 	collation := "bin"
 	for _, definition := range t.Columns {
 		if definition.Name == col {
@@ -144,26 +135,23 @@ func canonicalColumnOrder(t *table, col string) (func(...scm.Scmer) scm.Scmer, s
 	}
 	value := scm.Apply(scm.Globalenv.Vars[scm.Symbol("collate")], scm.NewString(collation), scm.NewBool(false))
 	order := scm.OptimizeProcToSerialFunction(value)
-	return order, orderRelationMeta(order)
+	return scm.OrderRelationLess(order), orderRelationMeta(order)
 }
 
-func boundaryOrder(t *table, boundary columnboundaries) (func(...scm.Scmer) scm.Scmer, string) {
+func boundaryOrder(t *table, boundary columnboundaries) (func(scm.Scmer, scm.Scmer) bool, string) {
 	if boundary.order != nil {
 		meta := boundary.orderMeta
 		if meta == "" {
 			meta = orderRelationMeta(boundary.order)
 		}
-		return boundary.order, meta
+		return scm.OrderRelationLess(boundary.order), meta
 	}
 	return canonicalColumnOrder(t, boundary.col)
 }
 
 func (s *StorageIndex) lessAt(col int, a, b scm.Scmer) bool {
-	if col < len(s.ColOrderFast) && s.ColOrderFast[col] != nil {
-		return s.ColOrderFast[col](a, b)
-	}
 	if col < len(s.ColOrder) && s.ColOrder[col] != nil {
-		return scm.ToBool(s.ColOrder[col](a, b))
+		return s.ColOrder[col](a, b)
 	}
 	return scm.Less(a, b)
 }
@@ -182,11 +170,14 @@ func (s *StorageIndex) usesNaturalAscendingOrder(col int) bool {
 	if col >= len(s.ColOrder) || s.ColOrder[col] == nil {
 		return true
 	}
-	collation, reverse, ok := scm.LookupCollate(s.ColOrder[col])
-	if !ok || reverse {
+	if col >= len(s.ColOrderMeta) {
 		return false
 	}
-	switch collation {
+	meta := s.ColOrderMeta[col]
+	if !strings.HasSuffix(meta, ":asc") {
+		return false
+	}
+	switch strings.TrimSuffix(meta, ":asc") {
 	case "bin", "binary", "utf8", "utf8mb4":
 		return true
 	default:
@@ -200,7 +191,7 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 	getters := make([]colGetter, len(s.Cols))
 	sessionKeys := make([]string, 0)
 	for i, col := range s.Cols {
-		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() && isScanPseudoColName(col) {
+		if !s.columnIsSorted(i) && isScanPseudoColName(col) {
 			continue
 		}
 		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
@@ -277,9 +268,23 @@ func sameComputedRevisions(a, b []computedRevision) bool {
 	return true
 }
 
-// matcherKindEqual checks if two matchers have the same kind for index deduplication.
+// matcherKindEqual checks if two matchers have the same kind.
 func matcherKindEqual(a, b IndexAnalyzer) bool {
 	return a.Kind() == b.Kind()
+}
+
+// indexMatcherCompatible reports whether an index column can serve a query
+// boundary. Equal and range boundaries both use the same sorted index data;
+// only custom row matchers require an exact analyzer kind.
+func indexMatcherCompatible(query, indexed IndexAnalyzer) bool {
+	if query == nil || query.IsSorted() {
+		return indexed == nil || indexed.IsSorted()
+	}
+	return indexed != nil && matcherKindEqual(query, indexed)
+}
+
+func (idx *StorageIndex) columnIsSorted(i int) bool {
+	return len(idx.ColMatchers) <= i || idx.ColMatchers[i] == nil || idx.ColMatchers[i].IsSorted()
 }
 
 func (idx *StorageIndex) sessionVariantKey(tx *TxContext) string {
@@ -419,7 +424,8 @@ func (idx *StorageIndex) computeDeltaBtreeSize(state *storageIndexState) uint {
 	return sz
 }
 
-// pretty-print: name(like)|birthdate(range)
+// String describes the physical index. Equal/range are query properties, not
+// distinct index kinds, so only custom analyzers are included in the output.
 func (idx *StorageIndex) String() string {
 	var b strings.Builder
 	for i, col := range idx.Cols {
@@ -427,7 +433,7 @@ func (idx *StorageIndex) String() string {
 			b.WriteByte('|')
 		}
 		b.WriteString(col)
-		if len(idx.ColMatchers) > i && idx.ColMatchers[i] != nil {
+		if len(idx.ColMatchers) > i && idx.ColMatchers[i] != nil && !idx.ColMatchers[i].IsSorted() {
 			b.WriteByte('(')
 			b.WriteString(idx.ColMatchers[i].Kind())
 			b.WriteByte(')')
@@ -489,12 +495,12 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []scm.Scmer, upperLast scm.Scmer, upperInclusive bool, getter func(int) scm.Scmer) (inRange bool, beyond bool) {
 	lastSorted := -1
 	for i := 0; i < cmpCols; i++ {
-		if len(s.ColMatchers) <= i || s.ColMatchers[i].IsSorted() {
+		if s.columnIsSorted(i) {
 			lastSorted = i
 		}
 	}
 	for i := 0; i < cmpCols; i++ {
-		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+		if !s.columnIsSorted(i) {
 			continue // non-sorted: block-skip handles this, scan() filters exact
 		}
 		v := getter(i)
@@ -532,7 +538,7 @@ func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []s
 
 func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid uint32, mainGetters []colGetter, delta indexPair) int {
 	for i := range s.Cols {
-		if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+		if !s.columnIsSorted(i) {
 			continue
 		}
 		mainVal := mainGetters[i].get(mainRecid)
@@ -660,13 +666,16 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 					if cols[i].col != index.Cols[i] {
 						goto skip_index // column mismatch
 					}
-					// matcher kind check (old indexes without ColMatchers are equal/range only)
-					if len(index.ColMatchers) > i && !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
+					var indexedMatcher IndexAnalyzer
+					if len(index.ColMatchers) > i {
+						indexedMatcher = index.ColMatchers[i]
+					}
+					if !indexMatcherCompatible(cols[i].matcher, indexedMatcher) {
 						goto skip_index // matcher kind mismatch
 					}
 					if cols[i].matcher.IsSorted() && !boundaryIsPoint(cols[i]) {
-						requiredOrder, _ := boundaryOrder(t.t, cols[i])
-						if len(index.ColOrder) <= i || !sameOrderRelation(requiredOrder, index.ColOrder[i]) {
+						_, requiredOrderMeta := boundaryOrder(t.t, cols[i])
+						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
 							goto skip_index
 						}
 					}
@@ -693,13 +702,17 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 						covered = false
 						break
 					}
-					if len(index.ColMatchers) > i && !matcherKindEqual(cols[i].matcher, index.ColMatchers[i]) {
+					var indexedMatcher IndexAnalyzer
+					if len(index.ColMatchers) > i {
+						indexedMatcher = index.ColMatchers[i]
+					}
+					if !indexMatcherCompatible(cols[i].matcher, indexedMatcher) {
 						covered = false
 						break
 					}
 					if cols[i].matcher.IsSorted() && !boundaryIsPoint(cols[i]) {
-						requiredOrder, _ := boundaryOrder(t.t, cols[i])
-						if len(index.ColOrder) <= i || !sameOrderRelation(requiredOrder, index.ColOrder[i]) {
+						_, requiredOrderMeta := boundaryOrder(t.t, cols[i])
+						if len(index.ColOrderMeta) <= i || requiredOrderMeta != index.ColOrderMeta[i] {
 							covered = false
 							break
 						}
@@ -759,10 +772,8 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		index.Cols = make([]string, indexCols)
 		index.ColMapCols = make([][]string, indexCols)
 		index.ColMapFn = make([]scm.Scmer, indexCols)
-		index.ColMatchers = make([]IndexAnalyzer, indexCols)
-		index.ColOrder = make([]func(...scm.Scmer) scm.Scmer, indexCols)
+		index.ColOrder = make([]func(scm.Scmer, scm.Scmer) bool, indexCols)
 		index.ColOrderMeta = make([]string, indexCols)
-		index.ColOrderFast = make([]func(scm.Scmer, scm.Scmer) bool, indexCols)
 		for i := 0; i < indexCols; i++ {
 			index.Cols[i] = cols[i].col
 			index.ColMapCols[i] = cols[i].mapCols // nil for raw columns
@@ -770,18 +781,21 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 			if !cols[i].mapFn.IsNil() {
 				index.sessionKeys = mergeSessionKeys(index.sessionKeys, extractSessionKeys(cols[i].mapFn))
 			}
-			index.ColMatchers[i] = cols[i].matcher // nil for equal/range
 			if cols[i].matcher.IsSorted() {
 				index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
-				index.ColOrderFast[i] = scm.OrderRelationLess(index.ColOrder[i])
+			} else {
+				if index.ColMatchers == nil {
+					index.ColMatchers = make([]IndexAnalyzer, indexCols)
+				}
+				index.ColMatchers[i] = cols[i].matcher
 			}
 		}
 		index.Savings = 0.0            // count how many cost we wasted so we decide when to build the index
 		index.baseState.active = false // tell the engine that index has to be built first
 		index.t = t
 		index.Native = true
-		for _, matcher := range index.ColMatchers {
-			if matcher.IsSorted() {
+		for i := range index.Cols {
+			if index.columnIsSorted(i) {
 				index.Native = false
 				break
 			}
@@ -854,10 +868,17 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
 		clone.ColMapCols = idx.ColMapCols // shallow copy OK (immutable per-col slices)
 		clone.ColMapFn = idx.ColMapFn     // shallow copy OK
 		clone.sessionKeys = append([]string(nil), idx.sessionKeys...)
-		clone.ColMatchers = idx.ColMatchers // shallow copy OK (singletons)
-		clone.ColOrder = append([]func(...scm.Scmer) scm.Scmer(nil), idx.ColOrder...)
+		for i, matcher := range idx.ColMatchers {
+			if matcher == nil || matcher.IsSorted() {
+				continue
+			}
+			if clone.ColMatchers == nil {
+				clone.ColMatchers = make([]IndexAnalyzer, len(idx.ColMatchers))
+			}
+			clone.ColMatchers[i] = matcher
+		}
+		clone.ColOrder = append([]func(scm.Scmer, scm.Scmer) bool(nil), idx.ColOrder...)
 		clone.ColOrderMeta = append([]string(nil), idx.ColOrderMeta...)
-		clone.ColOrderFast = append([]func(scm.Scmer, scm.Scmer) bool(nil), idx.ColOrderFast...)
 		clone.Savings = idx.Savings * 0.9
 		clone.baseState.active = false
 		candidates = append(candidates, clone)
@@ -898,8 +919,19 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
 					isPrefix = false
 					break
 				}
-				if len(shorter.ColOrder) <= k || len(longer.ColOrder) <= k ||
-					!sameOrderRelation(shorter.ColOrder[k], longer.ColOrder[k]) {
+				var shorterMatcher, longerMatcher IndexAnalyzer
+				if len(shorter.ColMatchers) > k {
+					shorterMatcher = shorter.ColMatchers[k]
+				}
+				if len(longer.ColMatchers) > k {
+					longerMatcher = longer.ColMatchers[k]
+				}
+				if !indexMatcherCompatible(shorterMatcher, longerMatcher) {
+					isPrefix = false
+					break
+				}
+				if len(shorter.ColOrderMeta) <= k || len(longer.ColOrderMeta) <= k ||
+					shorter.ColOrderMeta[k] != longer.ColOrderMeta[k] {
 					isPrefix = false
 					break
 				}
@@ -974,10 +1006,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		tmp := make([]uint32, s.t.main_count)
 		relations := make([]func(scm.Scmer, scm.Scmer) bool, len(cols))
 		for i := range relations {
-			if i < len(s.ColOrderFast) && s.ColOrderFast[i] != nil {
-				relations[i] = s.ColOrderFast[i]
-			} else if i < len(s.ColOrder) && s.ColOrder[i] != nil {
-				relations[i] = scm.OrderRelationLess(s.ColOrder[i])
+			if i < len(s.ColOrder) && s.ColOrder[i] != nil {
+				relations[i] = s.ColOrder[i]
 			} else {
 				relations[i] = scm.Less
 			}
@@ -1004,7 +1034,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		materialized := make([]scm.Scmer, mainCount*uint(numCols))
 		hasSortCol := make([]bool, numCols)
 		for colIdx, g := range cols {
-			if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+			if !s.columnIsSorted(colIdx) {
 				continue // query-level overlay column: never read by the comparator below
 			}
 			hasSortCol[colIdx] = true
@@ -1047,7 +1077,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			state.minVals = make([]scm.Scmer, len(cols))
 			state.maxVals = make([]scm.Scmer, len(cols))
 			for i, g := range cols {
-				if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+				if !s.columnIsSorted(i) {
 					continue
 				}
 				state.minVals[i] = g.get(tmp[0])
@@ -1059,7 +1089,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		state.minVals = make([]scm.Scmer, len(cols))
 		state.maxVals = make([]scm.Scmer, len(cols))
 		for i, g := range cols {
-			if len(s.ColMatchers) > i && !s.ColMatchers[i].IsSorted() {
+			if !s.columnIsSorted(i) {
 				continue
 			}
 			state.minVals[i] = g.get(0)
@@ -1078,7 +1108,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		// Repeated predicates of the same index kind bind independently but
 		// share their shard-local cache.
 		for previous := 0; previous < colIdx; previous++ {
-			if s.Cols[previous] == s.Cols[colIdx] && matcherKindEqual(s.ColMatchers[previous], analyzer) {
+			if s.Cols[previous] == s.Cols[colIdx] && s.ColMatchers[previous] != nil && matcherKindEqual(s.ColMatchers[previous], analyzer) {
 				state.indexHooks[colIdx] = state.indexHooks[previous]
 				break
 			}
@@ -1114,7 +1144,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 			compareCols = b.compareCols
 		}
 		for colIdx := 0; colIdx < compareCols; colIdx++ {
-			if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+			if !s.columnIsSorted(colIdx) {
 				continue
 			}
 			var av, bv scm.Scmer
@@ -1142,7 +1172,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		if len(s.sessionKeys) > 0 {
 			values := make([]scm.Scmer, len(s.Cols))
 			for colIdx := range s.Cols {
-				if len(s.ColMatchers) > colIdx && !s.ColMatchers[colIdx].IsSorted() {
+				if !s.columnIsSorted(colIdx) {
 					continue
 				}
 				values[colIdx] = s.getDeltaColValueTx(tx, recid, data, colIdx)
