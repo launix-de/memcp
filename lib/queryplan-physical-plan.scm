@@ -507,6 +507,13 @@ only partitioned FROM source would erase the block's row multiplicity
 		(merge_unique (map tail expr_probe_stages))
 		_ '())))
 
+(define physical_scalar_truth_plan_stages (lambda (plan)
+	(if (nil? plan)
+		'()
+		(begin
+			(define probe (physical_scalar_truth_plan_probe plan))
+			(if (nil? probe) '() (list (car probe)))))))
+
 (define query_block_probe_expr_stages (lambda (block)
 	(merge_unique (list
 		(expr_probe_stages (qb_sources block))
@@ -3027,7 +3034,7 @@ driver-predicate-first execution. Keeping those alternatives distinct makes
 the emitted work agree with the cost comparison. All residual conditions then
 re-enter the ordinary expression lowerer with the candidate-reduced row count,
 so complex ACL trees receive the same per-node physical choices as any scan. */
-(define ordered_batch_filter_expr (lambda (sources default_alias src condition memberships probe_work_rows acceptance_cols acceptance_probe)
+(define ordered_batch_filter_expr (lambda (sources default_alias src condition memberships required_recsets probe_work_rows acceptance_cols acceptance_probe)
 	(begin
 		(define input_batch (symbol "__ordered_input_batch"))
 		(define residual (reduce memberships (lambda (remaining membership)
@@ -3040,10 +3047,17 @@ so complex ACL trees receive the same per-node physical choices as any scan. */
 			(or unsupported (nil? expr))) false)
 			nil
 			(begin
-				(define membership_expr (if (empty_list? membership_exprs)
+				/* Exact carriers selected for independent conjuncts are part of the
+				batch input, not row callbacks. Intersecting them here preserves the same
+				AND semantics as the ordinary scan while retaining ordered braking. */
+				(define batch_inputs (merge (list
+					(list input_batch)
+					required_recsets
+					membership_exprs)))
+				(define membership_expr (if (equal? (count batch_inputs) 1)
 					input_batch
 					(list (quote recset_intersect)
-						(cons (quote list) (cons input_batch membership_exprs)))))
+						(cons (quote list) batch_inputs))))
 				(define residual_probe_work_rows
 					(batch_membership_survivor_rows memberships probe_work_rows))
 				(planner_record_physical_decision (list
@@ -3176,7 +3190,7 @@ RecSet; membership edges retain their own physical operators. */
 				planner_membership_recset_build_row_ns)
 			(* projection_rows 8)
 			0 visited_rows 0.55)
-			(planner_membership_direct_probe_cost
+			(planner_membership_downstream_probe_cost
 				(* visited_rows
 					(membership_candidate_density candidate_input_rows candidate_rows facts)
 					(qassoc_get facts (quote membership_downstream_probe_branches) 0)))
@@ -3397,7 +3411,9 @@ dependent choices must pass through this function and retain their guard. */
 							(+ (count (acceptance_required_sources
 								(membership_downstream_sources (qb_sources block) src membership)
 								alias raw_condition))
-								(count (expr_probe_stages raw_condition)))
+								(count (merge_unique (list
+									(expr_probe_stages raw_condition)
+									(physical_scalar_truth_plan_stages scalar_plan)))))
 							(not row_number_membership_consumer)))
 						(if (nil? plan) nil (list membership plan)))))
 					(lambda (entry) (not (nil? entry)))))
@@ -3526,7 +3542,9 @@ dependent choices must pass through this function and retain their guard. */
 						(or chosen (equal? (car (nth entry 1)) "ordered_batch_accept"))) false)))
 				(define batch_filter (if use_batch_accept
 					(ordered_batch_filter_expr (list src) alias src filter_condition
-						remaining_batch_memberships (probe_context_row_count (list src)) '() true)
+						remaining_batch_memberships
+						(if scalar_membership_filter (list scalar_membership_var) '())
+						(probe_context_row_count (list src)) '() true)
 					nil))
 				(define raw_map_row (list (quote resultrow)
 					(cons (quote list) (map_assoc bundled_fields (lambda (title expr)
@@ -4051,7 +4069,7 @@ move the window to the wrong tree level. */
 			acceptance_probe))
 		(define batch_filter (if use_batch_accept
 			(ordered_batch_filter_expr all_sources default_alias src condition
-				(list membership) acceptance_probe_work_rows acceptance_cols acceptance_probe)
+				(list membership) '() acceptance_probe_work_rows acceptance_cols acceptance_probe)
 			nil))
 		(if (and use_batch_accept (nil? batch_filter))
 			(neumann_fail "build_queryplan" "chosen ordered batch membership has no executable filter")
@@ -4632,7 +4650,9 @@ exact parameter value. */
 				(+ (count (acceptance_required_sources
 					(membership_downstream_sources all_sources src membership)
 					default_alias final_condition))
-					(count (expr_probe_stages final_condition)))
+					(count (merge_unique (list
+						(expr_probe_stages final_condition)
+						(physical_scalar_truth_plan_stages scalar_plan)))))
 				(not row_number_membership_consumer))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
@@ -4794,7 +4814,8 @@ exact parameter value. */
 			lowered_filter_condition))
 		(define batch_filter (if use_batch_accept
 			(ordered_batch_filter_expr all_sources default_alias src condition
-				(list membership) (probe_work_context_rows_for_alias probe_context alias) '() true)
+				(list membership) '()
+				(probe_work_context_rows_for_alias probe_context alias) '() true)
 			nil))
 		(define continuation_expr (continuation remaining_condition row_expr remaining_order_items))
 		(define map_body (if (equal? post_outer_condition true)
@@ -7207,6 +7228,7 @@ potentially large calibrated SELECT result. */
 							"limit" (physical_calibration_input decision "limit")
 							"offset" (physical_calibration_input decision "offset")
 							"probe_branches" (physical_calibration_input decision "probe_branches")
+							"downstream_probe_branches" (physical_calibration_input decision "downstream_probe_branches")
 							"candidate_scan_invocations" (physical_calibration_input decision "candidate_scan_invocations")
 							"candidate_filter_columns" (physical_calibration_input decision "candidate_filter_columns")
 							"candidate_map_columns" (physical_calibration_input decision "candidate_map_columns")

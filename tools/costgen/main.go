@@ -140,6 +140,7 @@ type calibrationRow struct {
 	Limit                            *float64 `json:"limit"`
 	Offset                           *float64 `json:"offset"`
 	ProbeBranches                    *float64 `json:"probe_branches"`
+	DownstreamProbeBranches          *float64 `json:"downstream_probe_branches"`
 	CandidateScanInvocations         *float64 `json:"candidate_scan_invocations"`
 	CandidateFilterColumns           *float64 `json:"candidate_filter_columns"`
 	CandidateMapColumns              *float64 `json:"candidate_map_columns"`
@@ -200,6 +201,8 @@ type constants struct {
 	groupCacheProbeRowNS       int64
 	orderedDriverInputNS       int64
 	orderedScanInvocationNS    int64
+	orderedRecsetRowNS         int64
+	downstreamProbeRowNS       int64
 	scalarPresenceProbeRowNS   int64
 	membershipDirectProbeRowNS int64
 }
@@ -254,23 +257,25 @@ func main() {
 	// must not be mistaken for additional equations of this coefficient model.
 	membershipObservations := filterDecisionObservations(observations, "membership_carrier")
 	training := filterObservations(membershipObservations, false)
+	allTraining := filterObservations(observations, false)
 	carrierTraining := filterCarrierObservations(training)
 	fitTraining := filterCompleteExactPairs(carrierTraining)
 	if err := validateMeasurementSignal(fitTraining); err != nil {
 		fatal(err)
 	}
-	c, err := solve(carrierTraining, training, currentConstants)
+	c, err := solve(carrierTraining, allTraining, currentConstants)
 	if err != nil {
 		fatal(err)
 	}
+	logStep("selected downstream probe coefficient=%d ns/probe", c.downstreamProbeRowNS)
 	if err := validateDecisionOrdering(training, c); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("scan invocation:      %d ns/invocation\nscan row:             %d ns/input-row\nfilter column:        %d ns/value\nmap column:           %d ns/value\nexpression operation: %d ns/row-operation\nbroad text match:     %d ns/input-row + %d ns/input-byte\nrecset startup:       %d ns\nrecset build:         %d ns/matching-row\nrecset probe:         %d ns/driver-row\nrecset aggregate:     %d ns/driver-input-row\ngroup-cache startup:  %d ns\ngroup-cache build:    %d ns/matching-row\ngroup-cache probe:    %d ns/driver-row\nordered driver input: %d ns/(rows²/1M)\nordered scan startup: %d ns/invocation\nscalar presence probe:%d ns/probe\nmembership probe:     %d ns/probe\n",
+	fmt.Printf("scan invocation:      %d ns/invocation\nscan row:             %d ns/input-row\nfilter column:        %d ns/value\nmap column:           %d ns/value\nexpression operation: %d ns/row-operation\nbroad text match:     %d ns/input-row + %d ns/input-byte\nrecset startup:       %d ns\nrecset build:         %d ns/matching-row\nrecset probe:         %d ns/driver-row\nrecset aggregate:     %d ns/driver-input-row\ngroup-cache startup:  %d ns\ngroup-cache build:    %d ns/matching-row\ngroup-cache probe:    %d ns/driver-row\nordered driver input: %d ns/(rows²/1M)\nordered scan startup: %d ns/invocation\nordered RecSet row:   %d ns/row\ndownstream probe:     %d ns/probe\nscalar presence probe:%d ns/probe\nmembership probe:     %d ns/probe\n",
 		c.scanInvocationNS, c.scanRowNS, c.filterColumnRowNS, c.mapColumnRowNS,
 		c.expressionOperationNS, c.broadTextMatchRowNS, c.broadTextMatchByteNS, c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
-		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS, c.scalarPresenceProbeRowNS,
+		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS, c.orderedRecsetRowNS, c.downstreamProbeRowNS, c.scalarPresenceProbeRowNS,
 		c.membershipDirectProbeRowNS)
 	printModelComparison("training", training, c)
 	holdout := filterObservations(membershipObservations, true)
@@ -284,6 +289,25 @@ func main() {
 		}
 	}
 	printDecisionOrdering(membershipObservations, c)
+	orderedObservations := filterDecisionObservations(observations, "ordered_recset_consumer")
+	orderedTraining := filterObservations(orderedObservations, false)
+	if len(orderedTraining) > 0 {
+		printModelComparison("ordered-training", orderedTraining, c)
+		if err := validateDecisionOrdering(orderedTraining, c); err != nil {
+			fatal(fmt.Errorf("ordered consumer training: %w", err))
+		}
+	}
+	orderedHoldout := filterObservations(orderedObservations, true)
+	if len(orderedHoldout) > 0 {
+		printModelComparison("ordered-holdout", orderedHoldout, c)
+		if err := validateDecisionOrdering(orderedHoldout, c); err != nil {
+			fatal(fmt.Errorf("ordered consumer holdout: %w", err))
+		}
+		if err := validateModelImprovement(orderedHoldout, c); err != nil {
+			fatal(fmt.Errorf("ordered consumer holdout: %w", err))
+		}
+	}
+	printDecisionOrdering(orderedObservations, c)
 	if *patch {
 		if err := patchQueryplan(queryplanPath, c); err != nil {
 			fatal(err)
@@ -1040,15 +1064,35 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
-	// Ordered scalar-RecSet consumer observations validate a second physical
-	// decision family. They deliberately reuse the membership coefficients but
-	// do not participate in fitting them: both alternatives share the (possibly
-	// complex) carrier producer, while this decision measures only its consumer.
+	// Ordered RecSet consumer variants share their producer. Their non-zero work
+	// vectors describe only the competing consumers so paired measurements can
+	// fit the cost without charging carrier construction to either alternative.
 	if row.Decision == "ordered_recset_consumer" {
 		if row.CarrierRows == nil || row.DriverInputRows == nil || row.Limit == nil {
 			return nil, fmt.Errorf("ordered RecSet consumer contains nil inputs: %+v", row)
 		}
-		return make([]float64, 17), nil
+		features := make([]float64, 19)
+		window := *row.Limit
+		if row.Offset != nil {
+			window += *row.Offset
+		}
+		visited := *row.DriverInputRows
+		if *row.CarrierRows > 0 {
+			visited = math.Min(visited, math.Max(window,
+				window**row.DriverInputRows / *row.CarrierRows))
+		}
+		switch row.Plan {
+		case "ordered_direct_recset":
+			features[15] = 1
+			features[17] = *row.CarrierRows
+		case "ordered_base_membership":
+			features[1] = visited
+			features[7] = visited
+			features[15] = 1
+		default:
+			return nil, fmt.Errorf("unsupported ordered RecSet plan %q", row.Plan)
+		}
+		return features, nil
 	}
 	scanInvocations := *row.CandidateScanInvocations + *row.DriverScanInvocations
 	driverWorkRows := *row.DriverInputRows
@@ -1083,6 +1127,21 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 	}
 	orderedDriverInputRows := 0.0
 	orderedScanInvocations := 0.0
+	downstreamProbeBranches := 0.0
+	if row.DownstreamProbeBranches != nil {
+		downstreamProbeBranches = *row.DownstreamProbeBranches
+	}
+	candidateDensity := 0.0
+	candidateProbeBranches := 1.0
+	if row.ProbeBranches != nil {
+		candidateProbeBranches = math.Max(1, *row.ProbeBranches)
+	}
+	if row.CandidateDensity != nil {
+		candidateDensity = *row.CandidateDensity
+	} else if *row.CandidateInputRows > 0 {
+		candidateDensity = math.Min(1,
+			*row.CandidateRows/(*row.CandidateInputRows/candidateProbeBranches))
+	}
 	if row.Limit != nil {
 		orderedDriverInputRows = *row.DriverInputRows * *row.DriverInputRows / 1_000_000
 		orderedScanInvocations = *row.DriverScanInvocations
@@ -1099,6 +1158,8 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			cacheStartup, cacheBuildRows, 0,
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes, orderedScanInvocations, 0,
+			orderedRecsetRows(row),
+			*row.ProjectedDriverRows * downstreamProbeBranches,
 		}, nil
 	case "driver_order_membership_probe", "scan_order":
 		recsetStartup, recsetBuildRows, recsetProbeRows := 1.0, *row.CandidateRows, *row.ExpectedDriverRowsVisited
@@ -1112,7 +1173,8 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			recsetStartup, recsetBuildRows, recsetProbeRows,
 			cacheStartup, cacheBuildRows, cacheProbeRows,
 			0, orderedDriverInputRows, 0,
-			0, orderedScanInvocations, 0,
+			0, orderedScanInvocations, 0, 0,
+			*row.ExpectedDriverRowsVisited * downstreamProbeBranches,
 		}, nil
 	case "ordered_batch_accept":
 		fraction := 1.0
@@ -1143,7 +1205,8 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			0, 0, 0, 0, 0, orderedDriverWork,
 			*row.CandidateBroadTextMatchRows * repeatFraction,
 			*row.CandidateBroadTextMatchBytes * repeatFraction,
-			batches * *row.DriverScanInvocations, 0,
+			batches * *row.DriverScanInvocations, 0, 0,
+			*row.ExpectedDriverRowsVisited * candidateDensity * downstreamProbeBranches,
 		}, nil
 	case "driver_filter_join_probe":
 		return []float64{
@@ -1151,7 +1214,8 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			0, 0, 0, 0, 0, 0,
 			aggregateDriverRows, 0, *row.CandidateBroadTextMatchRows,
 			*row.CandidateBroadTextMatchBytes, 0,
-			*row.DriverRows * *row.ProbeBranches,
+			*row.DriverRows * *row.ProbeBranches, 0,
+			*row.DriverRows * downstreamProbeBranches,
 		}, nil
 	case "prefiltered_candidate_keyset":
 		branches := math.Max(1, *row.ProbeBranches)
@@ -1172,11 +1236,19 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			1, projectionRows, 0, 0, 0, 0, 0, 0,
 			*row.CandidateBroadTextMatchRows * candidateFraction,
 			*row.CandidateBroadTextMatchBytes * candidateFraction,
-			orderedScanInvocations, 0,
+			orderedScanInvocations, 0, 0,
+			*row.PrefilteredDriverRows * downstreamProbeBranches,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported plan %q", row.Plan)
 	}
+}
+
+func orderedRecsetRows(row calibrationRow) float64 {
+	if row.Consumer == "order_limit" && row.ProjectedDriverRows != nil {
+		return *row.ProjectedDriverRows
+	}
+	return 0
 }
 
 // solveEquationSystem fits the physical work both alternatives actually perform:
@@ -1237,6 +1309,8 @@ func solveEquationSystem(rows []observation) (constants, error) {
 		recsetAggregateRowNS:       1,
 		orderedDriverInputNS:       1,
 		orderedScanInvocationNS:    1,
+		orderedRecsetRowNS:         1,
+		downstreamProbeRowNS:       1,
 		membershipDirectProbeRowNS: 1,
 	}, nil
 }
@@ -1281,18 +1355,41 @@ func solve(exactRows, allRows []observation, baseline constants) (constants, err
 			baseCorrect, fitCorrect, selected == fitted)
 	}
 
+	/* Residual fits isolate individual coefficients after the joint model has
+	been selected. They are still planner changes, not harmless duration
+	calibration: accepting one merely because it reduces residual error can undo
+	the selected model's inequalities. Apply each refinement atomically and only
+	when it fixes an additional measured decision across the complete pool. */
 	if value, ok := fitExactResidualPerRow(allRows, selected, 11); ok {
-		selected.recsetAggregateRowNS = value
+		trial := selected
+		trial.recsetAggregateRowNS = value
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
 	}
 	if value, ok := fitBroadTextResidualPerByte(allRows, selected); ok {
-		selected.broadTextMatchByteNS = value
+		trial := selected
+		trial.broadTextMatchByteNS = value
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
 	}
 	if value, ok := fitOrderedScanInvocation(allRows, selected); ok {
-		selected.orderedScanInvocationNS = value
+		trial := selected
+		trial.orderedScanInvocationNS = value
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
+	}
+	if value, ok := fitOrderedRecsetRow(allRows, selected); ok {
+		trial := selected
+		trial.orderedRecsetRowNS = value
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
+	}
+	if value, ok := fitDownstreamProbeRow(allRows, selected); ok {
+		trial := selected
+		trial.downstreamProbeRowNS = value
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
 	}
 	if startup, probe, ok := fitDirectCarrierPair(allRows, selected); ok {
-		selected.groupCacheStartupNS = startup
-		selected.membershipDirectProbeRowNS = probe
+		trial := selected
+		trial.groupCacheStartupNS = startup
+		trial.membershipDirectProbeRowNS = probe
+		selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
 	}
 	/* A race timeout mixes cold startup and incomplete operator work. It is a
 	lower bound for that whole alternative, not evidence for a linear ordered
@@ -1309,10 +1406,25 @@ func solve(exactRows, allRows []observation, baseline constants) (constants, err
 		without.broadTextMatchByteNS = 0
 		required := int64(math.Ceil((row.y - estimatedNS(row, without)) / row.x[14]))
 		if required > selected.broadTextMatchByteNS {
-			selected.broadTextMatchByteNS = required
+			trial := selected
+			trial.broadTextMatchByteNS = required
+			selected = acceptDecisionImprovingRefinement(allRows, selected, trial)
 		}
 	}
 	return selected, nil
+}
+
+func acceptDecisionImprovingRefinement(rows []observation, current, trial constants) constants {
+	currentCorrect, total := decisionAccuracy(rows, func(row observation) float64 {
+		return estimatedNS(row, current)
+	})
+	trialCorrect, _ := decisionAccuracy(rows, func(row observation) float64 {
+		return estimatedNS(row, trial)
+	})
+	if total > 0 && trialCorrect > currentCorrect {
+		return trial
+	}
+	return current
 }
 
 func fitBroadTextResidualPerByte(rows []observation, c constants) (int64, bool) {
@@ -1361,6 +1473,89 @@ func fitOrderedScanInvocation(rows []observation, c constants) (int64, bool) {
 	}
 	sort.Float64s(values)
 	return int64(math.Round(values[len(values)/2])), true
+}
+
+func fitOrderedRecsetRow(rows []observation, c constants) (int64, bool) {
+	direct := make(map[string]observation)
+	base := make(map[string]observation)
+	for _, row := range rows {
+		if row.censored || row.component != "" || len(row.x) <= 17 {
+			continue
+		}
+		switch row.plan {
+		case "candidate_keyset", "ordered_direct_recset":
+			if row.x[17] > 0 {
+				direct[row.caseName] = row
+			}
+		case "driver_order_membership_probe", "ordered_base_membership":
+			base[row.caseName] = row
+		}
+	}
+	values := make([]float64, 0)
+	for name, directRow := range direct {
+		baseRow, paired := base[name]
+		if !paired {
+			continue
+		}
+		without := c
+		without.orderedRecsetRowNS = 0
+		/* Carrier production and result emission are shared by the forced pair.
+		Subtracting the base alternative isolates the random ordered reads performed
+		only when the projected RecSet itself becomes the scan source. */
+		residual := (directRow.y - baseRow.y) -
+			(estimatedNS(directRow, without) - estimatedNS(baseRow, without))
+		values = append(values, math.Max(1, residual/directRow.x[17]))
+	}
+	if len(values) == 0 {
+		return 0, false
+	}
+	sort.Float64s(values)
+	return int64(math.Round(values[len(values)/2])), true
+}
+
+func fitDownstreamProbeRow(rows []observation, c constants) (int64, bool) {
+	byCase := make(map[string][]observation)
+	for _, row := range rows {
+		if !row.censored && row.component == "" && len(row.x) > 18 {
+			byCase[row.caseName] = append(byCase[row.caseName], row)
+		}
+	}
+	candidates := []int64{1, c.downstreamProbeRowNS}
+	without := c
+	without.downstreamProbeRowNS = 0
+	for _, alternatives := range byCase {
+		for leftIndex, left := range alternatives {
+			for _, right := range alternatives[leftIndex+1:] {
+				deltaWork := left.x[18] - right.x[18]
+				if deltaWork == 0 {
+					continue
+				}
+				value := ((left.y - right.y) -
+					(estimatedNS(left, without) - estimatedNS(right, without))) / deltaWork
+				if value >= 1 && !math.IsInf(value, 0) && !math.IsNaN(value) {
+					candidates = append(candidates, int64(math.Round(value)))
+				}
+			}
+		}
+	}
+	if len(candidates) == 2 && candidates[0] == candidates[1] {
+		return 0, false
+	}
+	best, bestCorrect, bestError := candidates[0], -1, math.Inf(1)
+	for _, candidate := range candidates {
+		trial := c
+		trial.downstreamProbeRowNS = candidate
+		correct, _ := decisionAccuracy(rows, func(row observation) float64 {
+			return estimatedNS(row, trial)
+		})
+		err := measureModelError(rows, func(row observation) float64 {
+			return estimatedNS(row, trial)
+		}).meanFactor
+		if correct > bestCorrect || (correct == bestCorrect && err < bestError) {
+			best, bestCorrect, bestError = candidate, correct, err
+		}
+	}
+	return best, true
 }
 
 func fitDirectCarrierPair(rows []observation, c constants) (int64, int64, bool) {
@@ -1485,6 +1680,8 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.broadTextMatchByteNS),
 		float64(c.orderedScanInvocationNS),
 		float64(c.membershipDirectProbeRowNS),
+		float64(c.orderedRecsetRowNS),
+		float64(c.downstreamProbeRowNS),
 	}
 	total := 0.0
 	for i, value := range row.x {
@@ -1568,6 +1765,7 @@ func filterCarrierObservations(rows []observation) []observation {
 
 func decisionAlternatives(rows []observation) (map[string]map[string]observation, error) {
 	groups := make(map[string]map[string]observation)
+	decisions := make(map[string]string)
 	for _, row := range rows {
 		if groups[row.caseName] == nil {
 			groups[row.caseName] = make(map[string]observation)
@@ -1575,21 +1773,34 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 		if _, duplicate := groups[row.caseName][row.plan]; duplicate {
 			return nil, fmt.Errorf("duplicate %s observation for %q", row.plan, row.caseName)
 		}
+		if existing := decisions[row.caseName]; existing != "" && existing != row.decision {
+			return nil, fmt.Errorf("mixed decision families for %q", row.caseName)
+		}
+		decisions[row.caseName] = row.decision
 		switch row.plan {
-		case "candidate_keyset", "driver_order_membership_probe", "driver_filter_join_probe", "ordered_batch_accept", "prefiltered_candidate_keyset":
+		case "candidate_keyset", "driver_order_membership_probe", "driver_filter_join_probe", "ordered_batch_accept", "prefiltered_candidate_keyset", "ordered_direct_recset", "ordered_base_membership":
 			groups[row.caseName][row.plan] = row
 		default:
 			return nil, fmt.Errorf("unsupported plan %q", row.plan)
 		}
 	}
 	for name, plans := range groups {
-		if _, ok := plans["candidate_keyset"]; !ok {
-			return nil, fmt.Errorf("incomplete alternatives for %q", name)
-		}
-		_, ordered := plans["driver_order_membership_probe"]
-		_, direct := plans["driver_filter_join_probe"]
-		if !ordered && !direct {
-			return nil, fmt.Errorf("incomplete alternatives for %q", name)
+		if decisions[name] == "ordered_recset_consumer" {
+			if _, direct := plans["ordered_direct_recset"]; !direct {
+				return nil, fmt.Errorf("incomplete ordered RecSet alternatives for %q", name)
+			}
+			if _, base := plans["ordered_base_membership"]; !base {
+				return nil, fmt.Errorf("incomplete ordered RecSet alternatives for %q", name)
+			}
+		} else {
+			if _, ok := plans["candidate_keyset"]; !ok {
+				return nil, fmt.Errorf("incomplete alternatives for %q", name)
+			}
+			_, ordered := plans["driver_order_membership_probe"]
+			_, direct := plans["driver_filter_join_probe"]
+			if !ordered && !direct {
+				return nil, fmt.Errorf("incomplete alternatives for %q", name)
+			}
 		}
 	}
 	return groups, nil
@@ -1819,6 +2030,8 @@ func readCurrentConstants(path string) (constants, error) {
 		"planner_membership_broad_text_match_row_ns",
 		"planner_membership_broad_text_match_byte_ns",
 		"planner_membership_ordered_scan_invocation_ns",
+		"planner_membership_ordered_recset_row_ns",
+		"planner_membership_downstream_probe_row_ns",
 		"planner_scalar_presence_probe_row_ns",
 		"planner_membership_direct_probe_row_ns",
 	}
@@ -1831,7 +2044,9 @@ func readCurrentConstants(path string) (constants, error) {
 			// A one-nanosecond floor lets the first run fit new membership and
 			// ordered-scan coefficients from their physical-consumer observations.
 			if name == "planner_membership_direct_probe_row_ns" ||
-				name == "planner_membership_ordered_scan_invocation_ns" {
+				name == "planner_membership_ordered_scan_invocation_ns" ||
+				name == "planner_membership_ordered_recset_row_ns" ||
+				name == "planner_membership_downstream_probe_row_ns" {
 				values[i] = 1
 				continue
 			}
@@ -1859,8 +2074,10 @@ func readCurrentConstants(path string) (constants, error) {
 		broadTextMatchRowNS:        values[13],
 		broadTextMatchByteNS:       values[14],
 		orderedScanInvocationNS:    values[15],
-		scalarPresenceProbeRowNS:   values[16],
-		membershipDirectProbeRowNS: values[17],
+		orderedRecsetRowNS:         values[16],
+		downstreamProbeRowNS:       values[17],
+		scalarPresenceProbeRowNS:   values[18],
+		membershipDirectProbeRowNS: values[19],
 	}, nil
 }
 
@@ -1888,6 +2105,10 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_direct_probe_cost (lambda (probe_rows)
 	(planner_cost 0 0 (* probe_rows planner_membership_direct_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
+(define planner_membership_downstream_probe_row_ns %d)
+(define planner_membership_downstream_probe_cost (lambda (probe_rows)
+	(planner_cost 0 0 (* probe_rows planner_membership_downstream_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
+
 (define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
 		(* domain_rows 8) 0 domain_rows 0.65)))
@@ -1912,11 +2133,14 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_group_cache_probe_row_ns %d)
 (define planner_membership_ordered_driver_input_row_ns %d)
 (define planner_membership_ordered_scan_invocation_ns %d)
+(define planner_membership_ordered_recset_row_ns %d)
 /* END GENERATED COST CONSTANTS */`, c.scalarPresenceProbeRowNS, c.membershipDirectProbeRowNS,
+		c.downstreamProbeRowNS,
 		c.scanInvocationNS, c.scanRowNS,
 		c.filterColumnRowNS, c.mapColumnRowNS, c.expressionOperationNS, c.broadTextMatchRowNS, c.broadTextMatchByteNS,
 		c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
-		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS)
+		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS,
+		c.orderedRecsetRowNS)
 	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }

@@ -131,21 +131,105 @@ func TestRowFeaturesModelsDirectPresenceProbes(t *testing.T) {
 		CandidateExpressionOperations: value(1), CandidateBroadTextMatchRows: value(0),
 		CandidateBroadTextMatchBytes: value(0), DriverScanInvocations: value(1),
 		DriverFilterColumns: value(0), DriverMapColumns: value(1), DriverExpressionOperations: value(0),
+		DownstreamProbeBranches: value(2),
 	}
 	features, err := rowFeatures(row)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(features) != 17 || features[16] != 75 {
+	if len(features) != 19 || features[16] != 75 {
 		t.Fatalf("direct presence features = %v, want 75 probes", features)
 	}
 }
 
+func TestRowFeaturesChargesOrderedProjectedRecsetRows(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Plan: "candidate_keyset", Consumer: "order_limit",
+		CandidateInputRows: value(100), CandidateRows: value(10), ProjectedDriverRows: value(25),
+		DriverInputRows: value(1000), DriverRows: value(3), ExpectedDriverRowsVisited: value(120),
+		CandidateScanInvocations: value(1), CandidateFilterColumns: value(1),
+		CandidateMapColumns: value(1), CandidateCacheMapColumns: value(2),
+		CandidateExpressionOperations: value(1), CandidateBroadTextMatchRows: value(0),
+		CandidateBroadTextMatchBytes: value(0), DriverScanInvocations: value(1),
+		DriverFilterColumns: value(0), DriverMapColumns: value(1), DriverExpressionOperations: value(0),
+		DownstreamProbeBranches: value(2),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[17] != 25 {
+		t.Fatalf("ordered RecSet rows = %v, want 25", features[17])
+	}
+	if features[18] != 50 {
+		t.Fatalf("downstream probe rows = %v, want 50", features[18])
+	}
+}
+
+func TestRowFeaturesModelsOrderedRecsetConsumerAlternatives(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	direct, err := rowFeatures(calibrationRow{
+		Decision: "ordered_recset_consumer", Plan: "ordered_direct_recset",
+		CarrierRows: value(100), DriverInputRows: value(1000), Limit: value(10), Offset: value(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := rowFeatures(calibrationRow{
+		Decision: "ordered_recset_consumer", Plan: "ordered_base_membership",
+		CarrierRows: value(100), DriverInputRows: value(1000), Limit: value(10), Offset: value(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct[17] != 100 || direct[15] != 1 {
+		t.Fatalf("direct ordered features = %v", direct)
+	}
+	if base[1] != 100 || base[7] != 100 || base[15] != 1 || base[17] != 0 {
+		t.Fatalf("base ordered features = %v", base)
+	}
+}
+
+func TestFitOrderedRecsetRowCancelsSharedCarrierWork(t *testing.T) {
+	directA, baseA := make([]float64, 19), make([]float64, 19)
+	directA[17], baseA[1] = 100, 20
+	directB, baseB := make([]float64, 19), make([]float64, 19)
+	directB[17], baseB[1] = 10, 200
+	value, ok := fitOrderedRecsetRow([]observation{
+		{caseName: "broad", plan: "candidate_keyset", y: 11000, x: directA},
+		{caseName: "broad", plan: "driver_order_membership_probe", y: 1000, x: baseA},
+		{caseName: "sparse", plan: "ordered_direct_recset", y: 2000, x: directB},
+		{caseName: "sparse", plan: "ordered_base_membership", y: 1000, x: baseB},
+	}, constants{})
+	if !ok || value != 100 {
+		t.Fatalf("ordered RecSet row = (%d, %v), want (100, true)", value, ok)
+	}
+}
+
+func TestFitDownstreamProbeRowUsesDecisionOrdering(t *testing.T) {
+	candidate, driver, batch := make([]float64, 19), make([]float64, 19), make([]float64, 19)
+	candidate[18], driver[18], batch[18] = 100, 1000, 10
+	rows := []observation{
+		{caseName: "compound", decision: "membership_carrier", plan: "candidate_keyset", y: 2000, x: candidate},
+		{caseName: "compound", decision: "membership_carrier", plan: "driver_order_membership_probe", y: 10000, x: driver},
+		{caseName: "compound", decision: "membership_carrier", plan: "ordered_batch_accept", y: 1000, x: batch},
+	}
+	value, ok := fitDownstreamProbeRow(rows, constants{})
+	if !ok || value <= 1 {
+		t.Fatalf("downstream probe row = (%d, %v), want calibrated value above floor", value, ok)
+	}
+	model := constants{downstreamProbeRowNS: value}
+	if err := validateDecisionOrdering(rows, model); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFitOrderedScanInvocationUsesExactBatchObservations(t *testing.T) {
-	features := make([]float64, 17)
+	features := make([]float64, 19)
 	features[15] = 4
 	value, ok := fitOrderedScanInvocation([]observation{
-		{caseName: "batch", plan: "candidate_keyset", y: 1000, x: make([]float64, 17)},
+		{caseName: "batch", plan: "candidate_keyset", y: 1000, x: make([]float64, 19)},
 		{caseName: "batch", plan: "ordered_batch_accept", y: 2680, x: features},
 	}, constants{})
 	if !ok || value != 420 {
@@ -178,10 +262,34 @@ func TestRowFeaturesModelsPrefilteredCandidateWork(t *testing.T) {
 	}
 }
 
+func TestRowFeaturesChargesPrefilteredDownstreamWorkToLocalDriverSubset(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Plan: "prefiltered_candidate_keyset", Consumer: "order_limit",
+		CandidateInputRows: value(2000), CandidateRows: value(250), CandidateDensity: value(0.25),
+		ProjectedDriverRows: value(1000), DriverInputRows: value(4000), DriverRows: value(72),
+		PrefilteredDriverRows: value(4000), ExpectedDriverRowsVisited: value(300),
+		ProbeBranches: value(2), DownstreamProbeBranches: value(1),
+		CandidateScanInvocations: value(2), CandidateFilterColumns: value(1),
+		CandidateMapColumns: value(1), CandidateCacheMapColumns: value(2),
+		CandidateExpressionOperations: value(1), CandidateBroadTextMatchRows: value(2000),
+		CandidateBroadTextMatchBytes: value(0), DriverScanInvocations: value(1),
+		DriverFilterColumns: value(0), DriverMapColumns: value(4), DriverExpressionOperations: value(0),
+		Limit: value(72), Offset: value(0),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[18] != 4000 {
+		t.Fatalf("prefiltered downstream probes = %v, want 4000", features[18])
+	}
+}
+
 func TestFitDirectCarrierPairCancelsPairedCommonWork(t *testing.T) {
-	candidateA, driverA := make([]float64, 17), make([]float64, 17)
+	candidateA, driverA := make([]float64, 19), make([]float64, 19)
 	candidateA[5], candidateA[8], driverA[16] = 1, 1, 100
-	candidateB, driverB := make([]float64, 17), make([]float64, 17)
+	candidateB, driverB := make([]float64, 19), make([]float64, 19)
 	candidateB[5], candidateB[8], driverB[16] = 1, 1, 10
 	startup, probe, ok := fitDirectCarrierPair([]observation{
 		{caseName: "large", plan: "candidate_keyset", y: 10000, x: candidateA},
@@ -226,7 +334,7 @@ func TestMedianRowsAcceptsOrderedBatchPlans(t *testing.T) {
 
 func TestValidateDecisionOrderingIncludesOrderedBatch(t *testing.T) {
 	features := func(first float64) []float64 {
-		values := make([]float64, 17)
+		values := make([]float64, 19)
 		values[0] = first
 		return values
 	}
@@ -242,7 +350,7 @@ func TestValidateDecisionOrderingIncludesOrderedBatch(t *testing.T) {
 
 func TestDecisionOrderingAcceptsOnlyMeasuredNoiseTies(t *testing.T) {
 	features := func(first float64) []float64 {
-		values := make([]float64, 17)
+		values := make([]float64, 19)
 		values[0] = first
 		return values
 	}
@@ -256,6 +364,32 @@ func TestDecisionOrderingAcceptsOnlyMeasuredNoiseTies(t *testing.T) {
 	rows[1].y = 200
 	if err := validateDecisionOrdering(rows, constants{scanInvocationNS: 1}); err == nil {
 		t.Fatal("materially slower estimated winner accepted as a noise tie")
+	}
+}
+
+func TestResidualRefinementMustImproveDecisionPool(t *testing.T) {
+	features := func(first, ordered float64) []float64 {
+		values := make([]float64, 19)
+		values[0], values[15] = first, ordered
+		return values
+	}
+	rows := []observation{
+		{caseName: "stable", plan: "candidate_keyset", y: 10, x: features(1, 0)},
+		{caseName: "stable", plan: "driver_order_membership_probe", y: 20, x: features(0, 1)},
+	}
+	current := constants{scanInvocationNS: 1, orderedScanInvocationNS: 2}
+	trial := current
+	trial.orderedScanInvocationNS = 100
+	if got := acceptDecisionImprovingRefinement(rows, current, trial); got != current {
+		t.Fatalf("equal-accuracy residual fit replaced selected baseline: %+v", got)
+	}
+
+	wrong := current
+	better := wrong
+	better.orderedScanInvocationNS = 0
+	rows[0].y, rows[1].y = 20, 10
+	if got := acceptDecisionImprovingRefinement(rows, wrong, better); got != better {
+		t.Fatalf("decision-improving residual fit was rejected: %+v", got)
 	}
 }
 

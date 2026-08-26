@@ -1399,19 +1399,58 @@ membership set. */
 				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 				true)))))
 
+/* A decorrelated base-table presence stage already is a semijoin relation:
+scan the child-side predicate, then let its grouping columns identify the true
+domain keys. This carrier is closed before the parent-domain scan and therefore
+must not initialize a correlated group-cache column which still expects a
+lexical outer row. Projection and key-index consumers can both reuse the same
+(prepare, RecSet, source-key-columns) representation below. */
+(define direct_base_presence_recset_source_parts (lambda (stage)
+	(if (or (not (qassoc_get (gs_facts stage) (quote direct_presence_recset_context) false))
+		(or (not (presence_probe_stage? stage))
+		(or (not (source_is_base_table? (gs_input stage)))
+			(stage_has_residual_outer_refs? stage))))
+		nil
+		(begin
+			(define src (gs_input stage))
+			(define source_key_cols (map (gs_keys stage) (lambda (key)
+				(direct_column_name_for_alias src key))))
+			(if (or (empty_list? source_key_cols)
+				(reduce source_key_cols (lambda (invalid col)
+					(or invalid (nil? col))) false))
+				nil
+				(begin
+					(define condition (coalesceNil
+						(qassoc_get (gs_facts stage) (quote condition) true) true))
+					(define filtercols (extract_columns_for_alias src condition))
+					(list true
+						(list (quote scan_recset)
+							(list (quote session) "__memcp_tx")
+							(source_table_expr src)
+							(cons (quote list) filtercols)
+							(list (quote lambda)
+								(map filtercols (lambda (col)
+									(symbol (concat (source_alias src) "." col))))
+								(lower_column_expr_for_alias src condition)))
+						source_key_cols)))))))
+
 (define direct_boolean_recset_query_scope_dependency? (lambda (stage)
 	(and (empty_list? (gs_domain stage))
 		(empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))))
 
-(define direct_boolean_recset_input_ownership_closed? (lambda (stage_catalog stage)
+(define direct_boolean_recset_input_stages (lambda (stage_catalog stage)
 	(begin
 		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
-		(define direct_stages (unique_stages_by_id (merge (list
+		(unique_stages_by_id (merge (list
 			(stage_outputs_from_sources_using stage_catalog (qb_sources (gs_input stage)))
 			(if (nil? owner_handle) '()
 				(filter (lowering_catalog_stages stage_catalog) (lambda (candidate)
 					(equal? (qassoc_get (gs_facts candidate) (quote btw2025_parent) nil)
-						owner_handle))))))))
+						owner_handle))))))))))
+
+(define direct_boolean_recset_input_ownership_closed? (lambda (stage_catalog stage)
+	(begin
+		(define direct_stages (direct_boolean_recset_input_stages stage_catalog stage))
 		(define has_invariant (reduce direct_stages (lambda (found dependency)
 			(or found (direct_boolean_recset_query_scope_dependency? dependency))) false))
 		(define has_correlated (reduce direct_stages (lambda (found dependency)
@@ -1436,8 +1475,26 @@ membership set. */
 								(gs_input stage)
 								(scalar_first_probe_recset_row_keys stage carrier_src))))))))))))
 
-(define lower_direct_boolean_stage_recset_expr (lambda (stage_catalog stage share_result)
+(define lower_direct_boolean_stage_recset_expr (lambda (stage_catalog stage share_result allow_direct_presence)
 	(begin
+		/* A projected outer carrier closes its complete boolean tree before any
+		driver callback. Overlay only the presence leaves so they can use their direct
+		semijoin RecSet; unrelated stages remain in the indexed parent catalog. A
+		per-row key-index consumer leaves the catalog unchanged and retains the
+		canonical shared group relation. */
+		(define direct_catalog (if allow_direct_presence
+			(begin
+				(define annotated_presence_stages (map
+					(filter (lowering_catalog_stages stage_catalog) presence_probe_stage?)
+					(lambda (candidate)
+						(group_stage_with_facts candidate
+							(qassoc_set (gs_facts candidate)
+								(quote direct_presence_recset_context) true)))))
+				(make_indexed_lowering_catalog annotated_presence_stages
+					(if (lowering_catalog? stage_catalog)
+						stage_catalog
+						(make_indexed_lowering_catalog stage_catalog nil))))
+			stage_catalog))
 		(define decision_id (concat "boolean_stage_recset:" (gs_id stage)))
 		(planner_record_physical_decision (list
 			(list "decision_id" decision_id)
@@ -1454,7 +1511,7 @@ membership set. */
 		The resulting expression has no lexical outer-row dependency and is therefore
 		safe to share between filters and projections in this query generation. */
 		(define producer (lower_group_stage_prepare_using
-			stage_catalog stage_catalog stage true (quote boolean-recset)))
+			direct_catalog direct_catalog stage true (quote boolean-recset)))
 		(if share_result
 			(list
 				(physical_query_session_symbol)
@@ -1464,17 +1521,22 @@ membership set. */
 				(list (quote lambda) '() producer))
 			producer))))
 
-(define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col share_result)
+(define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col share_result allow_direct_presence)
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
 			(merge_stage_catalogs (list all_stages probe_catalog (nested_stage_catalog stage)))))
+		(define catalog_stage (stage_by_id stage_catalog (gs_id stage)))
 		(define physical_stage (if (empty_list? probe_catalog)
-			stage
-			(group_stage_with_stage_catalog stage stage_catalog)))
+			(coalesceNil catalog_stage stage)
+			(group_stage_with_stage_catalog (coalesceNil catalog_stage stage) stage_catalog)))
 		(define graph (stage_dependency_graph stage_catalog))
-		(if (direct_boolean_recset_stage_eligible?
-			stage_catalog graph physical_stage requested_col)
+		(define direct_presence_parts
+			(direct_base_presence_recset_source_parts physical_stage))
+		(if (not (nil? direct_presence_parts))
+			direct_presence_parts
+			(if (direct_boolean_recset_stage_eligible?
+				stage_catalog graph physical_stage requested_col)
 			(begin
 				(define carrier_src (scalar_first_probe_carrier_source
 					(gs_input physical_stage)))
@@ -1484,7 +1546,7 @@ membership set. */
 					(gs_input physical_stage) row_keys))
 				(list true
 					(lower_direct_boolean_stage_recset_expr
-						stage_catalog physical_stage share_result)
+						stage_catalog physical_stage share_result allow_direct_presence)
 					(map row_keys (lambda (key)
 						(direct_column_name_for_alias domain_src key)))))
 			(begin
@@ -1510,13 +1572,16 @@ membership set. */
 						(list (quote table) cache_schema cache_relation)
 						(quoted_runtime_list (list requested_col))
 						(list (quote lambda) (list (symbol requested_col))
-							(list (quote equal??) (symbol requested_col) true)))
-					(list (nth (group_key_cols (gs_keys physical_stage)) row_key_index))))))))
+							(if (presence_probe_stage? physical_stage)
+								(list (quote >)
+									(list (quote coalesceNil) (symbol requested_col) 0) 0)
+								(list (quote equal??) (symbol requested_col) true))))
+					(list (nth (group_key_cols (gs_keys physical_stage)) row_key_index)))))))))
 
 (define lower_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key)
 	(begin
 		(define source_parts
-			(scalar_first_probe_recset_source_parts all_stages stage requested_col true))
+			(scalar_first_probe_recset_source_parts all_stages stage requested_col true false))
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
 		(define lookup_value (symbol (concat "__recset_lookup_value_"
 			(fnv_hash (gs_id stage)))))
@@ -1554,7 +1619,7 @@ choice at the consuming join edge. */
 	(begin
 		(define source_parts
 			(scalar_first_probe_recset_source_parts
-				all_stages stage requested_col share_result))
+				all_stages stage requested_col share_result true))
 		(define source_key_cols (nth source_parts 2))
 		(if (not (equal? (count source_key_cols) 1))
 			(neumann_fail "build_queryplan" "projected scalar RecSet has no resolved row-domain key")
@@ -3177,7 +3242,15 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(qassoc_set facts (quote membership_consumer) (quote aggregate))
 				facts)
 			(quote membership_downstream_probe_branches)
-			(coalesceNil downstream_probe_branches 0)))
+			/* ORDER/LIMIT carriers change how many rows reach downstream work even
+			when adaptive batching is structurally unavailable (for example an ordered
+			joined driver). Filter/aggregate carriers feed the same complete residual
+			pipeline, so charging their common work here would estimate the enclosing
+			query a second time. */
+			(if (equal? consumer (quote order_limit))
+				(max (coalesceNil downstream_probe_branches 0)
+					(qassoc_get facts (quote membership_downstream_probe_branches) 0))
+				0)))
 		(define driver_probe_supported (and allow_driver_probe
 			(membership_driver_subscan_supported? stage)))
 		(define raw_expr (recset_project_join_expr_for_membership_raw src membership))
@@ -3284,7 +3357,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						(membership_ordered_driver_probe_cost
 							candidate_input_rows candidate_rows driver_rows cost_facts)
 						(membership_driver_probe_cost driver_rows
-							(qassoc_get facts (quote membership_candidate_probe_branches) 1)))
+							(qassoc_get facts (quote membership_candidate_probe_branches) 1)
+							(qassoc_get cost_facts (quote membership_downstream_probe_branches) 0)))
 					nil))
 				(define batch_cost_facts (if allow_ordered_batch
 					(merge (list
@@ -3457,6 +3531,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list "estimate_population" (string estimate_population))
 							(list "estimate_coverage" (string estimate_coverage))
 							(list "probe_branches" (qassoc_get facts (quote membership_candidate_probe_branches) 1))
+							(list "downstream_probe_branches" (qassoc_get facts (quote membership_downstream_probe_branches) 0))
 							(list "selectivity_class" (string (qassoc_get facts (quote membership_selectivity_class) (quote unknown))))
 							(list "candidate_scan_invocations" (qassoc_get facts (quote membership_candidate_scan_invocations) 1))
 							(list "candidate_filter_columns" (qassoc_get facts (quote membership_candidate_filter_columns) 0))
@@ -6108,6 +6183,10 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_direct_probe_cost (lambda (probe_rows)
 	(planner_cost 0 0 (* probe_rows planner_membership_direct_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
 
+(define planner_membership_downstream_probe_row_ns 1372917)
+(define planner_membership_downstream_probe_cost (lambda (probe_rows)
+	(planner_cost 0 0 (* probe_rows planner_membership_downstream_probe_row_ns) 0 0 0 0 0 probe_rows 0.75)))
+
 (define planner_presence_carrier_cost (lambda (domain_rows probe_rows)
 	(planner_cost 1421611 (* probe_rows 136938) 0 0 0 0
 		(* domain_rows 8) 0 domain_rows 0.65)))
@@ -6132,4 +6211,5 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_group_cache_probe_row_ns 1)
 (define planner_membership_ordered_driver_input_row_ns 1)
 (define planner_membership_ordered_scan_invocation_ns 3027639)
+(define planner_membership_ordered_recset_row_ns 1)
 /* END GENERATED COST CONSTANTS */
