@@ -2467,6 +2467,9 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		recid := uint32(len(t.inserts)) + t.main_count
 		for j, colidx := range colidx {
 			if j < len(row) {
+				if colidx == aiColIdx && row[j].IsNil() {
+					continue
+				}
 				newrow[colidx] = row[j]
 			}
 		}

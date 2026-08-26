@@ -2436,6 +2436,9 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 					for _, colDesc := range t.Columns {
 						if col == colDesc.Name && colDesc.sanitizer != nil {
 							if i < len(row) {
+								if colDesc.AutoIncrement && row[i].IsNil() {
+									continue
+								}
 								row[i] = colDesc.sanitizer(row[i])
 							}
 						}
@@ -2454,6 +2457,9 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 			if col == colDesc.Name && colDesc.sanitizer != nil {
 				for _, row := range values {
 					if i < len(row) {
+						if colDesc.AutoIncrement && row[i].IsNil() {
+							continue
+						}
 						row[i] = colDesc.sanitizer(row[i])
 					}
 				}
