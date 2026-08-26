@@ -194,6 +194,58 @@ test_cases:
         - ID: 2
         - ID: 1
 
+  - name: "Drop cached correlated permission source"
+    sql: "DROP TABLE IF EXISTS dtl_cached_permission_base"
+
+  - name: "Create cached correlated permission source"
+    sql: "CREATE TABLE dtl_cached_permission_base (ID INT PRIMARY KEY, type_id INT, archive BOOL, sort_value INT)"
+
+  - name: "Compile correlated permission plan while driver is empty"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT b.ID, b.type_id, b.archive, b.sort_value
+        FROM dtl_cached_permission_base b
+        WHERE COALESCE((
+          SELECT CASE WHEN TRUE THEN TRUE ELSE FALSE END
+          FROM dtl_ref permission_type
+          WHERE permission_type.ID = b.type_id
+          LIMIT 1
+        ), FALSE)
+      ) t
+      LEFT JOIN dtl_ref sorter ON sorter.ID = t.type_id
+      WHERE t.ID IN (1) AND (t.archive IS NULL OR t.archive = FALSE)
+      ORDER BY t.sort_value DESC LIMIT 72 OFFSET 0
+    expect:
+      rows: 0
+
+  - name: "Insert first driver after correlated permission plan was cached"
+    sql: "INSERT INTO dtl_cached_permission_base (ID, type_id, archive, sort_value) VALUES (1, 10, FALSE, 100)"
+
+  - name: "Cached correlated permission plan observes first driver"
+    sql: |
+      SELECT t.*
+      FROM (
+        SELECT b.ID, b.type_id, b.archive, b.sort_value
+        FROM dtl_cached_permission_base b
+        WHERE COALESCE((
+          SELECT CASE WHEN TRUE THEN TRUE ELSE FALSE END
+          FROM dtl_ref permission_type
+          WHERE permission_type.ID = b.type_id
+          LIMIT 1
+        ), FALSE)
+      ) t
+      LEFT JOIN dtl_ref sorter ON sorter.ID = t.type_id
+      WHERE t.ID IN (1) AND (t.archive IS NULL OR t.archive = FALSE)
+      ORDER BY t.sort_value DESC LIMIT 72 OFFSET 0
+    expect:
+      rows: 1
+      data:
+        - ID: 1
+          type_id: 10
+          archive: 0
+          sort_value: 100
+
   - name: "physical outer ORDER BY contains no scalar probe IR"
     sql: |
       EXPLAIN

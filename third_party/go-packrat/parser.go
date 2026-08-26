@@ -1,5 +1,5 @@
 /*
-	(c) 2019 Launix, Inh. Carl-Philip Hänsch
+	(c) 2019, 2026 Launix, Inh. Carl-Philip Hänsch
 	Author: Tim Kluge
 
 	Dual licensed with custom aggreements or GPLv3
@@ -19,8 +19,15 @@ type Parser[T any] interface {
 }
 
 func (s *Scanner[T]) applyRule(rule Parser[T]) (Node[T], bool) {
-	startPosition := s.position
+	// Terminals cannot participate in left recursion. Running them directly
+	// avoids memo-map, MemoEntry, and LR-frame allocations for every keyword,
+	// identifier, literal, and punctuation token in large inputs.
+	switch rule.(type) {
+	case *AtomParser[T], *RegexParser[T], *EmptyParser[T], *EndParser[T], *RestParser[T]:
+		return rule.Match(s)
+	}
 
+	startPosition := s.position
 	memmap := s.memoization[startPosition]
 	if memmap == nil {
 		memmap = make(map[Parser[T]]*MemoEntry[T])
@@ -65,7 +72,7 @@ func (s *Scanner[T]) applyRule(rule Parser[T]) (Node[T], bool) {
 var emptyString = ""
 
 type Node[T any] struct {
-	Payload  T
+	Payload T
 }
 
 type ParserError[T any] struct {

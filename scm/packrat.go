@@ -23,8 +23,53 @@ import "sync"
 import packrat "github.com/launix-de/go-packrat/v2"
 
 type parserResult struct {
-	value Scmer
-	env   map[Symbol]Scmer
+	value         Scmer
+	env           map[Symbol]Scmer
+	variable      Symbol
+	variableValue Scmer
+	hasVariable   bool
+}
+
+func (r *parserResult) eachVariable(fn func(Symbol, Scmer)) {
+	if r == nil {
+		return
+	}
+	if r.hasVariable {
+		fn(r.variable, r.variableValue)
+	}
+	for key, value := range r.env {
+		fn(key, value)
+	}
+}
+
+func (r *parserResult) addVariable(key Symbol, value Scmer) {
+	if r.env != nil {
+		r.env[key] = value
+		return
+	}
+	if !r.hasVariable || r.variable == key {
+		r.variable = key
+		r.variableValue = value
+		r.hasVariable = true
+		return
+	}
+	r.env = map[Symbol]Scmer{
+		r.variable: r.variableValue,
+		key:        value,
+	}
+	r.variable = ""
+	r.variableValue = NewNil()
+	r.hasVariable = false
+}
+
+func (r *parserResult) variables() map[Symbol]Scmer {
+	if r.env != nil {
+		return r.env
+	}
+	if r.hasVariable {
+		return map[Symbol]Scmer{r.variable: r.variableValue}
+	}
+	return nil
 }
 
 type ScmParser struct {
@@ -63,8 +108,9 @@ func (b *ScmCaptureParser) Match(s *packrat.Scanner[*parserResult]) (packrat.Nod
 	matchedText := s.Substring(startPos, endPos)
 	// Return a list: (matched_text parsed_result)
 	result := []Scmer{NewString(matchedText), m.Payload.value}
-	env := m.Payload.env
-	return packrat.Node[*parserResult]{Payload: &parserResult{value: NewSlice(result), env: env}}, true
+	captured := *m.Payload
+	captured.value = NewSlice(result)
+	return packrat.Node[*parserResult]{Payload: &captured}, true
 }
 
 func parserSymbolEquals(v Scmer, name string) bool {
@@ -110,7 +156,7 @@ func (b *ScmParser) Match(s *packrat.Scanner[*parserResult]) (packrat.Node[*pars
 	} else {
 		var en2 Env
 		// evaluate parser
-		en2.Vars = m.Payload.env // take variable assignments
+		en2.Vars = m.Payload.variables() // take variable assignments
 		en2.Outer = b.Outer
 		en2.Nodefine = true
 		return packrat.Node[*parserResult]{Payload: &parserResult{value: Eval(b.Generator, &en2), env: nil}}, true
@@ -119,8 +165,8 @@ func (b *ScmParser) Match(s *packrat.Scanner[*parserResult]) (packrat.Node[*pars
 
 // TODO: create two variants of mergeParserResults, one where the result is not needed and thus nil can be returned as payload
 func mergeParserResults(s string, r ...*parserResult) *parserResult {
-	var env map[Symbol]Scmer
 	arr := make([]Scmer, 0, len(r))
+	result := &parserResult{}
 	for _, e := range r {
 		if e == nil {
 			continue
@@ -132,30 +178,19 @@ func mergeParserResults(s string, r ...*parserResult) *parserResult {
 			}
 		}
 		arr = append(arr, v)
-		if e.env != nil {
-			if env == nil {
-				env = make(map[Symbol]Scmer)
-			}
-			for k, v := range e.env {
-				env[k] = v
-			}
-		}
+		e.eachVariable(result.addVariable)
 	}
-	return &parserResult{value: NewSlice(arr), env: env}
+	result.value = NewSlice(arr)
+	return result
 }
 func mergeParserResultsNil(s string, r ...*parserResult) *parserResult {
-	var env map[Symbol]Scmer
+	result := &parserResult{value: NewNil()}
 	for _, e := range r {
-		if e != nil && e.env != nil {
-			if env == nil {
-				env = make(map[Symbol]Scmer)
-			}
-			for k, v := range e.env {
-				env[k] = v
-			}
+		if e != nil {
+			e.eachVariable(result.addVariable)
 		}
 	}
-	return &parserResult{value: NewNil(), env: env}
+	return result
 }
 
 func (b *ScmParser) Execute(str string, en *Env) Scmer {
@@ -176,12 +211,9 @@ func (b *ScmParserVariable) Match(s *packrat.Scanner[*parserResult]) (packrat.No
 	if !ok {
 		return m, ok
 	}
-	env := m.Payload.env
-	if env == nil {
-		env = make(map[Symbol]Scmer)
-	}
-	env[b.Variable] = m.Payload.value
-	return packrat.Node[*parserResult]{Payload: &parserResult{value: m.Payload.value, env: env}}, true
+	result := *m.Payload
+	result.addVariable(b.Variable, m.Payload.value)
+	return packrat.Node[*parserResult]{Payload: &result}, true
 }
 
 func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult bool) packrat.Parser[*parserResult] {
