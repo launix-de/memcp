@@ -121,8 +121,8 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
 			currentTx := CurrentTx()
-			for i, s := range shardlist {
-				gls.Go(func(i int, s *storageShard) func() {
+			for _, s := range shardlist {
+				gls.Go(func(s *storageShard) func() {
 					return func() {
 						defer func() {
 							if r := recover(); r != nil {
@@ -130,16 +130,10 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 								done <- scanError{r, string(debug.Stack())}
 							}
 						}()
-						for !s.ComputeColumn(name, inputCols, computor, filterCols, filter, len(shardlist) == 1, currentTx) {
-							// couldn't compute column because delta is still active
-							t.mu.Lock()
-							s = s.rebuild(false)
-							shardlist[i] = s
-							t.mu.Unlock()
-						}
+						s.ComputeColumn(name, inputCols, computor, filterCols, filter, currentTx)
 						done <- nil
 					}
-				}(i, s))
+				}(s))
 			}
 			for range shardlist {
 				err := <-done // collect finish signal before return
@@ -183,28 +177,7 @@ func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scme
 	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
 }
 
-// hasUnprotectedDelta reports whether compaction can make progress. Tombstones
-// retained solely for an active transaction are already part of main storage;
-// rebuilding them again cannot remove them until that transaction resolves.
-func (s *storageShard) hasUnprotectedDelta() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if len(s.inserts) > 0 {
-		return true
-	}
-	hasUnprotectedDeletion := false
-	s.deletions.Iterate(func(recid uint) {
-		if !s.rollbackProtected.Get(recid) {
-			hasUnprotectedDeletion = true
-		}
-	})
-	return hasUnprotectedDeletion
-}
-
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, parallel bool, tx *TxContext) bool {
-	if s.hasUnprotectedDelta() {
-		return false // can't compute in shards with delta storage
-	}
+func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, tx *TxContext) {
 	// Ensure shard is loaded from disk before we mark it WRITE (ensureLoaded
 	// guards on COLD state; setting WRITE first would skip the load entirely).
 	s.ensureLoaded()
@@ -240,18 +213,18 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 					proxy.Compress()
 				}
 			})
-			return true
+			return
 		}
 		// skip recompute if proxy is still valid (no invalidation since last compute)
-		if proxy.compressed && len(proxy.delta) == 0 {
+		if !proxy.needsUnfilteredPreparation() {
 			if filter.IsNil() {
-				return true // fully compressed, nothing to do
+				return // fully prepared, nothing to do
 			}
 			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
 			runWithTxSession(tx, func() {
 				proxy.CompressFiltered(filterCols, filter)
 			})
-			return true
+			return
 		}
 		runWithTxSession(tx, func() {
 			if !filter.IsNil() {
@@ -260,7 +233,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 				proxy.Compress()
 			}
 		})
-		return true
+		return
 	}
 
 	// Publish the definition before preparing values. Readers may immediately use
@@ -289,7 +262,6 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 			proxy.Compress() // eagerly compute + compress all values (same behavior as before)
 		}
 	})
-	return true
 }
 
 // ComputeOrderedColumn materializes an ordered-reduce computed (ORC) column.
