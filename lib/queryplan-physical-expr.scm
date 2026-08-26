@@ -5378,6 +5378,127 @@ of values protected by COALESCE are the common generated two-valued forms. */
 				(boolean_recset_nonnull_value? expr)))
 		_ (boolean_recset_nonnull_value? expr))))
 
+/* A query-invariant boolean may decide an entire RecSet branch before any
+dependent carrier is built. Keep that decision in the emitted control flow:
+building every input first and applying recset_union/intersect afterwards
+would erase SQL's useful short-circuit opportunity. This is a dominance rule,
+not a selectivity choice: the skipped branch cannot change the TRUE-row set.
+All data-dependent alternatives continue through the calibrated cost model. */
+(define expr_contains_query_invariant_binding? (lambda (expr)
+	(if (symbol? expr)
+		/* Compact scalar recipes retain the generated lexical binding but may
+		deliberately omit its producer stage from their local catalog. The binding
+		prefix is an internal physical-AST marker created exclusively by
+		query_invariant_probe_binding_key, not a SQL/table-shape heuristic. */
+		(strlike (string expr) "__query_invariant_probe_%" "binary")
+		(match expr
+			((symbol quote) _value) false
+			(cons head tail) (or
+				(expr_contains_query_invariant_binding? head)
+				(reduce tail (lambda (found item)
+					(or found (expr_contains_query_invariant_binding? item))) false))
+			_ false))))
+
+/* Probe markers may carry a complete lowering catalog as their fourth item.
+That catalog is lookup metadata, not a value dependency of this expression
+leaf. Invariance therefore follows the directly referenced stage only; treating
+every catalog entry as an operand makes an unrelated correlated sibling poison
+an otherwise query-constant boolean term. */
+(define expr_direct_probe_stages (lambda (expr)
+	(match expr
+		((symbol scalar_first_probe) stage _requested_col) (list stage)
+		((quote scalar_first_probe) stage _requested_col) (list stage)
+		((symbol scalar_first_probe) stage _requested_col _catalog) (list stage)
+		((quote scalar_first_probe) stage _requested_col _catalog) (list stage)
+		((symbol scalar_aggregate_probe) stage _requested_col) (list stage)
+		((quote scalar_aggregate_probe) stage _requested_col) (list stage)
+		((symbol scalar_cardinality_probe) stage _requested_col) (list stage)
+		((quote scalar_cardinality_probe) stage _requested_col) (list stage)
+		(cons head tail) (merge_unique (list
+			(expr_direct_probe_stages head)
+			(merge (map tail expr_direct_probe_stages))))
+		_ '())))
+
+(define probe_value_expr_contains_column_ref? (lambda (expr)
+	(match expr
+		((symbol scalar_first_probe) stage _requested_col)
+		(reduce (qassoc_get (gs_facts stage) (quote lookup-keys) '())
+			(lambda (found key) (or found (expr_contains_column_ref? key))) false)
+		((quote scalar_first_probe) stage requested_col)
+		(probe_value_expr_contains_column_ref?
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((symbol scalar_first_probe) stage requested_col _catalog)
+		(probe_value_expr_contains_column_ref?
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((quote scalar_first_probe) stage requested_col _catalog)
+		(probe_value_expr_contains_column_ref?
+			(list (symbol "scalar_first_probe") stage requested_col))
+		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) true
+		((quote get_column) _tblvar _tbl_ignorecase _col _col_ignorecase) true
+		((symbol quote) _value) false
+		(cons head tail) (or
+			(probe_value_expr_contains_column_ref? head)
+			(reduce tail (lambda (found item)
+				(or found (probe_value_expr_contains_column_ref? item))) false))
+		_ false)))
+
+(define boolean_recset_query_invariant_expr? (lambda (expr)
+	(begin
+		(define probe_stages (expr_direct_probe_stages expr))
+		(define has_invariant_binding (expr_contains_query_invariant_binding? expr))
+		(define has_invariant_stage (reduce probe_stages (lambda (found stage)
+			(or found (query_invariant_presence_stage? stage))) false))
+		(and (or has_invariant_binding has_invariant_stage)
+			(and (not (probe_value_expr_contains_column_ref? expr))
+				(reduce probe_stages (lambda (invariant stage)
+					(and invariant (query_invariant_presence_stage? stage))) true))))))
+
+(define boolean_recset_identity_plan (lambda (domain_src operator)
+	(boolean_recset_domain_scan_plan domain_src
+		(if (equal? operator (quote and)) true false))))
+
+(define boolean_recset_record_invariant_short_circuit (lambda (expr)
+	(planner_record_physical_decision (list
+		(list "decision_id" (concat "query_invariant_recset_short_circuit:"
+			(stable_structural_hash expr true)))
+		(list "decision" "query_invariant_recset_short_circuit")
+		(list "decision_site" "boolean_recset_algebra")
+		(list "chosen" "runtime_guard")
+		(list "selection" "dominance")
+		(list "reason" "invariant_true_skips_dependent_carrier")))))
+
+(define boolean_recset_short_circuit_plan (lambda (stage_catalog domain_src operator items)
+	(begin
+		(define classified_items (reduce items (lambda (classified item)
+			(if (boolean_recset_query_invariant_expr? item)
+				(list (cons item (nth classified 0)) (nth classified 1))
+				(list (nth classified 0) (cons item (nth classified 1)))))
+			(list '() '())))
+		(define invariant_items (reverse (nth classified_items 0)))
+		(if (empty_list? invariant_items)
+			nil
+			(begin
+				(define dependent_items (reverse (nth classified_items 1)))
+				(define invariant_expr (if (equal? (count invariant_items) 1)
+					(car invariant_items)
+					(cons operator invariant_items)))
+				(define dependent_plan (if (empty_list? dependent_items)
+					(boolean_recset_identity_plan domain_src operator)
+					(boolean_recset_expr_plan stage_catalog domain_src
+						(if (equal? (count dependent_items) 1)
+							(car dependent_items)
+							(cons operator dependent_items)))))
+				(boolean_recset_record_invariant_short_circuit invariant_expr)
+				(if (equal? operator (quote and))
+					(list (quote if)
+						(lower_column_expr_for_alias domain_src invariant_expr)
+						dependent_plan
+						(boolean_recset_domain_scan_plan domain_src false))
+					(list (quote if)
+						(lower_column_expr_for_alias domain_src invariant_expr)
+						(boolean_recset_domain_scan_plan domain_src true)
+						dependent_plan))))))))
+
 /* Compile true-row sets recursively. AND/OR are exact set intersection/union.
 CASE is a disjoint union of its true and false-condition branches; SQL treats a
 NULL WHEN condition like false, which is exactly the complement of its true-row
@@ -5445,13 +5566,19 @@ one ordinary scan_recset, while stage leaves use the carrier projection above. *
 					(list (symbol "if") condition then_expr else_expr))
 				(cons head items) (if (or (equal? head (quote and))
 					(equal? head (symbol "and")))
-					(boolean_recset_combine (quote recset_intersect)
-						(map items (lambda (item)
-							(boolean_recset_expr_plan stage_catalog domain_src item))))
-					(if (or (equal? head (quote or)) (equal? head (symbol "or")))
-						(boolean_recset_combine (quote recset_union)
+					(coalesceNil
+						(boolean_recset_short_circuit_plan
+							stage_catalog domain_src (quote and) items)
+						(boolean_recset_combine (quote recset_intersect)
 							(map items (lambda (item)
-								(boolean_recset_expr_plan stage_catalog domain_src item))))
+								(boolean_recset_expr_plan stage_catalog domain_src item)))))
+					(if (or (equal? head (quote or)) (equal? head (symbol "or")))
+						(coalesceNil
+							(boolean_recset_short_circuit_plan
+								stage_catalog domain_src (quote or) items)
+							(boolean_recset_combine (quote recset_union)
+								(map items (lambda (item)
+									(boolean_recset_expr_plan stage_catalog domain_src item)))))
 						(if (empty_list? (expr_probe_stages expr))
 							(boolean_recset_domain_scan_plan domain_src expr)
 							(neumann_fail "build_queryplan"

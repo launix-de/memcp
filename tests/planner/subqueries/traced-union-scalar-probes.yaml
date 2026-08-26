@@ -487,11 +487,104 @@ test_cases:
         - text: "__query_invariant_probe_"
           count: 4
 
+  - name: "Query-invariant OR short-circuits its dependent RecSet carrier"
+    session_id: "trace-invariant-probe"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT a.id
+      FROM trace_asset a
+      WHERE COALESCE((
+        SELECT (
+          EXISTS (
+            SELECT TRUE FROM trace_global_access global_access
+            WHERE global_access.actor_id = @trace_actor
+              AND global_access.scope_id IS NULL
+            LIMIT 1
+          )
+          OR EXISTS (
+            SELECT TRUE FROM trace_share local_access
+            WHERE local_access.box_id = box_row.id
+              AND local_access.owner_id = @trace_actor
+            LIMIT 1
+          )
+        )
+        FROM trace_box box_row
+        WHERE box_row.id = a.id * 100
+        LIMIT 1
+      ), FALSE)
+      ORDER BY a.id
+      LIMIT 72
+    expect:
+      result_contains:
+        - "query_invariant_recset_short_circuit"
+        - "invariant_true_skips_dependent_carrier"
+
+  - name: "True query-invariant branch admits rows without local access"
+    session_id: "trace-invariant-probe"
+    sql: |
+      SELECT a.id
+      FROM trace_asset a
+      WHERE COALESCE((
+        SELECT (
+          EXISTS (
+            SELECT TRUE FROM trace_global_access global_access
+            WHERE global_access.actor_id = @trace_actor
+              AND global_access.scope_id IS NULL
+            LIMIT 1
+          )
+          OR EXISTS (
+            SELECT TRUE FROM trace_share local_access
+            WHERE local_access.box_id = box_row.id
+              AND local_access.owner_id = @trace_actor
+            LIMIT 1
+          )
+        )
+        FROM trace_box box_row
+        WHERE box_row.id = a.id * 100
+        LIMIT 1
+      ), FALSE)
+      ORDER BY a.id
+    expect:
+      rows: 2
+      data:
+        - {id: 1}
+        - {id: 2}
+
   - name: "Query-invariant presence binding observes the next session value"
     session_id: "trace-invariant-probe"
     sql: "SET @trace_actor = 8"
     expect:
       rows_affected: 0
+
+  - name: "False query-invariant branch preserves local access filtering"
+    session_id: "trace-invariant-probe"
+    sql: |
+      SELECT a.id
+      FROM trace_asset a
+      WHERE COALESCE((
+        SELECT (
+          EXISTS (
+            SELECT TRUE FROM trace_global_access global_access
+            WHERE global_access.actor_id = @trace_actor
+              AND global_access.scope_id IS NULL
+            LIMIT 1
+          )
+          OR EXISTS (
+            SELECT TRUE FROM trace_share local_access
+            WHERE local_access.box_id = box_row.id
+              AND local_access.owner_id = @trace_actor
+            LIMIT 1
+          )
+        )
+        FROM trace_box box_row
+        WHERE box_row.id = a.id * 100
+        LIMIT 1
+      ), FALSE)
+      ORDER BY a.id
+    expect:
+      rows: 1
+      data:
+        - {id: 2}
 
   - name: "Equivalent invariant grants preserve the false and fallback branches"
     session_id: "trace-invariant-probe"
