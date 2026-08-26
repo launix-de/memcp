@@ -562,11 +562,18 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 // Buffer size controls early-out granularity: use small buffers (e.g. [8]uint32)
 // for existence checks, large buffers (e.g. [1024]uint32) for full scans.
 func (t *storageShard) iterateIndex(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, nil, selected, callback)
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, nil, nil, selected, callback)
+}
+
+// iterateIndexEstimate additionally reports the complete candidate range found
+// by an active sorted index. Delta rows are included conservatively because
+// they are merged after the main range and may still satisfy the predicate.
+func (t *storageShard) iterateIndexEstimate(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, 0, false, nil, nil, candidateSpan, selected, callback)
 }
 
 func (t *storageShard) iterateIndexOrdered(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, limit int, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, &indexIterationOptions{orderedLimit: limit}, selected, callback)
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, &indexIterationOptions{orderedLimit: limit}, nil, selected, callback)
 }
 
 func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
@@ -574,7 +581,7 @@ func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower [
 	if countUsage {
 		usageWeight = 1.0
 	}
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, true, nil, nil, nil, callback)
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, true, nil, nil, nil, nil, callback)
 }
 
 func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, exactMain *bool, callback func([]uint32) bool) {
@@ -582,7 +589,7 @@ func (t *storageShard) iterateIndexMatchAware(tx *TxContext, cols boundaries, lo
 	if countUsage {
 		usageWeight = 1.0
 	}
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, exactMain, nil, nil, callback)
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, exactMain, nil, nil, nil, callback)
 }
 
 func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, bool) {
@@ -597,7 +604,7 @@ func effectiveBoundaryInclusiveness(cols boundaries, lower []scm.Scmer) (bool, b
 	return true, true
 }
 
-func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 	if exactMain != nil {
 		*exactMain = false
 	}
@@ -665,7 +672,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 					}
 				}
 				// this index fits!
-				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, selected, callback)
+				index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
 				return
 			}
 		skip_index:
@@ -701,7 +708,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 				if covered {
 					// longer index covers this query; use it instead of creating a shorter one
 					t.indexMutex.Unlock()
-					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, selected, callback)
+					index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
 					return
 				}
 			}
@@ -781,7 +788,7 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 		}
 		t.Indexes = append(t.Indexes, index)
 		t.indexMutex.Unlock()
-		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, selected, callback)
+		index.iterate(tx, cols, lower, upperLast, lowerIncl, upperIncl, maxInsertIndex, buf, usageWeight, forceBuild, exactMain, options, candidateSpan, selected, callback)
 		return
 	}
 
@@ -1488,7 +1495,7 @@ func (s *StorageIndex) estimateHookCandidates(tx *TxContext, bounds boundaries) 
 }
 
 // iterate over index using a caller-provided buffer for batching
-func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scmer, upperLast scm.Scmer, lowerInclusive bool, upperInclusive bool, maxInsertIndex int, buf []uint32, usageWeight float64, forceBuild bool, exactMain *bool, options *indexIterationOptions, candidateSpan *int64, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
 
 	// Build column getters — use RLocked variant because the caller
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
@@ -1720,6 +1727,9 @@ start_scan:
 	}
 	mainStart := mainIdx
 	indexSpanRows = int64(mainEnd-mainStart) + int64(maxInsertIndex)
+	if candidateSpan != nil {
+		*candidateSpan = indexSpanRows
+	}
 	if hasRecSetBoundary {
 		rows := int64(0)
 		if recsetPart != nil {

@@ -69,7 +69,7 @@ func TestEstimateFilteredRowsReportsExaminedSample(t *testing.T) {
 	}
 }
 
-func TestEstimateFilteredRowsMarksCappedIndexPopulationAsLowerBound(t *testing.T) {
+func TestEstimateFilteredRowsRecognizesCompleteCappedIndexRange(t *testing.T) {
 	tbl, cols := scanColumnCostTable(t, "estimate_index_population", 10)
 	condition := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("c0")}),
@@ -90,9 +90,74 @@ func TestEstimateFilteredRowsMarksCappedIndexPopulationAsLowerBound(t *testing.T
 	}
 
 	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil)
-	if estimate.rows != 1 || !estimate.capped || estimate.examined != 1 ||
-		estimate.population != "index_candidates" || estimate.coverage != "lower_bound" {
-		t.Fatalf("estimate = %+v; want capped index lower bound", estimate)
+	if estimate.rows != 1 || estimate.capped || estimate.examined != 1 ||
+		estimate.population != "index_candidates" || estimate.coverage != "exact" {
+		t.Fatalf("estimate = %+v; want complete one-row index range", estimate)
+	}
+}
+
+func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testing.T) {
+	Init(scm.Globalenv)
+	dbName := "test_selectivity_index_population"
+	databases.Remove(dbName)
+	t.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("tenant", "INT", nil, nil)
+
+	values := make([][]scm.Scmer, 1000)
+	for row := range values {
+		values[row] = []scm.Scmer{scm.NewInt(int64(row % 10))}
+	}
+	tbl.Insert([]string{"tenant"}, values, nil, scm.NewNil(), false, nil)
+	RebuildTable(tbl, true, false)
+
+	condition := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("tenant")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal?"), scm.NewSymbol("tenant"), scm.NewInt(4),
+		}),
+		En: &scm.Globalenv,
+	})
+	shard := tbl.ActiveShards()[0]
+	for range 2 {
+		bounds := extractBoundaries([]string{"tenant"}, condition)
+		lower, upperLast := indexFromBoundaries(bounds)
+		var buf [128]uint32
+		shard.mu.RLock()
+		shard.iterateIndex(nil, bounds, lower, upperLast, len(shard.inserts), buf[:], 100, nil,
+			func([]uint32) bool { return true })
+		shard.mu.RUnlock()
+	}
+	shardEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 512, nil)
+	if shardEstimate.population != "index_candidates" || shardEstimate.examined != 100 {
+		t.Fatalf("shard estimate = %+v, want 100 index candidates", shardEstimate)
+	}
+	boundedEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 50, nil)
+	if boundedEstimate.rows != 100 || boundedEstimate.capped ||
+		boundedEstimate.population != "index_candidates" || boundedEstimate.coverage != "upper_bound" {
+		t.Fatalf("bounded shard estimate = %+v, want 100-row index upper bound", boundedEstimate)
+	}
+
+	estimate := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_selectivity_estimate")],
+		scm.NewNil(), NewTableScmer(tbl),
+		scm.NewSlice([]scm.Scmer{scm.NewString("tenant")}), condition, scm.NewInt(512))
+	fields := mustScmerSlice(estimate, "selectivity estimate")
+	fieldInt := func(name string) int64 {
+		for _, field := range fields {
+			pair := mustScmerSlice(field, "selectivity estimate field")
+			if scm.String(pair[0]) == name {
+				return int64(scm.ToInt(pair[1]))
+			}
+		}
+		t.Fatalf("missing selectivity estimate field %q", name)
+		return 0
+	}
+	if got := fieldInt("rows"); got != 100 {
+		t.Fatalf("estimated rows = %d, want 100", got)
+	}
+	if got := fieldInt("sampled"); got != 1000 {
+		t.Fatalf("sampled population = %d, want 1000", got)
 	}
 }
 

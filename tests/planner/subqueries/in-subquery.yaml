@@ -2680,7 +2680,8 @@ test_cases:
                 (list (+ i 1) (concat "asset-" i) (concat "broad needle text " i)))))
             (insert (table "memcp-tests" "in_prefilter_doc") '("ID" "file_id" "tenant" "sort_key")
               (map (produceN 20000) (lambda (i)
-                (list (+ i 1) (+ i 1) (if (>= i 19900) 7 9) i))))
+                (list (+ i 1) (+ i 1)
+                  (if (>= i 19900) 7 (if (>= i 19148) 8 9)) i))))
             (rebuild)
             true)
     steps:
@@ -2719,6 +2720,30 @@ test_cases:
             - "recset_project_join"
             - "recset_intersect"
             - "scan_order"
+      - sql: "SELECT d.ID FROM in_prefilter_doc d WHERE d.tenant = 8"
+        expect:
+          rows: 752
+      - sql: "SELECT d.ID FROM in_prefilter_doc d WHERE d.tenant = 8"
+        expect:
+          rows: 752
+      - sql: |
+          EXPLAIN PHYSICAL
+          SELECT d.ID
+          FROM in_prefilter_doc d
+          WHERE d.tenant = 8
+            AND d.file_id IN (
+            SELECT f.ID FROM in_prefilter_file f WHERE f.filename LIKE '%missing%'
+            UNION
+            SELECT f.ID FROM in_prefilter_file f WHERE f.search LIKE '%also-missing%'
+          )
+          ORDER BY d.sort_key
+          LIMIT 10
+        expect:
+          rows: 1
+          contains:
+            - "membership_carrier"
+            - "prefiltered_driver_rows 752"
+            - "chosen prefiltered_candidate_keyset"
       - sql: |
           EXPLAIN PHYSICAL CALIBRATE
           SELECT d.ID

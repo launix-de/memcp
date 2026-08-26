@@ -712,6 +712,25 @@ func Init(en scm.Env) {
 						scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(estimate.coverage)}),
 					})
 				}
+				// An ordinary index range examines only matching candidates. Its
+				// candidate count is the numerator of a shard sample, not the sample
+				// population itself. Scale it by the selected shard's visible row
+				// universe; using examined here turns every exact equality range into
+				// an apparent 100%-selective predicate.
+				if estimate.population == "index_candidates" && estimate.universe > 0 {
+					coverage := estimate.coverage
+					if len(shards) > 1 {
+						coverage = "sampled"
+					}
+					return scm.NewSlice([]scm.Scmer{
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(estimate.rows)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(estimate.capped)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("sampled"), scm.NewInt(estimate.universe)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("input"), scm.NewInt(input)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("population"), scm.NewSymbol("table_rows")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol(coverage)}),
+					})
+				}
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("rows"), scm.NewInt(estimate.rows)}),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("capped"), scm.NewBool(estimate.capped)}),
