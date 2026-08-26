@@ -6,6 +6,7 @@ metadata:
   isolated: true
 
 setup:
+  - sql: "DROP TABLE IF EXISTS dbc_unique_lifecycle"
   - sql: "DROP TABLE IF EXISTS dbc_child"
   - sql: "DROP TABLE IF EXISTS dbc_t"
 
@@ -107,6 +108,42 @@ test_cases:
     sql: "CREATE UNIQUE INDEX uk_slug ON dbc_t (slug(128))"
   - name: "DROP INDEX"
     sql: "DROP INDEX uk_slug ON dbc_t"
+
+  # Schema synchronization depends on index introspection and on UNIQUE being
+  # a real data constraint. In particular, a migration tool uses the failure
+  # from CREATE UNIQUE over duplicate data to trigger its duplicate cleanup.
+  - name: "Create table for unique index lifecycle"
+    sql: "CREATE TABLE dbc_unique_lifecycle (id INT PRIMARY KEY, external_key INT)"
+  - name: "Insert duplicate values before unique index creation"
+    sql: "INSERT INTO dbc_unique_lifecycle VALUES (1, 7), (2, 7)"
+    expect:
+      affected_rows: 2
+  - name: "Creating unique index over duplicate data fails"
+    sql: "CREATE UNIQUE INDEX dbc_unique_external_key ON dbc_unique_lifecycle (external_key)"
+    expect:
+      error: true
+  - name: "Remove one duplicate before retrying unique index creation"
+    sql: "DELETE FROM dbc_unique_lifecycle WHERE id = 2"
+    expect:
+      affected_rows: 1
+  - name: "Create unique index after duplicate cleanup"
+    sql: "CREATE UNIQUE INDEX dbc_unique_external_key ON dbc_unique_lifecycle (external_key)"
+  - name: "SHOW INDEXES exposes the created unique index"
+    sql: "SHOW INDEXES FROM dbc_unique_lifecycle"
+    expect:
+      min_rows: 1
+      result_contains:
+        - "dbc_unique_external_key"
+  - name: "Created unique index rejects a later duplicate"
+    sql: "INSERT INTO dbc_unique_lifecycle VALUES (3, 7)"
+    expect:
+      error: true
+  - name: "Drop unique index removes the constraint"
+    sql: "DROP INDEX dbc_unique_external_key ON dbc_unique_lifecycle"
+  - name: "Duplicate insert succeeds after dropping unique index"
+    sql: "INSERT INTO dbc_unique_lifecycle VALUES (3, 7)"
+    expect:
+      affected_rows: 1
 
   # --- Primary Key manipulation ---
   - name: "ALTER TABLE DROP PRIMARY KEY"
@@ -255,6 +292,7 @@ test_cases:
     sql: "CREATE TABLE dbc_double (id INT PRIMARY KEY, val DOUBLE)"
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS dbc_unique_lifecycle"
   - sql: "DROP TABLE IF EXISTS dbc_double_precision"
   - sql: "DROP TABLE IF EXISTS dbc_double"
   - sql: "DROP TABLE IF EXISTS dbc_datetime"
