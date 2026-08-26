@@ -1,3 +1,5 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
 # TRUNCATE TABLE — alias for DELETE FROM without WHERE
 
 metadata:
@@ -8,6 +10,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS trunc_t"
   - sql: "CREATE TABLE trunc_t (id INT, val VARCHAR(50))"
   - sql: "INSERT INTO trunc_t (id, val) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+  - sql: "DELETE FROM system.access WHERE username = 'maintenance-guard-marker'"
+  - sql: "INSERT INTO system.access (username, database) VALUES ('maintenance-guard-marker', 'system_statistic')"
 
 test_cases:
   - name: "Rows exist before truncate"
@@ -46,5 +50,74 @@ test_cases:
       data:
         - c: 0
 
+  - name: "System tables cannot be dropped"
+    sql: "DROP TABLE system.user"
+    expect: { error: true }
+
+  - name: "Statistic tables cannot be dropped"
+    sql: "DROP TABLE system_statistic.logs"
+    expect: { error: true }
+
+  - name: "System database cannot be dropped"
+    sql: "DROP DATABASE system"
+    expect: { error: true }
+
+  - name: "Statistic database cannot be dropped"
+    sql: "DROP DATABASE system_statistic"
+    expect: { error: true }
+
+  - name: "Refused database drop leaves access catalog untouched"
+    sql: "SELECT COUNT(*) AS c FROM system.access WHERE username = 'maintenance-guard-marker' AND database = 'system_statistic'"
+    expect:
+      rows: 1
+      data:
+        - c: 1
+
+  - name: "System catalog cannot be truncated"
+    sql: "TRUNCATE TABLE system.`user`"
+    expect: { error: true }
+
+  - name: "System catalog columns cannot be dropped"
+    sql: "ALTER TABLE system.`user` DROP COLUMN admin"
+    expect: { error: true }
+
+  - name: "System catalog engine cannot be changed"
+    sql: "ALTER TABLE system.`user` ENGINE=MEMORY"
+    expect: { error: true }
+
+  - name: "Recovery root user cannot be dropped"
+    sql: "DROP USER root"
+    expect: { error: true }
+
+  - name: "Recovery root administrator privilege cannot be revoked"
+    sql: "REVOKE ALL ON *.* FROM root"
+    expect: { error: true }
+
+  - name: "PostgreSQL recovery root administrator privilege cannot be removed"
+    syntax: postgresql
+    sql: "ALTER USER root NOSUPERUSER"
+    expect: { error: true }
+
+  - name: "Recovery root remains an administrator"
+    sql: "SELECT admin FROM system.`user` WHERE username = 'root'"
+    expect:
+      rows: 1
+      data:
+        - admin: true
+
+  - name: "Log tables can still be truncated"
+    setup:
+      - sql: "INSERT INTO system_statistic.logs (datetime, message) VALUES ('maintenance-test', 'truncate remains allowed')"
+    sql: "TRUNCATE TABLE system_statistic.logs"
+    expect: {}
+
+  - name: "Log table is empty after truncate"
+    sql: "SELECT COUNT(*) AS c FROM system_statistic.logs"
+    expect:
+      rows: 1
+      data:
+        - c: 0
+
 cleanup:
   - sql: "DROP TABLE IF EXISTS trunc_t"
+  - sql: "DELETE FROM system.access WHERE username = 'maintenance-guard-marker'"

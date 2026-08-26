@@ -740,7 +740,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define trunc_schema (coalesce schema2 schema))
-			(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)
+			(cons '!begin (list
+				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
+				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)))
 	)))
 
 	(define psql_insert_into (parser '(
@@ -1051,12 +1053,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "NOSUPERUSER" true))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" '('protected_sql_admin_revoke_value username)))))
 		))
 		/* DROP USER/ROLE [IF EXISTS] — cascade-deletes access entries then the user row */
 		(parser '((atom "DROP" true) (or (atom "USER" true) (atom "ROLE" true)) (? (atom "IF" true) (atom "EXISTS" true)) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
+					'((quote protect_sql_root_admin) username "drop")
 					'((quote scan) '(session "__memcp_tx") '('table "system" "access")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
@@ -1083,7 +1086,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" '('protected_sql_admin_revoke_value username)))))
 		))
 		/* GRANT <any> ON DATABASE db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
@@ -1212,7 +1215,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "SET" true) (atom "timezone" true) (or "=" (atom "TO" true)) (define tz psql_expression)) '((quote session) "time_zone" tz))
 
 
-		(parser '((atom "DROP" true) (atom "DATABASE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin (if policy (policy "system" true true) true) '((quote dropdatabase) id (if if_exists true false))))
+		(parser '((atom "DROP" true) (atom "DATABASE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) (begin
+			(if policy (policy "system" true true) true)
+			(list (quote drop_sql_database) (list (quote session) "__memcp_tx") id (if if_exists true false))))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema psql_identifier) (atom "." true) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id psql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
@@ -1412,7 +1417,7 @@ substring replace (which is the historical behaviour). */
 
 (define psql_import_dropdatabase (lambda (plan)
 	(match plan
-		(cons op tail) (equal? op (quote dropdatabase))
+		(cons op tail) (or (equal? op (quote dropdatabase)) (equal? op (quote drop_sql_database)))
 		false)
 ))
 

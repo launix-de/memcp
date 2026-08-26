@@ -2039,6 +2039,13 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 }
 
 func (t *table) DropColumn(name string) bool {
+	requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+	t.ddlMu.Lock()
+	defer t.ddlMu.Unlock()
+	return t.dropColumnDDLLocked(name)
+}
+
+func (t *table) dropColumnForMigration(name string) bool {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
 	return t.dropColumnDDLLocked(name)

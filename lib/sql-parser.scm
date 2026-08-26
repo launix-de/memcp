@@ -1267,7 +1267,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define trunc_schema (coalesce schema2 schema))
-			(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)
+			(cons '!begin (list
+				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
+				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)))
 	)))
 
 	/* Multi-table DELETE: route through query planner pipeline via build_dml_plan */
@@ -1624,6 +1626,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "DROP" true) (atom "USER" true) (? (atom "IF" true) (atom "EXISTS" true)) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
 				(cons '!begin (list
+					'((quote protect_sql_root_admin) username "drop")
 					'((quote scan) '(session "__memcp_tx") '('table "system" "access")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
@@ -1675,7 +1678,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" false))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" '('protected_sql_admin_revoke_value username)))))
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
@@ -1825,17 +1828,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				(cons '!begin (list
-					'((quote scan) '(session "__memcp_tx") '('table "system" "access")
-						'('list "database")
-						'((quote lambda) '('database) '((quote equal??) (quote database) id))
-						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-						(quote +)
-						0)
-					'((quote dropdatabase) id (if if_exists true false))
-				))
-		))
+				(list (quote drop_sql_database) (list (quote session) "__memcp_tx") id (if if_exists true false))))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define schema sql_identifier) (atom "." true) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "TABLE" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier)) '((quote droptable) schema id (if if_exists true false)))
 		(parser '((atom "DROP" true) (atom "VIEW" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true)))
