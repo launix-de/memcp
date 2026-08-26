@@ -1537,12 +1537,18 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 func (t *storageShard) ColumnReaderTx(tx *TxContext, col string) func(uint32) scm.Scmer {
 	cstorage := t.getColumnStorageOrPanic(col)
 	reader := newCachedColumnReaderTx(cstorage, tx)
+	_, computed := cstorage.(*StorageComputeProxy)
 	return func(idx uint32) scm.Scmer {
 		if idx < t.main_count {
 			return reader.GetValue(idx)
-		} else {
-			return t.getDelta(int(idx-t.main_count), col)
 		}
+		// A computed column has no physical delta slot. Keep the transaction-
+		// bound reader so session-sensitive variants use the same binding for
+		// main and delta rows.
+		if computed {
+			return reader.GetValue(idx)
+		}
+		return t.getDelta(int(idx-t.main_count), col)
 	}
 }
 

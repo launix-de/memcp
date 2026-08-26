@@ -804,12 +804,13 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 			(resultrow '("result" (eval (scheme sql))))
 		) (time (begin
 				/* SQL syntax mode */
+				(define sql_parse_input (strtrim sql))
 				/* tolerate an optional trailing ';' - must be at end of string */
-				(set sql (match sql (regex "^((?s:.*));\\s*$" _ body) body sql))
+				(set sql_parse_input (match sql_parse_input (regex "^((?s:.*));\\s*$" _ body) body sql_parse_input))
 				(define mysql_username (coalesce (session "username") "root"))
 				(define formula (if (equal? (session "syntax") "postgresql")
-					(cached_parse psql_queryplan_cache parse_psql schema sql (sql_policy mysql_username) mysql_username session false)
-					(cached_parse sql_queryplan_cache parse_sql schema sql (sql_policy mysql_username) mysql_username session true)))
+					(cached_parse psql_queryplan_cache parse_psql schema sql_parse_input (sql_policy mysql_username) mysql_username session false)
+					(cached_parse sql_queryplan_cache parse_sql schema sql_parse_input (sql_policy mysql_username) mysql_username session true)))
 				(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
 			) sql))
 	)) (lambda (e) (begin

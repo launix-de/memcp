@@ -50,10 +50,16 @@ type storageIndexState struct {
 	indexHooks         []IndexHook
 	indexHookBytes     atomic.Int64
 	precomputedDelta   bool
+	computedRevisions  []computedRevision
 }
 
 type indexIterationOptions struct {
 	orderedLimit int
+}
+
+type computedRevision struct {
+	proxy    *StorageComputeProxy
+	revision uint64
 }
 
 // (no op) numeric helper removed; collations now use golang.org/x/text/collate for ordering
@@ -228,6 +234,49 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 	return getters, sessionKeys
 }
 
+// computedRevisionsRLocked snapshots the logical generations of computed
+// columns used as index keys. The caller already owns the shard read lock.
+func (s *StorageIndex) computedRevisionsRLocked() []computedRevision {
+	result := make([]computedRevision, 0)
+	add := func(col string) {
+		if isScanPseudoColName(col) {
+			return
+		}
+		proxy, ok := s.t.getColumnStorageRLocked(col).(*StorageComputeProxy)
+		if !ok {
+			return
+		}
+		for _, existing := range result {
+			if existing.proxy == proxy {
+				return
+			}
+		}
+		result = append(result, computedRevision{proxy: proxy, revision: proxy.revision.Load()})
+	}
+	for i, col := range s.Cols {
+		if len(s.ColMapFn) > i && !s.ColMapFn[i].IsNil() {
+			for _, mapCol := range s.ColMapCols[i] {
+				add(mapCol)
+			}
+			continue
+		}
+		add(col)
+	}
+	return result
+}
+
+func sameComputedRevisions(a, b []computedRevision) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // matcherKindEqual checks if two matchers have the same kind for index deduplication.
 func matcherKindEqual(a, b IndexAnalyzer) bool {
 	return a.Kind() == b.Kind()
@@ -398,16 +447,8 @@ func (s *StorageIndex) getDeltaValue(data []scm.Scmer, col string) scm.Scmer {
 
 // getDeltaColValue returns the index-column value for a delta row at column index colIdx.
 // For computed columns it reads the source cols and applies the mapFn.
-func (s *StorageIndex) getDeltaColValue(data []scm.Scmer, colIdx int) scm.Scmer {
-	if len(s.ColMapFn) > colIdx && !s.ColMapFn[colIdx].IsNil() {
-		fn := scm.OptimizeProcToSerialFunction(s.ColMapFn[colIdx])
-		vals := make([]scm.Scmer, len(s.ColMapCols[colIdx]))
-		for i, mc := range s.ColMapCols[colIdx] {
-			vals[i] = s.getDeltaValue(data, mc)
-		}
-		return fn(vals...)
-	}
-	return s.getDeltaValue(data, s.Cols[colIdx])
+func (s *StorageIndex) getDeltaColValue(recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
+	return s.getDeltaColValueTx(nil, recid, data, colIdx)
 }
 
 func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []scm.Scmer, colIdx int) scm.Scmer {
@@ -419,17 +460,24 @@ func (s *StorageIndex) getDeltaColValueTx(tx *TxContext, recid uint32, data []sc
 				vals[i] = scm.NewNil()
 				continue
 			}
-			cs := s.t.getColumnStorageOrPanic(mc)
-			if proxy, ok := cs.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
-				vals[i] = s.t.ColumnReaderTx(tx, mc)(recid)
+			cs := s.t.getColumnStorageRLocked(mc)
+			if proxy, ok := cs.(*StorageComputeProxy); ok {
+				if !proxy.isOrdered {
+					vals[i] = proxy.getValueRLocked(tx, recid)
+				} else {
+					vals[i] = s.t.ColumnReaderTx(tx, mc)(recid)
+				}
 			} else {
 				vals[i] = s.getDeltaValue(data, mc)
 			}
 		}
 		return fn(vals...)
 	}
-	cs := s.t.getColumnStorageOrPanic(s.Cols[colIdx])
-	if proxy, ok := cs.(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
+	cs := s.t.getColumnStorageRLocked(s.Cols[colIdx])
+	if proxy, ok := cs.(*StorageComputeProxy); ok {
+		if !proxy.isOrdered {
+			return proxy.getValueRLocked(tx, recid)
+		}
 		return s.t.ColumnReaderTx(tx, s.Cols[colIdx])(recid)
 	}
 	return s.getDeltaValue(data, s.Cols[colIdx])
@@ -490,7 +538,7 @@ func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid u
 		mainVal := mainGetters[i].get(mainRecid)
 		deltaVal := delta.data[i]
 		if !state.precomputedDelta {
-			deltaVal = s.getDeltaColValue(delta.data, i)
+			deltaVal = s.getDeltaColValue(uint32(delta.itemid), delta.data, i)
 		}
 		if s.lessAt(i, mainVal, deltaVal) {
 			return -1
@@ -913,6 +961,7 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
 func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx *TxContext) {
+	startRevisions := s.computedRevisionsRLocked()
 	if !s.Native {
 		// main storage: build sort-order index
 		tmp := make([]uint32, s.t.main_count)
@@ -1066,8 +1115,8 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 				av = a.data[colIdx]
 				bv = b.data[colIdx]
 			} else {
-				av = s.getDeltaColValue(a.data, colIdx)
-				bv = s.getDeltaColValue(b.data, colIdx)
+				av = s.getDeltaColValue(uint32(a.itemid), a.data, colIdx)
+				bv = s.getDeltaColValue(uint32(b.itemid), b.data, colIdx)
 			}
 			if s.lessAt(colIdx, av, bv) {
 				return true // less
@@ -1098,7 +1147,9 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 		}
 	}
 
-	state.active = true // mark as ready
+	endRevisions := s.computedRevisionsRLocked()
+	state.computedRevisions = endRevisions
+	state.active = sameComputedRevisions(startRevisions, endRevisions)
 }
 
 // buildMainIndexPositionsLocked lazily constructs the inverse of mainIndexes
@@ -1446,6 +1497,13 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 	cols, sessionKeys := s.buildGetters(tx)
 	s.syncSessionKeys(sessionKeys)
 	state := s.stateForTx(tx, true)
+	currentRevisions := s.computedRevisionsRLocked()
+	s.mu.Lock()
+	if state.active && !sameComputedRevisions(state.computedRevisions, currentRevisions) {
+		state.active = false
+	}
+	stateActive := state.active
+	s.mu.Unlock()
 	// no collation-specific helpers in the current implementation
 	recsetPart, hasRecSetBoundary := smallestRecSetBoundary(bounds, s.t)
 	// An exact source with no rows in this shard is terminal. In particular,
@@ -1473,7 +1531,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 
 	savingsThreshold := 2.0 // building an index costs 1x the time as traversing the list
 	savings := s.addSavings(state, usageWeight)
-	if !state.active {
+	if !stateActive {
 		// index is not built yet
 		if savings < savingsThreshold && !forceBuild {
 			if preferRecSet {
@@ -1754,7 +1812,7 @@ start_scan:
 				if state.precomputedDelta {
 					return p.data[i]
 				}
-				return s.getDeltaColValue(p.data, i)
+				return s.getDeltaColValue(recid, p.data, i)
 			})
 			if !inRange {
 				return !beyond
