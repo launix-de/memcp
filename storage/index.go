@@ -1529,6 +1529,21 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 		}
 	}
 
+	// An unordered exact RecSet already is the cheapest possible candidate
+	// iterator when it is smaller than the base-index span. Building a forward
+	// index cannot provide order or reduce the candidate count; in particular,
+	// repeated batch-local scan_recset calls must not eventually build a
+	// synthetic $recset_contains index merely because their savings score grew.
+	// Ordered scans remain below this dominance rule because their measured
+	// base-walk versus inverse-position crossover is a real runtime choice.
+	if preferRecSet && options == nil {
+		if selected != nil {
+			selected(s, false)
+		}
+		s.iterateRecSetFirst(tx, nil, recsetPart, bounds, lower, upperLast,
+			upperInclusive, 0, int(s.t.main_count), maxInsertIndex, buf, cols, false, false, exactMain, callback)
+		return
+	}
 	savingsThreshold := 2.0 // building an index costs 1x the time as traversing the list
 	savings := s.addSavings(state, usageWeight)
 	if !stateActive {

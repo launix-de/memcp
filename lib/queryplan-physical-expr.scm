@@ -3389,11 +3389,12 @@ the cost-model program in the query AST. */
 				args chosen candidate_rows candidate_input_rows false 32)))
 		(list lower upper))))
 
-/* Recreate only the cheap source-local statistic read used for carrier
-costing. The expression is emitted into the cache guard and evaluated against
-the current request bindings and current autoindex statistics. It never builds
-the candidate RecSet. */
-(define membership_runtime_source_rows_expr (lambda (src condition fallback_rows)
+/* A guard may reject a cached variant and compile another one in the same
+request. Source-local sampling is invariant across those alternatives: the
+table snapshot and request bindings are unchanged. Pin that observation in the
+query scope so a broad/no-hit predicate is sampled once, while a later request
+still rechecks current data and autoindex statistics. */
+(define query_scoped_source_filter_estimate_expr (lambda (src condition max_rows)
 	(begin
 		(define alias (source_alias src))
 		(define cols (extract_columns_for_alias src condition))
@@ -3404,7 +3405,24 @@ the candidate RecSet. */
 			(list (quote lambda)
 				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 				(lower_column_expr_for_alias src condition))
-			512))
+			max_rows))
+		(define key (concat "__source_filter_estimate_"
+			(stable_structural_hash (list
+				(source_schema src) (source_relation src) cols condition max_rows) true)))
+		(list
+			(list (quote context) "session")
+			"get_or_compute_scoped"
+			(list (quote context) "query")
+			key
+			(list (quote lambda) '() estimate_expr)))))
+
+/* Recreate only the source-local statistic read used for carrier costing. The
+expression is emitted into the cache guard and evaluated against the current
+request bindings and current autoindex statistics. It never builds the
+candidate RecSet. */
+(define membership_runtime_source_rows_expr (lambda (src condition fallback_rows)
+	(begin
+		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 512))
 		(define text_prior (expr_text_pattern_expr condition))
 		(list (quote planner_estimated_matching_rows)
 			(if (nil? text_prior)

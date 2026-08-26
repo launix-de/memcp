@@ -4462,17 +4462,8 @@ topology inequality by bounded binary search and guard that crossover. */
 (define scan_access_path_runtime_rows_expr (lambda (src candidate)
 	(begin
 		(define predicate (qassoc_get candidate (quote predicate) true))
-		(define alias (source_alias src))
-		(define cols (extract_columns_for_alias src predicate))
 		(define pattern_expr (expr_text_pattern_expr predicate))
-		(define estimate_expr (list (quote scan_selectivity_estimate)
-			'(session "__memcp_tx")
-			(list (quote table) (source_schema src) (source_relation src))
-			(cons (quote list) cols)
-			(list (quote lambda)
-				(map cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-				(lower_column_expr_for_alias src predicate))
-			512))
+		(define estimate_expr (query_scoped_source_filter_estimate_expr src predicate 512))
 		(list (quote planner_estimated_matching_rows)
 			(if (nil? pattern_expr)
 				estimate_expr

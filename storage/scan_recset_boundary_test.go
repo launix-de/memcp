@@ -114,6 +114,40 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 	}
 }
 
+func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
+	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetdirectrepeat", 2_000)
+	source := recSetForIDs(tbl, map[int64]bool{3: true, 103: true, 1_503: true})
+	condition := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.NewBool(values[0].Int() >= 100)
+	})
+
+	for range 4 {
+		got := make([]int64, 0, 2)
+		source.scan(nil, []string{"id"}, condition, []string{"id"},
+			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+				got = append(got, values[0].Int())
+				return values[0]
+			}), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
+			scm.NewNil(), scm.NewNil(), false)
+		if want := []int64{103, 1_503}; !equalInt64s(got, want) {
+			t.Fatalf("repeated RecSet scan rows = %v, want %v", got, want)
+		}
+	}
+
+	for _, index := range tbl.ActiveShards()[0].Indexes {
+		if len(index.Cols) != 1 || index.Cols[0] != "$recset_contains" {
+			continue
+		}
+		index.mu.Lock()
+		active := index.baseState.active
+		storedRows := index.baseState.mainIndexes.count
+		index.mu.Unlock()
+		if active || storedRows != 0 {
+			t.Fatalf("repeated exact RecSet scan built a membership index: active=%t rows=%d", active, storedRows)
+		}
+	}
+}
+
 func TestSparseOrderedRecSetBuildsCompressedInversePositions(t *testing.T) {
 	const rows = 20_000
 	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetsparseorder", rows)
