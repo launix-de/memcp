@@ -1137,7 +1137,13 @@ class SQLTestRunner:
         cpu_pct = None  # CPU load percentage, measured during query execution
         if query and query.strip().upper() == "SHUTDOWN":
             # Issue shutdown
-            resp = self.execute_sql(database, query, auth_header, active_syntax)
+            # A graceful shutdown may close this request before a response reaches
+            # the client. Do not wait for that same process to become ready again;
+            # the managed restart handler below owns process replacement.
+            resp = self.execute_sql(
+                database, query, auth_header, active_syntax,
+                retry_on_connection_failure=False,
+            )
             if resp is not None and resp.status_code >= 500:
                 response = resp
             else:

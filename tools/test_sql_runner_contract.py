@@ -183,6 +183,20 @@ class InterruptedRequestContractTest(unittest.TestCase):
         self.assertTrue(passed)
         self.assertFalse(runner.execute_sql.call_args.kwargs["retry_on_connection_failure"])
 
+    def test_shutdown_does_not_wait_for_the_process_it_intentionally_stops(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.ensure_database = lambda _database: None
+        runner.execute_sql = mock.Mock(return_value=None)
+        restart = mock.Mock(return_value=True)
+        runner.set_restart_handler(restart)
+
+        self.assertTrue(runner.run_test_case({
+            "name": "managed restart",
+            "sql": "SHUTDOWN",
+        }, "memcp-tests"))
+        self.assertFalse(runner.execute_sql.call_args.kwargs["retry_on_connection_failure"])
+        restart.assert_called_once_with()
+
 
 class AtomicJSONObserverContractTest(unittest.TestCase):
     def test_accepts_complete_atomic_replacements(self) -> None:
