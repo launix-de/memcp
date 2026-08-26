@@ -366,6 +366,38 @@ partner. */
 					raw_probe))
 			nil))))
 
+(define physical_expr_refs_unconsumed_stage_output_alias? (lambda (expr)
+	(match expr
+		/* A physical probe owns the logical stage descriptor embedded in its marker.
+		Aliases inside that descriptor are inputs to the probe lowerer, not free
+		columns in the surrounding query block. */
+		((symbol scalar_first_probe) _stage _requested_col) false
+		((quote scalar_first_probe) _stage _requested_col) false
+		((symbol scalar_first_probe) _stage _requested_col _dependencies) false
+		((quote scalar_first_probe) _stage _requested_col _dependencies) false
+		((symbol scalar_aggregate_probe) _stage _requested_col) false
+		((quote scalar_aggregate_probe) _stage _requested_col) false
+		((symbol scalar_cardinality_probe) _stage _requested_col) false
+		((quote scalar_cardinality_probe) _stage _requested_col) false
+		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
+		((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(and (string? tblvar) (strlike tblvar "__exists_%"))
+		(cons _head tail) (reduce tail (lambda (found item)
+			(or found (physical_expr_refs_unconsumed_stage_output_alias? item))) false)
+		_ false)))
+
+(define query_block_refs_unconsumed_stage_output_alias? (lambda (block)
+	(physical_expr_refs_unconsumed_stage_output_alias?
+		(list
+			(qb_fields block)
+			(qb_where block)
+			(qb_group block)
+			(qb_having block)
+			(qb_order block)
+			(qb_hidden block)
+			(source_join_exprs (qb_sources block))))))
+
 (define lower_scalar_first_query_probe_expr_using (lambda (stage value_expr keys lookup_keys nested_stages prepare_stages inline_probe_stages partition_limit inline_nested_probes)
 	(begin
 		(define input (gs_input stage))
@@ -417,12 +449,37 @@ partner. */
 		only when it consumes every relational stage source and every stage-output
 		column. This structural proof prevents a partially rewritten plan from
 		dropping the LEFT-JOIN NULL extension of an unresolved dependency. */
+		(define recursive_value_title "__recursive_probe_value")
+		/* The scalar value is a consumer too, but it normally lives outside the
+		input query block passed to the recursive rewrite. Carry it as a temporary
+		field so nested stage outputs are rewritten in the same scope as WHERE and
+		the sources. Inspecting the input block alone would otherwise falsely prove
+		that a dependency was consumed while leaving a free stage alias in value_expr. */
+		(define recursive_probe_input (if inline_nested_probes
+			(make_query_block
+				(qb_schema probe_input)
+				(qb_sources probe_input)
+				(list recursive_value_title probe_value_expr)
+				(qb_where probe_input)
+				(qb_group probe_input)
+				(qb_having probe_input)
+				(qb_order probe_input)
+				(qb_limit probe_input)
+				(qb_offset probe_input)
+				(qb_hidden probe_input)
+				(qb_stages probe_input)
+				(qb_facts probe_input))
+			nil))
 		(define recursively_prepared_input (if inline_nested_probes
-			(query_block_without_stages_after_prepare_using nested_stages probe_input)
+			(query_block_without_stages_after_prepare_using nested_stages recursive_probe_input)
 			nil))
 		(define recursively_consumed (and inline_nested_probes
 			(and (single_source? (qb_sources recursively_prepared_input))
-				(not (expr_refs_stage_output_alias? recursively_prepared_input)))))
+				(and (not (stage_output_relation? (source_relation (car (qb_sources recursively_prepared_input)))))
+					(not (query_block_refs_unconsumed_stage_output_alias? recursively_prepared_input))))))
+		(define effective_probe_value_expr (if recursively_consumed
+			(field_expr_by_title (qb_fields recursively_prepared_input) recursive_value_title false)
+			probe_value_expr))
 		(define effective_prepare_stages (if recursively_consumed '() prepare_stages))
 		(define raw_prepared_input (if recursively_consumed
 			recursively_prepared_input
@@ -444,14 +501,14 @@ partner. */
 			(qb_stages prepared_input)
 			(qb_facts prepared_input)))
 		(define direct_probe (if (empty_list? effective_prepare_stages)
-			(lower_direct_scalar_query_probe prepared_input probe_value_expr partition_limit
+			(lower_direct_scalar_query_probe prepared_input effective_probe_value_expr partition_limit
 				(qassoc_get (gs_facts stage) (quote on_overflow) nil))
 			nil))
 		(define probe_expr (if (nil? direct_probe)
 			(begin
 				(define reduced (lower_query_block_as_dataset_reduce
 					bounded_prepared_input
-					(list "__value" probe_value_expr)
+					(list "__value" effective_probe_value_expr)
 					(list (quote lambda) (list (quote __value)) (quote __value))
 					(if (equal? (qassoc_get (gs_facts stage) (quote on_overflow) nil) (quote error))
 						(scalar_query_probe_reduce_cardinality)
@@ -6314,6 +6371,18 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 
 (define rewrite_scalar_first_probe_expr_using_index (lambda (stages index default_alias expr)
 	(match expr
+		/* Physical probe markers are atomic lowering results. Their embedded stage
+		descriptors describe the probe itself; recursively rewriting those logical
+		descriptors can change correlation keys and makes a second lowering pass
+		non-idempotent. */
+		((symbol scalar_first_probe) _stage _requested_col) expr
+		((quote scalar_first_probe) _stage _requested_col) expr
+		((symbol scalar_first_probe) _stage _requested_col _dependencies) expr
+		((quote scalar_first_probe) _stage _requested_col _dependencies) expr
+		((symbol scalar_aggregate_probe) _stage _requested_col) expr
+		((quote scalar_aggregate_probe) _stage _requested_col) expr
+		((symbol scalar_cardinality_probe) _stage _requested_col) expr
+		((quote scalar_cardinality_probe) _stage _requested_col) expr
 		((symbol if)
 			((symbol >) ((symbol coalesceNil) ((symbol get_column) count_alias count_tbl_ic count_col count_col_ic) 0) 1)
 			((symbol error) message)
