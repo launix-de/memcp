@@ -466,3 +466,47 @@ func TestMatcherKindEqual(t *testing.T) {
 		t.Error("range and like should not be kind-equal")
 	}
 }
+
+func TestSortedIndexMatchersAreInterchangeable(t *testing.T) {
+	for _, query := range []IndexAnalyzer{EqualMatcher, RangeMatcher} {
+		for _, indexed := range []IndexAnalyzer{nil, EqualMatcher, RangeMatcher} {
+			if !indexMatcherCompatible(query, indexed) {
+				t.Fatalf("query matcher %v did not accept sorted index matcher %v", query, indexed)
+			}
+		}
+		if indexMatcherCompatible(query, LikeMatcher) {
+			t.Fatalf("query matcher %v accepted a custom LIKE index", query)
+		}
+	}
+}
+
+func TestEqualityPrefixRequiresActiveSortedIndex(t *testing.T) {
+	idx := &StorageIndex{Cols: []string{"a", "b"}}
+	shard := &storageShard{Indexes: []*StorageIndex{idx}}
+
+	if shard.hasEqualityIndexPrefix(nil, []string{"a"}) {
+		t.Fatal("inactive sorted index must not select the sparse RecSet lookup path")
+	}
+	idx.baseState.active = true
+	if !shard.hasEqualityIndexPrefix(nil, []string{"a"}) {
+		t.Fatal("active sorted compound index must cover its equality prefix")
+	}
+	idx.ColMatchers = []IndexAnalyzer{LikeMatcher, nil}
+	if shard.hasEqualityIndexPrefix(nil, []string{"a"}) {
+		t.Fatal("custom analyzer index must not cover an equality prefix")
+	}
+}
+
+func TestSnapshotDropsLegacySortedMatcherMetadata(t *testing.T) {
+	legacy := &StorageIndex{
+		Cols:        []string{"status", "id"},
+		ColMatchers: []IndexAnalyzer{EqualMatcher, RangeMatcher},
+	}
+	snapshot := snapshotIndexesForRebuild([]*StorageIndex{legacy})
+	if len(snapshot) != 1 {
+		t.Fatalf("snapshot count = %d, want 1", len(snapshot))
+	}
+	if len(snapshot[0].ColMatchers) != 0 {
+		t.Fatalf("snapshot retained sorted matcher metadata: %#v", snapshot[0].ColMatchers)
+	}
+}
