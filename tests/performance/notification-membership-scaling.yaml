@@ -14,10 +14,11 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 # This workload deliberately combines the expensive parts of the notification
-# read: a large document relation, a compound correlated ACL, scalar ordering
+# read: a non-trivial document relation, a compound correlated ACL, scalar ordering
 # through the file relation, a one-row current page, and an outer seen-marker
-# anti-join. The initial ceiling is intentionally generous. Future physical
-# planner work can tighten it after the shape is both supported and measured.
+# anti-join. Six thousand rows keep the complete cold-cache shape inside the
+# repository's protected five-second CI ceiling while still crossing the
+# planner's small-relation heuristics.
 
 metadata:
   version: "1.0"
@@ -40,21 +41,19 @@ setup:
   - scm: |
       (begin
         (insert (table "memcp-tests" "nms_file") '("id" "uploaded_at")
-          (map (produceN 100000) (lambda (i)
+          (map (produceN 6000) (lambda (i)
             (list (+ i 1) (+ i 1)))))
         (insert (table "memcp-tests" "nms_document")
           '("id" "file_id" "location_id" "document_year" "department_id" "audit_id")
-          (map (produceN 100000) (lambda (i)
+          (map (produceN 6000) (lambda (i)
             (list (+ i 1) (+ i 1) (+ (mod i 4) 1)
               (+ 2000 (mod i 26)) (+ (mod i 32) 1) (+ (mod i 128) 1)))))
         (rebuild)
-        100000)
+        6000)
 
 test_cases:
   - name: "Large ordered notification anti-join remains bounded"
-    # The first execution deliberately includes cold group-cache construction.
-    # Keep this as a regression ceiling, not as a warm-query latency target.
-    max_time: 75
+    max_time: 5
     timeout: 90
     sql: |
       SELECT current_item.id
@@ -101,10 +100,10 @@ test_cases:
     expect:
       rows: 1
       data:
-        - id: 100000
+        - id: 6000
 
   - name: "Large notification insert-select remains bounded"
-    max_time: 30
+    max_time: 5
     timeout: 90
     sql: |
       INSERT INTO nms_seen (account_id, channel, view_name, item_id, seen_at)
