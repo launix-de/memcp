@@ -5863,6 +5863,114 @@ every title. */
 				nil)))
 		nil)))
 
+(define dml_target_source_for_spec (lambda (sources target_spec)
+	(match target_spec
+		'(target_alias target_schema target_tbl)
+		(reduce (coalesceNil sources '()) (lambda (found src)
+			(if (not (nil? found))
+				found
+				(if (and (equal?? (source_alias src) target_alias)
+					(and (equal? (source_schema src) target_schema)
+						(equal? (source_relation src) target_tbl)))
+					src
+					nil)))
+			nil)
+		_ nil)))
+
+(define dml_sum_exprs (lambda (exprs)
+	(match exprs
+		(cons expr rest) (if (empty_list? rest)
+			expr
+			(list (quote +) expr (dml_sum_exprs rest)))
+		_ 0)))
+
+(define multi_delete_target_scan_plan (lambda (target_src target_rows)
+	(begin
+		(define alias (source_alias target_src))
+		(define keycols (source_primary_key_columns target_src))
+		(if (empty_list? keycols)
+			(neumann_fail "build_queryplan" "multi-target DELETE requires a primary key on every target")
+			true)
+		(define keyparams (map keycols (lambda (col) (symbol (concat alias "." col)))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			(source_table_expr target_src)
+			(cons (quote list) keycols)
+			(list (quote lambda) keyparams
+				(list (quote has_assoc?) target_rows
+					(cons (quote list) keyparams)))
+			(quoted_runtime_list (list "$update"))
+			(list (quote lambda) (list (symbol "$update"))
+				(list (quote if) (list (symbol "$update")) 1 0))
+			(quote +)
+			0
+			nil
+			false))))
+
+(define lower_multi_target_delete_query_block (lambda (block target_specs)
+	(begin
+		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
+			(neumann_fail "build_queryplan" "DML over grouped query-block is not implemented yet")
+			true)
+		(if (query_limit_active? (qb_offset block) (qb_limit block))
+			(neumann_fail "build_queryplan" "multi-source DML with ORDER/LIMIT is not implemented yet")
+			true)
+		(define sources (qb_sources block))
+		(define scan_plan (query_block_join_plan block sources))
+		(define first_alias (source_alias (car sources)))
+		(define target_sources (map target_specs (lambda (target_spec)
+			(begin
+				(define target_src (dml_target_source_for_spec sources target_spec))
+				(if (nil? target_src)
+					(neumann_fail "build_queryplan" "multi-target DELETE relation mismatch")
+					target_src)))))
+		(define target_key_refs (map target_sources (lambda (target_src)
+			(map (source_primary_key_columns target_src) (lambda (col)
+				(list (quote get_column) (source_alias target_src) false col false))))))
+		(if (reduce target_key_refs (lambda (valid refs) (and valid (not (empty_list? refs)))) true)
+			true
+			(neumann_fail "build_queryplan" "multi-target DELETE requires a primary key on every target"))
+		(define cond (dml_preserve_driver_membership_probe (qb_schema block) (coalesceNil (qb_where block) true)))
+		(define needed_exprs (merge (list
+			(list cond)
+			(merge target_key_refs)
+			(source_join_exprs sources))))
+		(define target_indexes (produceN (count target_sources)))
+		/* A self-join may hold read rights for two aliases of the same shard.
+		Collect immutable primary keys for every target while joins are open, then
+		mutate only after every key-plan argument has released its scan rights. */
+		(define target_rows_symbols (map target_indexes (lambda (i)
+			(symbol (concat "target_rows_" i)))))
+		(define keep_old_key (list (quote lambda) (list (quote old) (quote _new)) (quote old)))
+		(define merge_target_rows (list (quote lambda) (list (quote rows) (quote grouped))
+			(list (quote merge_assoc) (quote rows) (quote grouped) keep_old_key)))
+		(define target_rows_plans (map target_indexes (lambda (i)
+			(build_join_scan_reduce_using_recipe
+				(qb_schema block)
+				sources
+				scan_plan
+				first_alias
+				needed_exprs
+				cond
+				(cons (quote list) (map (nth target_key_refs i) (lambda (key_ref)
+					(lower_column_expr_for_join sources first_alias key_ref))))
+				'()
+				0
+				-1
+				true nil nil (qb_stages block)
+				(list (quote lambda) (list (quote rows) (quote row))
+					(list (quote set_assoc) (quote rows) (quote row) true))
+				(list (quote list))
+				merge_target_rows
+				nil))))
+		(cons
+			(list (quote lambda) target_rows_symbols
+				(dml_sum_exprs (map target_indexes (lambda (i)
+					(multi_delete_target_scan_plan
+						(nth target_sources i)
+						(nth target_rows_symbols i))))))
+			target_rows_plans))))
+
 (define lower_multi_source_dml_query_block (lambda (block target_schema target_tbl)
 	(begin
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
@@ -5989,6 +6097,19 @@ every title. */
 				(merge (list
 					(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages block))
 					(list (lower_dml_query_block_core (query_block_without_stages_after_prepare_using stage_lookup block) target_schema target_tbl)))))))))
+
+(define lower_multi_target_delete_with_stages (lambda (block target_specs)
+	(if (empty_list? (qb_stages block))
+		(lower_multi_target_delete_query_block block target_specs)
+		(begin
+			(define stage_lookup (query_block_stage_lookup block))
+			(define dependency_graph (stage_dependency_graph stage_lookup))
+			(cons (quote begin)
+				(merge (list
+					(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup (qb_stages block))
+					(list (lower_multi_target_delete_query_block
+						(query_block_without_stages_after_prepare_using stage_lookup block)
+						target_specs)))))))))
 
 (define lower_dml_union_block_with_stages (lambda (block target_schema target_tbl)
 	(cons (quote begin)
@@ -6853,6 +6974,9 @@ though both handles are constant for the complete query generation. */
 				(symbol query-block) (lower_dml_query_block_with_stages (ir_root ir) target_schema target_tbl)
 				(symbol union-block) (lower_dml_union_block_with_stages (ir_root ir) target_schema target_tbl)
 				_ (neumann_fail "build_queryplan" "DML lowering expects a query-block root"))
+			((symbol dml-many) target_specs) (match (logical_op (ir_root ir))
+				(symbol query-block) (lower_multi_target_delete_with_stages (ir_root ir) target_specs)
+				_ (neumann_fail "build_queryplan" "multi-target DELETE lowering expects a query-block root"))
 			_ (neumann_fail "build_queryplan" "DML lowering is intentionally not scaffolded yet")))
 		(define consolidated_plan (consolidate_closed_group_prepares ir plan))
 		(define complete_plan (complete_emitted_prepare_bindings ir consolidated_plan))
@@ -6927,6 +7051,19 @@ ordering run. Storage artifacts begin in build_queryplan. */
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
 			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))))))
+
+(define build_multi_delete_plan (lambda (schema target_specs all_defs condition)
+	(begin
+		(define query (make_query_block
+			schema
+			all_defs
+			nil
+			(coalesceNil condition true)
+			'() nil '() nil nil '() '()
+			(list (list (quote dml) true))))
+		(neumann_compile_ir_pipeline
+			(ir_with_return (decorrelate_logical_query query)
+				(list (quote dml-many) target_specs))))))
 
 (define sql_truncate (lambda (schema tbl)
 	(build_dml_plan schema tbl nil

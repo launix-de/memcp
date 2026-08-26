@@ -1,0 +1,229 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+metadata:
+  version: "1.0"
+  description: "MySQL application SQL compatibility: connection setup, row counting, joins, grouping, temporal values, patterns, and multi-table DELETE"
+  requires_mysql: true
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS wpcompat_posts"
+  - sql: "DROP TABLE IF EXISTS wpcompat_comments"
+  - sql: "DROP TABLE IF EXISTS wpcompat_terms"
+  - sql: "DROP TABLE IF EXISTS wpcompat_term_taxonomy"
+  - sql: "DROP TABLE IF EXISTS wpcompat_term_relationships"
+  - sql: "DROP TABLE IF EXISTS wpcompat_options"
+  - sql: "DROP TABLE IF EXISTS wpcompat_mysql_leading"
+  - sql: "DROP TABLE IF EXISTS wpcompat_no_primary_key"
+  - sql: |
+      CREATE TABLE wpcompat_posts (
+        ID BIGINT PRIMARY KEY AUTO_INCREMENT,
+        post_date DATETIME,
+        post_date_gmt DATETIME,
+        post_name VARCHAR(200),
+        post_type VARCHAR(20),
+        post_status VARCHAR(20)
+      )
+  - sql: |
+      CREATE TABLE wpcompat_comments (
+        comment_ID BIGINT PRIMARY KEY,
+        comment_approved VARCHAR(20),
+        comment_type VARCHAR(20),
+        comment_date_gmt DATETIME
+      )
+  - sql: "CREATE TABLE wpcompat_terms (term_id BIGINT PRIMARY KEY, name VARCHAR(200))"
+  - sql: "CREATE TABLE wpcompat_term_taxonomy (term_taxonomy_id BIGINT PRIMARY KEY, term_id BIGINT, taxonomy VARCHAR(32))"
+  - sql: "CREATE TABLE wpcompat_term_relationships (object_id BIGINT, term_taxonomy_id BIGINT)"
+  - sql: "CREATE TABLE wpcompat_options (option_id BIGINT PRIMARY KEY, option_name VARCHAR(191), option_value TEXT)"
+  - sql: "CREATE TABLE wpcompat_no_primary_key (value INT)"
+  - sql: "INSERT INTO wpcompat_posts VALUES (1, '2026-08-20 10:00:00', '2026-08-20 10:00:00', 'first', 'post', 'publish'), (2, '2026-08-21 10:00:00', '2026-08-21 10:00:00', 'second', 'post', 'publish'), (3, '2026-08-22 10:00:00', '2026-08-22 10:00:00', 'third', 'post', 'publish')"
+  - sql: "INSERT INTO wpcompat_comments VALUES (1, '1', 'comment', '2026-08-22 10:00:00'), (2, '0', 'comment', '2026-08-22 11:00:00'), (3, '1', 'note', '2026-08-22 12:00:00')"
+  - sql: "INSERT INTO wpcompat_terms VALUES (1, 'twentytwentyfive')"
+  - sql: "INSERT INTO wpcompat_term_taxonomy VALUES (10, 1, 'wp_theme'), (11, 1, 'category')"
+  - sql: "INSERT INTO wpcompat_term_relationships VALUES (5, 11)"
+  - sql: "INSERT INTO wpcompat_options VALUES (1, '_transient_sample', 'cached'), (2, '_transient_timeout_sample', '1'), (3, 'keep', 'value')"
+
+test_cases:
+  - name: "SET NAMES with COLLATE and leading whitespace work over MySQL"
+    mysql:
+      statements:
+        - sql: "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_520_ci'"
+          expect: {}
+        - sql: "\nCREATE TABLE wpcompat_mysql_leading (id INT PRIMARY KEY)"
+          expect: {}
+        - sql: "INSERT INTO wpcompat_mysql_leading VALUES (1)"
+          expect: {}
+        - sql: "SELECT id FROM wpcompat_mysql_leading"
+          expect:
+            rows: 1
+            data:
+              - id: 1
+
+  - name: "SQL_CALC_FOUND_ROWS reports rows before LIMIT"
+    mysql:
+      statements:
+        - sql: "SELECT SQL_CALC_FOUND_ROWS wpcompat_posts.ID FROM wpcompat_posts WHERE post_type = 'post' AND post_status = 'publish' ORDER BY post_date DESC LIMIT 0, 2"
+          expect:
+            rows: 2
+            data:
+              - ID: 3
+              - ID: 2
+        - sql: "SELECT FOUND_ROWS() AS total"
+          expect:
+            rows: 1
+            data:
+              - total: 3
+
+  - name: "Filtered COUNT binds unqualified columns"
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM wpcompat_comments
+      WHERE comment_approved = '1' AND comment_type NOT IN ('note')
+    expect:
+      rows: 1
+      data:
+        - total: 1
+
+  - name: "Explicit INNER JOIN supports a two-table lookup"
+    sql: |
+      SELECT t.term_id
+      FROM wpcompat_terms AS t INNER JOIN wpcompat_term_taxonomy AS tt ON t.term_id = tt.term_id
+      WHERE tt.taxonomy IN ('wp_theme') AND t.name IN ('twentytwentyfive')
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - term_id: 1
+
+  - name: "Chained INNER JOIN supports DISTINCT and ORDER BY"
+    sql: |
+      SELECT DISTINCT t.term_id, tr.object_id
+      FROM wpcompat_terms AS t
+      INNER JOIN wpcompat_term_taxonomy AS tt ON t.term_id = tt.term_id
+      INNER JOIN wpcompat_term_relationships AS tr ON tr.term_taxonomy_id = tt.term_taxonomy_id
+      WHERE tt.taxonomy IN ('category', 'post_tag', 'post_format') AND tr.object_id IN (5)
+      ORDER BY t.name ASC
+    expect:
+      rows: 1
+      data:
+        - term_id: 1
+          object_id: 5
+
+  - name: "Empty grouped result may order by a non-projected source column"
+    sql: |
+      SELECT wpcompat_posts.ID
+      FROM wpcompat_posts
+      WHERE 1 = 1 AND wpcompat_posts.post_name IN ('front-page') AND (0 = 1)
+        AND wpcompat_posts.post_type = 'wp_template'
+        AND wpcompat_posts.post_status = 'publish'
+      GROUP BY wpcompat_posts.ID
+      ORDER BY wpcompat_posts.post_date DESC
+      LIMIT 0, 1
+    expect:
+      rows: 0
+
+  - name: "Grouped rows retain ordering by a non-projected source column"
+    sql: |
+      SELECT wpcompat_posts.ID
+      FROM wpcompat_posts
+      WHERE wpcompat_posts.post_type = 'post'
+      GROUP BY wpcompat_posts.ID
+      ORDER BY wpcompat_posts.post_date DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - ID: 3
+        - ID: 2
+
+  - name: "INSERT accepts a MySQL zero datetime"
+    sql: "INSERT INTO wpcompat_posts (post_date, post_date_gmt, post_name, post_type, post_status) VALUES ('2026-08-26 10:00:00', '0000-00-00 00:00:00', 'auto-draft', 'post', 'auto-draft')"
+
+  - name: "MySQL zero datetime round-trips"
+    sql: "SELECT post_date_gmt FROM wpcompat_posts WHERE post_name = 'auto-draft'"
+    expect:
+      rows: 1
+      data:
+        - post_date_gmt: "0000-00-00 00:00:00"
+
+  - name: "Self-join combines escaped LIKE patterns and a generated key"
+    sql: |
+      SELECT a.option_id AS value_id, b.option_id AS timeout_id
+      FROM wpcompat_options a, wpcompat_options b
+      WHERE a.option_name LIKE '\_transient\_%'
+        AND a.option_name NOT LIKE '\_transient\_timeout\_%'
+        AND b.option_name = CONCAT('_transient_timeout_', SUBSTRING(a.option_name, 12))
+        AND b.option_value < 2
+    expect:
+      rows: 1
+      data:
+        - value_id: 1
+          timeout_id: 2
+
+  - name: "Escaped LIKE wildcards bind on the selected alias"
+    sql: |
+      SELECT a.option_id
+      FROM wpcompat_options a
+      WHERE a.option_name LIKE '\_transient\_%'
+        AND a.option_name NOT LIKE '\_transient\_timeout\_%'
+    expect:
+      rows: 1
+      data:
+        - option_id: 1
+
+  - name: "Self-join aliases match a CONCAT and SUBSTRING generated key"
+    sql: |
+      SELECT a.option_id AS value_id, b.option_id AS timeout_id
+      FROM wpcompat_options a, wpcompat_options b
+      WHERE a.option_name LIKE '\_transient\_%'
+        AND a.option_name NOT LIKE '\_transient\_timeout\_%'
+        AND b.option_name = CONCAT('_transient_timeout_', SUBSTRING(a.option_name, 12))
+    expect:
+      rows: 1
+      data:
+        - value_id: 1
+          timeout_id: 2
+
+  - name: "Numeric comparison coerces a TEXT operand"
+    sql: "SELECT option_id FROM wpcompat_options WHERE option_name = '_transient_timeout_sample' AND option_value < 2"
+    expect:
+      rows: 1
+      data:
+        - option_id: 2
+
+  - name: "Multi-table DELETE removes both joined targets"
+    sql: |
+      DELETE a, b FROM wpcompat_options a, wpcompat_options b
+      WHERE a.option_name LIKE '\_transient\_%'
+        AND a.option_name NOT LIKE '\_transient\_timeout\_%'
+        AND b.option_name = CONCAT('_transient_timeout_', SUBSTRING(a.option_name, 12))
+        AND b.option_value < 2
+    expect:
+      affected_rows: 2
+
+  - name: "Multi-table DELETE preserves non-matching rows"
+    sql: "SELECT option_name FROM wpcompat_options ORDER BY option_name"
+    expect:
+      rows: 1
+      data:
+        - option_name: "keep"
+
+  - name: "Multi-target DELETE without stable row identities fails explicitly"
+    sql: "DELETE a, b FROM wpcompat_no_primary_key a, wpcompat_no_primary_key b WHERE a.value = b.value"
+    expect:
+      error: true
+
+  - name: "Malformed SET NAMES remains rejected"
+    sql: "SET NAMES 'utf8mb4' COLLATE"
+    expect:
+      error: true
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS wpcompat_posts"
+  - sql: "DROP TABLE IF EXISTS wpcompat_comments"
+  - sql: "DROP TABLE IF EXISTS wpcompat_terms"
+  - sql: "DROP TABLE IF EXISTS wpcompat_term_taxonomy"
+  - sql: "DROP TABLE IF EXISTS wpcompat_term_relationships"
+  - sql: "DROP TABLE IF EXISTS wpcompat_options"
+  - sql: "DROP TABLE IF EXISTS wpcompat_mysql_leading"
+  - sql: "DROP TABLE IF EXISTS wpcompat_no_primary_key"

@@ -32,9 +32,28 @@ var allowedDateFormats = []string{
 	"06-01-02",
 }
 
+// mysqlZeroDateUnix is outside Go's practical SQL date range and fits exactly
+// into Scmer's signed 45-bit date payload. It preserves MySQL's zero date
+// without conflating it with the Unix epoch.
+const mysqlZeroDateUnix int64 = -(1 << 44)
+
+func isMySQLZeroDate(s string) bool {
+	if s == "0000-00-00" || s == "0000-00-00 00:00:00" {
+		return true
+	}
+	if !strings.HasPrefix(s, "0000-00-00 00:00:00.") {
+		return false
+	}
+	fraction := strings.TrimPrefix(s, "0000-00-00 00:00:00.")
+	return fraction != "" && strings.Trim(fraction, "0") == ""
+}
+
 // ParseDateString tries to parse a date/datetime string using the allowed formats.
 // Returns the Unix timestamp and true on success, or 0 and false on failure.
 func ParseDateString(s string) (int64, bool) {
+	if isMySQLZeroDate(s) {
+		return mysqlZeroDateUnix, true
+	}
 	for _, format := range allowedDateFormats {
 		if t, err := time.Parse(format, s); err == nil {
 			return t.Unix(), true
@@ -68,6 +87,16 @@ func toTime(v Scmer) (time.Time, bool) {
 func sqlTemporalOutput(value Scmer, sqlType string) Scmer {
 	if value.IsNil() {
 		return NewNil()
+	}
+	if value.GetTag() == tagDate && value.Int() == mysqlZeroDateUnix {
+		switch strings.ToUpper(sqlType) {
+		case "DATE":
+			return NewString("0000-00-00")
+		case "DATETIME", "TIMESTAMP":
+			return NewString("0000-00-00 00:00:00")
+		default:
+			return value
+		}
 	}
 	t, ok := toTime(value)
 	if !ok {

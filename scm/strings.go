@@ -26,6 +26,7 @@ import "unicode"
 import "unsafe"
 import "net/url"
 import "strings"
+import "unicode/utf8"
 import crand "crypto/rand"
 import "crypto/sha1"
 import "encoding/hex"
@@ -134,10 +135,10 @@ func OrderRelationLess(fn func(...Scmer) Scmer) func(Scmer, Scmer) bool {
 
 /* SQL LIKE operator implementation on strings */
 func StrLike(str, pattern string) bool {
-	if !strings.ContainsAny(pattern, "%_") {
+	if !strings.ContainsAny(pattern, "%_\\") {
 		return str == pattern
 	}
-	if !strings.Contains(pattern, "_") {
+	if !strings.ContainsAny(pattern, "_\\") {
 		wildcards := strings.Count(pattern, "%")
 		if wildcards == 1 {
 			if pattern[0] == '%' {
@@ -151,44 +152,60 @@ func StrLike(str, pattern string) bool {
 			return strings.Contains(str, pattern[1:len(pattern)-1])
 		}
 	}
-	for {
-		// boundary check
-		if len(pattern) == 0 {
-			if len(str) == 0 {
-				// we finished matching
-				return true
-			} else {
-				// pattern is consumed but no string left: no match
-				return false
-			}
+	type likePosition struct {
+		str     int
+		pattern int
+	}
+	memo := make(map[likePosition]bool)
+	visited := make(map[likePosition]bool)
+	var match func(int, int) bool
+	match = func(strPos, patternPos int) bool {
+		position := likePosition{str: strPos, pattern: patternPos}
+		if visited[position] {
+			return memo[position]
 		}
-		// now str[0] and pattern[0] are assured to exist
-		if pattern[0] == '%' { // wildcard
-			pattern = pattern[1:]
-			if pattern == "" {
-				return true // string ends with wildcard
-			}
-			// otherwise: match against all possible endings
-			for i := len(str) - 1; i >= 0; i-- { // run from right to left to be as greedy and performant as possible
-				if str[i] == pattern[0] {
-					// check if this caracter matches the rest
-					if StrLike(str[i:], pattern) {
-						return true // we found a match with this position as continuation
-					}
+		visited[position] = true
+		matched := false
+		if patternPos == len(pattern) {
+			matched = strPos == len(str)
+		} else {
+			patternRune, patternSize := utf8.DecodeRuneInString(pattern[patternPos:])
+			switch patternRune {
+			case '%':
+				matched = match(strPos, patternPos+patternSize)
+				if !matched && strPos < len(str) {
+					_, strSize := utf8.DecodeRuneInString(str[strPos:])
+					matched = match(strPos+strSize, patternPos)
+				}
+			case '_':
+				if strPos < len(str) {
+					_, strSize := utf8.DecodeRuneInString(str[strPos:])
+					matched = match(strPos+strSize, patternPos+patternSize)
+				}
+			case '\\':
+				literalPos := patternPos + patternSize
+				literalRune := patternRune
+				literalSize := patternSize
+				if literalPos < len(pattern) {
+					literalRune, literalSize = utf8.DecodeRuneInString(pattern[literalPos:])
+				} else {
+					literalPos = patternPos
+				}
+				if strPos < len(str) {
+					strRune, strSize := utf8.DecodeRuneInString(str[strPos:])
+					matched = strRune == literalRune && match(strPos+strSize, literalPos+literalSize)
+				}
+			default:
+				if strPos < len(str) {
+					strRune, strSize := utf8.DecodeRuneInString(str[strPos:])
+					matched = strRune == patternRune && match(strPos+strSize, patternPos+patternSize)
 				}
 			}
-			return false // no continuation found
-		} else {
-			if len(str) > 0 && (pattern[0] == '_' || pattern[0] == str[0]) {
-				// match -> move one character forward
-				pattern = pattern[1:]
-				str = str[1:]
-			} else {
-				// mismatch -> we're out
-				return false
-			}
 		}
+		memo[position] = matched
+		return matched
 	}
+	return match(0, 0)
 }
 
 // StrLikeFold retains the established Unicode lower-case behavior. StrLike's

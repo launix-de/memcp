@@ -46,3 +46,15 @@ func TestStrLikeCollationUncasedPattern(t *testing.T) {
 		t.Fatal("cased pattern should retain case-insensitive matching")
 	}
 }
+
+func TestStrLikeEscapedWildcards(t *testing.T) {
+	if !StrLike("_transient_sample", `\_transient\_%`) {
+		t.Fatal("escaped underscores should match literal underscores")
+	}
+	if StrLike("xtransient_sample", `\_transient\_%`) {
+		t.Fatal("escaped leading underscore must not act as a wildcard")
+	}
+	if !StrLike("discount%", `discount\%`) {
+		t.Fatal("escaped percent should match a literal percent")
+	}
+}

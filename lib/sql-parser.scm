@@ -863,6 +863,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "MOD" true) "(" (define a sql_expression) "," (define b sql_expression) ")") (sql_mod_expr a b))
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
 		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
+		(parser '((atom "FOUND_ROWS" true) "(" ")") '('session "found_rows"))
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
 		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") '((quote if) cond t f))
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
@@ -935,7 +936,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
 		(parser '((define l tabledefs) (define x (or
 			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl true e))))
-			(parser '((atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
+			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
 			(parser '((? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) r)
 		))) (merge l x))
 		/* Normalize RIGHT JOIN to the existing LEFT JOIN execution contract:
@@ -999,6 +1000,26 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
 		'(schema tables fields condition group having order limit offset) (list schema tables fields condition group having nil nil nil)
 		_ query
+	)))
+	(define sql_select_calc_found_rows? (lambda (query) (match query
+		((symbol query-block) _schema _tables _fields _condition _group _having _order _limit _offset _hidden _stages facts)
+		(qassoc_get facts (quote sql_calc_found_rows) false)
+		_ false
+	)))
+	(define sql_build_select_plan (lambda (query) (begin
+		(define actual_plan (build_queryplan_term (sql_expand_views query policy)))
+		(if (sql_select_calc_found_rows? query)
+			(begin
+				(define count_plan (build_queryplan_term (sql_expand_views (sql_select_clear_stage query) policy)))
+				(list (quote !begin)
+					(list (quote session) "found_rows" 0)
+					(list
+						(list (quote lambda) (list (quote resultrow)) count_plan)
+						(list (quote lambda) (list (quote item))
+							(list (quote session) "found_rows"
+								(list (quote +) (list (quote session) "found_rows") 1))))
+					actual_plan))
+			actual_plan)
 	)))
 	(define sql_union_all_parts (lambda (query)
 		(match query
@@ -1093,6 +1114,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
+		(define calc_found_rows (? (atom "SQL_CALC_FOUND_ROWS" true)))
 		(? (atom "DISTINCT" true))
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
@@ -1150,7 +1172,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				'((define limit sql_expression))
 			)
 		)
-	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset '() '() '())))
+	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset '() '()
+			(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '()))))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)
@@ -1272,21 +1295,23 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)))
 	)))
 
-	/* Multi-table DELETE: route through query planner pipeline via build_dml_plan */
-	(define gen_multi_delete (lambda (target all_defs condition) (begin
-		/* Find target table definition */
-		(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-			'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
-			acc)) nil))
-		(define target_alias (match target_def '(id _ _ _ _) id))
-		(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-		(build_dml_plan schema target_tbl target_alias all_defs nil condition nil nil nil)
+	/* Multi-table DELETE: retain every target alias through physical lowering. */
+	(define gen_multi_delete (lambda (targets all_defs condition) (begin
+		(define target_specs (map targets (lambda (target) (begin
+			(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
+				'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+				acc)) nil))
+			(if (nil? target_def)
+				(error (concat "DELETE target not found: " target))
+				(match target_def '(id target_schema target_tbl _ _)
+					(list id target_schema target_tbl)))))))
+		(build_multi_delete_plan schema target_specs all_defs condition)
 	)))
 	(define sql_multi_delete (parser (or
 		/* DELETE t1 FROM t1 JOIN t2 ON ... WHERE ... */
 		(parser '(
 			(atom "DELETE" true)
-			(define target sql_identifier)
+			(define targets (+ sql_identifier ","))
 			(atom "FROM" true)
 			(define tbldefs (+ tabledefs ","))
 			(? '(
@@ -1297,18 +1322,21 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(define all_defs (merge tbldefs))
 				(set condition (coalesceNil condition true))
 				/* policy: write access check */
-				(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-					'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
-					acc)) nil))
-				(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-				(if policy (policy schema target_tbl true) true)
-				(gen_multi_delete target all_defs condition)
+				(map targets (lambda (target) (begin
+					(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
+						'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+						acc)) nil))
+					(if (nil? target_def)
+						(error (concat "DELETE target not found: " target))
+						(match target_def '(_ target_schema target_tbl _ _)
+							(if policy (policy target_schema target_tbl true) true))))))
+				(gen_multi_delete targets all_defs condition)
 		))
 		/* DELETE FROM t1 USING t1 JOIN t2 ON ... WHERE ... */
 		(parser '(
 			(atom "DELETE" true)
 			(atom "FROM" true)
-			(define target sql_identifier)
+			(define targets (+ sql_identifier ","))
 			(atom "USING" true)
 			(define tbldefs (+ tabledefs ","))
 			(? '(
@@ -1318,12 +1346,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		) (begin
 				(define all_defs (merge tbldefs))
 				(set condition (coalesceNil condition true))
-				(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-					'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
-					acc)) nil))
-				(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-				(if policy (policy schema target_tbl true) true)
-				(gen_multi_delete target all_defs condition)
+				(map targets (lambda (target) (begin
+					(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
+						'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+						acc)) nil))
+					(if (nil? target_def)
+						(error (concat "DELETE target not found: " target))
+						(match target_def '(_ target_schema target_tbl _ _)
+							(if policy (policy target_schema target_tbl true) true))))))
+				(gen_multi_delete targets all_defs condition)
 		))
 	)))
 
@@ -1485,7 +1516,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "CONSTRAINT" true) (define id (? sql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
-			(parser '((atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
+			(parser '((atom "KEY" true) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
 			(parser '(
 				(define col sql_identifier)
 				(define type sql_column_type)
@@ -1500,6 +1531,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		) ","))
 		")"
 		(define options (* (or
+			(parser '((atom "DEFAULT" true) (atom "CHARACTER" true) (atom "SET" true) (define id sql_identifier)) '("charset" id))
 			(parser '((atom "CHARACTER" true) (atom "SET" true) (define id sql_identifier)) '("charset" id))
 			(parser '((atom "ENGINE" true) "=" (atom "MEMORY" true)) '("engine" "memory"))
 			(parser '((atom "ENGINE" true) "=" (atom "CACHE" true)) '("engine" "cache"))
@@ -1595,7 +1627,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	/* TODO: ignore comments wherever they occur --> Lexer */
 	(define p (parser (or
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
-		(parser (define query sql_select) (build_queryplan_term (sql_expand_views query policy)))
+		(parser (define query sql_select) (sql_build_select_plan query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
 		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy)))
 		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s)))
@@ -1823,7 +1855,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "SHOW" true) (atom "timezone" true)) (list (quote resultrow) (list (quote list) "TimeZone" (list (quote session_globalvar) "time_zone"))))
 		/* SET GLOBAL time_zone */
 		(parser '((atom "SET" true) (atom "GLOBAL" true) (define key sql_identifier) "=" (define value sql_expression)) '((quote globalvars) key value))
-		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression)) (quote true)) /* ignore */
+		(parser '((atom "SET" true) (atom "NAMES" true) (define charset sql_expression) (? (atom "COLLATE" true) (or sql_identifier sql_string))) (quote true)) /* ignore */
 
 
 		(parser '((atom "DROP" true) (or (atom "DATABASE" true) (atom "SCHEMA" true)) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define id sql_identifier))
