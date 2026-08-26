@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,29 @@ func TestSolveKeepsBaselineWhenLegacyCarrierFitIsUnderdetermined(t *testing.T) {
 	}
 	if got.scanRowNS != baseline.scanRowNS {
 		t.Fatalf("scan row coefficient = %d, want preserved baseline %d", got.scanRowNS, baseline.scanRowNS)
+	}
+}
+
+func TestPatchQueryplanMigratesGeneratedConstantSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/queryplan.scm"
+	original := "before\n" + beginMarker + " legacy\n" + endMarker + "\nafter\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchQueryplan(path, constants{orderedRecsetSortUnitNS: 7}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "(define planner_membership_ordered_recset_sort_unit_ns 7)") {
+		t.Fatalf("migrated block does not contain new constant: %s", content)
+	}
+	if !strings.HasPrefix(content, "before\n") || !strings.HasSuffix(content, "\nafter\n") {
+		t.Fatalf("patch changed content outside generated block: %q", content)
 	}
 }
 
@@ -142,7 +166,7 @@ func TestRowFeaturesModelsDirectPresenceProbes(t *testing.T) {
 	}
 }
 
-func TestRowFeaturesChargesOrderedProjectedRecsetRows(t *testing.T) {
+func TestRowFeaturesChargesOrderedProjectedRecsetSortWork(t *testing.T) {
 	value := func(v float64) *float64 { return &v }
 	row := calibrationRow{
 		Plan: "candidate_keyset", Consumer: "order_limit",
@@ -159,51 +183,67 @@ func TestRowFeaturesChargesOrderedProjectedRecsetRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if features[17] != 25 {
-		t.Fatalf("ordered RecSet rows = %v, want 25", features[17])
+	if features[17] != 125 {
+		t.Fatalf("ordered RecSet sort work = %v, want 125", features[17])
 	}
 	if features[18] != 50 {
 		t.Fatalf("downstream probe rows = %v, want 50", features[18])
 	}
 }
 
-func TestRowFeaturesModelsOrderedRecsetConsumerAlternatives(t *testing.T) {
+func TestRowFeaturesModelsAdaptiveOrderedRecsetConsumer(t *testing.T) {
 	value := func(v float64) *float64 { return &v }
-	direct, err := rowFeatures(calibrationRow{
-		Decision: "ordered_recset_consumer", Plan: "ordered_direct_recset",
-		CarrierRows: value(100), DriverInputRows: value(1000), Limit: value(10), Offset: value(0),
-	})
+	baseRow := calibrationRow{
+		Plan: "candidate_keyset", Consumer: "order_limit",
+		CandidateInputRows: value(100), CandidateRows: value(10), ProjectedDriverRows: value(100),
+		DriverInputRows: value(1000), DriverRows: value(10), ExpectedDriverRowsVisited: value(100),
+		Limit: value(10), Offset: value(0), ProbeBranches: value(1),
+		CandidateScanInvocations: value(1), CandidateFilterColumns: value(0),
+		CandidateMapColumns: value(0), CandidateCacheMapColumns: value(0),
+		CandidateExpressionOperations: value(0), CandidateBroadTextMatchRows: value(0),
+		CandidateBroadTextMatchBytes: value(0), DriverScanInvocations: value(1),
+		DriverFilterColumns: value(0), DriverMapColumns: value(0), DriverExpressionOperations: value(0),
+	}
+	inverseRow := baseRow
+	inverseRow.ProjectedDriverRows = value(4)
+	inverse, err := rowFeatures(inverseRow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := rowFeatures(calibrationRow{
-		Decision: "ordered_recset_consumer", Plan: "ordered_base_membership",
-		CarrierRows: value(100), DriverInputRows: value(1000), Limit: value(10), Offset: value(0),
-	})
+	base, err := rowFeatures(baseRow)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if direct[17] != 100 || direct[15] != 1 {
-		t.Fatalf("direct ordered features = %v", direct)
+	if inverse[17] != 8 || inverse[7] != 0 {
+		t.Fatalf("inverse adaptive features = %v, want sort work 8 and no membership probes", inverse)
 	}
-	if base[1] != 100 || base[7] != 100 || base[15] != 1 || base[17] != 0 {
-		t.Fatalf("base ordered features = %v", base)
+	if base[17] != 0 || base[7] != 100 {
+		t.Fatalf("base adaptive features = %v, want 100 membership probes and no sort work", base)
 	}
 }
 
-func TestFitOrderedRecsetRowCancelsSharedCarrierWork(t *testing.T) {
+func TestOrderedRecsetSortWorkMatchesRuntimeModel(t *testing.T) {
+	if got := orderedRecsetSortWork(1); got != 1 {
+		t.Fatalf("sort work(1) = %v, want 1", got)
+	}
+	if got := orderedRecsetSortWork(5); got != 15 {
+		t.Fatalf("sort work(5) = %v, want 15", got)
+	}
+}
+
+func TestFitOrderedRecsetSortUnitCancelsSharedCarrierWork(t *testing.T) {
 	directA, baseA := make([]float64, 19), make([]float64, 19)
 	directA[17], baseA[1] = 100, 20
 	directB, baseB := make([]float64, 19), make([]float64, 19)
 	directB[17], baseB[1] = 10, 200
-	value, ok := fitOrderedRecsetRow([]observation{
+	value, ok := fitOrderedRecsetSortUnit([]observation{
 		{caseName: "broad", plan: "candidate_keyset", y: 11000, x: directA},
 		{caseName: "broad", plan: "driver_order_membership_probe", y: 1000, x: baseA},
-		{caseName: "sparse", plan: "ordered_direct_recset", y: 2000, x: directB},
-		{caseName: "sparse", plan: "ordered_base_membership", y: 1000, x: baseB},
+		{caseName: "sparse", plan: "candidate_keyset", y: 2000, x: directB},
+		{caseName: "sparse", plan: "driver_order_membership_probe", y: 1000, x: baseB},
 	}, constants{})
 	if !ok || value != 100 {
-		t.Fatalf("ordered RecSet row = (%d, %v), want (100, true)", value, ok)
+		t.Fatalf("ordered RecSet sort unit = (%d, %v), want (100, true)", value, ok)
 	}
 }
 

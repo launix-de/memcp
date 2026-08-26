@@ -598,25 +598,3 @@ test_cases:
         ), FALSE)
       ORDER BY d.sort_key, d.p1, d.id, d.file_id
       LIMIT 72
-
-  # The scalar stage is intentionally broad: its exact RecSet is cheaper to
-  # consume by walking the ordered document index and probing membership than
-  # by sorting the carrier. A separate decision family validates that crossover
-  # without feeding the shared carrier-production work back into its coefficient
-  # fit.
-  - name: "ordered scalar RecSet consumer crossover"
-    physical_calibration: true
-    calibration_decision: "ordered_recset_consumer"
-    warmup: 1
-    repetitions: 3
-    sql: |
-      SELECT d.id
-      FROM pc_docs_large d
-      WHERE COALESCE((
-        SELECT f.id < 4500
-        FROM pc_files_large f
-        WHERE f.id = d.file_id
-        LIMIT 1
-      ), FALSE)
-      ORDER BY d.sort_key, d.id
-      LIMIT 72

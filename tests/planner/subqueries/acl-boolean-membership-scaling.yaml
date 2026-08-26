@@ -700,10 +700,13 @@ test_cases:
     expect:
       result_contains:
         - "boolean_stage_recset"
-        - "ordered_recset_consumer"
+        - "chosen adaptive_recset_boundary"
+        - "runtime_cardinality_and_index_span"
+        - "ordered_inverse_recset"
         - "ordered_base_membership"
+      result_not_contains:
+        - "ordered_recset_consumer"
         - "ordered_direct_recset"
-        - "chosen ordered_base_membership"
 
   - name: "broad ordered ACL preserves direct RecSet results"
     max_time: 1
@@ -768,10 +771,13 @@ test_cases:
     expect:
       result_contains:
         - "boolean_stage_recset"
-        - "ordered_recset_consumer"
+        - "chosen adaptive_recset_boundary"
+        - "runtime_cardinality_and_index_span"
+        - "ordered_inverse_recset"
         - "ordered_base_membership"
+      result_not_contains:
+        - "ordered_recset_consumer"
         - "ordered_direct_recset"
-        - "chosen ordered_base_membership"
 
   - name: "joined broad ordered ACL preserves LEFT JOIN results"
     max_time: 1
