@@ -2785,23 +2785,23 @@ func init_json_functions() {
 		case args[1].IsNil():
 			return bsonArrayFromValues(args[:1], bsonFlagArrayAgg)
 		}
-		left := []bson.RawValue(nil)
+		left := bson.RawValue{}
 		if leftIsState {
-			left = mustBSONValues(bsonRawValue(args[0]))
+			left = bsonRawValue(args[0])
 		} else {
 			value, err := bsonFromSQLScalar(args[0])
 			jsonPanic(err)
-			left = []bson.RawValue{bsonRawValue(value)}
+			left = bsonRawValue(value)
 		}
-		right := []bson.RawValue(nil)
+		right := bson.RawValue{}
 		if rightIsState {
-			right = mustBSONValues(bsonRawValue(args[1]))
+			right = bsonRawValue(args[1])
 		} else {
 			value, err := bsonFromSQLScalar(args[1])
 			jsonPanic(err)
-			right = []bson.RawValue{bsonRawValue(value)}
+			right = bsonRawValue(value)
 		}
-		return newBSONValueFlags(bson.TypeArray, jsonRawArray(append(append([]bson.RawValue(nil), left...), right...)).Value, bsonFlagArrayAgg)
+		return bsonArrayFromRawParts(left, leftIsState, right, rightIsState, bsonFlagArrayAgg)
 	})
 	declareJSON("json_objectagg_entry", "constructs a JSON_OBJECTAGG key/value entry", func(args ...Scmer) Scmer {
 		requireJSONArgs("JSON_OBJECTAGG", args, 2)

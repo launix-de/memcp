@@ -372,6 +372,73 @@ test_cases:
       data:
         - values_array: [1, null, 3]
 
+  - name: "nested delivery-note JSON embeds item and serial-number arrays"
+    setup:
+      - sql: "DROP TABLE IF EXISTS json_delivery_serial_numbers"
+      - sql: "DROP TABLE IF EXISTS json_delivery_items"
+      - sql: "DROP TABLE IF EXISTS json_delivery_notes"
+      - sql: "CREATE TABLE json_delivery_notes (id INT PRIMARY KEY, note_number VARCHAR(16), delivery_date INT)"
+      - sql: "CREATE TABLE json_delivery_items (id INT PRIMARY KEY, delivery_note_id INT, sku VARCHAR(16), quantity INT)"
+      - sql: "CREATE TABLE json_delivery_serial_numbers (id INT PRIMARY KEY, delivery_item_id INT, serial_number VARCHAR(16))"
+      - sql: "INSERT INTO json_delivery_notes VALUES (1, 'DN-1', 200), (2, 'DN-2', 100)"
+      - sql: "INSERT INTO json_delivery_items VALUES (10, 1, 'SKU-A', 2), (11, 1, 'SKU-B', 1), (20, 2, 'SKU-C', 4)"
+      - sql: "INSERT INTO json_delivery_serial_numbers VALUES (100, 10, 'SN-A1'), (101, 10, 'SN-A2'), (110, 11, 'SN-B1'), (200, 20, 'SN-C1')"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS json_delivery_serial_numbers"
+      - sql: "DROP TABLE IF EXISTS json_delivery_items"
+      - sql: "DROP TABLE IF EXISTS json_delivery_notes"
+    sql: |
+      SELECT JSON_OBJECT(
+        'id', delivery_note.id,
+        'number', delivery_note.note_number,
+        'items', (
+          SELECT JSON_ARRAYAGG(JSON_OBJECT(
+            'id', delivery_item.id,
+            'sku', delivery_item.sku,
+            'quantity', delivery_item.quantity,
+            'serialNumbers', (
+              SELECT JSON_ARRAYAGG(JSON_OBJECT(
+                'id', serial_number.id,
+                'serialNumber', serial_number.serial_number
+              ))
+              FROM json_delivery_serial_numbers AS serial_number
+              WHERE serial_number.delivery_item_id = delivery_item.id
+            )
+          ))
+          FROM json_delivery_items AS delivery_item
+          WHERE delivery_item.delivery_note_id = delivery_note.id
+        )
+      ) AS delivery_note
+      FROM json_delivery_notes AS delivery_note
+      ORDER BY delivery_note.delivery_date DESC
+    expect:
+      rows: 2
+      data:
+        - delivery_note:
+            id: 1
+            number: "DN-1"
+            items:
+              - id: 10
+                sku: "SKU-A"
+                quantity: 2
+                serialNumbers:
+                  - {id: 100, serialNumber: "SN-A1"}
+                  - {id: 101, serialNumber: "SN-A2"}
+              - id: 11
+                sku: "SKU-B"
+                quantity: 1
+                serialNumbers:
+                  - {id: 110, serialNumber: "SN-B1"}
+        - delivery_note:
+            id: 2
+            number: "DN-2"
+            items:
+              - id: 20
+                sku: "SKU-C"
+                quantity: 4
+                serialNumbers:
+                  - {id: 200, serialNumber: "SN-C1"}
+
   - name: "JSON_OBJECTAGG over table rows"
     sql: "SELECT JSON_OBJECTAGG(id, JSON_VALUE(doc, '$.customer.name')) AS names FROM json_documents"
     expect:

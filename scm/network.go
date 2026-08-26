@@ -223,11 +223,15 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 					res.Write(bytes)
 					io.WriteString(res, ": ")
 				} else {
-					bytes, err := json.Marshal(scmerToGo(v))
-					if err != nil {
-						panic(err)
+					if v.IsBSON() {
+						v.Write(res)
+					} else {
+						bytes, err := json.Marshal(scmerToGo(v))
+						if err != nil {
+							panic(err)
+						}
+						res.Write(bytes)
 					}
-					res.Write(bytes)
 					if i < len(dict)-1 {
 						io.WriteString(res, ", ")
 					}

@@ -32,12 +32,7 @@ func init_streams() {
 		Name: "streamString",
 		Desc: "creates a stream that contains a string",
 		Fn: func(a ...Scmer) Scmer {
-			reader, writer := io.Pipe()
-			go func() {
-				io.WriteString(writer, String(a[0]))
-				writer.Close()
-			}()
-			return NewAny(io.Reader(reader))
+			return NewAny(a[0].Stream())
 		},
 		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "content", ParamDesc: "content to put into the stream"}},

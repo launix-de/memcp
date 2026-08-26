@@ -17,9 +17,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package scm
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"testing"
 	"unsafe"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/x/bsonx/bsoncore"
 )
 
 func callJSONTest(t *testing.T, name string, args ...Scmer) Scmer {
@@ -80,6 +85,25 @@ func TestBSONAppendStringUsesCallerBuffer(t *testing.T) {
 	text, appended := value.AppendString(buffer)
 	if got, want := string(appended[7:]), `{"escaped":"line\n\u0001","nested":[true,2.5,null]}`; got != want || text != want {
 		t.Fatalf("AppendString text=%q appended=%q want=%q", text, got, want)
+	}
+}
+
+func TestBSONWriteAndStreamMatchString(t *testing.T) {
+	value, err := NewBSONFromJSON(`{"customer":{"name":"Ada\nLovelace","rank":7},"items":[{"sku":"A","qty":2},null],"active":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	value.Write(&output)
+	if got, want := output.String(), value.String(); got != want {
+		t.Fatalf("written BSON = %q, want %q", got, want)
+	}
+	streamed, err := io.ReadAll(value.Stream())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(streamed), value.String(); got != want {
+		t.Fatalf("streamed BSON = %q, want %q", got, want)
 	}
 }
 
@@ -187,4 +211,75 @@ func BenchmarkBSONAppendString(b *testing.B) {
 		}
 		buffer = appended[:0]
 	}
+}
+
+func benchmarkJSONArrayAggReduce(b *testing.B, count int) {
+	entry := Globalenv.Vars[Symbol("json_arrayagg_entry")].Func()
+	reduce := Globalenv.Vars[Symbol("json_arrayagg_reduce")].Func()
+	values := make([]Scmer, count)
+	for i := range values {
+		values[i] = entry(bsonDocumentFromPairs([]bsonJSONPair{
+			{key: "id", value: bsonRawValue(NewBSONValue(bson.TypeInt64, bsoncore.AppendInt64(nil, int64(i))))},
+			{key: "serialNumber", value: bsonRawValue(NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, "SN-1000000")))},
+		}, 0))
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		result := NewNil()
+		for i := range values {
+			result = reduce(result, values[i])
+		}
+		if !result.IsBSON() {
+			b.Fatal("JSON_ARRAYAGG did not return BSON")
+		}
+	}
+}
+
+func BenchmarkJSONArrayAggReduce3(b *testing.B) {
+	benchmarkJSONArrayAggReduce(b, 3)
+}
+
+func BenchmarkJSONArrayAggReduce8(b *testing.B) {
+	benchmarkJSONArrayAggReduce(b, 8)
+}
+
+func BenchmarkJSONArrayAggReduce1000(b *testing.B) {
+	benchmarkJSONArrayAggReduce(b, 1000)
+}
+
+func BenchmarkBSONSerializeNested1000(b *testing.B) {
+	serials := bsonArrayFromRawValues([]bson.RawValue{
+		bsonRawValue(NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, "SN-1000000"))),
+		bsonRawValue(NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, "SN-1000001"))),
+		bsonRawValue(NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, "SN-1000002"))),
+	}, 0)
+	values := make([]bson.RawValue, 1000)
+	for i := range values {
+		values[i] = bsonRawValue(bsonDocumentFromPairs([]bsonJSONPair{
+			{key: "id", value: bsonRawValue(NewBSONValue(bson.TypeInt64, bsoncore.AppendInt64(nil, int64(i))))},
+			{key: "number", value: bsonRawValue(NewBSONValue(bson.TypeString, bsoncore.AppendString(nil, "DN-1000000")))},
+			{key: "serialNumbers", value: bsonRawValue(serials)},
+		}, 0))
+	}
+	value := bsonArrayFromRawValues(values, 0)
+
+	b.Run("append-materialize", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			encoded, err := appendBSONText(nil, value, false, "")
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(encoded) == 0 {
+				b.Fatal("empty BSON serialization")
+			}
+		}
+	})
+	b.Run("write-stream", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			value.Write(io.Discard)
+		}
+	})
 }
