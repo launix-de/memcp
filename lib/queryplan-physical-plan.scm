@@ -2330,19 +2330,33 @@ ordinary costed probe path. */
 remaining predicates consume the ordered carrier, but it cannot make a
 callback-sorted lookup capable of braking before all outer rows were visited.
 The canonical temp column memoizes exactly those same row-local lookups and is
-shared by every equivalent query until the cache manager evicts it. */
+shared by every equivalent query until the cache manager evicts it. A complete
+unique source key is part of the proof: without it, the scalar LIMIT may inspect
+or order several source rows and the ordinary late-projection path can be
+strictly cheaper. */
+(define scalar_order_lookup_cache_unique_input? (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define key_cols (map (gs_keys stage) (lambda (key)
+			(direct_column_name_for_alias input key))))
+		(and (not (empty_list? key_cols))
+			(and (not (reduce key_cols (lambda (missing col)
+				(or missing (nil? col))) false))
+				(contains? (source_unique_key_sets input) key_cols))))))
+
 (define scalar_order_lookup_cache_eligible? (lambda (stage target input_cols parts)
 	(and (scalar_value_stage? stage)
 		(and (source_is_base_table? (gs_input stage))
-			(and (not (nil? target))
+			(and (scalar_order_lookup_cache_unique_input? stage)
+				(and (not (nil? target))
 				(and (source_is_base_table? target)
 					(and (not (empty_list? input_cols))
 						(and (not (reduce input_cols (lambda (missing col)
 							(or missing (nil? col))) false))
 							(and (equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
 								(and (empty_list? (query_expr_session_reads stage))
-									(and (not (nil? parts))
-										(empty_list? (nth parts 1)))))))))))))
+										(and (not (nil? parts))
+											(empty_list? (nth parts 1))))))))))))))
 
 (define scalar_order_lookup_cache_worthwhile? (lambda (driver_rows)
 	(and (number? driver_rows)
