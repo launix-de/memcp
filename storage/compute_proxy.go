@@ -1097,8 +1097,18 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 			scmer.SetValue(idx, val)
 			return // stay compressed, no bitmap change needed
 		}
-		// main is compressed type → can't SetValue → fall back to lazy
-		p.compressed = false
+		// Compressed immutable storages cannot update in place. Keep the compact
+		// base column and install one sparse override instead of switching the
+		// complete proxy back to lazy mode: validMask is intentionally empty after
+		// Compress(), so that transition would make every unrelated row look stale.
+		if idx < p.count {
+			colvalues := make([]scm.Scmer, len(p.inputCols))
+			for i, col := range p.inputCols {
+				colvalues[i] = p.shard.getColumnStorageOrPanic(col).GetValue(idx)
+			}
+			p.delta[idx] = applyWithTx(CurrentTx(), p.computor, colvalues...)
+			return
+		}
 	}
 	p.validMask.Set(uint(idx), false)
 	delete(p.delta, idx)

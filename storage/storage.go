@@ -553,11 +553,7 @@ func lockTable(schema, name string, write bool, ss *scm.SessionState) {
 
 const computeInvalidationWaveKey = "memcpComputeInvalidationWave"
 
-// invalidateComputedColumn propagates invalidation through computed-cache
-// dependency edges. A GLS-local visited set makes one synchronous invalidation
-// wave idempotent and prevents malformed cyclic computed definitions from
-// recursing forever without introducing a global lock or cross-query state.
-func invalidateComputedColumn(t *table, colName string) {
+func withComputeInvalidationWave(t *table, colName string, invalidate func() bool) {
 	if value, ok := scm.GetGLSValue(computeInvalidationWaveKey); ok {
 		visited := value.(map[string]bool)
 		key := t.schema.Name + "\x00" + t.Name + "\x00" + colName
@@ -565,6 +561,22 @@ func invalidateComputedColumn(t *table, colName string) {
 			return
 		}
 		visited[key] = true
+		if invalidate() {
+			t.ExecuteTriggers(AfterInvalidate, nil, nil)
+		}
+		return
+	}
+	scm.SetValues(map[string]any{computeInvalidationWaveKey: make(map[string]bool)}, func() {
+		withComputeInvalidationWave(t, colName, invalidate)
+	})
+}
+
+// invalidateComputedColumn propagates invalidation through computed-cache
+// dependency edges. A GLS-local visited set makes one synchronous invalidation
+// wave idempotent and prevents malformed cyclic computed definitions from
+// recursing forever without introducing a global lock or cross-query state.
+func invalidateComputedColumn(t *table, colName string) {
+	withComputeInvalidationWave(t, colName, func() bool {
 		invalidated := false
 		for _, s := range t.maintenanceShards() {
 			s.mu.RLock()
@@ -575,13 +587,24 @@ func invalidateComputedColumn(t *table, colName string) {
 				invalidated = true
 			}
 		}
-		if invalidated {
-			t.ExecuteTriggers(AfterInvalidate, nil, nil)
-		}
+		return invalidated
+	})
+}
+
+// invalidateComputedRows preserves the exact subset found by an analyzed
+// lookup-maintenance scan. The AfterInvalidate edge stays column-level, so a
+// nested cache remains correct even when its own lookup relation cannot be
+// narrowed safely. The common invalidation-wave guard prevents dependency
+// cycles exactly as for invalidateComputedColumn.
+func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct{}) {
+	if proxy == nil || proxy.shard == nil || len(recids) == 0 {
 		return
 	}
-	scm.SetValues(map[string]any{computeInvalidationWaveKey: make(map[string]bool)}, func() {
-		invalidateComputedColumn(t, colName)
+	withComputeInvalidationWave(proxy.shard.t, proxy.colName, func() bool {
+		for recid := range recids {
+			proxy.Invalidate(recid)
+		}
+		return true
 	})
 }
 

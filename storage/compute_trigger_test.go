@@ -174,6 +174,164 @@ func TestComputeTriggersGuardRelevantSourceColumns(t *testing.T) {
 	}
 }
 
+func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-lookup-trigger-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tlookuptrigger")
+
+	CreateDatabase("tlookuptrigger", false)
+	base, _ := CreateTable("tlookuptrigger", "base", Safe, false)
+	src, _ := CreateTable("tlookuptrigger", "src", Safe, false)
+	base.CreateColumn("id", "INT", nil, nil)
+	base.CreateColumn("ref_id", "INT", nil, nil)
+	base.CreateColumn("cached", "INT", nil, nil)
+	src.CreateColumn("ref_id", "INT", nil, nil)
+	src.CreateColumn("val", "INT", nil, nil)
+
+	computorSource := `(lambda (ref_id)
+		(scan nil (table "tlookuptrigger" "src")
+			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer ref_id)))
+			'("val") (lambda (val) val)
+			(lambda (old value) value) 0 nil false))`
+	rawComputor := scm.Eval(scm.Read("raw lookup trigger test", computorSource), &scm.Globalenv)
+	compiledComputor := scm.Eval(scm.Optimize(scm.Read("compiled lookup trigger test", computorSource), &scm.Globalenv, nil), &scm.Globalenv)
+	for variant, computor := range map[string]scm.Scmer{"raw": rawComputor, "compiled": compiledComputor} {
+		refs := extractScanJoinInfo(computor)
+		if len(refs) != 1 || len(refs[0].srcCols) != 1 || refs[0].srcCols[0] != "ref_id" || refs[0].inputCols[0] != "ref_id" {
+			t.Fatalf("%s lookup relation was not extracted: %#v", variant, refs)
+		}
+	}
+	base.registerComputeTriggers("cached", compiledComputor)
+
+	tr, ok := findTriggerByPrefixAndTiming(src.Triggers, ".cache:base:cached|scan0|src|", AfterUpdate)
+	if !ok {
+		t.Fatal("missing AfterUpdate lookup dependency trigger")
+	}
+	plan := triggerPlanStringForTest(tr)
+	if !strings.Contains(plan, `"$invalidate:cached"`) {
+		t.Fatalf("lookup-shaped compute trigger must invalidate matching cache rows:\n%s", plan)
+	}
+	if strings.Contains(plan, `(invalidatecolumn`) {
+		t.Fatalf("lookup-shaped compute trigger must not invalidate the complete cache:\n%s", plan)
+	}
+}
+
+func TestLookupInvalidationIncludesComputedDeltaRows(t *testing.T) {
+	db := newDatabase()
+	db.Name = "tlookupdelta"
+	tbl := &table{schema: db, Name: "base", Columns: []*column{{Name: "cached"}}}
+	shard := &storageShard{
+		t:            tbl,
+		main_count:   1,
+		columns:      make(map[string]ColumnStorage),
+		deltaColumns: make(map[string]int),
+	}
+	proxy := &StorageComputeProxy{
+		delta:   map[uint32]scm.Scmer{1: scm.NewInt(20)},
+		shard:   shard,
+		colName: "cached",
+		count:   1,
+	}
+	proxy.validMask.Set(0, true)
+	proxy.validMask.Set(1, true)
+	shard.columns["cached"] = proxy
+
+	mapFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		return scm.Apply(args[0])
+	})
+	reduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		return args[1]
+	})
+	mr := shard.OpenMapReducer([]string{"$invalidate:cached"}, mapFn, reduceFn, false, 0, nil, nil)
+	mr.processDeltaBlock(scm.NewNil(), []uint32{1})
+	mr.FlushSideEffects()
+
+	if !proxy.validMask.Get(0) {
+		t.Fatal("delta-row invalidation cleared an unrelated main cache row")
+	}
+	if proxy.validMask.Get(1) {
+		t.Fatal("delta-row invalidation did not clear the matching cache row")
+	}
+	if _, ok := proxy.delta[1]; ok {
+		t.Fatal("delta-row invalidation retained the stale cached value")
+	}
+}
+
+func buildIntStorageForLookupTest(values ...int64) *StorageInt {
+	result := new(StorageInt)
+	result.prepare()
+	for i, value := range values {
+		result.scan(uint32(i), scm.NewInt(value))
+	}
+	result.init(uint32(len(values)))
+	for i, value := range values {
+		result.build(uint32(i), scm.NewInt(value))
+	}
+	result.finish()
+	return result
+}
+
+func buildScmerStorageForLookupTest(values ...int64) *StorageSCMER {
+	result := new(StorageSCMER)
+	result.init(uint32(len(values)))
+	for i, value := range values {
+		result.build(uint32(i), scm.NewInt(value))
+	}
+	result.finish()
+	return result
+}
+
+func TestLookupInvalidationKeepsCompressedBaseRows(t *testing.T) {
+	db := newDatabase()
+	db.Name = "tlookupcompressed"
+	tbl := &table{schema: db, Name: "base", Columns: []*column{{Name: "input"}, {Name: "cached"}}}
+	shard := &storageShard{
+		t:            tbl,
+		main_count:   3,
+		columns:      make(map[string]ColumnStorage),
+		deltaColumns: make(map[string]int),
+	}
+	input := buildScmerStorageForLookupTest(1, 2, 3)
+	proxy := &StorageComputeProxy{
+		main:       buildIntStorageForLookupTest(11, 12, 13),
+		delta:      make(map[uint32]scm.Scmer),
+		compressed: true,
+		computor: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(args[0].Int() + 10)
+		}),
+		inputCols: []string{"input"},
+		shard:     shard,
+		colName:   "cached",
+		count:     3,
+	}
+	shard.columns["input"] = input
+	shard.columns["cached"] = proxy
+
+	input.SetValue(1, scm.NewInt(20))
+	proxy.Invalidate(1)
+
+	if !proxy.compressed {
+		t.Fatal("one lookup invalidation discarded the compressed cache base")
+	}
+	for idx, want := range []int64{11, 30, 13} {
+		if got := proxy.GetValue(uint32(idx)).Int(); got != want {
+			t.Fatalf("cached row %d = %d, want %d", idx, got, want)
+		}
+	}
+	if len(proxy.delta) != 1 {
+		t.Fatalf("sparse override count = %d, want 1", len(proxy.delta))
+	}
+}
+
 func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-orc-trigger-*")
 	if err != nil {
