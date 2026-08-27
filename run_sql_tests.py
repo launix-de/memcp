@@ -1137,7 +1137,13 @@ class SQLTestRunner:
         cpu_pct = None  # CPU load percentage, measured during query execution
         if query and query.strip().upper() == "SHUTDOWN":
             # Issue shutdown
-            resp = self.execute_sql(database, query, auth_header, active_syntax)
+            # A graceful shutdown may close this request before a response reaches
+            # the client. Do not wait for that same process to become ready again;
+            # the managed restart handler below owns process replacement.
+            resp = self.execute_sql(
+                database, query, auth_header, active_syntax,
+                retry_on_connection_failure=False,
+            )
             if resp is not None and resp.status_code >= 500:
                 response = resp
             else:
@@ -1790,6 +1796,19 @@ def suite_requires_managed_restart(spec_file: str) -> bool:
     return False
 
 
+def suite_execution_mode(spec_file: str) -> str:
+    """Choose whether a suite shares the server or owns a managed instance."""
+    metadata = load_suite_metadata(spec_file)
+    requires_restart = suite_requires_managed_restart(spec_file)
+    if requires_restart and metadata.get("isolated"):
+        return "managed_subprocess"
+    if requires_restart:
+        return "direct"
+    if metadata.get("isolated") or metadata.get("requires_mysql"):
+        return "subprocess"
+    return "parallel"
+
+
 def normalize_jobs(jobs: Optional[int]) -> int:
     if jobs is None:
         try:
@@ -1830,8 +1849,12 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
         ordered_specs = prioritize_spec_files(spec_files)
         print(f"🧪 Running {len(ordered_specs)} suites (fail-fast)")
         for idx, spec_file in enumerate(ordered_specs):
-            metadata = load_suite_metadata(spec_file)
-            if suite_requires_managed_restart(spec_file):
+            mode = suite_execution_mode(spec_file)
+            if mode == "managed_subprocess":
+                ok, output = run_spec_subprocess(spec_file, None, log_times, False, True)
+                if output:
+                    print(output, end="" if output.endswith("\n") else "\n")
+            elif mode == "direct":
                 if restart_handler is None and connect_only:
                     print(f"❌ {spec_file}: suite requires restart handling and cannot run with --connect-only")
                     remaining_specs = len(ordered_specs) - idx - 1
@@ -1842,7 +1865,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
                 if restart_handler is not None:
                     runner.set_restart_handler(restart_handler)
                 ok = runner.run_test_spec(spec_file)
-            elif metadata.get("isolated"):
+            elif mode == "subprocess":
                 ok, output = run_spec_subprocess(spec_file, port, log_times, True, True)
                 if output:
                     print(output, end="" if output.endswith("\n") else "\n")
@@ -1871,20 +1894,19 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
     parallel_specs: List[str] = []
     sequential_specs: List[Tuple[str, str]] = []
     for spec_file in spec_files:
-        metadata = load_suite_metadata(spec_file)
         # Scheduling contract:
-        # - restart/SHUTDOWN suites run sequentially with managed restarts
-        #   against the same shared ./data.
+        # - isolated restart/SHUTDOWN suites own a fresh managed server/datadir.
+        # - other restart/SHUTDOWN suites run sequentially with managed restarts
+        #   against the shared server/datadir.
         # - metadata.isolated also means sequential execution on that same
         #   shared database, never a fresh datadir.
         # - only non-isolated, non-restart suites may use the parallel
         #   connect-only worker pool.
-        if suite_requires_managed_restart(spec_file):
-            sequential_specs.append(("direct", spec_file))
-        elif metadata.get("isolated") or metadata.get("requires_mysql"):
-            sequential_specs.append(("subprocess", spec_file))
-        else:
+        mode = suite_execution_mode(spec_file)
+        if mode == "parallel":
             parallel_specs.append(spec_file)
+        else:
+            sequential_specs.append((mode, spec_file))
 
     def record_result(spec_file: str, ok: bool, output: str) -> None:
         suite_status[spec_file] = ok
@@ -1902,7 +1924,10 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             record_result(spec_file, ok, output)
 
     for mode, spec_file in sequential_specs:
-        if mode == "direct":
+        if mode == "managed_subprocess":
+            ok, output = run_spec_subprocess(spec_file, None, log_times, False, False)
+            record_result(spec_file, ok, output)
+        elif mode == "direct":
             if restart_handler is None and connect_only:
                 suite_status[spec_file] = False
                 print(f"❌ {spec_file}: suite requires restart handling and cannot run with --connect-only")

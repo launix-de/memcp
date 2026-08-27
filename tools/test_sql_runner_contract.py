@@ -48,6 +48,7 @@ from run_sql_tests import (  # noqa: E402
     resolve_timing_samples,
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
+    suite_execution_mode,
 )
 
 
@@ -182,6 +183,20 @@ class InterruptedRequestContractTest(unittest.TestCase):
         self.assertTrue(passed)
         self.assertFalse(runner.execute_sql.call_args.kwargs["retry_on_connection_failure"])
 
+    def test_shutdown_does_not_wait_for_the_process_it_intentionally_stops(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.ensure_database = lambda _database: None
+        runner.execute_sql = mock.Mock(return_value=None)
+        restart = mock.Mock(return_value=True)
+        runner.set_restart_handler(restart)
+
+        self.assertTrue(runner.run_test_case({
+            "name": "managed restart",
+            "sql": "SHUTDOWN",
+        }, "memcp-tests"))
+        self.assertFalse(runner.execute_sql.call_args.kwargs["retry_on_connection_failure"])
+        restart.assert_called_once_with()
+
 
 class AtomicJSONObserverContractTest(unittest.TestCase):
     def test_accepts_complete_atomic_replacements(self) -> None:
@@ -266,6 +281,46 @@ class FailFastParallelContractTest(unittest.TestCase):
             runner.run_test_case = run_case
             self.assertTrue(runner.run_test_spec(str(spec)))
             self.assertCountEqual(completed, ["first", "second"])
+
+
+class SuiteIsolationContractTest(unittest.TestCase):
+    def test_isolated_restart_suite_owns_a_managed_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "restart.yaml"
+            spec.write_text(
+                "metadata:\n"
+                "  isolated: true\n"
+                "test_cases:\n"
+                "  - name: restart\n"
+                "    sql: SHUTDOWN\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(suite_execution_mode(str(spec)), "managed_subprocess")
+
+    def test_shared_restart_suite_keeps_the_direct_managed_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "restart.yaml"
+            spec.write_text(
+                "test_cases:\n"
+                "  - name: restart\n"
+                "    sql: SHUTDOWN\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(suite_execution_mode(str(spec)), "direct")
+
+    def test_precommit_hook_delegates_managed_restart_suites_to_the_runner(self) -> None:
+        hook = (Path(__file__).resolve().parents[1] / "git-pre-commit").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn('if [ "$mode" = "managed_subprocess" ]; then', hook)
+        self.assertIn(
+            'python3 -u run_sql_tests.py "$tf" "${runner_args[@]}"',
+            hook,
+        )
+        self.assertIn(
+            'python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}"',
+            hook,
+        )
 
 if __name__ == "__main__":
     unittest.main()

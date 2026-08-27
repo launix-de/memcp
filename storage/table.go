@@ -1727,6 +1727,9 @@ func (c *column) UpdateSanitizer() {
 				return scm.NewDate(int64(v.Float()))
 			}
 			if v.IsString() {
+				if ts, err := strconv.ParseInt(v.String(), 10, 64); err == nil {
+					return scm.NewDate(ts)
+				}
 				if ts, ok := scm.ParseDateString(v.String()); ok {
 					return scm.NewDate(ts)
 				}
@@ -2433,6 +2436,9 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 					for _, colDesc := range t.Columns {
 						if col == colDesc.Name && colDesc.sanitizer != nil {
 							if i < len(row) {
+								if colDesc.AutoIncrement && row[i].IsNil() {
+									continue
+								}
 								row[i] = colDesc.sanitizer(row[i])
 							}
 						}
@@ -2451,6 +2457,9 @@ func (t *table) sanitizeInsertRows(columns []string, values [][]scm.Scmer, isIgn
 			if col == colDesc.Name && colDesc.sanitizer != nil {
 				for _, row := range values {
 					if i < len(row) {
+						if colDesc.AutoIncrement && row[i].IsNil() {
+							continue
+						}
 						row[i] = colDesc.sanitizer(row[i])
 					}
 				}
