@@ -17,6 +17,12 @@ setup:
   - sql: "DROP TABLE IF EXISTS wpcompat_no_primary_key"
   - sql: "DROP TABLE IF EXISTS sqlcompat_usermeta"
   - sql: "DROP TABLE IF EXISTS sqlcompat_users"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_actions"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_claims"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_timestamps"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_replace"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_prefix_index"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_termmeta"
   - sql: |
       CREATE TABLE wpcompat_posts (
         ID BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -40,14 +46,20 @@ setup:
   - sql: "CREATE TABLE wpcompat_no_primary_key (value INT)"
   - sql: "CREATE TABLE sqlcompat_users (ID BIGINT PRIMARY KEY)"
   - sql: "CREATE TABLE sqlcompat_usermeta (umeta_id BIGINT PRIMARY KEY, user_id BIGINT, meta_key VARCHAR(255), meta_value TEXT)"
+  - sql: "CREATE TABLE sqlcompat_actions (action_id BIGINT PRIMARY KEY, claim_id BIGINT, status VARCHAR(20), priority INT, scheduled_date_gmt DATETIME, last_attempt_gmt DATETIME)"
+  - sql: "CREATE TABLE sqlcompat_claims (claim_id BIGINT PRIMARY KEY, created_at DATETIME)"
+  - sql: "CREATE TABLE sqlcompat_replace (action_id BIGINT PRIMARY KEY, note_id BIGINT, status VARCHAR(20))"
+  - sql: "CREATE TABLE sqlcompat_termmeta (meta_id BIGINT PRIMARY KEY, term_id BIGINT, meta_key VARCHAR(255), meta_value VARCHAR(255))"
   - sql: "INSERT INTO wpcompat_posts VALUES (1, '2026-08-20 10:00:00', '2026-08-20 10:00:00', 'first', 'post', 'publish'), (2, '2026-08-21 10:00:00', '2026-08-21 10:00:00', 'second', 'post', 'publish'), (3, '2026-08-22 10:00:00', '2026-08-22 10:00:00', 'third', 'post', 'publish'), (4, '2026-08-23 10:00:00', '2026-08-23 10:00:00', 'header', 'wp_template', 'publish'), (5, '2026-08-24 10:00:00', '2026-08-24 10:00:00', 'footer', 'wp_template_part', 'publish')"
   - sql: "INSERT INTO wpcompat_comments VALUES (1, '1', 'comment', '2026-08-22 10:00:00'), (2, '0', 'comment', '2026-08-22 11:00:00'), (3, '1', 'note', '2026-08-22 12:00:00')"
-  - sql: "INSERT INTO wpcompat_terms VALUES (1, 'twentytwentyfive')"
-  - sql: "INSERT INTO wpcompat_term_taxonomy VALUES (10, 1, 'wp_theme'), (11, 1, 'category')"
+  - sql: "INSERT INTO wpcompat_terms VALUES (1, 'twentytwentyfive'), (2, 'another-theme')"
+  - sql: "INSERT INTO wpcompat_term_taxonomy VALUES (10, 1, 'wp_theme'), (11, 1, 'category'), (12, 2, 'wp_theme')"
   - sql: "INSERT INTO wpcompat_term_relationships VALUES (5, 11), (5, 15), (5, 15)"
   - sql: "INSERT INTO wpcompat_options VALUES (1, '_transient_sample', 'cached'), (2, '_transient_timeout_sample', '1'), (3, 'keep', 'value')"
   - sql: "INSERT INTO sqlcompat_users VALUES (1)"
   - sql: "INSERT INTO sqlcompat_usermeta VALUES (1, 1, 'capabilities', 'a:1:{s:13:\"administrator\";b:1;}')"
+  - sql: "INSERT INTO sqlcompat_termmeta VALUES (1, 1, 'order', '2'), (2, 2, 'order', '1'), (3, 2, 'order', '1')"
+  - sql: "INSERT INTO sqlcompat_actions VALUES (1, 0, 'pending', 20, '2026-08-26 10:00:00', NULL), (2, 0, 'pending', 10, '2026-08-26 09:00:00', NULL), (3, 0, 'complete', 1, '2026-08-25 09:00:00', NULL)"
 
 test_cases:
   - name: "SET NAMES with COLLATE and leading whitespace work over MySQL"
@@ -205,6 +217,144 @@ test_cases:
           empty_roles: 0
           total: 1
 
+  - name: "SHOW VARIABLES filters rows with a WHERE predicate"
+    mysql:
+      statements:
+        - sql: "SHOW VARIABLES WHERE Variable_name IN ('max_allowed_packet', 'time_zone', 'system_time_zone')"
+          expect:
+            rows: 3
+
+  - name: "SHOW FULL COLUMNS filters rows with a LIKE pattern"
+    mysql:
+      statements:
+        - sql: "SHOW FULL COLUMNS FROM sqlcompat_actions LIKE 'scheduled_date_gmt'"
+          expect:
+            rows: 1
+            data:
+              - Field: scheduled_date_gmt
+
+  - name: "SHOW COLUMNS filters rows with a LIKE pattern"
+    mysql:
+      statements:
+        - sql: "SHOW COLUMNS FROM sqlcompat_actions LIKE 'status'"
+          expect:
+            rows: 1
+            data:
+              - Field: status
+
+  - name: "VERSION returns a MySQL-compatible server version"
+    sql: "SELECT VERSION() AS server_version"
+    expect:
+      rows: 1
+      data:
+        - server_version: "5.7.44-MemCP"
+
+  - name: "CREATE TABLE accepts prefix lengths in a UNIQUE KEY"
+    sql: "CREATE TABLE sqlcompat_prefix_index (id BIGINT PRIMARY KEY, slug VARCHAR(200), UNIQUE KEY slug (slug(191)))"
+    expect: {}
+
+  - name: "REPLACE inserts a row when its key is absent"
+    sql: "REPLACE INTO sqlcompat_replace (action_id, note_id, status) VALUES (1, 10, 'pending')"
+    expect:
+      affected_rows: 1
+
+  - name: "REPLACE overwrites the row selected by a unique key"
+    sql: "REPLACE INTO sqlcompat_replace (action_id, note_id, status) VALUES (1, 11, 'actioned')"
+    expect:
+      affected_rows: 2
+
+  - name: "REPLACE exposes only the replacement values"
+    sql: "SELECT action_id, note_id, status FROM sqlcompat_replace"
+    expect:
+      rows: 1
+      data:
+        - action_id: 1
+          note_id: 11
+          status: actioned
+
+  - name: "LEFT JOIN ordering retains a nullable metadata driver"
+    sql: |
+      SELECT DISTINCT t.term_id
+      FROM wpcompat_terms AS t
+      LEFT JOIN sqlcompat_termmeta AS tm
+        ON t.term_id = tm.term_id AND tm.meta_key = 'order'
+      INNER JOIN wpcompat_term_taxonomy AS tt ON t.term_id = tt.term_id
+      WHERE tt.taxonomy IN ('wp_theme')
+        AND (tm.meta_key = 'order' OR tm.meta_key IS NULL)
+      ORDER BY tm.meta_value + 0 ASC, t.name ASC
+    expect:
+      rows: 2
+      data:
+        - term_id: 2
+        - term_id: 1
+
+  - name: "Scalar subquery arithmetic accepts an implicit output alias"
+    sql: |
+      SELECT (
+        (SELECT 1 FROM sqlcompat_users u
+         LEFT JOIN sqlcompat_claims c ON u.ID = c.claim_id
+         WHERE c.claim_id IS NULL LIMIT 1)
+        +
+        (SELECT COUNT(1) FROM (
+          SELECT a.action_id FROM sqlcompat_actions a
+          JOIN sqlcompat_users u ON u.ID = a.action_id
+          WHERE a.status = 'pending'
+        ) matching_rows)
+      ) result_count
+    expect:
+      rows: 1
+      data:
+        - result_count: 2
+
+  - name: "DUAL supplies one row to an INSERT SELECT and scalar subquery"
+    sql: |
+      INSERT INTO sqlcompat_claims (claim_id, created_at)
+      SELECT 7, '2026-08-26 12:00:00' FROM DUAL
+      WHERE (SELECT NULL FROM DUAL) IS NULL
+    expect:
+      affected_rows: 1
+
+  - name: "UPDATE JOIN applies an ordered derived-table target set"
+    sql: |
+      UPDATE sqlcompat_actions t1
+      JOIN (
+        SELECT action_id FROM sqlcompat_actions
+        WHERE claim_id = 0 AND status = 'pending'
+        ORDER BY priority ASC, scheduled_date_gmt ASC, action_id ASC
+        LIMIT 1 FOR UPDATE
+      ) t2 ON t1.action_id = t2.action_id
+      SET claim_id = 7, last_attempt_gmt = '2026-08-26 12:30:00'
+    expect:
+      affected_rows: 1
+
+  - name: "UPDATE JOIN changes only the selected target row"
+    sql: "SELECT action_id, claim_id FROM sqlcompat_actions ORDER BY action_id"
+    expect:
+      rows: 3
+      data:
+        - action_id: 1
+          claim_id: 0
+        - action_id: 2
+          claim_id: 7
+        - action_id: 3
+          claim_id: 0
+
+  - name: "DELETE alias removes rows selected through an INNER JOIN"
+    sql: |
+      DELETE a FROM sqlcompat_actions AS a
+      INNER JOIN sqlcompat_claims AS c ON a.claim_id = c.claim_id
+      WHERE c.claim_id = 7
+    expect:
+      affected_rows: 1
+
+  - name: "ALTER TABLE accepts ADD INDEX as compatible metadata"
+    sql: "ALTER TABLE wpcompat_comments ADD INDEX sqlcompat_comment_type (comment_type)"
+    expect: {}
+
+  - name: "TIMESTAMP accepts an ON UPDATE CURRENT_TIMESTAMP clause"
+    sql: "CREATE TABLE sqlcompat_timestamps (id INT PRIMARY KEY, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL ON UPDATE CURRENT_TIMESTAMP)"
+    expect: {}
+
   - name: "INSERT accepts a MySQL zero datetime"
     sql: "INSERT INTO wpcompat_posts (post_date, post_date_gmt, post_name, post_type, post_status) VALUES ('2026-08-26 10:00:00', '0000-00-00 00:00:00', 'auto-draft', 'post', 'auto-draft')"
 
@@ -214,6 +364,17 @@ test_cases:
       rows: 1
       data:
         - post_date_gmt: "0000-00-00 00:00:00"
+
+  - name: "Numeric strings are coerced to unix timestamps for DATETIME"
+    sql: "INSERT INTO wpcompat_posts (post_date, post_date_gmt, post_name, post_type, post_status) VALUES ('1787744404', '1787744404', 'numeric-date', 'post', 'publish')"
+
+  - name: "Unix timestamp strings round-trip as DATETIME"
+    sql: "SELECT UNIX_TIMESTAMP(post_date) AS post_ts, UNIX_TIMESTAMP(post_date_gmt) AS gmt_ts FROM wpcompat_posts WHERE post_name = 'numeric-date'"
+    expect:
+      rows: 1
+      data:
+        - post_ts: 1787744404
+          gmt_ts: 1787744404
 
   - name: "Self-join combines escaped LIKE patterns and a generated key"
     sql: |
@@ -298,3 +459,9 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS wpcompat_no_primary_key"
   - sql: "DROP TABLE IF EXISTS sqlcompat_usermeta"
   - sql: "DROP TABLE IF EXISTS sqlcompat_users"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_actions"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_claims"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_timestamps"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_replace"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_prefix_index"
+  - sql: "DROP TABLE IF EXISTS sqlcompat_termmeta"

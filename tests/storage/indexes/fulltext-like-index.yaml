@@ -119,7 +119,7 @@ test_cases:
           (begin
             (define cols (get_assoc index "cols"))
             (or found (and
-              (strlike cols "%id(equal)%" "utf8mb4_bin")
+              (strlike cols "id|%vorname(like)%" "utf8mb4_bin")
               (strlike cols "%vorname(like)%" "utf8mb4_bin"))))) false))
         (if bad
           (error "point lookup built a full-table LIKE matcher index")

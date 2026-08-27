@@ -73,6 +73,20 @@ type blockingSchemaWritePersistence struct {
 	once    sync.Once
 }
 
+type blockingSchemaReadPersistence struct {
+	PersistenceEngine
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (p *blockingSchemaReadPersistence) ReadSchema() []byte {
+	p.calls.Add(1)
+	p.entered <- struct{}{}
+	<-p.release
+	return p.PersistenceEngine.ReadSchema()
+}
+
 func (p *blockingSchemaWritePersistence) WriteSchema(schema []byte) {
 	p.once.Do(func() {
 		close(p.entered)
@@ -112,6 +126,45 @@ func reloadTableFromPersistence(t *testing.T, name string, persistence Persisten
 		release()
 	}
 	return tbl
+}
+
+func TestConcurrentFirstDatabaseReadersShareOneSchemaLoad(t *testing.T) {
+	_, persistence := createDurabilityTestTable(t, "tconcurrentloadsource", 1)
+	blocking := &blockingSchemaReadPersistence{
+		PersistenceEngine: persistence,
+		entered:           make(chan struct{}, 2),
+		release:           make(chan struct{}),
+	}
+	db := newDatabase()
+	db.Name = "tconcurrentload"
+	db.persistence = blocking
+	db.srState = COLD
+
+	loaded := make(chan *table, 2)
+	go func() { loaded <- db.GetTable("items") }()
+	<-blocking.entered
+	go func() { loaded <- db.GetTable("items") }()
+
+	select {
+	case <-blocking.entered:
+		close(blocking.release)
+		t.Fatal("a concurrent reader started a second schema load")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(blocking.release)
+	for range 2 {
+		select {
+		case tbl := <-loaded:
+			if tbl == nil {
+				t.Fatal("concurrent reader did not observe the loaded table catalog")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("concurrent reader did not continue after schema load")
+		}
+	}
+	if calls := blocking.calls.Load(); calls != 1 {
+		t.Fatalf("schema loaded %d times, want 1", calls)
+	}
 }
 
 func waitForRepartitionDualWrite(t *testing.T, tbl *table) {
@@ -1211,6 +1264,93 @@ func TestCreateColumnBuiltinUpgradesExistingColumnToORC(t *testing.T) {
 	}
 	if got := shard.getDelta(1, "running").Int(); got != 300 {
 		t.Fatalf("delta running[1] = %d, want 300", got)
+	}
+}
+
+func TestMutationScanRepairsInvalidOrderedComputeColumnBeforeTakingShardLock(t *testing.T) {
+	dir, err := os.MkdirTemp("", "memcp-scan-orc-repair-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	oldBasepath := Basepath
+	Basepath = dir
+	defer func() { Basepath = oldBasepath }()
+
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("tscanorcrepair")
+
+	CreateDatabase("tscanorcrepair", false)
+	tbl, _ := CreateTable("tscanorcrepair", "items", Memory, false)
+	tbl.CreateColumn("day", "INT", nil, nil)
+	tbl.CreateColumn("amount", "INT", nil, nil)
+	tbl.CreateColumn("running", "INT", nil, nil)
+	tbl.Insert([]string{"day", "amount"}, [][]scm.Scmer{
+		{scm.NewInt(10), scm.NewInt(100)},
+		{scm.NewInt(20), scm.NewInt(200)},
+	}, nil, scm.NewNil(), false, nil)
+
+	mapFn := scm.Eval(scm.Read("test", "(lambda ($set v) (list $set v))"), &scm.Globalenv)
+	reduceFn := scm.Eval(scm.Read("test", "(lambda (acc mapped) (begin (define new_acc (+ acc (cadr mapped))) ((car mapped) new_acc) new_acc))"), &scm.Globalenv)
+	options := scm.NewSlice([]scm.Scmer{
+		scm.NewString("sortcols"), scm.NewSlice([]scm.Scmer{scm.NewString("day")}),
+		scm.NewString("sortdirs"), scm.NewSlice([]scm.Scmer{scm.NewBool(false)}),
+		scm.NewString("partitioncount"), scm.NewInt(0),
+		scm.NewString("mapcols"), scm.NewSlice([]scm.Scmer{scm.NewString("amount")}),
+		scm.NewString("mapfn"), mapFn,
+		scm.NewString("reducefn"), reduceFn,
+		scm.NewString("reduceinit"), scm.NewInt(0),
+	})
+	createcolumn := scm.Globalenv.Vars[scm.Symbol("createcolumn")]
+	if !scm.Apply(
+		createcolumn,
+		NewTableScmer(tbl),
+		scm.NewString("running"),
+		scm.NewString("INT"),
+		scm.NewSlice(nil),
+		options,
+	).Bool() {
+		t.Fatal("createcolumn should upgrade running to an ordered compute column")
+	}
+
+	shard := tbl.Shards[0]
+	shard.mu.RLock()
+	proxy := shard.columns["running"].(*StorageComputeProxy)
+	shard.mu.RUnlock()
+	if got := proxy.GetValue(1).Int(); got != 300 {
+		t.Fatalf("initial running value = %d, want 300", got)
+	}
+	proxy.validMask.Set(0, false)
+	proxy.validMask.Set(1, false)
+
+	done := make(chan []int64, 1)
+	go func() {
+		values := make([]int64, 0, 2)
+		tbl.scan(
+			nil,
+			[]string{},
+			trueCondition(),
+			[]string{"$update", "running"},
+			scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+				values = append(values, args[1].Int())
+				return scm.NewNil()
+			}),
+			scm.NewNil(),
+			scm.NewNil(),
+			scm.NewNil(),
+			false,
+		)
+		done <- values
+	}()
+
+	select {
+	case values := <-done:
+		if len(values) != 2 || values[0] != 100 || values[1] != 300 {
+			t.Fatalf("scan returned ordered values %v, want [100 300]", values)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mutation scan deadlocked while repairing an ordered compute column under the shard lock")
 	}
 }
 

@@ -3320,7 +3320,7 @@ guard. The guard therefore asserts the actual planner inequality instead of
 pinning one sampled row count: harmless estimate refinement keeps the cached
 plan, while an autoindex or data growth which changes the winner recompiles it. */
 (define membership_carrier_cost_choice (lambda (candidate_input_rows candidate_rows driver_rows facts
-		driver_probe_supported driver_strategy allow_ordered_batch prefiltered_supported prefiltered_driver_rows)
+	driver_probe_supported driver_strategy allow_ordered_batch prefiltered_supported prefiltered_driver_rows)
 	(begin
 		(define candidate_cost (membership_projection_cost
 			candidate_input_rows candidate_rows driver_rows facts))
@@ -3422,15 +3422,22 @@ request bindings and current autoindex statistics. It never builds the
 candidate RecSet. */
 (define membership_runtime_source_rows_expr (lambda (src condition fallback_rows)
 	(begin
-		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 512))
+		/* Membership carrier selection needs a directional selectivity estimate,
+		not hundreds of successful executions of a potentially nested ACL filter.
+		A single match supplies the runtime existence signal; table statistics and
+		text-pattern priors provide the cardinality direction without repeatedly
+		executing a potentially nested ACL filter during cold planning. */
+		(define estimate_expr (query_scoped_source_filter_estimate_expr src condition 1))
 		(define text_prior (expr_text_pattern_expr condition))
-		(list (quote planner_estimated_matching_rows)
-			(if (nil? text_prior)
-				estimate_expr
-				(list (quote qassoc_set) estimate_expr
-					(list (quote quote) (quote fallback_selectivity))
-					(list (quote text_pattern_selectivity_prior) text_prior)))
-			fallback_rows fallback_rows))))
+		(if (nil? text_prior)
+			(list (quote planner_estimated_matching_rows)
+				estimate_expr fallback_rows fallback_rows)
+			/* A zero-match text probe must inspect the complete source even with a
+			one-match cap. Text predicates already have a calibrated cardinality
+			prior, so use it directly instead of executing a cold planning scan. */
+			(list (quote max) 1
+				(list (quote *) fallback_rows
+					(list (quote text_pattern_selectivity_prior) text_prior)))))))
 
 (define membership_runtime_stage_rows_expr (lambda (input fallback_rows)
 	(if (union_block? input)
@@ -3770,11 +3777,11 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						planner_adaptive_observation_budget_ns))) false))
 				(define runtime_cost_guard_supported (and runtime_choice_risky
 					(and (not estimate_complete)
-					(and (nil? observation_keys)
-					(and known
-						(and (not guarded_broad_order_driver)
-							(and (not (nil? runtime_candidate_rows_expr))
-								(not (nil? runtime_driver_rows_expr)))))))))
+						(and (nil? observation_keys)
+							(and known
+								(and (not guarded_broad_order_driver)
+									(and (not (nil? runtime_candidate_rows_expr))
+										(not (nil? runtime_driver_rows_expr)))))))))
 				(define runtime_cost_args (if runtime_cost_guard_supported (list
 					candidate_input_rows candidate_rows driver_rows cost_facts
 					driver_probe_supported driver_strategy allow_ordered_batch

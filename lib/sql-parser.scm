@@ -659,6 +659,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (atom "NULL" true) '("null" true))
 		(parser '((atom "DEFAULT" true) (define default sql_literal)) '("default" default))
 		(parser '((atom "DEFAULT" true) (atom "CURRENT_TIMESTAMP" true) (? "(" ")")) '("default_expression" "CURRENT_TIMESTAMP"))
+		(parser '((atom "ON" true) (atom "UPDATE" true) (atom "CURRENT_TIMESTAMP" true) (? "(" ")")) '("update" "CURRENT_TIMESTAMP"))
 		(parser '((atom "ON" true) (atom "UPDATE" true) (define default sql_literal)) '("update" default))
 		(parser '((atom "COMMENT" true) (define comment sql_expression)) '("comment" comment))
 		(parser '((atom "COLLATE" true) (define comment sql_identifier)) '("collate" comment))
@@ -883,6 +884,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* MySQL LAST_INSERT_ID(): direct session lookup to support session scoping */
 		(parser '((atom "LAST_INSERT_ID" true) "(" ")") '('session "last_insert_id"))
 		(parser '((atom "FOUND_ROWS" true) "(" ")") '('session "found_rows"))
+		/* Keep SQL VERSION() aligned with the MySQL handshake string. */
+		(parser '((atom "VERSION" true) "(" ")") "5.7.44-MemCP")
 		/* MySQL IF(condition, true_expr, false_expr) with short-circuit semantics */
 		(parser '((atom "IF" true) "(" (define cond sql_expression) "," (define t sql_expression) "," (define f sql_expression) ")") '((quote if) cond t f))
 		(parser '((atom "VALUES" true) "(" (define e sql_identifier_unquoted) ")") '('get_column "VALUES" true e true)) /* passthrough VALUES for now, the extract_stupid and replace_stupid will do their job for now */
@@ -952,6 +955,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 
 	(define tabledefs (parser (or
+		/* MySQL's DUAL is a one-row pseudo table. Omitting FROM has the same
+		logical shape and also keeps DUAL out of the physical source catalog. */
+		(parser (atom "DUAL" true) '())
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
 		(parser '((define l tabledefs) (define x (or
 			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e sql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl true e))))
@@ -1134,13 +1140,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
 		(define calc_found_rows (? (atom "SQL_CALC_FOUND_ROWS" true)))
-		(? (atom "DISTINCT" true))
+		(define distinct (? (atom "DISTINCT" true)))
 		(define cols (+ (or
 			(parser "*" '("*" '((quote get_column) nil false "*" false)))
 			(parser '((define tbl sql_identifier_quoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
 			(parser '((define tbl sql_identifier_unquoted) "." "*") '("*" '((quote get_column) tbl false "*" false)))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_identifier)) '(title e))
 			(parser '((define e sql_expression) (atom "AS" true) (define title sql_string)) '(title e))
+			/* MySQL permits a bare select-list alias without AS. */
+			(parser '((define e sql_expression) (define title sql_identifier)) '(title e))
 			/* capture sql_expression to get raw SQL text for column naming */
 			(parser (define captured (capture sql_expression)) '((extract_title_or_sql captured) (car (cdr captured))))
 		) ","))
@@ -1191,8 +1199,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				'((define limit sql_expression))
 			)
 		)
-	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition group having order limit offset '() '()
-			(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '()))))
+		/* Locking reads are accepted for MySQL compatibility. MemCP's
+		transaction layer owns visibility and write serialization. */
+		(? (atom "FOR" true) (atom "UPDATE" true))
+	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition
+			(if distinct (extract_assoc (merge cols) (lambda (_title expr) expr)) group)
+			having order limit offset '() '()
+			(merge (list
+				(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '())
+				(if distinct (list (list (quote select_distinct) true)) '()))))))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)
@@ -1419,6 +1434,32 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					false '('lambda '('id) '('session "last_insert_id" 'id))))
 	)))
 
+	/* MySQL REPLACE has INSERT syntax and overwrites every supplied column when
+	a unique-key collision selects an existing row. */
+	(define sql_replace_into (parser '(
+		(atom "REPLACE" true)
+		(atom "INTO" true)
+		(? (define schema2 sql_identifier) ".")
+		(define tbl sql_identifier)
+		(? "("
+			(define coldesc (* sql_identifier ","))
+			")")
+		(atom "VALUES" true)
+		(define datasets (* (parser '("(" (define dataset (* sql_expression ",")) ")") dataset) ","))
+	) (begin
+			(if policy (policy (coalesce schema2 schema) tbl true) true)
+			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
+			(define updaterows2 (merge (map coldesc (lambda (col)
+				(list col (list (quote get_column) "VALUES" true col true))))))
+			(define updatecols (cons "$update" (map coldesc (lambda (col) (concat "NEW." col)))))
+			'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc)
+				(cons list (map datasets (lambda (dataset) (cons list dataset))))
+				(cons list updatecols)
+				'('lambda (map updatecols (lambda (c) (symbol c)))
+					'('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v))))))
+				false '('lambda '('id) '('session "last_insert_id" 'id))
+	))))
+
 	(define sql_insert_values_select (parser '(
 		(atom "INSERT" true)
 		(define ignoreexists (? (atom "IGNORE" true true true)))
@@ -1532,7 +1573,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		"("
 		(define cols (* (or
 			(parser '((atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
-			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
+			(parser '((atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "CONSTRAINT" true) (define id (? sql_identifier)) (atom "FOREIGN" true) (atom "KEY" true) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2) updatemode deletemode))
 			(parser '((atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2)))
 			(parser '((atom "KEY" true) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list))) /* ignore index definitions */
@@ -1578,7 +1619,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "ADD" true) (atom "PRIMARY" true) (atom "KEY" true) "(" (define cols (+ sql_identifier ",")) ")") '((quote list) "unique" "PRIMARY" (cons (quote list) cols)))
 			(parser '((atom "ADD" true) (atom "UNIQUE" true) (atom "KEY" true) (define id sql_identifier) "(" (define cols (+ sql_identifier ",")) ")" (? (atom "USING" true) (atom "BTREE" true))) '((quote list) "unique" id (cons (quote list) cols)))
 			(parser '((atom "ADD" true) (atom "FOREIGN" true) (atom "KEY" true) (define id (? sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "DELETE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true))) (? (atom "ON" true) (atom "UPDATE" true) (or (atom "RESTRICT" true) (atom "CASCADE" true) (atom "SET NULL" true)))) '((quote list) "foreign" id (cons (quote list) cols1) tbl2 (cons (quote list) cols2))) */
-			(parser '((atom "ADD" true) (atom "KEY" true) sql_identifier "(" (+ sql_identifier ",") ")" (? (atom "USING" true) (atom "BTREE" true))) nil) /* ignore index definitions */
+			(parser '((atom "ADD" true) (or (atom "KEY" true) (atom "INDEX" true)) sql_identifier "(" (+ (parser '((define col sql_identifier) (? "(" sql_int ")")) col) ",") ")" (? (atom "USING" true) (atom "BTREE" true))) (lambda (id) true)) /* ignore index definitions */
 			(parser '((atom "ADD" true) (atom "FULLTEXT" true) (? (atom "INDEX" true)) (? sql_identifier) "(" (+ sql_identifier ",") ")") (lambda (id) true)) /* ignore fulltext index */
 			(parser '((atom "ADD" true) (? (atom "CONSTRAINT" true) (define cname (? sql_identifier))) (atom "FOREIGN" true) (atom "KEY" true) (? (define fkname sql_identifier)) "(" (define cols1 (+ sql_identifier ",")) ")" (atom "REFERENCES" true) (define tbl2 sql_identifier) "(" (define cols2 (+ sql_identifier ",")) ")" (? (atom "ON" true) (atom "UPDATE" true) (define updatemode sql_foreign_key_mode)) (? (atom "ON" true) (atom "DELETE" true) (define deletemode sql_foreign_key_mode))) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "FOREIGN" true) (atom "KEY" true) (define fk sql_identifier)) (lambda (id) true))
@@ -1659,6 +1700,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
+		sql_replace_into
 		sql_insert_select
 		sql_create_view
 		sql_create_table
@@ -1781,7 +1823,11 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "SHOW" true) (atom "TABLE" true) (atom "STATUS" true) (? (atom "FROM" true) (define schema2 sql_identifier)) (? (atom "LIKE" true) (define likepattern sql_expression))) '((quote map) '((quote show) (coalesce schema2 schema)) '((quote lambda) '((quote tbl)) '('if '('strlike 'tbl '('coalesce 'likepattern "%")) '((quote resultrow) '('list "name" 'tbl "rows" "1")))))) /* TODO: engine version row_format avg_row_length data_length max_data_length index_length data_free auto_increment create_time update_time check_time collation checksum create_options comment max_index_length temporary */
 		(parser '((or (atom "DESCRIBE" true) (atom "DESC" true)) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier)) '((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
 		(parser '((or (atom "DESCRIBE" true) (atom "DESC" true)) (define id sql_identifier)) '((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line)))))
-		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) (begin
+		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier) (atom "LIKE" true) (define likepattern sql_expression))
+			'((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote if) '((quote strlike) '((quote get_assoc) (quote line) "Field") likepattern) '((quote resultrow) (quote line)) nil))))
+		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier) (atom "LIKE" true) (define likepattern sql_expression))
+			'((quote map) '((quote show) schema id) '((quote lambda) '((quote line)) '((quote if) '((quote strlike) '((quote get_assoc) (quote line) "Field") likepattern) '((quote resultrow) (quote line)) nil))))
+		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define schema2 sql_identifier) (atom "." true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) (begin
 			(define transform_col (lambda (expr) (match expr
 				'('get_column _ _ col _) (list (quote get_assoc) (quote line) col)
 				(cons head tail) (cons (transform_col head) (map tail transform_col))
@@ -1791,7 +1837,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				'((quote map) '((quote show) schema2 id) '((quote lambda) '((quote line)) '((quote resultrow) (quote line))))
 				'((quote map) '((quote show) schema2 id) (list (quote lambda) '((quote line)) (list (quote if) (transform_col where) (list (quote resultrow) (quote line)) nil))))
 		))
-		(parser '((atom "SHOW" true) (atom "FULL" true) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) (begin
+		(parser '((atom "SHOW" true) (? (atom "FULL" true)) (atom "COLUMNS" true) (atom "FROM" true) (define id sql_identifier) (? (atom "WHERE" true) (define where sql_expression))) (begin
 			(define transform_col (lambda (expr) (match expr
 				'('get_column _ _ col _) (list (quote get_assoc) (quote line) col)
 				(cons head tail) (cons (transform_col head) (map tail transform_col))
@@ -1863,6 +1909,31 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			'((quote kill_query) id))
 
 		/* SHOW [GLOBAL|SESSION] VARIABLES [LIKE pattern] — filter at parse time, dynamic values at query time */
+		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (atom "WHERE" true) (define where sql_expression))
+			(begin
+				(define all_rows (list
+					(list "version"                 "0.9")
+					(list "character_set_server"    "utf8mb4")
+					(list "collation_server"        "utf8mb4_general_ci")
+					(list "lower_case_table_names"  0)
+					(list "time_zone"               (list (quote session_globalvar) "time_zone"))
+					(list "system_time_zone"        (list (quote session_globalvar) "system_time_zone"))
+					(list "key_buffer_size"         0)
+					(list "max_allowed_packet"      67108864)
+					(list "max_connections"         151)
+					(list "innodb_buffer_pool_size" 0)
+				))
+				(define transform_col (lambda (expr row_expr) (match expr
+					'('get_column _ _ col _) (list (quote get_assoc) row_expr col)
+					(cons head tail) (cons (transform_col head row_expr) (map tail (lambda (item) (transform_col item row_expr))))
+					expr
+				)))
+				(cons (quote !begin) (map all_rows (lambda (row) (begin
+					(define row_expr (list (quote list) "Variable_name" (nth row 0) "Value" (nth row 1)))
+					(list (quote if) (transform_col where row_expr) (list (quote resultrow) row_expr) nil)
+				))))
+			)
+		)
 		(parser '((atom "SHOW" true) (? (or (atom "GLOBAL" true) (atom "SESSION" true))) (atom "VARIABLES" true) (? (atom "LIKE" true) (define likepattern sql_expression)))
 			(begin
 				(define all_rows (list
@@ -1872,6 +1943,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(list "lower_case_table_names"  0)
 					(list "time_zone"               (list (quote session_globalvar) "time_zone"))
 					(list "system_time_zone"        (list (quote session_globalvar) "system_time_zone"))
+					(list "key_buffer_size"         0)
+					(list "max_allowed_packet"      67108864)
+					(list "max_connections"         151)
+					(list "innodb_buffer_pool_size" 0)
 				))
 				(define pat (coalesce likepattern "%"))
 				(define filtered (filter all_rows (lambda (row) (strlike (nth row 0) pat "utf8mb4_general_ci"))))

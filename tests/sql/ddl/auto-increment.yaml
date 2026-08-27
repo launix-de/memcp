@@ -16,6 +16,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS ai_mixed"
   - sql: "DROP TABLE IF EXISTS ai_restart"
   - sql: "DROP TABLE IF EXISTS ai_same_col"
+  - sql: "DROP TABLE IF EXISTS ai_null_explicit"
   - sql: "DROP TABLE IF EXISTS ai_tx"
   - sql: "DROP TABLE IF EXISTS ai_partitioned"
   - sql: "DROP TABLE IF EXISTS ai_seeded"
@@ -25,6 +26,7 @@ setup:
   - sql: "CREATE TABLE ai_mixed (id INT AUTO_INCREMENT PRIMARY KEY, val INT)"
   - sql: "CREATE TABLE ai_restart (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_same_col (id INT AUTO_INCREMENT PRIMARY KEY, category INT, name TEXT)"
+  - sql: "CREATE TABLE ai_null_explicit (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, name TEXT)"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ai_basic"
@@ -32,6 +34,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ai_restart"
   - sql: "DROP TABLE IF EXISTS ai_mixed"
   - sql: "DROP TABLE IF EXISTS ai_same_col"
+  - sql: "DROP TABLE IF EXISTS ai_null_explicit"
   - sql: "DROP TABLE IF EXISTS ai_tx"
   - sql: "DROP TABLE IF EXISTS ai_partitioned"
   - sql: "DROP TABLE IF EXISTS ai_seeded"
@@ -52,6 +55,18 @@ test_cases:
       rows: 1
       data:
         - {id: 1}
+
+  - name: "Explicit NULL requests an AUTO_INCREMENT value for every row"
+    sql: "INSERT INTO ai_null_explicit (id, name) VALUES (NULL, 'null-id-one'), (NULL, 'null-id-two')"
+    expect:
+      affected_rows: 2
+
+  - name: "Explicit NULL AUTO_INCREMENT rows receive distinct generated IDs"
+    sql: "SELECT COUNT(*) AS rows_found, COUNT(DISTINCT id) AS distinct_ids FROM ai_null_explicit"
+    expect:
+      rows: 1
+      data:
+        - {rows_found: 2, distinct_ids: 2}
 
   - name: "INSERT without ID assigns auto id (second row)"
     sql: "INSERT INTO ai_basic (name) VALUES ('beta')"

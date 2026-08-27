@@ -827,12 +827,66 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// shards have their column map populated by load(t) first.
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
+	t.ensureMainCount(false)
+	scanCols := append(append([]string(nil), conditionCols...), callbackCols...)
+	orderedProxies := t.orderedScanProxies(scanCols, currentTx)
+	prepareOrdered := func() {
+		if len(orderedProxies) == 0 {
+			return
+		}
+		t.mu.RLock()
+		upper := t.main_count + uint32(len(t.inserts))
+		recids := make([]uint32, 0, upper)
+		for id := uint32(0); id < upper; id++ {
+			if currentTx != nil && currentTx.Mode == TxACID {
+				if !currentTx.IsVisible(t, id) {
+					continue
+				}
+			} else if t.deletions.Get(uint(id)) {
+				continue
+			}
+			recids = append(recids, id)
+		}
+		t.mu.RUnlock()
+		for _, proxy := range orderedProxies {
+			for _, id := range recids {
+				if !proxy.validMask.Get(uint(id)) {
+					proxy.GetValue(id)
+				}
+			}
+		}
+	}
+	orderedReadyLocked := func() bool {
+		upper := t.main_count + uint32(len(t.inserts))
+		for id := uint32(0); id < upper; id++ {
+			if currentTx != nil && currentTx.Mode == TxACID {
+				if !currentTx.IsVisible(t, id) {
+					continue
+				}
+			} else if t.deletions.Get(uint(id)) {
+				continue
+			}
+			for _, proxy := range orderedProxies {
+				if !proxy.validMask.Get(uint(id)) {
+					return false
+				}
+			}
+		}
+		return true
+	}
 	ownsWrite := t.hasWriteOwnerForTx(currentTx)
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
-		t.lockForMutation(ss)
-		writeLocked = true
+		for {
+			prepareOrdered()
+			t.lockForMutation(ss)
+			if orderedReadyLocked() {
+				writeLocked = true
+				break
+			}
+			t.mu.Unlock()
+		}
 		defer func() {
 			if writeLocked {
 				t.mu.Unlock()
@@ -850,7 +904,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		}
 	}
 	skipShardReadLock := ownsWrite || lockMutationExclusively
-	t.ensureMainCount(skipShardReadLock)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
 	// condition column readers
@@ -884,8 +937,18 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false
 	if !skipShardReadLock {
-		t.mu.RLock()
-		locked = true
+		acquireVerifiedReadLock := func() {
+			for {
+				prepareOrdered()
+				t.mu.RLock()
+				if orderedReadyLocked() {
+					locked = true
+					return
+				}
+				t.mu.RUnlock()
+			}
+		}
+		acquireVerifiedReadLock()
 		// Table lock check must happen AFTER shard RLock to close the TOCTOU window:
 		// WRITE publication holds every shard write lock, so a scan that gets past
 		// RLock observes it. READ locks do not block ordinary scans.
@@ -893,8 +956,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			t.mu.RUnlock()
 			locked = false
 			t.t.waitTableLock(ss, hasMutationCallback)
-			t.mu.RLock()
-			locked = true
+			// A writer may have invalidated an ordered value while this scan was
+			// waiting. Prepare and verify again instead of blindly reacquiring RLock.
+			acquireVerifiedReadLock()
 		}
 	}
 	defer func() {
@@ -1047,6 +1111,35 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	}
 	mapper.FlushSideEffects()
 	return akkumulator, outCount, candidateCount
+}
+
+// orderedScanProxies returns the ORC-backed columns that a scan may read.
+// They must be made valid before the shard lock is acquired: an on-demand ORC
+// repair takes shard write locks and therefore cannot run under a scan-held
+// shard read or write lock.
+func (t *storageShard) orderedScanProxies(cols []string, currentTx *TxContext) []*StorageComputeProxy {
+	seen := make(map[*StorageComputeProxy]struct{})
+	result := make([]*StorageComputeProxy, 0)
+	for _, col := range cols {
+		if col == "$recset_contains" || col == "$update" || col == "$break" ||
+			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
+			strings.HasPrefix(col, "$increment:") || strings.HasPrefix(col, "$set:") {
+			continue
+		}
+		if _, ok := parseBatchPseudoColName(col); ok {
+			continue
+		}
+		proxy, ok := t.getColumnStorageOrPanicEx(col, false, currentTx).(*StorageComputeProxy)
+		if !ok || !proxy.isOrdered {
+			continue
+		}
+		if _, exists := seen[proxy]; exists {
+			continue
+		}
+		seen[proxy] = struct{}{}
+		result = append(result, proxy)
+	}
+	return result
 }
 
 func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {

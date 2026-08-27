@@ -1689,23 +1689,42 @@ physical membership probe. */
 						(nil? (qb_offset inner)))))))))
 
 (define normalize_membership_query_block (lambda (inner)
-	(if (and (query_block? inner)
-		(and (not (empty_list? (qb_order inner)))
-			(and (nil? (qb_limit inner)) (nil? (qb_offset inner)))))
-		(make_query_block
-			(qb_schema inner)
-			(qb_sources inner)
-			(qb_fields inner)
-			(qb_where inner)
-			(qb_group inner)
-			(qb_having inner)
-			'()
-			(qb_limit inner)
-			(qb_offset inner)
-			(qb_hidden inner)
-			(qb_stages inner)
-			(qb_facts inner))
-		inner)))
+	(begin
+		(define normalized_order (if (and (query_block? inner)
+			(and (not (empty_list? (qb_order inner)))
+				(and (nil? (qb_limit inner)) (nil? (qb_offset inner)))))
+			(make_query_block
+				(qb_schema inner)
+				(qb_sources inner)
+				(qb_fields inner)
+				(qb_where inner)
+				(qb_group inner)
+				(qb_having inner)
+				'()
+				(qb_limit inner)
+				(qb_offset inner)
+				(qb_hidden inner)
+				(qb_stages inner)
+				(qb_facts inner))
+			inner))
+		/* Duplicate elimination does not change IN/NOT IN membership. Remove the
+		parser's DISTINCT group before choosing the plain membership lowering. */
+		(if (and (query_block? normalized_order)
+			(qassoc_get (qb_facts normalized_order) (quote select_distinct) false))
+			(make_query_block
+				(qb_schema normalized_order)
+				(qb_sources normalized_order)
+				(qb_fields normalized_order)
+				(qb_where normalized_order)
+				'()
+				(qb_having normalized_order)
+				(qb_order normalized_order)
+				(qb_limit normalized_order)
+				(qb_offset normalized_order)
+				(qb_hidden normalized_order)
+				(qb_stages normalized_order)
+				(qb_facts normalized_order))
+			normalized_order))))
 
 (define membership_inner_supported? (lambda (inner)
 	(and (query_block? inner)
@@ -3186,20 +3205,19 @@ without separately proving two-valued semantics. */
 	(and (query_block? inner)
 		(and (not (empty_list? (qb_order inner)))
 			(and (not (nil? (qb_limit inner)))
-				(and (nil? (source_join_expr src))
-					(and (not (source_outer? src))
-						(and (empty_list? (qb_group inner))
-							(and (nil? (qb_having inner))
-								(and (not (query_block_has_aggregates? inner))
-									(and (scalar_source_shape_supported? (qb_sources inner))
-										/* The row-number rewrite below stores its order as base-table
-										columns. An ORDER expression realized by a decorrelated helper
-										is still streamable, but it is not a base storage column. Keep
-										that complete logical relation in the ordinary limited-derived
-										stage instead of misclassifying the helper alias as a column of
-										the driver. */
-										(direct_source_order_items?
-											(car (qb_sources inner)) (qb_order inner)))))))))))))
+				(and (not (source_outer? src))
+					(and (empty_list? (qb_group inner))
+						(and (nil? (qb_having inner))
+							(and (not (query_block_has_aggregates? inner))
+								(and (scalar_source_shape_supported? (qb_sources inner))
+									/* The row-number rewrite below stores its order as base-table
+									columns. An ORDER expression realized by a decorrelated helper
+									is still streamable, but it is not a base storage column. Keep
+									that complete logical relation in the ordinary limited-derived
+									stage instead of misclassifying the helper alias as a column of
+									the driver. */
+									(direct_source_order_items?
+										(car (qb_sources inner)) (qb_order inner))))))))))))
 
 (define make_ordered_limited_derived_rewrite (lambda (src alias inner)
 	(begin
@@ -3252,8 +3270,12 @@ without separately proving two-valued semantics. */
 		(define lower_filter (if (> offset_value 0) (list (quote >) rn_expr offset_value) true))
 		(define limit_filter (combine_where lower_filter (list (quote <=) rn_expr upper_bound)))
 		(define derived_filter (combine_where inner_where limit_filter))
+		/* An INNER JOIN predicate belongs above the complete ordered/limited
+		derived relation. Keeping it on the rewritten source preserves the
+		subquery boundary while avoiding a scalar/correlated fallback. */
+		(define joined_filter (combine_where derived_filter (coalesceNil (source_join_expr src) true)))
 		(list
-			(cons (source_with_join_expr derived_src derived_filter) helper_sources)
+			(cons (source_with_join_expr derived_src joined_filter) helper_sources)
 			(requalify_single_source_fields inner_alias alias (qb_fields inner))
 			true
 			rn_stage))))

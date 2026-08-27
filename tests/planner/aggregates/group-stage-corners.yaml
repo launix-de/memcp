@@ -260,6 +260,63 @@ test_cases:
         - customer: "Charlie"
           products: 1
 
+  - name: "COUNT DISTINCT preserves joined identifiers across shards"
+    setup:
+      - scm: '(settings "ShardSize" 32)'
+      - sql: "CREATE TABLE gs_distinct_entities (id BIGINT PRIMARY KEY, state VARCHAR(20))"
+      - sql: "CREATE TABLE gs_distinct_attributes (attribute_id BIGINT PRIMARY KEY, entity_id BIGINT, attribute_key VARCHAR(40))"
+      - sql: |
+          INSERT INTO gs_distinct_entities VALUES
+            (1000001, 'active')
+      - sql: |
+          INSERT INTO gs_distinct_attributes VALUES
+            (1, 1000001, 'alpha'), (2, 1000001, 'beta')
+      - sql: |
+          SELECT a.attribute_key, COUNT(DISTINCT a.entity_id) AS entities_found
+          FROM gs_distinct_attributes a
+          INNER JOIN gs_distinct_entities e ON e.id = a.entity_id
+          WHERE e.state = 'active'
+          GROUP BY a.attribute_key
+      - scm: |
+          (begin
+            (define rows (produceN 127 (lambda (i) (list (+ i 1000002) "active"))))
+            (insert (table "memcp-tests" "gs_distinct_entities") '("id" "state") rows '() (lambda () true) false))
+      - scm: |
+          (begin
+            (define rows (produceN 254 (lambda (i)
+              (list (+ i 3)
+                    (+ (floor (/ i 2)) 1000002)
+                    (if (equal? (mod i 2) 0) "alpha" "beta")))))
+            (insert (table "memcp-tests" "gs_distinct_attributes") '("attribute_id" "entity_id" "attribute_key") rows '() (lambda () true) false))
+      - sql: "SELECT COUNT(*) AS n FROM gs_distinct_entities WHERE id > 0"
+      - sql: "SELECT COUNT(*) AS n FROM gs_distinct_attributes WHERE entity_id > 0"
+      - scm: '(rebuild (table "memcp-tests" "gs_distinct_entities") true true)'
+      - scm: '(rebuild (table "memcp-tests" "gs_distinct_attributes") true true)'
+      - scm: '(settings "ShardSize" 60000)'
+    sql: |
+      SELECT a.attribute_key,
+             COUNT(*) AS rows_found,
+             COUNT(DISTINCT a.entity_id) AS entities_found
+      FROM gs_distinct_attributes a
+      INNER JOIN gs_distinct_entities e ON e.id = a.entity_id
+      WHERE e.state = 'active'
+      GROUP BY a.attribute_key
+      HAVING COUNT(*) >= 2
+      ORDER BY a.attribute_key
+    expect:
+      rows: 2
+      data:
+        - attribute_key: "alpha"
+          rows_found: 128
+          entities_found: 128
+        - attribute_key: "beta"
+          rows_found: 128
+          entities_found: 128
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS gs_distinct_attributes"
+      - sql: "DROP TABLE IF EXISTS gs_distinct_entities"
+      - scm: '(settings "ShardSize" 60000)'
+
   # =================================================================
   # 7. Scalar subquery with COUNT(DISTINCT)
   # =================================================================
