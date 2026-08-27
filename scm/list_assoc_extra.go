@@ -39,7 +39,7 @@ func init_list_assoc_extra() {
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a mapped dictionary according to a map function\nValues stay the same but keys are mapped.",
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "dict", Description: "dictionary whose keys have to be mapped", NoEscape: true},
-				{Kind: "func", Label: "map", Description: "map function func(key, value)->key where the first parameter is the old key, the second is the value. It must return the new key.", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "map", Description: "computes a replacement key for each dictionary entry", Params: []*TypeDescriptor{{Kind: "string", Label: "key", Description: "existing key"}, {Kind: "any", Label: "value", Description: "entry value"}}, Return: &TypeDescriptor{Kind: "any", Label: "new_key", Description: "replacement key"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -71,7 +71,7 @@ func init_list_assoc_extra() {
 		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only key remap for dictionaries",
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "dict", Description: "owned dictionary whose keys have to be remapped"},
-				{Kind: "func", Label: "map", Description: "map function func(key, value)->key", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "map", Description: "computes a replacement key for each dictionary entry", Params: []*TypeDescriptor{{Kind: "string", Label: "key", Description: "existing key"}, {Kind: "any", Label: "value", Description: "entry value"}}, Return: &TypeDescriptor{Kind: "any", Label: "new_key", Description: "replacement key"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,

@@ -815,7 +815,7 @@ func setupIO(wd string) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Loads a file and calls the callback. Whenever the file changes on disk, the file is load again.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "filename", Description: "filename relative to folder of source file or absolute path"},
-				{Kind: "func", Label: "updatehandler", Description: "handler that receives the file content func(content)", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "content"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "updatehandler", Description: "handler that receives the file content whenever it changes", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "content", Description: "new file content"}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "ignored handler result"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -827,7 +827,7 @@ func setupIO(wd string) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Opens a HTTP server at a given port", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", Label: "port", Description: "port number for HTTP server"},
-				{Kind: "func", Label: "handler", Description: "handler: lambda(req res) that handles the http request", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "req"}, {Kind: "any", Label: "res"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "handler", Description: "handler that processes each HTTP request", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "req", Description: "HTTP request object"}, {Kind: "any", Label: "res", Description: "HTTP response object"}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "handler result"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -836,16 +836,16 @@ func setupIO(wd string) {
 		Name: "serveStatic",
 
 		Fn: (func(...scm.Scmer) scm.Scmer)(scm.HTTPStaticGetter(wd)),
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a static handler for use as a callback in (serve) - returns a handler lambda(req res)", HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a static-file HTTP handler for use with serve", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "directory", Description: "folder with the files to serve"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "func",
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "handler", Description: "HTTP handler that serves files from the configured directory",
 				Params: []*scm.TypeDescriptor{
 					{Kind: "any", Label: "req", Description: "HTTP request object"},
 					{Kind: "any", Label: "res", Description: "HTTP response object"},
 				},
-				Return: &scm.TypeDescriptor{Kind: "any"},
+				Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "handler result"},
 			},
 		},
 	})
@@ -856,8 +856,8 @@ func setupIO(wd string) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Imports a file .scm file into current namespace", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "number", Label: "port", Description: "port number for MySQL server"},
-				{Kind: "func", Label: "getPassword", Description: "lambda(username string) string|nil has to return the password for a user or nil to deny login", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username"}}, Return: &scm.TypeDescriptor{Kind: "string|nil"}},
-				{Kind: "func", Label: "schemacallback", Description: "lambda(username schema) bool handler check whether user is allowed to schema - you should check access rights here", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username"}, {Kind: "string", Label: "schema"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Label: "getPassword", Description: "returns the password for a user, or nil to deny login", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username", Description: "user attempting to log in"}}, Return: &scm.TypeDescriptor{Kind: "string|nil", Label: "password", Description: "password used for authentication, or nil to deny login"}},
+				{Kind: "func", Label: "schemacallback", Description: "checks whether a user may access a schema", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username", Description: "authenticated user"}, {Kind: "string", Label: "schema", Description: "requested schema"}}, Return: &scm.TypeDescriptor{Kind: "bool", Label: "allowed", Description: "whether access is allowed"}},
 				{Kind: "func", Label: "handler", Description: "processes one SQL query in a schema", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "sql"}, {Kind: "func", Label: "resultrow", Description: "emits one result row", Params: []*scm.TypeDescriptor{{Kind: "list", Label: "row", Element: &scm.TypeDescriptor{Kind: "any", Label: "column value"}}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result"}}, {Kind: "func", Label: "session", Description: "reads or updates request-local values", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "stored value"}}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
@@ -870,8 +870,8 @@ func setupIO(wd string) {
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Listen on a Unix domain socket for MySQL protocol", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "socketpath", Description: "path to the Unix domain socket"},
-				{Kind: "func", Label: "getPassword", Description: "lambda(username string) string|nil has to return the password for a user or nil to deny login", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username"}}, Return: &scm.TypeDescriptor{Kind: "string|nil"}},
-				{Kind: "func", Label: "schemacallback", Description: "lambda(username schema) bool handler check whether user is allowed to schema - you should check access rights here", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username"}, {Kind: "string", Label: "schema"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Label: "getPassword", Description: "returns the password for a user, or nil to deny login", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username", Description: "user attempting to log in"}}, Return: &scm.TypeDescriptor{Kind: "string|nil", Label: "password", Description: "password used for authentication, or nil to deny login"}},
+				{Kind: "func", Label: "schemacallback", Description: "checks whether a user may access a schema", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "username", Description: "authenticated user"}, {Kind: "string", Label: "schema", Description: "requested schema"}}, Return: &scm.TypeDescriptor{Kind: "bool", Label: "allowed", Description: "whether access is allowed"}},
 				{Kind: "func", Label: "handler", Description: "processes one SQL query in a schema", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "schema"}, {Kind: "string", Label: "sql"}, {Kind: "func", Label: "resultrow", Description: "emits one result row", Params: []*scm.TypeDescriptor{{Kind: "list", Label: "row", Element: &scm.TypeDescriptor{Kind: "any", Label: "column value"}}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result"}}, {Kind: "func", Label: "session", Description: "reads or updates request-local values", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "stored value"}}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},

@@ -4777,7 +4777,9 @@ func init_strings() {
 				ctx.BindReg(d4.Reg, &d4)
 				ctx.BindReg(d4.Reg2, &d4)
 				if d4.Loc == LocImm {
-					if result.Loc == LocAny { return d4 }
+					if result.Loc == LocAny {
+						return d4
+					}
 				}
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
@@ -10115,12 +10117,12 @@ func init_strings() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a canonical order relation for a collation and direction. MemCP allows natural sorting of numeric literals.",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "collation", Description: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", Label: "reverse", Description: "whether to reverse the order like in ORDER BY DESC", Optional: true}},
-			Return: &TypeDescriptor{Kind: "func",
+			Return: &TypeDescriptor{Kind: "func", Label: "relation", Description: "compares two values using the selected collation and direction",
 				Params: []*TypeDescriptor{
 					{Kind: "any", Label: "a", Description: "left operand"},
 					{Kind: "any", Label: "b", Description: "right operand"},
 				},
-				Return: &TypeDescriptor{Kind: "bool"},
+				Return: &TypeDescriptor{Kind: "bool", Label: "ordered", Description: "whether a sorts before b"},
 			},
 			Const: true,
 

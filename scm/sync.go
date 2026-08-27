@@ -526,15 +526,15 @@ func init_sync() {
 		Name: "newsession",
 
 		Fn: NewSession,
-		Type: &TypeDescriptor{Kind: "func", Description: "Creates a new session which is a threadsafe key-value store. Besides get/set/list, get_or_compute_scoped shares concurrent computation by a query-local handle.",
-			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
+		Type: &TypeDescriptor{Kind: "func", Description: "Creates a thread-safe key-value session. Call it without arguments to list values, with a key to read, with a key and value to store, or with get_or_compute_scoped, a scope, a key, and a producer to share one concurrent computation.",
+			Return: &TypeDescriptor{Kind: "func", Label: "session", Description: "session accessor accepting exactly zero, one, two, or four arguments", HasSideEffects: true,
 				Params: []*TypeDescriptor{
 					{Kind: "any", Label: "key_or_operation", Description: "key, or get_or_compute_scoped", Optional: true},
-					{Kind: "any", Label: "value_scope_or_key", Description: "value, scope, or compute key", Optional: true},
-					{Kind: "any", Label: "key_or_producer", Description: "scoped key or producer", Optional: true},
-					{Kind: "func", Label: "scoped_producer", Description: "producer for scoped computation", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+					{Kind: "any", Label: "value_or_scope", Description: "value to store, or scope for get_or_compute_scoped", Optional: true},
+					{Kind: "any", Label: "scoped_key", Description: "cache key used by get_or_compute_scoped", Optional: true},
+					{Kind: "func", Label: "scoped_producer", Description: "producer used only by the four-argument get_or_compute_scoped form", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "value", Description: "computed value cached for the scope and key"}},
 				},
-				Return: &TypeDescriptor{Kind: "any"},
+				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value list, stored value, retrieved value, or shared computed value"},
 			},
 		},
 	})
@@ -745,11 +745,11 @@ func init_sync() {
 			Params: []*TypeDescriptor{
 				{Kind: "func", Label: "f", Description: "function that produces the result value", Params: []*TypeDescriptor{{Kind: "any", Label: "argument", Variadic: true}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 			},
-			Return: &TypeDescriptor{Kind: "func",
+			Return: &TypeDescriptor{Kind: "func", Label: "once_wrapper", Description: "calls the wrapped function once and returns its cached result thereafter",
 				Params: []*TypeDescriptor{
 					{Kind: "any", Label: "args", Description: "arguments forwarded to the wrapped function on first call", Variadic: true},
 				},
-				Return: &TypeDescriptor{Kind: "any"},
+				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result cached from the first call"},
 			},
 
 			JITEmit: nil,
@@ -792,11 +792,11 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "Creates a context-aware mutex. The return value serializes calls to parameterless functions and stops waiting when the current request is cancelled.",
 			Params: []*TypeDescriptor{},
-			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Return: &TypeDescriptor{Kind: "func", Label: "locked", Description: "executes one parameterless function while holding the mutex", HasSideEffects: true,
 				Params: []*TypeDescriptor{
 					{Kind: "func", Label: "fn", Description: "parameterless function to execute under the lock", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 				},
-				Return: &TypeDescriptor{Kind: "any"},
+				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result returned by the protected function"},
 			},
 
 			JITEmit: nil,

@@ -19,6 +19,7 @@ package scm
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -170,5 +171,74 @@ func TestHelpUsesRecursiveTypeDescriptors(t *testing.T) {
 	}
 	if strings.Contains(help, "visit (func(row:list<any>) -> bool)") {
 		t.Fatalf("recursive help repeats an expanded callback signature:\n%s", help)
+	}
+}
+
+func TestFunctionFactoriesDescribeReturnedFunctions(t *testing.T) {
+	tests := []struct {
+		name              string
+		returnLabel       string
+		nestedReturnLabel string
+	}{
+		{name: "make_structural_index", returnLabel: "lookup"},
+		{name: "make_structural_catalog", returnLabel: "catalog", nestedReturnLabel: "value"},
+		{name: "newpromise", returnLabel: "promise"},
+		{name: "newsession", returnLabel: "session"},
+		{name: "once", returnLabel: "once_wrapper"},
+		{name: "mutex", returnLabel: "locked"},
+		{name: "parser", returnLabel: "parser"},
+		{name: "lambda", returnLabel: "lambda"},
+		{name: "collate", returnLabel: "relation"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			declaration := declarations[test.name]
+			if declaration == nil || declaration.Type == nil || declaration.Type.Return == nil {
+				t.Fatalf("%s has no declared return type", test.name)
+			}
+			returned := declaration.Type.Return
+			if !hasTypeKind(returned.Kind, "func") {
+				t.Fatalf("%s return kind = %q, want a function", test.name, returned.Kind)
+			}
+			if returned.Label != test.returnLabel || returned.Description == "" {
+				t.Fatalf("%s returned function label/description = %q/%q", test.name, returned.Label, returned.Description)
+			}
+			if returned.Return == nil || returned.Return.Label == "" || returned.Return.Description == "" {
+				t.Fatalf("%s returned function has an undocumented result: %#v", test.name, returned.Return)
+			}
+			if test.nestedReturnLabel != "" {
+				if !hasTypeKind(returned.Return.Kind, "func") || returned.Return.Return == nil {
+					t.Fatalf("%s does not describe its second-level returned function", test.name)
+				}
+				if returned.Return.Return.Label != test.nestedReturnLabel || returned.Return.Return.Description == "" {
+					t.Fatalf("%s second-level result is undocumented: %#v", test.name, returned.Return.Return)
+				}
+			}
+		})
+	}
+}
+
+func TestCallbackDescriptionsDoNotRepeatStructuredSignatures(t *testing.T) {
+	var inspect func(string, *TypeDescriptor)
+	inspect = func(path string, descriptor *TypeDescriptor) {
+		if descriptor == nil {
+			return
+		}
+		if hasTypeKind(descriptor.Kind, "func") && (strings.Contains(descriptor.Description, "func(") || strings.Contains(descriptor.Description, "lambda(")) {
+			t.Errorf("%s repeats a structured function signature in its description: %q", path, descriptor.Description)
+		}
+		for i, param := range descriptor.Params {
+			inspect(path+".param["+strconv.Itoa(i)+"]", param)
+		}
+		inspect(path+".return", descriptor.Return)
+		inspect(path+".element", descriptor.Element)
+		for key, value := range descriptor.Keys {
+			inspect(path+".key["+key+"]", value)
+		}
+	}
+
+	for name, declaration := range declarations {
+		inspect(name, declaration.Type)
 	}
 }

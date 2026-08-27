@@ -997,9 +997,9 @@ func Init(en scm.Env) {
 				{Kind: "recset", Label: "source_recset"},
 				{Kind: "list", Label: "source_key_columns"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{
-				{Kind: "any", Label: "key", Variadic: true},
-			}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "lookup", Description: "tests whether the recset contains a row with the supplied composite key", Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "key", Description: "one value for each source key column, in the same order", Variadic: true},
+			}, Return: &scm.TypeDescriptor{Kind: "bool", Label: "present", Description: "whether the composite key occurs in the recset"}},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -3027,7 +3027,7 @@ func Init(en scm.Env) {
 				{Kind: "list", Label: "onCollisionCols", Description: "list of columns of the old dataset that have to be passed to onCollision. Can also request $update, $set:<computed-column>, or NEW.<insert-column>.", Optional: true},
 				{Kind: "func", Label: "onCollision", Description: "function called for each collision. Its positional parameters are the values requested by onCollisionCols, in the same order. If omitted, collisions raise an error.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "column values", Description: "one value for each onCollisionCols entry", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result"}},
 				{Kind: "bool", Label: "mergeNull", Description: "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)", Optional: true},
-				{Kind: "func", Label: "onInsertid", Description: "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "number", Label: "id"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "onInsertid", Description: "called once with the first auto_increment id assigned for this INSERT", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "number", Label: "id", Description: "first assigned auto_increment id"}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "ignored callback result"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "number"},
 		},
