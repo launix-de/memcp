@@ -143,11 +143,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			}
 			// update CacheManager size for temp columns
 			if c.IsTemp {
-				var totalRows int64
-				for _, s := range shardlist {
-					totalRows += int64(s.Count())
-				}
-				GlobalCache.UpdateSize(c, totalRows*16) // ~16 bytes per value estimate
+				GlobalCache.SetSize(c, t.tempColumnMemory(c, shardlist))
 			}
 			if metadataChanged {
 				t.ddlMu.Lock()
@@ -169,6 +165,22 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 		}
 	}
 	panic("column " + t.Name + "." + name + " does not exist")
+}
+
+func (t *table) tempColumnMemory(column *column, shards []*storageShard) int64 {
+	var size int64
+	for _, shard := range shards {
+		if shard == nil {
+			continue
+		}
+		shard.mu.RLock()
+		storage := shard.columns[column.Name]
+		if storage != nil {
+			size += int64(storage.ComputeSize())
+		}
+		shard.mu.RUnlock()
+	}
+	return size
 }
 
 func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {

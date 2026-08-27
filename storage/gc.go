@@ -17,55 +17,142 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package storage
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 
-	"github.com/launix-de/memcp/scm"
+	"github.com/google/uuid"
 )
 
-// CleanDatabase removes orphaned blob files and shard column/log files for db.
-// Orphaned blobs are those on disk with no entry (or refcount=0) in the .blobs table.
-// Orphaned shard files are those whose UUID-prefix is not in any active shard.
-// Safe to call on a live, loaded database.
+const blobManifestColumn = ".blobrefs-v1"
+
+const blobManifestHeader = "memcp-blob-references-v1\n"
+
+// CleanDatabase removes only disk objects proven unowned by the complete active
+// generation. It serializes against rebuild/repartition publication, but does
+// not stop ordinary queries or DML.
 func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
+	// Startup cleanup runs immediately after the lazy database catalog is
+	// discovered. An unloaded schema is not an empty schema: load its committed
+	// topology before proving that any disk object is unowned.
+	db.ensureLoaded()
+	db.persistenceLifecycle.Lock()
+	defer db.persistenceLifecycle.Unlock()
 	blobsDeleted = cleanBlobs(db)
 	shardsDeleted = cleanShards(db)
 	return
 }
 
-// cleanBlobs deletes blob files that are not referenced in the .blobs table.
-// IncrBlobRefcount is always called BEFORE WriteBlob, and the per-hash lock
-// prevents cleanup from racing a missing-row insert or final decrement.
-// Queries the .blobs table per blob file instead of building an in-memory map.
+// cleanBlobs deletes a blob only when every active persistent shard generation
+// has supplied a valid ownership manifest. The refcount table is operational
+// metadata and can lag after a crash, so it is never proof that deletion is
+// safe. Legacy or incomplete generations make cleanup a conservative no-op.
 func cleanBlobs(db *database) int {
-	bt := db.GetTable(".blobs")
-	if bt == nil {
+	references, complete := activeBlobReferences(db)
+	if !complete {
 		return 0
 	}
-	aggr := sumProc()
 
-	// Walk disk blobs one by one; check refcount via scan on .blobs table.
 	deleted := 0
 	db.persistence.WalkBlobs(func(hash string) error {
 		defer db.lockBlobRef(hash)()
-		state := db.blobRefState()
-		state.rows.RLock()
-		defer state.rows.RUnlock()
-		hashVal := scm.NewString(hash)
-		// scan .blobs WHERE hash = <hash>, sum refcount
-		rc := bt.scan(
-			nil,
-			[]string{"hash"}, blobCondition(hashVal),
-			[]string{"refcount"},
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
-			aggr, scm.NewInt(0), aggr, false,
-		)
-		if scm.ToInt(rc) <= 0 {
+		if _, live := references[hash]; !live {
 			db.persistence.DeleteBlob(hash)
 			deleted++
 		}
 		return nil
 	})
 	return deleted
+}
+
+func activeBlobReferences(db *database) (map[string]struct{}, bool) {
+	db.schemalock.RLock()
+	defer db.schemalock.RUnlock()
+	references := make(map[string]struct{})
+	for _, table := range db.tables.GetAll() {
+		if table.Name == ".blobs" || table.PersistencyMode == Memory || table.PersistencyMode == Cache {
+			continue
+		}
+		for _, shard := range table.ActiveShards() {
+			if shard == nil {
+				continue
+			}
+			reader := db.persistence.ReadColumn(shard.uuid.String(), blobManifestColumn)
+			if _, failed := reader.(ErrorReader); failed {
+				reader.Close()
+				return nil, false
+			}
+			scanner := bufio.NewScanner(reader)
+			if !scanner.Scan() || scanner.Text()+"\n" != blobManifestHeader {
+				reader.Close()
+				return nil, false
+			}
+			if !scanner.Scan() {
+				reader.Close()
+				return nil, false
+			}
+			expectedChecksum, err := hex.DecodeString(scanner.Text())
+			if err != nil || len(expectedChecksum) != sha256.Size {
+				reader.Close()
+				return nil, false
+			}
+			hasher := sha256.New()
+			for scanner.Scan() {
+				hash := strings.TrimSpace(scanner.Text())
+				if decoded, err := hex.DecodeString(hash); err != nil || len(decoded) != sha256.Size {
+					reader.Close()
+					return nil, false
+				}
+				hasher.Write([]byte(hash + "\n"))
+				references[hash] = struct{}{}
+			}
+			if err := scanner.Err(); err != nil {
+				reader.Close()
+				return nil, false
+			}
+			reader.Close()
+			if !bytes.Equal(hasher.Sum(nil), expectedChecksum) {
+				return nil, false
+			}
+		}
+	}
+	return references, true
+}
+
+func writeBlobManifest(shard *storageShard) {
+	if shard == nil || shard.t == nil || shard.t.schema == nil || shard.uuid == uuid.Nil {
+		return
+	}
+	if shard.t.PersistencyMode == Memory || shard.t.PersistencyMode == Cache || shard.t.Name == ".blobs" {
+		return
+	}
+	references := make(map[string]struct{})
+	for _, column := range shard.columns {
+		if blobs, ok := column.(*OverlayBlob); ok {
+			blobs.appendBlobReferences(references, shard.main_count)
+		}
+	}
+	hashes := make([]string, 0, len(references))
+	for hash := range references {
+		hashes = append(hashes, hash)
+	}
+	sort.Strings(hashes)
+	body := ""
+	if len(hashes) > 0 {
+		body = strings.Join(hashes, "\n") + "\n"
+	}
+	checksum := sha256.Sum256([]byte(body))
+	writer := shard.t.schema.persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
+	manifest := blobManifestHeader + hex.EncodeToString(checksum[:]) + "\n" + body
+	if _, err := writer.Write([]byte(manifest)); err != nil {
+		_ = writer.Close()
+		panic(err)
+	}
+	finishColumnWrite(writer, shard.t.PersistencyMode == Safe)
 }
 
 // cleanShards deletes shard column/log files whose UUID is not in any active shard.

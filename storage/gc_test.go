@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/launix-de/memcp/scm"
 )
@@ -41,6 +42,31 @@ func setupGCTest(t *testing.T) func() {
 		databases.Remove("gcdb")
 		Basepath = oldBasepath
 		os.RemoveAll(dir)
+	}
+}
+
+func TestCleanDatabaseWaitsForGenerationPublication(t *testing.T) {
+	defer setupGCTest(t)()
+	CreateDatabase("gcdb", false)
+	db := GetDatabase("gcdb")
+
+	db.persistenceLifecycle.RLock()
+	done := make(chan struct{})
+	go func() {
+		CleanDatabase(db)
+		close(done)
+	}()
+	select {
+	case <-done:
+		db.persistenceLifecycle.RUnlock()
+		t.Fatal("cleanup entered while an unpublished generation was active")
+	case <-time.After(25 * time.Millisecond):
+	}
+	db.persistenceLifecycle.RUnlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not resume after generation publication")
 	}
 }
 
@@ -163,6 +189,141 @@ func TestCleanOrphanedBlob(t *testing.T) {
 		scm.NewNil(), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }), false)
 	if count != 3 {
 		t.Errorf("expected 3 rows after GC, got %d", count)
+	}
+}
+
+// TestCleanBlobsRequiresCompleteActiveManifests verifies the conservative
+// deletion contract: a blob is garbage only when every active shard generation
+// has proved its references. A missing manifest must turn cleanup into a no-op,
+// never into a best-effort deletion based on secondary refcount metadata.
+func TestCleanBlobsRequiresCompleteActiveManifests(t *testing.T) {
+	defer setupGCTest(t)()
+
+	CreateDatabase("gcdb", false)
+	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+	insertLongRows(t, tbl, []string{
+		strings.Repeat("m", maxInlineBlobBytes+1),
+		strings.Repeat("n", maxInlineBlobBytes+1),
+		strings.Repeat("o", maxInlineBlobBytes+1),
+	})
+
+	shards := tbl.ActiveShards()
+	if len(shards) == 0 || shards[0] == nil {
+		t.Fatal("expected an active shard")
+	}
+	tbl.schema.persistence.RemoveColumn(shards[0].uuid.String(), blobManifestColumn)
+
+	orphanHash := "feedfacefeedfacefeedfacefeedface"
+	orphanPath := filepath.Join(Basepath, "gcdb", "blob", orphanHash[:2], orphanHash[2:4])
+	if err := os.MkdirAll(orphanPath, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanPath, orphanHash), []byte("orphan"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, _ := CleanDatabase(tbl.schema)
+	if deleted != 0 {
+		t.Fatalf("cleanup deleted %d blobs without a complete active manifest", deleted)
+	}
+	if _, err := os.Stat(filepath.Join(orphanPath, orphanHash)); err != nil {
+		t.Fatalf("unproven blob was removed: %v", err)
+	}
+}
+
+func TestStartupCleanLoadsColdSchemaBeforeBlobDeletion(t *testing.T) {
+	defer setupGCTest(t)()
+
+	CreateDatabase("gcdb", false)
+	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+	insertLongRows(t, tbl, []string{
+		strings.Repeat("c", maxInlineBlobBytes+1),
+		strings.Repeat("d", maxInlineBlobBytes+1),
+		strings.Repeat("e", maxInlineBlobBytes+1),
+	})
+	wantBlobs := len(blobFiles(t, "gcdb"))
+	if wantBlobs == 0 {
+		t.Fatal("expected external blob fixture")
+	}
+
+	databases.Remove("gcdb")
+	LoadDatabases()
+	cold := GetDatabase("gcdb")
+	if cold == nil || cold.srState != COLD {
+		t.Fatal("expected lazily loaded database after catalog discovery")
+	}
+	deleted, _ := CleanDatabase(cold)
+	if deleted != 0 {
+		t.Fatalf("startup cleanup deleted %d live blobs from a cold schema", deleted)
+	}
+	if got := len(blobFiles(t, "gcdb")); got != wantBlobs {
+		t.Fatalf("live blob count after startup cleanup = %d, want %d", got, wantBlobs)
+	}
+}
+
+func TestCleanBlobsRejectsCorruptManifest(t *testing.T) {
+	defer setupGCTest(t)()
+
+	CreateDatabase("gcdb", false)
+	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+	insertLongRows(t, tbl, []string{
+		strings.Repeat("p", maxInlineBlobBytes+1),
+		strings.Repeat("q", maxInlineBlobBytes+1),
+		strings.Repeat("r", maxInlineBlobBytes+1),
+	})
+	shard := tbl.ActiveShards()[0]
+	writer := tbl.schema.persistence.WriteColumn(shard.uuid.String(), blobManifestColumn)
+	if _, err := writer.Write([]byte(blobManifestHeader + strings.Repeat("0", 64) + "\n" + strings.Repeat("f", 64) + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	orphanHash := "01230123012301230123012301230123"
+	orphanPath := filepath.Join(Basepath, "gcdb", "blob", orphanHash[:2], orphanHash[2:4])
+	if err := os.MkdirAll(orphanPath, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanPath, orphanHash), []byte("orphan"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	deleted, _ := CleanDatabase(tbl.schema)
+	if deleted != 0 {
+		t.Fatalf("cleanup trusted a corrupt manifest and deleted %d blobs", deleted)
+	}
+}
+
+func TestRepartitionPublishesBlobManifests(t *testing.T) {
+	defer setupGCTest(t)()
+
+	CreateDatabase("gcdb", false)
+	tbl, _ := CreateTable("gcdb", "docs", Safe, false)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("content", "TEXT", nil, nil)
+	insertLongRows(t, tbl, []string{
+		strings.Repeat("s", maxInlineBlobBytes+1),
+		strings.Repeat("t", maxInlineBlobBytes+1),
+		strings.Repeat("u", maxInlineBlobBytes+1),
+		strings.Repeat("v", maxInlineBlobBytes+1),
+	})
+	if !tbl.beginManualRepartition() {
+		t.Fatal("could not claim repartition")
+	}
+	tbl.repartition([]shardDimension{tbl.NewShardDimension("id", 2)})
+	for _, shard := range tbl.ActiveShards() {
+		reader := tbl.schema.persistence.ReadColumn(shard.uuid.String(), blobManifestColumn)
+		if _, failed := reader.(ErrorReader); failed {
+			reader.Close()
+			t.Fatalf("repartitioned shard %s has no blob manifest", shard.uuid)
+		}
+		reader.Close()
 	}
 }
 

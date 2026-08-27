@@ -542,6 +542,8 @@ func (t *table) proposerepartition(maincount uint) (shardCandidates []shardDimen
 // before invoking repartition). It manages its own shard-level locking.
 // maintenanceMu is already held and maintenanceKind is set to 2 by the caller.
 func (t *table) repartition(shardCandidates []shardDimension) {
+	t.schema.persistenceLifecycle.RLock()
+	defer t.schema.persistenceLifecycle.RUnlock()
 	t.ddlMu.RLock()
 	defer t.ddlMu.RUnlock()
 	t.repartitionDDLReadLocked(shardCandidates)
@@ -957,6 +959,11 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 	for i, built := range builtData {
 		mainCounts[i] = built.mainCount
 	}
+	// Blob ownership belongs to the unpublished shard generation. Persist its
+	// manifest before schema.json can make that generation authoritative.
+	for _, shard := range newshards {
+		writeBlobManifest(shard)
+	}
 	applyPendingDeletes := func() int {
 		t.repartitionPendingMu.Lock()
 		pending := t.repartitionPendingDels
@@ -1157,7 +1164,12 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			s.RemoveFromDisk()
 		}
 
-		if t.PersistencyMode != Memory && !strings.HasPrefix(t.Name, ".") {
+		if t.PersistencyMode == Cache && !t.isEphemeralQueryTable() {
+			for _, s := range newshards {
+				atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
+				GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+			}
+		} else if t.PersistencyMode != Memory && !t.isEphemeralQueryTable() {
 			for _, s := range newshards {
 				atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 				GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)

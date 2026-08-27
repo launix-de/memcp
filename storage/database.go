@@ -57,6 +57,11 @@ type database struct {
 	savePanic       any           `json:"-"`
 	schemaDirty     atomic.Bool   `json:"-"`
 	blobRefs        *blobRefState `json:"-"`
+	// persistenceLifecycle prevents cleanup from inspecting generation-private
+	// files between their write and schema publication. Rebuild/repartition take
+	// a read capability; cleanup takes the exclusive capability. Query and DML
+	// paths do not participate.
+	persistenceLifecycle sync.RWMutex `json:"-"`
 
 	// lazy-loading/shared-resource state (not serialized)
 	srState SharedState `json:"-"`
@@ -223,7 +228,9 @@ func RebuildTable(tbl *table, all bool, repartition bool) string {
 		panic("cannot rebuild a stale table handle")
 	}
 
-	result := tbl.schema.rebuild(all, repartition, true, tbl)
+	tbl.schema.persistenceLifecycle.RLock()
+	defer tbl.schema.persistenceLifecycle.RUnlock()
+	result := tbl.schema.rebuildWithLifecycle(all, repartition, true, tbl)
 	errs := append([]string(nil), result.errors...)
 	if len(errs) == 0 {
 		if err := func() (err error) {
@@ -253,7 +260,9 @@ func rebuildDatabases(all bool, repartition bool, includeEphemeral bool) string 
 	var errs []string
 	for _, db := range dbs {
 		func(db *database) {
-			result := db.rebuild(all, repartition, includeEphemeral)
+			db.persistenceLifecycle.RLock()
+			defer db.persistenceLifecycle.RUnlock()
+			result := db.rebuildWithLifecycle(all, repartition, includeEphemeral)
 			if len(result.errors) > 0 {
 				errs = append(errs, result.errors...)
 				return
@@ -533,6 +542,15 @@ func (db *database) ensureLoaded() {
 		// FK enforcement triggers are serializable Procs and persist with the table JSON.
 		// No re-installation needed on load.
 		db.srState = SHARED
+		// Dot-prefixed cache tables are planner-owned and persisted only so a
+		// warm query cache can survive restart. Re-register their table-level
+		// owner after loading; durable internal tables such as .blobs remain
+		// ordinary shard-owned storage.
+		for _, table := range db.tables.GetAll() {
+			if table.isEphemeralQueryTable() {
+				registerCreatedTable(table)
+			}
+		}
 	})
 }
 
@@ -626,6 +644,15 @@ func (db *database) ShowTables() scm.Scmer {
 }
 
 func (db *database) rebuild(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
+	db.persistenceLifecycle.RLock()
+	defer db.persistenceLifecycle.RUnlock()
+	return db.rebuildWithLifecycle(all, repartition, includeEphemeral, only...)
+}
+
+// rebuildWithLifecycle requires a persistenceLifecycle read capability. The
+// public rebuild paths retain it through schema publication, so cleanup cannot
+// observe generation-private files in the build→publish interval.
+func (db *database) rebuildWithLifecycle(all bool, repartition bool, includeEphemeral bool, only ...*table) rebuildDatabaseResult {
 	if db.srState == COLD {
 		// do nothing for cold databases; avoid loading during rebuild
 		return rebuildDatabaseResult{}
@@ -1300,7 +1327,7 @@ func (db *database) newTable(name string, pm PersistencyMode) *table {
 func registerCreatedTable(t *table) {
 	// register temp keytable with CacheManager AFTER releasing schemalock
 	// to avoid deadlock: AddItem → run() → evict → keytableCleanup → TryLock(schemalock)
-	if strings.HasPrefix(t.Name, ".") {
+	if t.isEphemeralQueryTable() {
 		schemaName := t.schema.Name
 		GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeTempKeytable, func(ptr any, freedByType *[numEvictableTypes]int64) bool {
 			return keytableCleanup(ptr.(*table), schemaName, freedByType)
@@ -1308,6 +1335,10 @@ func registerCreatedTable(t *table) {
 	} else if t.PersistencyMode == Cache {
 		// Register the initial shard so eviction can reach it before the first rebuild.
 		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
+	} else if t.PersistencyMode != Memory {
+		// The initial writable generation owns WAL/delta memory before its first
+		// rebuild just as much as a rebuilt shard does.
+		GlobalCache.AddItem(t.Shards[0], int64(t.Shards[0].ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 }
 

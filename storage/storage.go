@@ -3034,22 +3034,35 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "stat",
-
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				memTotal, memAvail := ReadMemInfo()
 				processMem := ReadProcessRSS()
 				cs := GlobalCache.Stat()
+				nonEvictable := processMem - cs.CurrentMemory
+				if nonEvictable < 0 {
+					nonEvictable = 0
+				}
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewString("mem_available"), scm.NewInt(memAvail),
 					scm.NewString("mem_total"), scm.NewInt(memTotal),
 					scm.NewString("process_memory"), scm.NewInt(processMem),
+					scm.NewString("evictable_memory"), scm.NewInt(cs.CurrentMemory),
+					scm.NewString("non_evictable_process_memory"), scm.NewInt(nonEvictable),
 					scm.NewString("shard_memory"), scm.NewInt(cs.CurrentMemory),
 					scm.NewString("shard_budget"), scm.NewInt(cs.MemoryBudget),
 					scm.NewString("persisted_memory"), scm.NewInt(cs.PersistedMemory),
 					scm.NewString("persisted_budget"), scm.NewInt(cs.PersistedBudget),
 					scm.NewString("cache_entry_count"), scm.NewInt(cs.CountByType[TypeCacheEntry]),
 					scm.NewString("cache_entry_size"), scm.NewInt(cs.SizeByType[TypeCacheEntry]),
+					scm.NewString("shard_column_size"), scm.NewInt(cs.SizeByType[TypeShard]),
+					scm.NewString("index_size"), scm.NewInt(cs.SizeByType[TypeIndex]),
+					scm.NewString("temp_column_size"), scm.NewInt(cs.SizeByType[TypeTempColumn]),
+					scm.NewString("temp_column_count"), scm.NewInt(cs.CountByType[TypeTempColumn]),
+					scm.NewString("temp_keytable_size"), scm.NewInt(cs.SizeByType[TypeTempKeytable]),
+					scm.NewString("temp_keytable_count"), scm.NewInt(cs.CountByType[TypeTempKeytable]),
+					scm.NewString("string_dictionary_size"), scm.NewInt(cs.SizeByType[TypeStringDict]),
+					scm.NewString("string_dictionary_count"), scm.NewInt(cs.CountByType[TypeStringDict]),
 				})
 			} else if len(a) == 1 {
 				return scm.NewString(GetDatabase(scm.String(a[0])).PrintMemUsage())
@@ -3060,7 +3073,7 @@ func Init(en scm.Env) {
 			}
 			return scm.NewNil()
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "return system statistics as assoc: mem_available, mem_total, process_memory, shard_memory, shard_budget, persisted_memory, persisted_budget, cache_entry_count, cache_entry_size.\n(stat schema) and (stat schema tbl) return a string with detailed memory usage.",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return system statistics as assoc. process_memory is RSS; evictable_memory and its per-owner size/count fields are disjoint CacheManager ownership; non_evictable_process_memory is their difference. shard_memory remains a compatibility alias for evictable_memory.\n(stat schema) and (stat schema tbl) return a string with detailed memory usage.",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "string", Label: "schema", Description: "(optional) database name for detailed string output", Optional: true},
 				{Kind: "string", Label: "table", Description: "(optional) table name for detailed string output", Optional: true},

@@ -164,12 +164,46 @@ func (s *FileStorage) ReadBlob(hash string) io.ReadCloser {
 
 func (s *FileStorage) WriteBlob(hash string) io.WriteCloser {
 	p := s.blobPath(hash)
-	os.MkdirAll(p[:strings.LastIndex(p, "/")], 0750)
-	f, err := os.Create(p)
+	dir := p[:strings.LastIndex(p, "/")]
+	os.MkdirAll(dir, 0750)
+	f, err := os.CreateTemp(dir, ".blob-write-")
 	if err != nil {
 		panic(err)
 	}
-	return f
+	return &fileBlobWriter{File: f, finalPath: p, directory: dir}
+}
+
+// fileBlobWriter publishes a content-addressed blob only after the complete
+// payload is durable. Linking is a no-replace operation: concurrent writers of
+// the same hash keep the first complete object instead of truncating it.
+type fileBlobWriter struct {
+	*os.File
+	finalPath string
+	directory string
+}
+
+func (w *fileBlobWriter) Close() error {
+	if err := w.File.Sync(); err != nil {
+		w.File.Close()
+		os.Remove(w.File.Name())
+		return err
+	}
+	if err := w.File.Close(); err != nil {
+		os.Remove(w.File.Name())
+		return err
+	}
+	err := os.Link(w.File.Name(), w.finalPath)
+	if err != nil && !os.IsExist(err) {
+		os.Remove(w.File.Name())
+		return err
+	}
+	os.Remove(w.File.Name())
+	dir, err := os.Open(w.directory)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (s *FileStorage) DeleteBlob(hash string) {
@@ -180,6 +214,9 @@ func (s *FileStorage) WalkBlobs(fn func(hash string) error) error {
 	return filepath.Walk(s.path+"blob/", func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
+		}
+		if strings.HasPrefix(info.Name(), ".blob-write-") {
+			return nil
 		}
 		return fn(info.Name())
 	})

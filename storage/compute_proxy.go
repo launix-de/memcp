@@ -697,9 +697,30 @@ func (p *StorageComputeProxy) orcCol() *column {
 func (p *StorageComputeProxy) ComputeSize() uint {
 	var sz uint = 128 // struct overhead
 	sz += p.validMask.ComputeSize()
+	p.mu.RLock()
 	sz += uint(len(p.delta)) * 24 // rough estimate per map entry
 	if p.main != nil {
 		sz += p.main.ComputeSize()
+	}
+	p.mu.RUnlock()
+
+	// Session-bound variants are owned by this proxy as well. Snapshot the map
+	// under variantsMu, then measure each variant under its own lock so size
+	// accounting never races lazy materialization or invalidation.
+	p.variantsMu.RLock()
+	variants := make([]*storageComputeVariant, 0, len(p.variants))
+	for _, variant := range p.variants {
+		variants = append(variants, variant)
+	}
+	p.variantsMu.RUnlock()
+	for _, variant := range variants {
+		variant.mu.RLock()
+		sz += 96 + variant.validMask.ComputeSize()
+		sz += uint(len(variant.delta)) * 24
+		if variant.main != nil {
+			sz += variant.main.ComputeSize()
+		}
+		variant.mu.RUnlock()
 	}
 	return sz
 }
