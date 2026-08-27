@@ -216,44 +216,44 @@ func initMetricsDeclarations(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "cpu_usage",
-		Desc: "Returns current CPU usage as a percentage (0-100)",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewFloat(loadSnapshot().cpuUsage)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns current CPU usage as a percentage (0-100)",
 			Return: &scm.TypeDescriptor{Kind: "number"},
 		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "active_connections",
-		Desc: "Returns the current number of active HTTP connections",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(atomic.LoadInt64(&scm.ActiveHTTPConnections))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns the current number of active HTTP connections",
 			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "max_connections",
-		Desc: "Returns the maximum number of HTTP connections over the last 10 minutes",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(loadSnapshot().maxConn10min)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns the maximum number of HTTP connections over the last 10 minutes",
 			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "requests_per_second",
-		Desc: "Returns the average number of HTTP requests per second over the last 10 seconds",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewFloat(loadSnapshot().rps)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns the average number of HTTP requests per second over the last 10 seconds",
 			Return: &scm.TypeDescriptor{Kind: "number"},
 		},
 	})

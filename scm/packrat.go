@@ -443,11 +443,13 @@ func init_parser() {
 	DeclareTitle("Parsers")
 	Declare(&Globalenv, &Declaration{
 		Name: "parser",
-		Desc: `creates a parser
-	
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: `creates a parser
+
 	Scm parsers work this way:
 	(parser syntax scmerresult) -> func
-	
+
 	syntax can be one of:
 	(parser syntax scmerresult) will execute scmerresult after parsing syntax
 	(parser syntax scmerresult "skipper") will add a different whitespace skipper regex to the root parser
@@ -465,13 +467,14 @@ func init_parser() {
 	$ EndParser
 	empty EmptyParser
 	symbol -> use other parser defined in env
-	
+
 	for further details on packrat parsers, take a look at https://github.com/launix-de/go-packrat
 	`,
-		Fn: nil,
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "syntax", ParamDesc: "syntax of the grammar (see docs)"}, &TypeDescriptor{Kind: "any", ParamName: "generator", ParamDesc: "(optional) expressions to evaluate. All captured variables are available in the scope.", Optional: true}, &TypeDescriptor{Kind: "string", ParamName: "skipper", ParamDesc: "(optional) string that defines the skip mechanism for whitespaces as regexp", Optional: true}},
-			Return: &TypeDescriptor{Kind: "func"},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "syntax", Description: "syntax of the grammar (see docs)"}, &TypeDescriptor{Kind: "any", Label: "generator", Description: "(optional) expressions to evaluate. All captured variables are available in the scope.", Optional: true}, &TypeDescriptor{Kind: "string", Label: "skipper", Description: "(optional) string that defines the skip mechanism for whitespaces as regexp", Optional: true}},
+			Return: &TypeDescriptor{Kind: "func", Label: "parser", Description: "parser produced from the grammar",
+				Params: []*TypeDescriptor{{Kind: "string", Label: "input", Description: "text to parse"}},
+				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value produced by the grammar generator"},
+			},
 		},
 	})
 }

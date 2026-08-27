@@ -1039,11 +1039,11 @@ func init() {
 	DeclareTitle("SCM Builtins")
 	Declare(&Globalenv, &Declaration{
 		Name: "quote",
-		Desc: "returns a symbol or list without evaluating it",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a symbol or list without evaluating it",
 			Params: []*TypeDescriptor{
-				{Kind: "symbol", ParamName: "symbol", ParamDesc: "symbol to quote"},
+				{Kind: "symbol", Label: "symbol", Description: "symbol to quote"},
 			},
 			Return: &TypeDescriptor{Kind: "symbol"},
 			Const:  true,
@@ -1051,24 +1051,24 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "eval",
-		Desc: "executes the given scheme program in the current environment",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "executes the given scheme program in the current environment",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"},
+				{Kind: "list", Label: "code", Description: "list with head and optional parameters"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "size",
-		Desc: "compute the memory size of a value",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewInt(int64(ComputeSize(a[0])))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "compute the memory size of a value",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value to examine"},
+				{Kind: "any", Label: "value", Description: "value to examine"},
 			},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
@@ -1183,7 +1183,7 @@ func init() {
 	}}
 	Declare(&Globalenv, &Declaration{
 		Name: "optimize",
-		Desc: "optimize the given scheme program and optionally report telemetry after completion",
+
 		Fn: func(a ...Scmer) Scmer {
 			var report func(Scmer)
 			if len(a) == 2 {
@@ -1194,11 +1194,11 @@ func init() {
 			}
 			return Optimize(a[0], &Globalenv, report)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "optimize the given scheme program and optionally report telemetry after completion",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "code", ParamDesc: "list with head and optional parameters"},
+				{Kind: "list", Label: "code", Description: "list with head and optional parameters"},
 				{
-					Kind: "func", ParamName: "telemetry_callback", ParamDesc: "optional callback invoked once with optimizer telemetry", Optional: true, NoEscape: true,
+					Kind: "func", Label: "telemetry_callback", Description: "optional callback invoked once with optimizer telemetry", Optional: true, NoEscape: true,
 					Params: []*TypeDescriptor{optimizerTelemetryType}, Return: &TypeDescriptor{Kind: "any"},
 				},
 			},
@@ -1225,25 +1225,25 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "time",
-		Desc: "measures the time it takes to compute the first argument",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "measures the time it takes to compute the first argument",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "code", ParamDesc: "code to execute"},
-				{Kind: "string", ParamName: "label", ParamDesc: "label to print in the log or trace", Optional: true},
+				{Kind: "any", Label: "code", Description: "code to execute"},
+				{Kind: "string", Label: "label", Description: "label to print in the log or trace", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "if",
-		Desc: "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "checks a condition and then conditionally evaluates code branches; there might be multiple condition+true-branch clauses",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "condition...", ParamDesc: "condition to evaluate"},
-				{Kind: "returntype", ParamName: "true-branch...", ParamDesc: "code to evaluate if condition is true"},
-				{Kind: "any", ParamName: "false-branch", ParamDesc: "code to evaluate if condition is false", Variadic: true},
+				{Kind: "any", Label: "condition...", Description: "condition to evaluate"},
+				{Kind: "returntype", Label: "true-branch...", Description: "code to evaluate if condition is true"},
+				{Kind: "any", Label: "false-branch", Description: "code to evaluate if condition is false", Variadic: true},
 			},
 			Return:   &TypeDescriptor{Kind: "returntype"},
 			Const:    true,
@@ -1252,11 +1252,11 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "and",
-		Desc: "lazily combines conditions using SQL three-valued logic; returns false on the first false value, nil for UNKNOWN, otherwise true",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "lazily combines conditions using SQL three-valued logic; returns false on the first false value, nil for UNKNOWN, otherwise true",
 			Params: []*TypeDescriptor{
-				{Kind: "bool", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true},
+				{Kind: "bool", Label: "condition", Description: "condition to evaluate", Variadic: true},
 			},
 			Return:   &TypeDescriptor{Kind: "bool"},
 			Const:    true,
@@ -1265,11 +1265,11 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "or",
-		Desc: "lazily combines conditions using SQL three-valued logic; returns true on the first true value, nil for UNKNOWN, otherwise false",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "lazily combines conditions using SQL three-valued logic; returns true on the first true value, nil for UNKNOWN, otherwise false",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "condition", ParamDesc: "condition to evaluate", Variadic: true},
+				{Kind: "any", Label: "condition", Description: "condition to evaluate", Variadic: true},
 			},
 			Return:   &TypeDescriptor{Kind: "bool"},
 			Const:    true,
@@ -1278,11 +1278,11 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "coalesce",
-		Desc: "returns the first value that has a non-zero value",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the first value that has a non-zero value",
 			Params: []*TypeDescriptor{
-				{Kind: "returntype", ParamName: "value", ParamDesc: "value to examine", Variadic: true},
+				{Kind: "returntype", Label: "value", Description: "value to examine", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "returntype"},
 			Const:  true,
@@ -1290,11 +1290,11 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "coalesceNil",
-		Desc: "returns the first value that has a non-nil value",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the first value that has a non-nil value",
 			Params: []*TypeDescriptor{
-				{Kind: "returntype", ParamName: "value", ParamDesc: "value to examine", Variadic: true},
+				{Kind: "returntype", Label: "value", Description: "value to examine", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "returntype"},
 			Const:  true,
@@ -1302,24 +1302,24 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "define",
-		Desc: "defines or sets a variable in the current environment",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "defines or sets a variable in the current environment",
 			Params: []*TypeDescriptor{
-				{Kind: "symbol", ParamName: "variable", ParamDesc: "variable to set"},
-				{Kind: "returntype", ParamName: "value", ParamDesc: "value to set the variable to"},
+				{Kind: "symbol", Label: "variable", Description: "variable to set"},
+				{Kind: "returntype", Label: "value", Description: "value to set the variable to"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "set",
-		Desc: "defines or sets a variable in the current environment",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "defines or sets a variable in the current environment",
 			Params: []*TypeDescriptor{
-				{Kind: "symbol", ParamName: "variable", ParamDesc: "variable to set"},
-				{Kind: "returntype", ParamName: "value", ParamDesc: "value to set the variable to"},
+				{Kind: "symbol", Label: "variable", Description: "variable to set"},
+				{Kind: "returntype", Label: "value", Description: "value to set the variable to"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
@@ -1328,7 +1328,7 @@ func init() {
 	// basic
 	Declare(&Globalenv, &Declaration{
 		Name: "error",
-		Desc: "halts the whole execution thread and throws an error message",
+
 		Fn: func(a ...Scmer) Scmer {
 			if len(a) == 1 {
 				panic(a[0])
@@ -1340,9 +1340,9 @@ func init() {
 				panic(b.String())
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "halts the whole execution thread and throws an error message",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value...", ParamDesc: "value or message to throw", Variadic: true},
+				{Kind: "any", Label: "value...", Description: "value or message to throw", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 
@@ -1351,7 +1351,7 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "try",
-		Desc: "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
+
 		Fn: func(a ...Scmer) (result Scmer) {
 			defer func() {
 				err := recover()
@@ -1362,10 +1362,10 @@ func init() {
 			result = Apply(a[0])
 			return
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "func", ParamDesc: "function with no parameters that will be called", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "errorhandler", ParamDesc: "function that takes the error as parameter", Params: []*TypeDescriptor{{Kind: "any", ParamName: "error"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "func", Description: "function with no parameters that will be called", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "errorhandler", Description: "function that takes the error as parameter", Params: []*TypeDescriptor{{Kind: "any", Label: "error"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -1375,14 +1375,14 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "apply",
-		Desc: "runs the function with its arguments",
+
 		Fn: func(a ...Scmer) Scmer {
 			return Apply(a[0], asSlice(a[1], "apply")...)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "runs the function with its arguments",
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "function", ParamDesc: "function to execute"},
-				{Kind: "list", ParamName: "arguments", ParamDesc: "list of arguments to apply"},
+				{Kind: "func", Label: "function", Description: "function to execute", Params: []*TypeDescriptor{{Kind: "any", Label: "argument", Variadic: true}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
+				{Kind: "list", Label: "arguments", Description: "list of arguments to apply"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -1392,14 +1392,14 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "apply_assoc",
-		Desc: "runs the function with its arguments but arguments is a assoc list",
+
 		Fn: func(a ...Scmer) Scmer {
 			return ApplyAssoc(a[0], asSlice(a[1], "apply_assoc"))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "runs the function with its arguments but arguments is a assoc list",
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "function", ParamDesc: "function to execute (must be a lambda)"},
-				{Kind: "list", ParamName: "arguments", ParamDesc: "assoc list of arguments to apply"},
+				{Kind: "func", Label: "function", Description: "function to execute (must be a lambda)", Params: []*TypeDescriptor{{Kind: "any", Label: "named argument", Variadic: true}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
+				{Kind: "list", Label: "arguments", Description: "assoc list of arguments to apply"},
 			},
 			Return: &TypeDescriptor{Kind: "symbol"},
 			Const:  true,
@@ -1409,13 +1409,13 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "symbol",
-		Desc: "returns a symbol built from that string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewSymbol(String(a[0]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a symbol built from that string",
 			Params: []*TypeDescriptor{
-				{Kind: "string", ParamName: "value", ParamDesc: "string value that will be converted into a symbol"},
+				{Kind: "string", Label: "value", Description: "string value that will be converted into a symbol"},
 			},
 			Return: &TypeDescriptor{Kind: "symbol"},
 
@@ -1586,11 +1586,11 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "list",
-		Desc: "returns a list containing the parameters as alements",
-		Fn:   nil,
-		Type: &TypeDescriptor{
+
+		Fn: nil,
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list containing the parameters as alements",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value...", ParamDesc: "value for the list", Variadic: true},
+				{Kind: "any", Label: "value...", Description: "value for the list", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
@@ -1598,7 +1598,7 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "for",
-		Desc: "Sequential loop over a list state; applies a condition and step function and returns the final state list.\nUse only when iterations have strong data dependencies and must run sequentially.\n\nExamples:\n- Count to 10: (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1))))  => '(10)\n- Sum 0..9:   (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))) => '(10 45)",
+
 		Fn: func(a ...Scmer) Scmer {
 			state := append([]Scmer{}, asSlice(a[0], "for init")...)
 			cond := OptimizeProcToSerialFunction(a[1])
@@ -1613,11 +1613,11 @@ func init() {
 			}
 			return NewSlice(state)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Sequential loop over a list state; applies a condition and step function and returns the final state list.\nUse only when iterations have strong data dependencies and must run sequentially.\n\nExamples:\n- Count to 10: (for '(0) (lambda (x) (< x 10)) (lambda (x) (list (+ x 1))))  => '(10)\n- Sum 0..9:   (for '(0 0) (lambda (x sum) (< x 10)) (lambda (x sum) (list (+ x 1) (+ sum x)))) => '(10 45)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "init", ParamDesc: "initial state as a list"},
-				{Kind: "func", ParamName: "condition", ParamDesc: "func that receives the current state as parameters and must return true if the loop shall be continued", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "step", ParamDesc: "step func that returns the next state as a list", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
+				{Kind: "list", Label: "init", Description: "initial state as a list"},
+				{Kind: "func", Label: "condition", Description: "func that receives the current state as parameters and must return true if the loop shall be continued", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Label: "step", Description: "step func that returns the next state as a list", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -1628,7 +1628,7 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "for_mut",
-		Desc: "in-place for loop (optimizer-only, skips defensive state copy)",
+
 		Fn: func(a ...Scmer) Scmer {
 			state := asSlice(a[0], "for_mut init")
 			cond := OptimizeProcToSerialFunction(a[1])
@@ -1643,11 +1643,11 @@ func init() {
 			}
 			return NewSlice(state)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place for loop (optimizer-only, skips defensive state copy)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "init", ParamDesc: "owned initial state", Transfer: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "func(state...) -> bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "step", ParamDesc: "step func returning next state as list", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
+				{Kind: "list", Label: "init", Description: "owned initial state", Transfer: true},
+				{Kind: "func", Label: "condition", Description: "determines whether another loop iteration should run", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Description: "current loop state values", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool", Label: "continue", Description: "whether to continue iterating"}},
+				{Kind: "func", Label: "step", Description: "step func returning next state as list", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -1658,13 +1658,13 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "string",
-		Desc: "converts the given value into string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(String(a[0]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "converts the given value into string",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "any value"},
+				{Kind: "any", Label: "value", Description: "any value"},
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
@@ -1771,7 +1771,10 @@ func init() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "match",
-		Desc: `takes a value evaluates the branch that first matches the given pattern
+
+		Fn:// TODO: returntype as soon as repead validate is implemented */
+		nil,
+		Type: &TypeDescriptor{Kind: "func", Description: `takes a value evaluates the branch that first matches the given pattern
 Patterns can be any of:
  - symbol matches any value and stores is into a variable
  - "string" (matches only this string)
@@ -1782,14 +1785,11 @@ Patterns can be any of:
  - (cons a b) will reverse the cons function, so it will match the head of the list with a and the rest with b
  - (regex "pattern" text var1 var2...) will match the given regex pattern, store the whole string into text and all capture groups into var1, var2...
 `,
-		Fn:// TODO: returntype as soon as repead validate is implemented */
-		nil,
-		Type: &TypeDescriptor{
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value to evaluate"},
-				{Kind: "any", ParamName: "pattern...", ParamDesc: "pattern"},
-				{Kind: "returntype", ParamName: "result...", ParamDesc: "result value when the pattern matches; this code can use the variables matched in the pattern"},
-				{Kind: "any", ParamName: "default", ParamDesc: "(optional) value that is returned when no pattern matches", Variadic: true},
+				{Kind: "any", Label: "value", Description: "value to evaluate"},
+				{Kind: "any", Label: "pattern...", Description: "pattern"},
+				{Kind: "returntype", Label: "result...", Description: "result value when the pattern matches; this code can use the variables matched in the pattern"},
+				{Kind: "any", Label: "default", Description: "(optional) value that is returned when no pattern matches", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -1797,45 +1797,48 @@ Patterns can be any of:
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "lambda",
-		Desc: "returns a function (func) constructed from the given code",
+
 		Fn:// TODO: func(...)->returntype as soon as function types are implemented
 		nil,
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a function (func) constructed from the given code",
 			Params: []*TypeDescriptor{
-				{Kind: "symbol|list|nil", ParamName: "parameters", ParamDesc: "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
-				{Kind: "any", ParamName: "code", ParamDesc: "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
-				{Kind: "number", ParamName: "numvars", ParamDesc: "number of unnamed variables that can be accessed via (var 0) (var 1) etc.", Optional: true},
+				{Kind: "symbol|list|nil", Label: "parameters", Description: "if you provide a parameter list, you will have named parameters. If you provide a single symbol, the list of parameters will be provided in that symbol"},
+				{Kind: "any", Label: "code", Description: "value that is evaluated when the lambda is called. code can use the parameters provided in the declaration as well es the scope above"},
+				{Kind: "number", Label: "numvars", Description: "number of unnamed variables that can be accessed via (var 0) (var 1) etc.", Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "func"},
+			Return: &TypeDescriptor{Kind: "func", Label: "lambda", Description: "function constructed from parameters and code",
+				Params: []*TypeDescriptor{{Kind: "any", Label: "argument", Description: "value bound to the corresponding declared parameter", Variadic: true}},
+				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value produced by code"},
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "begin",
-		Desc: "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
+
 		Fn:// TODO: returntype as soon as repeat is implemented
 		nil,
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "creates a own variable scope, evaluates all sub expressions and returns the result of the last one",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "expression...", ParamDesc: "expressions to evaluate", Variadic: true},
+				{Kind: "any", Label: "expression...", Description: "expressions to evaluate", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallel",
-		Desc: "executes all parameters in parallel and returns nil if they are finished",
+
 		Fn:// TODO: returntype as soon as repeat is implemented
 		nil,
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "executes all parameters in parallel and returns nil if they are finished",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "expression...", ParamDesc: "expressions to evaluate in parallel", Variadic: true},
+				{Kind: "any", Label: "expression...", Description: "expressions to evaluate in parallel", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "source",
-		Desc: "annotates the node with filename and line information for better backtraces",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewSourceInfo(SourceInfo{
 				source: String(a[0]),
@@ -1844,12 +1847,12 @@ Patterns can be any of:
 				value:  a[3],
 			})
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "annotates the node with filename and line information for better backtraces",
 			Params: []*TypeDescriptor{
-				{Kind: "string", ParamName: "filename", ParamDesc: "Filename of the code"},
-				{Kind: "number", ParamName: "line", ParamDesc: "Line of the code"},
-				{Kind: "number", ParamName: "column", ParamDesc: "Column of the code"},
-				{Kind: "returntype", ParamName: "code", ParamDesc: "code"},
+				{Kind: "string", Label: "filename", Description: "Filename of the code"},
+				{Kind: "number", Label: "line", Description: "Line of the code"},
+				{Kind: "number", Label: "column", Description: "Column of the code"},
+				{Kind: "returntype", Label: "code", Description: "code"},
 			},
 			Return: &TypeDescriptor{Kind: "returntype"},
 			Const:  true,
@@ -1859,18 +1862,18 @@ Patterns can be any of:
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "source_coverage_report",
-		Desc: "returns Scheme source coverage statistics, optionally filtered by source path prefix",
-		Fn:   sourceCoverageReport,
-		Type: &TypeDescriptor{
+
+		Fn: sourceCoverageReport,
+		Type: &TypeDescriptor{Kind: "func", Description: "returns Scheme source coverage statistics, optionally filtered by source path prefix",
 			Params: []*TypeDescriptor{
-				{Kind: "string", ParamName: "prefix", ParamDesc: "source path prefix", Optional: true},
+				{Kind: "string", Label: "prefix", Description: "source path prefix", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "assoc"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "scheme",
-		Desc: "parses a scheme expression into a list",
+
 		Fn: func(a ...Scmer) Scmer {
 			filename := "eval"
 			if len(a) > 1 {
@@ -1878,10 +1881,10 @@ Patterns can be any of:
 			}
 			return Read(filename, String(a[0]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "parses a scheme expression into a list",
 			Params: []*TypeDescriptor{
-				{Kind: "string", ParamName: "code", ParamDesc: "Scheme code"},
-				{Kind: "string", ParamName: "filename", ParamDesc: "optional filename", Optional: true},
+				{Kind: "string", Label: "code", Description: "Scheme code"},
+				{Kind: "string", Label: "filename", Description: "optional filename", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -2469,13 +2472,13 @@ Patterns can be any of:
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "serialize",
-		Desc: "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(SerializeToString(a[0], &Globalenv))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "serializes a piece of code into a (hopefully) reparsable string; you shall be able to send that code over network and reparse with (scheme)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "code", ParamDesc: "Scheme code"},
+				{Kind: "list", Label: "code", Description: "Scheme code"},
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 
@@ -2484,7 +2487,7 @@ Patterns can be any of:
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "pretty_print",
-		Desc: "formats Scheme code as an indented, human-readable string; expressions up to width characters are kept on one line, longer ones are expanded with one argument per line",
+
 		Fn: func(a ...Scmer) Scmer {
 			width := 20
 			if len(a) >= 2 {
@@ -2492,10 +2495,10 @@ Patterns can be any of:
 			}
 			return NewString(PrettyPrint(a[0], &Globalenv, width))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "formats Scheme code as an indented, human-readable string; expressions up to width characters are kept on one line, longer ones are expanded with one argument per line",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "code", ParamDesc: "Scheme code to format"},
-				{Kind: "int", ParamName: "width", ParamDesc: "max characters before expanding (default 20)", Optional: true},
+				{Kind: "list", Label: "code", Description: "Scheme code to format"},
+				{Kind: "int", Label: "width", Description: "max characters before expanding (default 20)", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 
@@ -2649,7 +2652,7 @@ func typeDescriptorRetainedSize(td *TypeDescriptor, visited map[*TypeDescriptor]
 	visited[td] = struct{}{}
 
 	sz := goAllocOverhead + uint(unsafe.Sizeof(*td))
-	sz += align8(uint(len(td.Kind) + len(td.ParamName) + len(td.ParamDesc)))
+	sz += align8(uint(len(td.Kind) + len(td.Label) + len(td.Description)))
 	if len(td.Params) > 0 {
 		sz += goAllocOverhead + align8(uint(len(td.Params))*uint(unsafe.Sizeof(td)))
 		for _, param := range td.Params {

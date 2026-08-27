@@ -250,19 +250,19 @@ func (s *Scheduler) run() {
 func init_scheduler() {
 	Declare(&Globalenv, &Declaration{
 		Name: "setTimeout",
-		Desc: "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
+
 		Fn:   setTimeout,
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", ParamName: "callback", ParamDesc: "function to execute once the timeout expires", Params: []*TypeDescriptor{{Kind: "any", ParamName: "args", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", ParamName: "milliseconds", ParamDesc: "milliseconds until execution"}, &TypeDescriptor{Kind: "any", ParamName: "args...", ParamDesc: "optional arguments forwarded to the callback", Variadic: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", Label: "callback", Description: "function to execute once the timeout expires", Params: []*TypeDescriptor{{Kind: "any", Label: "args", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", Label: "milliseconds", Description: "milliseconds until execution"}, &TypeDescriptor{Kind: "any", Label: "args...", Description: "optional arguments forwarded to the callback", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "int"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "clearTimeout",
-		Desc: "Cancels a timeout created with setTimeout.",
+
 		Fn:   clearTimeout,
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "id", ParamDesc: "identifier returned by setTimeout"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "Cancels a timeout created with setTimeout.",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "id", Description: "identifier returned by setTimeout"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
 	})

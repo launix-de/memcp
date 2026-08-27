@@ -2110,11 +2110,11 @@ func init_jit() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "jit",
-		Desc: "compiles a lambda to optimized native code when this build enables JIT",
+
 		Fn:   jitCompile,
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "compiles a lambda to optimized native code when this build enables JIT",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "fn", ParamDesc: "the function to compile"},
+				{Kind: "any", Label: "fn", Description: "the function to compile"},
 			},
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
@@ -2122,13 +2122,13 @@ func init_jit() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "jit?",
-		Desc: "tells whether a value is a JIT-compiled function descriptor",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(a[0].GetTag() == tagJIT || (a[0].GetTag() == tagProc && a[0].Proc() != nil && a[0].Proc().Compiled != nil))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "tells whether a value is a JIT-compiled function descriptor",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value to inspect", NoEscape: true},
+				{Kind: "any", Label: "value", Description: "value to inspect", NoEscape: true},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -2195,7 +2195,7 @@ func init_jit() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "jit-warn-if-fallback",
-		Desc: "prints a diagnostic warning when an enabled JIT build kept a procedure interpreted and returns the procedure unchanged",
+
 		Fn: func(a ...Scmer) Scmer {
 			value := a[0]
 			compiled := value.GetTag() == tagJIT || (value.GetTag() == tagProc && value.Proc() != nil && value.Proc().Compiled != nil)
@@ -2208,10 +2208,10 @@ func init_jit() {
 			}
 			return value
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "prints a diagnostic warning when an enabled JIT build kept a procedure interpreted and returns the procedure unchanged",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "procedure", ParamDesc: "procedure expected to be a native compilation candidate"},
-				{Kind: "string", ParamName: "label", ParamDesc: "optional diagnostic label", Optional: true},
+				{Kind: "any", Label: "procedure", Description: "procedure expected to be a native compilation candidate"},
+				{Kind: "string", Label: "label", Description: "optional diagnostic label", Optional: true},
 			},
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
@@ -2219,11 +2219,11 @@ func init_jit() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "jit-enabled?",
-		Desc: "tells whether this binary was built with the patched Go JIT runtime",
+
 		Fn: func(_ ...Scmer) Scmer {
 			return NewBool(jitEnabled)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "tells whether this binary was built with the patched Go JIT runtime",
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 

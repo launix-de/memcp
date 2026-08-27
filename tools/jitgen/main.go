@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/constant"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"math"
@@ -209,6 +210,11 @@ func main() {
 
 		// Single-pass: try to generate, recover on failure
 		newText, genErr := generateClosure(op.name, ssaFn, nil)
+		if genErr == "" {
+			if _, err := parser.ParseExpr(newText); err != nil {
+				genErr = "generated invalid Go expression: " + err.Error()
+			}
+		}
 		// Declaration emitters are expressions nested one indentation level below
 		// their TypeDescriptor field. Keep generated output gofmt-stable both when
 		// inserting a new JITEmit field and when replacing an existing closure.
@@ -351,6 +357,10 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 				typeExpr := keyedValue(comp, "Type")
 				if unaryType, ok := typeExpr.(*ast.UnaryExpr); ok && unaryType.Op == token.AND {
 					if typeComp, ok := unaryType.X.(*ast.CompositeLit); ok {
+						kind, ok := stringLiteral(keyedValue(typeComp, "Kind"))
+						if !ok || kind != "func" {
+							return true
+						}
 						jitExpr = keyedValue(typeComp, "JITEmit")
 						if jitExpr == nil {
 							jitInsertPos = typeComp.Rbrace
@@ -387,6 +397,15 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 		return true
 	})
 	return ops
+}
+
+func stringLiteral(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	return value, err == nil
 }
 
 // --- Storage method collection (pattern 2: ColumnStorage.GetValue → JITEmit) ---

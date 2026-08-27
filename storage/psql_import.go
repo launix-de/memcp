@@ -32,7 +32,7 @@ import "github.com/launix-de/memcp/scm"
 func initPSQLImport(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "psql_import",
-		Desc: "imports schema+data from a PostgreSQL server into MemCP",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			host := "127.0.0.1"
 			if !a[0].IsNil() {
@@ -194,8 +194,8 @@ func initPSQLImport(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string|nil", ParamName: "host", ParamDesc: "PostgreSQL host (nil => 127.0.0.1)"}, &scm.TypeDescriptor{Kind: "int|nil", ParamName: "port", ParamDesc: "PostgreSQL port (nil => 5432)"}, &scm.TypeDescriptor{Kind: "string", ParamName: "username", ParamDesc: "PostgreSQL username"}, &scm.TypeDescriptor{Kind: "string", ParamName: "password", ParamDesc: "PostgreSQL password"}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcedb", ParamDesc: "source database (omit/nil => all non-system dbs)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourceschema", ParamDesc: "source schema (omit/nil => all non-system schemas in sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targetdb", ParamDesc: "target database (omit/nil => sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcetable", ParamDesc: "source table (omit/nil => all tables in sourceschema)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targettable", ParamDesc: "target table (omit/nil => sourcetable)", Optional: true}},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "imports schema+data from a PostgreSQL server into MemCP",
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string|nil", Label: "host", Description: "PostgreSQL host (nil => 127.0.0.1)"}, &scm.TypeDescriptor{Kind: "int|nil", Label: "port", Description: "PostgreSQL port (nil => 5432)"}, &scm.TypeDescriptor{Kind: "string", Label: "username", Description: "PostgreSQL username"}, &scm.TypeDescriptor{Kind: "string", Label: "password", Description: "PostgreSQL password"}, &scm.TypeDescriptor{Kind: "string|nil", Label: "sourcedb", Description: "source database (omit/nil => all non-system dbs)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", Label: "sourceschema", Description: "source schema (omit/nil => all non-system schemas in sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", Label: "targetdb", Description: "target database (omit/nil => sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", Label: "sourcetable", Description: "source table (omit/nil => all tables in sourceschema)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", Label: "targettable", Description: "target table (omit/nil => sourcetable)", Optional: true}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})

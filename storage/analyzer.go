@@ -356,7 +356,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	if p.Params.IsSlice() {
 		params = p.Params.Slice()
 	}
-	resolveParamName := func(node scm.Scmer) (string, bool) {
+	resolveLabel := func(node scm.Scmer) (string, bool) {
 		node = node.WithoutSourceInfo()
 		if node.IsSymbol() {
 			name := node.String()
@@ -377,7 +377,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	// resolveColVar maps a node to a column name.
 	// Handles both symbol params (linear scan, no alloc) and NthLocalVar(i).
 	resolveColVar := func(node scm.Scmer) (string, bool) {
-		if name, ok := resolveParamName(node); ok {
+		if name, ok := resolveLabel(node); ok {
 			if !isScanPseudoColName(name) {
 				return name, true
 			}
@@ -385,7 +385,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		return "", false
 	}
 	resolveBatchSubidx := func(node scm.Scmer) (int, bool) {
-		if name, ok := resolveParamName(node); ok {
+		if name, ok := resolveLabel(node); ok {
 			return parseBatchPseudoColName(name)
 		}
 		return 0, false
@@ -462,7 +462,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		return d != nil && d.Name == name
 	}
 	analyzeContext := &indexAnalyzeContext{
-		resolveParameter: resolveParamName,
+		resolveParameter: resolveLabel,
 		resolveColumn:    resolveColVar,
 		extractConstant:  extractConstant,
 		functionIs:       funcIs,

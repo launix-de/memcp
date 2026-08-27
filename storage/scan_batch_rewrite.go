@@ -64,14 +64,14 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	}
 
 	// Extract outer param symbol names
-	outerParamNames := extractParamNames(mapParams)
-	stride := len(outerParamNames)
+	outerLabels := extractLabels(mapParams)
+	stride := len(outerLabels)
 	if stride == 0 {
 		return scm.NewNil()
 	}
 
 	// Skip DML scans: $update and other $ params are functions, not data columns
-	for _, name := range outerParamNames {
+	for _, name := range outerLabels {
 		if len(name) > 0 && name[0] == '$' {
 			return scm.NewNil()
 		}
@@ -101,8 +101,8 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	// The inner scan must actually reference at least one outer param
 	// (otherwise it's a cross-join where batching adds overhead for no gain
 	// and can break GROUP BY keytable logic).
-	outerParamSet := make(map[string]bool, len(outerParamNames))
-	for _, name := range outerParamNames {
+	outerParamSet := make(map[string]bool, len(outerLabels))
+	for _, name := range outerLabels {
 		outerParamSet[name] = true
 	}
 	hasOuterRef := false
@@ -121,7 +121,7 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	replaceMap := make(map[string]string, stride)
 	batchPseudocols := make([]scm.Scmer, stride)
 	batchParams := make([]scm.Scmer, stride)
-	for i, name := range outerParamNames {
+	for i, name := range outerLabels {
 		pseudo := fmt.Sprintf("#%d", i)
 		replaceMap[name] = pseudo
 		batchPseudocols[i] = scm.NewString(pseudo)
@@ -146,7 +146,7 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	appendArgs := make([]scm.Scmer, stride+2)
 	appendArgs[0] = scm.NewSymbol("append_mut")
 	appendArgs[1] = scm.NewSymbol("__record")
-	for i, name := range outerParamNames {
+	for i, name := range outerLabels {
 		outerMapParams[i] = scm.NewSymbol(name)
 		appendArgs[i+2] = scm.NewSymbol(name)
 	}
@@ -258,8 +258,8 @@ func extractLambdaParts(expr scm.Scmer) (params []scm.Scmer, body scm.Scmer) {
 	return []scm.Scmer{}, sl[2]
 }
 
-// extractParamNames extracts string names from a lambda parameter list.
-func extractParamNames(params []scm.Scmer) []string {
+// extractLabels extracts string names from a lambda parameter list.
+func extractLabels(params []scm.Scmer) []string {
 	names := make([]string, 0, len(params))
 	for _, p := range params {
 		if p.IsSymbol() {

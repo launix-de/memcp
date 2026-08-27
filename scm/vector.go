@@ -27,7 +27,7 @@ func init_vector() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "dot",
-		Desc: "produced the dot product",
+
 		Fn: func(a ...Scmer) Scmer {
 			var result float64
 			v1 := asSlice(a[0], "dot v1")
@@ -59,8 +59,8 @@ func init_vector() {
 			}
 			return NewFloat(result)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "v1", ParamDesc: "vector1"}, &TypeDescriptor{Kind: "list", ParamName: "v2", ParamDesc: "vector2"}, &TypeDescriptor{Kind: "string", ParamName: "mode", ParamDesc: "DOT, COSINE, EUCLIDEAN, default is DOT", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "produced the dot product",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", Label: "v1", Description: "vector1"}, &TypeDescriptor{Kind: "list", Label: "v2", Description: "vector2"}, &TypeDescriptor{Kind: "string", Label: "mode", Description: "DOT, COSINE, EUCLIDEAN, default is DOT", Optional: true}},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
 

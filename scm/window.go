@@ -40,15 +40,15 @@ func init_window() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "stream_emit",
-		Desc: "invokes a streaming callback immediately; marks ordering-sensitive emission as an observable effect",
+
 		Fn: func(a ...Scmer) Scmer {
 			return Apply(a[0], a[1])
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "invokes a streaming callback immediately; marks ordering-sensitive emission as an observable effect",
 			HasSideEffects: true,
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "emit", Params: []*TypeDescriptor{{Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "any", ParamName: "value"},
+				{Kind: "func", Label: "emit", Params: []*TypeDescriptor{{Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
@@ -56,7 +56,7 @@ func init_window() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "stream_window_reduce",
-		Desc: "applies OFFSET/LIMIT and a serial reducer to complete values emitted by a nested streaming producer without collecting an intermediate relation",
+
 		Fn: func(a ...Scmer) (result Scmer) {
 			offset := ToInt(a[0])
 			limit := ToInt(a[1])
@@ -92,14 +92,14 @@ func init_window() {
 			producerFn(emit)
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "applies OFFSET/LIMIT and a serial reducer to complete values emitted by a nested streaming producer without collecting an intermediate relation",
 			HasSideEffects: true,
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "offset", ParamDesc: "number of complete producer values to skip"},
-				{Kind: "number", ParamName: "limit", ParamDesc: "maximum values to reduce, or -1 for no limit"},
-				{Kind: "func", ParamName: "reduce", ParamDesc: "serial accumulator over complete values", Params: []*TypeDescriptor{{Kind: "any", ParamName: "acc"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "initial accumulator"},
-				{Kind: "func", ParamName: "producer", ParamDesc: "nested streaming plan called with a one-value emit callback", Params: []*TypeDescriptor{{Kind: "func", ParamName: "emit"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "number", Label: "offset", Description: "number of complete producer values to skip"},
+				{Kind: "number", Label: "limit", Description: "maximum values to reduce, or -1 for no limit"},
+				{Kind: "func", Label: "reduce", Description: "serial accumulator over complete values", Params: []*TypeDescriptor{{Kind: "any", Label: "acc"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral", Description: "initial accumulator"},
+				{Kind: "func", Label: "producer", Description: "nested streaming plan called with a one-value emit callback", Params: []*TypeDescriptor{{Kind: "func", Label: "emit", Description: "emits one complete value", Params: []*TypeDescriptor{{Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:  &TypeDescriptor{Kind: "any"},
 			JITEmit: nil,
@@ -108,7 +108,7 @@ func init_window() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "window_mut",
-		Desc: "Ring buffer shift-insert for window functions. (window_mut window emit_fn vals) writes vals (a list of stride values) into the current slot, increments counter. If skip>0, decrements skip. Otherwise calls (emit_fn oldest_v0 oldest_v1 ... newest_v0 newest_v1) with all slot values ordered oldest-to-newest. Returns updated window.",
+
 		Fn: func(a ...Scmer) Scmer {
 			win := asSlice(a[0], "window_mut")
 			emitFn := a[1]
@@ -166,8 +166,8 @@ func init_window() {
 
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", ParamName: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "list", ParamName: "vals", ParamDesc: "list of stride values to insert"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "Ring buffer shift-insert for window functions. (window_mut window emit_fn vals) writes vals (a list of stride values) into the current slot, increments counter. If skip>0, decrements skip. Otherwise calls (emit_fn oldest_v0 oldest_v1 ... newest_v0 newest_v1) with all slot values ordered oldest-to-newest. Returns updated window.",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", Label: "window", Description: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", Label: "emit_fn", Description: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", Label: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "list", Label: "vals", Description: "list of stride values to insert"}},
 			Return: &TypeDescriptor{Kind: "list"},
 
 			JITEmit: nil,
@@ -176,7 +176,7 @@ func init_window() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "window_flush",
-		Desc: "Flush remaining window buffer by shifting in nils. (window_flush window emit_fn count) shifts in count positions of nils, calling emit_fn for each displaced position. Returns nil.",
+
 		Fn: func(a ...Scmer) Scmer {
 			win := asSlice(a[0], "window_flush")
 			emitFn := a[1]
@@ -214,8 +214,8 @@ func init_window() {
 
 			return NewNil()
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", ParamName: "window", ParamDesc: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", ParamName: "emit_fn", ParamDesc: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", ParamName: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", ParamName: "count", ParamDesc: "number of nil positions to shift in"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "Flush remaining window buffer by shifting in nils. (window_flush window emit_fn count) shifts in count positions of nils, calling emit_fn for each displaced position. Returns nil.",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", Label: "window", Description: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", Label: "emit_fn", Description: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", Label: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", Label: "count", Description: "number of nil positions to shift in"}},
 			Return: &TypeDescriptor{Kind: "nil"},
 
 			JITEmit: nil,

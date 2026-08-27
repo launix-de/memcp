@@ -277,13 +277,13 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "string?",
-		Desc: "tells if the value is a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			_, ok := a[0].Any().(string)
 			return NewBool(ok)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "tells if the value is a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "value"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 
@@ -292,7 +292,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "concat",
-		Desc: "concatenates stringable values and returns a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			var sb strings.Builder
 			for _, s := range a {
@@ -307,8 +307,8 @@ func init_strings() {
 			}
 			return NewString(sb.String())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "first value to concat"}, &TypeDescriptor{Kind: "any", ParamName: "more...", ParamDesc: "additional values to concat", Variadic: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "concatenates stringable values and returns a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "first value to concat"}, &TypeDescriptor{Kind: "any", Label: "more...", Description: "additional values to concat", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -317,12 +317,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_concat",
-		Desc: "SQL CONCAT semantics: returns NULL if any argument is NULL",
+
 		Fn: func(a ...Scmer) Scmer {
 			return Globalenv.Vars["concat"].Func()(a...)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "first value to concat"}, &TypeDescriptor{Kind: "any", ParamName: "more...", ParamDesc: "additional values to concat", Variadic: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "SQL CONCAT semantics: returns NULL if any argument is NULL",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "first value to concat"}, &TypeDescriptor{Kind: "any", Label: "more...", Description: "additional values to concat", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
@@ -331,7 +331,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "substr",
-		Desc: "returns a substring (0-based index)",
+
 		Fn: func(a ...Scmer) Scmer {
 			s := String(a[0])
 			i := ToInt(a[1])
@@ -340,8 +340,8 @@ func init_strings() {
 			}
 			return NewString(s[i:])
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to cut"}, &TypeDescriptor{Kind: "number", ParamName: "start", ParamDesc: "first character index (0-based)"}, &TypeDescriptor{Kind: "number", ParamName: "len", ParamDesc: "optional length", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a substring (0-based index)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to cut"}, &TypeDescriptor{Kind: "number", Label: "start", Description: "first character index (0-based)"}, &TypeDescriptor{Kind: "number", Label: "len", Description: "optional length", Optional: true}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -1012,7 +1012,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_substr",
-		Desc: "SQL SUBSTR/SUBSTRING with 1-based index and bounds checking",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -1038,8 +1038,8 @@ func init_strings() {
 			}
 			return NewString(s[start:])
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to cut"}, &TypeDescriptor{Kind: "number", ParamName: "start", ParamDesc: "first character position (1-based)"}, &TypeDescriptor{Kind: "number", ParamName: "len", ParamDesc: "optional length", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "SQL SUBSTR/SUBSTRING with 1-based index and bounds checking",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to cut"}, &TypeDescriptor{Kind: "number", Label: "start", Description: "first character position (1-based)"}, &TypeDescriptor{Kind: "number", Label: "len", Description: "optional length", Optional: true}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -4637,19 +4637,19 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "simplify",
-		Desc: "turns a stringable input value in the easiest-most value (e.g. turn strings into numbers if they are numeric",
+
 		Fn: func(a ...Scmer) Scmer {
 			// turn string to number or so
 			return Simplify(String(a[0]))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to simplify"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "Converts numeric text to a number. Text beginning with { or [ becomes a native JSON value when it is valid JSON; other input remains a string.",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "value to interpret as a number or JSON value"}},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-				argPinned0 := make([]Reg, 0, len(args)*2)
+				argPinned0 := make([]Reg, 0, len(args)*3)
 				seenArgRegs := make(map[Reg]bool)
 				for _, ai := range args {
 					if ai.Loc == LocReg {
@@ -4669,8 +4669,21 @@ func init_strings() {
 							seenArgRegs[ai.Reg2] = true
 							argPinned0 = append(argPinned0, ai.Reg2)
 						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
 					}
 				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
 				d1 := args[0]
 				d1.ID = 0
 				d3 := d1
@@ -4737,19 +4750,10 @@ func init_strings() {
 				ctx.EnsureDesc(&d2)
 				if d2.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					if d2.Imm.GetTag() == tagBool {
-						ctx.EmitMakeBool(tmpPair, d2)
-					} else if d2.Imm.GetTag() == tagInt {
-						ctx.EmitMakeInt(tmpPair, d2)
-					} else if d2.Imm.GetTag() == tagFloat {
-						ctx.EmitMakeFloat(tmpPair, d2)
-					} else if d2.Imm.GetTag() == tagNil {
-						ctx.EmitMakeNil(tmpPair)
-					} else {
-						ptrWord, auxWord := d2.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
-					}
+					ctx.TrackImm(d2.Imm)
+					ptrWord, _ := d2.Imm.RawWords()
+					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d2.Imm.String())))
 					d2 = tmpPair
 				} else if d2.Loc == LocReg {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d2.Type, Reg: ctx.AllocRegExcept(d2.Reg), Reg2: ctx.AllocRegExcept(d2.Reg)}
@@ -4805,21 +4809,18 @@ func init_strings() {
 					}
 				}
 				return result
-				for _, r := range argPinned0 {
-					ctx.UnprotectReg(r)
-				}
 				return result
 			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strlen",
-		Desc: "returns the length of a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewInt(int64(len(String(a[0]))))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the length of a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 
@@ -4951,7 +4952,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strlike",
-		Desc: "matches the string against a wildcard pattern using SQL NULL semantics",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
@@ -4964,8 +4965,8 @@ func init_strings() {
 			}
 			return NewBool(StrLikeCollation(value, pattern, collation))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "pattern with % and _ in them"}, &TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "collation in which to compare them", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "matches the string against a wildcard pattern using SQL NULL semantics",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "pattern with % and _ in them"}, &TypeDescriptor{Kind: "string", Label: "collation", Description: "collation in which to compare them", Optional: true}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 
@@ -6263,15 +6264,15 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strlike_cs",
-		Desc: "matches the string against a wildcard pattern case-sensitively using SQL NULL semantics",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
 			}
 			return NewBool(StrLike(String(a[0]), String(a[1])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "pattern with % and _ in them"}, &TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "ignored (present for parser compatibility)", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "matches the string against a wildcard pattern case-sensitively using SQL NULL semantics",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "pattern with % and _ in them"}, &TypeDescriptor{Kind: "string", Label: "collation", Description: "ignored (present for parser compatibility)", Optional: true}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 
@@ -6925,12 +6926,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "toLower",
-		Desc: "turns a string into lower case",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(strings.ToLower(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "turns a string into lower case",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -7075,12 +7076,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "toUpper",
-		Desc: "turns a string into upper case",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(strings.ToUpper(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "turns a string into upper case",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -7225,12 +7226,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "replace",
-		Desc: "replaces all occurances in a string with another string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(strings.ReplaceAll(String(a[0]), String(a[1]), String(a[2])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "s", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "find", ParamDesc: "search string"}, &TypeDescriptor{Kind: "string", ParamName: "replace", ParamDesc: "replace string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "replaces all occurances in a string with another string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "s", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "find", Description: "search string"}, &TypeDescriptor{Kind: "string", Label: "replace", Description: "replace string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -7571,12 +7572,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strtrim",
-		Desc: "trims whitespace from both ends of a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(strings.TrimSpace(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "trims whitespace from both ends of a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -7721,12 +7722,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strltrim",
-		Desc: "trims whitespace from the left of a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "trims whitespace from the left of a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -7907,12 +7908,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "strrtrim",
-		Desc: "trims whitespace from the right of a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "trims whitespace from the right of a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -8094,15 +8095,15 @@ func init_strings() {
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_trim",
-		Desc: "SQL TRIM(): NULL-safe trim of whitespace from both ends",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
 			}
 			return NewString(strings.TrimSpace(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "SQL TRIM(): NULL-safe trim of whitespace from both ends",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -8447,15 +8448,15 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_ltrim",
-		Desc: "SQL LTRIM(): NULL-safe trim of whitespace from left",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
 			}
 			return NewString(strings.TrimLeft(String(a[0]), " \t\n\r"))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "SQL LTRIM(): NULL-safe trim of whitespace from left",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -8838,15 +8839,15 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_rtrim",
-		Desc: "SQL RTRIM(): NULL-safe trim of whitespace from right",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
 			}
 			return NewString(strings.TrimRight(String(a[0]), " \t\n\r"))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "SQL RTRIM(): NULL-safe trim of whitespace from right",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -9229,7 +9230,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "split",
-		Desc: "splits a string using a separator or space",
+
 		Fn: func(a ...Scmer) Scmer {
 			split := " "
 			if len(a) > 1 {
@@ -9242,8 +9243,8 @@ func init_strings() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "separator", ParamDesc: "(optional) parameter, defaults to \" \"", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "splits a string using a separator or space",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "separator", Description: "(optional) parameter, defaults to \" \"", Optional: true}},
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
 
@@ -9253,7 +9254,7 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "string_repeat",
-		Desc: "repeats a string n times",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -9264,8 +9265,8 @@ func init_strings() {
 			}
 			return NewString(strings.Repeat(String(a[0]), int(n)))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to repeat"}, &TypeDescriptor{Kind: "number", ParamName: "count", ParamDesc: "number of repetitions"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "repeats a string n times",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to repeat"}, &TypeDescriptor{Kind: "number", Label: "count", Description: "number of repetitions"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -9875,7 +9876,7 @@ func init_strings() {
 	collation_re := regexp.MustCompile("^([^_]+_)?(.+?)$") // caracterset_language_case
 	Declare(&Globalenv, &Declaration{
 		Name: "collate",
-		Desc: "returns a canonical order relation for a collation and direction. MemCP allows natural sorting of numeric literals.",
+
 		Fn: func(a ...Scmer) Scmer {
 			collationName := String(a[0])
 			reverse := len(a) > 1 && ToBool(a[1])
@@ -10114,14 +10115,14 @@ func init_strings() {
 			canonical, _ := collateCache.LoadOrStore(key, result)
 			return canonical.(Scmer)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "collation", ParamDesc: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", ParamName: "reverse", ParamDesc: "whether to reverse the order like in ORDER BY DESC", Optional: true}},
-			Return: &TypeDescriptor{Kind: "func",
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a canonical order relation for a collation and direction. MemCP allows natural sorting of numeric literals.",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "collation", Description: "collation string of the form LANG or LANG_cs or LANG_ci where LANG is a BCP 47 code, for compatibility to MySQL, a CHARSET_ prefix is allowed and ignored as well as the aliases bin, danish, general, german1, german2, spanish and swedish are allowed for language codes"}, &TypeDescriptor{Kind: "bool", Label: "reverse", Description: "whether to reverse the order like in ORDER BY DESC", Optional: true}},
+			Return: &TypeDescriptor{Kind: "func", Label: "relation", Description: "compares two values using the selected collation and direction",
 				Params: []*TypeDescriptor{
-					{Kind: "any", ParamName: "a", ParamDesc: "left operand"},
-					{Kind: "any", ParamName: "b", ParamDesc: "right operand"},
+					{Kind: "any", Label: "a", Description: "left operand"},
+					{Kind: "any", Label: "b", Description: "right operand"},
 				},
-				Return: &TypeDescriptor{Kind: "bool"},
+				Return: &TypeDescriptor{Kind: "bool", Label: "ordered", Description: "whether a sorts before b"},
 			},
 			Const: true,
 
@@ -10132,12 +10133,12 @@ func init_strings() {
 	/* escaping functions similar to PHP */
 	Declare(&Globalenv, &Declaration{
 		Name: "htmlentities",
-		Desc: "escapes the string for use in HTML",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(html.EscapeString(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "input string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "escapes the string for use in HTML",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "input string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10282,12 +10283,12 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "urlencode",
-		Desc: "encodes a string according to URI coding schema",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(url.QueryEscape(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to encode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "encodes a string according to URI coding schema",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10432,7 +10433,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "urldecode",
-		Desc: "decodes a string according to URI coding schema",
+
 		Fn: func(a ...Scmer) Scmer {
 			result, err := url.QueryUnescape(String(a[0]))
 			if err != nil {
@@ -10440,8 +10441,8 @@ func init_strings() {
 			}
 			return NewString(result)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "decodes a string according to URI coding schema",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10450,7 +10451,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "json_encode",
-		Desc: "encodes a value in JSON, treats lists as lists",
+
 		Fn: func(a ...Scmer) Scmer {
 			b, err := json.Marshal(a[0])
 			if err != nil {
@@ -10458,8 +10459,8 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to encode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "encodes a value in JSON, treats lists as lists",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "value to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10468,7 +10469,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "json_quote",
-		Desc: "quotes a string as a JSON string literal without HTML escaping",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || !a[0].IsString() {
 				return NewNil()
@@ -10481,8 +10482,8 @@ func init_strings() {
 			}
 			return NewString(strings.TrimSuffix(encoded.String(), "\n"))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "string to quote"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "quotes a string as a JSON string literal without HTML escaping",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "string to quote"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10491,7 +10492,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "json_encode_assoc",
-		Desc: "encodes a value in JSON, treats lists as associative arrays",
+
 		Fn: func(a ...Scmer) Scmer {
 			// Build a Go structure where assoc lists (even-length lists or FastDict)
 			// are represented as map[string]any, and leaf values remain Scmer so
@@ -10525,8 +10526,8 @@ func init_strings() {
 			}
 			return NewString(string(b))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "value to encode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "encodes a value in JSON, treats lists as associative arrays",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "value to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10535,7 +10536,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "json_decode",
-		Desc: "parses JSON into a map",
+
 		Fn: func(a ...Scmer) Scmer {
 			var result any
 			err := json.Unmarshal([]byte(String(a[0])), &result)
@@ -10544,8 +10545,8 @@ func init_strings() {
 			}
 			return TransformFromJSON(result)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "parses JSON into a map",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
@@ -10554,7 +10555,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "json_decode_scmer",
-		Desc: "parses JSON produced by json_encode and preserves Scheme symbols and lists",
+
 		Fn: func(a ...Scmer) Scmer {
 			var result Scmer
 			err := json.Unmarshal([]byte(String(a[0])), &result)
@@ -10563,8 +10564,8 @@ func init_strings() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "Scmer JSON to decode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "parses JSON produced by json_encode and preserves Scheme symbols and lists",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "Scmer JSON to decode"}},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
@@ -10574,12 +10575,12 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "base64_encode",
-		Desc: "encodes a string as Base64 (standard encoding)",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(base64.StdEncoding.EncodeToString([]byte(String(a[0]))))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "binary string to encode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "encodes a string as Base64 (standard encoding)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "binary string to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10588,7 +10589,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "base64_decode",
-		Desc: "decodes a Base64 string (standard encoding)",
+
 		Fn: func(a ...Scmer) Scmer {
 			decoded, err := base64.StdEncoding.DecodeString(String(a[0]))
 			if err != nil {
@@ -10596,8 +10597,8 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "base64-encoded string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "decodes a Base64 string (standard encoding)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "base64-encoded string"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10607,7 +10608,7 @@ func init_strings() {
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_unescape",
-		Desc: "unescapes the inner part of a sql string",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := String(a[0])
 			out := sql_escapings.ReplaceAllStringFunc(input, func(m string) string {
@@ -10629,8 +10630,8 @@ func init_strings() {
 			})
 			return NewString(out)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "unescapes the inner part of a sql string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10639,7 +10640,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "bin2hex",
-		Desc: "turns binary data into hex with lowercase letters",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := String(a[0])
 			result := make([]byte, 2*len(input))
@@ -10650,8 +10651,8 @@ func init_strings() {
 			}
 			return NewString(string(result))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to decode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "turns binary data into hex with lowercase letters",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to decode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10660,7 +10661,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "bin2hex",
-		Desc: "turns binary data into hex with lowercase letters",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := String(a[0])
 			result := make([]byte, 2*len(input))
@@ -10671,8 +10672,8 @@ func init_strings() {
 			}
 			return NewString(string(result))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "string to encode"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "turns binary data into hex with lowercase letters",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "string to encode"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10681,7 +10682,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "hex2bin",
-		Desc: "decodes a hex string into binary data",
+
 		Fn: func(a ...Scmer) Scmer {
 			decoded, err := hex.DecodeString(String(a[0]))
 			if err != nil {
@@ -10689,8 +10690,8 @@ func init_strings() {
 			}
 			return NewString(string(decoded))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "hex string (even length)"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "decodes a hex string into binary data",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "hex string (even length)"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10700,7 +10701,7 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "uuid",
-		Desc: "generates a new random UUID v4 string",
+
 		Fn: func(a ...Scmer) Scmer {
 			id, err := uuid.NewRandom()
 			if err != nil {
@@ -10708,7 +10709,7 @@ func init_strings() {
 			}
 			return NewString(id.String())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "generates a new random UUID v4 string",
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  false, /* NOT const — each call must return a unique value */
 
@@ -10718,7 +10719,7 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "randomBytes",
-		Desc: "returns a string with numBytes cryptographically secure random bytes",
+
 		Fn: func(a ...Scmer) Scmer {
 			n := ToInt(a[0])
 			if n < 0 {
@@ -10732,8 +10733,8 @@ func init_strings() {
 			}
 			return NewString(string(buf))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "numBytes", ParamDesc: "number of random bytes"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a string with numBytes cryptographically secure random bytes",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "numBytes", Description: "number of random bytes"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10743,7 +10744,7 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "regexp_replace",
-		Desc: "replaces matches of a regex pattern in a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -10754,8 +10755,8 @@ func init_strings() {
 			}
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
 		},
-		Type: &TypeDescriptor{
-			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "regex pattern"}, &TypeDescriptor{Kind: "string", ParamName: "replacement", ParamDesc: "replacement string"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "replaces matches of a regex pattern in a string",
+			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}, &TypeDescriptor{Kind: "string", Label: "replacement", Description: "replacement string"}},
 			Return:   &TypeDescriptor{Kind: "string"},
 			Const:    true,
 			Optimize: optimizeRegexpReplace,
@@ -10766,12 +10767,12 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "fnv_hash",
-		Desc: "computes a fast non-cryptographic 64-bit FNV-1a hash of a string, returns a 16-character hex string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(fnvHashString(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "computes a fast non-cryptographic 64-bit FNV-1a hash of a string, returns a 16-character hex string",
+			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string to hash"}},
 			Return:   &TypeDescriptor{Kind: "string"},
 			Const:    true,
 			Optimize: optimizeFNVHash,
@@ -10917,7 +10918,7 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "stable_structural_hash",
-		Desc: "streams the string or serialized representation of a Scheme value into stable FNV-1a without constructing the complete representation",
+
 		Fn: func(a ...Scmer) Scmer {
 			if len(a) < 1 || len(a) > 2 {
 				panic("stable_structural_hash expects a value and optional serialize flag")
@@ -10930,10 +10931,10 @@ func init_strings() {
 			}
 			return NewString(formatStructuralHash(writer.hash))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "streams the string or serialized representation of a Scheme value into stable FNV-1a without constructing the complete representation",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value to hash", NoEscape: true},
-				{Kind: "bool", ParamName: "serialize", ParamDesc: "use the Scheme serializer instead of string rendering", Optional: true},
+				{Kind: "any", Label: "value", Description: "value to hash", NoEscape: true},
+				{Kind: "bool", Label: "serialize", Description: "use the Scheme serializer instead of string rendering", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
@@ -10943,13 +10944,13 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sha1",
-		Desc: "computes the SHA-1 digest of a string, returns a 40-character lowercase hex string",
+
 		Fn: func(a ...Scmer) Scmer {
 			sum := sha1.Sum([]byte(String(a[0])))
 			return NewString(hex.EncodeToString(sum[:]))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "computes the SHA-1 digest of a string, returns a 40-character lowercase hex string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string to hash"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10958,13 +10959,13 @@ func init_strings() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sha256",
-		Desc: "computes the SHA-256 digest of a string, returns a 64-character lowercase hex string",
+
 		Fn: func(a ...Scmer) Scmer {
 			sum := sha256.Sum256([]byte(String(a[0])))
 			return NewString(hex.EncodeToString(sum[:]))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string to hash"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "computes the SHA-256 digest of a string, returns a 64-character lowercase hex string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string to hash"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -10974,7 +10975,7 @@ func init_strings() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "regexp_test",
-		Desc: "tests if a string matches a regex pattern, returns true/false",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
@@ -10985,8 +10986,8 @@ func init_strings() {
 			}
 			return NewBool(re.MatchString(String(a[0])))
 		},
-		Type: &TypeDescriptor{
-			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "str", ParamDesc: "input string"}, &TypeDescriptor{Kind: "string", ParamName: "pattern", ParamDesc: "regex pattern"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests if a string matches a regex pattern, returns true/false",
+			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}},
 			Return:   &TypeDescriptor{Kind: "bool"},
 			Const:    true,
 			Optimize: optimizeRegexpTest,

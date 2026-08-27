@@ -172,7 +172,7 @@ func init_timezone() {
 	// UNIX_TIMESTAMP(dt): converts datetime string to unix timestamp integer
 	Declare(&Globalenv, &Declaration{
 		Name: "unix_timestamp",
-		Desc: "returns a unix timestamp (integer seconds since epoch)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if len(a) == 0 {
 				return NewInt(time.Now().Unix())
@@ -186,8 +186,8 @@ func init_timezone() {
 			}
 			return NewInt(t.Unix())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "dt", ParamDesc: "optional datetime value to convert", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a unix timestamp (integer seconds since epoch)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "dt", Description: "optional datetime value to convert", Optional: true}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 		},
@@ -196,11 +196,11 @@ func init_timezone() {
 	// system_time_zone: returns the OS-level timezone name
 	Declare(&Globalenv, &Declaration{
 		Name: "system_time_zone",
-		Desc: "returns the operating system's local timezone name",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewString(time.Local.String())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the operating system's local timezone name",
 			Return: &TypeDescriptor{Kind: "string"},
 		},
 	})
@@ -208,7 +208,7 @@ func init_timezone() {
 	// CONVERT_TZ(dt, from_tz, to_tz)
 	Declare(&Globalenv, &Declaration{
 		Name: "convert_tz",
-		Desc: "converts a datetime from one timezone to another",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() || a[2].IsNil() {
 				return NewNil()
@@ -240,8 +240,8 @@ func init_timezone() {
 			naive := time.Date(tInTo.Year(), tInTo.Month(), tInTo.Day(), tInTo.Hour(), tInTo.Minute(), tInTo.Second(), 0, time.UTC)
 			return NewDate(naive.Unix())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "dt", ParamDesc: "datetime value"}, &TypeDescriptor{Kind: "string", ParamName: "from_tz", ParamDesc: "source timezone"}, &TypeDescriptor{Kind: "string", ParamName: "to_tz", ParamDesc: "target timezone"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "converts a datetime from one timezone to another",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "dt", Description: "datetime value"}, &TypeDescriptor{Kind: "string", Label: "from_tz", Description: "source timezone"}, &TypeDescriptor{Kind: "string", Label: "to_tz", Description: "target timezone"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 		},
@@ -250,7 +250,7 @@ func init_timezone() {
 	// FROM_UNIXTIME(unix_ts [, format])
 	Declare(&Globalenv, &Declaration{
 		Name: "from_unixtime",
-		Desc: "converts a unix timestamp to a datetime in the session timezone",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -264,8 +264,8 @@ func init_timezone() {
 			}
 			return NewDate(unix)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", ParamName: "unix_ts", ParamDesc: "unix timestamp (seconds since epoch)"}, &TypeDescriptor{Kind: "string", ParamName: "format", ParamDesc: "optional MySQL format string", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "converts a unix timestamp to a datetime in the session timezone",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "unix_ts", Description: "unix timestamp (seconds since epoch)"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "optional MySQL format string", Optional: true}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 		},
@@ -274,11 +274,11 @@ func init_timezone() {
 	// UTC_TIMESTAMP()
 	Declare(&Globalenv, &Declaration{
 		Name: "utc_timestamp",
-		Desc: "returns the current UTC datetime",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewDate(time.Now().UTC().Unix())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the current UTC datetime",
 			Return: &TypeDescriptor{Kind: "date"},
 		},
 	})
@@ -286,13 +286,13 @@ func init_timezone() {
 	// UTC_DATE()
 	Declare(&Globalenv, &Declaration{
 		Name: "utc_date",
-		Desc: "returns the current UTC date (midnight)",
+
 		Fn: func(a ...Scmer) Scmer {
 			now := time.Now().UTC()
 			midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the current UTC date (midnight)",
 			Return: &TypeDescriptor{Kind: "date"},
 		},
 	})
@@ -300,14 +300,14 @@ func init_timezone() {
 	// UTC_TIME()
 	Declare(&Globalenv, &Declaration{
 		Name: "utc_time",
-		Desc: "returns the current UTC time (as a datetime at epoch date)",
+
 		Fn: func(a ...Scmer) Scmer {
 			now := time.Now().UTC()
 			// Return as seconds since midnight
 			seconds := int64(now.Hour()*3600 + now.Minute()*60 + now.Second())
 			return NewDate(seconds)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the current UTC time (as a datetime at epoch date)",
 			Return: &TypeDescriptor{Kind: "date"},
 		},
 	})
@@ -315,11 +315,11 @@ func init_timezone() {
 	// SYSDATE() — re-evaluated on every call (unlike NOW() which is constant per query)
 	Declare(&Globalenv, &Declaration{
 		Name: "sysdate",
-		Desc: "returns the current datetime (re-evaluated per call, unlike now())",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewDate(time.Now().Unix())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the current datetime (re-evaluated per call, unlike now())",
 			Return: &TypeDescriptor{Kind: "date"},
 		},
 	})
@@ -329,7 +329,7 @@ func init_timezone() {
 	// If dt has zone_id!=0 (TIMESTAMPTZ): convert UTC moment to local time in zone → return as-is.
 	Declare(&Globalenv, &Declaration{
 		Name: "at_time_zone",
-		Desc: "PostgreSQL AT TIME ZONE operator: converts between timezones",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
@@ -359,8 +359,8 @@ func init_timezone() {
 			naive := time.Date(utcTime.Year(), utcTime.Month(), utcTime.Day(), utcTime.Hour(), utcTime.Minute(), utcTime.Second(), 0, time.UTC)
 			return NewDate(naive.Unix())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "dt", ParamDesc: "datetime value"}, &TypeDescriptor{Kind: "string", ParamName: "zone", ParamDesc: "target timezone"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "PostgreSQL AT TIME ZONE operator: converts between timezones",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "dt", Description: "datetime value"}, &TypeDescriptor{Kind: "string", Label: "zone", Description: "target timezone"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 		},
@@ -369,7 +369,7 @@ func init_timezone() {
 	// TIMESTAMPDIFF(unit, dt1, dt2)
 	Declare(&Globalenv, &Declaration{
 		Name: "timestampdiff",
-		Desc: "returns the difference between two datetimes in the given unit",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[1].IsNil() || a[2].IsNil() {
 				return NewNil()
@@ -404,8 +404,8 @@ func init_timezone() {
 				return NewNil() // unknown unit → NULL (MySQL compatible)
 			}
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "unit", ParamDesc: "SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR"}, &TypeDescriptor{Kind: "any", ParamName: "dt1", ParamDesc: "first datetime"}, &TypeDescriptor{Kind: "any", ParamName: "dt2", ParamDesc: "second datetime"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the difference between two datetimes in the given unit",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "unit", Description: "SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR"}, &TypeDescriptor{Kind: "any", Label: "dt1", Description: "first datetime"}, &TypeDescriptor{Kind: "any", Label: "dt2", Description: "second datetime"}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 		},

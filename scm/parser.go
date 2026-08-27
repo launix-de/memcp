@@ -50,6 +50,11 @@ func (source_info SourceInfo) String() string {
 }
 
 func Simplify(s string) Scmer {
+	if len(s) > 0 && (s[0] == '[' || s[0] == '{') {
+		if value, err := NewBSONFromJSON(s); err == nil {
+			return value
+		}
+	}
 	if f, err := strconv.ParseFloat(s, 64); err == nil {
 		return NewFloat(f)
 	}
