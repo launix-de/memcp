@@ -869,18 +869,30 @@ type scanJoinInfo struct {
 // filter lambda. If the filter cannot be analyzed, the info is returned with
 // empty srcCols/inputCols so callers can fall back to full invalidation.
 func extractScanJoinInfo(computor scm.Scmer) []scanJoinInfo {
-	if computor.IsProc() {
-		return extractScanJoinInfoBody(computor.Proc().Body)
-	}
-	return extractScanJoinInfoBody(computor)
+	return extractScanJoinInfoBody(computor, nil)
 }
 
-func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
+func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoinInfo {
 	expr = stripSourceInfo(expr)
+	if expr.IsProc() {
+		proc := expr.Proc()
+		params := outerParams
+		paramExpr := stripSourceInfo(proc.Params)
+		if paramExpr.IsSlice() {
+			params = paramExpr.Slice()
+		}
+		return extractScanJoinInfoBody(proc.Body, params)
+	}
 	if !expr.IsSlice() {
 		return nil
 	}
 	items := expr.Slice()
+	if len(items) >= 3 && callHeadIs(items[0], "lambda") {
+		paramExpr := stripSourceInfo(items[1])
+		if paramExpr.IsSlice() {
+			return extractScanJoinInfoBody(items[2], paramExpr.Slice())
+		}
+	}
 	if len(items) >= 5 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
 		tableIdx := 2
 		condColsIdx, filterIdx := 3, 4
@@ -918,7 +930,7 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 			info.mapCols = extractStringListFromAST(items[5])
 		}
 		if len(condCols) > 0 {
-			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols)
+			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols, outerParams)
 		}
 		// A physical table expression can itself be a plan (for example a
 		// recset_project_join whose producer prepares correlated stage caches).
@@ -926,26 +938,43 @@ func extractScanJoinInfoBody(expr scm.Scmer) []scanJoinInfo {
 		// scans in the filter and mapper are; otherwise source mutations leave a
 		// cached aggregate valid even though its projected input changed.
 		result := []scanJoinInfo{info}
-		result = append(result, extractScanJoinInfoBody(tableExpr)...)
+		result = append(result, extractScanJoinInfoBody(tableExpr, outerParams)...)
 		for _, item := range items[filterIdx+1:] {
-			result = append(result, extractScanJoinInfoBody(item)...)
+			result = append(result, extractScanJoinInfoBody(item, outerParams)...)
 		}
 		return result
 	}
 	var result []scanJoinInfo
 	for _, item := range items {
-		result = append(result, extractScanJoinInfoBody(item)...)
+		result = append(result, extractScanJoinInfoBody(item, outerParams)...)
 	}
 	return result
 }
 
-// extractStringListFromAST parses (list "a" "b" ...) into a Go string slice.
-// The first element may be the symbol "list" or a resolved native function.
+// extractStringListFromAST parses both (list "a" "b" ...) and the quoted
+// column-list form '("a" "b") emitted by physical scan plans.
 func extractStringListFromAST(expr scm.Scmer) []string {
+	expr = stripSourceInfo(expr)
 	if !expr.IsSlice() {
 		return nil
 	}
 	items := expr.Slice()
+	if len(items) == 2 && callHeadIs(items[0], "quote") {
+		literal := stripSourceInfo(items[1])
+		if !literal.IsSlice() {
+			return nil
+		}
+		items = literal.Slice()
+		result := make([]string, len(items))
+		for i, item := range items {
+			item = stripSourceInfo(item)
+			if !item.IsString() {
+				return nil
+			}
+			result[i] = item.String()
+		}
+		return result
+	}
 	if len(items) < 2 {
 		return nil
 	}
@@ -974,7 +1003,7 @@ func extractStringListFromAST(expr scm.Scmer) []string {
 // extractEqualityJoins inspects a filter lambda for patterns like
 // (equal? filterParam (outer inputCol)) and returns matched srcCol/inputCol pairs.
 // filterParam is matched by position against condCols.
-func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inputCols []string) {
+func extractEqualityJoins(filterExpr scm.Scmer, condCols []string, computorParams []scm.Scmer) (srcCols, inputCols []string) {
 	var params []scm.Scmer
 	var body scm.Scmer
 	filterExpr = stripSourceInfo(filterExpr)
@@ -987,10 +1016,11 @@ func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inp
 	} else if filterExpr.IsSlice() {
 		items := filterExpr.Slice()
 		if len(items) >= 3 && callHeadIs(items[0], "lambda") {
-			if items[1].IsSlice() {
-				params = items[1].Slice()
+			paramExpr := stripSourceInfo(items[1])
+			if paramExpr.IsSlice() {
+				params = paramExpr.Slice()
 			}
-			body = items[2]
+			body = stripSourceInfo(items[2])
 		}
 	}
 	if len(params) == 0 || body.IsNil() {
@@ -1005,9 +1035,9 @@ func extractEqualityJoins(filterExpr scm.Scmer, condCols []string) (srcCols, inp
 	}
 	equalities := collectEqualities(body)
 	for _, eq := range equalities {
-		pIdx, iCol := matchJoinEquality(eq[0], eq[1], paramIdx, len(params), nil)
+		pIdx, iCol := matchJoinEquality(eq[0], eq[1], paramIdx, len(params), computorParams)
 		if pIdx < 0 {
-			pIdx, iCol = matchJoinEquality(eq[1], eq[0], paramIdx, len(params), nil)
+			pIdx, iCol = matchJoinEquality(eq[1], eq[0], paramIdx, len(params), computorParams)
 		}
 		if pIdx >= 0 && pIdx < len(condCols) {
 			srcCols = append(srcCols, condCols[pIdx])
@@ -1070,6 +1100,20 @@ func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, 
 			inner := stripSourceInfo(bItems[1])
 			if inner.IsSymbol() {
 				return idx, inner.String()
+			}
+			if inner.IsNthLocalVar() && computorParams != nil {
+				outerIdx := int(inner.NthLocalVar())
+				// A compiled filter numbers its own parameters first and
+				// closure captures afterwards.  Raw ASTs have no such offset.
+				if outerIdx >= paramCount {
+					outerIdx -= paramCount
+				}
+				if outerIdx >= 0 && outerIdx < len(computorParams) {
+					param := stripSourceInfo(computorParams[outerIdx])
+					if param.IsSymbol() {
+						return idx, param.String()
+					}
+				}
 			}
 			if inner.IsSlice() {
 				gcItems := inner.Slice()
@@ -1407,8 +1451,33 @@ func mergeUniqueStrings(parts ...[]string) []string {
 	return result
 }
 
-func scanRelevantSourceCols(ref scanJoinInfo) []string {
-	return mergeUniqueStrings(ref.condCols, ref.mapCols)
+func scanRelevantSourceCols(ref scanJoinInfo, srcTable *table) []string {
+	result := mergeUniqueStrings(ref.condCols, ref.mapCols)
+	if srcTable == nil {
+		return result
+	}
+
+	// Trigger rows do not materialize runtime-computed columns. If a scan reads
+	// one, comparing OLD/NEW for that column would therefore compare nil with nil
+	// and incorrectly suppress the dependency trigger. Expand it to the physical
+	// source columns that can change its value. The traversal is transitive and
+	// cycle-safe so nested lookup and ordered caches keep their invalidation edge.
+	seen := make(map[string]bool, len(result))
+	for i := 0; i < len(result); i++ {
+		name := result[i]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		for _, col := range srcTable.Columns {
+			if col.Name != name || !isRuntimeComputedColumn(col) {
+				continue
+			}
+			result = mergeUniqueStrings(result, col.ComputorInputCols, col.OrcSortCols, col.OrcMapCols)
+			break
+		}
+	}
+	return result
 }
 
 func buildColsChangedExpr(cols []string) scm.Scmer {
@@ -1724,7 +1793,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 
 		// Determine trigger bodies: selective if join pairs are available
 		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
-		relevantCols := scanRelevantSourceCols(ref)
+		relevantCols := scanRelevantSourceCols(ref, srcTable)
 
 		// Check if this scan is an additive aggregate eligible for incremental update.
 		var scanNode []scm.Scmer
@@ -1761,8 +1830,15 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 					} else {
 						body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapFnIdx], timing)
 					}
+				} else if selective {
+					// A scalar/lookup computor with analyzable equality keys defines an
+					// exact reverse mapping from the changed source key to cache rows.
+					// Preserve that subset; $invalidate batches record IDs and applies
+					// the invalidations only after the maintenance scan releases locks.
+					body = buildSelectiveInvalidationBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, timing)
 				} else {
-					// Full invalidation: for non-additive aggregates and AfterInvalidate propagation.
+					// Opaque scans have no proven reverse mapping. They must retain the
+					// complete invalidation fallback for correctness.
 					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
 					body = scm.NewSlice([]scm.Scmer{
 						scm.NewSymbol("invalidatecolumn"),
@@ -1877,7 +1953,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 			continue
 		}
 		selective := len(ref.srcCols) > 0 && len(ref.srcCols) == len(ref.inputCols)
-		relevantCols := scanRelevantSourceCols(ref)
+		relevantCols := scanRelevantSourceCols(ref, srcTable)
 		for _, timing := range []TriggerTiming{AfterInsert, AfterUpdate, AfterDelete} {
 			triggerName := ".orcdep:" + t.Name + ":" + name + "|scan" + strconv.Itoa(refIdx) + "|" + srcTable.Name + "|" + timing.String()
 			exists := false

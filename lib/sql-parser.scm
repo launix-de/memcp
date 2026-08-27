@@ -242,6 +242,23 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		'()
 	)))
 
+	/* SHOW INDEX rows are associations produced by storage metadata rather than
+	query-table columns. Compile an optional WHERE against that row without
+	leaking the metadata representation into the general SELECT planner. */
+	(define show_index_where_expr (lambda (expr)
+		(match expr
+			'('get_column _ _ col _) (list (quote get_assoc) (quote row) col)
+			(cons head tail) (cons head (map tail show_index_where_expr))
+			_ expr)))
+	(define show_index_plan (lambda (target_schema target_table where)
+		(list (quote map)
+			(list (quote show) target_schema target_table "indexes")
+			(list (quote lambda) (list (quote row))
+				(if (nil? where)
+					(list (quote resultrow) (quote row))
+					(list (quote if) (show_index_where_expr where)
+						(list (quote resultrow) (quote row)) nil))))))
+
 	/* helper function for triggers: transform get_column to dict access */
 	/* (get_column "NEW" _ col _) -> (get_assoc NEW col) */
 	/* (get_column "OLD" _ col _) -> (get_assoc OLD col) */
@@ -1608,7 +1625,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "DROP" true) (atom "FOREIGN" true) (atom "KEY" true) (define fk sql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "CONSTRAINT" true) (define fk sql_identifier)) (lambda (id) true))
 			(parser '((atom "DROP" true) (atom "PRIMARY" true) (atom "KEY" true)) (lambda (id) true))
-			(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)) (lambda (id) true))
+			(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier))
+				(lambda (id) (list (quote dropkey) (list (quote table) schema id) idx)))
 			(parser '((atom "ADD" true) (?(atom "COLUMN" true))
 				(define col sql_identifier)
 				(define type sql_column_type)
@@ -1846,8 +1864,17 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "SHOW" true) (atom "CREATE" true) (atom "TRIGGER" true) (define id sql_identifier))
 			'((quote resultrow) '((quote format_create_trigger) schema id)))
 
-		/* SHOW INDEXES FROM t / SHOW INDEX FROM t / SHOW KEYS FROM t (no-op, returns empty) */
-		(parser '((atom "SHOW" true) (or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true)) (atom "FROM" true) sql_identifier (? (atom "WHERE" true) sql_expression)) "ignore")
+		/* SHOW INDEXES FROM [schema.]table [FROM schema] [WHERE ...] */
+		(parser '((atom "SHOW" true)
+			(or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true))
+			(atom "FROM" true)
+			(define target (or
+				(parser '((define schema2 sql_identifier) "." (define id sql_identifier)) '(schema2 id))
+				(parser (define id sql_identifier) '(nil id))))
+			(? (or (atom "FROM" true) (atom "IN" true)) (define schema3 sql_identifier))
+			(? (atom "WHERE" true) (define where sql_expression)))
+			(match target '(schema2 id)
+				(show_index_plan (coalesce schema3 (coalesce schema2 schema)) id where)))
 
 		/* SHOW ENGINES: list engines recognized by CREATE/ALTER TABLE */
 		(parser '((atom "SHOW" true) (atom "ENGINES" true)) (cons '!begin '(
@@ -1996,7 +2023,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(atom "USING" true) (atom "BTREE" true)
 			"(" (define cols (+ sql_index_column ",")) ")"
 		) (match tbl '(schema2 t) '('createkey '('table (coalesce schema2 schema) t) idx true (cons (quote list) cols))))
-		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier) (? (atom "ON" true) (define tbl sql_identifier))) "ignore")
+		(parser '((atom "DROP" true) (atom "INDEX" true) (define idx sql_identifier)
+			(atom "ON" true)
+			(define target (or
+				(parser '((define schema2 sql_identifier) "." (define tbl sql_identifier)) '(schema2 tbl))
+				(parser (define tbl sql_identifier) '(nil tbl)))))
+			(match target '(schema2 tbl)
+				(list (quote dropkey) (list (quote table) (coalesce schema2 schema) tbl) idx)))
 
 		/* CREATE TRIGGER syntax */
 		/* body from sql_trigger_body is (raw_sql parsed_body) due to capture wrapper */

@@ -124,9 +124,10 @@ type StorageComputeProxy struct {
 	// Validity is tracked per-row via validMask (1=valid, 0=needs compute).
 	// Invalidation sets bits to 0; on-demand recompute sets them back to 1.
 	isOrdered bool
-	// Invalidation telemetry: tracks cumulative cost of selective invalidations
-	// since last read. When invalidation cost exceeds last recompute cost,
-	// switches to InvalidateAll() to avoid death-by-a-thousand-cuts.
+	// Invalidation telemetry compares measured selective maintenance with the
+	// last complete or suffix recompute. It is an operator-local runtime gate:
+	// exact row invalidation is retained when it is cheaper, while broad fanout
+	// can fall back to InvalidateAll instead of serially recomputing most rows.
 	invalidateNsSinceRead atomic.Int64  // cumulative invalidation nanoseconds since last read
 	lastRecomputeNs       atomic.Int64  // nanoseconds of the last full/suffix recompute
 	revision              atomic.Uint64 // logical value changes; index readers use this for lazy invalidation
@@ -942,6 +943,8 @@ func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
 
 // Compress materializes all values into a compressed main storage.
 func (p *StorageComputeProxy) Compress() {
+	compressStart := time.Now()
+	compressedNow := false
 	tx := CurrentTx()
 	if variant := p.currentVariant(tx, true); variant != nil {
 		p.compressVariant(variant, tx)
@@ -959,6 +962,7 @@ func (p *StorageComputeProxy) Compress() {
 		}
 		if p.count == 0 {
 			p.compressed = true
+			compressedNow = true
 			return
 		}
 
@@ -1002,8 +1006,12 @@ func (p *StorageComputeProxy) Compress() {
 		}
 		p.validMask.Reset()
 		p.compressed = true
+		compressedNow = true
 	}()
 	p.prewarmDeltaRows(tx, nil, scm.NewNil(), true)
+	if compressedNow {
+		p.ResetInvalidationTelemetry(time.Since(compressStart).Nanoseconds())
+	}
 }
 
 // CompressFiltered prewarms an ordinary computed column only for rows matching
@@ -1097,11 +1105,67 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 			scmer.SetValue(idx, val)
 			return // stay compressed, no bitmap change needed
 		}
-		// main is compressed type → can't SetValue → fall back to lazy
-		p.compressed = false
+		// Compressed immutable storages cannot update in place. Keep the compact
+		// base column and install one sparse override instead of switching the
+		// complete proxy back to lazy mode: validMask is intentionally empty after
+		// Compress(), so that transition would make every unrelated row look stale.
+		if idx < p.count {
+			colvalues := make([]scm.Scmer, len(p.inputCols))
+			for i, col := range p.inputCols {
+				colvalues[i] = p.shard.getColumnStorageOrPanic(col).GetValue(idx)
+			}
+			p.delta[idx] = applyWithTx(CurrentTx(), p.computor, colvalues...)
+			return
+		}
 	}
 	p.validMask.Set(uint(idx), false)
 	delete(p.delta, idx)
+}
+
+// InvalidateRows chooses between exact point repair and complete lazy
+// invalidation from measurements of this proxy's own computor. Dominating
+// cases remain unconditional: small batches are repaired directly. For a
+// broad batch, a short measured sample is extrapolated and compared with the
+// last complete materialization. This avoids both a global cost constant and
+// a schema-specific heuristic; the same physical operator adapts to cheap and
+// expensive lookup bodies and to changing table cardinalities.
+func (p *StorageComputeProxy) InvalidateRows(recids map[uint32]struct{}) {
+	if len(recids) == 0 {
+		return
+	}
+	const sampleRows = 32
+	if len(recids) <= sampleRows || p.hasSessionVariants() {
+		for recid := range recids {
+			p.Invalidate(recid)
+		}
+		return
+	}
+
+	fullRecomputeNs := p.lastRecomputeNs.Load()
+	if fullRecomputeNs <= 0 {
+		for recid := range recids {
+			p.Invalidate(recid)
+		}
+		return
+	}
+
+	ids := make([]uint32, 0, len(recids))
+	for recid := range recids {
+		ids = append(ids, recid)
+	}
+	started := time.Now()
+	for _, recid := range ids[:sampleRows] {
+		p.Invalidate(recid)
+	}
+	sampleNs := time.Since(started).Nanoseconds()
+	estimatedNs := float64(sampleNs) * float64(len(ids)) / float64(sampleRows)
+	if estimatedNs >= float64(fullRecomputeNs) {
+		p.InvalidateAll()
+		return
+	}
+	for _, recid := range ids[sampleRows:] {
+		p.Invalidate(recid)
+	}
 }
 
 // IncrementalUpdate adds delta to the cached value at idx.

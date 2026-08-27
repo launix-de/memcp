@@ -362,6 +362,12 @@ type uniqueKey struct {
 	Id   string
 	Cols []string
 }
+
+type uniqueValidationRow struct {
+	shard *storageShard
+	recid uint32
+	key   []scm.Scmer
+}
 type foreignKeyMode uint8
 
 const (
@@ -378,6 +384,61 @@ type foreignKey struct {
 	Cols2      []string
 	Updatemode foreignKeyMode
 	Deletemode foreignKeyMode
+}
+
+// hasDuplicateUniqueValues validates a proposed UNIQUE key against the current
+// visible table snapshot. CREATE KEY calls this while holding an exclusive
+// table lock, so collecting keys and probing the existing adaptive indexes are
+// one atomic DDL observation. NULL-containing tuples are excluded, matching
+// the insert-time UNIQUE contract which permits multiple SQL NULL values.
+func (t *table) hasDuplicateUniqueValues(cols []string) bool {
+	currentTx := CurrentTx()
+	shards := t.ActiveShards()
+	rows := make([]uniqueValidationRow, 0, t.CountEstimate())
+
+	for _, shard := range shards {
+		if shard == nil {
+			continue
+		}
+		release := shard.GetRead()
+		shard.mu.RLock()
+		limit := shard.main_count + uint32(len(shard.inserts))
+		for recid := uint32(0); recid < limit; recid++ {
+			visible := !shard.deletions.Get(uint(recid))
+			if currentTx != nil && currentTx.Mode == TxACID {
+				visible = currentTx.IsVisible(shard, recid)
+			}
+			if !visible {
+				continue
+			}
+			key := make([]scm.Scmer, len(cols))
+			hasNull := false
+			for i, col := range cols {
+				key[i] = shard.rowValueByRecidLocked(recid, col)
+				if key[i].IsNil() {
+					hasNull = true
+				}
+			}
+			if !hasNull {
+				rows = append(rows, uniqueValidationRow{shard: shard, recid: recid, key: key})
+			}
+		}
+		shard.mu.RUnlock()
+		release()
+	}
+
+	for _, row := range rows {
+		for _, shard := range shards {
+			if shard == nil {
+				continue
+			}
+			recid, present := shard.GetRecordidForUnique(cols, row.key, currentTx)
+			if present && (shard != row.shard || recid != row.recid) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 /*

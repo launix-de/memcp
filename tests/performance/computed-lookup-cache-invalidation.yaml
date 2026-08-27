@@ -1,0 +1,72 @@
+# Copyright (C) 2026  MemCP Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Row-local invalidation of a canonical computed lookup cache"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS lookup_invalidation_driver"
+  - sql: "DROP TABLE IF EXISTS lookup_invalidation_source"
+  - sql: "CREATE TABLE lookup_invalidation_source (id INT PRIMARY KEY, val INT)"
+  - sql: "CREATE TABLE lookup_invalidation_driver (id INT PRIMARY KEY, source_id INT)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "lookup_invalidation_source") '("id" "val")
+          (map (produceN 8000) (lambda (i) (list (+ i 1) (+ i 10))))
+          '() (lambda () true) false)
+        (insert (table "memcp-tests" "lookup_invalidation_driver") '("id" "source_id")
+          (map (produceN 8000) (lambda (i) (list (+ i 1) (+ i 1))))
+          '() (lambda () true) false)
+        (rebuild (table "memcp-tests" "lookup_invalidation_source") true false)
+        (rebuild (table "memcp-tests" "lookup_invalidation_driver") true false))
+
+test_cases:
+  - name: "Build and warm the canonical lookup cache"
+    scm: |
+      (begin
+        (createcolumn
+          (table "memcp-tests" "lookup_invalidation_driver")
+          ".lookup:value" "INT" '() '("temp" true)
+          '("source_id")
+          (lambda (source_id)
+            (scan nil (table "memcp-tests" "lookup_invalidation_source")
+              '("id") (lambda (id) (equal? id (outer source_id)))
+              '("val") (lambda (val) val)
+              (lambda (old value) value) 0 nil false)))
+        (scan nil (table "memcp-tests" "lookup_invalidation_driver")
+          '() (lambda () true)
+          '(".lookup:value") (lambda (value) value)
+          + 0 nil false))
+
+  - name: "Mutate one lookup source"
+    sql: "UPDATE lookup_invalidation_source SET val = 999999 WHERE id = 4000"
+    expect:
+      affected_rows: 1
+
+  - name: "One source mutation does not rebuild every cached lookup"
+    max_time: 0.5
+    sql: |
+      SELECT SUM(`.lookup:value`) AS total
+      FROM lookup_invalidation_driver
+    expect:
+      rows: 1
+      data:
+        - total: 33071990
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS lookup_invalidation_driver"
+  - sql: "DROP TABLE IF EXISTS lookup_invalidation_source"

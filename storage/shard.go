@@ -1599,7 +1599,7 @@ type ShardMapReducer struct {
 	// Batched side effects: collected during scan, flushed after lock release.
 	// $increment calls are aggregated per (proxy, recid) → one update per unique target.
 	incrementBatch  map[*StorageComputeProxy]map[uint32]scm.Scmer // proxy → recid → accumulated delta
-	invalidateBatch map[*StorageComputeProxy]bool                 // proxies to InvalidateAll after scan
+	invalidateBatch map[*StorageComputeProxy]map[uint32]struct{}  // proxy -> matching rows to invalidate after scan
 	reduceScmer     scm.Scmer                                     // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
@@ -1787,12 +1787,19 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		}
 		if needsMutationMetadata && mr.isInvalidate[i] {
 			if proxy := mr.invalidateProxy[i]; proxy != nil {
-				// Batch invalidations: mark proxy for InvalidateAll after scan
+				// Keep the exact matching record IDs. Lookup-cache maintenance scans
+				// already paid to identify this subset; collapsing it to InvalidateAll
+				// would discard that information and turn one source-row mutation into
+				// a complete cache rebuild.
 				if mr.invalidateBatch == nil {
-					mr.invalidateBatch = make(map[*StorageComputeProxy]bool)
+					mr.invalidateBatch = make(map[*StorageComputeProxy]map[uint32]struct{})
 				}
+				if mr.invalidateBatch[proxy] == nil {
+					mr.invalidateBatch[proxy] = make(map[uint32]struct{})
+				}
+				proxyBatch := mr.invalidateBatch[proxy]
 				fn := func(id uint32, args ...scm.Scmer) scm.Scmer {
-					mr.invalidateBatch[proxy] = true
+					proxyBatch[id] = struct{}{}
 					return scm.NewBool(true)
 				}
 				mr.invClosureFn[i] = &fn
@@ -1803,16 +1810,17 @@ func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn s
 		}
 		if needsMutationMetadata && mr.isInvalidate[i] {
 			if fnptr := mr.invClosureFn[i]; fnptr != nil {
-				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+				getter := func(id uint32, batchid uint32) scm.Scmer {
 					return scm.NewClosure(fnptr, id)
 				}
+				mr.mainGetters[i] = getter
+				mr.deltaGetters[i] = getter
 			} else {
-				mr.mainGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
+				getter := func(id uint32, batchid uint32) scm.Scmer {
 					return scm.NewClosure(mr.noopClosureFn, id)
 				}
-			}
-			mr.deltaGetters[i] = func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewClosure(mr.noopClosureFn, id)
+				mr.mainGetters[i] = getter
+				mr.deltaGetters[i] = getter
 			}
 			continue
 		}
@@ -2176,9 +2184,12 @@ func (m *ShardMapReducer) Close() {
 // invalidations). Must be called AFTER the scan completes and all shard
 // locks are released, to avoid deadlocks.
 func (m *ShardMapReducer) FlushSideEffects() {
-	// 1. Flush batched invalidations (cheapest: just set bits)
-	for proxy := range m.invalidateBatch {
-		proxy.InvalidateAll()
+	// 1. Flush batched invalidations while preserving the row subset selected by
+	// the maintenance scan. Propagation remains column-level for now: downstream
+	// computed columns are invalidated through the existing cycle-safe
+	// AfterInvalidate graph after this proxy has been updated.
+	for proxy, recids := range m.invalidateBatch {
+		invalidateComputedRows(proxy, recids)
 	}
 	m.invalidateBatch = nil
 
