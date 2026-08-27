@@ -1968,15 +1968,49 @@ func Init(en scm.Env) {
 
 			cols := scmerSliceToStrings(mustScmerSlice(a[3], "unique columns"))
 			name := scm.String(a[1])
+			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 
+			// SQL DDL runs with a query session. Its exclusive table lock closes the
+			// race with writers which selected the no-UNIQUE insert path before the
+			// metadata was published. Boot-time catalog creation is single-threaded
+			// and therefore does not require a user-level lock.
+			unlockTable := func() {}
+			if ss := scm.GetCurrentSessionState(); ss != nil {
+				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss)
+			}
+			defer unlockTable()
+
+			// Validate under the table-local schema lock, but do not hold the
+			// database-wide catalog lock while scanning table data.
+			alreadyExists, hasDuplicates := func() (bool, bool) {
+				t.ddlMu.Lock()
+				defer t.ddlMu.Unlock()
+				for _, u := range t.Unique {
+					if strings.EqualFold(u.Id, name) {
+						return true, false
+					}
+				}
+				return false, t.hasDuplicateUniqueValues(cols)
+			}()
+			if alreadyExists {
+				return scm.NewBool(false)
+			}
+			if hasDuplicates {
+				panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s prevents unique key %s", t.Name, name))
+			}
+
+			// Publication follows the documented database -> table DDL lock order.
+			// Recheck the name because another internal DDL operation may have
+			// published metadata between validation and catalog publication.
 			t.schema.schemalock.Lock()
+			t.ddlMu.Lock()
+			defer t.ddlMu.Unlock()
 			for _, u := range t.Unique {
-				if u.Id == name {
+				if strings.EqualFold(u.Id, name) {
 					t.schema.schemalock.Unlock()
 					return scm.NewBool(false)
 				}
 			}
-
 			t.Unique = append(t.Unique, uniqueKey{name, cols})
 			t.publishShowColumnsSnapshot()
 			t.schema.saveLockedAndUnlock(t.schemaSaveMode())
@@ -1989,6 +2023,41 @@ func Init(en scm.Env) {
 				{Kind: "string", ParamName: "keyname", ParamDesc: "name of the new key"},
 				{Kind: "bool", ParamName: "unique", ParamDesc: "whether the key is unique"},
 				{Kind: "list", ParamName: "columns", ParamDesc: "list of columns to include"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "dropkey",
+		Desc: "drops a named unique key from a table",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			t := TableFromScmer(a[0])
+			name := scm.String(a[1])
+			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
+
+			unlockTable := func() {}
+			if ss := scm.GetCurrentSessionState(); ss != nil {
+				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss)
+			}
+			defer unlockTable()
+			t.schema.schemalock.Lock()
+			t.ddlMu.Lock()
+			defer t.ddlMu.Unlock()
+			for i, key := range t.Unique {
+				if strings.EqualFold(key.Id, name) {
+					t.Unique = append(t.Unique[:i], t.Unique[i+1:]...)
+					t.publishShowColumnsSnapshot()
+					t.schema.saveLockedAndUnlock(t.schemaSaveMode())
+					return scm.NewBool(true)
+				}
+			}
+			t.schema.schemalock.Unlock()
+			return scm.NewBool(false)
+		},
+		Type: &scm.TypeDescriptor{HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", ParamName: "table"},
+				{Kind: "string", ParamName: "keyname", ParamDesc: "name of the unique key"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2909,7 +2978,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "show",
-		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
+		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns INFORMATION_SCHEMA index statistics\n(show schema tbl \"indexes\") returns MySQL SHOW INDEX rows",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			// table-based overloads: (show table) / (show recset) → columns,
 			// (show table "statistics") / (show recset "statistics") → index stats, etc.
@@ -2925,7 +2994,10 @@ func Init(en scm.Env) {
 				}
 				if len(a) == 2 {
 					if a[1].IsString() && scm.String(a[1]) == "statistics" {
-						return showBuildMeta(t.schema, t) // reuse existing statistics builder
+						return showBuildIndexRows(t.schema, t, false)
+					}
+					if a[1].IsString() && scm.String(a[1]) == "indexes" {
+						return showBuildIndexRows(t.schema, t, true)
 					}
 					if a[1].IsBool() && a[1].Bool() {
 						return showBuildMeta(t.schema, t)
@@ -2998,32 +3070,12 @@ func Init(en scm.Env) {
 				if t == nil {
 					panic("show3: table " + scm.String(a[0]) + "." + scm.String(a[1]) + " does not exist")
 				}
-				// (show schema tbl "statistics") → index statistics (INFORMATION_SCHEMA)
+				// (show schema tbl "statistics"|"indexes") → index metadata
 				if a[2].IsString() && scm.String(a[2]) == "statistics" {
-					var result []scm.Scmer
-					for _, uk := range t.Unique {
-						for seq, col := range uk.Cols {
-							result = append(result, scm.NewSlice([]scm.Scmer{
-								scm.NewString("table_catalog"), scm.NewString("def"),
-								scm.NewString("table_schema"), scm.NewString(db.Name),
-								scm.NewString("table_name"), scm.NewString(t.Name),
-								scm.NewString("non_unique"), scm.NewInt(0),
-								scm.NewString("index_schema"), scm.NewString(db.Name),
-								scm.NewString("index_name"), scm.NewString(uk.Id),
-								scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
-								scm.NewString("column_name"), scm.NewString(col),
-								scm.NewString("collation"), scm.NewString("A"),
-								scm.NewString("cardinality"), scm.NewNil(),
-								scm.NewString("sub_part"), scm.NewNil(),
-								scm.NewString("packed"), scm.NewNil(),
-								scm.NewString("nullable"), scm.NewString(""),
-								scm.NewString("index_type"), scm.NewString("BTREE"),
-								scm.NewString("comment"), scm.NewString(""),
-								scm.NewString("index_comment"), scm.NewString(""),
-							}))
-						}
-					}
-					return scm.NewSlice(result)
+					return showBuildIndexRows(db, t, false)
+				}
+				if a[2].IsString() && scm.String(a[2]) == "indexes" {
+					return showBuildIndexRows(db, t, true)
 				}
 				// (show schema tbl true) → full table info {columns, meta, shards}
 				if a[2].IsBool() && a[2].Bool() {
@@ -4013,6 +4065,64 @@ func showEngineStr(t *table) string {
 	default:
 		return "safe"
 	}
+}
+
+// showBuildIndexRows is the single metadata source for INFORMATION_SCHEMA and
+// MySQL SHOW INDEX. Keeping the two wire spellings over the same immutable key
+// snapshot prevents schema synchronizers from seeing a different constraint
+// catalog than the SQL planner and insert path.
+func showBuildIndexRows(db *database, t *table, mysqlNames bool) scm.Scmer {
+	t.ddlMu.RLock()
+	keys := make([]uniqueKey, len(t.Unique))
+	for i, key := range t.Unique {
+		keys[i] = uniqueKey{Id: key.Id, Cols: append([]string(nil), key.Cols...)}
+	}
+	t.ddlMu.RUnlock()
+
+	result := make([]scm.Scmer, 0, len(keys))
+	for _, key := range keys {
+		for seq, col := range key.Cols {
+			if mysqlNames {
+				result = append(result, scm.NewSlice([]scm.Scmer{
+					scm.NewString("Table"), scm.NewString(t.Name),
+					scm.NewString("Non_unique"), scm.NewInt(0),
+					scm.NewString("Key_name"), scm.NewString(key.Id),
+					scm.NewString("Seq_in_index"), scm.NewInt(int64(seq + 1)),
+					scm.NewString("Column_name"), scm.NewString(col),
+					scm.NewString("Collation"), scm.NewString("A"),
+					scm.NewString("Cardinality"), scm.NewNil(),
+					scm.NewString("Sub_part"), scm.NewNil(),
+					scm.NewString("Packed"), scm.NewNil(),
+					scm.NewString("Null"), scm.NewString(""),
+					scm.NewString("Index_type"), scm.NewString("BTREE"),
+					scm.NewString("Comment"), scm.NewString(""),
+					scm.NewString("Index_comment"), scm.NewString(""),
+					scm.NewString("Visible"), scm.NewString("YES"),
+					scm.NewString("Expression"), scm.NewNil(),
+				}))
+				continue
+			}
+			result = append(result, scm.NewSlice([]scm.Scmer{
+				scm.NewString("table_catalog"), scm.NewString("def"),
+				scm.NewString("table_schema"), scm.NewString(db.Name),
+				scm.NewString("table_name"), scm.NewString(t.Name),
+				scm.NewString("non_unique"), scm.NewInt(0),
+				scm.NewString("index_schema"), scm.NewString(db.Name),
+				scm.NewString("index_name"), scm.NewString(key.Id),
+				scm.NewString("seq_in_index"), scm.NewInt(int64(seq + 1)),
+				scm.NewString("column_name"), scm.NewString(col),
+				scm.NewString("collation"), scm.NewString("A"),
+				scm.NewString("cardinality"), scm.NewNil(),
+				scm.NewString("sub_part"), scm.NewNil(),
+				scm.NewString("packed"), scm.NewNil(),
+				scm.NewString("nullable"), scm.NewString(""),
+				scm.NewString("index_type"), scm.NewString("BTREE"),
+				scm.NewString("comment"), scm.NewString(""),
+				scm.NewString("index_comment"), scm.NewString(""),
+			}))
+		}
+	}
+	return scm.NewSlice(result)
 }
 
 func showStringSlice(values []string) scm.Scmer {

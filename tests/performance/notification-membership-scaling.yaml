@@ -1,0 +1,158 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# This workload deliberately combines the expensive parts of the notification
+# read: a non-trivial document relation, a compound correlated ACL, scalar ordering
+# through the file relation, a one-row current page, and an outer seen-marker
+# anti-join. Four thousand rows keep the complete cold-cache shape inside the
+# repository's protected five-second CI ceiling while still crossing the
+# planner's small-relation heuristics.
+
+metadata:
+  version: "1.0"
+  description: "Large notification membership query stays bounded"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nms_seen"
+  - sql: "DROP TABLE IF EXISTS nms_assignment"
+  - sql: "DROP TABLE IF EXISTS nms_location"
+  - sql: "DROP TABLE IF EXISTS nms_document"
+  - sql: "DROP TABLE IF EXISTS nms_file"
+  - sql: "CREATE TABLE nms_file (id INT PRIMARY KEY, uploaded_at INT NOT NULL) ENGINE=memory"
+  - sql: "CREATE TABLE nms_document (id INT PRIMARY KEY, file_id INT, location_id INT, document_year INT, department_id INT, audit_id INT) ENGINE=memory"
+  - sql: "CREATE TABLE nms_location (id INT PRIMARY KEY, direct_flag INT NOT NULL) ENGINE=memory"
+  - sql: "CREATE TABLE nms_assignment (id INT PRIMARY KEY, location_id INT, account_id INT, allowed BOOL) ENGINE=memory"
+  - sql: "CREATE TABLE nms_seen (account_id INT, channel VARCHAR(32), view_name VARCHAR(64), item_id INT, seen_at INT, UNIQUE KEY nms_seen_identity (account_id, channel, view_name, item_id)) ENGINE=memory"
+  - sql: "INSERT INTO nms_location VALUES (1, 1), (2, 0), (3, 0), (4, 0)"
+  - sql: "INSERT INTO nms_assignment VALUES (1, 2, 112, TRUE), (2, 4, 112, TRUE)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "nms_file") '("id" "uploaded_at")
+          (map (produceN 4000) (lambda (i)
+            (list (+ i 1) (+ i 1)))))
+        (insert (table "memcp-tests" "nms_document")
+          '("id" "file_id" "location_id" "document_year" "department_id" "audit_id")
+          (map (produceN 4000) (lambda (i)
+            (list (+ i 1) (+ i 1) (+ (mod i 4) 1)
+              (+ 2000 (mod i 26)) (+ (mod i 32) 1) (+ (mod i 128) 1)))))
+        (rebuild)
+        4000)
+
+test_cases:
+  - name: "Large ordered notification anti-join remains bounded"
+    max_time: 5
+    timeout: 90
+    sql: |
+      SELECT current_item.id
+      FROM (
+        SELECT document.id
+        FROM nms_document document
+        WHERE COALESCE((
+          SELECT CASE
+            WHEN location.direct_flag = 1 THEN TRUE
+            ELSE EXISTS (
+              SELECT TRUE
+              FROM nms_assignment assignment
+              WHERE assignment.location_id = location.id
+                AND assignment.account_id = 112
+                AND assignment.allowed = TRUE
+              LIMIT 1
+            )
+          END
+          FROM nms_location location
+          WHERE location.id = document.location_id
+          LIMIT 1
+        ), FALSE)
+        ORDER BY (
+          SELECT file.uploaded_at
+          FROM nms_file file
+          WHERE file.id = document.file_id
+          LIMIT 1
+        ) DESC,
+        document.document_year DESC,
+        document.location_id DESC,
+        document.department_id DESC,
+        document.audit_id DESC
+        LIMIT 1
+      ) current_item
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM nms_seen seen
+        WHERE seen.account_id = 112
+          AND seen.channel = 'document'
+          AND seen.view_name = 'main'
+          AND seen.item_id = current_item.id
+      )
+      LIMIT 10000
+    expect:
+      rows: 1
+      data:
+        - id: 4000
+
+  - name: "Large notification insert-select remains bounded"
+    max_time: 5
+    timeout: 90
+    sql: |
+      INSERT INTO nms_seen (account_id, channel, view_name, item_id, seen_at)
+      SELECT 112, 'document', 'main', current_item.id, 2000
+      FROM (
+        SELECT document.id
+        FROM nms_document document
+        WHERE COALESCE((
+          SELECT CASE
+            WHEN location.direct_flag = 1 THEN TRUE
+            ELSE EXISTS (
+              SELECT TRUE
+              FROM nms_assignment assignment
+              WHERE assignment.location_id = location.id
+                AND assignment.account_id = 112
+                AND assignment.allowed = TRUE
+              LIMIT 1
+            )
+          END
+          FROM nms_location location
+          WHERE location.id = document.location_id
+          LIMIT 1
+        ), FALSE)
+        ORDER BY (
+          SELECT file.uploaded_at
+          FROM nms_file file
+          WHERE file.id = document.file_id
+          LIMIT 1
+        ) DESC,
+        document.document_year DESC,
+        document.location_id DESC,
+        document.department_id DESC,
+        document.audit_id DESC
+        LIMIT 1
+      ) current_item
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM nms_seen seen
+        WHERE seen.account_id = 112
+          AND seen.channel = 'document'
+          AND seen.view_name = 'main'
+          AND seen.item_id = current_item.id
+      )
+    expect:
+      affected_rows: 1
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nms_seen"
+  - sql: "DROP TABLE IF EXISTS nms_assignment"
+  - sql: "DROP TABLE IF EXISTS nms_location"
+  - sql: "DROP TABLE IF EXISTS nms_document"
+  - sql: "DROP TABLE IF EXISTS nms_file"

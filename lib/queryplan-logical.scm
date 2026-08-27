@@ -3187,6 +3187,20 @@ without separately proving two-valued semantics. */
 			(rewrite_derived_ref alias projection (source_join_expr src))))
 		(list (cons source logical_extra_sources) projection stage))))
 
+(define direct_source_order_item? (lambda (src item)
+	(match item
+		'(expr _dir) (match expr
+			((symbol get_column) tblvar tbl_ignorecase _col _col_ignorecase)
+			(source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			((quote get_column) tblvar tbl_ignorecase _col _col_ignorecase)
+			(source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			_ false)
+		_ false)))
+
+(define direct_source_order_items? (lambda (src items)
+	(reduce (coalesceNil items '()) (lambda (direct item)
+		(and direct (direct_source_order_item? src item))) true)))
+
 (define ordered_limited_derived_supported? (lambda (inner src)
 	(and (query_block? inner)
 		(and (not (empty_list? (qb_order inner)))
@@ -3195,7 +3209,15 @@ without separately proving two-valued semantics. */
 					(and (empty_list? (qb_group inner))
 						(and (nil? (qb_having inner))
 							(and (not (query_block_has_aggregates? inner))
-								(scalar_source_shape_supported? (qb_sources inner)))))))))))
+								(and (scalar_source_shape_supported? (qb_sources inner))
+									/* The row-number rewrite below stores its order as base-table
+									columns. An ORDER expression realized by a decorrelated helper
+									is still streamable, but it is not a base storage column. Keep
+									that complete logical relation in the ordinary limited-derived
+									stage instead of misclassifying the helper alias as a column of
+									the driver. */
+									(direct_source_order_items?
+										(car (qb_sources inner)) (qb_order inner))))))))))))
 
 (define make_ordered_limited_derived_rewrite (lambda (src alias inner)
 	(begin

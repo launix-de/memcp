@@ -1,0 +1,281 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Notification membership workflow over an ordered derived query"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS nmw_seen"
+  - sql: "DROP TABLE IF EXISTS nmw_document"
+  - sql: "DROP TABLE IF EXISTS nmw_file"
+  - sql: |
+      CREATE TABLE nmw_file (
+        id INT PRIMARY KEY,
+        uploaded_at INT NOT NULL
+      )
+  - sql: |
+      CREATE TABLE nmw_document (
+        id INT PRIMARY KEY,
+        file_id INT,
+        document_year INT,
+        location_id INT,
+        department_id INT,
+        audit_id INT
+      )
+  - sql: |
+      CREATE TABLE nmw_seen (
+        account_id INT NOT NULL,
+        channel VARCHAR(32) NOT NULL,
+        view_name VARCHAR(64) NOT NULL,
+        item_id INT,
+        seen_at INT NOT NULL,
+        UNIQUE KEY nmw_seen_identity (account_id, channel, view_name, item_id)
+      )
+  - sql: "INSERT INTO nmw_file VALUES (10, 100), (20, 300), (30, 200)"
+  - sql: "INSERT INTO nmw_document VALUES (1, 10, 2024, 1, 1, 1), (2, 20, 2025, 1, 1, 1), (3, 30, 2023, 2, 2, 2)"
+  - sql: "INSERT INTO nmw_seen VALUES (112, 'document', 'main', 1, 1000), (112, 'document', 'main', 99, 1001), (7, 'document', 'main', 2, 1002)"
+
+test_cases:
+  - name: "Periodic notification account selection keeps every OR branch"
+    sql: |
+      SELECT account_id
+      FROM nmw_seen
+      WHERE account_id = 112
+         OR account_id = 7
+         OR channel = 'missing'
+         OR view_name = 'missing'
+      GROUP BY account_id
+      ORDER BY account_id
+    expect:
+      rows: 2
+      data:
+        - account_id: 7
+        - account_id: 112
+
+  - name: "Multi-row seen markers preserve composite identity"
+    sql: |
+      INSERT INTO nmw_seen (account_id, channel, view_name, item_id, seen_at)
+      VALUES (112, 'document', 'secondary', 2, 1003),
+             (112, 'document', 'secondary', 3, 1003)
+    expect:
+      affected_rows: 2
+
+  - name: "Duplicate seen marker is rejected"
+    sql: |
+      INSERT INTO nmw_seen (account_id, channel, view_name, item_id, seen_at)
+      VALUES (112, 'document', 'secondary', 2, 1004)
+    expect:
+      error: true
+
+  - name: "Deletable markers use NOT IN over the current ordered page"
+    sql: |
+      SELECT seen.item_id AS id
+      FROM nmw_seen seen
+      WHERE seen.account_id = 112
+        AND seen.channel = 'document'
+        AND seen.view_name = 'main'
+        AND NOT seen.item_id IN (
+          SELECT document.id
+          FROM nmw_document document
+          ORDER BY (
+            SELECT file.uploaded_at
+            FROM nmw_file file
+            WHERE file.id = document.file_id
+            LIMIT 1
+          ) DESC,
+          document.document_year DESC,
+          document.location_id DESC,
+          document.department_id DESC,
+          document.audit_id DESC
+          LIMIT 1
+        )
+      ORDER BY seen.item_id
+      LIMIT 10000
+    expect:
+      rows: 2
+      data:
+        - id: 1
+        - id: 99
+
+  - name: "Equivalent joined order establishes the current-item oracle"
+    sql: |
+      SELECT current_item.id
+      FROM (
+        SELECT document.id
+        FROM nmw_document document
+        LEFT JOIN nmw_file file ON file.id = document.file_id
+        ORDER BY file.uploaded_at DESC,
+          document.document_year DESC,
+          document.location_id DESC,
+          document.department_id DESC,
+          document.audit_id DESC
+        LIMIT 1
+      ) current_item
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM nmw_seen seen
+        WHERE seen.account_id = 112
+          AND seen.channel = 'document'
+          AND seen.view_name = 'main'
+          AND seen.item_id = current_item.id
+      )
+      LIMIT 10000
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "DELETE accepts the bounded obsolete-id list"
+    sql: |
+      DELETE FROM nmw_seen
+      WHERE account_id = 112
+        AND channel = 'document'
+        AND view_name = 'main'
+        AND item_id IN (1, 99)
+    expect:
+      affected_rows: 2
+
+  - name: "DELETE leaves unrelated notification channels untouched"
+    sql: |
+      SELECT item_id
+      FROM nmw_seen
+      WHERE account_id = 112
+      ORDER BY channel, item_id
+    expect:
+      rows: 2
+      data:
+        - item_id: 2
+        - item_id: 3
+
+  # These final cases preserve the application shape rather than rewriting it
+  # as a JOIN. They intentionally expose a planner regression on current
+  # master: the scalar ORDER expression must retain its correlated source when
+  # the limited query block is consumed as a derived source.
+  - name: "Derived current page preserves correlated scalar ordering"
+    sql: |
+      SELECT current_item.id
+      FROM (
+        SELECT document.id
+        FROM nmw_document document
+        ORDER BY (
+          SELECT file.uploaded_at
+          FROM nmw_file file
+          WHERE file.id = document.file_id
+          LIMIT 1
+        ) DESC,
+        document.document_year DESC,
+        document.location_id DESC,
+        document.department_id DESC,
+        document.audit_id DESC
+        LIMIT 1
+      ) current_item
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "Unseen lookup anti-joins the ordered derived current page"
+    sql: |
+      SELECT current_item.id
+      FROM (
+        SELECT document.id
+        FROM nmw_document document
+        ORDER BY (
+          SELECT file.uploaded_at
+          FROM nmw_file file
+          WHERE file.id = document.file_id
+          LIMIT 1
+        ) DESC,
+        document.document_year DESC,
+        document.location_id DESC,
+        document.department_id DESC,
+        document.audit_id DESC
+        LIMIT 1
+      ) current_item
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM nmw_seen seen
+        WHERE seen.account_id = 112
+          AND seen.channel = 'document'
+          AND seen.view_name = 'main'
+          AND seen.item_id = current_item.id
+      )
+      LIMIT 10000
+    expect:
+      rows: 1
+      data:
+        - id: 2
+
+  - name: "Insert-select records the unseen ordered current page"
+    sql: |
+      INSERT INTO nmw_seen (account_id, channel, view_name, item_id, seen_at)
+      SELECT 112, 'document', 'main', current_item.id, 2000
+      FROM (
+        SELECT document.id
+        FROM nmw_document document
+        ORDER BY (
+          SELECT file.uploaded_at
+          FROM nmw_file file
+          WHERE file.id = document.file_id
+          LIMIT 1
+        ) DESC,
+        document.document_year DESC,
+        document.location_id DESC,
+        document.department_id DESC,
+        document.audit_id DESC
+        LIMIT 1
+      ) current_item
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM nmw_seen seen
+        WHERE seen.account_id = 112
+          AND seen.channel = 'document'
+          AND seen.view_name = 'main'
+          AND seen.item_id = current_item.id
+      )
+    expect:
+      affected_rows: 1
+
+  - name: "Inserted current-page marker suppresses a repeated notification"
+    sql: |
+      SELECT current_item.id
+      FROM (
+        SELECT document.id
+        FROM nmw_document document
+        ORDER BY (
+          SELECT file.uploaded_at
+          FROM nmw_file file
+          WHERE file.id = document.file_id
+          LIMIT 1
+        ) DESC
+        LIMIT 1
+      ) current_item
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM nmw_seen seen
+        WHERE seen.account_id = 112
+          AND seen.channel = 'document'
+          AND seen.view_name = 'main'
+          AND seen.item_id = current_item.id
+      )
+    expect:
+      rows: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS nmw_seen"
+  - sql: "DROP TABLE IF EXISTS nmw_document"
+  - sql: "DROP TABLE IF EXISTS nmw_file"
