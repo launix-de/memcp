@@ -332,6 +332,76 @@ func TestLookupInvalidationKeepsCompressedBaseRows(t *testing.T) {
 	}
 }
 
+func newAdaptiveLookupProxyForTest(rowCount int) (*StorageComputeProxy, *int) {
+	db := newDatabase()
+	db.Name = "tlookupadaptive"
+	tbl := &table{schema: db, Name: "base", Columns: []*column{{Name: "input"}, {Name: "cached"}}}
+	shard := &storageShard{
+		t:            tbl,
+		main_count:   uint32(rowCount),
+		columns:      make(map[string]ColumnStorage),
+		deltaColumns: make(map[string]int),
+	}
+	values := make([]int64, rowCount)
+	for i := range values {
+		values[i] = int64(i)
+	}
+	input := buildScmerStorageForLookupTest(values...)
+	calls := 0
+	proxy := &StorageComputeProxy{
+		main:       buildScmerStorageForLookupTest(values...),
+		delta:      make(map[uint32]scm.Scmer),
+		compressed: true,
+		computor: scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+			calls++
+			return args[0]
+		}),
+		inputCols: []string{"input"},
+		shard:     shard,
+		colName:   "cached",
+		count:     uint32(rowCount),
+	}
+	shard.columns["input"] = input
+	shard.columns["cached"] = proxy
+	return proxy, &calls
+}
+
+func TestLookupInvalidationFallsBackForExpensiveBroadFanout(t *testing.T) {
+	proxy, calls := newAdaptiveLookupProxyForTest(64)
+	proxy.lastRecomputeNs.Store(1)
+	recids := make(map[uint32]struct{}, 64)
+	for i := uint32(0); i < 64; i++ {
+		recids[i] = struct{}{}
+	}
+
+	proxy.InvalidateRows(recids)
+
+	if proxy.compressed {
+		t.Fatal("broad point invalidation did not fall back to full lazy invalidation")
+	}
+	if *calls >= len(recids) {
+		t.Fatalf("adaptive probe recomputed %d rows, want fewer than %d", *calls, len(recids))
+	}
+}
+
+func TestLookupInvalidationKeepsCheaperExactFanout(t *testing.T) {
+	proxy, calls := newAdaptiveLookupProxyForTest(64)
+	proxy.lastRecomputeNs.Store(1 << 62)
+	recids := make(map[uint32]struct{}, 64)
+	for i := uint32(0); i < 64; i++ {
+		recids[i] = struct{}{}
+	}
+
+	proxy.InvalidateRows(recids)
+
+	if !proxy.compressed {
+		t.Fatal("cheap point invalidation unexpectedly discarded the compressed cache")
+	}
+	if *calls != len(recids) {
+		t.Fatalf("exact invalidation recomputed %d rows, want %d", *calls, len(recids))
+	}
+}
+
 func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T) {
 	dir, err := os.MkdirTemp("", "memcp-orc-trigger-*")
 	if err != nil {

@@ -22,10 +22,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS lookup_cache_document"
   - sql: "DROP TABLE IF EXISTS lookup_cache_file"
   - sql: "DROP TABLE IF EXISTS lookup_cache_folder"
-  - sql: "CREATE TABLE lookup_cache_folder (id INT PRIMARY KEY, stamp INT)"
+  - sql: "CREATE TABLE lookup_cache_folder (id INT PRIMARY KEY, stamp INT, label_code INT)"
   - sql: "CREATE TABLE lookup_cache_file (id INT PRIMARY KEY, folder_id INT)"
   - sql: "CREATE TABLE lookup_cache_document (id INT PRIMARY KEY, file_id INT)"
-  - sql: "INSERT INTO lookup_cache_folder VALUES (1, 100), (2, 200)"
+  - sql: "INSERT INTO lookup_cache_folder VALUES (1, 100, 7), (2, 200, 9)"
   - sql: "INSERT INTO lookup_cache_file VALUES (10, 1), (20, 2)"
   - sql: "INSERT INTO lookup_cache_document VALUES (1000, 10), (2000, 20)"
 
@@ -43,6 +43,19 @@ test_cases:
             '("stamp") (lambda (stamp) stamp)
             (lambda (old value) value) 0 nil false)))
 
+  - name: "Create a fused lookup cache reading multiple source columns"
+    scm: |
+      (createcolumn
+        (table "memcp-tests" "lookup_cache_file")
+        ".lookup:folder_pair" "INT" '() '("temp" true)
+        '("folder_id")
+        (lambda (folder_id)
+          (scan nil
+            (table "memcp-tests" "lookup_cache_folder")
+            '("id") (lambda (id) (equal? id (outer folder_id)))
+            '("stamp" "label_code") (lambda (stamp label_code) (+ stamp label_code))
+            (lambda (old value) value) 0 nil false)))
+
   - name: "Create a lookup cache depending on another lookup cache"
     scm: |
       (createcolumn
@@ -56,9 +69,23 @@ test_cases:
             '(".lookup:folder_stamp") (lambda (folder_stamp) folder_stamp)
             (lambda (old value) value) 0 nil false)))
 
+  - name: "Create a nested cache from the fused lookup output"
+    scm: |
+      (createcolumn
+        (table "memcp-tests" "lookup_cache_document")
+        ".lookup:file_folder_pair" "INT" '() '("temp" true)
+        '("file_id")
+        (lambda (file_id)
+          (scan nil
+            (table "memcp-tests" "lookup_cache_file")
+            '("id") (lambda (id) (equal? id (outer file_id)))
+            '(".lookup:folder_pair") (lambda (folder_pair) folder_pair)
+            (lambda (old value) value) 0 nil false)))
+
   - name: "Nested lookup caches expose their initial values"
     sql: |
-      SELECT id, `.lookup:file_folder_stamp` AS stamp
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
       FROM lookup_cache_document
       ORDER BY id
     expect:
@@ -66,8 +93,10 @@ test_cases:
       data:
         - id: 1000
           stamp: 100
+          pair_value: 107
         - id: 2000
           stamp: 200
+          pair_value: 209
 
   - name: "Mutate the source of one nested lookup branch"
     sql: "UPDATE lookup_cache_folder SET stamp = 111 WHERE id = 1"
@@ -76,7 +105,8 @@ test_cases:
 
   - name: "Invalidation cascades through both lookup cache levels"
     sql: |
-      SELECT id, `.lookup:file_folder_stamp` AS stamp
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
       FROM lookup_cache_document
       ORDER BY id
     expect:
@@ -84,8 +114,52 @@ test_cases:
       data:
         - id: 1000
           stamp: 111
+          pair_value: 118
         - id: 2000
           stamp: 200
+          pair_value: 209
+
+  - name: "Point a cache row at a source key that does not exist yet"
+    sql: "UPDATE lookup_cache_file SET folder_id = 3 WHERE id = 20"
+    expect:
+      affected_rows: 1
+
+  - name: "The missing lookup result is cached without affecting its sibling"
+    sql: |
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
+      FROM lookup_cache_document
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1000
+          stamp: 111
+          pair_value: 118
+        - id: 2000
+          stamp: 0
+          pair_value: 0
+
+  - name: "Move a source row onto the previously missing lookup key"
+    sql: "UPDATE lookup_cache_folder SET id = 3 WHERE id = 2"
+    expect:
+      affected_rows: 1
+
+  - name: "Changing the source join key invalidates matches for the new key"
+    sql: |
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
+      FROM lookup_cache_document
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1000
+          stamp: 111
+          pair_value: 118
+        - id: 2000
+          stamp: 200
+          pair_value: 209
 
   - name: "Move a lookup row to another parent"
     sql: "UPDATE lookup_cache_file SET folder_id = 1 WHERE id = 20"
@@ -94,7 +168,8 @@ test_cases:
 
   - name: "Changing an intermediate lookup key invalidates its consumers"
     sql: |
-      SELECT id, `.lookup:file_folder_stamp` AS stamp
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
       FROM lookup_cache_document
       ORDER BY id
     expect:
@@ -102,8 +177,10 @@ test_cases:
       data:
         - id: 1000
           stamp: 111
+          pair_value: 118
         - id: 2000
           stamp: 111
+          pair_value: 118
 
   - name: "Move a driver row to another cached lookup"
     sql: "UPDATE lookup_cache_document SET file_id = 20 WHERE id = 1000"
@@ -112,7 +189,8 @@ test_cases:
 
   - name: "Changing the local lookup key computes the new row value"
     sql: |
-      SELECT id, `.lookup:file_folder_stamp` AS stamp
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
       FROM lookup_cache_document
       ORDER BY id
     expect:
@@ -120,8 +198,10 @@ test_cases:
       data:
         - id: 1000
           stamp: 111
+          pair_value: 118
         - id: 2000
           stamp: 111
+          pair_value: 118
 
   - name: "Delete the nested lookup source"
     sql: "DELETE FROM lookup_cache_folder WHERE id = 1"
@@ -130,7 +210,8 @@ test_cases:
 
   - name: "Deleting a lookup source invalidates all matching cache levels"
     sql: |
-      SELECT id, `.lookup:file_folder_stamp` AS stamp
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
       FROM lookup_cache_document
       ORDER BY id
     expect:
@@ -138,17 +219,20 @@ test_cases:
       data:
         - id: 1000
           stamp: 0
+          pair_value: 0
         - id: 2000
           stamp: 0
+          pair_value: 0
 
   - name: "Reinsert the nested lookup source"
-    sql: "INSERT INTO lookup_cache_folder VALUES (1, 333)"
+    sql: "INSERT INTO lookup_cache_folder VALUES (1, 333, 17)"
     expect:
       affected_rows: 1
 
   - name: "Inserting a lookup source repairs all matching cache levels"
     sql: |
-      SELECT id, `.lookup:file_folder_stamp` AS stamp
+      SELECT id, `.lookup:file_folder_stamp` AS stamp,
+             `.lookup:file_folder_pair` AS pair_value
       FROM lookup_cache_document
       ORDER BY id
     expect:
@@ -156,8 +240,10 @@ test_cases:
       data:
         - id: 1000
           stamp: 333
+          pair_value: 350
         - id: 2000
           stamp: 333
+          pair_value: 350
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS lookup_cache_document"

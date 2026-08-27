@@ -601,9 +601,7 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 		return
 	}
 	withComputeInvalidationWave(proxy.shard.t, proxy.colName, func() bool {
-		for recid := range recids {
-			proxy.Invalidate(recid)
-		}
+		proxy.InvalidateRows(recids)
 		return true
 	})
 }
