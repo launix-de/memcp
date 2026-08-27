@@ -19,7 +19,7 @@ package scm
 func init_list_assoc_extra() {
 	Declare(&Globalenv, &Declaration{
 		Name: "mapkey_assoc",
-		Desc: "returns a mapped dictionary according to a map function\nValues stay the same but keys are mapped.",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
@@ -36,10 +36,10 @@ func init_list_assoc_extra() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a mapped dictionary according to a map function\nValues stay the same but keys are mapped.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary whose keys have to be mapped", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(key, value)->key where the first parameter is the old key, the second is the value. It must return the new key.", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "dictionary whose keys have to be mapped", NoEscape: true},
+				{Kind: "func", Label: "map", Description: "map function func(key, value)->key where the first parameter is the old key, the second is the value. It must return the new key.", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -48,7 +48,7 @@ func init_list_assoc_extra() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "mapkey_assoc_mut",
-		Desc: "optimizer-only key remap for dictionaries",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc_mut"])
@@ -68,10 +68,10 @@ func init_list_assoc_extra() {
 			})
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only key remap for dictionaries",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary whose keys have to be remapped"},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(key, value)->key", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "owned dictionary whose keys have to be remapped"},
+				{Kind: "func", Label: "map", Description: "map function func(key, value)->key", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,

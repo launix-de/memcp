@@ -78,13 +78,13 @@ func init_alu() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "int?",
-		Desc: "tells if the value is a integer",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(a[0].GetTag() == tagInt)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "tells if the value is a integer",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value"},
+				{Kind: "any", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -151,14 +151,14 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "number?",
-		Desc: "tells if the value is a number",
+
 		Fn: func(a ...Scmer) Scmer {
 			tag := a[0].GetTag()
 			return NewBool(tag == tagFloat || tag == tagInt || tag == tagDate)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "tells if the value is a number",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value"},
+				{Kind: "any", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -750,13 +750,13 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "symbol?",
-		Desc: "tells if the value is a symbol",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(a[0].GetTag() == tagSymbol)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "tells if the value is a symbol",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value"},
+				{Kind: "any", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -824,7 +824,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "+",
-		Desc: "adds two or more numbers",
+
 		Fn: func(a ...Scmer) Scmer {
 			// Fast path: accumulate ints until first non-int, then promote to float if needed
 			var sumInt int64
@@ -852,9 +852,9 @@ func init_alu() {
 			}
 			return NewFloat(sumFloat)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "adds two or more numbers",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value...", ParamDesc: "values to add", Variadic: true},
+				{Kind: "number", Label: "value...", Description: "values to add", Variadic: true},
 			},
 			Return:   &TypeDescriptor{Kind: "number"},
 			Const:    true,
@@ -4121,7 +4121,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_sum_reduce",
-		Desc: "adds two SQL SUM values while treating NULL as the empty aggregate identity",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return a[1]
@@ -4134,10 +4134,10 @@ func init_alu() {
 			}
 			return NewFloat(a[0].Float() + a[1].Float())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "adds two SQL SUM values while treating NULL as the empty aggregate identity",
 			Params: []*TypeDescriptor{
-				{Kind: "number|nil", ParamName: "left", ParamDesc: "partial sum"},
-				{Kind: "number|nil", ParamName: "right", ParamDesc: "next value"},
+				{Kind: "number|nil", Label: "left", Description: "partial sum"},
+				{Kind: "number|nil", Label: "right", Description: "next value"},
 			},
 			Return: &TypeDescriptor{Kind: "number|nil"},
 			Const:  true,
@@ -5449,7 +5449,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "-",
-		Desc: "subtracts two or more numbers from the first one",
+
 		Fn: func(a ...Scmer) Scmer {
 			// Nil short-circuit
 			for _, v := range a {
@@ -5481,9 +5481,9 @@ func init_alu() {
 			}
 			return NewFloat(diffFloat)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "subtracts two or more numbers from the first one",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value...", ParamDesc: "values", Variadic: true},
+				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -13702,14 +13702,14 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_add_numeric_literals",
-		Desc: "adds two SQL numeric literals using their exact decimal spellings",
+
 		Fn: func(a ...Scmer) Scmer {
 			return sqlLiteralArithmetic(a[0], a[1], false)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "adds two SQL numeric literals using their exact decimal spellings",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "a", ParamDesc: "left literal"},
-				{Kind: "number", ParamName: "b", ParamDesc: "right literal"},
+				{Kind: "number", Label: "a", Description: "left literal"},
+				{Kind: "number", Label: "b", Description: "right literal"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -13865,14 +13865,14 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_sub_numeric_literals",
-		Desc: "subtracts two SQL numeric literals using their exact decimal spellings",
+
 		Fn: func(a ...Scmer) Scmer {
 			return sqlLiteralArithmetic(a[0], a[1], true)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "subtracts two SQL numeric literals using their exact decimal spellings",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "a", ParamDesc: "left literal"},
-				{Kind: "number", ParamName: "b", ParamDesc: "right literal"},
+				{Kind: "number", Label: "a", Description: "left literal"},
+				{Kind: "number", Label: "b", Description: "right literal"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -14028,7 +14028,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "*",
-		Desc: "multiplies two or more numbers",
+
 		Fn: func(a ...Scmer) Scmer {
 			// Nil short-circuit (SQL-style): if any arg is nil, result is nil
 			for _, v := range a {
@@ -14064,9 +14064,9 @@ func init_alu() {
 			}
 			return NewFloat(prodFloat)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "multiplies two or more numbers",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value...", ParamDesc: "values", Variadic: true},
+				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
 			Return:   &TypeDescriptor{Kind: "number"},
 			Const:    true,
@@ -20770,7 +20770,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "/",
-		Desc: "divides two or more numbers from the first one",
+
 		Fn: func(a ...Scmer) Scmer {
 			// Nil short-circuit
 			for _, v := range a {
@@ -20784,9 +20784,9 @@ func init_alu() {
 			}
 			return NewFloat(v)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "divides two or more numbers from the first one",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value...", ParamDesc: "values", Variadic: true},
+				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -20796,7 +20796,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "mod",
-		Desc: "returns the remainder of integer division (modulo)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
@@ -20814,10 +20814,10 @@ func init_alu() {
 			}
 			return NewFloat(float64(int64(a[0].Float()) % int64(b)))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the remainder of integer division (modulo)",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "a", ParamDesc: "dividend"},
-				{Kind: "number", ParamName: "b", ParamDesc: "divisor"},
+				{Kind: "number", Label: "a", Description: "dividend"},
+				{Kind: "number", Label: "b", Description: "divisor"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -22675,17 +22675,17 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "<=",
-		Desc: "compares two numbers or strings; returns nil if either value is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
 			}
 			return NewBool(!Less(a[1], a[0]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "compares two numbers or strings; returns nil if either value is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "first value"},
-				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
+				{Kind: "any", Label: "a", Description: "first value"},
+				{Kind: "any", Label: "b", Description: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -23214,17 +23214,17 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "<",
-		Desc: "compares two numbers or strings; returns nil if either value is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
 			}
 			return NewBool(Less(a[0], a[1]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "compares two numbers or strings; returns nil if either value is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "first value"},
-				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
+				{Kind: "any", Label: "a", Description: "first value"},
+				{Kind: "any", Label: "b", Description: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -23717,17 +23717,17 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: ">",
-		Desc: "compares two numbers or strings; returns nil if either value is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
 			}
 			return NewBool(Less(a[1], a[0]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "compares two numbers or strings; returns nil if either value is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "first value"},
-				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
+				{Kind: "any", Label: "a", Description: "first value"},
+				{Kind: "any", Label: "b", Description: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -24220,17 +24220,17 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: ">=",
-		Desc: "compares two numbers or strings; returns nil if either value is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
 			}
 			return NewBool(!Less(a[0], a[1]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "compares two numbers or strings; returns nil if either value is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "first value"},
-				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
+				{Kind: "any", Label: "a", Description: "first value"},
+				{Kind: "any", Label: "b", Description: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -24759,14 +24759,14 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "equal?",
-		Desc: "compares two values of the same type, (equal? nil nil) is true",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(Equal(a[0], a[1]))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "compares two values of the same type, (equal? nil nil) is true",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "first value"},
-				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
+				{Kind: "any", Label: "a", Description: "first value"},
+				{Kind: "any", Label: "b", Description: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -24898,14 +24898,14 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "equal??",
-		Desc: "performs a SQL compliant sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive, (equal? nil nil) is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			return EqualSQL(a[0], a[1])
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "performs a SQL compliant sloppy equality check on primitive values (number, int, string, bool. nil), strings are compared case insensitive, (equal? nil nil) is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "first value"},
-				{Kind: "any", ParamName: "b", ParamDesc: "second value"},
+				{Kind: "any", Label: "a", Description: "first value"},
+				{Kind: "any", Label: "b", Description: "second value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -25057,15 +25057,15 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_not",
-		Desc: "negates a SQL predicate while preserving nil as UNKNOWN",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
 			}
 			return NewBool(!a[0].Bool())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{{Kind: "any", ParamName: "value", ParamDesc: "SQL predicate value"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "negates a SQL predicate while preserving nil as UNKNOWN",
+			Params: []*TypeDescriptor{{Kind: "any", Label: "value", Description: "SQL predicate value"}},
 			// SQL NOT is nullable: UNKNOWN remains UNKNOWN. Advertising a concrete
 			// bool lets expression optimization replace it with two-valued `not`.
 			Return: &TypeDescriptor{Kind: "bool|nil"},
@@ -25344,7 +25344,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "equal_collate",
-		Desc: "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
@@ -25362,11 +25362,11 @@ func init_alu() {
 			}
 			return EqualSQL(a[0], a[1])
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "performs SQL equality with a specified collation (e.g. *_ci case-insensitive, *_bin case-sensitive); returns nil if either arg is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "left side"},
-				{Kind: "any", ParamName: "b", ParamDesc: "right side"},
-				{Kind: "string", ParamName: "collation", ParamDesc: "collation name"},
+				{Kind: "any", Label: "a", Description: "left side"},
+				{Kind: "any", Label: "b", Description: "right side"},
+				{Kind: "string", Label: "collation", Description: "collation name"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -25376,7 +25376,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "notequal_collate",
-		Desc: "performs SQL inequality with a specified collation; returns nil if either arg is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			r := Globalenv.Vars["equal_collate"].Func()(a[0], a[1], a[2])
 			if r.IsNil() {
@@ -25384,11 +25384,11 @@ func init_alu() {
 			}
 			return NewBool(!r.Bool())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "performs SQL inequality with a specified collation; returns nil if either arg is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "a", ParamDesc: "left side"},
-				{Kind: "any", ParamName: "b", ParamDesc: "right side"},
-				{Kind: "string", ParamName: "collation", ParamDesc: "collation name"},
+				{Kind: "any", Label: "a", Description: "left side"},
+				{Kind: "any", Label: "b", Description: "right side"},
+				{Kind: "string", Label: "collation", Description: "collation name"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -25398,13 +25398,13 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "!",
-		Desc: "negates the boolean value",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(!a[0].Bool())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "negates the boolean value",
 			Params: []*TypeDescriptor{
-				{Kind: "bool", ParamName: "value", ParamDesc: "value"},
+				{Kind: "bool", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -25487,13 +25487,13 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "not",
-		Desc: "negates the boolean value",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(!a[0].Bool())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "negates the boolean value",
 			Params: []*TypeDescriptor{
-				{Kind: "bool", ParamName: "value", ParamDesc: "value"},
+				{Kind: "bool", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -25576,13 +25576,13 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "nil?",
-		Desc: "returns true if value is nil",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(a[0].IsNil())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns true if value is nil",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value"},
+				{Kind: "any", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -25640,7 +25640,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "min",
-		Desc: "returns the smallest value",
+
 		Fn: func(a ...Scmer) Scmer {
 			var result Scmer
 			for _, v := range a {
@@ -25652,9 +25652,9 @@ func init_alu() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the smallest value",
 			Params: []*TypeDescriptor{
-				{Kind: "number|string", ParamName: "value...", ParamDesc: "value", Variadic: true},
+				{Kind: "number|string", Label: "value...", Description: "value", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number|string"},
 			Const:  true,
@@ -27889,7 +27889,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "max",
-		Desc: "returns the highest value",
+
 		Fn: func(a ...Scmer) Scmer {
 			var result Scmer
 			for _, v := range a {
@@ -27901,9 +27901,9 @@ func init_alu() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the highest value",
 			Params: []*TypeDescriptor{
-				{Kind: "number|string", ParamName: "value...", ParamDesc: "value", Variadic: true},
+				{Kind: "number|string", Label: "value...", Description: "value", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "number|string"},
 			Const:  true,
@@ -30138,13 +30138,13 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "floor",
-		Desc: "rounds the number down",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewFloat(math.Floor(a[0].Float()))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "rounds the number down",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value", ParamDesc: "value"},
+				{Kind: "number", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -30238,13 +30238,13 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "ceil",
-		Desc: "rounds the number up",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewFloat(math.Ceil(a[0].Float()))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "rounds the number up",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value", ParamDesc: "value"},
+				{Kind: "number", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -30338,13 +30338,13 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "round",
-		Desc: "rounds the number",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewFloat(math.Round(a[0].Float()))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "rounds the number",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value", ParamDesc: "value"},
+				{Kind: "number", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -30423,7 +30423,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_decimal_output",
-		Desc: "normalizes a DECIMAL-derived result to its declared output scale",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -30438,10 +30438,10 @@ func init_alu() {
 			}
 			return NewFloat(roundSQLDecimalOutput(value, scale))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "normalizes a DECIMAL-derived result to its declared output scale",
 			Params: []*TypeDescriptor{
-				{Kind: "number|nil", ParamName: "value", ParamDesc: "DECIMAL-derived value"},
-				{Kind: "int", ParamName: "scale", ParamDesc: "declared decimal scale"},
+				{Kind: "number|nil", Label: "value", Description: "DECIMAL-derived value"},
+				{Kind: "int", Label: "scale", Description: "declared decimal scale"},
 			},
 			Return: &TypeDescriptor{Kind: "number|nil"},
 			Const:  true,
@@ -31763,7 +31763,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_abs",
-		Desc: "SQL ABS(): returns absolute value, NULL-safe",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -31778,9 +31778,9 @@ func init_alu() {
 			}
 			return NewFloat(v)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "SQL ABS(): returns absolute value, NULL-safe",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value", ParamDesc: "value"},
+				{Kind: "number", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -33330,7 +33330,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sqrt",
-		Desc: "returns the square root of a number",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -33341,9 +33341,9 @@ func init_alu() {
 			}
 			return NewFloat(math.Sqrt(v))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the square root of a number",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "value", ParamDesc: "value"},
+				{Kind: "number", Label: "value", Description: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
@@ -33838,7 +33838,7 @@ func init_alu() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_rand",
-		Desc: "SQL RAND(): returns a random float in [0,1)",
+
 		Fn: func(a ...Scmer) Scmer {
 			var buf [8]byte
 			if _, err := crand.Read(buf[:]); err != nil {
@@ -33848,7 +33848,7 @@ func init_alu() {
 			u := binary.LittleEndian.Uint64(buf[:]) >> 11
 			return NewFloat(float64(u) / (1 << 53))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "SQL RAND(): returns a random float in [0,1)",
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
 

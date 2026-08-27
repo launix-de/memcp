@@ -35,7 +35,7 @@ const mysqlImportTriggersTable = "triggers"
 func initMySQLImport(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "mysql_import",
-		Desc: "imports schema+data from a MySQL server into MemCP",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			host := "127.0.0.1"
 			if !a[0].IsNil() {
@@ -147,8 +147,8 @@ func initMySQLImport(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
-			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string|nil", ParamName: "host", ParamDesc: "MySQL host (nil => 127.0.0.1)"}, &scm.TypeDescriptor{Kind: "int|nil", ParamName: "port", ParamDesc: "MySQL port (nil => 3306)"}, &scm.TypeDescriptor{Kind: "string", ParamName: "username", ParamDesc: "MySQL username"}, &scm.TypeDescriptor{Kind: "string", ParamName: "password", ParamDesc: "MySQL password"}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcedb", ParamDesc: "source database (omit/nil => all non-system dbs)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targetdb", ParamDesc: "target database (omit/nil => sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "sourcetable", ParamDesc: "source table (omit/nil => all tables in sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", ParamName: "targettable", ParamDesc: "target table (omit/nil => sourcetable)", Optional: true}},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "imports schema+data from a MySQL server into MemCP",
+			Params: []*scm.TypeDescriptor{&scm.TypeDescriptor{Kind: "string|nil", Label: "host", Description: "MySQL host (nil => 127.0.0.1)"}, &scm.TypeDescriptor{Kind: "int|nil", Label: "port", Description: "MySQL port (nil => 3306)"}, &scm.TypeDescriptor{Kind: "string", Label: "username", Description: "MySQL username"}, &scm.TypeDescriptor{Kind: "string", Label: "password", Description: "MySQL password"}, &scm.TypeDescriptor{Kind: "string|nil", Label: "sourcedb", Description: "source database (omit/nil => all non-system dbs)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", Label: "targetdb", Description: "target database (omit/nil => sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", Label: "sourcetable", Description: "source table (omit/nil => all tables in sourcedb)", Optional: true}, &scm.TypeDescriptor{Kind: "string|nil", Label: "targettable", Description: "target table (omit/nil => sourcetable)", Optional: true}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})

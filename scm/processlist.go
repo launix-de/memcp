@@ -413,7 +413,7 @@ func init_processlist() {
 	nextSessionID.Store(1)
 	Declare(&Globalenv, &Declaration{
 		Name: "show_processlist",
-		Desc: "returns a list of active sessions for SHOW [FULL] PROCESSLIST; pass true for full info",
+
 		Fn: func(a ...Scmer) Scmer {
 			full := len(a) > 0 && a[0].Bool()
 			sessions := Snapshot()
@@ -437,32 +437,32 @@ func init_processlist() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", ParamName: "full", ParamDesc: "if true, include full Info text", Optional: true}},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list of active sessions for SHOW [FULL] PROCESSLIST; pass true for full info",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", Label: "full", Description: "if true, include full Info text", Optional: true}},
 			Return: &TypeDescriptor{Kind: "list"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "connection_id",
-		Desc: "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if ss := GetCurrentSessionState(); ss != nil {
 				return NewInt(int64(ss.ID))
 			}
 			return NewInt(0)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
 			Return: &TypeDescriptor{Kind: "int"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "kill_query",
-		Desc: "cancel the running query in session id; returns true if a query was killed",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewBool(KillSession(uint64(a[0].Int())))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "int", ParamName: "id", ParamDesc: "session ID from SHOW PROCESSLIST"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "cancel the running query in session id; returns true if a query was killed",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "int", Label: "id", Description: "session ID from SHOW PROCESSLIST"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
 	})

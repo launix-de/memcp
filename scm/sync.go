@@ -506,33 +506,33 @@ func init_sync() {
 	DeclareTitle("Sync")
 	Declare(&Globalenv, &Declaration{
 		Name: "newpromise",
-		Desc: "Creates a single-value promise cell (thread-safe via CAS spin-lock). Returns a tagPromise Scmer. (newpromise) allocates a [2]Scmer backing; (newpromise list) reuses an existing ≥2-element slice as backing with zero extra allocation. API: (p \"value\") reads current value (nil if pending), (p \"value\" v) resolves, (p \"once\" v) resolves once (panics if already fulfilled/failed), (p \"once\" v msg) resolves once with custom panic message, (p \"state\") returns state (nil/true/false), (p \"fail\") sets failed and clears the stored value, (p \"fail\" err) sets failed and stores err as payload.",
-		Fn:   NewPromise,
-		Type: &TypeDescriptor{
+
+		Fn: NewPromise,
+		Type: &TypeDescriptor{Kind: "func", Description: "Creates a thread-safe promise that lets parallel work publish one result for other code to inspect. Use it for shared initialization, asynchronous results, or ensuring that only the first successful producer resolves a value. Read with (promise \"value\"), inspect completion with (promise \"state\"), resolve with (promise \"value\" value), resolve exactly once with (promise \"once\" value), and mark failure with (promise \"fail\" error).",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "list", ParamDesc: "optional: ≥2-element slice to use as backing", Optional: true},
+				{Kind: "list", Label: "storage", Description: "optional existing two-item list used to hold the promise state; most callers omit this", Optional: true, Element: &TypeDescriptor{Kind: "any", Label: "slot", Description: "promise state or value slot"}},
 			},
-			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
+			Return: &TypeDescriptor{Kind: "func", Label: "promise", Description: "operation-based accessor for reading, resolving, or failing the promise", HasSideEffects: true,
 				Params: []*TypeDescriptor{
-					{Kind: "string", ParamName: "operation", ParamDesc: "one of: value, state, fail, once"},
-					{Kind: "any", ParamName: "value", ParamDesc: "value to store (for value/once/fail)", Optional: true},
-					{Kind: "string", ParamName: "msg", ParamDesc: "custom panic message (for once)", Optional: true},
+					{Kind: "string", Label: "operation", Description: "one of: value, state, fail, once"},
+					{Kind: "any", Label: "value", Description: "value to store (for value/once/fail)", Optional: true},
+					{Kind: "string", Label: "message", Description: "optional error message used when once finds an already completed promise", Optional: true},
 				},
-				Return: &TypeDescriptor{Kind: "any"},
+				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "stored value, state flag, or operation result"},
 			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "newsession",
-		Desc: "Creates a new session which is a threadsafe key-value store. Besides get/set/list, get_or_compute_scoped shares concurrent computation by a query-local handle.",
-		Fn:   NewSession,
-		Type: &TypeDescriptor{
+
+		Fn: NewSession,
+		Type: &TypeDescriptor{Kind: "func", Description: "Creates a new session which is a threadsafe key-value store. Besides get/set/list, get_or_compute_scoped shares concurrent computation by a query-local handle.",
 			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
 				Params: []*TypeDescriptor{
-					{Kind: "any", ParamName: "key_or_operation", ParamDesc: "key, or get_or_compute_scoped", Optional: true},
-					{Kind: "any", ParamName: "value_scope_or_key", ParamDesc: "value, scope, or compute key", Optional: true},
-					{Kind: "any", ParamName: "key_or_producer", ParamDesc: "scoped key or producer", Optional: true},
-					{Kind: "func", ParamName: "scoped_producer", ParamDesc: "producer for scoped computation", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+					{Kind: "any", Label: "key_or_operation", Description: "key, or get_or_compute_scoped", Optional: true},
+					{Kind: "any", Label: "value_scope_or_key", Description: "value, scope, or compute key", Optional: true},
+					{Kind: "any", Label: "key_or_producer", Description: "scoped key or producer", Optional: true},
+					{Kind: "func", Label: "scoped_producer", Description: "producer for scoped computation", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
 				},
 				Return: &TypeDescriptor{Kind: "any"},
 			},
@@ -540,14 +540,14 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "with_session",
-		Desc: "Executes a function with the given session installed in the execution context, so storage operations can access the session's transaction state.",
+
 		Fn: func(a ...Scmer) Scmer {
 			return WithSession(a[0], a[1])
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Executes a function with the given session installed in the execution context, so storage operations can access the session's transaction state.",
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "session", ParamDesc: "the session to install", Params: []*TypeDescriptor{{Kind: "any", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "fn", ParamDesc: "the function to execute", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "session", Description: "the session to install", Params: []*TypeDescriptor{{Kind: "any", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "fn", Description: "the function to execute", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 
@@ -698,18 +698,18 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "context",
-		Desc: "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
-		Fn:   Context,
-		Type: &TypeDescriptor{
+
+		Fn: Context,
+		Type: &TypeDescriptor{Kind: "func", Description: "Context helper function. Each context also contains a session. (context func args) creates a new context and runs func in that context, (context \"session\") reads the session variable, (context \"check\") will check the liveliness of the context and otherwise throw an error",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "args...", ParamDesc: "depends on the usage", Variadic: true},
+				{Kind: "any", Label: "args...", Description: "depends on the usage", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sleep",
-		Desc: "sleeps the amount of seconds",
+
 		Fn: func(a ...Scmer) Scmer {
 			ctx := GetContext()
 			select {
@@ -719,9 +719,9 @@ func init_sync() {
 				return NewBool(true)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "sleeps the amount of seconds",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "duration", ParamDesc: "number of seconds to sleep"},
+				{Kind: "number", Label: "duration", Description: "number of seconds to sleep"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 
@@ -730,7 +730,7 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "once",
-		Desc: "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
+
 		Fn: func(a ...Scmer) Scmer {
 			var params []Scmer
 			once := sync.OnceValue[Scmer](func() Scmer {
@@ -741,13 +741,13 @@ func init_sync() {
 				return once()
 			})
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
 			Params: []*TypeDescriptor{
-				{Kind: "func", ParamName: "f", ParamDesc: "function that produces the result value"},
+				{Kind: "func", Label: "f", Description: "function that produces the result value", Params: []*TypeDescriptor{{Kind: "any", Label: "argument", Variadic: true}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 			},
 			Return: &TypeDescriptor{Kind: "func",
 				Params: []*TypeDescriptor{
-					{Kind: "any", ParamName: "args", ParamDesc: "arguments forwarded to the wrapped function on first call", Variadic: true},
+					{Kind: "any", Label: "args", Description: "arguments forwarded to the wrapped function on first call", Variadic: true},
 				},
 				Return: &TypeDescriptor{Kind: "any"},
 			},
@@ -757,7 +757,7 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "mutex",
-		Desc: "Creates a context-aware mutex. The return value serializes calls to parameterless functions and stops waiting when the current request is cancelled.",
+
 		Fn: func(a ...Scmer) Scmer {
 			token := make(chan struct{}, 1)
 			token <- struct{}{}
@@ -790,11 +790,11 @@ func init_sync() {
 				return Apply(a[0])
 			})
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Creates a context-aware mutex. The return value serializes calls to parameterless functions and stops waiting when the current request is cancelled.",
 			Params: []*TypeDescriptor{},
 			Return: &TypeDescriptor{Kind: "func", HasSideEffects: true,
 				Params: []*TypeDescriptor{
-					{Kind: "func", ParamName: "fn", ParamDesc: "parameterless function to execute under the lock"},
+					{Kind: "func", Label: "fn", Description: "parameterless function to execute under the lock", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 				},
 				Return: &TypeDescriptor{Kind: "any"},
 			},
@@ -804,11 +804,11 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "numcpu",
-		Desc: "Returns the number of logical CPUs available for parallel execution",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewInt(int64(runtime.NumCPU()))
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Returns the number of logical CPUs available for parallel execution",
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
 
@@ -863,7 +863,7 @@ func init_sync() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "memstats",
-		Desc: "Returns memory statistics as a dict with keys: alloc, total_alloc, sys, heap_alloc, heap_sys (all in bytes)",
+
 		Fn: func(a ...Scmer) Scmer {
 			m := CachedMemStats()
 			fd := NewFastDictValue(5)
@@ -874,7 +874,7 @@ func init_sync() {
 			fd.Set(NewString("heap_sys"), NewInt(int64(m.HeapSys)), nil)
 			return NewFastDict(fd)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Returns memory statistics as a dict with keys: alloc, total_alloc, sys, heap_alloc, heap_sys (all in bytes)",
 			Return: &TypeDescriptor{Kind: "dict"},
 			Const:  true,
 

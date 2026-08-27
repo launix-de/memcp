@@ -589,6 +589,123 @@ func Init(en scm.Env) {
 	const scanFilterColumnsDesc = "physical columns passed to filter before map/reduce; $recset_contains supplies a row-bound RecSet membership closure"
 	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
 	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"
+	columnList := func(label, description string) *scm.TypeDescriptor {
+		return &scm.TypeDescriptor{
+			Kind:        "list",
+			Label:       label,
+			Description: description,
+			Element: &scm.TypeDescriptor{
+				Kind:        "string",
+				Label:       "column",
+				Description: "column name passed to the corresponding callback parameter",
+			},
+		}
+	}
+	rowCallback := func(label, description, returnKind, returnDescription string) *scm.TypeDescriptor {
+		return &scm.TypeDescriptor{
+			Kind:        "func",
+			Label:       label,
+			Description: description,
+			Params: []*scm.TypeDescriptor{{
+				Kind:        "any",
+				Label:       "columns",
+				Description: "one value for each entry in the matching column list, in the same order",
+				Variadic:    true,
+			}},
+			Return: &scm.TypeDescriptor{Kind: returnKind, Label: "result", Description: returnDescription},
+		}
+	}
+	reducer := func(label, description string) *scm.TypeDescriptor {
+		return &scm.TypeDescriptor{
+			Kind:        "func",
+			Label:       label,
+			Description: description,
+			Optional:    true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "accumulator", Description: "current aggregate, initially the neutral value"},
+				{Kind: "any", Label: "value", Description: "next mapped or partially reduced value"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any", Label: "accumulator", Description: "aggregate passed to the next reducer call or returned by the scan"},
+		}
+	}
+	sortColumnList := func(label, description string) *scm.TypeDescriptor {
+		return &scm.TypeDescriptor{
+			Kind:        "list",
+			Label:       label,
+			Description: description,
+			Element: &scm.TypeDescriptor{
+				Kind:        "string|func",
+				Label:       "sort column",
+				Description: "a column name, or a function of row-column values that returns the sortable value",
+				Params: []*scm.TypeDescriptor{{
+					Kind: "any", Label: "columns", Description: "column values used to compute the sort key", Variadic: true,
+				}},
+				Return: &scm.TypeDescriptor{Kind: "any", Label: "sort key", Description: "value compared at this sort position"},
+			},
+		}
+	}
+	sortDirectionList := func(label, description string) *scm.TypeDescriptor {
+		return &scm.TypeDescriptor{
+			Kind:        "list",
+			Label:       label,
+			Description: description,
+			Element: &scm.TypeDescriptor{
+				Kind:        "func",
+				Label:       "direction",
+				Description: "strict ordering relation such as <, >, or a collate relation",
+				Params: []*scm.TypeDescriptor{
+					{Kind: "any", Label: "left", Description: "left sort value"},
+					{Kind: "any", Label: "right", Description: "right sort value"},
+				},
+				Return: &scm.TypeDescriptor{Kind: "bool", Label: "ordered", Description: "true when left belongs before right"},
+			},
+		}
+	}
+	tableOptions := &scm.TypeDescriptor{
+		Kind:        "list|assoc",
+		Label:       "options",
+		Description: "table options as an alternating key/value list",
+		Keys: map[string]*scm.TypeDescriptor{
+			"auto_increment": {Kind: "int", Label: "auto_increment", Description: "first automatically assigned value; must be non-negative"},
+			"charset":        {Kind: "string", Label: "charset", Description: "default character set name"},
+			"collation":      {Kind: "string", Label: "collation", Description: "default collation name"},
+			"comment":        {Kind: "string", Label: "comment", Description: "user-visible table comment"},
+			"engine":         {Kind: "string", Label: "engine", Description: "storage engine: safe, logged, sloppy, memory, or cache"},
+			"oninit": {
+				Kind:        "func",
+				Label:       "oninit",
+				Description: "closed zero-argument initializer run synchronously once per data generation; concurrent if-not-exists callers wait for completion",
+				Params:      []*scm.TypeDescriptor{},
+				Return:      &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "ignored initializer result"},
+			},
+		},
+	}
+	columnOptions := &scm.TypeDescriptor{
+		Kind:        "list|assoc",
+		Label:       "options",
+		Description: "column properties and computed-column configuration as an alternating key/value list",
+		Keys: map[string]*scm.TypeDescriptor{
+			"auto_increment":     {Kind: "bool", Label: "auto_increment", Description: "assign increasing values automatically"},
+			"collate":            {Kind: "string", Label: "collate", Description: "collation used for this column"},
+			"comment":            {Kind: "string", Label: "comment", Description: "user-visible column comment"},
+			"default":            {Kind: "any", Label: "default", Description: "literal value used when an insert omits the column"},
+			"default_expression": {Kind: "string", Label: "default_expression", Description: "expression evaluated when an insert omits the column"},
+			"filtercols":         columnList("filtercols", "columns supplied to filter before computing a value"),
+			"filter":             rowCallback("filter", "predicate limiting which rows are computed", "bool", "true when the row should be computed"),
+			"mapcols":            columnList("mapcols", "columns supplied to mapfn for ordered-reduce computation"),
+			"mapfn":              rowCallback("mapfn", "maps one source row into a value for reducefn", "any", "value passed to reducefn"),
+			"null":               {Kind: "bool", Label: "null", Description: "whether the column accepts nil values"},
+			"partitioncount":     {Kind: "int", Label: "partitioncount", Description: "number of leading sort columns that define independent reducer partitions"},
+			"primary":            {Kind: "bool", Label: "primary", Description: "whether this column belongs to the primary key"},
+			"reducefn":           reducer("reducefn", "combines ordered mapped values into the computed-column aggregate"),
+			"reduceinit":         {Kind: "any", Label: "reduceinit", Description: "initial accumulator supplied to reducefn"},
+			"sortcols":           sortColumnList("sortcols", "columns or expressions defining ordered-reduce input order"),
+			"sortdirs":           sortDirectionList("sortdirs", "one ordering relation for every sortcols entry"),
+			"temp":               {Kind: "bool", Label: "temp", Description: "whether this is a query-local temporary computed column"},
+			"unique":             {Kind: "bool", Label: "unique", Description: "whether values must be unique"},
+			"update":             {Kind: "any", Label: "update", Description: "expression evaluated when a row is updated"},
+		},
+	}
 	scm.DeclareTitle("Storage")
 
 	// Register TagTable serializer for the printer.
@@ -601,7 +718,7 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table",
-		Desc: "resolves a schema+table name pair into a table handle",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -613,11 +730,10 @@ func Init(en scm.Env) {
 			}
 			return NewTableScmer(t)
 		},
-		Type: &scm.TypeDescriptor{
-			Kind: "func",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "resolves a schema+table name pair into a table handle",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema"},
-				{Kind: "string", ParamName: "table"},
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "table"},
 			Optimize: func(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
@@ -634,34 +750,34 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_estimate",
-		Desc: "estimate output row count for a table scan",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			return scm.NewInt(int64(t.CountEstimate()))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "estimate output row count for a table scan",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
+				{Kind: "table", Label: "table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table_planner_statistics",
-		Desc: "return the immutable O(1) planner-statistics snapshot for a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return TableFromScmer(a[0]).PlannerStatistics()
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the immutable O(1) planner-statistics snapshot for a table",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
+				{Kind: "table", Label: "table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_selectivity_estimate",
-		Desc: "bounded estimate of visible rows matching a table filter; stops at max_rows and does not log scan telemetry",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			t := TableFromScmer(a[1])
@@ -751,34 +867,34 @@ func Init(en scm.Env) {
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("coverage"), scm.NewSymbol("lower_bound")}),
 			})
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "bounded estimate of visible rows matching a table filter; stops at max_rows and does not log scan telemetry",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table", ParamName: "table"},
-				{Kind: "list", ParamName: "condition_cols"},
-				{Kind: "any", ParamName: "condition"},
-				{Kind: "int", ParamName: "max_rows"},
+				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table", Label: "table"},
+				columnList("condition_cols", "columns passed to the selectivity predicate"),
+				rowCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
+				{Kind: "int", Label: "max_rows"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table_empty?",
-		Desc: "returns true if a table currently has no rows",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			return scm.NewBool(t.CountExact() == 0)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns true if a table currently has no rows",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
+				{Kind: "table", Label: "table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_recset",
-		Desc: "builds a query-local record-set handle from one table scan, or -- when given an existing recset instead of a table -- narrows that recset to the members which also satisfy filter, re-evaluating filter only over its existing membership. The latter is the cheap way to AND a further (possibly subscan-heavy) condition onto an already-narrowed recset without re-touching rows outside it (e.g. evaluating an expensive correlated check only over the rows a cheap selective filter already narrowed a table down to). The returned value is not persisted and can be scanned like a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
@@ -788,33 +904,33 @@ func Init(en scm.Env) {
 			t := TableFromScmer(a[1])
 			return NewRecSetScmer(t.scanRecSet(currentTx, filtercols, a[3]))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "builds a query-local record-set handle from one table scan, or -- when given an existing recset instead of a table -- narrows that recset to the members which also satisfy filter, re-evaluating filter only over its existing membership. The latter is the cheap way to AND a further (possibly subscan-heavy) condition onto an already-narrowed recset without re-touching rows outside it (e.g. evaluating an expensive correlated check only over the rows a cheap selective filter already narrowed a table down to). The returned value is not persisted and can be scanned like a table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "any", ParamName: "table", ParamDesc: "a table, or an existing recset to narrow further"},
-				{Kind: "list", ParamName: "filterColumns"},
-				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row enters the recset", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "any", Label: "table", Description: "a table, or an existing recset to narrow further"},
+				columnList("filterColumns", scanFilterColumnsDesc),
+				rowCallback("filter", "lambda function that decides whether a row enters the recset", "bool", "true when the row belongs in the recset"),
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_count",
-		Desc: "returns the number of currently stored recids in a query-local recset",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(RecSetFromScmer(a[0]).count)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the number of currently stored recids in a query-local recset",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "recset", ParamName: "recset"},
+				{Kind: "recset", Label: "recset"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "int"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_project_join",
-		Desc: "projects a source recset through key columns into a query-local target-table recset",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			source := RecSetFromScmer(a[1])
@@ -823,21 +939,21 @@ func Init(en scm.Env) {
 			targetKeyCols := scmerSliceToStrings(mustScmerSlice(a[4], "targetKeyColumns"))
 			return NewRecSetScmer(source.projectJoin(currentTx, sourceKeyCols, target, targetKeyCols))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "projects a source recset through key columns into a query-local target-table recset",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "recset", ParamName: "source_recset"},
-				{Kind: "list", ParamName: "source_key_columns"},
-				{Kind: "table", ParamName: "target_table"},
-				{Kind: "list", ParamName: "target_key_columns"},
+				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "recset", Label: "source_recset"},
+				{Kind: "list", Label: "source_key_columns"},
+				{Kind: "table", Label: "target_table"},
+				{Kind: "list", Label: "target_key_columns"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_key_index",
-		Desc: "builds an immutable lookup function for key columns of the rows contained in a query-local recset",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			source := RecSetFromScmer(a[1])
@@ -853,21 +969,21 @@ func Init(en scm.Env) {
 				return scm.NewBool(keys.contains(values))
 			})
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "builds an immutable lookup function for key columns of the rows contained in a query-local recset",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context used while reading source keys"},
-				{Kind: "recset", ParamName: "source_recset"},
-				{Kind: "list", ParamName: "source_key_columns"},
+				{Kind: "any", Label: "tx", Description: "transaction context used while reading source keys"},
+				{Kind: "recset", Label: "source_recset"},
+				{Kind: "list", Label: "source_key_columns"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "func", Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "key", Variadic: true},
+				{Kind: "any", Label: "key", Variadic: true},
 			}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_union",
-		Desc: "combines query-local recsets from the same table and removes duplicate record IDs",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			values := mustScmerSlice(a[0], "recsets")
 			recsets := make([]*recSet, 0, len(values))
@@ -876,17 +992,17 @@ func Init(en scm.Env) {
 			}
 			return NewRecSetScmer(recSetUnion(recsets))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "combines query-local recsets from the same table and removes duplicate record IDs",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "list", ParamName: "recsets"},
+				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_intersect",
-		Desc: "intersects query-local recsets from the same table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			values := mustScmerSlice(a[0], "recsets")
 			recsets := make([]*recSet, 0, len(values))
@@ -895,17 +1011,17 @@ func Init(en scm.Env) {
 			}
 			return NewRecSetScmer(recSetIntersect(recsets))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "intersects query-local recsets from the same table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "list", ParamName: "recsets"},
+				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_difference",
-		Desc: "returns the records from the first query-local recset which occur in none of the following same-table recsets",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			values := mustScmerSlice(a[0], "recsets")
 			recsets := make([]*recSet, 0, len(values))
@@ -914,31 +1030,31 @@ func Init(en scm.Env) {
 			}
 			return NewRecSetScmer(recSetDifference(recsets))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the records from the first query-local recset which occur in none of the following same-table recsets",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "list", ParamName: "recsets"},
+				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "recset_not",
-		Desc: "returns the complement of a query-local recset relative to the currently visible rows of its base table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return NewRecSetScmer(recSetNot(RecSetFromScmer(a[0])))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the complement of a query-local recset relative to the currently visible rows of its base table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "recset", ParamName: "recset"},
+				{Kind: "recset", Label: "recset"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_exists",
-		Desc: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[2], "filterColumns"))
@@ -964,12 +1080,12 @@ func Init(en scm.Env) {
 			t := TableFromScmer(tableArg)
 			return scm.NewBool(t.scanExists(currentTx, filtercols, a[3]))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns true if a table contains at least one visible row matching the given filter; uses scan boundary analysis without map/reduce setup",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list|recset", ParamName: "table"},
-				{Kind: "list", ParamName: "filterColumns"},
-				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a row exists", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table|list|recset", Label: "table"},
+				columnList("filterColumns", scanFilterColumnsDesc),
+				rowCallback("filter", "lambda function that decides whether a row exists", "bool", "true when the row satisfies the existence test"),
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -977,7 +1093,7 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",
-		Desc: "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			layout := scanLayout(a)
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
@@ -1065,19 +1181,19 @@ func Init(en scm.Env) {
 			}
 			return t.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local recset, or a list for temporary data"},
-				{Kind: "list", ParamName: "filterColumns", ParamDesc: scanFilterColumnsDesc},
-				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
-				{Kind: "list", ParamName: "mapColumns", ParamDesc: scanMapColumnsDesc},
-				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
-				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
+				columnList("filterColumns", scanFilterColumnsDesc),
+				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to map"),
+				columnList("mapColumns", scanMapColumnsDesc),
+				rowCallback("map", "lambda function that extracts or produces one value from the row; it may also use documented pseudo columns for mutations or result output", "any", "value passed to reduce, or returned directly when no reducer is supplied"),
+				reducer("reduce", "optional aggregation function used first within shards and then to combine shard results"),
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
+				reducer("reduce2", "optional final reducer that combines the neutral value with the result produced by reduce"),
+				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScan,
@@ -1085,7 +1201,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_batch",
-		Desc: "does an unordered parallel filter-map-reduce pass on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			layout := scanLayout(a)
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
@@ -1183,20 +1299,20 @@ func Init(en scm.Env) {
 			}
 			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filter-map-reduce pass on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local recset, or a list for temporary data"},
-				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of columns that are fed into filter; #0, #1, ... address batchdata slots"},
-				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
-				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of columns that are fed into map; #0, #1, ... address batchdata slots"},
-				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "int", ParamName: "stride", ParamDesc: "number of batchdata entries per batch row"},
-				{Kind: "list", ParamName: "batchdata", ParamDesc: "flat batch buffer accessed via #N pseudo columns"},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results", Optional: true},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				{Kind: "func", Params: []*scm.TypeDescriptor{{}, nil}, ParamName: "reduce2", ParamDesc: "(optional) second stage reduce function that will apply a result of reduce to the neutral element/accumulator", Optional: true},
-				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
+				columnList("filterColumns", "columns passed to filter; #0, #1, ... address batchdata slots"),
+				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase", "bool", "true when this table row and batch row proceed to map"),
+				columnList("mapColumns", "columns passed to map; #0, #1, ... address batchdata slots"),
+				rowCallback("map", "lambda function that extracts data from the table row and batch row", "any", "value passed to reduce or returned directly"),
+				{Kind: "int", Label: "stride", Description: "number of batchdata entries per batch row"},
+				{Kind: "list", Label: "batchdata", Description: "flat batch buffer accessed via #N pseudo columns", Element: &scm.TypeDescriptor{Kind: "any", Label: "slot", Description: "one batch value; every stride consecutive slots form a batch row"}},
+				reducer("reduce", "optional lambda function that aggregates mapped values"),
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
+				reducer("reduce2", "optional final reducer that combines the neutral value with the result produced by reduce"),
+				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanBatch,
@@ -1204,7 +1320,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_batch_accept",
-		Desc: "incrementally scans a table or existing RecSet in scan_order order and applies a RecSet batch filter before OFFSET/LIMIT and map/reduce. The first candidate RecSet contains offset+limit rows; if too few rows are accepted, subsequent disjoint batches contain twice as many candidates until the accepted limit is satisfied or the input is exhausted. batchFilter is called as (batchFilter input_recset) and must return an exact subset RecSet of the same base table and transaction. A simple batchFilter may call (scan_recset tx input_recset filterColumns realFilter); complex filters may project input_recset to another table, apply search/ACL scans and project the result back to the input table. The returned RecSet is used only as a membership mask against the already ordered candidate vector, so output order is preserved without scanning the unordered RecSet again. For non-unique ORDER BY values, include an explicit unique tie-breaker. sortcols/sortdirs may both be empty; that path greedily collects candidates without sorting. limitPartitionCols is present for scan_order signature compatibility and currently must be 0",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			tableArg := a[1]
@@ -1242,23 +1358,23 @@ func Init(en scm.Env) {
 			return scanOrderBatchAccept(currentTx, source, batchFilter, sortcolsVals, sortdirs,
 				limitPartitionCols, offset, limit, mapcols, callback, aggregate, neutral, isOuter, notFoundValue)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "incrementally scans a table or existing RecSet in scan_order order and applies a RecSet batch filter before OFFSET/LIMIT and map/reduce. The first candidate RecSet contains offset+limit rows; if too few rows are accepted, subsequent disjoint batches contain twice as many candidates until the accepted limit is satisfied or the input is exhausted. batchFilter is called as (batchFilter input_recset) and must return an exact subset RecSet of the same base table and transaction. A simple batchFilter may call (scan_recset tx input_recset filterColumns realFilter); complex filters may project input_recset to another table, apply search/ACL scans and project the result back to the input table. The returned RecSet is used only as a membership mask against the already ordered candidate vector, so output order is preserved without scanning the unordered RecSet again. For non-unique ORDER BY values, include an explicit unique tie-breaker. sortcols/sortdirs may both be empty; that path greedily collects candidates without sorting. limitPartitionCols is present for scan_order signature compatibility and currently must be 0",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context used consistently by the candidate scan and every batch filter operation; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|recset", ParamName: "table_or_recset", ParamDesc: "base table or complete existing query-local RecSet from which ordered candidate batches are drawn"},
-				{Kind: "func", ParamName: "batchFilter", ParamDesc: "function (lambda (input_recset) accepted_recset). It may naively narrow input_recset with scan_recset, or run arbitrary RecSet projections/search/ACL operations and project back. It must return a same-table, same-transaction subset of input_recset", Params: []*scm.TypeDescriptor{{Kind: "recset", ParamName: "input_recset"}}, Return: &scm.TypeDescriptor{Kind: "recset"}},
-				{Kind: "list", ParamName: "sortcols", ParamDesc: "same as scan_order: columns or computed sort functions. Include a unique tie-breaker for a total repeatable order; use an empty list for greedy unsorted collection"},
-				{Kind: "list", ParamName: "sortdirs", ParamDesc: "same as scan_order: one relation per sort column (<, > or collate relation); must also be empty when sortcols is empty"},
-				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "reserved for scan_order signature compatibility; currently must be 0"},
-				{Kind: "number", ParamName: "offset", ParamDesc: "number of batch-filter-accepted rows to skip; it is not the number of driver candidates already examined"},
-				{Kind: "number", ParamName: "limit", ParamDesc: "finite maximum number of accepted rows passed to map; the initial candidate batch size is offset+limit and doubles for every subsequent batch"},
-				{Kind: "list", ParamName: "mapColumns", ParamDesc: scanOrderMapColumnsDesc},
-				{Kind: "func", ParamName: "map", ParamDesc: "same map callback contract as scan_order; accepted record IDs are passed to its shard mapper in batches", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "reduce", ParamDesc: "optional serial reducer over mapped accepted rows, with the same accumulator contract as scan_order", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc"}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "optional neutral element for reduce; defaults to nil", Optional: true},
-				{Kind: "bool", ParamName: "isOuter", ParamDesc: "optional scan_order-compatible outer behavior: map one NULL row when no accepted row reaches map", Optional: true},
-				{Kind: "any", ParamName: "notFoundValue", ParamDesc: "optional result when no accepted row reaches map and isOuter is false; defaults to neutral", Optional: true},
+				{Kind: "any", Label: "tx", Description: "transaction context used consistently by the candidate scan and every batch filter operation; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table|recset", Label: "table_or_recset", Description: "base table or complete existing query-local RecSet from which ordered candidate batches are drawn"},
+				{Kind: "func", Label: "batchFilter", Description: "function (lambda (input_recset) accepted_recset). It may naively narrow input_recset with scan_recset, or run arbitrary RecSet projections/search/ACL operations and project back. It must return a same-table, same-transaction subset of input_recset", Params: []*scm.TypeDescriptor{{Kind: "recset", Label: "input_recset"}}, Return: &scm.TypeDescriptor{Kind: "recset"}},
+				sortColumnList("sortcols", "same as scan_order: columns or computed sort functions. Include a unique tie-breaker for a total repeatable order; use an empty list for greedy unsorted collection"),
+				sortDirectionList("sortdirs", "same as scan_order: one relation per sort column; must also be empty when sortcols is empty"),
+				{Kind: "number", Label: "limitPartitionCols", Description: "reserved for scan_order signature compatibility; currently must be 0"},
+				{Kind: "number", Label: "offset", Description: "number of batch-filter-accepted rows to skip; it is not the number of driver candidates already examined"},
+				{Kind: "number", Label: "limit", Description: "finite maximum number of accepted rows passed to map; the initial candidate batch size is offset+limit and doubles for every subsequent batch"},
+				columnList("mapColumns", scanOrderMapColumnsDesc),
+				rowCallback("map", "same map callback contract as scan_order; accepted record IDs are passed to its shard mapper in batches", "any", "value passed to reduce or returned directly"),
+				reducer("reduce", "optional serial reducer over mapped accepted rows, with the same accumulator contract as scan_order"),
+				{Kind: "any", Label: "neutral", Description: "optional neutral element for reduce; defaults to nil", Optional: true},
+				{Kind: "bool", Label: "isOuter", Description: "optional scan_order-compatible outer behavior: map one NULL row when no accepted row reaches map", Optional: true},
+				{Kind: "any", Label: "notFoundValue", Description: "optional result when no accepted row reaches map and isOuter is false; defaults to neutral", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrderBatchAccept,
@@ -1266,7 +1382,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order",
-		Desc: "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			layout := scanLayout(a)
 			filtercols := scmerSliceToStrings(mustScmerSlice(a[layout.filterColsIdx], "filterColumns"))
@@ -1420,25 +1536,33 @@ func Init(en scm.Env) {
 
 			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
-				{Kind: "table|list|recset", ParamName: "table", ParamDesc: "table handle, query-local RecSet, or a list for temporary data"},
-				{Kind: "list", ParamName: "filterColumns", ParamDesc: scanFilterColumnsDesc},
-				{Kind: "func", ParamName: "filter", ParamDesc: "lambda function that decides whether a dataset is passed to the map phase. You can use any column of that table as lambda parameter. You should structure your lambda with an (and) at the root element. Every equal? < > <= >= will possibly translated to an indexed scan", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
-				{Kind: "list", ParamName: "sortcols", ParamDesc: "list of columns to sort. Each column is either a string to point to an existing column or a func(cols...)->any to compute a sortable value"},
-				{Kind: "list", ParamName: "sortdirs", ParamDesc: "list of column directions to sort. Must be same length as sortcols. < means ascending, > means descending, (collate ...) will add collations"},
-				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "number of leading sort columns that form the partition key for per-partition offset/limit. 0 (default) means global offset/limit."},
-				{Kind: "number", ParamName: "offset", ParamDesc: "number of globally ordered, filter-accepted items to skip before map; apply SQL OFFSET here rather than in map"},
-				{Kind: "number", ParamName: "limit", ParamDesc: "maximum globally ordered, filter-accepted items passed to map; -1 means unlimited; apply SQL LIMIT here so shard-local Top-K and the global merge can brake early"},
-				{Kind: "list", ParamName: "mapColumns", ParamDesc: scanOrderMapColumnsDesc},
-				{Kind: "func", ParamName: "map", ParamDesc: "lambda function to extract data from the dataset. You can use any column of that table as lambda parameter. You can return a value you want to extract and pass to reduce, but you can also directly call insert, print or resultrow functions. If you declare a parameter named '$update', this variable will hold a function that you can use to delete or update a row. Call ($update) to delete the dataset, call ($update '(\"field1\" value1 \"field2\" value2)) to update certain columns.", Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) lambda function to aggregate the map results. It takes two parameters (a b) where a is the accumulator and b the new value. The accumulator for the first reduce call is the neutral element. The return value will be the accumulator input for the next reduce call. There are two reduce phases: shard-local and shard-collect. In the shard-local phase, a starts with neutral and b is fed with the return values of each map call. In the shard-collect phase, a starts with neutral and b is fed with the result of each shard-local pass.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "acc"}, {Kind: "any", ParamName: "val"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
-				{Kind: "any", ParamName: "notFoundValue", ParamDesc: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
-				{Kind: "list", ParamName: "postOrderFilterColumns", ParamDesc: "(optional) columns for a predicate evaluated in global order before OFFSET/LIMIT are counted; use for expensive acceptance checks that cannot participate in index boundaries", Optional: true},
-				{Kind: "func", ParamName: "postOrderFilter", ParamDesc: "(optional) late acceptance predicate. Rejected rows do not count toward OFFSET/LIMIT and never reach map. SQL plans use this instead of callback-driven $break control flow", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
+				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local RecSet, or a list for temporary data"},
+				columnList("filterColumns", scanFilterColumnsDesc),
+				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to ordering and map"),
+				sortColumnList("sortcols", "columns used for ordering; each entry corresponds to one relation in sortdirs"),
+				sortDirectionList("sortdirs", "one ordering relation per entry in sortcols; < is ascending and > is descending"),
+				{Kind: "number", Label: "limitPartitionCols", Description: "number of leading sort columns that form the partition key for per-partition offset/limit. 0 (default) means global offset/limit."},
+				{Kind: "number", Label: "offset", Description: "number of globally ordered, filter-accepted items to skip before map; apply SQL OFFSET here rather than in map"},
+				{Kind: "number", Label: "limit", Description: "maximum globally ordered, filter-accepted items passed to map; -1 means unlimited; apply SQL LIMIT here so shard-local Top-K and the global merge can brake early"},
+				columnList("mapColumns", scanOrderMapColumnsDesc),
+				rowCallback("map", "lambda function that extracts or produces one value from each accepted row", "any", "value passed to reduce or returned directly"),
+				reducer("reduce", "optional serial aggregation function over mapped values"),
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
+				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
+				func() *scm.TypeDescriptor {
+					value := columnList("postOrderFilterColumns", "optional columns for a predicate evaluated in global order before OFFSET/LIMIT are counted; use for expensive acceptance checks that cannot participate in index boundaries")
+					value.Optional = true
+					return value
+				}(),
+				func() *scm.TypeDescriptor {
+					value := rowCallback("postOrderFilter", "optional late acceptance predicate. Rejected rows do not count toward OFFSET/LIMIT and never reach map", "bool", "true when the ordered row counts toward OFFSET/LIMIT and reaches map")
+					value.Optional = true
+					return value
+				}(),
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrder,
@@ -1446,7 +1570,7 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_multi",
-		Desc: "does an ordered parallel filter and serial map-reduce pass across multiple tables simultaneously, merging results into a single sorted stream",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			// Parameters:
 			// 0:  tx
@@ -1524,25 +1648,25 @@ func Init(en scm.Env) {
 
 			return scanOrderMulti(currentTx, specs, sortdirs, int(limitPartitionCols), int(offset), int(limit), aggregate, neutral, isOuter, notFoundValue)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial map-reduce pass across multiple tables simultaneously, merging results into a single sorted stream",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "tx", ParamDesc: "transaction context"},
-				{Kind: "list", ParamName: "tables", ParamDesc: "list of table handles"},
-				{Kind: "list", ParamName: "filterColumns", ParamDesc: "list of filter column lists, one per table"},
-				{Kind: "list", ParamName: "filterFns", ParamDesc: "list of filter lambdas, one per table"},
-				{Kind: "list", ParamName: "sortcols", ParamDesc: "list of sort column lists, one per table"},
-				{Kind: "list", ParamName: "sortdirs", ParamDesc: "list of sort direction comparators (shared)"},
-				{Kind: "list", ParamName: "perTableOffset", ParamDesc: "per-table offset (list of int; -1 disables)"},
-				{Kind: "list", ParamName: "perTableLimit", ParamDesc: "per-table limit (list of int; -1 disables)"},
-				{Kind: "number", ParamName: "limitPartitionCols", ParamDesc: "number of leading sort columns forming partition key"},
-				{Kind: "number", ParamName: "offset", ParamDesc: "number of items to skip (global)"},
-				{Kind: "number", ParamName: "limit", ParamDesc: "max number of items to read (global; -1 = unlimited)"},
-				{Kind: "list", ParamName: "mapColumns", ParamDesc: "list of map column lists, one per table"},
-				{Kind: "list", ParamName: "mapFns", ParamDesc: "list of map lambdas, one per table"},
-				{Kind: "func", ParamName: "reduce", ParamDesc: "(optional) aggregation function", Optional: true},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) neutral element for reduce", Optional: true},
-				{Kind: "bool", ParamName: "isOuter", ParamDesc: "(optional) if true, emit null row when no hits", Optional: true},
-				{Kind: "any", ParamName: "notFoundValue", ParamDesc: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
+				{Kind: "any", Label: "tx", Description: "transaction context"},
+				{Kind: "list", Label: "tables", Description: "scan sources; all per-table lists must have this length", Element: &scm.TypeDescriptor{Kind: "table|recset", Label: "source", Description: "base table or query-local record set for one input stream"}},
+				{Kind: "list", Label: "filterColumns", Description: "filter column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table filter columns", Description: "columns supplied to the matching filterFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
+				{Kind: "list", Label: "filterFns", Description: "filter lambdas, one per table", Element: rowCallback("table filter", "predicate for the corresponding table and filterColumns entry", "bool", "true when the row enters that table's ordered stream")},
+				{Kind: "list", Label: "sortcols", Description: "sort column lists, one per table; every inner list must match sortdirs in length and result domains", Element: sortColumnList("table sort columns", "sort expressions for the corresponding table")},
+				sortDirectionList("sortdirs", "shared ordering relations used for every table stream and for the outer merge"),
+				{Kind: "list|nil", Label: "perTableOffset", Description: "optional per-table offsets; nil disables all per-table offsets", Element: &scm.TypeDescriptor{Kind: "int", Label: "offset", Description: "rows skipped in the corresponding table before the outer merge; -1 disables the offset"}},
+				{Kind: "list|nil", Label: "perTableLimit", Description: "optional per-table limits; nil disables all per-table limits", Element: &scm.TypeDescriptor{Kind: "int", Label: "limit", Description: "maximum rows retained from the corresponding table before the outer merge; -1 disables the limit"}},
+				{Kind: "number", Label: "limitPartitionCols", Description: "number of leading sort columns forming partition key"},
+				{Kind: "number", Label: "offset", Description: "number of items to skip (global)"},
+				{Kind: "number", Label: "limit", Description: "max number of items to read (global; -1 = unlimited)"},
+				{Kind: "list", Label: "mapColumns", Description: "map column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table map columns", Description: "columns supplied to the matching mapFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
+				{Kind: "list", Label: "mapFns", Description: "map lambdas, one per table", Element: rowCallback("table map", "mapper for the corresponding table and mapColumns entry", "any", "value inserted into the merged stream and passed to reduce")},
+				reducer("reduce", "optional aggregation function over mapped values from the merged stream"),
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for reduce", Optional: true},
+				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, emit null row when no hits", Optional: true},
+				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanOrderMulti,
@@ -1550,71 +1674,71 @@ func Init(en scm.Env) {
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createdatabase",
-		Desc: "creates a new database",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ignoreexists := len(a) > 1 && scm.ToBool(a[1])
 			return scm.NewBool(CreateDatabase(scm.String(a[0]), ignoreexists))
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new database", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the new database"},
-				{Kind: "bool", ParamName: "ignoreexists", ParamDesc: "if true, return false instead of throwing an error", Optional: true},
+				{Kind: "string", Label: "schema", Description: "name of the new database"},
+				{Kind: "bool", Label: "ignoreexists", Description: "if true, return false instead of throwing an error", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "dropdatabase",
-		Desc: "drops a database",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifexists := len(a) > 1 && scm.ToBool(a[1])
 			return scm.NewBool(DropDatabase(scm.String(a[0]), ifexists))
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a database", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
-				{Kind: "bool", ParamName: "ifexists", ParamDesc: "if true, don't throw an error if it doesn't exist", Optional: true},
+				{Kind: "string", Label: "schema", Description: "name of the database"},
+				{Kind: "bool", Label: "ifexists", Description: "if true, don't throw an error if it doesn't exist", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "checktablemaintenance",
-		Desc: "checks whether a user-initiated maintenance operation is allowed for a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			operation := maintenanceOperation(scm.String(a[2]))
 			requireTableMaintenance(scm.String(a[0]), scm.String(a[1]), operation)
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "checks whether a user-initiated maintenance operation is allowed for a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema"},
-				{Kind: "string", ParamName: "table"},
-				{Kind: "string", ParamName: "operation"},
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table"},
+				{Kind: "string", Label: "operation"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "maintenance_capabilities",
-		Desc: "returns the server-side maintenance capabilities for a database or table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) > 1 {
 				return maintenanceCapabilitiesScmer(tableMaintenanceCapabilities(scm.String(a[0]), scm.String(a[1])))
 			}
 			return maintenanceCapabilitiesScmer(databaseMaintenanceCapabilities(scm.String(a[0])))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the server-side maintenance capabilities for a database or table",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema"},
-				{Kind: "string", ParamName: "table", Optional: true},
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createtable",
-		Desc: "creates a table, runs its oninit option and registered after-create-table lifecycle triggers synchronously, and returns only after initialization completes; concurrent if-not-exists callers wait for that same completion",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
 			db := GetDatabase(scm.String(a[0]))
@@ -1820,20 +1944,20 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a table, runs its oninit option and registered after-create-table lifecycle triggers synchronously, and returns only after initialization completes; concurrent if-not-exists callers wait for that same completion", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the existing database that will contain the table"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to create"},
-				{Kind: "list", ParamName: "cols", ParamDesc: "column and constraint definitions: (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). dimensions is a list of integer type dimensions. typeparams is an alternating key/value list supporting primary (bool), unique (bool), auto_increment (bool), null (bool), default (any), default_expression (string), update (expression), comment (string), collate (string), temp (bool), filtercols (string list), filter (function), sortcols (string list), sortdirs (bool list), partitioncount (integer), mapcols (string list), mapfn (function), reducefn (function), and reduceinit (any). Column lists are string lists; foreign-key modes are restrict, cascade, or set null"},
-				{Kind: "list", ParamName: "options", ParamDesc: "alternating key/value list; supported keys are engine (safe, logged, sloppy, memory, or cache), collation (string), charset (string), comment (string), auto_increment (non-negative integer), and oninit (closed zero-argument function run synchronously once per data generation; concurrent if-not-exists callers wait for it, and memory/cache tables persist the callback so the first idempotent createtable after restart repopulates their empty data)"},
-				{Kind: "bool", ParamName: "ifnotexists", ParamDesc: "when true, return false instead of failing if the table exists; if another caller is still creating it, wait for that caller's after-create-table initialization before returning false", Optional: true},
+				{Kind: "string", Label: "schema", Description: "name of the existing database that will contain the table"},
+				{Kind: "string", Label: "table", Description: "name of the table to create"},
+				{Kind: "list", Label: "cols", Description: "column and constraint definitions", Element: &scm.TypeDescriptor{Kind: "list", Label: "definition", Description: "one of (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). Column lists contain strings; foreign-key modes are restrict, cascade, or set null. A column definition's dimensions contains integers and its typeparams uses the same fields documented by createcolumn options"}},
+				tableOptions,
+				{Kind: "bool", Label: "ifnotexists", Description: "when true, return false instead of failing if the table exists; if another caller is still creating it, wait for that caller's after-create-table initialization before returning false", Optional: true},
 			},
-			Return: &scm.TypeDescriptor{Kind: "bool", ParamDesc: "true when this call created and initialized the table, false when ifnotexists reused an initialized table"},
+			Return: &scm.TypeDescriptor{Kind: "bool", Description: "true when this call created and initialized the table, false when ifnotexists reused an initialized table"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createcolumn",
-		Desc: "creates a new column in table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 
@@ -1922,22 +2046,30 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(created)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new column in table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "colname", ParamDesc: "name of the new column"},
-				{Kind: "string", ParamName: "type", ParamDesc: "name of the basetype"},
-				{Kind: "list", ParamName: "dimensions", ParamDesc: "dimensions of the type (e.g. for decimal)"},
-				{Kind: "list", ParamName: "options", ParamDesc: "assoc list: primary, unique, auto_increment, null, comment, default, default_expression, collate; ORC: sortcols, sortdirs, partitioncount, mapcols, mapfn, reducefn, reduceinit"},
-				{Kind: "list", ParamName: "computorCols", ParamDesc: "list of columns that is passed into params of computor", Optional: true},
-				{Kind: "func", ParamName: "computor", ParamDesc: "lambda expression that can take other column values and computes the value of that column", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", ParamName: "columns", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "colname", Description: "name of the new column"},
+				{Kind: "string", Label: "type", Description: "name of the basetype"},
+				{Kind: "list", Label: "dimensions", Description: "dimensions of the type, for example precision and scale for decimal", Element: &scm.TypeDescriptor{Kind: "int", Label: "dimension", Description: "one type-specific dimension"}},
+				columnOptions,
+				func() *scm.TypeDescriptor {
+					value := columnList("computorCols", "columns passed to computor in this order")
+					value.Optional = true
+					return value
+				}(),
+				func() *scm.TypeDescriptor {
+					value := rowCallback("computor", "lambda expression that computes this column from the values selected by computorCols", "any", "computed column value")
+					value.Optional = true
+					return value
+				}(),
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createkey",
-		Desc: "creates a new key on a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 
@@ -1962,19 +2094,19 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new key on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "keyname", ParamDesc: "name of the new key"},
-				{Kind: "bool", ParamName: "unique", ParamDesc: "whether the key is unique"},
-				{Kind: "list", ParamName: "columns", ParamDesc: "list of columns to include"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "keyname", Description: "name of the new key"},
+				{Kind: "bool", Label: "unique", Description: "whether the key is unique"},
+				{Kind: "list", Label: "columns", Description: "list of columns to include"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createforeignkey",
-		Desc: "creates a new foreign key on a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t1 := TableFromScmer(a[0])
 			id := scm.String(a[1])
@@ -2002,22 +2134,22 @@ func Init(en scm.Env) {
 
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new foreign key on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table1"},
-				{Kind: "string", ParamName: "keyname", ParamDesc: "name of the new key"},
-				{Kind: "list", ParamName: "columns1", ParamDesc: "list of columns to include"},
-				{Kind: "table", ParamName: "table2"},
-				{Kind: "list", ParamName: "columns2", ParamDesc: "list of columns to include"},
-				{Kind: "string", ParamName: "updatemode", ParamDesc: "restrict|cascade|set null"},
-				{Kind: "string", ParamName: "deletemode", ParamDesc: "restrict|cascade|set null"},
+				{Kind: "table", Label: "table1"},
+				{Kind: "string", Label: "keyname", Description: "name of the new key"},
+				{Kind: "list", Label: "columns1", Description: "list of columns to include"},
+				{Kind: "table", Label: "table2"},
+				{Kind: "list", Label: "columns2", Description: "list of columns to include"},
+				{Kind: "string", Label: "updatemode", Description: "restrict|cascade|set null"},
+				{Kind: "string", Label: "deletemode", Description: "restrict|cascade|set null"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "shardcolumn",
-		Desc: "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			numPartitions := 0
@@ -2041,18 +2173,18 @@ func Init(en scm.Env) {
 			return scm.NewSlice(t.NewShardDimension(scm.String(a[1]), numPartitions).Pivots)
 
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "tells us how it would partition a column according to their values. Returns a list of pivot elements.",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "colname", ParamDesc: "name of the column"},
-				{Kind: "number", ParamName: "numpartitions", ParamDesc: "number of partitions; optional. leave 0 if you want to detect the partiton number automatically or copy the partition schema of the table", Optional: true},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "colname", Description: "name of the column"},
+				{Kind: "number", Label: "numpartitions", Description: "number of partitions; optional. leave 0 if you want to detect the partiton number automatically or copy the partition schema of the table", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "partitiontable",
-		Desc: "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			cols := normalizePartitionDataset(a[1])
@@ -2118,17 +2250,17 @@ func Init(en scm.Env) {
 				return scm.NewBool(false)
 			}
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "suggests a partition scheme for a table. If the table has no partition scheme yet, it will immediately apply that scheme and return true. If the table already has a partition scheme, it will alter the partitioning score such that the partitioning scheme is considered in the next repartitioning and return false.",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "list", ParamName: "columns", ParamDesc: "associative list of string -> list representing column name -> pivots. You can compute pivots by (shardcolumn ...)"},
+				{Kind: "table", Label: "table"},
+				{Kind: "list", Label: "columns", Description: "associative list of string -> list representing column name -> pivots. You can compute pivots by (shardcolumn ...)"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "altertable",
-		Desc: "alters a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			db := t.schema
@@ -2199,18 +2331,18 @@ func Init(en scm.Env) {
 				panic("unimplemented alter table operation: " + operation)
 			}
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "alters a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "operation", ParamDesc: "one of owner|drop|engine|collation|auto_increment"},
-				{Kind: "any", ParamName: "parameter", ParamDesc: "name of the column to drop or value of the parameter"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "operation", Description: "one of owner|drop|engine|collation|auto_increment"},
+				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "altercolumn",
-		Desc: "alters a column",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			db := t.schema
@@ -2245,83 +2377,83 @@ func Init(en scm.Env) {
 			}
 			panic("column " + t.schema.Name + "." + t.Name + "." + scm.String(a[1]) + " does not exist")
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "alters a column",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "column", ParamDesc: "name of the column"},
-				{Kind: "string", ParamName: "operation", ParamDesc: "one of drop|type|collation|auto_increment|comment"},
-				{Kind: "any", ParamName: "parameter", ParamDesc: "name of the column to drop or value of the parameter"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "column", Description: "name of the column"},
+				{Kind: "string", Label: "operation", Description: "one of drop|type|collation|auto_increment|comment"},
+				{Kind: "any", Label: "parameter", Description: "name of the column to drop or value of the parameter"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "droptable",
-		Desc: "removes a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifexists := len(a) > 2 && scm.ToBool(a[2])
 			DropTable(scm.String(a[0]), scm.String(a[1]), ifexists)
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "removes a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema"},
-				{Kind: "string", ParamName: "table"},
-				{Kind: "bool", ParamName: "ifexists", ParamDesc: "if true, don't throw an error if it already exists", Optional: true},
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table"},
+				{Kind: "bool", Label: "ifexists", Description: "if true, don't throw an error if it already exists", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "dropcolumn",
-		Desc: "drops a column from a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			return scm.NewBool(t.DropColumn(scm.String(a[1])))
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a column from a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "column", ParamDesc: "name of the column to drop"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "column", Description: "name of the column to drop"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "migratedropcolumn",
-		Desc: "drops a legacy system column during startup migration",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			return scm.NewBool(t.dropColumnForMigration(scm.String(a[1])))
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "drops a legacy system column during startup migration", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "column", ParamDesc: "legacy column name"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "column", Description: "legacy column name"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "invalidatecolumn",
-		Desc: "marks all values of a computed column as stale",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			colName := scm.String(a[1])
 			invalidateComputedColumn(t, colName)
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "marks all values of a computed column as stale",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "column", ParamDesc: "name of the computed column"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "column", Description: "name of the computed column"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "invalidateorc",
-		Desc: "invalidates ORC column rows from a sort key onwards via validMask scan",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			// Accept both a single value and a list of sort key values
@@ -2334,18 +2466,18 @@ func Init(en scm.Env) {
 			t.invalidateORCFromSortKey(scm.String(a[1]), sortKeys)
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "invalidates ORC column rows from a sort key onwards via validMask scan",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "column", ParamDesc: "name of the ORC column"},
-				{Kind: "list", ParamName: "sortkeys", ParamDesc: "composite sort key values from which to invalidate"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "column", Description: "name of the ORC column"},
+				{Kind: "list", Label: "sortkeys", Description: "composite sort key values from which to invalidate"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "register_keytable_cleanup",
-		Desc: "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if a[0].IsNil() {
 				return scm.NewBool(false)
@@ -2602,19 +2734,19 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "registers triggers on a base table to maintain keytable entries (insert/delete group keys)",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "base_table"},
-				{Kind: "table", ParamName: "kt_table"},
-				{Kind: "string", ParamName: "tblvar", ParamDesc: "table alias used in scan column prefixes"},
-				{Kind: "list", ParamName: "key_pairs", ParamDesc: "list of (base_col kt_col) pairs"},
+				{Kind: "table", Label: "base_table"},
+				{Kind: "table", Label: "kt_table"},
+				{Kind: "string", Label: "tblvar", Description: "table alias used in scan column prefixes"},
+				{Kind: "list", Label: "key_pairs", Description: "list of (base_col kt_col) pairs"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "initialize_cache_table",
-		Desc: "registers maintenance, locks source tables for a consistent snapshot, and runs a canonical planner-cache initializer exactly once",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			tbl := TableFromScmer(a[1])
@@ -2652,21 +2784,21 @@ func Init(en scm.Env) {
 			})
 			return scm.NewBool(initialized)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "registers maintenance, locks source tables for a consistent snapshot, and runs a canonical planner-cache initializer exactly once", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "any", ParamName: "transaction", ParamDesc: "explicit transaction context carrying query-session ownership"},
-				{Kind: "table", ParamName: "table"},
-				{Kind: "list", ParamName: "source_tables"},
-				{Kind: "func", ParamName: "register_maintenance", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "initializer", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "finalizer", ParamDesc: "optional zero-argument finalizer run under the same source-table locks after initialization", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}, Optional: true},
+				{Kind: "any", Label: "transaction", Description: "explicit transaction context carrying query-session ownership"},
+				{Kind: "table", Label: "table"},
+				{Kind: "list", Label: "source_tables"},
+				{Kind: "func", Label: "register_maintenance", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "initializer", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "finalizer", Description: "optional zero-argument finalizer run under the same source-table locks after initialization", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}, Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "touch_keytable",
-		Desc: "extends the lease on a keytable so CacheManager defers eviction",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			tbl := TableFromScmer(a[0])
 			now := time.Now()
@@ -2679,16 +2811,16 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "extends the lease on a keytable so CacheManager defers eviction",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
+				{Kind: "table", Label: "table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "locktables",
-		Desc: "acquires WRITE or READ user-level locks on a list of tables (LOCK TABLES); implicitly releases any previously held locks",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ss := scm.GetCurrentSessionState()
 			if ss != nil {
@@ -2703,29 +2835,29 @@ func Init(en scm.Env) {
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "acquires WRITE or READ user-level locks on a list of tables (LOCK TABLES); implicitly releases any previously held locks", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "list", ParamName: "locks", ParamDesc: "flat list of schema, table, write? triples"},
+				{Kind: "list", Label: "locks", Description: "flat list of schema, table, write? triples"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "unlocktables",
-		Desc: "releases all user-level table locks held by this session",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if ss := scm.GetCurrentSessionState(); ss != nil {
 				ss.ReleaseAllLocks()
 			}
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "releases all user-level table locks held by this session", HasSideEffects: true,
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "get_fk_target",
-		Desc: "returns (ref_table ref_column) if a single-column FK exists for the given column, nil otherwise",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			tbl := TableFromScmer(a[0])
 			col := scm.String(a[1])
@@ -2736,33 +2868,33 @@ func Init(en scm.Env) {
 			}
 			return scm.NewNil()
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns (ref_table ref_column) if a single-column FK exists for the given column, nil otherwise",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "column", ParamDesc: "column name"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "column", Description: "column name"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "renametable",
-		Desc: "renames a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			RenameTable(scm.String(a[0]), scm.String(a[1]), scm.String(a[2]))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "renames a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
-				{Kind: "string", ParamName: "oldname", ParamDesc: "current name of the table"},
-				{Kind: "string", ParamName: "newname", ParamDesc: "new name of the table"},
+				{Kind: "string", Label: "schema", Description: "name of the database"},
+				{Kind: "string", Label: "oldname", Description: "current name of the table"},
+				{Kind: "string", Label: "newname", Description: "new name of the table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "insert",
-		Desc: "inserts a new dataset into table and returns the number of successful items",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			var onCollisionCols []string
@@ -2798,22 +2930,22 @@ func Init(en scm.Env) {
 			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
 			return scm.NewInt(int64(inserted))
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "inserts a new dataset into table and returns the number of successful items", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "list", ParamName: "columns", ParamDesc: "list of column names, e.g. '(\"ID\", \"value\")"},
-				{Kind: "list", ParamName: "datasets", ParamDesc: "list of list of column values, e.g. '('(1 10) '(2 15))"},
-				{Kind: "list", ParamName: "onCollisionCols", ParamDesc: "list of columns of the old dataset that have to be passed to onCollision. Can also request $update, $set:<computed-column>, or NEW.<insert-column>.", Optional: true},
-				{Kind: "func", ParamName: "onCollision", ParamDesc: "function called for each collision. Its positional parameters are the values requested by onCollisionCols, in the same order. If omitted, collisions raise an error.", Optional: true, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "bool", ParamName: "mergeNull", ParamDesc: "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)", Optional: true},
-				{Kind: "func", ParamName: "onInsertid", ParamDesc: "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "number", ParamName: "id"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "table", Label: "table"},
+				{Kind: "list", Label: "columns", Description: "list of column names, e.g. '(\"ID\", \"value\")"},
+				{Kind: "list", Label: "datasets", Description: "list of list of column values, e.g. '('(1 10) '(2 15))"},
+				{Kind: "list", Label: "onCollisionCols", Description: "list of columns of the old dataset that have to be passed to onCollision. Can also request $update, $set:<computed-column>, or NEW.<insert-column>.", Optional: true},
+				{Kind: "func", Label: "onCollision", Description: "function called for each collision. Its positional parameters are the values requested by onCollisionCols, in the same order. If omitted, collisions raise an error.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "column values", Description: "one value for each onCollisionCols entry", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result"}},
+				{Kind: "bool", Label: "mergeNull", Description: "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)", Optional: true},
+				{Kind: "func", Label: "onInsertid", Description: "(optional) callback (id)->any; called once with the first auto_increment id assigned for this INSERT", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "number", Label: "id"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "number"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "stat",
-		Desc: "return system statistics as assoc: mem_available, mem_total, process_memory, shard_memory, shard_budget, persisted_memory, persisted_budget, cache_entry_count, cache_entry_size.\n(stat schema) and (stat schema tbl) return a string with detailed memory usage.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) == 0 {
 				memTotal, memAvail := ReadMemInfo()
@@ -2839,28 +2971,28 @@ func Init(en scm.Env) {
 			}
 			return scm.NewNil()
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return system statistics as assoc: mem_available, mem_total, process_memory, shard_memory, shard_budget, persisted_memory, persisted_budget, cache_entry_count, cache_entry_size.\n(stat schema) and (stat schema tbl) return a string with detailed memory usage.",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "(optional) database name for detailed string output", Optional: true},
-				{Kind: "string", ParamName: "table", ParamDesc: "(optional) table name for detailed string output", Optional: true},
+				{Kind: "string", Label: "schema", Description: "(optional) database name for detailed string output", Optional: true},
+				{Kind: "string", Label: "table", Description: "(optional) table name for detailed string output", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "totalmem",
-		Desc: "Returns total physical memory in bytes (from /proc/meminfo)",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return scm.NewInt(totalMemoryBytes())
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Returns total physical memory in bytes (from /proc/meminfo)",
 			Return: &scm.TypeDescriptor{Kind: "number"},
 			Const:  true,
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "resolve_column_name",
-		Desc: "resolve a physical column name from immutable table metadata",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -2876,19 +3008,19 @@ func Init(en scm.Env) {
 			}
 			return scm.NewString(name)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "resolve a physical column name from immutable table metadata",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database name"},
-				{Kind: "string", ParamName: "table", ParamDesc: "table name"},
-				{Kind: "string", ParamName: "column", ParamDesc: "column name"},
-				{Kind: "bool", ParamName: "ignorecase", ParamDesc: "whether identifier case is ignored"},
+				{Kind: "string", Label: "schema", Description: "database name"},
+				{Kind: "string", Label: "table", Description: "table name"},
+				{Kind: "string", Label: "column", Description: "column name"},
+				{Kind: "bool", Label: "ignorecase", Description: "whether identifier case is ignored"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string|nil", Transfer: false},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "show",
-		Desc: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			// table-based overloads: (show table) / (show recset) → columns,
 			// (show table "statistics") / (show recset "statistics") → index stats, etc.
@@ -3126,12 +3258,12 @@ func Init(en scm.Env) {
 			}
 			panic("invalid call of show")
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "show databases/tables/columns/shards\n\n(show) lists database names\n(show schema) lists table names\n(show table_handle) lists the memoized column defs\n(show table_handle true) returns table metadata\n(show table_handle \"statistics\") returns index statistics\n(show schema true) lists tables with full info: [{name,engine,row_count,size_bytes,collation,comment},...]\n(show schema tbl) lists column defs\n(show schema tbl true) returns assoc {columns,meta,shards}\n(show schema tbl N) returns shard N overview assoc {shard,state,main_count,delta,deletions,size_bytes}\n(show schema tbl N true) returns shard N full assoc adding columns and indexes\n(show schema tbl \"statistics\") returns index statistics (used by INFORMATION_SCHEMA)",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string|table|recset", ParamName: "schema_or_table", ParamDesc: "(optional) database name or resolved table/recset handle", Optional: true},
-				{Kind: "string|bool", ParamName: "table_or_property", ParamDesc: "(optional) table name, true for full info, or \"statistics\" for a handle", Optional: true},
-				{Kind: "int|bool|string", ParamName: "property", ParamDesc: "(optional) shard index (int), true for full table info, or \"statistics\"", Optional: true},
-				{Kind: "bool", ParamName: "full", ParamDesc: "(optional) true to include columns and indexes in shard detail", Optional: true},
+				{Kind: "string|table|recset", Label: "schema_or_table", Description: "(optional) database name or resolved table/recset handle", Optional: true},
+				{Kind: "string|bool", Label: "table_or_property", Description: "(optional) table name, true for full info, or \"statistics\" for a handle", Optional: true},
+				{Kind: "int|bool|string", Label: "property", Description: "(optional) shard index (int), true for full table info, or \"statistics\"", Optional: true},
+				{Kind: "bool", Label: "full", Description: "(optional) true to include columns and indexes in shard detail", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any", Transfer: false},
 		},
@@ -3139,7 +3271,7 @@ func Init(en scm.Env) {
 	// show_triggers(schema, table): returns a list of triggers for a table (non-system triggers only)
 	scm.Declare(&en, &scm.Declaration{
 		Name: "show_triggers",
-		Desc: "show triggers for a given table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -3197,10 +3329,10 @@ func Init(en scm.Env) {
 			}
 			return scm.NewSlice(rows)
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "show triggers for a given table",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database name"},
-				{Kind: "string", ParamName: "table", ParamDesc: "(optional) table name, if omitted shows all triggers in schema", Optional: true},
+				{Kind: "string", Label: "schema", Description: "database name"},
+				{Kind: "string", Label: "table", Description: "(optional) table name, if omitted shows all triggers in schema", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -3208,7 +3340,7 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "rebuild",
-		Desc: "rebuilds main storages and returns the amount of time it took; with a table handle, rebuilds only that table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			if len(a) > 0 && a[0].IsCustom(TagTable) {
 				all := len(a) > 1 && scm.ToBool(a[1])
@@ -3232,11 +3364,11 @@ func Init(en scm.Env) {
 
 			return scm.NewString(Rebuild(all, repartition))
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "rebuilds main storages and returns the amount of time it took; with a table handle, rebuilds only that table",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "bool|table", ParamName: "table_or_all", ParamDesc: "table handle for a table-local rebuild; otherwise whether to rebuild unchanged shards globally (default: false)", Optional: true},
-				{Kind: "bool", ParamName: "all_or_repartition", ParamDesc: "with a table: whether to rebuild unchanged shards; globally: whether to repartition (default: true)", Optional: true},
-				{Kind: "bool", ParamName: "repartition", ParamDesc: "with a table handle, whether to repartition that table (default: true)", Optional: true},
+				{Kind: "bool|table", Label: "table_or_all", Description: "table handle for a table-local rebuild; otherwise whether to rebuild unchanged shards globally (default: false)", Optional: true},
+				{Kind: "bool", Label: "all_or_repartition", Description: "with a table: whether to rebuild unchanged shards; globally: whether to repartition (default: true)", Optional: true},
+				{Kind: "bool", Label: "repartition", Description: "with a table handle, whether to repartition that table (default: true)", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string"},
 		},
@@ -3246,7 +3378,7 @@ func Init(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "loadCSV",
-		Desc: "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			// schema, table, filename, delimiter
 			start := time.Now()
@@ -3267,20 +3399,20 @@ func Init(en scm.Env) {
 
 			return scm.NewString(fmt.Sprint(time.Since(start)))
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "loads a CSV stream into a table and returns the amount of time it took.\nThe first line of the file must be the headlines. The headlines must match the table's columns exactly.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table"},
-				{Kind: "stream", ParamName: "stream", ParamDesc: "CSV file, load with: (stream filename)"},
-				{Kind: "string", ParamName: "delimiter", ParamDesc: "(optional) delimiter defaults to \";\"", Optional: true},
-				{Kind: "bool", ParamName: "firstline", ParamDesc: "(optional) if the first line contains the column names (otherwise, the tables column order is used)", Optional: true},
+				{Kind: "string", Label: "schema", Description: "name of the database"},
+				{Kind: "string", Label: "table", Description: "name of the table"},
+				{Kind: "stream", Label: "stream", Description: "CSV file, load with: (stream filename)"},
+				{Kind: "string", Label: "delimiter", Description: "(optional) delimiter defaults to \";\"", Optional: true},
+				{Kind: "bool", Label: "firstline", Description: "(optional) if the first line contains the column names (otherwise, the tables column order is used)", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "loadJSON",
-		Desc: "loads a .jsonl file from stream into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			// schema, filename
 			start := time.Now()
@@ -3293,22 +3425,22 @@ func Init(en scm.Env) {
 
 			return scm.NewString(fmt.Sprint(time.Since(start)))
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "loads a .jsonl file from stream into a database and returns the amount of time it took.\nJSONL is a linebreak separated file of JSON objects. Each JSON object is one dataset in the database. Before you add rows, you must declare the table in a line '#table <tablename>'. All other lines starting with # are comments. Columns are created dynamically as soon as they occur in a json object.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database where you want to put the tables in"},
-				{Kind: "stream", ParamName: "stream", ParamDesc: "stream of the .jsonl file, read with: (stream filename)"},
+				{Kind: "string", Label: "schema", Description: "name of the database where you want to put the tables in"},
+				{Kind: "stream", Label: "stream", Description: "stream of the .jsonl file, read with: (stream filename)"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "string"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "settings",
-		Desc: "reads or writes a global settings value. This modifies your data/settings.json.",
-		Fn:   ChangeSettings,
-		Type: &scm.TypeDescriptor{
+
+		Fn: ChangeSettings,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "reads or writes a global settings value. This modifies your data/settings.json.",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "key", ParamDesc: "name of the key to set or get (for reference, rts)", Optional: true},
-				{Kind: "any", ParamName: "value", ParamDesc: "new value of that setting", Optional: true},
+				{Kind: "string", Label: "key", Description: "name of the key to set or get (for reference, rts)", Optional: true},
+				{Kind: "any", Label: "value", Description: "new value of that setting", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -3317,7 +3449,7 @@ func Init(en scm.Env) {
 	// Trigger management
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createcreatetabletrigger",
-		Desc: "registers a lifecycle trigger that fires synchronously after a future createtable for the given schema/table succeeds",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			body, deferredPlan := unwrapDeferredTriggerBody(a[4])
 			if triggerScmerMissing(body) && !triggerScmerMissing(deferredPlan) {
@@ -3346,21 +3478,21 @@ func Init(en scm.Env) {
 			})
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "registers a lifecycle trigger that fires synchronously after a future createtable for the given schema/table succeeds", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table to watch for creation"},
-				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
-				{Kind: "string", ParamName: "source_sql", ParamDesc: "original SQL body text (for diagnostics)"},
-				{Kind: "any", ParamName: "body", ParamDesc: "trigger body (Scheme procedure or deferred trigger expression)"},
-				{Kind: "bool", ParamName: "visible", ParamDesc: "true = user trigger, false = internal trigger"},
+				{Kind: "string", Label: "schema", Description: "name of the database"},
+				{Kind: "string", Label: "table", Description: "name of the table to watch for creation"},
+				{Kind: "string", Label: "name", Description: "name of the trigger"},
+				{Kind: "string", Label: "source_sql", Description: "original SQL body text (for diagnostics)"},
+				{Kind: "any", Label: "body", Description: "trigger body (Scheme procedure or deferred trigger expression)"},
+				{Kind: "bool", Label: "visible", Description: "true = user trigger, false = internal trigger"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "dropcreatetabletrigger",
-		Desc: "removes a registered create-table lifecycle trigger",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			schema := scm.String(a[0])
 			table := scm.String(a[1])
@@ -3373,19 +3505,19 @@ func Init(en scm.Env) {
 			}
 			panic("create-table trigger " + schema + "." + table + ":" + name + " does not exist")
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "removes a registered create-table lifecycle trigger", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
-				{Kind: "string", ParamName: "table", ParamDesc: "name of the table watched for creation"},
-				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
-				{Kind: "bool", ParamName: "ifexists", ParamDesc: "don't throw error if trigger doesn't exist"},
+				{Kind: "string", Label: "schema", Description: "name of the database"},
+				{Kind: "string", Label: "table", Description: "name of the table watched for creation"},
+				{Kind: "string", Label: "name", Description: "name of the trigger"},
+				{Kind: "bool", Label: "ifexists", Description: "don't throw error if trigger doesn't exist"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createtrigger",
-		Desc: "creates a new trigger on a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			db := t.schema
@@ -3441,21 +3573,21 @@ func Init(en scm.Env) {
 			db.saveLockedAndUnlock(t.schemaSaveMode())
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "creates a new trigger on a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "table", ParamName: "table"},
-				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
-				{Kind: "string", ParamName: "timing", ParamDesc: "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete"},
-				{Kind: "string", ParamName: "source_sql", ParamDesc: "original SQL body text (for SHOW TRIGGERS)"},
-				{Kind: "any", ParamName: "body", ParamDesc: "trigger body (parsed Scheme expression)"},
-				{Kind: "bool", ParamName: "visible", ParamDesc: "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "name", Description: "name of the trigger"},
+				{Kind: "string", Label: "timing", Description: "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete"},
+				{Kind: "string", Label: "source_sql", Description: "original SQL body text (for SHOW TRIGGERS)"},
+				{Kind: "any", Label: "body", Description: "trigger body (parsed Scheme expression)"},
+				{Kind: "bool", Label: "visible", Description: "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "droptrigger",
-		Desc: "removes a trigger from a table",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
@@ -3474,11 +3606,11 @@ func Init(en scm.Env) {
 			}
 			panic("trigger " + name + " does not exist")
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "removes a trigger from a table", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "name of the database"},
-				{Kind: "string", ParamName: "name", ParamDesc: "name of the trigger"},
-				{Kind: "bool", ParamName: "ifexists", ParamDesc: "don't throw error if trigger doesn't exist"},
+				{Kind: "string", Label: "schema", Description: "name of the database"},
+				{Kind: "string", Label: "name", Description: "name of the trigger"},
+				{Kind: "bool", Label: "ifexists", Description: "don't throw error if trigger doesn't exist"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -3490,10 +3622,17 @@ func Init(en scm.Env) {
 	initMetricsDeclarations(en)
 	scm.DeclareInSection("Sync", &en, &scm.Declaration{
 		Name: "newcachemap",
-		Desc: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys, (cachemap \"get_or_compute\" key producer) computes one value for concurrent misses of the same key.",
-		Fn:   NewCacheMap,
-		Type: &scm.TypeDescriptor{
-			Return: &scm.TypeDescriptor{Kind: "func"},
+
+		Fn: NewCacheMap,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys, (cachemap \"get_or_compute\" key producer) computes one value for concurrent misses of the same key.",
+			Return: &scm.TypeDescriptor{Kind: "func", Label: "cachemap", Description: "thread-safe cache accessor",
+				Params: []*scm.TypeDescriptor{
+					{Kind: "any", Label: "key_or_operation", Description: "cache key, or get_or_compute", Optional: true},
+					{Kind: "any", Label: "value_or_key", Description: "value to store, or key for get_or_compute", Optional: true},
+					{Kind: "func", Label: "producer", Description: "zero-argument value producer used by get_or_compute", Optional: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any", Label: "value"}},
+				},
+				Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "cached value, previous value, or key list depending on the operation"},
+			},
 		},
 	})
 	initTransaction(en)
@@ -3701,7 +3840,7 @@ func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVa
 func initFKBuiltins(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "__fk_check_ref",
-		Desc: "check that FK values exist in the parent table, panic if not",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := CurrentTx()
 			schema := scm.String(a[0])
@@ -3728,13 +3867,13 @@ func initFKBuiltins(en scm.Env) {
 			}
 			return scm.NewNil()
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "check that FK values exist in the parent table, panic if not",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database name"},
-				{Kind: "string", ParamName: "parent_table", ParamDesc: "parent table name"},
-				{Kind: "list", ParamName: "parent_cols", ParamDesc: "parent column names"},
-				{Kind: "list", ParamName: "values", ParamDesc: "FK values to check"},
-				{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"},
+				{Kind: "string", Label: "schema", Description: "database name"},
+				{Kind: "string", Label: "parent_table", Description: "parent table name"},
+				{Kind: "list", Label: "parent_cols", Description: "parent column names"},
+				{Kind: "list", Label: "values", Description: "FK values to check"},
+				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -3743,7 +3882,7 @@ func initFKBuiltins(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "__fk_on_parent_delete",
-		Desc: "enforce FK constraint when parent row is deleted",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := CurrentTx()
 			schema := scm.String(a[0])
@@ -3773,14 +3912,14 @@ func initFKBuiltins(en scm.Env) {
 			}
 			return scm.NewNil()
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "enforce FK constraint when parent row is deleted",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database name"},
-				{Kind: "string", ParamName: "child_table", ParamDesc: "child table name"},
-				{Kind: "list", ParamName: "child_cols", ParamDesc: "child FK column names"},
-				{Kind: "list", ParamName: "parent_vals", ParamDesc: "old parent PK values"},
-				{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"},
-				{Kind: "string", ParamName: "mode", ParamDesc: "RESTRICT, CASCADE, or SETNULL"},
+				{Kind: "string", Label: "schema", Description: "database name"},
+				{Kind: "string", Label: "child_table", Description: "child table name"},
+				{Kind: "list", Label: "child_cols", Description: "child FK column names"},
+				{Kind: "list", Label: "parent_vals", Description: "old parent PK values"},
+				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
+				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -3789,7 +3928,7 @@ func initFKBuiltins(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "__fk_on_parent_update",
-		Desc: "enforce FK constraint when parent PK is updated",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := CurrentTx()
 			schema := scm.String(a[0])
@@ -3832,15 +3971,15 @@ func initFKBuiltins(en scm.Env) {
 			}
 			return scm.NewNil()
 		},
-		Type: &scm.TypeDescriptor{
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "enforce FK constraint when parent PK is updated",
 			Params: []*scm.TypeDescriptor{
-				{Kind: "string", ParamName: "schema", ParamDesc: "database name"},
-				{Kind: "string", ParamName: "child_table", ParamDesc: "child table name"},
-				{Kind: "list", ParamName: "child_cols", ParamDesc: "child FK column names"},
-				{Kind: "list", ParamName: "old_vals", ParamDesc: "old parent PK values"},
-				{Kind: "list", ParamName: "new_vals", ParamDesc: "new parent PK values"},
-				{Kind: "string", ParamName: "fk_id", ParamDesc: "FK constraint name"},
-				{Kind: "string", ParamName: "mode", ParamDesc: "RESTRICT, CASCADE, or SETNULL"},
+				{Kind: "string", Label: "schema", Description: "database name"},
+				{Kind: "string", Label: "child_table", Description: "child table name"},
+				{Kind: "list", Label: "child_cols", Description: "child FK column names"},
+				{Kind: "list", Label: "old_vals", Description: "old parent PK values"},
+				{Kind: "list", Label: "new_vals", Description: "new parent PK values"},
+				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
+				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,

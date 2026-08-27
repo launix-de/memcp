@@ -30,12 +30,12 @@ func init_streams() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "streamString",
-		Desc: "creates a stream that contains a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewAny(a[0].Stream())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "content", ParamDesc: "content to put into the stream"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "creates a stream that contains a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "content", Description: "content to put into the stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
 			JITEmit: nil,
@@ -43,7 +43,7 @@ func init_streams() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "gzip",
-		Desc: "compresses a stream with gzip. Create streams with (stream filename)",
+
 		Fn: func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
 			if !ok {
@@ -60,8 +60,8 @@ func init_streams() {
 			}()
 			return NewAny(io.Reader(reader))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "compresses a stream with gzip. Create streams with (stream filename)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
 			JITEmit: nil,
@@ -69,7 +69,7 @@ func init_streams() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "xz",
-		Desc: "compresses a stream with xz. Create streams with (stream filename)",
+
 		Fn: func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
 			if !ok {
@@ -89,8 +89,8 @@ func init_streams() {
 			}
 			return NewAny(io.Reader(reader))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "compresses a stream with xz. Create streams with (stream filename)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
 			JITEmit: nil,
@@ -98,7 +98,7 @@ func init_streams() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "zcat",
-		Desc: "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
+
 		Fn: func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
 			if !ok {
@@ -110,8 +110,8 @@ func init_streams() {
 			}
 			return NewAny(reader)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "turns a compressed gzip stream into a stream of uncompressed data. Create streams with (stream filename)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
 			JITEmit: nil,
@@ -119,7 +119,7 @@ func init_streams() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "xzcat",
-		Desc: "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
+
 		Fn: func(a ...Scmer) Scmer {
 			stream, ok := a[0].Any().(io.Reader)
 			if !ok {
@@ -131,8 +131,8 @@ func init_streams() {
 			}
 			return NewAny(reader)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", ParamName: "stream", ParamDesc: "input stream"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "turns a compressed xz stream into a stream of uncompressed data. Create streams with (stream filename)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
 			JITEmit: nil,

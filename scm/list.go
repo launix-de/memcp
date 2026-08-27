@@ -844,11 +844,11 @@ func init_list() {
 	// in declarations so serialization can resolve the function pointer.
 	Declare(&Globalenv, &Declaration{
 		Name: "list",
-		Desc: "constructs a list from its arguments",
+
 		Fn:   List,
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "constructs a list from its arguments",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "items", ParamDesc: "items to put into the list", Variadic: true},
+				{Kind: "any", Label: "items", Description: "items to put into the list", Variadic: true},
 			},
 			Return:         &TypeDescriptor{Kind: "list", Length: UnknownLength},
 			Const:          true,
@@ -900,7 +900,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "count",
-		Desc: "counts the number of elements in the list",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].GetTag() == tagSlice {
 				return NewInt(int64(len(a[0].Slice())))
@@ -914,9 +914,9 @@ func init_list() {
 			}
 			panic("count expects a list")
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "counts the number of elements in the list",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "base list", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "base list", NoEscape: true},
 			},
 			Return:   &TypeDescriptor{Kind: "int"},
 			Const:    true,
@@ -927,7 +927,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "nth",
-		Desc: "get the nth item of a list",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "nth")
 			idx := int(a[1].Int())
@@ -936,10 +936,10 @@ func init_list() {
 			}
 			return list[idx]
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "get the nth item of a list",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "base list", NoEscape: true},
-				{Kind: "number", ParamName: "index", ParamDesc: "index beginning from 0"},
+				{Kind: "list", Label: "list", Description: "base list", NoEscape: true},
+				{Kind: "number", Label: "index", Description: "index beginning from 0"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -1579,7 +1579,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "nth_mut",
-		Desc: "sets the nth item of an owned list in-place and returns the mutated list",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "nth_mut")
 			idx := int(a[1].Int())
@@ -1589,11 +1589,11 @@ func init_list() {
 			list[idx] = a[2]
 			return NewSlice(list)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "sets the nth item of an owned list in-place and returns the mutated list",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
-				{Kind: "number", ParamName: "index", ParamDesc: "index beginning from 0"},
-				{Kind: "any", ParamName: "value", ParamDesc: "new value"},
+				{Kind: "list", Label: "list", Description: "owned base list"},
+				{Kind: "number", Label: "index", Description: "index beginning from 0"},
+				{Kind: "any", Label: "value", Description: "new value"},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -1604,7 +1604,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "slice",
-		Desc: "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "slice")
 			start := int(a[1].Int())
@@ -1622,11 +1622,11 @@ func init_list() {
 			copy(result, list[start:end])
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "extract a sublist from start (inclusive) to end (exclusive).\n(slice list start end) returns elements list[start..end).",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "base list", NoEscape: true},
-				{Kind: "number", ParamName: "start", ParamDesc: "start index (inclusive)"},
-				{Kind: "number", ParamName: "end", ParamDesc: "end index (exclusive)"},
+				{Kind: "list", Label: "list", Description: "base list", NoEscape: true},
+				{Kind: "number", Label: "start", Description: "start index (inclusive)"},
+				{Kind: "number", Label: "end", Description: "end index (exclusive)"},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
@@ -1636,7 +1636,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reverse",
-		Desc: "returns a new list with elements in reversed order.",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "reverse")
 			n := len(list)
@@ -1646,9 +1646,9 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a new list with elements in reversed order.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list to reverse", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list to reverse", NoEscape: true},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -1659,16 +1659,16 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "append",
-		Desc: "appends items to a list and return the extended list.\nThe original list stays unharmed.",
+
 		Fn: func(a ...Scmer) Scmer {
 			base := append([]Scmer{}, asSlice(a[0], "append")...)
 			base = append(base, a[1:]...)
 			return NewSlice(base)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "appends items to a list and return the extended list.\nThe original list stays unharmed.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "base list"},
-				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
+				{Kind: "list", Label: "list", Description: "base list"},
+				{Kind: "any", Label: "item...", Description: "items to add", Variadic: true},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -1679,7 +1679,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "append_unique",
-		Desc: "appends items to a list but only if they are new.\nThe original list stays unharmed.",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := append([]Scmer{}, asSlice(a[0], "append_unique")...)
 			for _, el := range a[1:] {
@@ -1694,10 +1694,10 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "appends items to a list but only if they are new.\nThe original list stays unharmed.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "base list"},
-				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
+				{Kind: "list", Label: "list", Description: "base list"},
+				{Kind: "any", Label: "item...", Description: "items to add", Variadic: true},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -1708,7 +1708,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "cons",
-		Desc: "constructs a list from a head and a tail list",
+
 		Fn: func(a ...Scmer) Scmer {
 			car := a[0]
 			if a[1].GetTag() == tagSlice {
@@ -1716,10 +1716,10 @@ func init_list() {
 			}
 			return NewSlice([]Scmer{car, a[1]})
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "constructs a list from a head and a tail list",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "car", ParamDesc: "new head element"},
-				{Kind: "list", ParamName: "cdr", ParamDesc: "tail that is appended after car", NoEscape: true},
+				{Kind: "any", Label: "car", Description: "new head element"},
+				{Kind: "list", Label: "cdr", Description: "tail that is appended after car", NoEscape: true},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -1730,7 +1730,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "car",
-		Desc: "extracts the head of a list",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "car")
 			if len(list) == 0 {
@@ -1738,9 +1738,9 @@ func init_list() {
 			}
 			return list[0]
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "extracts the head of a list",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list", NoEscape: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -2118,7 +2118,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "cdr",
-		Desc: "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "cdr")
 			if len(list) == 0 {
@@ -2126,9 +2126,9 @@ func init_list() {
 			}
 			return NewSlice(list[1:])
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "extracts the tail of a list\nThe tail of a list is a list with all items except the head.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list", NoEscape: true},
 			},
 			// cdr shares the input slice's backing array; its result is borrowed.
 			Return:   &TypeDescriptor{Kind: "list"},
@@ -2595,7 +2595,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "cadr",
-		Desc: "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "cadr")
 			if len(list) < 2 {
@@ -2603,9 +2603,9 @@ func init_list() {
 			}
 			return list[1]
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "extracts the second element of a list.\nEquivalent to (car (cdr x)).",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list", NoEscape: true},
+				{Kind: "list", Label: "list", Description: "list", NoEscape: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -2983,7 +2983,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "zip",
-		Desc: "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
+
 		Fn: func(a ...Scmer) Scmer {
 			lists := a
 			if len(a) == 1 {
@@ -3008,9 +3008,9 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "swaps the dimension of a list of lists. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as the components that will be zipped into the sub list",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "list", ParamDesc: "list of lists of items", NoEscape: true, Variadic: true},
+				{Kind: "any", Label: "list", Description: "list of lists of items", NoEscape: true, Variadic: true},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -3021,7 +3021,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "merge",
-		Desc: "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
+
 		Fn: func(a ...Scmer) Scmer {
 			lists := a
 			if len(a) == 1 {
@@ -3037,9 +3037,9 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "flattens a list of lists into a list containing all the subitems. If one parameter is given, it is a list of lists that is flattened. If multiple parameters are given, they are treated as lists that will be merged into one",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "list", ParamDesc: "list of lists of items", NoEscape: true, Variadic: true},
+				{Kind: "any", Label: "list", Description: "list of lists of items", NoEscape: true, Variadic: true},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -3050,7 +3050,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "merge_unique",
-		Desc: "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
+
 		Fn: func(a ...Scmer) Scmer {
 			lists := a
 			if len(a) == 1 {
@@ -3077,9 +3077,9 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "flattens a list of lists into a list containing all the subitems. Duplicates are filtered out.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list of lists of items", NoEscape: true, Variadic: true},
+				{Kind: "list", Label: "list", Description: "list of lists of items", NoEscape: true, Variadic: true},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -3090,7 +3090,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "has?",
-		Desc: "checks if a list has a certain item (equal?)",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "has?")
 			for _, v := range list {
@@ -3100,10 +3100,10 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "checks if a list has a certain item (equal?)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "haystack", ParamDesc: "list to search in", NoEscape: true},
-				{Kind: "any", ParamName: "needle", ParamDesc: "item to search for"},
+				{Kind: "list", Label: "haystack", Description: "list to search in", NoEscape: true},
+				{Kind: "any", Label: "needle", Description: "item to search for"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -3113,7 +3113,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "filter",
-		Desc: "returns a list that only contains elements that pass the filter function",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "filter")
 			result := make([]Scmer, 0, len(input))
@@ -3125,10 +3125,10 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list that only contains elements that pass the filter function",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be filtered", NoEscape: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(item)->bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "list", Description: "list that has to be filtered", NoEscape: true},
+				{Kind: "func", Label: "condition", Description: "filter condition func(item)->bool", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -3139,7 +3139,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "find",
-		Desc: "returns the first list element that passes the condition function, or nil/default if none matches",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "find")
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -3153,11 +3153,11 @@ func init_list() {
 			}
 			return NewNil()
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the first list element that passes the condition function, or nil/default if none matches",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list to search", NoEscape: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(any)->bool that is applied until the first match", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Optional: true},
+				{Kind: "list", Label: "list", Description: "list to search", NoEscape: true},
+				{Kind: "func", Label: "condition", Description: "predicate func(any)->bool that is applied until the first match", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "any", Label: "default", Description: "optional default value if nothing matches", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -3167,7 +3167,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "map",
-		Desc: "returns a list that contains the results of a map function that is applied to the list",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "map")
 			result := make([]Scmer, len(list))
@@ -3177,10 +3177,10 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list that contains the results of a map function that is applied to the list",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", Description: "list that has to be mapped", NoEscape: true},
+				{Kind: "func", Label: "map", Description: "map function func(any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -3939,7 +3939,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallel_map",
-		Desc: "like map, but applies fn to each element in parallel using a worker pool limited to runtime.NumCPU()",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "parallel_map")
 			if len(list) <= 1 {
@@ -3989,10 +3989,10 @@ func init_list() {
 			}
 			return NewSlice(results)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "like map, but applies fn to each element in parallel using a worker pool limited to runtime.NumCPU()",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list to map over in parallel", NoEscape: true},
-				{Kind: "func", ParamName: "fn", ParamDesc: "function applied to each element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true},
+				{Kind: "func", Label: "fn", Description: "function applied to each element", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Optimize: optimizeFixedLengthInput("parallel_map_mut"),
@@ -4002,7 +4002,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallel_map_mut",
-		Desc: "like parallel_map, but signals the optimizer that fn may have side effects",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "parallel_map_mut")
 			if len(list) <= 1 {
@@ -4051,10 +4051,10 @@ func init_list() {
 			}
 			return NewSlice(results)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "like parallel_map, but signals the optimizer that fn may have side effects",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list to map over in parallel", NoEscape: true},
-				{Kind: "func", ParamName: "fn", ParamDesc: "function with side effects applied to each element", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true},
+				{Kind: "func", Label: "fn", Description: "function with side effects applied to each element", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 
@@ -4063,7 +4063,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "mapIndex",
-		Desc: "returns a list that contains the results of a map function that is applied to the list",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "mapIndex")
 			result := make([]Scmer, len(list))
@@ -4073,10 +4073,10 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list that contains the results of a map function that is applied to the list",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be mapped", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}, {Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", Description: "list that has to be mapped", NoEscape: true},
+				{Kind: "func", Label: "map", Description: "map function func(i, any)->any that is applied to each item", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -4087,7 +4087,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce",
-		Desc: "returns a list that contains the result of a map function",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "reduce")
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -4105,11 +4105,11 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list that contains the result of a map function",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+				{Kind: "list", Label: "list", Description: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "item"}}, Label: "reduce", Description: "reduce function func(any any)->any where the first parameter is the accumulator, the second is a list item", Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral", Description: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return:   &TypeDescriptor{Kind: "any"},
 			Const:    true,
@@ -5986,7 +5986,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "produce",
-		Desc: "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
+
 		Fn: func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
 			state := a[0]
@@ -5998,11 +5998,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list that contains produced items - it works like for(state = startstate, condition(state), state = iterator(state)) {yield state}",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "startstate", ParamDesc: "start state to begin with"},
-				{Kind: "func", ParamName: "condition", ParamDesc: "func that returns true whether the state will be inserted into the result or the loop is stopped", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "iterator", ParamDesc: "func that produces the next state", Params: []*TypeDescriptor{{Kind: "any", ParamName: "state"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "startstate", Description: "start state to begin with"},
+				{Kind: "func", Label: "condition", Description: "func that returns true whether the state will be inserted into the result or the loop is stopped", Params: []*TypeDescriptor{{Kind: "any", Label: "state"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Label: "iterator", Description: "func that produces the next state", Params: []*TypeDescriptor{{Kind: "any", Label: "state"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: FreshAlloc,
 			Const:  true,
@@ -6012,7 +6012,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "produceN",
-		Desc: "returns a list with numbers from 0..n-1, optionally mapped through a function",
+
 		Fn: func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
 			if n < 0 {
@@ -6032,10 +6032,10 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list with numbers from 0..n-1, optionally mapped through a function",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "(optional) map function applied to each index", Optional: true, Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "number", Label: "n", Description: "number of elements to produce"},
+				{Kind: "func", Label: "fn", Description: "(optional) map function applied to each index", Optional: true, Params: []*TypeDescriptor{{Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -6046,7 +6046,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallelN",
-		Desc: "returns a list with numbers from 0..n-1 mapped in parallel through a function",
+
 		Fn: func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
 			if n < 0 {
@@ -6102,10 +6102,10 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a list with numbers from 0..n-1 mapped in parallel through a function",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "number", Label: "n", Description: "number of elements to produce"},
+				{Kind: "func", Label: "fn", Description: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -6116,7 +6116,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "produceN_mut",
-		Desc: "in-place produceN variant (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
 			if n < 0 {
@@ -6139,11 +6139,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place produceN variant (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", NoEscape: true, Optional: true},
+				{Kind: "number", Label: "n", Description: "number of elements to produce"},
+				{Kind: "func", Label: "fn", Description: "map function applied to each index", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "target", Description: "(optional) preallocated target list", NoEscape: true, Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "list"},
 			Const:     true,
@@ -6154,7 +6154,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallelN_mut",
-		Desc: "in-place parallelN variant (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			n := int(a[0].Int())
 			if n < 0 {
@@ -6247,11 +6247,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place parallelN variant (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "number", ParamName: "n", ParamDesc: "number of elements to produce"},
-				{Kind: "func", ParamName: "fn", ParamDesc: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "list", ParamName: "target", ParamDesc: "(optional) preallocated target list", NoEscape: true, Optional: true},
+				{Kind: "number", Label: "n", Description: "number of elements to produce"},
+				{Kind: "func", Label: "fn", Description: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "target", Description: "(optional) preallocated target list", NoEscape: true, Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "list"},
 			Const:     true,
@@ -6262,16 +6262,16 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "list?",
-		Desc: "checks if a value is a list",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsSlice() {
 				return NewBool(true)
 			}
 			return NewBool(false)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "checks if a value is a list",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "value to check"},
+				{Kind: "any", Label: "value", Description: "value to check"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -6532,7 +6532,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "contains?",
-		Desc: "checks if a value is in a list; uses the equal?? operator",
+
 		Fn: func(a ...Scmer) Scmer {
 			arr := asSlice(a[0], "contains?")
 			for _, v := range arr {
@@ -6542,10 +6542,10 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "checks if a value is in a list; uses the equal?? operator",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list to check", NoEscape: true},
-				{Kind: "any", ParamName: "value", ParamDesc: "value to check"},
+				{Kind: "list", Label: "list", Description: "list to check", NoEscape: true},
+				{Kind: "any", Label: "value", Description: "value to check"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -6555,7 +6555,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_in",
-		Desc: "tests SQL IN-list membership and returns nil when NULL makes the result UNKNOWN",
+
 		Fn: func(a ...Scmer) Scmer {
 			values := asSlice(a[0], "sql_in")
 			if a[1].IsNil() {
@@ -6575,8 +6575,8 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{{Kind: "list", ParamName: "values", ParamDesc: "SQL IN-list values", NoEscape: true}, {Kind: "any", ParamName: "value", ParamDesc: "value to find"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests SQL IN-list membership and returns nil when NULL makes the result UNKNOWN",
+			Params: []*TypeDescriptor{{Kind: "list", Label: "values", Description: "SQL IN-list values", NoEscape: true}, {Kind: "any", Label: "value", Description: "value to find"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 
@@ -6589,7 +6589,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "filter_assoc",
-		Desc: "returns a filtered dictionary according to a filter function",
+
 		Fn: func(a ...Scmer) Scmer {
 			result := make([]Scmer, 0)
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -6609,10 +6609,10 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a filtered dictionary according to a filter function",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be filtered", NoEscape: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(string any)->bool where the first parameter is the key, the second is the value", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "dict", Description: "dictionary that has to be filtered", NoEscape: true},
+				{Kind: "func", Label: "condition", Description: "filter function func(string any)->bool where the first parameter is the key, the second is the value", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -6623,7 +6623,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "find_assoc",
-		Desc: "returns the first key/value pair that passes the condition function, or nil/default if none matches",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			if slice, fd := asAssoc(a[0], "find_assoc"); fd == nil {
@@ -6652,11 +6652,11 @@ func init_list() {
 			}
 			return NewNil()
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the first key/value pair that passes the condition function, or nil/default if none matches",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary to search", NoEscape: true},
-				{Kind: "func", ParamName: "condition", ParamDesc: "predicate func(string any)->bool that is applied until the first match", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "any", ParamName: "default", ParamDesc: "optional default value if nothing matches", Optional: true},
+				{Kind: "list", Label: "dict", Description: "dictionary to search", NoEscape: true},
+				{Kind: "func", Label: "condition", Description: "predicate func(string any)->bool that is applied until the first match", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "any", Label: "default", Description: "optional default value if nothing matches", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -6666,7 +6666,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "map_assoc",
-		Desc: "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			if slice, fd := asAssoc(a[0], "map_assoc"); fd == nil {
@@ -6690,10 +6690,10 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a mapped dictionary according to a map function\nKeys will stay the same but values are mapped.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be mapped", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value.", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "dictionary that has to be mapped", NoEscape: true},
+				{Kind: "func", Label: "map", Description: "map function func(string any)->any where the first parameter is the key, the second is the value. It must return the new value.", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -6704,7 +6704,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_assoc",
-		Desc: "reduces a dictionary according to a reduce function",
+
 		Fn: func(a ...Scmer) Scmer {
 			result := a[2]
 			reduce := OptimizeProcToSerialFunction(a[1])
@@ -6720,11 +6720,11 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "reduces a dictionary according to a reduce function",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be reduced", NoEscape: true},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "key"}, {ParamName: "value"}}, ParamName: "reduce", ParamDesc: "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "initial value for the accumulator"},
+				{Kind: "list", Label: "dict", Description: "dictionary that has to be reduced", NoEscape: true},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "key"}, {Label: "value"}}, Label: "reduce", Description: "reduce function func(any string any)->any where the first parameter is the accumulator, second is key, third is value. It must return the new accumulator.", Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral", Description: "initial value for the accumulator"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -6734,17 +6734,17 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "make_structural_index",
-		Desc: "Builds an immutable structural-expression index. It eagerly hashes every key and every node under roots, then returns a parallel-safe lookup function that maps an equal expression to its zero-based key position or nil.",
+
 		Fn:   NewStructuralIndex,
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Builds an immutable structural-expression index. It eagerly hashes every key and every node under roots, then returns a parallel-safe lookup function that maps an equal expression to its zero-based key position or nil.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "keys", ParamDesc: "immutable structural expressions to index"},
-				{Kind: "list", ParamName: "roots", ParamDesc: "immutable expression roots whose descendant hashes are precomputed"},
+				{Kind: "list", Label: "keys", Description: "immutable structural expressions to index"},
+				{Kind: "list", Label: "roots", Description: "immutable expression roots whose descendant hashes are precomputed"},
 			},
 			Return: &TypeDescriptor{
 				Kind: "func",
 				Params: []*TypeDescriptor{
-					{Kind: "any", ParamName: "expression", ParamDesc: "a key, root, descendant of a declared root, or scalar expression"},
+					{Kind: "any", Label: "expression", Description: "a key, root, descendant of a declared root, or scalar expression"},
 				},
 				Return: &TypeDescriptor{Kind: "int|nil"},
 			},
@@ -6752,18 +6752,24 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "make_structural_catalog",
-		Desc: "Creates an atomic compile-local structural catalog. Look up with (catalog key), insert with (catalog key value), or freeze with (catalog) for parallel-safe read-only lookup.",
+
 		Fn:   NewStructuralCatalog,
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "Creates an atomic compile-local structural catalog. Look up with (catalog key), insert with (catalog key value), or freeze with (catalog) for parallel-safe read-only lookup.",
 			Params: []*TypeDescriptor{
-				{Kind: "bool|symbol", ParamName: "mode", ParamDesc: "true forces collisions for tests; ast selects type-stable compiler equality", Optional: true},
+				{Kind: "bool|symbol", Label: "mode", Description: "true forces collisions for tests; ast selects type-stable compiler equality", Optional: true},
 			},
-			Return: &TypeDescriptor{Kind: "func"},
+			Return: &TypeDescriptor{Kind: "func", Label: "catalog", Description: "atomic structural-expression lookup and update function",
+				Params: []*TypeDescriptor{
+					{Kind: "any", Label: "key", Description: "expression to look up; omit to freeze the catalog", Optional: true},
+					{Kind: "any", Label: "value", Description: "value to store for key", Optional: true},
+				},
+				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "stored value, lookup result, or frozen lookup function"},
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "has_assoc?",
-		Desc: "checks if a dictionary has a key present",
+
 		Fn: func(a ...Scmer) Scmer {
 			if slice, fd := asAssoc(a[0], "has_assoc?"); fd == nil {
 				for i := 0; i < len(slice); i += 2 {
@@ -6778,10 +6784,10 @@ func init_list() {
 			}
 			return NewBool(false)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "checks if a dictionary has a key present",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be checked", NoEscape: true},
-				{Kind: "string", ParamName: "key", ParamDesc: "key to test"},
+				{Kind: "list", Label: "dict", Description: "dictionary that has to be checked", NoEscape: true},
+				{Kind: "string", Label: "key", Description: "key to test"},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
@@ -6791,7 +6797,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "get_assoc",
-		Desc: "gets a value from a dictionary by key, returns nil if not found",
+
 		Fn: func(a ...Scmer) Scmer {
 			if slice, fd := asAssoc(a[0], "get_assoc"); fd == nil {
 				for i := 0; i < len(slice); i += 2 {
@@ -6810,11 +6816,11 @@ func init_list() {
 			}
 			return NewNil()
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "gets a value from a dictionary by key, returns nil if not found",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary to look up", NoEscape: true},
-				{Kind: "any", ParamName: "key", ParamDesc: "key to look up"},
-				{Kind: "any", ParamName: "default", ParamDesc: "optional default value if key not found", Optional: true},
+				{Kind: "list", Label: "dict", Description: "dictionary to look up", NoEscape: true},
+				{Kind: "any", Label: "key", Description: "key to look up"},
+				{Kind: "any", Label: "default", Description: "optional default value if key not found", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -6824,7 +6830,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "get_assoc_pairlist",
-		Desc: "gets a value from a list of key/value rows without flattening the rows",
+
 		Fn: func(a ...Scmer) Scmer {
 			for _, entry := range asSlice(a[0], "get_assoc_pairlist") {
 				if !entry.IsSlice() {
@@ -6841,11 +6847,11 @@ func init_list() {
 			}
 			return a[2]
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "gets a value from a list of key/value rows without flattening the rows",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "rows", ParamDesc: "list whose rows contain a key followed by one or more values", NoEscape: true},
-				{Kind: "any", ParamName: "key", ParamDesc: "key compared with the first item of each row"},
-				{Kind: "any", ParamName: "default", ParamDesc: "value returned when no row contains the key"},
+				{Kind: "list", Label: "rows", Description: "list whose rows contain a key followed by one or more values", NoEscape: true},
+				{Kind: "any", Label: "key", Description: "key compared with the first item of each row"},
+				{Kind: "any", Label: "default", Description: "value returned when no row contains the key"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -6855,7 +6861,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "extract_assoc",
-		Desc: "applies a function (key value) on the dictionary and returns the results as a flat list",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			if slice, fd := asAssoc(a[0], "extract_assoc"); fd == nil {
@@ -6878,10 +6884,10 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "applies a function (key value) on the dictionary and returns the results as a flat list",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "dictionary that has to be checked", NoEscape: true},
-				{Kind: "func", ParamName: "map", ParamDesc: "func(key, value)->any that extracts one element per key-value pair", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "dictionary that has to be checked", NoEscape: true},
+				{Kind: "func", Label: "map", Description: "func(key, value)->any that extracts one element per key-value pair", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -6892,7 +6898,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "set_assoc",
-		Desc: "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
+
 		Fn: func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
@@ -6928,12 +6934,12 @@ func init_list() {
 				return NewFastDict(fd)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a new dictionary where a single value has been changed.\nThe original dictionary is not modified.",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "input dictionary"},
-				{Kind: "string", ParamName: "key", ParamDesc: "key that has to be set"},
-				{Kind: "any", ParamName: "value", ParamDesc: "new value to set"},
-				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "input dictionary"},
+				{Kind: "string", Label: "key", Description: "key that has to be set"},
+				{Kind: "any", Label: "value", Description: "new value to set"},
+				{Kind: "func", Label: "merge", Description: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value. It must return the merged value that shall be physically stored in the new dictionary.", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old"}, {Kind: "any", Label: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -6944,7 +6950,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "merge_assoc",
-		Desc: "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
+
 		Fn: func(a ...Scmer) Scmer {
 			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc"])
 			dst := a[0]
@@ -6965,11 +6971,11 @@ func init_list() {
 			}
 			return dst
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a dictionary where all keys from dict1 and all keys from dict2 are present.\nIf a key is present in both inputs, the second one will be dominant so the first value will be overwritten unless you provide a merge function",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict1", ParamDesc: "first input dictionary that has to be changed. You must not use this value again."},
-				{Kind: "list", ParamName: "dict2", ParamDesc: "input dictionary that contains the new values that have to be added"},
-				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict1", Description: "first input dictionary that has to be changed. You must not use this value again."},
+				{Kind: "list", Label: "dict2", Description: "input dictionary that contains the new values that have to be added"},
+				{Kind: "func", Label: "merge", Description: "(optional) func(any any)->any that is called when a value is overwritten. The first parameter is the old value, the second is the new value from dict2. It must return the merged value that shall be pysically stored in the new dictionary.", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old"}, {Kind: "any", Label: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -6982,7 +6988,7 @@ func init_list() {
 	// Fused physical operators: optimizer-only, forbidden from .scm code.
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_segments",
-		Desc: "reduces ordered list segments without flattening them (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			segments := asSlice(a[0], "reduce_segments")
 			for _, segment := range segments {
@@ -7006,11 +7012,11 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "reduces ordered list segments without flattening them (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "segments", NoEscape: true},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "any", ParamName: "neutral", Optional: true},
+				{Kind: "list", Label: "segments", NoEscape: true},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "item"}}, Label: "reduce", Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral", Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "any"},
 			Const:     true,
@@ -7021,7 +7027,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "filter_map",
-		Desc: "fused serial map and filter (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "filter_map")
 			mapper := OptimizeProcToSerialFunction(a[1])
@@ -7035,11 +7041,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial map and filter (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", NoEscape: true},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "condition", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "condition", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -7050,7 +7056,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "map_filter",
-		Desc: "fused serial filter and map (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "map_filter")
 			predicate := OptimizeProcToSerialFunction(a[1])
@@ -7063,11 +7069,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial filter and map (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", NoEscape: true},
-				{Kind: "func", ParamName: "condition", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "condition", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -7078,7 +7084,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "map_map",
-		Desc: "fused serial map and map (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "map_map")
 			first := OptimizeProcToSerialFunction(a[1])
@@ -7089,11 +7095,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial map and map (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", NoEscape: true},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -7104,7 +7110,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_map",
-		Desc: "fused serial map and reduce (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "reduce_map")
 			mapper := OptimizeProcToSerialFunction(a[1])
@@ -7126,12 +7132,12 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial map and reduce (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+				{Kind: "list", Label: "list", Description: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "item"}}, Label: "reduce", Return: &TypeDescriptor{Kind: "any"}, Description: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", Label: "neutral", Description: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "any"},
 			Const:     true,
@@ -7142,7 +7148,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_filter",
-		Desc: "fused serial filter and reduce (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "reduce_filter")
 			predicate := OptimizeProcToSerialFunction(a[1])
@@ -7166,12 +7172,12 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial filter and reduce (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the list item"},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+				{Kind: "list", Label: "list", Description: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", Label: "filter", Params: []*TypeDescriptor{{Label: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "item"}}, Label: "reduce", Return: &TypeDescriptor{Kind: "any"}, Description: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the list item"},
+				{Kind: "any", Label: "neutral", Description: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "any"},
 			Const:     true,
@@ -7182,7 +7188,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_merge2",
-		Desc: "fused serial merge of two lists and reduce (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if len(a) < 3 {
 				panic("reduce_merge2 expects at least two input lists and a reduce function")
@@ -7214,12 +7220,12 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial merge of two lists and reduce (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "lhs", ParamDesc: "first list to reduce"},
-				{Kind: "list", ParamName: "rhs", ParamDesc: "second list to reduce"},
-				{Kind: "func", ParamName: "reduce", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "optional initial value of the accumulator, defaults to nil", Optional: true},
+				{Kind: "list", Label: "lhs", Description: "first list to reduce"},
+				{Kind: "list", Label: "rhs", Description: "second list to reduce"},
+				{Kind: "func", Label: "reduce", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}, Description: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", Label: "neutral", Description: "optional initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "any"},
 			Const:     true,
@@ -7230,7 +7236,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_map_filter",
-		Desc: "fused serial map then filter and reduce (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "reduce_map_filter")
 			mapper := OptimizeProcToSerialFunction(a[1])
@@ -7256,13 +7262,13 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial map then filter and reduce (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+				{Kind: "list", Label: "list", Description: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "filter", Params: []*TypeDescriptor{{Label: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "item"}}, Label: "reduce", Return: &TypeDescriptor{Kind: "any"}, Description: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", Label: "neutral", Description: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "any"},
 			Const:     true,
@@ -7273,7 +7279,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_filter_map",
-		Desc: "fused serial filter then map and reduce (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "reduce_filter_map")
 			predicate := OptimizeProcToSerialFunction(a[1])
@@ -7299,13 +7305,13 @@ func init_list() {
 			}
 			return result
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial filter then map and reduce (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "list that has to be reduced", NoEscape: true},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, ParamName: "acc"}, {ParamName: "item"}}, ParamName: "reduce", Return: &TypeDescriptor{Kind: "any"}, ParamDesc: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
-				{Kind: "any", ParamName: "neutral", ParamDesc: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
+				{Kind: "list", Label: "list", Description: "list that has to be reduced", NoEscape: true},
+				{Kind: "func", Label: "filter", Params: []*TypeDescriptor{{Label: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Params: []*TypeDescriptor{{Transfer: true, Label: "acc"}, {Label: "item"}}, Label: "reduce", Return: &TypeDescriptor{Kind: "any"}, Description: "reduce function func(any any)->any where the first parameter is the accumulator, the second is the mapped item"},
+				{Kind: "any", Label: "neutral", Description: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
 			Return:    &TypeDescriptor{Kind: "any"},
 			Const:     true,
@@ -7316,7 +7322,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "filter_filter",
-		Desc: "fused serial filter and filter (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "filter_filter")
 			left := OptimizeProcToSerialFunction(a[1])
@@ -7329,11 +7335,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial filter and filter (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", NoEscape: true},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
-				{Kind: "func", ParamName: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "func", Label: "filter", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:    FreshAlloc,
 			Forbidden: true,
@@ -7343,7 +7349,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "cons_map",
-		Desc: "constructs a list head while mapping its tail (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[1], "cons_map")
 			mapper := OptimizeProcToSerialFunction(a[2])
@@ -7354,11 +7360,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "constructs a list head while mapping its tail (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "head"},
-				{Kind: "list", ParamName: "list", NoEscape: true},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "head"},
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -8226,7 +8232,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "flat_map",
-		Desc: "fused fixed-width serial map and flatten (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "flat_map")
 			mapper := OptimizeProcToSerialFunction(a[1])
@@ -8237,11 +8243,11 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "fused fixed-width serial map and flatten (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", NoEscape: true},
-				{Kind: "func", ParamName: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "list"}},
-				{Kind: "int", ParamName: "width"},
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "list"}},
+				{Kind: "int", Label: "width"},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -8255,7 +8261,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "map_mut",
-		Desc: "in-place map (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := a[0].Slice()
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -8264,10 +8270,10 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place map (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned list to map in-place"},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", Description: "owned list to map in-place"},
+				{Kind: "func", Label: "map", Description: "map function", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -8942,7 +8948,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "mapIndex_mut",
-		Desc: "in-place mapIndex (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := a[0].Slice()
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -8951,10 +8957,10 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place mapIndex (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned list to map in-place"},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(i, any)->any", Params: []*TypeDescriptor{{Kind: "int", ParamName: "index"}, {Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "list", Description: "owned list to map in-place"},
+				{Kind: "func", Label: "map", Description: "map function func(i, any)->any", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -8966,7 +8972,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "map_assoc_mut",
-		Desc: "in-place map_assoc (optimizer-only, slice path only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			if slice, fd := asAssoc(a[0], "map_assoc_mut"); fd == nil {
@@ -8989,10 +8995,10 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place map_assoc (optimizer-only, slice path only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to map in-place"},
-				{Kind: "func", ParamName: "map", ParamDesc: "map function func(key, value)->value", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "owned dictionary to map in-place"},
+				{Kind: "func", Label: "map", Description: "map function func(key, value)->value", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9006,7 +9012,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "filter_mut",
-		Desc: "in-place filter (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			input := a[0].Slice()
 			fn := OptimizeProcToSerialFunction(a[1])
@@ -9019,10 +9025,10 @@ func init_list() {
 			}
 			return NewSlice(input[:w])
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place filter (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned list to filter in-place"},
-				{Kind: "func", ParamName: "condition", ParamDesc: "filter condition func(any)->bool", Params: []*TypeDescriptor{{Kind: "any", ParamName: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "list", Description: "owned list to filter in-place"},
+				{Kind: "func", Label: "condition", Description: "filter condition func(any)->bool", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9034,7 +9040,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "reverse_mut",
-		Desc: "in-place reverse (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := a[0].Slice()
 			for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
@@ -9042,9 +9048,9 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place reverse (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned list to reverse in-place"},
+				{Kind: "list", Label: "list", Description: "owned list to reverse in-place"},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9056,7 +9062,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "filter_assoc_mut",
-		Desc: "in-place filter_assoc (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			if slice, fd := asAssoc(a[0], "filter_assoc_mut"); fd == nil {
@@ -9080,10 +9086,10 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place filter_assoc (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to filter in-place"},
-				{Kind: "func", ParamName: "condition", ParamDesc: "filter function func(key, value)->bool", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "dict", Description: "owned dictionary to filter in-place"},
+				{Kind: "func", Label: "condition", Description: "filter function func(key, value)->bool", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9095,7 +9101,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "extract_assoc_mut",
-		Desc: "in-place extract_assoc (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			fn := OptimizeProcToSerialFunction(a[1])
 			if slice, fd := asAssoc(a[0], "extract_assoc_mut"); fd == nil {
@@ -9114,10 +9120,10 @@ func init_list() {
 				return NewSlice(result)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place extract_assoc (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to extract from in-place"},
-				{Kind: "func", ParamName: "map", ParamDesc: "func(key, value)->any that extracts each element", Params: []*TypeDescriptor{{Kind: "string", ParamName: "key"}, {Kind: "any", ParamName: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "owned dictionary to extract from in-place"},
+				{Kind: "func", Label: "map", Description: "func(key, value)->any that extracts each element", Params: []*TypeDescriptor{{Kind: "string", Label: "key"}, {Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9129,7 +9135,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "set_assoc_mut",
-		Desc: "in-place set_assoc (optimizer-only, mutates input directly)",
+
 		Fn: func(a ...Scmer) Scmer {
 			var mergeFn func(Scmer, Scmer) Scmer
 			if len(a) > 3 {
@@ -9167,12 +9173,12 @@ func init_list() {
 				return NewFastDict(fd)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place set_assoc (optimizer-only, mutates input directly)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict", ParamDesc: "owned dictionary to mutate"},
-				{Kind: "string", ParamName: "key", ParamDesc: "key to set"},
-				{Kind: "any", ParamName: "value", ParamDesc: "new value"},
-				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) merge function", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict", Description: "owned dictionary to mutate"},
+				{Kind: "string", Label: "key", Description: "key to set"},
+				{Kind: "any", Label: "value", Description: "new value"},
+				{Kind: "func", Label: "merge", Description: "(optional) merge function", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old"}, {Kind: "any", Label: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9186,16 +9192,16 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "append_mut",
-		Desc: "in-place append (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			base := asSlice(a[0], "append_mut")
 			base = append(base, a[1:]...)
 			return NewSlice(base)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place append (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
-				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
+				{Kind: "list", Label: "list", Description: "owned base list"},
+				{Kind: "any", Label: "item...", Description: "items to add", Variadic: true},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9207,7 +9213,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "append_unique_mut",
-		Desc: "in-place append_unique (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			list := asSlice(a[0], "append_unique_mut")
 			for _, el := range a[1:] {
@@ -9221,10 +9227,10 @@ func init_list() {
 			}
 			return NewSlice(list)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place append_unique (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
-				{Kind: "any", ParamName: "item...", ParamDesc: "items to add", Variadic: true},
+				{Kind: "list", Label: "list", Description: "owned base list"},
+				{Kind: "any", Label: "item...", Description: "items to add", Variadic: true},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9236,7 +9242,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "merge_unique_mut",
-		Desc: "in-place merge_unique (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if len(a) == 1 {
 				lists := asSlice(a[0], "merge_unique_mut")
@@ -9289,9 +9295,9 @@ func init_list() {
 			}
 			return NewSlice(result)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place merge_unique (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned base list or owned list of lists", Variadic: true},
+				{Kind: "list", Label: "list", Description: "owned base list or owned list of lists", Variadic: true},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9303,7 +9309,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "reset_mut",
-		Desc: "resets an owned list to len=0 while preserving capacity",
+
 		Fn: func(a ...Scmer) Scmer {
 			base := asSlice(a[0], "reset_mut")
 			if base == nil {
@@ -9311,9 +9317,9 @@ func init_list() {
 			}
 			return NewSlice(base[:0:cap(base)])
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "resets an owned list to len=0 while preserving capacity",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", ParamDesc: "owned base list"},
+				{Kind: "list", Label: "list", Description: "owned base list"},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9325,7 +9331,7 @@ func init_list() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "merge_assoc_mut",
-		Desc: "in-place merge_assoc (optimizer-only)",
+
 		Fn: func(a ...Scmer) Scmer {
 			setAssoc := OptimizeProcToSerialFunction(Globalenv.Vars["set_assoc_mut"])
 			dst := a[0]
@@ -9346,11 +9352,11 @@ func init_list() {
 			}
 			return dst
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "in-place merge_assoc (optimizer-only)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "dict1", ParamDesc: "owned first dictionary"},
-				{Kind: "list", ParamName: "dict2", ParamDesc: "dictionary with new values"},
-				{Kind: "func", ParamName: "merge", ParamDesc: "(optional) merge function", Optional: true, Params: []*TypeDescriptor{{Kind: "any", ParamName: "old"}, {Kind: "any", ParamName: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "list", Label: "dict1", Description: "owned first dictionary"},
+				{Kind: "list", Label: "dict2", Description: "dictionary with new values"},
+				{Kind: "func", Label: "merge", Description: "(optional) merge function", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old"}, {Kind: "any", Label: "new"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return:    FreshAlloc,
 			Const:     true,
@@ -9361,7 +9367,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sort",
-		Desc: "returns a sorted copy of a list using a comparator (lambda (a b) truthy/falsy)",
+
 		Fn: func(a ...Scmer) Scmer {
 			src := a[0].Slice()
 			cmp := a[1]
@@ -9372,10 +9378,10 @@ func init_list() {
 			})
 			return NewSlice(dst)
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a sorted copy of a list using a comparator (lambda (a b) truthy/falsy)",
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list", NoEscape: true},
-				{Kind: "func", ParamName: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:   FreshAlloc,
 			Const:    true,
@@ -9386,7 +9392,7 @@ func init_list() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sort_mut",
-		Desc: "sorts a list in-place using a comparator (lambda (a b) truthy/falsy)",
+
 		Fn: func(a ...Scmer) Scmer {
 			src := a[0].Slice()
 			cmp := a[1]
@@ -9395,11 +9401,11 @@ func init_list() {
 			})
 			return a[0]
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "sorts a list in-place using a comparator (lambda (a b) truthy/falsy)",
 			HasSideEffects: true,
 			Params: []*TypeDescriptor{
-				{Kind: "list", ParamName: "list"},
-				{Kind: "func", ParamName: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+				{Kind: "list", Label: "list"},
+				{Kind: "func", Label: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return: &TypeDescriptor{Kind: "list"},
 

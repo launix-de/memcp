@@ -121,14 +121,14 @@ func init_date() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_temporal_output",
-		Desc: "formats a temporal SQL result according to its compiler-tracked declared type",
+
 		Fn: func(a ...Scmer) Scmer {
 			return sqlTemporalOutput(a[0], a[1].String())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "formats a temporal SQL result according to its compiler-tracked declared type",
 			Params: []*TypeDescriptor{
-				{Kind: "any", ParamName: "value", ParamDesc: "type-flexible temporal value"},
-				{Kind: "string", ParamName: "sql_type", ParamDesc: "declared SQL temporal type"},
+				{Kind: "any", Label: "value", Description: "type-flexible temporal value"},
+				{Kind: "string", Label: "sql_type", Description: "declared SQL temporal type"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
@@ -340,11 +340,11 @@ func init_date() {
 
 	Declare(&Globalenv, &Declaration{
 		Name: "now",
-		Desc: "returns the current date/time",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewDate(time.Now().Unix())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the current date/time",
 			Return: &TypeDescriptor{Kind: "date"},
 
 			JITEmit: nil,
@@ -352,11 +352,11 @@ func init_date() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "nanotime",
-		Desc: "returns a monotonic nanosecond timestamp for benchmarking (not wall-clock)",
+
 		Fn: func(a ...Scmer) Scmer {
 			return NewInt(time.Now().UnixNano())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns a monotonic nanosecond timestamp for benchmarking (not wall-clock)",
 			Return: &TypeDescriptor{Kind: "int"},
 
 			JITEmit: nil,
@@ -364,14 +364,14 @@ func init_date() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "current_date",
-		Desc: "returns the current date (midnight in session timezone)",
+
 		Fn: func(a ...Scmer) Scmer {
 			loc := GetCurrentSessionLocation()
 			now := time.Now().In(loc)
 			midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the current date (midnight in session timezone)",
 			Return: &TypeDescriptor{Kind: "date"},
 
 			JITEmit: nil,
@@ -379,7 +379,7 @@ func init_date() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parse_date",
-		Desc: "parses a date from a string",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -395,8 +395,8 @@ func init_date() {
 			}
 			return NewNil()
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "values to parse"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "parses a date from a string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "values to parse"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
@@ -405,7 +405,7 @@ func init_date() {
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "format_date",
-		Desc: "formats a unix timestamp, date, or datetime string into a date string",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -418,8 +418,8 @@ func init_date() {
 			t = t.In(GetCurrentSessionLocation())
 			return NewString(formatDateMySQL(t, String(a[1])))
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "timestamp", ParamDesc: "unix timestamp, date, or datetime string"}, &TypeDescriptor{Kind: "string", ParamName: "format", ParamDesc: "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "formats a unix timestamp, date, or datetime string into a date string",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "timestamp", Description: "unix timestamp, date, or datetime string"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)"}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -430,7 +430,7 @@ func init_date() {
 	// EXTRACT(field FROM expr) - implemented as extract_date(expr, field)
 	Declare(&Globalenv, &Declaration{
 		Name: "extract_date",
-		Desc: "extracts a date field (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY) from a date value",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -469,8 +469,8 @@ func init_date() {
 				panic("unknown EXTRACT field: " + field)
 			}
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "date value"}, &TypeDescriptor{Kind: "string", ParamName: "field", ParamDesc: "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "extracts a date field (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY) from a date value",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "date value"}, &TypeDescriptor{Kind: "string", Label: "field", Description: "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY"}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 
@@ -481,7 +481,7 @@ func init_date() {
 	// DATE_ADD(expr, interval_seconds)
 	Declare(&Globalenv, &Declaration{
 		Name: "date_add",
-		Desc: "adds an interval to a date value",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -512,8 +512,8 @@ func init_date() {
 			}
 			return NewDate(t.Unix())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "date value"}, &TypeDescriptor{Kind: "int", ParamName: "amount", ParamDesc: "interval amount"}, &TypeDescriptor{Kind: "string", ParamName: "unit", ParamDesc: "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "adds an interval to a date value",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "date value"}, &TypeDescriptor{Kind: "int", Label: "amount", Description: "interval amount"}, &TypeDescriptor{Kind: "string", Label: "unit", Description: "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
@@ -524,7 +524,7 @@ func init_date() {
 	// DATE_SUB(expr, amount, unit)
 	Declare(&Globalenv, &Declaration{
 		Name: "date_sub",
-		Desc: "subtracts an interval from a date value",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -555,8 +555,8 @@ func init_date() {
 			}
 			return NewDate(t.Unix())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "date value"}, &TypeDescriptor{Kind: "int", ParamName: "amount", ParamDesc: "interval amount"}, &TypeDescriptor{Kind: "string", ParamName: "unit", ParamDesc: "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "subtracts an interval from a date value",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "date value"}, &TypeDescriptor{Kind: "int", Label: "amount", Description: "interval amount"}, &TypeDescriptor{Kind: "string", Label: "unit", Description: "interval unit: DAY, WEEK, MONTH, YEAR, HOUR, MINUTE, SECOND"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
@@ -567,7 +567,7 @@ func init_date() {
 	// DATE(expr) - truncate to date only (midnight)
 	Declare(&Globalenv, &Declaration{
 		Name: "date_trunc_day",
-		Desc: "truncates a datetime to date (midnight UTC)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -579,8 +579,8 @@ func init_date() {
 			midnight := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "value", ParamDesc: "date/datetime value"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "truncates a datetime to date (midnight UTC)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "date/datetime value"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
@@ -591,7 +591,7 @@ func init_date() {
 	// TIMESTAMPDIFF(unit, datetime1, datetime2) - returns datetime2 - datetime1 in the given unit
 	Declare(&Globalenv, &Declaration{
 		Name: "timestampdiff",
-		Desc: "returns the difference between two datetime values in the specified unit (datetime2 - datetime1)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[1].IsNil() || a[2].IsNil() {
 				return NewNil()
@@ -647,11 +647,11 @@ func init_date() {
 				panic("unknown TIMESTAMPDIFF unit: " + unit)
 			}
 		},
-		Type: &TypeDescriptor{
+		Type: &TypeDescriptor{Kind: "func", Description: "returns the difference between two datetime values in the specified unit (datetime2 - datetime1)",
 			Params: []*TypeDescriptor{
-				{Kind: "string", ParamName: "unit", ParamDesc: "unit: MICROSECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR"},
-				{Kind: "any", ParamName: "datetime1", ParamDesc: "first datetime value"},
-				{Kind: "any", ParamName: "datetime2", ParamDesc: "second datetime value"},
+				{Kind: "string", Label: "unit", Description: "unit: MICROSECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR"},
+				{Kind: "any", Label: "datetime1", Description: "first datetime value"},
+				{Kind: "any", Label: "datetime2", Description: "second datetime value"},
 			},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
@@ -663,7 +663,7 @@ func init_date() {
 	// DATEDIFF(date1, date2) - returns number of days between two dates
 	Declare(&Globalenv, &Declaration{
 		Name: "datediff",
-		Desc: "returns number of days between two dates (date1 - date2)",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() || a[1].IsNil() {
 				return NewNil()
@@ -678,8 +678,8 @@ func init_date() {
 			days := int64(d1.Sub(d2).Hours() / 24)
 			return NewInt(days)
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", ParamName: "date1", ParamDesc: "first date"}, &TypeDescriptor{Kind: "any", ParamName: "date2", ParamDesc: "second date"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "returns number of days between two dates (date1 - date2)",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "date1", Description: "first date"}, &TypeDescriptor{Kind: "any", Label: "date2", Description: "second date"}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 
@@ -690,7 +690,7 @@ func init_date() {
 	// STR_TO_DATE(str, format) - parse string with MySQL format to date
 	Declare(&Globalenv, &Declaration{
 		Name: "str_to_date",
-		Desc: "parses a string with MySQL format specifiers to a date",
+
 		Fn: func(a ...Scmer) Scmer {
 			if a[0].IsNil() {
 				return NewNil()
@@ -703,8 +703,8 @@ func init_date() {
 			}
 			return NewNil()
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", ParamName: "value", ParamDesc: "date string"}, &TypeDescriptor{Kind: "string", ParamName: "format", ParamDesc: "MySQL format string (e.g. %Y-%m-%d)"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "parses a string with MySQL format specifiers to a date",
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "value", Description: "date string"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "MySQL format string (e.g. %Y-%m-%d)"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 

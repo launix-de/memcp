@@ -66,13 +66,13 @@ func (builder *sqlShapeBuilder) Result() (string, string) {
 func declareSQLLiteralParameterizer() {
 	Declare(&Globalenv, &Declaration{
 		Name: "parameterize_sql_select_literals",
-		Desc: "replaces safe literals in a top-level MySQL SELECT and returns normalized SQL, positional runtime bindings, and its stable shape hash",
+
 		Fn: func(a ...Scmer) Scmer {
 			normalized, bindings, shapeHash := parameterizeSQLSelectLiterals(String(a[0]))
 			return NewSlice([]Scmer{NewString(normalized), NewSlice(bindings), NewString(shapeHash)})
 		},
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{{Kind: "string", ParamName: "query"}},
+		Type: &TypeDescriptor{Kind: "func", Description: "replaces safe literals in a top-level MySQL SELECT and returns normalized SQL, positional runtime bindings, and its stable shape hash",
+			Params: []*TypeDescriptor{{Kind: "string", Label: "query"}},
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
 		},

@@ -1796,10 +1796,10 @@ func jsonRawScalarResult(value bson.RawValue, returning string) Scmer {
 func declareJSON(name, description string, fn func(...Scmer) Scmer) {
 	Declare(&Globalenv, &Declaration{
 		Name: name,
-		Desc: description,
-		Fn:   fn,
-		Type: &TypeDescriptor{
-			Params: []*TypeDescriptor{{Kind: "any", ParamName: "arguments", Variadic: true}},
+
+		Fn: fn,
+		Type: &TypeDescriptor{Kind: "func", Description: description,
+			Params: []*TypeDescriptor{{Kind: "any", Label: "arguments", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 		},

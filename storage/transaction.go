@@ -818,7 +818,7 @@ func initTransaction(en scm.Env) {
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_begin",
-		Desc: "Begins a new cursor-stability transaction. Takes the session function as argument. Stores the transaction context in the session.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -834,15 +834,15 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Begins a new cursor-stability transaction. Takes the session function as argument. Stores the transaction context in the session.", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_begin_acid",
-		Desc: "Begins a new ACID transaction with snapshot isolation and OCC commit. Takes the session function as argument.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -857,15 +857,15 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Begins a new ACID transaction with snapshot isolation and OCC commit. Takes the session function as argument.", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_commit",
-		Desc: "Commits the current transaction.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -882,15 +882,15 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Commits the current transaction.", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function that holds tx state", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_rollback",
-		Desc: "Rolls back the current transaction.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
 			existingTx := sessionFn(scm.NewString("__memcp_tx"))
@@ -903,26 +903,26 @@ func initTransaction(en scm.Env) {
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{{Kind: "func", ParamName: "session", ParamDesc: "the session function that holds tx state", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Rolls back the current transaction.", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function that holds tx state", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "with_autocommit",
-		Desc: "Executes fn inside an implicit TxCursorStability transaction if no explicit " +
-			"transaction is active in session. Commits on success, rolls back on error, " +
-			"and re-raises any panic so the caller's error handler still fires. " +
-			"If an explicit transaction is active (session[\"transaction\"] != nil), " +
-			"fn is executed without any wrapping.",
+
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			return WithAutocommit(a[0].Func(), a[1])
 		},
-		Type: &scm.TypeDescriptor{HasSideEffects: true,
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "Executes fn inside an implicit TxCursorStability transaction if no explicit " +
+			"transaction is active in session. Commits on success, rolls back on error, " +
+			"and re-raises any panic so the caller's error handler still fires. " +
+			"If an explicit transaction is active (session[\"transaction\"] != nil), " +
+			"fn is executed without any wrapping.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
-				{Kind: "func", ParamName: "session", ParamDesc: "the session function holding tx state", Params: []*scm.TypeDescriptor{{Kind: "string", ParamName: "key", Optional: true}, {Kind: "any", ParamName: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", ParamName: "fn", ParamDesc: "zero-argument function to execute", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "session", Description: "the session function holding tx state", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "fn", Description: "zero-argument function to execute", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},

@@ -16,15 +16,16 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package scm
 
-import "os"
 import "fmt"
-import "strings"
+import "io"
+import "os"
 import "path/filepath"
+import "sort"
+import "strings"
 
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
 	Name string
-	Desc string
 	Fn   func(...Scmer) Scmer
 	Type *TypeDescriptor
 }
@@ -68,8 +69,8 @@ type TypeDescriptor struct {
 	Variadic       bool                       // for func params: last param accepts 0+ values
 	Forbidden      bool                       // for func: optimizer-only, hidden from help
 	HasSideEffects bool                       // for func: true = call has side effects, cannot be eliminated even if result unused
-	ParamName      string                     // for func params: documentation name
-	ParamDesc      string                     // for func params: documentation description
+	Label          string                     // human-readable label at any nesting level
+	Description    string                     // user-facing documentation at any nesting level
 	Params         []*TypeDescriptor          // for Kind="func": parameter types
 	Return         *TypeDescriptor            // for Kind="func": return type
 	Keys           map[string]*TypeDescriptor // for Kind="assoc": per-key type info
@@ -273,6 +274,7 @@ func (d *Declaration) IsFoldable() bool {
 }
 
 func Declare(env *Env, def *Declaration) {
+	validateDeclaration(def)
 	if !def.IsForbidden() {
 		declaration_titles = append(declaration_titles, def.Name)
 	}
@@ -287,6 +289,7 @@ func Declare(env *Env, def *Declaration) {
 // existing named section in the help index. If the section is not found,
 // it falls back to a normal Declare (appending at the end).
 func DeclareInSection(section string, env *Env, def *Declaration) {
+	validateDeclaration(def)
 	declarations[def.Name] = def
 	if def.Fn != nil {
 		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
@@ -314,6 +317,12 @@ func DeclareInSection(section string, env *Env, def *Declaration) {
 		return
 	}
 	declaration_titles = append(declaration_titles[:insertAt], append([]string{def.Name}, declaration_titles[insertAt:]...)...)
+}
+
+func validateDeclaration(def *Declaration) {
+	if def == nil || def.Type == nil || def.Type.Kind != "func" {
+		panic("declaration requires a function TypeDescriptor")
+	}
 }
 
 // slugify makes a filesystem-safe, lowercase slug from a chapter title.
@@ -431,8 +440,8 @@ func WriteDocumentation(folder string) error {
 		// Functions in this chapter
 		for _, def := range ch.Fns {
 			fmt.Fprintf(f, "## %s\n\n", def.Name)
-			if def.Desc != "" {
-				fmt.Fprintf(f, "%s\n\n", def.Desc)
+			if def.Type.Description != "" {
+				fmt.Fprintf(f, "%s\n\n", def.Type.Description)
 			}
 			fmt.Fprintf(f, "**Allowed number of parameters:** %d–%d\n\n", def.MinParams(), def.MaxParams())
 
@@ -441,27 +450,19 @@ func WriteDocumentation(folder string) error {
 				fmt.Fprintln(f, "_This function has no parameters._")
 			} else if d, ok := declarations[def.Name]; ok && !d.IsForbidden() {
 				for _, p := range def.Type.Params {
-					kind := p.Kind
-					if kind == "func" && len(p.Params) > 0 {
-						kind = FormatTypeSignature(p)
-					}
-					flags := ""
-					if p.Optional {
-						flags += " _(optional)_"
-					}
-					if p.Variadic {
-						flags += " _(variadic)_"
-					}
-					fmt.Fprintf(f, "- **%s** (`%s`): %s%s\n", p.ParamName, kind, p.ParamDesc, flags)
+					p.WriteDocumentation(f, 0)
 				}
 				fmt.Fprintln(f)
 			}
 
-			retStr := "any"
-			if def.Type != nil && def.Type.Return != nil {
-				retStr = FormatTypeSignature(def.Type.Return)
+			fmt.Fprintln(f, "### Returns")
+			fmt.Fprintln(f)
+			if def.Type.Return == nil {
+				(&TypeDescriptor{Kind: "any"}).writeDocumentation(f, 0, "value")
+			} else {
+				def.Type.Return.writeDocumentation(f, 0, "value")
 			}
-			fmt.Fprintf(f, "### Returns\n\n`%s`\n\n", retStr)
+			fmt.Fprintln(f)
 		}
 
 		_ = f.Close()
@@ -716,56 +717,137 @@ func Validate(val Scmer, require string) string {
 	return "any"
 }
 
-// FormatTypeSignature returns a human-readable type string for a TypeDescriptor.
-// For func types with Params, it produces "func(name:type, ...) -> returntype".
+// FormatTypeSignature returns a compact, recursively rendered type signature.
 func FormatTypeSignature(td *TypeDescriptor) string {
 	if td == nil {
 		return "any"
 	}
-	if td.Kind != "func" || len(td.Params) == 0 {
-		if td.Kind == "" {
-			return "any"
-		}
-		return td.Kind
+	kind := td.Kind
+	if kind == "" {
+		kind = "any"
+	}
+	if hasTypeKind(kind, "list") && td.Element != nil {
+		kind = replaceTypeKind(kind, "list", "list<"+FormatTypeSignature(td.Element)+">")
+	}
+	if !hasTypeKind(kind, "func") {
+		return kind
 	}
 	var b strings.Builder
-	b.WriteString("func(")
+	funcSignature := strings.Builder{}
+	funcSignature.WriteString("func(")
 	for i, p := range td.Params {
 		if i > 0 {
-			b.WriteString(", ")
+			funcSignature.WriteString(", ")
 		}
 		if p == nil {
-			b.WriteString("any")
+			funcSignature.WriteString("any")
 			continue
 		}
-		if p.ParamName != "" {
-			b.WriteString(p.ParamName)
-			b.WriteString(":")
+		if p.Label != "" {
+			funcSignature.WriteString(p.Label)
+			funcSignature.WriteString(":")
 		}
-		b.WriteString(FormatTypeSignature(p))
+		funcSignature.WriteString(FormatTypeSignature(p))
 		if p.Optional {
-			b.WriteString("?")
+			funcSignature.WriteString("?")
 		}
 		if p.Variadic {
-			b.WriteString("...")
+			funcSignature.WriteString("...")
 		}
 	}
-	b.WriteString(")")
+	funcSignature.WriteString(")")
 	if td.Return != nil {
-		b.WriteString(" -> ")
-		b.WriteString(FormatTypeSignature(td.Return))
+		funcSignature.WriteString(" -> ")
+		funcSignature.WriteString(FormatTypeSignature(td.Return))
 	}
+	b.WriteString(replaceTypeKind(kind, "func", funcSignature.String()))
 	return b.String()
+}
+
+func hasTypeKind(kinds, wanted string) bool {
+	for _, kind := range strings.Split(kinds, "|") {
+		if kind == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceTypeKind(kinds, wanted, replacement string) string {
+	parts := strings.Split(kinds, "|")
+	for i, kind := range parts {
+		if kind == wanted {
+			parts[i] = replacement
+		}
+	}
+	return strings.Join(parts, "|")
+}
+
+// WriteDocumentation writes a Markdown list item for a type and recursively
+// documents nested lists, assoc fields, callback parameters, and return types.
+// depth controls the initial list indentation, using two spaces per level.
+func (td *TypeDescriptor) WriteDocumentation(w io.Writer, depth int) {
+	td.writeDocumentation(w, depth, "")
+}
+
+func (td *TypeDescriptor) writeDocumentation(w io.Writer, depth int, fallbackLabel string) {
+	if td == nil {
+		td = &TypeDescriptor{Kind: "any"}
+	}
+	label := td.Label
+	if label == "" {
+		label = fallbackLabel
+	}
+	indent := strings.Repeat("  ", depth)
+	fmt.Fprint(w, indent+"- ")
+	if label != "" {
+		fmt.Fprintf(w, "**%s** ", label)
+	}
+	fmt.Fprintf(w, "(`%s`)", FormatTypeSignature(td))
+	if td.Description != "" {
+		fmt.Fprintf(w, ": %s", td.Description)
+	}
+	if td.Optional {
+		fmt.Fprint(w, " _(optional)_")
+	}
+	if td.Variadic {
+		fmt.Fprint(w, " _(variadic)_")
+	}
+	fmt.Fprintln(w)
+
+	if hasTypeKind(td.Kind, "list") {
+		if td.Element != nil {
+			td.Element.writeDocumentation(w, depth+1, "elements")
+		}
+	}
+	if hasTypeKind(td.Kind, "assoc") {
+		keys := make([]string, 0, len(td.Keys))
+		for key := range td.Keys {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			td.Keys[key].writeDocumentation(w, depth+1, key)
+		}
+	}
+	if hasTypeKind(td.Kind, "func") {
+		if len(td.Params) > 0 {
+			fmt.Fprintln(w, indent+"  - **Parameters**")
+			for _, param := range td.Params {
+				param.writeDocumentation(w, depth+2, "parameter")
+			}
+		}
+		if td.Return != nil {
+			fmt.Fprintln(w, indent+"  - **Returns**")
+			td.Return.writeDocumentation(w, depth+2, "value")
+		}
+	}
 }
 
 // formatParamLine formats a single parameter for Help/Docs output,
 // including callback signature details when Kind is "func".
 func formatParamLine(p *TypeDescriptor) string {
-	kind := p.Kind
-	if kind == "func" && len(p.Params) > 0 {
-		kind = FormatTypeSignature(p)
-	}
-	line := " - " + p.ParamName + " (" + kind + "): " + p.ParamDesc
+	line := " - " + p.Label + " (" + FormatTypeSignature(p) + "): " + p.Description
 	if p.Optional {
 		line += " [optional]"
 	}
@@ -783,7 +865,7 @@ func Help(fn Scmer) string {
 			if title[0] == '#' {
 				b.WriteString("\n-- " + title[1:] + " --\n")
 			} else if d, ok := declarations[title]; ok && !d.IsForbidden() {
-				b.WriteString("  " + title + ": " + strings.Split(d.Desc, "\n")[0] + "\n")
+				b.WriteString("  " + title + ": " + strings.Split(d.Type.Description, "\n")[0] + "\n")
 			}
 		}
 		b.WriteString("\nget further information by typing (help \"functionname\") to get more info\n")
@@ -791,7 +873,7 @@ func Help(fn Scmer) string {
 		def := DeclarationForValue(fn)
 		if def != nil {
 			b.WriteString("Help for: " + def.Name + "\n===\n\n")
-			b.WriteString(def.Desc + "\n\n")
+			b.WriteString(def.Type.Description + "\n\n")
 			b.WriteString(fmt.Sprintf("Allowed nø of parameters: %d-%d\n\n", def.MinParams(), def.MaxParams()))
 			if def.Type != nil {
 				for _, p := range def.Type.Params {
