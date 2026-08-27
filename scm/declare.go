@@ -783,6 +783,21 @@ func replaceTypeKind(kinds, wanted, replacement string) string {
 	return strings.Join(parts, "|")
 }
 
+// documentedTypeName keeps function signatures compact when their parameters
+// and return type are rendered as a nested structure immediately below them.
+func documentedTypeName(td *TypeDescriptor) string {
+	if td == nil {
+		return "any"
+	}
+	if hasTypeKind(td.Kind, "func") && (len(td.Params) > 0 || td.Return != nil) {
+		if td.Kind == "" {
+			return "func"
+		}
+		return td.Kind
+	}
+	return FormatTypeSignature(td)
+}
+
 // WriteDocumentation writes a Markdown list item for a type and recursively
 // documents nested lists, assoc fields, callback parameters, and return types.
 // depth controls the initial list indentation, using two spaces per level.
@@ -803,7 +818,7 @@ func (td *TypeDescriptor) writeDocumentation(w io.Writer, depth int, fallbackLab
 	if label != "" {
 		fmt.Fprintf(w, "**%s** ", label)
 	}
-	fmt.Fprintf(w, "(`%s`)", FormatTypeSignature(td))
+	fmt.Fprintf(w, "(`%s`)", documentedTypeName(td))
 	if td.Description != "" {
 		fmt.Fprintf(w, ": %s", td.Description)
 	}
@@ -844,17 +859,56 @@ func (td *TypeDescriptor) writeDocumentation(w io.Writer, depth int, fallbackLab
 	}
 }
 
-// formatParamLine formats a single parameter for Help/Docs output,
-// including callback signature details when Kind is "func".
-func formatParamLine(p *TypeDescriptor) string {
-	line := " - " + p.Label + " (" + FormatTypeSignature(p) + "): " + p.Description
-	if p.Optional {
-		line += " [optional]"
+func (td *TypeDescriptor) writeHelp(w io.Writer, depth int, fallbackLabel string) {
+	if td == nil {
+		td = &TypeDescriptor{Kind: "any"}
 	}
-	if p.Variadic {
-		line += " [variadic]"
+	label := td.Label
+	if label == "" {
+		label = fallbackLabel
 	}
-	return line
+	indent := strings.Repeat("  ", depth)
+	fmt.Fprint(w, indent+" - ")
+	if label != "" {
+		fmt.Fprint(w, label+" ")
+	}
+	fmt.Fprintf(w, "(%s)", documentedTypeName(td))
+	if td.Description != "" {
+		fmt.Fprint(w, ": "+td.Description)
+	}
+	if td.Optional {
+		fmt.Fprint(w, " [optional]")
+	}
+	if td.Variadic {
+		fmt.Fprint(w, " [variadic]")
+	}
+	fmt.Fprintln(w)
+
+	if hasTypeKind(td.Kind, "list") && td.Element != nil {
+		td.Element.writeHelp(w, depth+1, "elements")
+	}
+	if hasTypeKind(td.Kind, "assoc") {
+		keys := make([]string, 0, len(td.Keys))
+		for key := range td.Keys {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			td.Keys[key].writeHelp(w, depth+1, key)
+		}
+	}
+	if hasTypeKind(td.Kind, "func") {
+		if len(td.Params) > 0 {
+			fmt.Fprintln(w, indent+"   Parameters:")
+			for _, param := range td.Params {
+				param.writeHelp(w, depth+2, "parameter")
+			}
+		}
+		if td.Return != nil {
+			fmt.Fprintln(w, indent+"   Returns:")
+			td.Return.writeHelp(w, depth+2, "value")
+		}
+	}
 }
 
 func Help(fn Scmer) string {
@@ -878,13 +932,13 @@ func Help(fn Scmer) string {
 			if def.Type != nil {
 				for _, p := range def.Type.Params {
 					if p != nil {
-						b.WriteString(formatParamLine(p) + "\n")
+						p.writeHelp(&b, 0, "parameter")
 					}
 				}
 			}
 			if def.Type != nil && def.Type.Return != nil {
-				retStr := FormatTypeSignature(def.Type.Return)
-				b.WriteString("\nReturns: " + retStr + "\n")
+				b.WriteString("\nReturns:\n")
+				def.Type.Return.writeHelp(&b, 0, "value")
 			}
 			b.WriteString("\n")
 		} else {

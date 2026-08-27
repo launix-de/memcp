@@ -64,7 +64,7 @@ func TestTypeDescriptorWritesDeepDocumentation(t *testing.T) {
 		"    - **rows** (`list<list<any>>`): input rows",
 		"      - **row** (`list<any>`)",
 		"        - **value** (`any`)",
-		"    - **visit** (`func(row:list<any>) -> bool`): handles one row",
+		"    - **visit** (`func`): handles one row",
 		"      - **Parameters**",
 		"        - **row** (`list<any>`)",
 		"      - **Returns**",
@@ -120,9 +120,55 @@ func TestWriteDocumentationUsesRecursiveTypeDescriptors(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := string(content)
-	for _, expected := range []string{"**rows** (`list<list<any>>`)", "**visit** (`func(row:list<any>) -> bool`)", "**results** (`list<string>`)", "**result** (`string`)"} {
+	for _, expected := range []string{"**rows** (`list<list<any>>`)", "**visit** (`func`)", "**results** (`list<string>`)", "**result** (`string`)"} {
 		if !strings.Contains(doc, expected) {
 			t.Fatalf("generated documentation does not contain %q:\n%s", expected, doc)
 		}
+	}
+	if strings.Contains(doc, "**visit** (`func(row:list<any>) -> bool`)") {
+		t.Fatalf("generated documentation repeats an expanded callback signature:\n%s", doc)
+	}
+}
+
+func TestHelpUsesRecursiveTypeDescriptors(t *testing.T) {
+	oldTitles, oldDeclarations, oldHashes := declaration_titles, declarations, declarations_hash
+	defer func() {
+		declaration_titles, declarations, declarations_hash = oldTitles, oldDeclarations, oldHashes
+	}()
+	declaration_titles = nil
+	declarations = make(map[string]*Declaration)
+	declarations_hash = make(map[string]*Declaration)
+
+	env := Env{Vars: make(Vars)}
+	Declare(&env, &Declaration{
+		Name: "nested-help",
+		Fn:   func(...Scmer) Scmer { return NewNil() },
+		Type: &TypeDescriptor{
+			Kind:        "func",
+			Description: "documents nested values",
+			Params:      []*TypeDescriptor{nestedDocumentationType()},
+			Return:      &TypeDescriptor{Kind: "bool", Label: "success"},
+		},
+	})
+
+	help := Help(NewString("nested-help"))
+	for _, expected := range []string{
+		" - options (assoc): configuration fields",
+		"   - rows (list<list<any>>): input rows",
+		"     - row (list<any>)",
+		"       - value (any)",
+		"   - visit (func): handles one row",
+		"     Parameters:",
+		"       - row (list<any>)",
+		"     Returns:",
+		"       - accepted (bool)",
+		"Returns:\n - success (bool)",
+	} {
+		if !strings.Contains(help, expected) {
+			t.Fatalf("recursive help does not contain %q:\n%s", expected, help)
+		}
+	}
+	if strings.Contains(help, "visit (func(row:list<any>) -> bool)") {
+		t.Fatalf("recursive help repeats an expanded callback signature:\n%s", help)
 	}
 }
