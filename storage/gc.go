@@ -20,8 +20,11 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -50,7 +53,8 @@ func CleanDatabase(db *database) (blobsDeleted, shardsDeleted int) {
 // cleanBlobs deletes a blob only when every active persistent shard generation
 // has supplied a valid ownership manifest. The refcount table is operational
 // metadata and can lag after a crash, so it is never proof that deletion is
-// safe. Legacy or incomplete generations make cleanup a conservative no-op.
+// safe. Missing legacy manifests are reconstructed from committed column files;
+// corrupt manifests and all ambiguous I/O failures remain a fail-closed no-op.
 func cleanBlobs(db *database) int {
 	references, complete := activeBlobReferences(db)
 	if !complete {
@@ -82,45 +86,130 @@ func activeBlobReferences(db *database) (map[string]struct{}, bool) {
 				continue
 			}
 			reader := db.persistence.ReadColumn(shard.uuid.String(), blobManifestColumn)
-			if _, failed := reader.(ErrorReader); failed {
+			if readErr, failed := reader.(ErrorReader); failed {
 				reader.Close()
-				return nil, false
-			}
-			scanner := bufio.NewScanner(reader)
-			if !scanner.Scan() || scanner.Text()+"\n" != blobManifestHeader {
-				reader.Close()
-				return nil, false
-			}
-			if !scanner.Scan() {
-				reader.Close()
-				return nil, false
-			}
-			expectedChecksum, err := hex.DecodeString(scanner.Text())
-			if err != nil || len(expectedChecksum) != sha256.Size {
-				reader.Close()
-				return nil, false
-			}
-			hasher := sha256.New()
-			for scanner.Scan() {
-				hash := strings.TrimSpace(scanner.Text())
-				if decoded, err := hex.DecodeString(hash); err != nil || len(decoded) != sha256.Size {
-					reader.Close()
+				if !readErr.Missing() {
 					return nil, false
 				}
-				hasher.Write([]byte(hash + "\n"))
+				legacyReferences, ok := backfillBlobManifest(shard)
+				if !ok {
+					return nil, false
+				}
+				for hash := range legacyReferences {
+					references[hash] = struct{}{}
+				}
+				continue
+			}
+			manifestReferences, ok := readBlobManifest(reader)
+			if !ok {
+				return nil, false
+			}
+			for hash := range manifestReferences {
 				references[hash] = struct{}{}
-			}
-			if err := scanner.Err(); err != nil {
-				reader.Close()
-				return nil, false
-			}
-			reader.Close()
-			if !bytes.Equal(hasher.Sum(nil), expectedChecksum) {
-				return nil, false
 			}
 		}
 	}
 	return references, true
+}
+
+func readBlobManifest(reader io.ReadCloser) (map[string]struct{}, bool) {
+	defer reader.Close()
+	references := make(map[string]struct{})
+	scanner := bufio.NewScanner(reader)
+	if !scanner.Scan() || scanner.Text()+"\n" != blobManifestHeader || !scanner.Scan() {
+		return nil, false
+	}
+	expectedChecksum, err := hex.DecodeString(scanner.Text())
+	if err != nil || len(expectedChecksum) != sha256.Size {
+		return nil, false
+	}
+	hasher := sha256.New()
+	for scanner.Scan() {
+		hash := strings.TrimSpace(scanner.Text())
+		if decoded, err := hex.DecodeString(hash); err != nil || len(decoded) != sha256.Size {
+			return nil, false
+		}
+		hasher.Write([]byte(hash + "\n"))
+		references[hash] = struct{}{}
+	}
+	if scanner.Err() != nil || !bytes.Equal(hasher.Sum(nil), expectedChecksum) {
+		return nil, false
+	}
+	return references, true
+}
+
+// backfillBlobManifest upgrades one legacy active generation without loading
+// blob payloads or forcing a rebuild. It inspects only committed column files,
+// deserializes reference-bearing OverlayBlob/compute-proxy columns, and then
+// publishes the same checksummed manifest used by new generations.
+func backfillBlobManifest(shard *storageShard) (references map[string]struct{}, ok bool) {
+	if shard == nil || shard.t == nil || shard.t.schema == nil {
+		return nil, false
+	}
+	references = make(map[string]struct{})
+	for _, column := range shard.t.Columns {
+		if column.IsTemp {
+			continue
+		}
+		reader := shard.t.schema.persistence.ReadColumn(shard.uuid.String(), column.Name)
+		if readErr, failed := reader.(ErrorReader); failed {
+			reader.Close()
+			if readErr.Missing() {
+				// The ordinary column loader represents an absent committed column
+				// as sparse NULLs, so it cannot own an external blob.
+				continue
+			}
+			return nil, false
+		}
+		var magic uint8
+		if err := binary.Read(reader, binary.LittleEndian, &magic); err != nil {
+			reader.Close()
+			return nil, false
+		}
+		if magic != 31 && magic != 50 {
+			reader.Close()
+			continue
+		}
+		storageType, known := storages[magic]
+		if !known {
+			reader.Close()
+			return nil, false
+		}
+		storage := reflect.New(storageType).Interface().(ColumnStorage)
+		count, decoded := deserializeReferenceStorage(storage, reader)
+		reader.Close()
+		if !decoded {
+			return nil, false
+		}
+		appendColumnBlobReferences(storage, references, count)
+	}
+	if !tryWriteBlobManifestReferences(shard, references) {
+		return nil, false
+	}
+	return references, true
+}
+
+func deserializeReferenceStorage(storage ColumnStorage, reader io.Reader) (count uint32, ok bool) {
+	defer func() {
+		if recover() != nil {
+			count, ok = 0, false
+		}
+	}()
+	decoded := storage.Deserialize(reader)
+	if uint(uint32(decoded)) != decoded {
+		return 0, false
+	}
+	return uint32(decoded), true
+}
+
+func tryWriteBlobManifestReferences(shard *storageShard, references map[string]struct{}) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	writeBlobManifestReferences(shard, references)
+	return true
 }
 
 func writeBlobManifest(shard *storageShard) {
@@ -132,10 +221,41 @@ func writeBlobManifest(shard *storageShard) {
 	}
 	references := make(map[string]struct{})
 	for _, column := range shard.columns {
-		if blobs, ok := column.(*OverlayBlob); ok {
-			blobs.appendBlobReferences(references, shard.main_count)
+		appendColumnBlobReferences(column, references, shard.main_count)
+	}
+	writeBlobManifestReferences(shard, references)
+}
+
+// appendColumnBlobReferences follows persisted storage wrappers. This keeps
+// manifests complete when a computed column compresses to OverlayBlob rather
+// than exposing that overlay as the shard's top-level storage.
+func appendColumnBlobReferences(storage ColumnStorage, references map[string]struct{}, count uint32) {
+	switch typed := storage.(type) {
+	case *OverlayBlob:
+		typed.appendBlobReferences(references, count)
+	case *StorageComputeProxy:
+		typed.mu.RLock()
+		if typed.main != nil {
+			appendColumnBlobReferences(typed.main, references, count)
+		}
+		typed.mu.RUnlock()
+		typed.variantsMu.RLock()
+		variants := make([]*storageComputeVariant, 0, len(typed.variants))
+		for _, variant := range typed.variants {
+			variants = append(variants, variant)
+		}
+		typed.variantsMu.RUnlock()
+		for _, variant := range variants {
+			variant.mu.RLock()
+			if variant.main != nil {
+				appendColumnBlobReferences(variant.main, references, variant.count)
+			}
+			variant.mu.RUnlock()
 		}
 	}
+}
+
+func writeBlobManifestReferences(shard *storageShard, references map[string]struct{}) {
 	hashes := make([]string, 0, len(references))
 	for hash := range references {
 		hashes = append(hashes, hash)

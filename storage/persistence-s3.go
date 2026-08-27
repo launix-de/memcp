@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/carli2/hybridsort"
 	"io"
@@ -33,8 +34,21 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	"github.com/launix-de/memcp/scm"
 )
+
+func s3ObjectMissing(err error) bool {
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.ErrorCode() {
+	case "NoSuchKey", "NotFound", "NoSuchObject":
+		return true
+	}
+	return false
+}
 
 func init() {
 	BackendRegistry["s3"] = func(dbName string, raw json.RawMessage) PersistenceEngine {
@@ -203,7 +217,7 @@ func (s *S3Storage) ReadColumn(shard string, column string) io.ReadCloser {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: s3ObjectMissing(err)}
 	}
 	return resp.Body
 }
@@ -259,7 +273,7 @@ func (s *S3Storage) ReadBlob(hash string) io.ReadCloser {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: s3ObjectMissing(err)}
 	}
 	return resp.Body
 }

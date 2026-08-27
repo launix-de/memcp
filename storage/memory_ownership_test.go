@@ -84,6 +84,26 @@ func TestShardMemoryExcludesMaterializedCompressedDictionary(t *testing.T) {
 	}
 }
 
+func TestOwnedMemoryExcludesNestedMaterializedDictionaries(t *testing.T) {
+	base := &StorageString{compressedDict: []byte("compressed"), compressed: true}
+	blob := &OverlayBlob{Base: base}
+	before := ownedColumnMemory(blob)
+	base.dictionary = "materialized-under-blob"
+	if after := ownedColumnMemory(blob); after != before {
+		t.Fatalf("blob owner includes separately weighted nested dictionary: before=%d after=%d", before, after)
+	}
+
+	prefix := &StoragePrefix{values: StorageString{compressed: true, dictionary: "materialized-under-prefix"}}
+	if got, want := materializedDictionaryMemory(prefix), uint(len(prefix.values.dictionary)); got != want {
+		t.Fatalf("nested prefix dictionary ownership = %d, want %d", got, want)
+	}
+
+	proxy := &StorageComputeProxy{main: base, delta: make(map[uint32]scm.Scmer)}
+	if got, want := materializedDictionaryMemory(proxy), uint(len(base.dictionary)); got != want {
+		t.Fatalf("nested compute-proxy dictionary ownership = %d, want %d", got, want)
+	}
+}
+
 func TestShardMemoryExcludesSeparatelyOwnedIndex(t *testing.T) {
 	shard := &storageShard{
 		columns:      make(map[string]ColumnStorage),
@@ -115,6 +135,13 @@ func TestCacheManagerSetSizeIsAbsolute(t *testing.T) {
 	stat := manager.Stat()
 	if stat.CurrentMemory != 25 {
 		t.Fatalf("absolute size update accumulated: got %d want 25", stat.CurrentMemory)
+	}
+}
+
+func TestDisjointOwnershipDoesNotChangeEvictionWeights(t *testing.T) {
+	want := [numEvictableTypes]int64{20, 1, 20, 2, 20, 20}
+	if evictableWeights != want {
+		t.Fatalf("eviction weights changed with accounting ownership: got %v want %v", evictableWeights, want)
 	}
 }
 

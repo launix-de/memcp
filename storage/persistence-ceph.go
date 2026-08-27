@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/carli2/hybridsort"
 	"io"
@@ -171,12 +172,12 @@ func (s *CephStorage) ReadColumn(shard string, column string) io.ReadCloser {
 	// If you want streaming, you'd need chunked reads; for now columns are usually loaded fully anyway.
 	stat, err := s.ioctx.Stat(obj)
 	if err != nil {
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
 	}
 	data := make([]byte, stat.Size)
 	n, err := s.ioctx.Read(obj, data, 0)
 	if err != nil {
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
 	}
 	return io.NopCloser(bytes.NewReader(data[:n]))
 }
@@ -223,12 +224,12 @@ func (s *CephStorage) ReadBlob(hash string) io.ReadCloser {
 	obj := s.obj("blob/" + hash)
 	stat, err := s.ioctx.Stat(obj)
 	if err != nil {
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
 	}
 	data := make([]byte, stat.Size)
 	n, err := s.ioctx.Read(obj, data, 0)
 	if err != nil {
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: errors.Is(err, rados.ErrNotFound)}
 	}
 	return io.NopCloser(bytes.NewReader(data[:n]))
 }

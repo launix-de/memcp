@@ -30,6 +30,17 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "Schema stat labels owner payload as an estimate rather than RSS"
+    scm: |
+      (begin
+        (define summary (stat "memcp-tests"))
+        (and
+          (strlike summary "%Disjoint owner-payload estimate (not RSS%")
+          (strlike summary "%Base%Indexes%Temp columns%String dicts%Metadata%Total%")
+          (strlike summary "%total owner payload estimate%")))
+    expect:
+      data: [true]
+
   - name: "Persistent blob metadata is not registered as a temporary keytable"
     scm: |
       (begin

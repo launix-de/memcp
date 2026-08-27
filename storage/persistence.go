@@ -128,8 +128,14 @@ func MoveDatabase(src PersistenceEngine, dst PersistenceEngine) {
 
 // ErrorReader implements io.ReadCloser
 type ErrorReader struct {
-	e error
+	e        error
+	notFound bool
 }
+
+// Missing reports whether the backend proved that the requested object does
+// not exist. Callers must not equate arbitrary read failures with absence:
+// doing so could turn a transient backend outage into destructive cleanup.
+func (e ErrorReader) Missing() bool { return e.notFound }
 
 func (e ErrorReader) Read([]byte) (int, error) {
 	// reflects the error (e.g. file not found)

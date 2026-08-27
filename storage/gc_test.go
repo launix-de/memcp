@@ -192,11 +192,11 @@ func TestCleanOrphanedBlob(t *testing.T) {
 	}
 }
 
-// TestCleanBlobsRequiresCompleteActiveManifests verifies the conservative
-// deletion contract: a blob is garbage only when every active shard generation
-// has proved its references. A missing manifest must turn cleanup into a no-op,
-// never into a best-effort deletion based on secondary refcount metadata.
-func TestCleanBlobsRequiresCompleteActiveManifests(t *testing.T) {
+// TestCleanBlobsBackfillsMissingLegacyManifest verifies the upgrade path: a
+// legacy active generation is proven from its committed columns before cleanup
+// proceeds. Live blobs survive, the new manifest is durable, and only then may
+// an orphan be deleted.
+func TestCleanBlobsBackfillsMissingLegacyManifest(t *testing.T) {
 	defer setupGCTest(t)()
 
 	CreateDatabase("gcdb", false)
@@ -225,11 +225,22 @@ func TestCleanBlobsRequiresCompleteActiveManifests(t *testing.T) {
 	}
 
 	deleted, _ := CleanDatabase(tbl.schema)
-	if deleted != 0 {
-		t.Fatalf("cleanup deleted %d blobs without a complete active manifest", deleted)
+	if deleted != 1 {
+		t.Fatalf("cleanup deleted %d blobs after legacy backfill, want 1 orphan", deleted)
 	}
-	if _, err := os.Stat(filepath.Join(orphanPath, orphanHash)); err != nil {
-		t.Fatalf("unproven blob was removed: %v", err)
+	if _, err := os.Stat(filepath.Join(orphanPath, orphanHash)); !os.IsNotExist(err) {
+		t.Fatalf("orphan survived completed legacy proof: %v", err)
+	}
+	reader := tbl.schema.persistence.ReadColumn(shards[0].uuid.String(), blobManifestColumn)
+	if _, failed := reader.(ErrorReader); failed {
+		reader.Close()
+		t.Fatal("legacy manifest was not persisted")
+	}
+	if _, valid := readBlobManifest(reader); !valid {
+		t.Fatal("backfilled manifest is invalid")
+	}
+	if got := len(blobFiles(t, "gcdb")); got != 3 {
+		t.Fatalf("live blob count after legacy backfill = %d, want 3", got)
 	}
 }
 
@@ -250,6 +261,18 @@ func TestStartupCleanLoadsColdSchemaBeforeBlobDeletion(t *testing.T) {
 		t.Fatal("expected external blob fixture")
 	}
 
+	for _, shard := range tbl.ActiveShards() {
+		tbl.schema.persistence.RemoveColumn(shard.uuid.String(), blobManifestColumn)
+	}
+	orphanHash := "cabba9ecabba9ecabba9ecabba9ecabb"
+	orphanPath := filepath.Join(Basepath, "gcdb", "blob", orphanHash[:2], orphanHash[2:4])
+	if err := os.MkdirAll(orphanPath, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanPath, orphanHash), []byte("orphan"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
 	databases.Remove("gcdb")
 	LoadDatabases()
 	cold := GetDatabase("gcdb")
@@ -257,8 +280,8 @@ func TestStartupCleanLoadsColdSchemaBeforeBlobDeletion(t *testing.T) {
 		t.Fatal("expected lazily loaded database after catalog discovery")
 	}
 	deleted, _ := CleanDatabase(cold)
-	if deleted != 0 {
-		t.Fatalf("startup cleanup deleted %d live blobs from a cold schema", deleted)
+	if deleted != 1 {
+		t.Fatalf("startup cleanup deleted %d blobs, want only the legacy orphan", deleted)
 	}
 	if got := len(blobFiles(t, "gcdb")); got != wantBlobs {
 		t.Fatalf("live blob count after startup cleanup = %d, want %d", got, wantBlobs)
@@ -324,6 +347,18 @@ func TestRepartitionPublishesBlobManifests(t *testing.T) {
 			t.Fatalf("repartitioned shard %s has no blob manifest", shard.uuid)
 		}
 		reader.Close()
+	}
+}
+
+func TestBlobManifestFollowsComputedStorageWrappers(t *testing.T) {
+	marker := "!0123456789abcdef0123456789abcdef"
+	blob := &OverlayBlob{Base: &StorageConst{value: scm.NewString(marker), count: 1}}
+	proxy := &StorageComputeProxy{main: blob, compressed: true, count: 1, delta: make(map[uint32]scm.Scmer)}
+	references := make(map[string]struct{})
+	appendColumnBlobReferences(proxy, references, 1)
+	want := "3031323334353637383961626364656630313233343536373839616263646566"
+	if _, ok := references[want]; !ok || len(references) != 1 {
+		t.Fatalf("nested computed blob references = %v, want only %s", references, want)
 	}
 }
 

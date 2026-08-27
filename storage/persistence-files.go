@@ -129,7 +129,7 @@ func (s *FileStorage) ReadColumn(shard string, column string) io.ReadCloser {
 	f, err := os.Open(s.path + shard + "-" + ProcessColumnName(column))
 	if err != nil {
 		// file does not exist -> no data available
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: os.IsNotExist(err)}
 	}
 	return f
 }
@@ -157,7 +157,7 @@ func (s *FileStorage) blobPath(hash string) string {
 func (s *FileStorage) ReadBlob(hash string) io.ReadCloser {
 	f, err := os.Open(s.blobPath(hash))
 	if err != nil {
-		return ErrorReader{err}
+		return ErrorReader{e: err, notFound: os.IsNotExist(err)}
 	}
 	return f
 }

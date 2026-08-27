@@ -176,7 +176,7 @@ func (t *table) tempColumnMemory(column *column, shards []*storageShard) int64 {
 		shard.mu.RLock()
 		storage := shard.columns[column.Name]
 		if storage != nil {
-			size += int64(storage.ComputeSize())
+			size += int64(ownedColumnMemory(storage))
 		}
 		shard.mu.RUnlock()
 	}

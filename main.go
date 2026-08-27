@@ -1227,7 +1227,11 @@ func main() {
 		}
 	})
 	<-initDone
-	go storage.Clean() // remove crash-orphaned blobs/shard files after init completes
+	go func() {
+		// Cleanup is deliberately observable: legacy manifest backfill and orphan
+		// removal may reclaim substantial disk space on the first upgraded start.
+		fmt.Println(storage.Clean())
+	}()
 
 	// install exit handler
 	cancelChan := make(chan os.Signal, 1)

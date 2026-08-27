@@ -310,16 +310,63 @@ func (s *storageShard) ownsColumnMemory(name string) bool {
 // registration. The column object still reports its complete diagnostic size;
 // ownership is resolved only where the shard total is assembled.
 func ownedColumnMemory(storage ColumnStorage) uint {
+	if storage == nil {
+		return 0
+	}
 	size := storage.ComputeSize()
-	if strings, ok := storage.(*StorageString); ok && strings.compressed {
-		strings.dictMu.RLock()
-		materialized := uint(len(strings.dictionary))
-		strings.dictMu.RUnlock()
-		if materialized <= size {
-			size -= materialized
-		}
+	materialized := materializedDictionaryMemory(storage)
+	if materialized <= size {
+		size -= materialized
 	}
 	return size
+}
+
+// materializedDictionaryMemory follows storage wrappers because a compressed
+// StorageString may be nested below OverlayBlob, StoragePrefix, or a computed
+// column proxy. Every materialized dictionary is a separately weighted
+// TypeStringDict cache owner and must therefore be excluded from its parent's
+// bytes at every nesting depth.
+func materializedDictionaryMemory(storage any) uint {
+	switch typed := storage.(type) {
+	case *StorageString:
+		if !typed.compressed {
+			return 0
+		}
+		typed.dictMu.RLock()
+		size := uint(len(typed.dictionary))
+		typed.dictMu.RUnlock()
+		return size
+	case *OverlayBlob:
+		if typed.Base == nil {
+			return 0
+		}
+		return materializedDictionaryMemory(typed.Base)
+	case *StoragePrefix:
+		return materializedDictionaryMemory(&typed.values)
+	case *StorageComputeProxy:
+		var size uint
+		typed.mu.RLock()
+		if typed.main != nil {
+			size += materializedDictionaryMemory(typed.main)
+		}
+		typed.mu.RUnlock()
+		typed.variantsMu.RLock()
+		variants := make([]*storageComputeVariant, 0, len(typed.variants))
+		for _, variant := range typed.variants {
+			variants = append(variants, variant)
+		}
+		typed.variantsMu.RUnlock()
+		for _, variant := range variants {
+			variant.mu.RLock()
+			if variant.main != nil {
+				size += materializedDictionaryMemory(variant.main)
+			}
+			variant.mu.RUnlock()
+		}
+		return size
+	default:
+		return 0
+	}
 }
 
 type shardStatsSnapshot struct {
