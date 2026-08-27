@@ -1317,9 +1317,25 @@ outer joins. */
 					membership_src
 					(query_block_with_presence_probes_using stage_lookup membership_src false)))
 			membership_src))
-		(define rewrite_sources (if (query_block? membership_src) (qb_sources membership_src) '()))
+		(define scalar_order_cache (if (query_block? rewritten_src)
+			(scalar_order_lookup_cache_candidate stage_lookup rewritten_src) nil))
+		(define carrier_src (if (query_block? rewritten_src)
+			(query_block_with_scalar_order_lookup_cache
+				(query_block_with_scalar_order_lookup_cache_input
+					stage_lookup rewritten_src scalar_order_cache)
+				scalar_order_cache)
+			rewritten_src))
+		/* Once ORDER has a native carrier, keep the remaining boolean stages as
+		value probes. The ordinary scalar truth cost model can then choose a complete
+		RecSet or batch-local probes and the ordered scan may count LIMIT only after
+		that acceptance predicate succeeds. */
+		(define optimized_src (if (and (not (nil? scalar_order_cache)) (query_block? carrier_src))
+			(query_block_with_scalar_first_probes_using stage_lookup carrier_src)
+			carrier_src))
+		(define rewrite_catalog_src (if (nil? scalar_order_cache) membership_src optimized_src))
+		(define rewrite_sources (if (query_block? rewrite_catalog_src) (qb_sources rewrite_catalog_src) '()))
 		(define rewrite_default_alias (if (query_block? src)
-			(qassoc_get (qb_facts membership_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
+			(qassoc_get (qb_facts rewrite_catalog_src) (quote default_alias) (if (empty_list? rewrite_sources) nil (source_alias (car rewrite_sources))))
 			nil))
 		(define presence_probe_sources_for_rewrite (if (query_block? src)
 			(presence_probe_output_sources stage_lookup rewrite_sources rewrite_default_alias
@@ -1374,28 +1390,28 @@ outer joins. */
 			(map ags (lambda (ag) (aggregate_col_name_using src ag)))
 			'()))
 		(define scalar_aggregate_stage (scalar_aggregate_probe_stage? stage))
-		(define prepared_src (if (query_block? rewritten_src)
+		(define prepared_src (if (query_block? optimized_src)
 			(if (equal? result_sink (quote boolean-recset))
-				rewritten_src
+				optimized_src
 				(if scalar_aggregate_stage
 					(begin
 						(define constant_reorder_stages (if (lowering_catalog? stage_lookup)
 							stage_lookup
 							(unique_stages_by_id (merge (list stage_lookup (qb_stages rewritten_src))))))
-						(if (not (empty_list? (filter (qb_sources rewritten_src) (lambda (src)
+						(if (not (empty_list? (filter (qb_sources optimized_src) (lambda (src)
 							(constant_scalar_or_presence_stage_output_source? constant_reorder_stages src)))))
-							(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages rewritten_src)
-							(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src)))
-					(query_block_without_stages_after_eager_prepare_using stage_lookup rewritten_src)))
-			rewritten_src))
-		(define direct_nested_stages (if (query_block? rewritten_src)
+							(query_block_without_stages_after_eager_prepare_with_constant_scalars_first constant_reorder_stages optimized_src)
+							(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
+					(query_block_without_stages_after_eager_prepare_using stage_lookup optimized_src)))
+			optimized_src))
+		(define direct_nested_stages (if (query_block? optimized_src)
 			(merge_unique (list
-				(query_block_stages_to_prepare_using stage_lookup rewritten_src)
-				(available_stage_outputs_from_sources_using stage_lookup (qb_sources rewritten_src))
+				(query_block_stages_to_prepare_using stage_lookup optimized_src)
+				(available_stage_outputs_from_sources_using stage_lookup (qb_sources optimized_src))
 				(available_stage_outputs_from_sources_using stage_lookup (group_stage_final_extra_source_refs stage))
-				(group_cache_stages_from_sources stage_lookup (qb_sources rewritten_src))
+				(group_cache_stages_from_sources stage_lookup (qb_sources optimized_src))
 				(group_cache_stages_from_sources stage_lookup (group_stage_final_extra_source_refs stage))
-				(query_block_probe_expr_stages rewritten_src)))
+				(query_block_probe_expr_stages optimized_src)))
 			'()))
 		(define owner_handle (qassoc_get (gs_facts stage) (quote btw2025_handle) nil))
 		(define owner_ancestors (qassoc_get (gs_facts stage) (quote btw2025_ancestors) '()))
@@ -1413,13 +1429,13 @@ outer joins. */
 							(and
 								(not (equal? candidate_handle owner_handle))
 								(not (contains? owner_ancestors candidate_handle))))))))))
-		(define nested_prepare (if (and include_nested_prepares (query_block? rewritten_src))
+		(define nested_prepare (if (and include_nested_prepares (query_block? optimized_src))
 			(if relational_presence_chain
 				(lower_presence_stage_prepares_with_graph
 					prepare_dependency_graph stage_lookup nested_stages)
 				(lower_unique_stage_prepares_using prepare_catalog stage_lookup nested_stages))
 			'()))
-		(define nested_materialize (if (and include_nested_prepares (query_block? rewritten_src))
+		(define nested_materialize (if (and include_nested_prepares (query_block? optimized_src))
 			(lower_stage_materialize_all nested_stages) '()))
 		(define nested_prepare_expr (if (empty_list? nested_prepare)
 			nil
@@ -1570,9 +1586,12 @@ outer joins. */
 		raw_stage_lookup above) is bound exactly once here, ahead of whatever
 		this stage's own prepare plan does, so every rewritten reference below
 		reads that one binding instead of re-probing per row. */
-		(define lowered_plan (if (empty_list? invariant_probe_bindings)
+		(define lookup_cached_plan (if (nil? scalar_order_cache)
 			lowered_plan_core
-			(cons (quote !begin) (merge (list invariant_probe_bindings (list lowered_plan_core))))))
+			(list (quote !begin) (nth scalar_order_cache 4) lowered_plan_core)))
+		(define lowered_plan (if (empty_list? invariant_probe_bindings)
+			lookup_cached_plan
+			(cons (quote !begin) (merge (list invariant_probe_bindings (list lookup_cached_plan))))))
 		(if (nil? base_group_into_plan)
 			lowered_plan
 			(list
@@ -2255,6 +2274,235 @@ probes remain recipes and still execute after root braking. */
 					(scalar_query_probe_recipe_key stage requested_col)))
 				_ false))))))
 
+/* A scalar lookup used as the leading ORDER key otherwise becomes a callback
+inside the driving scan: every outer row performs the lookup, then the complete
+outer relation is sorted before LIMIT can brake. A canonical computed column on
+the outer base table is the same total scalar value (including SQL NULL), but it
+also gives the storage layer a native ordered carrier. createcolumn is lazy and
+the storage dependency graph invalidates exactly the affected outer rows.
+
+This is a physical carrier choice after decorrelation and join reordering. It
+does not alter the logical group stage or assume referential completeness; a
+missing lookup row computes NULL, preserving LEFT JOIN scalar semantics. Keep
+the eligibility proof deliberately narrow: a session-independent, unordered
+base-table lookup with direct outer key columns. Other scalar shapes retain the
+ordinary costed probe path. */
+(define scalar_order_lookup_cache_marker (lambda (expr found)
+	(if (not (nil? found))
+		found
+		(match expr
+			((symbol scalar_first_probe) stage requested_col) (list stage requested_col)
+			((quote scalar_first_probe) stage requested_col) (list stage requested_col)
+			((symbol scalar_first_probe) stage requested_col _dependencies) (list stage requested_col)
+			((quote scalar_first_probe) stage requested_col _dependencies) (list stage requested_col)
+			(cons _head tail) (reduce tail (lambda (nested item)
+				(scalar_order_lookup_cache_marker item nested)) nil)
+			_ nil))))
+
+(define scalar_order_relational_cache_marker (lambda (stages sources expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col _col_ignorecase)
+		(begin
+			(define src (reduce sources (lambda (found candidate)
+				(if (not (nil? found)) found
+					(if (source_alias_matches? candidate (source_alias candidate) tblvar tbl_ignorecase)
+						candidate nil))) nil))
+			(define stage (if (and (not (nil? src)) (stage_output_relation? (source_relation src)))
+				(stage_for_output_relation stages (source_relation src)) nil))
+			(if (nil? stage) nil (list stage col src)))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(scalar_order_relational_cache_marker stages sources
+			(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
+		_ nil)))
+
+(define scalar_order_lookup_cache_target (lambda (block stage)
+	(begin
+		(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+		(define aliases (merge_unique (map lookup_keys (lambda (key)
+			(list (expr_source_alias key))))))
+		(define target (if (single_source? aliases)
+			(join_optimizer_source_by_alias (qb_sources block) (car aliases)) nil))
+		(define input_cols (if (nil? target) '()
+			(map lookup_keys (lambda (key) (direct_column_name_for_alias target key)))))
+		(list target input_cols lookup_keys))))
+
+/* This proof is intentionally structural. Cardinality may choose how the
+remaining predicates consume the ordered carrier, but it cannot make a
+callback-sorted lookup capable of braking before all outer rows were visited.
+The canonical temp column memoizes exactly those same row-local lookups and is
+shared by every equivalent query until the cache manager evicts it. A complete
+unique source key is part of the proof: without it, the scalar LIMIT may inspect
+or order several source rows and the ordinary late-projection path can be
+strictly cheaper. */
+(define scalar_order_lookup_cache_unique_input? (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(define key_cols (map (gs_keys stage) (lambda (key)
+			(direct_column_name_for_alias input key))))
+		(and (not (empty_list? key_cols))
+			(and (not (reduce key_cols (lambda (missing col)
+				(or missing (nil? col))) false))
+				(contains? (source_unique_key_sets input) key_cols))))))
+
+(define scalar_order_lookup_cache_eligible? (lambda (stage target input_cols parts)
+	(and (scalar_value_stage? stage)
+		(and (source_is_base_table? (gs_input stage))
+			(and (scalar_order_lookup_cache_unique_input? stage)
+				(and (not (nil? target))
+				(and (source_is_base_table? target)
+					(and (not (empty_list? input_cols))
+						(and (not (reduce input_cols (lambda (missing col)
+							(or missing (nil? col))) false))
+							(and (equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
+								(and (empty_list? (query_expr_session_reads stage))
+										(and (not (nil? parts))
+											(empty_list? (nth parts 1))))))))))))))
+
+(define scalar_order_lookup_cache_worthwhile? (lambda (driver_rows)
+	(and (number? driver_rows)
+		(> (qassoc_get (planner_direct_presence_probe_cost driver_rows)
+			(quote total_ns) 0)
+			planner_adaptive_observation_budget_ns))))
+
+/* Below the shared risk budget the direct alternative is intentionally kept:
+its complete estimated work is already negligible and avoids creating a cache
+for one-off tiny relations. The emitted guard repeats this same cost inequality
+against the live table cardinality, so a cached direct plan cannot survive data
+growth into the expensive range. The per-probe coefficient is generated by
+tools/costgen; this lowering adds no hand-tuned crossover. */
+(define select_scalar_order_lookup_cache_candidate (lambda (candidate)
+	(if (nil? candidate)
+		nil
+		(begin
+			(define target (nth candidate 0))
+			(define stage (nth candidate 1))
+			(define driver_rows (planner_source_row_count target))
+			(define normal_choice (if (planner_guarded_choice
+				(scalar_order_lookup_cache_worthwhile? driver_rows)
+				(list (quote scalar_order_lookup_cache_worthwhile?)
+					(list (quote planner_source_row_count) (list (quote quote) target))))
+				"canonical_computed_column" "direct_scalar_lookup"))
+			(define decision_id (concat "scalar_order_lookup_cache:" (gs_id stage)))
+			(define alternatives (list "canonical_computed_column" "direct_scalar_lookup"))
+			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
+			(define forced (planner_physical_override decision_id))
+			(planner_record_physical_decision (list
+				(list "decision_id" decision_id)
+				(list "decision" "scalar_order_lookup_carrier")
+				(list "chosen" chosen)
+				(list "normally_chosen" normal_choice)
+				(list "selection" (if (nil? forced) "cost_risk_gate" "forced"))
+				(list "reason" (if (nil? forced)
+					"native_order_carrier_for_nontrivial_scalar_work"
+					"calibration_override"))
+				(list "inputs" (list
+					(list "driver_rows" driver_rows)
+					(list "risk_budget_ns" planner_adaptive_observation_budget_ns)))
+				(list "alternatives" alternatives)))
+			(if (equal? chosen "canonical_computed_column") candidate nil)))))
+
+(define scalar_order_lookup_cache_candidate (lambda (stages block)
+	(if (not (query_limit_active? (qb_offset block) (qb_limit block)))
+		nil
+		(begin
+			(define sources (qb_sources block))
+			(define relational (if (empty_list? (qb_order block)) nil
+				(scalar_order_relational_cache_marker
+					stages sources (car (order_exprs (qb_order block))))))
+			(define marker (if (not (nil? relational))
+				relational
+				(begin
+					(define probe (if (empty_list? (qb_order block)) nil
+						(scalar_order_lookup_cache_marker (car (order_exprs (qb_order block))) nil)))
+					(if (nil? probe) nil (list (nth probe 0) (nth probe 1) nil)))))
+			(if (nil? marker)
+				nil
+				(begin
+					(define stage (nth marker 0))
+					(define requested_col (nth marker 1))
+					(define stage_source (nth marker 2))
+					(define target_parts (scalar_order_lookup_cache_target block stage))
+					(define target (nth target_parts 0))
+					(define input_cols (nth target_parts 1))
+					(define lookup_keys (nth target_parts 2))
+					(define ag (scalar_first_probe_aggregate stage requested_col))
+					(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
+					(if (not (scalar_order_lookup_cache_eligible?
+						stage target input_cols parts))
+						nil
+						(begin
+							(define cache (group_stage_cache stage))
+							(define column_name (concat ".lookup:"
+								(stable_structural_hash
+									(list (group_cache_relation cache) requested_col) true)))
+							(define params (map input_cols (lambda (col)
+								(symbol (concat (source_alias target) "." col)))))
+							(define lookup_expr (lower_table_scalar_first_probe_expr
+								(qb_sources block)
+								(qassoc_get (qb_facts block) (quote default_alias) (source_alias target))
+								(gs_input stage) stage (nth parts 0) (gs_keys stage) lookup_keys
+								'() '() 0 1 nil))
+							(select_scalar_order_lookup_cache_candidate
+								(list target stage requested_col column_name
+								(list (quote createcolumn)
+									(source_table_expr target)
+									column_name "any"
+									(quoted_runtime_list '())
+									(quoted_runtime_list '("temp" true))
+									(cons (quote list) input_cols)
+									(list (quote lambda) params lookup_expr))
+								stage_source))))))))))))
+
+(define replace_scalar_order_lookup_with_cache (lambda (candidate expr)
+	(if (nil? candidate)
+		expr
+		(match expr
+			((symbol scalar_first_probe) stage requested_col)
+			(if (and (equal? (gs_id stage) (gs_id (nth candidate 1)))
+				(equal? requested_col (nth candidate 2)))
+				(list (quote get_column) (source_alias (nth candidate 0)) false (nth candidate 3) false)
+				expr)
+			((quote scalar_first_probe) stage requested_col)
+			(replace_scalar_order_lookup_with_cache candidate
+				(list (symbol "scalar_first_probe") stage requested_col))
+			((symbol scalar_first_probe) stage requested_col _dependencies)
+			(replace_scalar_order_lookup_with_cache candidate
+				(list (symbol "scalar_first_probe") stage requested_col))
+			((quote scalar_first_probe) stage requested_col _dependencies)
+			(replace_scalar_order_lookup_with_cache candidate
+				(list (symbol "scalar_first_probe") stage requested_col))
+			(cons head tail) (cons head (map tail (lambda (item)
+				(replace_scalar_order_lookup_with_cache candidate item))))
+			_ expr))))
+
+(define query_block_with_scalar_order_lookup_cache (lambda (block candidate)
+	(if (nil? candidate)
+		block
+		(make_query_block
+			(qb_schema block) (qb_sources block) (qb_fields block) (qb_where block)
+			(qb_group block) (qb_having block)
+			(map (qb_order block) (lambda (item)
+				(match item
+					'(expr dir) (list (replace_scalar_order_lookup_with_cache candidate expr) dir)
+					_ item)))
+			(qb_limit block) (qb_offset block) (qb_hidden block) (qb_stages block) (qb_facts block)))))
+
+(define query_block_with_scalar_order_lookup_cache_input (lambda (stages block candidate)
+	(if (or (nil? candidate) (nil? (nth candidate 5)))
+		block
+		(query_block_with_selected_probe_sources_using
+			stages (list (nth candidate 5)) block))))
+
+(define scalar_probe_entries_without_lookup_cache (lambda (entries candidate)
+	(if (nil? candidate)
+		entries
+		(filter entries (lambda (entry)
+			(match entry
+				'(stage requested_col) (not (and
+					(equal? (gs_id stage) (gs_id (nth candidate 1)))
+					(equal? requested_col (nth candidate 2))))
+				_ true))))))
+
 (define prepare_simple_query_block_physical_core_chosen (lambda (block)
 	(begin
 		(define raw_stage_lookup (query_block_stage_lookup block))
@@ -2288,19 +2536,28 @@ probes remain recipes and still execute after root braking. */
 					recipe_block))
 			(begin
 				(define stage_catalog (query_block_stage_catalog block))
+				(define scalar_order_cache
+					(scalar_order_lookup_cache_candidate stage_lookup block))
+				(define cache_input_block
+					(query_block_with_scalar_order_lookup_cache_input
+						stage_lookup block scalar_order_cache))
 				(define candidate_eager_stages (filter
-					(query_block_stages_to_prepare_using stage_lookup block)
+					(query_block_stages_to_prepare_using stage_lookup cache_input_block)
 					(lambda (stage) (not (stage_shared_prepare? stage)))))
 				(define dependency_graph (stage_dependency_graph stage_lookup))
-				(define raw_prepared_block (if (single_source? (qb_sources block))
-					(query_block_without_stages_after_prepare_using stage_lookup block)
-					(query_block_with_prepared_sources_using stage_lookup block)))
+				(define raw_prepared_block (if (single_source? (qb_sources cache_input_block))
+					(query_block_without_stages_after_prepare_using stage_lookup cache_input_block)
+					(query_block_with_prepared_sources_using stage_lookup cache_input_block)))
 				(define raw_probe_recipe_entries
 					(query_block_scalar_query_probe_recipe_entries raw_prepared_block))
+				(define carrier_block
+					(query_block_with_scalar_order_lookup_cache raw_prepared_block scalar_order_cache))
+				(define carrier_probe_recipe_entries
+					(scalar_probe_entries_without_lookup_cache raw_probe_recipe_entries scalar_order_cache))
 				(define probe_recipe_entries
-					(if (query_block_bounded_scalar_probe_recipe_context? raw_prepared_block)
+					(if (query_block_bounded_scalar_probe_recipe_context? carrier_block)
 						(query_block_bounded_scalar_probe_recipe_entries
-							raw_prepared_block raw_probe_recipe_entries)
+							carrier_block carrier_probe_recipe_entries)
 						'()))
 				/* Every promoted scalar probe owns its physical realization. Eager
 				preparation here would make a second operator decision before the
@@ -2314,12 +2571,12 @@ probes remain recipes and still execute after root braking. */
 					(extract_assoc probe_marker_stage_ids (lambda (id _owned) id))))
 				(define eager_dependency_graph (stage_dependency_graph eager_stage_lookup))
 				(define bounded_probe_recipe_keys
-					(query_block_bounded_scalar_probe_recipe_keys raw_prepared_block probe_recipe_entries))
+					(query_block_bounded_scalar_probe_recipe_keys carrier_block probe_recipe_entries))
 				(define probe_recipe_plans
 					(scalar_query_probe_recipe_plans_using_graph
 						stage_lookup dependency_graph probe_recipe_entries bounded_probe_recipe_keys))
 				(define prepared_block
-					(query_block_with_scalar_query_probe_recipes raw_prepared_block probe_recipe_entries))
+					(query_block_with_scalar_query_probe_recipes carrier_block probe_recipe_entries))
 				(define probe_recipe_bindings
 					(scalar_query_probe_recipe_bindings probe_recipe_plans))
 				(define probe_recipe_prepares
@@ -2334,6 +2591,7 @@ probes remain recipes and still execute after root braking. */
 				(list
 					(merge (list
 						invariant_probe_bindings
+						(if (nil? scalar_order_cache) '() (list (nth scalar_order_cache 4)))
 						probe_recipe_prepares
 						probe_recipe_bindings
 						(lazy_stage_prepare_bindings stage_lookup lazy_stages)

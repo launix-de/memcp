@@ -1781,7 +1781,7 @@ would still have to project that value over the segment. */
 		(query_invariant_scalar_first_probe_key stage requested_col)
 		(list (quote lambda) '() expr))))
 
-(define lower_table_scalar_first_probe_expr (lambda (sources default_alias src stage value_expr keys lookup_keys order_exprs dirs offset_value partition_limit)
+(define lower_table_scalar_first_probe_expr (lambda (sources default_alias src stage value_expr keys lookup_keys order_exprs dirs offset_value partition_limit tx_expr)
 	(begin
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define condition_cols (extract_columns_for_alias src condition))
@@ -1791,7 +1791,7 @@ would still have to project that value over the segment. */
 		(define filtercols (merge_unique (list condition_cols key_cols order_cols)))
 		(define mapcols (merge_unique (list value_cols)))
 		(list (quote scan_order)
-			'(session "__memcp_tx")
+			tx_expr
 			(source_table_expr src)
 			(cons (quote list) filtercols)
 			(list (quote lambda)
@@ -1903,7 +1903,7 @@ would still have to project that value over the segment. */
 					1 nil)
 				(lower_table_scalar_first_probe_expr
 					sources default_alias src stage value_expr keys lookup_keys
-					order_exprs dirs offset_value partition_limit))
+					order_exprs dirs offset_value partition_limit '(session "__memcp_tx")))
 			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator")))
 		(define memoized_lowered (if
 			(qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
