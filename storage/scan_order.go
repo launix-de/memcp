@@ -334,6 +334,8 @@ type scanOrderTableSpec struct {
 	recset          *recSet
 	conditionCols   []string
 	condition       scm.Scmer
+	acceptCols      []string
+	accept          scm.Scmer
 	sortcols        []scm.Scmer
 	callbackCols    []string
 	callback        scm.Scmer
@@ -622,6 +624,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		spec := &tables[ti]
 		t := spec.backingTable()
 		touchTempColumns(t, spec.conditionCols, spec.callbackCols)
+		touchTempColumns(t, spec.acceptCols, nil)
 
 		// Per-table top-K hint: when perTableLimit is set, each shard only
 		// needs to return the top (perTableOffset + perTableLimit) rows in
@@ -672,6 +675,8 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		callback := spec.callback
 		conditionCols := spec.conditionCols
 		condition := spec.condition
+		acceptCols := spec.acceptCols
+		accept := spec.accept
 		sortcols := spec.sortcols
 		tableBounds := bounds
 		tableIdx := ti
@@ -705,7 +710,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 										q_ <- scanOrderResult{err: scanError{r, string(debug.Stack())}}
 									}
 								}()
-								res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+								res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 								res.callbackCols = callbackCols
 								res.callback = callback
 								res.tableIdx = tableIdx
@@ -735,7 +740,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 						if ss != nil && ss.IsKilledSeq(querySeq) {
 							panic("query killed")
 						}
-						res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+						res := part.shard.scan_order(tableBounds, lower, upperLast, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 						res.callbackCols = callbackCols
 						res.callback = callback
 						res.tableIdx = tableIdx
@@ -759,7 +764,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 				if ss != nil && ss.IsKilledSeq(querySeq) {
 					panic("query killed")
 				}
-				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
+				res := s.scan_order(tableBounds, lower, upperLast, conditionCols, condition, acceptCols, accept, sortcols, sortdirs, limitPartitionCols, offset, shardLimit, callbackCols, currentTx, ss)
 				res.callbackCols = callbackCols
 				res.callback = callback
 				res.tableIdx = tableIdx
@@ -1143,7 +1148,7 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
 	if ss == nil {
@@ -1151,11 +1156,19 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	}
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	var acceptFn func(...scm.Scmer) scm.Scmer
+	if !accept.IsNil() {
+		acceptFn = scm.OptimizeProcToSerialFunction(accept)
+	}
 
 	// prepare filter function
 	cdataset := make([]scm.Scmer, len(conditionCols))
 	for i := range cdataset {
 		cdataset[i] = scm.NewNil()
+	}
+	adataset := make([]scm.Scmer, len(acceptCols))
+	for i := range adataset {
+		adataset[i] = scm.NewNil()
 	}
 
 	// prepare sort criteria so they can be queried easily
@@ -1234,6 +1247,16 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			cNeedsCachedReader[i] = true
 		}
 	}
+	acols := make([]ColumnStorage, len(acceptCols))
+	aReaders := make([]ColumnReader, len(acceptCols))
+	aNeedsCachedReader := make([]bool, len(acceptCols))
+	for i, column := range acceptCols {
+		acols[i] = t.getColumnStorageOrPanicEx(column, skipShardReadLock, currentTx)
+		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx)
+		if _, ok := acols[i].(*StorageComputeProxy); ok {
+			aNeedsCachedReader[i] = true
+		}
+	}
 	// initialize main_count lazily if needed
 	t.ensureMainCount(skipShardReadLock)
 	// scan loop in read lock
@@ -1278,6 +1301,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// GetValue call per row per column.
 		var survivedBuf, mainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
+		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
 		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, limit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
 				resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
@@ -1329,18 +1353,34 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					ccols[i].GetValueMulti(mainIds, colBufs[i], 1)
 				}
 			}
+			for i := range acols {
+				if cap(acceptColBufs[i]) < len(mainIds) {
+					acceptColBufs[i] = make([]scm.Scmer, len(mainIds))
+				}
+				acceptColBufs[i] = acceptColBufs[i][:len(mainIds)]
+				if len(mainIds) == 0 {
+					continue
+				}
+				if aNeedsCachedReader[i] {
+					aReaders[i].GetValueMulti(mainIds, acceptColBufs[i], 1)
+				} else {
+					acols[i].GetValueMulti(mainIds, acceptColBufs[i], 1)
+				}
+			}
 
 			// pass 3: evaluate the condition per row using the pre-fetched
 			// main-storage values; delta rows are still read one at a time.
 			outN := 0
 			mainBufIdx := 0
 			for _, idx := range survived {
-				if idx < t.main_count {
+				mainStorage := idx < t.main_count
+				rowMainBufIdx := mainBufIdx
+				if mainStorage {
 					for i := range ccols {
 						if conditionGetters[i] != nil {
 							cdataset[i] = conditionGetters[i](idx, 0)
 						} else {
-							cdataset[i] = colBufs[i][mainBufIdx]
+							cdataset[i] = colBufs[i][rowMainBufIdx]
 						}
 					}
 					mainBufIdx++
@@ -1361,6 +1401,26 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				// check condition
 				if !scm.ToBool(conditionFn(cdataset...)) {
 					continue // condition did not match
+				}
+				if acceptFn != nil {
+					if mainStorage {
+						for i := range acols {
+							adataset[i] = acceptColBufs[i][rowMainBufIdx]
+						}
+					} else {
+						for i, column := range acceptCols {
+							if aNeedsCachedReader[i] {
+								adataset[i] = aReaders[i].GetValue(idx)
+							} else if _, isProxy := acols[i].(*StorageComputeProxy); isProxy {
+								adataset[i] = acols[i].GetValue(idx)
+							} else {
+								adataset[i] = t.getDelta(int(idx-t.main_count), column)
+							}
+						}
+					}
+					if !scm.ToBool(acceptFn(adataset...)) {
+						continue
+					}
 				}
 
 				batch[outN] = idx

@@ -1693,6 +1693,7 @@ func Init(en scm.Env) {
 			Optimize: optimizeScanOrderMulti,
 		},
 	})
+	declareScanJoinOrder(&en)
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createdatabase",
 

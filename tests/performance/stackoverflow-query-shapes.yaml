@@ -125,10 +125,46 @@ test_cases:
       rows: 1
       result_contains: ["ordered_join_carrier", "projected_candidate_keyset", "ordered_postfilter"]
 
+  - name: "SO 6037843 handwritten scan_join_order"
+    scm: |
+      (begin
+        (define foos (table "memcp-tests" "so_perf_foos"))
+        (define bars (table "memcp-tests" "so_perf_bars"))
+        (define found
+          (scan_join_order (session "__memcp_tx")
+            (list foos bars)
+            (list (list) (list "baz_id"))
+            (list (lambda () true) (lambda (baz_id) (equal? baz_id 13266)))
+            (list (list (list 0 "bar_id" "id")))
+            (list) nil
+            (list (list 0 "id")) (list >)
+            0 0 5
+            (list (list 0 "id"))
+            (lambda (_id) 1) + 0))
+        (if (equal? found 5) "ok" (error "wrong scan_join_order row count")))
+
   - name: "SO 73024688 string FK ordered join"
     threshold_ms: 180000
     sql: "SELECT i.id FROM so_perf_products p JOIN so_perf_images i ON i.product_unique_id = p.unique_id WHERE p.project_1 = 1 ORDER BY i.id LIMIT 1000 OFFSET 0"
     expect: {rows: 1000}
+
+  - name: "SO 73024688 handwritten scan_join_order"
+    scm: |
+      (begin
+        (define images (table "memcp-tests" "so_perf_images"))
+        (define products (table "memcp-tests" "so_perf_products"))
+        (define found
+          (scan_join_order (session "__memcp_tx")
+            (list images products)
+            (list (list) (list "project_1"))
+            (list (lambda () true) (lambda (project_1) (equal? project_1 1)))
+            (list (list (list 0 "product_unique_id" "unique_id")))
+            (list) nil
+            (list (list 0 "id")) (list <)
+            0 0 1000
+            (list (list 0 "id"))
+            (lambda (_id) 1) + 0))
+        (if (equal? found 1000) "ok" (error "wrong scan_join_order row count")))
 
   - name: "SO 79837534 selective joined SUM"
     threshold_ms: 180000
@@ -172,6 +208,29 @@ test_cases:
     sql: "SELECT ak FROM so_perf_join_view ORDER BY ak LIMIT 1"
     expect: {rows: 1, data: [{ak: 1}]}
 
+  - name: "SO 79644544 handwritten four-way scan_join_order"
+    scm: |
+      (begin
+        (define a (table "memcp-tests" "so_perf_a"))
+        (define b (table "memcp-tests" "so_perf_b"))
+        (define c (table "memcp-tests" "so_perf_c"))
+        (define d (table "memcp-tests" "so_perf_d"))
+        (define minimum
+          (scan_join_order (session "__memcp_tx")
+            (list a b c d)
+            (list (list) (list) (list) (list))
+            (list (lambda () true) (lambda () true) (lambda () true) (lambda () true))
+            (list
+              (list (list 0 "apk" "ak"))
+              (list (list 1 "bpk" "bk"))
+              (list (list 1 "bpk" "bk")))
+            (list) nil
+            (list (list 0 "apk")) (list <)
+            0 0 1
+            (list (list 0 "apk"))
+            (lambda (apk) apk) (lambda (_acc apk) apk) nil))
+        (if (equal? minimum 1) "ok" (error "wrong scan_join_order minimum")))
+
   - name: "SO 79644544 handwritten ordered batch join carrier"
     scm: |
       (begin
@@ -207,6 +266,30 @@ test_cases:
     threshold_ms: 180000
     sql: "SELECT m.ts, s.type, m.val FROM so_perf_measures m JOIN so_perf_nodes n ON m.node_id = n.id JOIN so_perf_sensors s ON m.sensor_id = s.id WHERE n.serial = 'TEST0000003' AND s.type IN ('ca1') AND m.ts BETWEEN 0 AND 120000 ORDER BY m.ts DESC LIMIT 4"
     expect: {rows: 0, data: []}
+
+  - name: "SO 79550978 handwritten scan_join_order"
+    scm: |
+      (begin
+        (define measures (table "memcp-tests" "so_perf_measures"))
+        (define nodes (table "memcp-tests" "so_perf_nodes"))
+        (define sensors (table "memcp-tests" "so_perf_sensors"))
+        (define found
+          (scan_join_order (session "__memcp_tx")
+            (list measures nodes sensors)
+            (list (list "ts") (list "serial") (list "type"))
+            (list
+              (lambda (ts) (and (>= ts 0) (<= ts 120000)))
+              (lambda (serial) (equal? serial "TEST0000003"))
+              (lambda (type) (equal? type "ca1")))
+            (list
+              (list (list 0 "node_id" "id"))
+              (list (list 0 "sensor_id" "id")))
+            (list) nil
+            (list (list 0 "ts")) (list >)
+            0 0 4
+            (list (list 0 "val"))
+            (lambda (_val) 1) + 0 nil false 0))
+        (if (equal? found 0) "ok" (error "wrong scan_join_order row count")))
 
   - name: "SO 79550978 handwritten intersected join carriers"
     scm: |
