@@ -51,6 +51,7 @@ from run_sql_tests import (  # noqa: E402
     resolve_timing_samples,
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
+    sql_request_is_retry_safe,
     suite_execution_mode,
 )
 from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
@@ -161,6 +162,49 @@ class ErrorResponseContractTest(unittest.TestCase):
 
 
 class InterruptedRequestContractTest(unittest.TestCase):
+    def test_only_read_only_sql_is_safe_to_replay(self) -> None:
+        for query in (
+            "SELECT * FROM items",
+            " -- inspect\nSHOW TABLES",
+            "/* plan only */ EXPLAIN SELECT * FROM items",
+            "DESCRIBE items",
+        ):
+            with self.subTest(query=query):
+                self.assertTrue(sql_request_is_retry_safe(query))
+        for query in (
+            "INSERT INTO items VALUES (1)",
+            "UPDATE items SET value = value + 1",
+            "DELETE FROM items",
+            "WITH source AS (SELECT 1) INSERT INTO items SELECT * FROM source",
+            "SET @counter = 1",
+        ):
+            with self.subTest(query=query):
+                self.assertFalse(sql_request_is_retry_safe(query))
+
+    def test_mutation_is_not_retried_by_default_after_unknown_outcome(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.ensure_database = lambda _database: None
+        with mock.patch("run_sql_tests.requests.post", side_effect=TimeoutError) as post, \
+                mock.patch("run_sql_tests.wait_for_memcp") as wait_for_memcp:
+            response = runner.execute_sql(
+                "memcp-tests", "INSERT INTO items VALUES (1)",
+            )
+        self.assertIsNone(response)
+        post.assert_called_once()
+        wait_for_memcp.assert_not_called()
+
+    def test_read_only_request_may_retry_after_connection_loss(self) -> None:
+        runner = SQLTestRunner("http://localhost:1")
+        runner.ensure_database = lambda _database: None
+        recovered = SimpleNamespace(status_code=200, text='{"value": 1}')
+        with mock.patch(
+            "run_sql_tests.requests.post", side_effect=[ConnectionError, recovered]
+        ) as post, mock.patch("run_sql_tests.wait_for_memcp") as wait_for_memcp:
+            response = runner.execute_sql("memcp-tests", "SELECT 1")
+        self.assertIs(response, recovered)
+        self.assertEqual(post.call_count, 2)
+        wait_for_memcp.assert_called_once()
+
     def test_interrupted_mutation_is_not_retried_after_connection_loss(self) -> None:
         runner = SQLTestRunner("http://localhost:1")
         runner.ensure_database = lambda _database: None

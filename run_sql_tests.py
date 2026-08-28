@@ -337,6 +337,17 @@ def is_error_response(response: Optional[requests.Response]) -> bool:
     return response is not None and (response.status_code != 200 or "Error" in response.text)
 
 
+def sql_request_is_retry_safe(query: str) -> bool:
+    """Return whether replay after an unknown request outcome is harmless."""
+    sql = re.sub(r"\A(?:\s|--[^\n]*(?:\n|\Z)|/\*.*?\*/)*", "", query, flags=re.DOTALL)
+    match = re.match(r"([A-Za-z]+)", sql)
+    if match is None:
+        return False
+    return match.group(1).upper() in {
+        "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN",
+    }
+
+
 def _load_runner_config() -> Dict[str, Any]:
     try:
         with open(PERF_BASELINE_FILE, 'r', encoding='utf-8') as f:
@@ -712,7 +723,7 @@ class SQLTestRunner:
         except Exception:
             pass
 
-    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None, retry_on_connection_failure: bool = True) -> Optional[requests.Response]:
+    def execute_sql(self, database: str, query: str, auth_header: Optional[Dict[str, str]] = None, syntax: Optional[str] = None, session_id: Optional[str] = None, timeout: int = 10, params: Optional[list] = None, retry_on_connection_failure: Optional[bool] = None) -> Optional[requests.Response]:
         # proactively ensure database exists (works for connect-only too)
         self.ensure_database(database)
         encoded_db = quote(database, safe='')
@@ -728,8 +739,11 @@ class SQLTestRunner:
         body = query.encode("utf-8") if isinstance(query, str) else query
         if session_id:
             headers["X-Session-Id"] = session_id
-        # Normal probes tolerate a server restart. Crash-interruption tests must
-        # never replay a potentially mutating statement into the new process.
+        # A lost response does not tell us whether a mutation committed.  Only
+        # statements whose repetition cannot change database state may be
+        # replayed after a connection failure or client-side timeout.
+        if retry_on_connection_failure is None:
+            retry_on_connection_failure = sql_request_is_retry_safe(query)
         attempts = 5 if retry_on_connection_failure else 1
         for attempt in range(attempts):
             try:
@@ -933,7 +947,10 @@ class SQLTestRunner:
                     sql_code = step["sql"]
                     if is_perf_test:
                         sql_code = sql_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
-                    resp = self.execute_sql(database, sql_code, syntax=self.suite_syntax, session_id=session_id)
+                    resp = self.execute_sql(
+                        database, sql_code, syntax=self.suite_syntax,
+                        session_id=session_id, timeout=int(step.get("timeout", 600)),
+                    )
                     expect_error = self._step_expects_error(step)
                     if resp is None:
                         return self._record_fail(name, "Setup SQL failed: no response", sql_code, None, None, is_noncritical)
@@ -1443,7 +1460,10 @@ class SQLTestRunner:
             self.setup_operations.append(step)
             expect_error = self._step_expects_error(step)
             if "sql" in step:
-                resp = self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
+                resp = self.execute_sql(
+                    database, step['sql'], syntax=self.suite_syntax,
+                    timeout=int(step.get("timeout", 600)),
+                )
                 if resp is None:
                     print(f"❌ Setup step {idx} failed: no response")
                     print(f"    SQL: {step.get('sql','')[:300]}")
