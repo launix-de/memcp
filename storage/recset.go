@@ -498,35 +498,47 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 }
 
 func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionProgram := scm.PrepareSerialProc(condition)
+	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	var conditionFn func(...scm.Scmer) scm.Scmer
+	if !conditionAlwaysTrue {
+		conditionFn = scm.OptimizeProcToSerialFunction(condition)
+	}
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
-	ccols := make([]ColumnStorage, len(conditionCols))
-	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsCachedReader := make([]bool, len(conditionCols))
-	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	for i, k := range conditionCols {
-		if k == "$recset_contains" {
-			fnptr := recSetContainsClosure(t)
-			if recsetBoundaryCoversCondition {
-				fnptr = recSetAlreadyMatchedClosure()
+	var ccols []ColumnStorage
+	var cReaders []ColumnReader
+	var cNeedsCachedReader []bool
+	var conditionGetters []mapArgGetter
+	var cdataset []scm.Scmer
+	if !conditionAlwaysTrue {
+		ccols = make([]ColumnStorage, len(conditionCols))
+		cReaders = make([]ColumnReader, len(conditionCols))
+		cNeedsCachedReader = make([]bool, len(conditionCols))
+		conditionGetters = make([]mapArgGetter, len(conditionCols))
+		for i, k := range conditionCols {
+			if k == "$recset_contains" {
+				fnptr := recSetContainsClosure(t)
+				if recsetBoundaryCoversCondition {
+					fnptr = recSetAlreadyMatchedClosure()
+				}
+				getter := func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+				conditionGetters[i] = getter
+				continue
 			}
-			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewClosure(fnptr, id)
+			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+			if _, ok := ccols[i].(*StorageComputeProxy); ok {
+				cNeedsCachedReader[i] = true
 			}
-			conditionGetters[i] = getter
-			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if _, ok := ccols[i].(*StorageComputeProxy); ok {
-			cNeedsCachedReader[i] = true
-		}
+		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
-	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	locked := false
 	if !skipShardReadLock {
@@ -564,7 +576,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 		} else if t.deletions.Get(uint(idx)) {
 			return false
 		}
-		if idx < t.main_count && exactLikeMain && singleExactLike {
+		if conditionAlwaysTrue || idx < t.main_count && exactLikeMain && singleExactLike {
 			return true
 		}
 		if idx < t.main_count {
@@ -1458,7 +1470,12 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 // e.g. evaluating an expensive correlated ACL check only over the ~30k rows a
 // mandant filter already narrowed a table down to, not the full table.
 func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionProgram := scm.PrepareSerialProc(condition)
+	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	var conditionFn func(...scm.Scmer) scm.Scmer
+	if !conditionAlwaysTrue {
+		conditionFn = scm.OptimizeProcToSerialFunction(condition)
+	}
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -1470,22 +1487,28 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 	boundaries := recSetFilterBoundaries(owner, conditionCols, condition)
 	lower, upperLast := indexFromBoundaries(boundaries)
 
-	ccols := make([]ColumnStorage, len(conditionCols))
-	cReaders := make([]ColumnReader, len(conditionCols))
-	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	for i, k := range conditionCols {
-		if k == "$recset_contains" {
-			fnptr := recSetContainsClosure(t)
-			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewClosure(fnptr, id)
+	var ccols []ColumnStorage
+	var cReaders []ColumnReader
+	var conditionGetters []mapArgGetter
+	var cdataset []scm.Scmer
+	if !conditionAlwaysTrue {
+		ccols = make([]ColumnStorage, len(conditionCols))
+		cReaders = make([]ColumnReader, len(conditionCols))
+		conditionGetters = make([]mapArgGetter, len(conditionCols))
+		for i, k := range conditionCols {
+			if k == "$recset_contains" {
+				fnptr := recSetContainsClosure(t)
+				getter := func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+				conditionGetters[i] = getter
+				continue
 			}
-			conditionGetters[i] = getter
-			continue
+			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
-	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	locked := false
 	if !skipShardReadLock {
@@ -1518,6 +1541,10 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 				return
 			}
 		} else if t.deletions.Get(uint(idx)) {
+			return
+		}
+		if conditionAlwaysTrue {
+			builder.add(idx, true)
 			return
 		}
 		if idx < mainCount {

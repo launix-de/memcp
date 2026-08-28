@@ -25,9 +25,10 @@ import "strings"
 
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
-	Name string
-	Fn   func(...Scmer) Scmer
-	Type *TypeDescriptor
+	Name            string
+	Fn              func(...Scmer) Scmer
+	Type            *TypeDescriptor
+	RetainsCallArgs bool // native result or state may retain the variadic argument array
 }
 
 // MinParams returns the minimum number of required parameters.

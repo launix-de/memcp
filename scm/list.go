@@ -843,7 +843,8 @@ func init_list() {
 	// list is already in Globalenv.Vars (scm.go init); register it
 	// in declarations so serialization can resolve the function pointer.
 	Declare(&Globalenv, &Declaration{
-		Name: "list",
+		Name:            "list",
+		RetainsCallArgs: true,
 
 		Fn: List,
 		Type: &TypeDescriptor{Kind: "func", Description: "constructs a list from its arguments",
