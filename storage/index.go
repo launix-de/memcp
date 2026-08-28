@@ -1308,9 +1308,11 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		mainItems := items[:mainCount]
 		deltaItems := items[mainCount:]
 		var localPositions [1024]uint32
-		positions := localPositions[:len(mainItems)]
+		positions := localPositions[:0]
 		if len(mainItems) > len(localPositions) {
 			positions = make([]uint32, len(mainItems))
+		} else {
+			positions = localPositions[:len(mainItems)]
 		}
 		state.mainIndexPositions.GetValuesUInt32Multi(mainItems, positions, 1)
 		// Access/equality bounds may cover only a narrow part of the ordered

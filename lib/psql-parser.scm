@@ -468,7 +468,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* TODO: left [outer] join, right [outer] join recursive buildup */
 		(parser '((define l tabledefs) (define x (or
 			(parser '((atom "LEFT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e psql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl true e))))
-			(parser '((atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e psql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
+			(parser '((? (atom "INNER" true)) (atom "JOIN" true) (define r tabledef) (atom "ON" true) (define e psql_expression)) (match r '(id schema tbl _ nil) '('(id schema tbl false e))))
 			(parser '((? (atom "CROSS" true)) (atom "JOIN" true) (define r tabledefs)) r)
 		))) (merge l x))
 		(parser '((define l tabledef) (atom "RIGHT" true) (? (atom "OUTER" true)) (atom "JOIN" true) (define r tabledefs) (atom "ON" true) (define e psql_expression)) (match l '(id schema tbl _ nil) (cons '(id schema tbl true e) r)))
