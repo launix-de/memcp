@@ -126,6 +126,8 @@ type column struct {
 	OrcSortCols       []string  `json:",omitempty"` // ORDER BY column names (partition cols first, then order cols)
 	OrcSortDirs       []bool    `json:",omitempty"` // false=ASC, true=DESC, one per OrcSortCol
 	OrcPartitionCount int       `json:",omitempty"` // number of leading OrcSortCols that form the window partition
+	OrcFilterCols     []string  `json:",omitempty"` // rows admitted to the ordered reduction before window evaluation
+	OrcFilterFn       scm.Scmer // predicate over OrcFilterCols; nil means every row
 	OrcMapCols        []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
 	OrcMapFn          scm.Scmer // (lambda ($set mapcols...) ...) — passes data to reduceFn
 	OrcReduceFn       scm.Scmer // (lambda (acc mapped) ...) — accumulates and writes via $set

@@ -328,6 +328,75 @@ test_cases:
         - {id: 4, time_val: 15, prev_time: 30, next_amt: 400}
         - {id: 5, time_val: 25, prev_time: 15, next_amt: null}
 
+  - name: "Compatible LAG and LEAD share one streaming window"
+    sql: "EXPLAIN PHYSICAL SELECT id, LAG(time_val, 2) OVER (ORDER BY time_val) AS prev_time, LEAD(amount) OVER (ORDER BY time_val) AS next_amount FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "window_mut"
+        - "window_flush"
+      result_not_contains:
+        - "createcolumn"
+
+  - name: "Compatible LAG streams in the requested window order"
+    sql: "EXPLAIN PHYSICAL SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp ORDER BY time_val"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "window_mut"
+      result_not_contains:
+        - "createcolumn"
+
+  - name: "LAG without an outer order may choose its window order"
+    sql: "EXPLAIN PHYSICAL SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "window_mut"
+      result_not_contains:
+        - "createcolumn"
+
+  - name: "Compatible partitioned LEAD streams and flushes its tail"
+    sql: "EXPLAIN PHYSICAL SELECT id, parent, time_val, LEAD(time_val) OVER (PARTITION BY parent ORDER BY time_val) AS next_time FROM win_emp ORDER BY parent, time_val"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "window_mut"
+        - "window_flush"
+      result_not_contains:
+        - "createcolumn"
+
+  - name: "Filtered LAG windows contain only accepted input rows"
+    sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp WHERE parent = 100 ORDER BY time_val"
+    expect:
+      rows: 3
+      data:
+        - {id: 1, time_val: 10, prev_time: null}
+        - {id: 2, time_val: 20, prev_time: 10}
+        - {id: 3, time_val: 30, prev_time: 20}
+
+  - name: "Incompatible output order retains the materialized ORC barrier"
+    sql: "EXPLAIN PHYSICAL SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp ORDER BY id"
+    expect:
+      rows: 1
+      result_contains:
+        - "createcolumn"
+      result_not_contains:
+        - "window_mut"
+
+  - name: "Materialized fallback applies WHERE before the window"
+    sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp WHERE parent = 100 ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - {id: 1, time_val: 10, prev_time: null}
+        - {id: 2, time_val: 20, prev_time: 10}
+        - {id: 3, time_val: 30, prev_time: 20}
+
   # ==========================================================================
   # Case 8: Multiple window functions — different OVER clauses use separate ORCs
   # ==========================================================================
@@ -509,6 +578,35 @@ test_cases:
         - {id: 3, parent: 100, amount: 700, rnk: 3}
         - {id: 4, parent: 200, amount: 200, rnk: 1}
         - {id: 5, parent: 200, amount: 400, rnk: 2}
+
+  - name: "A filter-column update invalidates the materialized window domain"
+    sql: "UPDATE win_emp SET parent = 100 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "A row entering the filtered domain participates in LAG"
+    sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp WHERE parent = 100 ORDER BY id"
+    expect:
+      rows: 4
+      data:
+        - {id: 1, time_val: 10, prev_time: null}
+        - {id: 2, time_val: 20, prev_time: 15}
+        - {id: 3, time_val: 30, prev_time: 20}
+        - {id: 4, time_val: 15, prev_time: 10}
+
+  - name: "Restore the filtered window fixture"
+    sql: "UPDATE win_emp SET parent = 200 WHERE id = 4"
+    expect:
+      affected_rows: 1
+
+  - name: "A row leaving the filtered domain no longer affects LAG"
+    sql: "SELECT id, time_val, LAG(time_val) OVER (ORDER BY time_val) AS prev_time FROM win_emp WHERE parent = 100 ORDER BY id"
+    expect:
+      rows: 3
+      data:
+        - {id: 1, time_val: 10, prev_time: null}
+        - {id: 2, time_val: 20, prev_time: 10}
+        - {id: 3, time_val: 30, prev_time: 20}
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS win_emp"

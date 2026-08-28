@@ -288,7 +288,7 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 // mapFn:     (lambda ($set mapCols...) ...) — passes data through to reduceFn
 // reduceFn:  (lambda (acc mapped) ...) — calls ($set newVal), returns new acc
 // reduceInit: initial accumulator value
-func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
 	found := false
 	paramsChanged := false
 	isTemp := false
@@ -299,10 +299,13 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 			paramsChanged = !slicesEqual(c.OrcSortCols, sortCols) ||
 				!boolSlicesEqual(c.OrcSortDirs, sortDirs) ||
 				c.OrcPartitionCount != partCount ||
+				!slicesEqual(c.OrcFilterCols, filterCols) ||
 				!slicesEqual(c.OrcMapCols, mapCols)
 			t.Columns[i].OrcSortCols = sortCols
 			t.Columns[i].OrcSortDirs = sortDirs
 			t.Columns[i].OrcPartitionCount = partCount
+			t.Columns[i].OrcFilterCols = filterCols
+			t.Columns[i].OrcFilterFn = filterFn
 			t.Columns[i].OrcMapCols = mapCols
 			t.Columns[i].OrcMapFn = mapFn
 			t.Columns[i].OrcReduceFn = reduceFn
@@ -347,10 +350,10 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	}
 }
 
-func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeOrderedColumnDDLLocked(name, sortCols, sortDirs, partCount, mapCols, mapFn, reduceFn, reduceInit)
+	t.computeOrderedColumnDDLLocked(name, sortCols, sortDirs, partCount, filterCols, filterFn, mapCols, mapFn, reduceFn, reduceInit)
 }
 
 // initORCShard ensures a StorageComputeProxy with isOrdered=true exists on shard s.
@@ -440,15 +443,17 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 
 	// Build condition filter. For partitioned ORCs, restrict the scan to the
 	// partition containing the requested row. This avoids scanning all partitions
-	// when only one was invalidated.
+	// when only one was invalidated. A query-domain filter is evaluated in the
+	// same callback, before the ordered reducer, so SQL WHERE semantics precede
+	// LAG/LEAD rather than filtering a window over the complete base table.
 	partCount := analyzeOrcPartition(col)
-	var condCols []string
-	var condFn scm.Scmer
+	var partCols []string
+	var partKeys []scm.Scmer
 
 	if partCount > 0 {
 		// Read partition key of the requested row
-		partCols := col.OrcSortCols[:partCount]
-		partKeys := make([]scm.Scmer, partCount)
+		partCols = col.OrcSortCols[:partCount]
+		partKeys = make([]scm.Scmer, partCount)
 		for i, pc := range partCols {
 			requestShard.mu.RLock()
 			cs := requestShard.columns[pc]
@@ -459,19 +464,86 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 				partKeys[i] = requestShard.getDelta(int(requestIdx-requestShard.main_count), pc)
 			}
 		}
-		// Filter: only rows in the same partition
-		condCols = partCols
-		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-			for i := 0; i < partCount; i++ {
-				if scm.Less(a[i], partKeys[i]) || scm.Less(partKeys[i], a[i]) {
-					return scm.NewBool(false) // different partition
+	}
+	condCols := make([]string, 0, len(partCols)+len(col.OrcFilterCols))
+	condCols = append(condCols, partCols...)
+	condCols = append(condCols, col.OrcFilterCols...)
+	filterFn := scm.OptimizeProcToSerialFunction(col.OrcFilterFn)
+	condFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		for i := 0; i < partCount; i++ {
+			if scm.Less(a[i], partKeys[i]) || scm.Less(partKeys[i], a[i]) {
+				return scm.NewBool(false)
+			}
+		}
+		if col.OrcFilterFn.IsNil() {
+			return scm.NewBool(true)
+		}
+		return scm.NewBool(scm.ToBool(filterFn(a[partCount:]...)))
+	})
+
+	// A domain-filtered ORC has intentional holes: rows outside the predicate
+	// never receive a value. Rebuild its accepted domain directly instead of
+	// reading the same computed column for prefix/convergence detection. Besides
+	// being the correct validity model for sparse domains, this avoids making a
+	// worker wait on the orcMu currently held by its own recomputation.
+	if !col.OrcFilterFn.IsNil() {
+		type filteredProxy struct {
+			proxy *StorageComputeProxy
+			limit uint32
+		}
+		proxies := make([]filteredProxy, 0)
+		for _, s := range t.maintenanceShards() {
+			s.mu.RLock()
+			proxy, ok := s.columns[name].(*StorageComputeProxy)
+			limit := s.main_count + uint32(len(s.inserts))
+			s.mu.RUnlock()
+			if !ok {
+				continue
+			}
+			// The filtered recipe is sparse by definition. Drop stale materialized
+			// values before rebuilding; readers of invalid rows wait on orcMu.
+			proxy.mu.Lock()
+			proxy.main = nil
+			proxy.delta = make(map[uint32]scm.Scmer)
+			proxy.compressed = false
+			proxy.validMask.Reset()
+			proxy.mu.Unlock()
+			proxies = append(proxies, filteredProxy{proxy: proxy, limit: limit})
+		}
+
+		domainCondFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewBool(scm.ToBool(filterFn(a...)))
+		})
+		scanCallbackCols := make([]string, 0, 1+len(col.OrcMapCols))
+		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
+		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
+		scm.SetValues(map[string]any{orcRecomputeMarkerKey: t}, func() {
+			t.scan_order(
+				CurrentTx(),
+				col.OrcFilterCols, domainCondFn,
+				sortcolsScmer, sortdirsFns,
+				0, 0, -1,
+				scanCallbackCols,
+				col.OrcMapFn,
+				col.OrcReduceFn,
+				col.OrcReduceInit,
+				false,
+				col.OrcReduceInit,
+				nil,
+				scm.NewNil(),
+			)
+		})
+		// Speculative callback-column prefetch may read rows rejected by the
+		// predicate. Publish those holes as valid nils after every accepted row
+		// has been written, so it never starts a second domain rebuild.
+		for _, item := range proxies {
+			for idx := uint32(0); idx < item.limit; idx++ {
+				if !item.proxy.validMask.Get(uint(idx)) {
+					item.proxy.validMask.Set(uint(idx), true)
 				}
 			}
-			return scm.NewBool(true)
-		})
-	} else {
-		condCols = []string{}
-		condFn = scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+		}
+		return
 	}
 
 	// Callback: $set + $break + stored ORC value + mapCols
@@ -763,7 +835,7 @@ func (t *table) registerORCTriggers(name string) {
 	hasSortKey := col != nil && len(col.OrcSortCols) > 0
 	relevantCols := []string(nil)
 	if col != nil {
-		relevantCols = mergeUniqueStrings(col.OrcSortCols, col.OrcMapCols)
+		relevantCols = mergeUniqueStrings(col.OrcSortCols, col.OrcFilterCols, col.OrcMapCols)
 	}
 
 	// Build composite sort key expression: (list (get_assoc dict "col1") (get_assoc dict "col2") ...)
@@ -1485,7 +1557,7 @@ func scanRelevantSourceCols(ref scanJoinInfo, srcTable *table) []string {
 			if col.Name != name || !isRuntimeComputedColumn(col) {
 				continue
 			}
-			result = mergeUniqueStrings(result, col.ComputorInputCols, col.OrcSortCols, col.OrcMapCols)
+			result = mergeUniqueStrings(result, col.ComputorInputCols, col.OrcSortCols, col.OrcFilterCols, col.OrcMapCols)
 			break
 		}
 	}

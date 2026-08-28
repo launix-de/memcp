@@ -1091,6 +1091,8 @@ func TestEnsureColumnLoadedRehydratesOrderedProxyFromSchemaPlaceholder(t *testin
 		[]string{"day"},
 		[]bool{false},
 		0,
+		nil,
+		scm.NewNil(),
 		[]string{"id"},
 		scm.NewNil(),
 		scm.NewNil(),
