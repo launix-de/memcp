@@ -12,6 +12,7 @@ metadata:
 
 setup:
   - sql: "DROP VIEW IF EXISTS so_perf_join_view"
+  - sql: "DROP TABLE IF EXISTS so_perf_plot_links"
   - sql: "DROP TABLE IF EXISTS so_perf_plots"
   - sql: "DROP TABLE IF EXISTS so_perf_bars"
   - sql: "DROP TABLE IF EXISTS so_perf_foos"
@@ -34,7 +35,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS so_perf_performance"
   - sql: "DROP TABLE IF EXISTS so_perf_org_players"
   # https://stackoverflow.com/questions/50367835/postgresql-slow-query-with-limit-and-order-by
-  - sql: "CREATE TABLE so_perf_plots (id INT PRIMARY KEY, fk_id VARCHAR(36), created_at BIGINT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_plots (id INT PRIMARY KEY, created_at BIGINT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_plot_links (plot_id INT, table_2_id VARCHAR(36)) ENGINE=memory"
   # https://stackoverflow.com/questions/6037843/extremely-slow-postgresql-query-with-order-and-limit-clauses
   - sql: "CREATE TABLE so_perf_bars (id INT PRIMARY KEY, baz_id INT) ENGINE=memory"
   - sql: "CREATE TABLE so_perf_foos (id INT PRIMARY KEY, bar_id INT) ENGINE=memory"
@@ -66,9 +68,12 @@ setup:
   - sql: "CREATE TABLE so_perf_org_players (org_id INT, player_id INT) ENGINE=memory"
   - scm: |
       (begin
-        (insert (table "memcp-tests" "so_perf_plots") '("id" "fk_id" "created_at")
+        (insert (table "memcp-tests" "so_perf_plots") '("id" "created_at")
           (map (produceN 120000) (lambda (i)
-            (list (+ i 1) (if (>= i 119900) "target" "noise") i))))
+            (list (+ i 1) i))))
+        (insert (table "memcp-tests" "so_perf_plot_links") '("plot_id" "table_2_id")
+          (map (produceN 120000) (lambda (i)
+            (list (+ i 1) (if (equal? i 0) "target" "noise")))))
         (insert (table "memcp-tests" "so_perf_bars") '("id" "baz_id")
           (map (produceN 8192) (lambda (i)
             (list (+ i 1) (if (< i 16) 13266 (+ i 20000))))))
@@ -130,10 +135,35 @@ setup:
         true)
 
 test_cases:
-  - name: "SO 50367835 filtered latest row"
+  - name: "SO 50367835 selective latest joined row"
     threshold_ms: 180000
-    sql: "SELECT id FROM so_perf_plots WHERE fk_id = 'target' ORDER BY created_at DESC LIMIT 1"
-    expect: {rows: 1, data: [{id: 120000}]}
+    sql: "SELECT p.id FROM so_perf_plots p JOIN so_perf_plot_links l ON p.id = l.plot_id WHERE l.table_2_id = 'target' ORDER BY p.created_at DESC LIMIT 1"
+    expect: {rows: 1, data: [{id: 1}]}
+
+  - name: "SO 50367835 exposes costed ordered join alternatives"
+    sql: "EXPLAIN PHYSICAL SELECT p.id FROM so_perf_plots p JOIN so_perf_plot_links l ON p.id = l.plot_id WHERE l.table_2_id = 'target' ORDER BY p.created_at DESC LIMIT 1"
+    expect:
+      rows: 1
+      result_contains: ["chosen scan_join_order", "legacy_join_tree", "lowest_total_ns"]
+
+  - name: "SO 50367835 handwritten scan_join_order"
+    scm: |
+      (begin
+        (define plots (table "memcp-tests" "so_perf_plots"))
+        (define links (table "memcp-tests" "so_perf_plot_links"))
+        (define found
+          (scan_join_order (session "__memcp_tx")
+            (list plots links)
+            (list (list) (list "table_2_id"))
+            (list (lambda () true)
+              (lambda (table_2_id) (equal? table_2_id "target")))
+            (list (list (list 0 "id" "plot_id")))
+            (list) nil
+            (list (list 0 "created_at")) (list >)
+            0 0 1
+            (list (list 0 "id"))
+            (lambda (_id) 1) + 0))
+        (if (equal? found 1) "ok" (error "wrong scan_join_order row count")))
 
   - name: "SO 6037843 selective ordered join"
     threshold_ms: 180000
@@ -416,6 +446,7 @@ test_cases:
 
 cleanup:
   - sql: "DROP VIEW IF EXISTS so_perf_join_view"
+  - sql: "DROP TABLE IF EXISTS so_perf_plot_links"
   - sql: "DROP TABLE IF EXISTS so_perf_plots"
   - sql: "DROP TABLE IF EXISTS so_perf_bars"
   - sql: "DROP TABLE IF EXISTS so_perf_foos"

@@ -4405,8 +4405,16 @@ has selected a lowerer. */
 						lookup_input_rows lookup_rows requested_rows work))
 					(define projected_rows (membership_projected_driver_rows
 						lookup_input_rows lookup_rows driver_input_rows work))
-					(list (if (planner_cost_better? candidate_cost driver_cost)
-						candidate_cost driver_cost) projected_rows)))))))
+					(define use_projected (planner_cost_better? candidate_cost driver_cost))
+					/* Keep the probe cardinality aligned with the selected legacy carrier.
+					The projected candidate touches projected_rows driver records. The
+					ordered post-filter must instead visit enough driver rows to find the
+					requested hits; cross-table anti-correlation can make that the complete
+					driver even when the final join cardinality is tiny. */
+					(define ordered_visited_rows (membership_expected_driver_rows_visited
+						lookup_input_rows lookup_rows requested_rows work))
+					(list (if use_projected candidate_cost driver_cost)
+						(if use_projected projected_rows ordered_visited_rows))))))))
 
 /* Enumerate metadata only. No scan, RecSet, keytable or callback AST is built
 until the caller has selected this physical alternative. */
@@ -4779,9 +4787,16 @@ until the caller has selected this physical alternative. */
 				alternatives compare the calibrated cost-domain record instead. */
 				(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
 				(define sources (qassoc_get spec (quote sources) '()))
-				(define projected_legacy_cost (ordered_join_projected_candidate_cost
-					all_sources default_alias (car sources) (cdr sources)
-					final_condition offset_value limit_value))
+				/* Mirror the legacy lowerer's cardinality guard: a projected RecSet is
+				a semijoin carrier and cannot represent a multiplying lookup. */
+				(define projected_legacy_cost (if
+					(downstream_sources_at_most_one_driver_row?
+						sources default_alias final_condition stages)
+					(ordered_join_projected_candidate_cost
+						all_sources default_alias (car sources) (cdr sources)
+						final_condition offset_value limit_value)
+					nil))
+				(define driver_input_rows (planner_source_row_count (car sources)))
 				(define logical_legacy_cost (if (nil? estimated_legacy_cost)
 					(planner_cost_add
 						(planner_scan_cost input_rows 0.5)
@@ -4792,9 +4807,16 @@ until the caller has selected this physical alternative. */
 				row. A projected carrier reduces that work to its exact projected
 				driver cardinality; otherwise the complete ordered input remains live. */
 				(define legacy_probe_rows (if (nil? projected_legacy_cost)
-					input_rows (cadr projected_legacy_cost)))
+					driver_input_rows (cadr projected_legacy_cost)))
 				(define legacy_base_cost (if (nil? projected_legacy_cost)
-					logical_legacy_cost (car projected_legacy_cost)))
+					/* The DP join cost does not include the ordered root scan that this
+					lowerer adds. Use Costgen's scan_order invocation calibration; a
+					projected carrier already includes its complete scan startup. */
+					(planner_cost_add logical_legacy_cost
+						(planner_cost planner_membership_ordered_scan_invocation_ns
+							0 0 0 0 0 0 0 0 0.65)
+						legacy_probe_rows 0.65)
+					(car projected_legacy_cost)))
 				(define legacy_cost (planner_cost_add legacy_base_cost
 					(planner_join_work_cost legacy_probe_rows 0.65)
 					(coalesceNil joined_rows legacy_probe_rows) 0.65))
