@@ -441,6 +441,47 @@ const (
 	uniquePointScanBufferSize = 8
 )
 
+type fullScanIDBuffer struct {
+	values [defaultScanBufferSize]uint32
+}
+
+type pointScanIDBuffer struct {
+	values [uniquePointScanBufferSize]uint32
+}
+
+// The index iterator callback makes a dynamically sized []uint32 escape even
+// though it is consumed before scan returns. Reuse the two calibrated batch
+// sizes instead of paying for a heap allocation on every scan. sync.Pool keeps
+// concurrent scans independent and permits the runtime to discard idle memory.
+var fullScanIDBufferPool = sync.Pool{
+	New: func() any { return new(fullScanIDBuffer) },
+}
+
+var pointScanIDBufferPool = sync.Pool{
+	New: func() any { return new(pointScanIDBuffer) },
+}
+
+func acquireScanIDBuffer(size int) ([]uint32, *fullScanIDBuffer, *pointScanIDBuffer) {
+	if size == defaultScanBufferSize {
+		buffer := fullScanIDBufferPool.Get().(*fullScanIDBuffer)
+		return buffer.values[:], buffer, nil
+	}
+	if size == uniquePointScanBufferSize {
+		buffer := pointScanIDBufferPool.Get().(*pointScanIDBuffer)
+		return buffer.values[:], nil, buffer
+	}
+	return make([]uint32, size), nil, nil
+}
+
+func releaseScanIDBuffer(full *fullScanIDBuffer, point *pointScanIDBuffer) {
+	if full != nil {
+		fullScanIDBufferPool.Put(full)
+	}
+	if point != nil {
+		pointScanIDBufferPool.Put(point)
+	}
+}
+
 // scanBufferSize keeps full scans batched while avoiding a 4 KiB allocation
 // for the common join case where an exact unique key can yield at most one
 // currently visible row. A few slots remain for stale index entries left by
@@ -801,8 +842,9 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	found := false
 	var foundID uint32
 
-	var buf [8]uint32
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(uniquePointScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
 		}
@@ -1043,7 +1085,8 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	}
 
 	// filter phase: iterateIndex fills the reusable buffer, callback filters in-place and flushes to MapReducer
-	buf := make([]uint32, t.t.scanBufferSize(boundaries))
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(t.t.scanBufferSize(boundaries))
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	hadValue := false
 
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
@@ -1349,7 +1392,8 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		mutationSeen = make(map[uint64]struct{}, 128)
 	}
 
-	var buf [1024]uint32
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	var batchBuf [1024]uint32
 	hadValue := false
 	batchCount := len(batchdata) / stride
@@ -1364,7 +1408,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			activeLower, activeUpperLast = indexFromBoundaries(activeBoundaries)
 		}
 
-		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
 			outN := 0
 			for _, idx := range batch {
