@@ -1,0 +1,113 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Original-scale reproduction of https://stackoverflow.com/questions/73024688/mysql-inner-join-and-order-by-bad-performance
+# This suite deliberately stays out of CI: it builds 6,276,445 products and
+# 22,888,685 images while retaining the engine's default shard size.
+
+metadata:
+  version: "1.0"
+  description: "Original-scale MariaDB ordered product/image join"
+  isolated: true
+  ci: false
+
+setup:
+  - sql: "DROP TABLE IF EXISTS so_730_large_images"
+  - sql: "DROP TABLE IF EXISTS so_730_large_products"
+  - sql: "CREATE TABLE so_730_large_products (id BIGINT, unique_id VARCHAR(32), project_1 INT, project_late INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_730_large_images (id BIGINT, product_unique_id VARCHAR(32)) ENGINE=memory"
+  - scm: |
+      (begin
+        (define insert_batches (lambda (target cols total batch_size rowfn)
+          (reduce (produceN (ceil (/ total batch_size)))
+            (lambda (inserted batch) (begin
+              (define first (* batch batch_size))
+              (define amount (min batch_size (- total first)))
+              (+ inserted (insert target cols
+                (map (produceN amount) (lambda (local)
+                  (rowfn (+ first local)))))))) 0)))
+        (define products (table "memcp-tests" "so_730_large_products"))
+        (define images (table "memcp-tests" "so_730_large_images"))
+        (insert_batches products '("id" "unique_id" "project_1" "project_late")
+          6276445 10000 (lambda (i)
+            (list (+ i 1)
+              (concat "product-" (string (+ i 1)))
+              (if (equal? (mod i 22) 0) 1 0)
+              (if (>= i (- 6276445 286960)) 1 0))))
+        (insert_batches images '("id" "product_unique_id")
+          22888685 10000 (lambda (i)
+            (list (+ i 1)
+              (concat "product-" (string (+ 1 (mod i 6276445)))))))
+        (rebuild products true true)
+        (rebuild images true true)
+        true)
+  - sql: "CREATE UNIQUE INDEX so_730_large_products_uid ON so_730_large_products(unique_id)"
+    timeout: 1800
+  - scm: |
+      (scan_order nil
+        (table "memcp-tests" "so_730_large_images")
+        '() (lambda () true) '("id") '(<) 0 0 1
+        '() (lambda () true) (lambda (acc _row) acc) true false)
+  - sql: "ALTER TABLE so_730_large_products ENGINE=sloppy"
+  - sql: "ALTER TABLE so_730_large_images ENGINE=sloppy"
+  - scm: |
+      (begin
+        (rebuild (table "memcp-tests" "so_730_large_products") true true)
+        (rebuild (table "memcp-tests" "so_730_large_images") true true)
+        true)
+
+test_cases:
+  - name: "original-scale planner exposes all ordered join alternatives"
+    sql: "EXPLAIN PHYSICAL SELECT i.id FROM so_730_large_products p JOIN so_730_large_images i ON i.product_unique_id = p.unique_id WHERE p.project_1 = 1 ORDER BY i.id LIMIT 1000 OFFSET 0"
+    expect:
+      rows: 1
+      result_contains:
+        - "chosen legacy_join_tree"
+        - "ordered_batch_accept"
+        - "projected_candidate_keyset"
+        - "scan_join_order"
+        - "driver_order_partitioned"
+
+  - name: "original-scale uniformly distributed ordered join"
+    threshold_ms: 180000
+    timing_samples: 3
+    sql: "SELECT i.id FROM so_730_large_products p JOIN so_730_large_images i ON i.product_unique_id = p.unique_id WHERE p.project_1 = 1 ORDER BY i.id LIMIT 1000 OFFSET 0"
+    expect: {rows: 1000}
+
+  - name: "original-scale adversarial late ordered join"
+    threshold_ms: 180000
+    timing_samples: 3
+    sql: "SELECT i.id FROM so_730_large_products p JOIN so_730_large_images i ON i.product_unique_id = p.unique_id WHERE p.project_late = 1 ORDER BY i.id LIMIT 1000 OFFSET 0"
+    expect: {rows: 1000}
+
+  - name: "original-scale handwritten partition-pruned batch plan"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define products (table "memcp-tests" "so_730_large_products"))
+        (define images (table "memcp-tests" "so_730_large_images"))
+        (define selected (scan_recset tx products '("project_1")
+          (lambda (project_1) (equal? project_1 1))))
+        (define lookup (recset_key_index tx selected '("unique_id")))
+        (define found (scan_order_batch_accept tx images
+          (lambda (input) (scan_recset tx input '("product_unique_id")
+            (lambda (product_unique_id) (lookup product_unique_id))))
+          '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
+        (if (equal? found 1000) "ok" (error "wrong batch result")))
+
+  - name: "original-scale handwritten complete projected plan"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define products (table "memcp-tests" "so_730_large_products"))
+        (define images (table "memcp-tests" "so_730_large_images"))
+        (define selected (scan_recset tx products '("project_late")
+          (lambda (project_late) (equal? project_late 1))))
+        (define projected (recset_project_join tx selected '("unique_id")
+          images '("product_unique_id")))
+        (define found (scan_order tx projected '() (lambda () true)
+          '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
+        (if (equal? found 1000) "ok" (error "wrong projected result")))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS so_730_large_images"
+  - sql: "DROP TABLE IF EXISTS so_730_large_products"

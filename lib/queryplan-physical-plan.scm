@@ -3459,16 +3459,16 @@ RecSet; membership edges retain their own physical operators. */
 			(qassoc_get facts (quote membership_candidate_scan_invocations) probe_branches)))
 		(define driver_scan_invocations (max 1
 			(qassoc_get facts (quote membership_driver_scan_invocations) 1)))
-		/* scan_order_batch_accept requests disjoint windows, but the current
-		ordered primitive has no resumable cursor. Every window therefore pays
-		for another ordered traversal of the driver, irrespective of how few
-		rows that window returns. Keep this explicit so calibration can price
-		the implementation that is actually emitted. */
-		/* Reuse the calibrated scan_order work unit. Without a resumable cursor,
-		each batch repeats the same quadratic ordered traversal; a separate linear
-		coefficient would describe the same operator inconsistently. */
-		(define ordered_driver_work_units (* batches
-			(/ (* driver_input_rows driver_input_rows) 1000000)))
+		/* A one-dimensional range partition on the leading ORDER BY column turns
+		each candidate window into a prefix of disjoint ordered shard runs. Batch
+		growth revisits earlier prefixes, but its geometric series is bounded by
+		twice the final visited prefix. Free or incompatible shards retain the
+		calibrated full ordered traversal per batch. */
+		(define order_partitioned (qassoc_get facts
+			(quote membership_driver_order_partitioned) false))
+		(define ordered_driver_work_units (if order_partitioned
+			(* 2 visited_rows)
+			(* batches (/ (* driver_input_rows driver_input_rows) 1000000))))
 		(define candidate_fraction (if (and (number? driver_input_rows) (> driver_input_rows 0))
 			(min 1 (/ visited_rows driver_input_rows)) 1))
 		/* Disjoint driver batches may contain the same foreign-key value. In the
@@ -3564,6 +3564,8 @@ RecSet; membership edges retain their own physical operators. */
 					(and bounded
 						(or (empty_list? order_items)
 							(not (empty_list? (source_primary_key_columns src)))))))
+				(define source_order_partitioning
+					(planner_source_order_partitioning src order_items))
 				(define membership_plans (filter (map memberships (lambda (membership)
 					(begin
 						(define plan (recset_project_join_plan_for_membership_using
@@ -3579,6 +3581,7 @@ RecSet; membership edges retain their own physical operators. */
 								alias raw_condition))
 								(count (expr_probe_stages raw_condition)))
 							(not row_number_membership_consumer)
+							source_order_partitioning
 							(quote single_source)))
 						(if (nil? plan) nil (list membership plan)))))
 					(lambda (entry) (not (nil? entry)))))
@@ -4145,7 +4148,18 @@ semantics and drops projection-only nullable lookups. */
 downstream lookup cannot multiply driver rows. This is a physical access-path
 candidate: logical join order remains unchanged, while the filtered lookup is
 projected back onto the ordered driver before scan_order applies Top-K. */
-(define ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition offset limit)
+(define planner_source_order_partitioning (lambda (src order_items)
+	(if (or (not (source_is_base_table? src)) (empty_list? order_items))
+		nil
+		(match (car order_items)
+			'(expr _direction) (begin
+				(define col (direct_column_name_for_alias src expr))
+				(if (nil? col) nil
+					(list col (table_order_partitioned?
+						(table (source_schema src) (source_relation src)) col))))
+			_ nil))))
+
+(define ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
 	(if (or (not (single_source? remaining_sources))
 		(or (source_outer? src) (source_outer? (car remaining_sources))))
 		nil
@@ -4200,6 +4214,7 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(list (quote membership_candidate_probe_branches) 1)
 						(list (quote membership_candidate_cache_backed) false)
 						(list (quote membership_driver_input_rows) driver_input_rows)
+						(list (quote membership_driver_rows) requested_rows)
 						(list (quote membership_driver_scan_invocations) 1)
 						(list (quote membership_driver_filter_columns) 0)
 						(list (quote membership_driver_map_columns) 0)
@@ -4208,10 +4223,15 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(list (quote membership_order_limit) (planner_literal_value limit))
 						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
+					(define order_partitioning (planner_source_order_partitioning src order_items))
+					(define cost_work (if (nil? order_partitioning) work
+						(cons (list (quote membership_driver_order_partitioned)
+							(cadr order_partitioning)) work)))
 					(define candidate_cost (membership_projection_cost
-						lookup_input_rows lookup_rows requested_rows work))
+						lookup_input_rows lookup_rows requested_rows cost_work))
 					(define driver_cost (membership_ordered_driver_probe_cost
-						lookup_input_rows lookup_rows requested_rows work))
+						lookup_input_rows lookup_rows requested_rows cost_work))
+					(define batch_cost (ordered_batch_accept_cost cost_work))
 					(define lookup_cols (extract_columns_for_alias lookup lookup_condition))
 					(define lookup_recset (list (quote scan_recset)
 						'(session "__memcp_tx")
@@ -4228,22 +4248,27 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(quoted_runtime_list (cadr edge_columns))))
 					(list carrier candidate_cost driver_cost lookup_rows
 						(membership_projected_driver_rows lookup_input_rows lookup_rows
-							driver_input_rows work)
-						lookup_condition lookup_estimate exact))))))))
+							driver_input_rows cost_work)
+						lookup_condition lookup_estimate exact batch_cost order_partitioning)))))))
 
-(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition offset limit)
+(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
 	(begin
 		(define candidate (ordered_join_projected_candidate
-			sources default_alias src remaining_sources condition offset limit))
+			sources default_alias src remaining_sources condition order_items offset limit))
 		(if (nil? candidate)
 			nil
 			(begin
 				(define decision_id (concat "ordered_join_carrier:"
 					(source_alias src) ":" (source_alias (car remaining_sources))))
-				(define normal_choice (if (planner_cost_better? (nth candidate 1) (nth candidate 2))
-					"projected_candidate_keyset" "ordered_postfilter"))
+				(define normal_choice (car (reduce (list
+					(list "ordered_postfilter" (nth candidate 2))
+					(list "ordered_batch_accept" (nth candidate 8)))
+					(lambda (best alternative)
+						(if (planner_cost_better? (cadr alternative) (cadr best))
+							alternative best))
+					(list "projected_candidate_keyset" (nth candidate 1)))))
 				(define chosen (planner_physical_choice decision_id normal_choice
-					(list "projected_candidate_keyset" "ordered_postfilter")))
+					(list "projected_candidate_keyset" "ordered_postfilter" "ordered_batch_accept")))
 				(define forced (planner_physical_override decision_id))
 				(define lookup (car remaining_sources))
 				(define lookup_input_rows (planner_source_row_count lookup))
@@ -4277,12 +4302,22 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(list "candidate_rows" (nth candidate 3))
 						(list "projected_driver_rows" (nth candidate 4))
 						(list "driver_input_rows" (planner_source_row_count src))
-						(list "carrier_exact" (nth candidate 7))))
+						(list "carrier_exact" (nth candidate 7))
+						(list "driver_order_partitioned" (if (nil? (nth candidate 9))
+							false (cadr (nth candidate 9))))))
 					(list "alternatives" (list
 						(list (list "plan" "projected_candidate_keyset")
 							(list "cost" (planner_cost_explain (nth candidate 1))))
 						(list (list "plan" "ordered_postfilter")
-							(list "cost" (planner_cost_explain (nth candidate 2))))))))
+							(list "cost" (planner_cost_explain (nth candidate 2))))
+						(list (list "plan" "ordered_batch_accept")
+							(list "cost" (planner_cost_explain (nth candidate 8))))))))
+				(if (nil? (nth candidate 9)) true
+					(planner_record_guard_condition (list (quote equal?)
+						(list (quote table_order_partitioned?)
+							(list (quote table) (source_schema src) (source_relation src))
+							(car (nth candidate 9)))
+						(cadr (nth candidate 9)))))
 				(if (equal? chosen "projected_candidate_keyset")
 					(list (car candidate) (nth candidate 7)) nil))))))
 
@@ -4351,7 +4386,7 @@ move the window to the wrong tree level. */
 /* Cost the established two-table carrier without constructing its RecSet AST.
 This keeps physical enumeration side-effect free until the outer cost decision
 has selected a lowerer. */
-(define ordered_join_projected_candidate_cost (lambda (sources default_alias src remaining_sources condition offset limit)
+(define ordered_join_projected_candidate_cost (lambda (sources default_alias src remaining_sources condition order_items offset limit)
 	(if (or (not (single_source? remaining_sources))
 		(or (source_outer? src) (source_outer? (car remaining_sources))))
 		nil
@@ -4391,6 +4426,7 @@ has selected a lowerer. */
 						(list (quote membership_candidate_probe_branches) 1)
 						(list (quote membership_candidate_cache_backed) false)
 						(list (quote membership_driver_input_rows) driver_input_rows)
+						(list (quote membership_driver_rows) requested_rows)
 						(list (quote membership_driver_scan_invocations) 1)
 						(list (quote membership_driver_filter_columns) 0)
 						(list (quote membership_driver_map_columns) 0)
@@ -4399,22 +4435,32 @@ has selected a lowerer. */
 						(list (quote membership_order_limit) (planner_literal_value limit))
 						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
+					(define order_partitioning (planner_source_order_partitioning src order_items))
+					(define cost_work (if (nil? order_partitioning) work
+						(cons (list (quote membership_driver_order_partitioned)
+							(cadr order_partitioning)) work)))
 					(define candidate_cost (membership_projection_cost
-						lookup_input_rows lookup_rows requested_rows work))
+						lookup_input_rows lookup_rows requested_rows cost_work))
 					(define driver_cost (membership_ordered_driver_probe_cost
-						lookup_input_rows lookup_rows requested_rows work))
+						lookup_input_rows lookup_rows requested_rows cost_work))
+					(define batch_cost (ordered_batch_accept_cost cost_work))
 					(define projected_rows (membership_projected_driver_rows
-						lookup_input_rows lookup_rows driver_input_rows work))
-					(define use_projected (planner_cost_better? candidate_cost driver_cost))
+						lookup_input_rows lookup_rows driver_input_rows cost_work))
 					/* Keep the probe cardinality aligned with the selected legacy carrier.
 					The projected candidate touches projected_rows driver records. The
 					ordered post-filter must instead visit enough driver rows to find the
 					requested hits; cross-table anti-correlation can make that the complete
 					driver even when the final join cardinality is tiny. */
 					(define ordered_visited_rows (membership_expected_driver_rows_visited
-						lookup_input_rows lookup_rows requested_rows work))
-					(list (if use_projected candidate_cost driver_cost)
-						(if use_projected projected_rows ordered_visited_rows))))))))
+						lookup_input_rows lookup_rows requested_rows cost_work))
+					(define best (reduce (list
+						(list batch_cost ordered_visited_rows)
+						(list driver_cost ordered_visited_rows))
+						(lambda (current alternative)
+							(if (planner_cost_better? (car alternative) (car current))
+								alternative current))
+						(list candidate_cost projected_rows)))
+					(list (car best) (cadr best))))))))
 
 /* Enumerate metadata only. No scan, RecSet, keytable or callback AST is built
 until the caller has selected this physical alternative. */
@@ -4494,16 +4540,6 @@ until the caller has selected this physical alternative. */
 		(define offset (coalesceNil (planner_literal_value offset_value) 0))
 		(define limit (coalesceNil (planner_literal_value limit_value) -1))
 		(define target (if (< limit 0) -1 (+ offset limit)))
-		(define projected_join_choice (if (and (>= target 0)
-			(downstream_sources_at_most_one_driver_row?
-				ordered_sources default_alias final_condition stages))
-			(choose_ordered_join_projected_candidate all_sources default_alias src
-				remaining_sources final_condition offset_value limit_value)
-			nil))
-		(define projected_join_carrier (if (nil? projected_join_choice)
-			nil (car projected_join_choice)))
-		(define projected_join_exact (if (nil? projected_join_choice)
-			false (cadr projected_join_choice)))
 		(define acceptance_probe_work_rows (coalesceNil
 			(probe_limit_work_rows limit_value)
 			(if (< target 0) nil target)))
@@ -4519,6 +4555,18 @@ until the caller has selected this physical alternative. */
 			ordered_sources default_alias src order_items stages final_condition '()))
 		(define driver_order_items (nth order_parts 0))
 		(define remaining_order_items (nth order_parts 1))
+		(define driver_order_partitioning
+			(planner_source_order_partitioning src driver_order_items))
+		(define projected_join_choice (if (and (>= target 0)
+			(downstream_sources_at_most_one_driver_row?
+				ordered_sources default_alias final_condition stages))
+			(choose_ordered_join_projected_candidate all_sources default_alias src
+				remaining_sources final_condition driver_order_items offset_value limit_value)
+			nil))
+		(define projected_join_carrier (if (nil? projected_join_choice)
+			nil (car projected_join_choice)))
+		(define projected_join_exact (if (nil? projected_join_choice)
+			false (cadr projected_join_choice)))
 		(define membership (driver_membership_for_source src raw_condition))
 		/* A RecSet batch represents driver membership, not join multiplicity. The
 		consumer is therefore available exactly when the remaining join tree is a
@@ -4542,7 +4590,9 @@ until the caller has selected this physical alternative. */
 				(+ (count (acceptance_required_sources
 					remaining_sources default_alias final_condition))
 					(count (expr_probe_stages final_condition)))
-				true (quote ordered_join_stream))))
+				true
+				driver_order_partitioning
+				(quote ordered_join_stream))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		/* A scalar truth carrier over the complete driver would defeat adaptive
@@ -4794,7 +4844,7 @@ until the caller has selected this physical alternative. */
 						sources default_alias final_condition stages)
 					(ordered_join_projected_candidate_cost
 						all_sources default_alias (car sources) (cdr sources)
-						final_condition offset_value limit_value)
+						final_condition order_items offset_value limit_value)
 					nil))
 				(define driver_input_rows (planner_source_row_count (car sources)))
 				(define logical_legacy_cost (if (nil? estimated_legacy_cost)
@@ -5386,6 +5436,8 @@ topology inequality by bounded binary search and guard that crossover. */
 			(query_limit_active? offset_value limit_value)))
 		(define row_number_membership_consumer
 			(membership_row_number_consumer? membership direct_order_limit))
+		(define current_order_partitioning
+			(planner_source_order_partitioning src current_order_items))
 		(define membership_plan (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
 			nil
 			(recset_project_join_plan_for_membership_using src membership
@@ -5404,7 +5456,9 @@ topology inequality by bounded binary search and guard that crossover. */
 					(count (merge_unique (list
 						(expr_probe_stages final_condition)
 						(physical_scalar_truth_plan_stages scalar_plan)))))
-				(not row_number_membership_consumer) (quote join_leaf))))
+				(not row_number_membership_consumer)
+				current_order_partitioning
+				(quote join_leaf))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		(define residual_probe_work_rows (membership_plan_residual_work_rows

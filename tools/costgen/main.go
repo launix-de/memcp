@@ -145,6 +145,7 @@ type calibrationRow struct {
 	CandidateDensity                 *float64 `json:"candidate_density"`
 	ProjectedDriverRows              *float64 `json:"projected_driver_rows"`
 	DriverInputRows                  *float64 `json:"driver_input_rows"`
+	DriverOrderPartitioned           bool     `json:"driver_order_partitioned"`
 	DriverRows                       *float64 `json:"driver_rows"`
 	PrefilteredDriverRows            *float64 `json:"prefiltered_driver_rows"`
 	ExpectedDriverRowsVisited        *float64 `json:"expected_driver_rows_visited"`
@@ -1257,6 +1258,11 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		projectionRows := *row.ProbeBranches *
 			(2**row.ExpectedDriverRowsVisited + candidateWorkRows + candidateMatchRows)
 		orderedDriverWork := batches * *row.DriverInputRows * *row.DriverInputRows / 1_000_000
+		if row.DriverOrderPartitioned {
+			// Range-partitioned ORDER BY windows visit a geometric series of
+			// disjoint shard prefixes, bounded by twice the final prefix.
+			orderedDriverWork = 2 * *row.ExpectedDriverRowsVisited
+		}
 		return []float64{
 			*row.DriverScanInvocations + batches**row.CandidateScanInvocations,
 			*row.ExpectedDriverRowsVisited + candidateWorkRows + projectionRows,

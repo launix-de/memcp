@@ -199,6 +199,52 @@ test_cases:
     sql: "SELECT i.id FROM so_perf_products p JOIN so_perf_images i ON i.product_unique_id = p.unique_id WHERE p.project_1 = 1 ORDER BY i.id LIMIT 1000 OFFSET 0"
     expect: {rows: 1000}
 
+  - name: "SO 73024688 exposes the costed partition-pruned batch carrier"
+    sql: "EXPLAIN PHYSICAL SELECT i.id FROM so_perf_products p JOIN so_perf_images i ON i.product_unique_id = p.unique_id WHERE p.project_1 = 1 ORDER BY i.id LIMIT 1000 OFFSET 0"
+    expect:
+      rows: 1
+      result_contains:
+        - "ordered_batch_accept"
+        - "driver_order_partitioned"
+        - "projected_candidate_keyset"
+        - "scan_join_order"
+
+  - name: "SO 73024688 handwritten partition-pruned batch carrier"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define images (table "memcp-tests" "so_perf_images"))
+        (define products (table "memcp-tests" "so_perf_products"))
+        (define selected_products
+          (scan_recset tx products '("project_1")
+            (lambda (project_1) (equal? project_1 1))))
+        (define product_lookup
+          (recset_key_index tx selected_products '("unique_id")))
+        (define found
+          (scan_order_batch_accept tx images
+            (lambda (input)
+              (scan_recset tx input '("product_unique_id")
+                (lambda (product_unique_id) (product_lookup product_unique_id))))
+            '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
+        (if (equal? found 1000) "ok" (error "wrong batch carrier row count")))
+
+  - name: "SO 73024688 handwritten complete projected carrier"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define images (table "memcp-tests" "so_perf_images"))
+        (define products (table "memcp-tests" "so_perf_products"))
+        (define selected_products
+          (scan_recset tx products '("project_1")
+            (lambda (project_1) (equal? project_1 1))))
+        (define selected_images
+          (recset_project_join tx selected_products '("unique_id")
+            images '("product_unique_id")))
+        (define found
+          (scan_order tx selected_images '() (lambda () true)
+            '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
+        (if (equal? found 1000) "ok" (error "wrong projected carrier row count")))
+
   - name: "SO 73024688 handwritten scan_join_order"
     scm: |
       (begin

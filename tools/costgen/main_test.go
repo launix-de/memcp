@@ -168,6 +168,15 @@ func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 	if features[15] != 4 {
 		t.Fatalf("ordered scan invocations = %v, want 4", features[15])
 	}
+	row.DriverOrderPartitioned = true
+	partitionedFeatures, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partitionedFeatures[12] != 200 {
+		t.Fatalf("partition-pruned ordered batch work = %v, want twice the 100-row prefix",
+			partitionedFeatures[12])
+	}
 }
 
 func TestRowFeaturesModelsDirectPresenceProbes(t *testing.T) {

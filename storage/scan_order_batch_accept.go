@@ -18,6 +18,7 @@ package storage
 
 import "fmt"
 import "sort"
+import "strings"
 import "github.com/launix-de/memcp/scm"
 
 type orderedBatchRecord struct {
@@ -36,6 +37,10 @@ type orderedBatchPart struct {
 // scanOrderBatchAccept. The ordered record vector remains authoritative because
 // a RecSet itself deliberately carries membership, not order.
 func collectOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpec, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int) ([]orderedBatchRecord, *recSet) {
+	if records, batch, ok := collectPartitionOrderedCandidateBatch(
+		currentTx, source, sortcols, sortdirs, offset, limit); ok {
+		return records, batch
+	}
 	table := source.backingTable()
 	parts := make(map[*storageShard]*orderedBatchPart)
 	partOrder := make([]*orderedBatchPart, 0)
@@ -76,6 +81,112 @@ func collectOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpe
 		batch.shards = append(batch.shards, shardPart)
 	}
 	return records, batch
+}
+
+// collectPartitionOrderedCandidateBatch exploits a one-dimensional range
+// partition on the leading ORDER BY column. Those shards are disjoint ordered
+// runs, so OFFSET/LIMIT can stop after the last contributing shard instead of
+// starting every shard merely to discover the global Top-K. The generic merge
+// remains the fallback for free shards, RecSets, computed orders and
+// multi-dimensional partitioning.
+func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpec, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int) ([]orderedBatchRecord, *recSet, bool) {
+	if source.recset != nil || source.table == nil || limit <= 0 || len(sortcols) == 0 || len(sortdirs) == 0 || !sortcols[0].IsString() {
+		return nil, nil, false
+	}
+	orderMeta := orderRelationMeta(sortdirs[0])
+	descending := strings.HasSuffix(orderMeta, ":desc")
+	ascending := strings.HasSuffix(orderMeta, ":asc")
+	if !ascending && !descending {
+		relationID := scm.FunctionIdentity(sortdirs[0])
+		ascending = relationID == scm.FunctionIdentity(scm.OptimizeProcToSerialFunction(
+			scm.Eval(scm.NewSymbol("<"), &scm.Globalenv)))
+		descending = relationID == scm.FunctionIdentity(scm.OptimizeProcToSerialFunction(
+			scm.Eval(scm.NewSymbol(">"), &scm.Globalenv)))
+		if !ascending && !descending {
+			return nil, nil, false
+		}
+	}
+
+	table := source.table
+	for {
+		topology := table.activeTopology()
+		if topology.mode != ShardModePartition || len(topology.dimensions) != 1 ||
+			topology.dimensions[0].Column != sortcols[0].String() ||
+			len(topology.shards) != topology.dimensions[0].NumPartitions {
+			return nil, nil, false
+		}
+		if !topology.acquireOperation() {
+			continue
+		}
+		if table.topology.Load() != topology {
+			topology.releaseOperation()
+			continue
+		}
+
+		var records []orderedBatchRecord
+		var partOrder []*orderedBatchPart
+		func() {
+			defer topology.releaseOperation()
+			records = make([]orderedBatchRecord, 0, limit)
+			partOrder = make([]*orderedBatchPart, 0)
+			remainingOffset := offset
+			bounds, _ := extendBoundariesWithSortCols(nil, sortcols, sortdirs)
+			lower, upperLast := indexFromBoundaries(bounds)
+			condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+			sessionState := SessionStateFromTx(currentTx)
+			querySeq := querySeqFromTx(currentTx)
+			visit := func(shard *storageShard) {
+				if shard == nil || len(records) >= limit {
+					return
+				}
+				if sessionState != nil && sessionState.IsKilledSeq(querySeq) {
+					panic("query killed")
+				}
+				shard.activeScanners.Add(1)
+				release := shard.acquireReadForScan(currentTx)
+				queue := func() *shardqueue {
+					defer release()
+					defer shard.activeScanners.Add(-1)
+					return shard.scan_order(bounds, lower, upperLast, nil, condition,
+						nil, scm.NewNil(), sortcols, sortdirs, 0, remainingOffset,
+						limit-len(records), nil, currentTx, sessionState)
+				}()
+				if remainingOffset >= len(queue.items) {
+					remainingOffset -= len(queue.items)
+					return
+				}
+				items := queue.items[remainingOffset:]
+				remainingOffset = 0
+				if available := limit - len(records); len(items) > available {
+					items = items[:available]
+				}
+				part := &orderedBatchPart{shard: shard, universe: queue.universe,
+					recids: append([]uint32(nil), items...)}
+				partOrder = append(partOrder, part)
+				for _, recid := range items {
+					records = append(records, orderedBatchRecord{shard: shard, recid: recid})
+				}
+			}
+			if descending {
+				for i := len(topology.shards) - 1; i >= 0 && len(records) < limit; i-- {
+					visit(topology.shards[i])
+				}
+			} else {
+				for i := 0; i < len(topology.shards) && len(records) < limit; i++ {
+					visit(topology.shards[i])
+				}
+			}
+		}()
+
+		batch := &recSet{tx: currentTx, table: table, shards: make([]recSetShard, 0, len(partOrder))}
+		for _, part := range partOrder {
+			sort.Slice(part.recids, func(i, j int) bool { return part.recids[i] < part.recids[j] })
+			shardPart := newRecSetShardFromSortedIDs(part.shard, part.universe, part.recids)
+			batch.count += shardPart.count
+			batch.shards = append(batch.shards, shardPart)
+		}
+		return records, batch, true
+	}
 }
 
 func validateAcceptedBatch(currentTx *TxContext, batch *recSet, acceptedValue scm.Scmer) *recSet {
