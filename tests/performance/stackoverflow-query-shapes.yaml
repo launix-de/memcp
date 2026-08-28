@@ -1,0 +1,335 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Reproducible performance workload derived from public Stack Overflow query
+# shapes. It deliberately keeps the engine's default shard size; `(rebuild)`
+# owns automatic partitioning exactly as it does in production.
+
+metadata:
+  version: "1.0"
+  description: "PostgreSQL, MySQL, and MariaDB Stack Overflow query shapes"
+  isolated: true
+  ci: false
+  max_time: 180
+
+setup:
+  # https://stackoverflow.com/questions/50367835/postgresql-slow-query-with-limit-and-order-by
+  - sql: "CREATE TABLE so_perf_plots (id INT PRIMARY KEY, fk_id VARCHAR(36), created_at BIGINT) ENGINE=memory"
+  # https://stackoverflow.com/questions/6037843/extremely-slow-postgresql-query-with-order-and-limit-clauses
+  - sql: "CREATE TABLE so_perf_bars (id INT PRIMARY KEY, baz_id INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_foos (id INT PRIMARY KEY, bar_id INT) ENGINE=memory"
+  # https://stackoverflow.com/questions/73024688/mariadb-query-is-slow-with-order-by
+  - sql: "CREATE TABLE so_perf_products (id INT PRIMARY KEY, unique_id VARCHAR(32) UNIQUE, project_1 INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_images (id INT PRIMARY KEY, product_unique_id VARCHAR(32)) ENGINE=memory"
+  # https://stackoverflow.com/questions/79837534/slow-mariadb-query-on-11-million-row-table-despite-indexes
+  - sql: "CREATE TABLE so_perf_accounts (id INT PRIMARY KEY, project_id INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_transactions (id INT PRIMARY KEY, account_id INT, amount DECIMAL(10,2), created_at BIGINT) ENGINE=memory"
+  # https://stackoverflow.com/questions/79571812/mysql-query-performance-on-20-million-records
+  - sql: "CREATE TABLE so_perf_search (id INT PRIMARY KEY, body VARCHAR(128), updated_at BIGINT) ENGINE=memory"
+  # https://stackoverflow.com/questions/79644544/postgresql-min-on-view-is-much-slower-than-order-by-limit-1
+  - sql: "CREATE TABLE so_perf_a (apk INT PRIMARY KEY) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_b (bpk INT PRIMARY KEY, ak INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_c (bk INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_d (bk INT) ENGINE=memory"
+  - sql: "CREATE VIEW so_perf_join_view AS SELECT a.apk AS ak, b.bpk AS bk FROM so_perf_a a JOIN so_perf_b b ON b.ak = a.apk JOIN so_perf_c c ON c.bk = b.bpk JOIN so_perf_d d ON d.bk = b.bpk"
+  # https://stackoverflow.com/questions/79550978/slow-postgresql-query-with-order-by-and-limit-on-timescaledb
+  - sql: "CREATE TABLE so_perf_nodes (id INT PRIMARY KEY, serial VARCHAR(32)) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_sensors (id INT PRIMARY KEY, type VARCHAR(16)) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_measures (id INT PRIMARY KEY, node_id INT, sensor_id INT, ts BIGINT, val INT) ENGINE=memory"
+  # https://stackoverflow.com/questions/77990392/mariadb-not-in-subquery-with-union-is-very-slow
+  - sql: "CREATE TABLE so_perf_t1 (pid INT PRIMARY KEY, otherpid INT, col1 INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_t2 (pid INT) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_t3 (pid INT) ENGINE=memory"
+  # https://stackoverflow.com/questions/79828237/postgresql-query-performance-with-three-large-tables-distinct-and-pagination
+  - sql: "CREATE TABLE so_perf_players (player_id INT PRIMARY KEY, business_name VARCHAR(32), first_name VARCHAR(32), last_name VARCHAR(32)) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_performance (player_id INT, hashed_player_id VARCHAR(32), fps_score INT, year INT, UNIQUE(year, player_id, hashed_player_id)) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_org_players (org_id INT, player_id INT) ENGINE=memory"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "so_perf_plots") '("id" "fk_id" "created_at")
+          (map (produceN 120000) (lambda (i)
+            (list (+ i 1) (if (>= i 119900) "target" "noise") i))))
+        (insert (table "memcp-tests" "so_perf_bars") '("id" "baz_id")
+          (map (produceN 8192) (lambda (i)
+            (list (+ i 1) (if (< i 16) 13266 (+ i 20000))))))
+        (insert (table "memcp-tests" "so_perf_foos") '("id" "bar_id")
+          (map (produceN 120000) (lambda (i)
+            (list (+ i 1) (if (< i 160) (+ 1 (floor (/ i 10))) 17)))))
+        (insert (table "memcp-tests" "so_perf_products") '("id" "unique_id" "project_1")
+          (map (produceN 20000) (lambda (i)
+            (list (+ i 1) (concat "product-" (string (+ i 1)))
+              (if (>= i 19000) 1 0)))))
+        (insert (table "memcp-tests" "so_perf_images") '("id" "product_unique_id")
+          (map (produceN 120000) (lambda (i)
+            (list (+ i 1) (concat "product-" (string (+ 1 (mod i 20000))))))))
+        (insert (table "memcp-tests" "so_perf_accounts") '("id" "project_id")
+          (map (produceN 5000) (lambda (i)
+            (list (+ i 1) (if (< i 50) 7 8)))))
+        (insert (table "memcp-tests" "so_perf_transactions") '("id" "account_id" "amount" "created_at")
+          (map (produceN 120000) (lambda (i)
+            (list (+ i 1) (+ 1 (mod i 5000)) 1.25 i))))
+        (insert (table "memcp-tests" "so_perf_search") '("id" "body" "updated_at")
+          (map (produceN 120000) (lambda (i)
+            (list (+ i 1) (if (equal? (mod i 1000) 0)
+              "prefix-key_middle-suffix" "unrelated text") i))))
+        (insert (table "memcp-tests" "so_perf_a") '("apk")
+          (map (produceN 10000) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "so_perf_b") '("bpk" "ak")
+          (map (produceN 30000) (lambda (i)
+            (list (+ i 1) (+ 1 (mod i 10000))))))
+        (insert (table "memcp-tests" "so_perf_c") '("bk")
+          (map (produceN 30000) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "so_perf_d") '("bk")
+          (map (produceN 30000) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "so_perf_nodes") '("id" "serial")
+          (map (produceN 10) (lambda (i)
+            (list (+ i 1) (if (equal? i 0) "TEST0000003" (concat "node-" i))))))
+        (insert (table "memcp-tests" "so_perf_sensors") '("id" "type")
+          (map (produceN 100) (lambda (i)
+            (list (+ i 1) (if (equal? i 99) "ca1" "other")))))
+        (insert (table "memcp-tests" "so_perf_measures") '("id" "node_id" "sensor_id" "ts" "val")
+          (map (produceN 120000) (lambda (i)
+            (list (+ i 1) 1 (+ 1 (mod i 99)) i (mod i 1000)))))
+        (insert (table "memcp-tests" "so_perf_t1") '("pid" "otherpid" "col1")
+          (map (produceN 120000) (lambda (i) (list (+ i 1) nil (+ i 1)))))
+        (insert (table "memcp-tests" "so_perf_t2") '("pid")
+          (map (produceN 30000) (lambda (i) (list (+ i 1)))))
+        (insert (table "memcp-tests" "so_perf_t3") '("pid")
+          (map (produceN 30000) (lambda (i) (list (+ i 30001)))))
+        (insert (table "memcp-tests" "so_perf_players") '("player_id" "business_name" "first_name" "last_name")
+          (map (produceN 10000) (lambda (i)
+            (list (+ i 1) (concat "business-" i) (concat "first-" i) (concat "last-" i)))))
+        (insert (table "memcp-tests" "so_perf_performance") '("player_id" "hashed_player_id" "fps_score" "year")
+          (map (produceN 70000) (lambda (i)
+            (list (+ 1 (mod i 10000)) (concat "hash-" (string (+ 1 (mod i 10000))))
+              (mod i 100) (+ 2007 (* 3 (floor (/ i 10000))))))))
+        (insert (table "memcp-tests" "so_perf_org_players") '("org_id" "player_id")
+          (map (produceN 10000) (lambda (i)
+            (list (if (< i 6000) 1 99) (+ i 1)))))
+        (rebuild)
+        true)
+
+test_cases:
+  - name: "SO 50367835 filtered latest row"
+    threshold_ms: 180000
+    sql: "SELECT id FROM so_perf_plots WHERE fk_id = 'target' ORDER BY created_at DESC LIMIT 1"
+    expect: {rows: 1, data: [{id: 120000}]}
+
+  - name: "SO 6037843 selective ordered join"
+    threshold_ms: 180000
+    sql: "SELECT f.id, f.bar_id FROM so_perf_foos f JOIN so_perf_bars b ON f.bar_id = b.id WHERE b.baz_id = 13266 ORDER BY f.id DESC LIMIT 5"
+    expect: {rows: 5}
+
+  - name: "SO 6037843 exposes costed carrier alternatives"
+    sql: "EXPLAIN PHYSICAL SELECT f.id FROM so_perf_foos f JOIN so_perf_bars b ON f.bar_id = b.id WHERE b.baz_id = 13266 ORDER BY f.id DESC LIMIT 5"
+    expect:
+      rows: 1
+      result_contains: ["ordered_join_carrier", "projected_candidate_keyset", "ordered_postfilter"]
+
+  - name: "SO 73024688 string FK ordered join"
+    threshold_ms: 180000
+    sql: "SELECT i.id FROM so_perf_products p JOIN so_perf_images i ON i.product_unique_id = p.unique_id WHERE p.project_1 = 1 ORDER BY i.id LIMIT 1000 OFFSET 0"
+    expect: {rows: 1000}
+
+  - name: "SO 79837534 selective joined SUM"
+    threshold_ms: 180000
+    sql: "SELECT SUM(t.amount) AS total FROM so_perf_transactions t LEFT JOIN so_perf_accounts a ON t.account_id = a.id WHERE t.created_at >= 100000 AND a.project_id = 7"
+    expect: {rows: 1, data: [{total: 250}]}
+
+  - name: "SO 79837534 handwritten projected aggregate carrier"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define accounts (table "memcp-tests" "so_perf_accounts"))
+        (define transactions (table "memcp-tests" "so_perf_transactions"))
+        (define selected_accounts
+          (scan_recset tx accounts '("project_id")
+            (lambda (project_id) (equal? project_id 7))))
+        (define selected_transactions
+          (recset_project_join tx selected_accounts '("id") transactions '("account_id")))
+        (define total
+          (scan tx selected_transactions '("created_at")
+            (lambda (created_at) (>= created_at 100000))
+            '("amount") (lambda (amount) amount) + 0))
+        (if (equal? total 250) "ok" (error "wrong projected SUM result")))
+
+  - name: "SO 79571812 LIKE contains scan"
+    threshold_ms: 180000
+    sql: "SELECT COUNT(*) AS n FROM so_perf_search WHERE body LIKE '%key_middle%'"
+    expect: {rows: 1, data: [{n: 120}]}
+
+  - name: "SO 79571812 MATCH compatibility scan"
+    threshold_ms: 180000
+    sql: "SELECT COUNT(*) AS n FROM so_perf_search WHERE MATCH(body) AGAINST ('key_middle')"
+    expect: {rows: 1, data: [{n: 120}]}
+
+  - name: "SO 79644544 MIN over four-table view"
+    threshold_ms: 180000
+    sql: "SELECT MIN(ak) AS min_ak FROM so_perf_join_view"
+    expect: {rows: 1, data: [{min_ak: 1}]}
+
+  - name: "SO 79644544 ordered equivalent"
+    threshold_ms: 180000
+    sql: "SELECT ak FROM so_perf_join_view ORDER BY ak LIMIT 1"
+    expect: {rows: 1, data: [{ak: 1}]}
+
+  - name: "SO 79644544 handwritten ordered batch join carrier"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define a (table "memcp-tests" "so_perf_a"))
+        (define b (table "memcp-tests" "so_perf_b"))
+        (define c (table "memcp-tests" "so_perf_c"))
+        (define d (table "memcp-tests" "so_perf_d"))
+        (define minimum
+          (scan_order_batch_accept tx a
+            (lambda (a_batch)
+              (begin
+                (define b_batch
+                  (recset_project_join tx a_batch '("apk") b '("ak")))
+                (define c_batch
+                  (recset_project_join tx b_batch '("bpk") c '("bk")))
+                (define d_batch
+                  (recset_project_join tx b_batch '("bpk") d '("bk")))
+                (define b_from_c
+                  (recset_project_join tx c_batch '("bk") b '("bpk")))
+                (define b_from_d
+                  (recset_project_join tx d_batch '("bk") b '("bpk")))
+                (define valid_b
+                  (recset_intersect (list b_batch b_from_c b_from_d)))
+                (define valid_a
+                  (recset_project_join tx valid_b '("ak") a '("apk")))
+                (recset_intersect (list a_batch valid_a))))
+            '("apk") '(<) 0 0 1 '("apk")
+            (lambda (apk) apk) (lambda (_acc value) value) nil false))
+        (if (equal? minimum 1) "ok" (error "wrong ordered batch MIN result")))
+
+  - name: "SO 79550978 missing latest sensor value"
+    threshold_ms: 180000
+    sql: "SELECT m.ts, s.type, m.val FROM so_perf_measures m JOIN so_perf_nodes n ON m.node_id = n.id JOIN so_perf_sensors s ON m.sensor_id = s.id WHERE n.serial = 'TEST0000003' AND s.type IN ('ca1') AND m.ts BETWEEN 0 AND 120000 ORDER BY m.ts DESC LIMIT 4"
+    expect: {rows: 0, data: []}
+
+  - name: "SO 79550978 handwritten intersected join carriers"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define nodes (table "memcp-tests" "so_perf_nodes"))
+        (define sensors (table "memcp-tests" "so_perf_sensors"))
+        (define measures (table "memcp-tests" "so_perf_measures"))
+        (define selected_nodes
+          (scan_recset tx nodes '("serial")
+            (lambda (serial) (equal? serial "TEST0000003"))))
+        (define selected_sensors
+          (scan_recset tx sensors '("type")
+            (lambda (type) (equal? type "ca1"))))
+        (define node_measures
+          (recset_project_join tx selected_nodes '("id") measures '("node_id")))
+        (define sensor_measures
+          (recset_project_join tx selected_sensors '("id") measures '("sensor_id")))
+        (define time_measures
+          (scan_recset tx measures '("ts")
+            (lambda (ts) (and (>= ts 0) (<= ts 120000)))))
+        (define selected
+          (recset_intersect (list node_measures sensor_measures time_measures)))
+        (define rows
+          (scan_order tx selected '() (lambda () true) '("ts") '(>) 0 0 4
+            '("ts" "sensor_id" "val")
+            (lambda (ts sensor_id val) (list ts sensor_id val))
+            (lambda (acc row) (cons row acc)) '() false))
+        (if (empty_list? rows) "ok" (error "missing sensor returned rows")))
+
+  - name: "SO 77990392 original NOT IN UNION"
+    threshold_ms: 180000
+    sql: "SELECT col1 FROM so_perf_t1 WHERE pid NOT IN (SELECT pid FROM so_perf_t2 WHERE pid IS NOT NULL UNION SELECT pid FROM so_perf_t3 WHERE pid IS NOT NULL UNION SELECT otherpid AS pid FROM so_perf_t1 WHERE otherpid IS NOT NULL)"
+    expect: {rows: 60000}
+
+  - name: "SO 77990392 split NOT IN workaround from question"
+    threshold_ms: 180000
+    sql: "SELECT col1 FROM so_perf_t1 WHERE pid NOT IN (SELECT pid FROM so_perf_t2 WHERE pid IS NOT NULL UNION SELECT pid FROM so_perf_t3 WHERE pid IS NOT NULL) AND pid NOT IN (SELECT otherpid AS pid FROM so_perf_t1 WHERE otherpid IS NOT NULL)"
+    expect: {rows: 60000}
+
+  - name: "SO 77990392 handwritten anti-membership difference"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define t1 (table "memcp-tests" "so_perf_t1"))
+        (define t2 (table "memcp-tests" "so_perf_t2"))
+        (define t3 (table "memcp-tests" "so_perf_t3"))
+        (define all_t1 (scan_recset tx t1 '() (lambda () true)))
+        (define nonnull_t2
+          (scan_recset tx t2 '("pid") (lambda (pid) (not (nil? pid)))))
+        (define nonnull_t3
+          (scan_recset tx t3 '("pid") (lambda (pid) (not (nil? pid)))))
+        (define other_t1
+          (scan_recset tx t1 '("otherpid")
+            (lambda (otherpid) (not (nil? otherpid)))))
+        (define excluded2
+          (recset_project_join tx nonnull_t2 '("pid") t1 '("pid")))
+        (define excluded3
+          (recset_project_join tx nonnull_t3 '("pid") t1 '("pid")))
+        (define excluded1
+          (recset_project_join tx other_t1 '("otherpid") t1 '("pid")))
+        (define excluded
+          (recset_union (list excluded2 excluded3 excluded1)))
+        (define allowed (recset_difference (list all_t1 excluded)))
+        (define row_count
+          (scan tx allowed '() (lambda () true) '() (lambda () 1) + 0))
+        (if (equal? row_count 60000) "ok" (error "wrong anti-membership result")))
+
+  - name: "SO 79828237 DISTINCT cursor join"
+    threshold_ms: 180000
+    sql: "SELECT DISTINCT p.business_name, pf.fps_score, pf.hashed_player_id, p.first_name, p.last_name FROM so_perf_performance pf JOIN so_perf_players p ON pf.player_id = p.player_id JOIN so_perf_org_players op ON pf.player_id = op.player_id WHERE pf.year = 2019 AND op.org_id IN (1) ORDER BY pf.hashed_player_id LIMIT 5000"
+    expect: {rows: 5000}
+
+  - name: "SO 79828237 handwritten DISTINCT semijoin carrier"
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define org_players (table "memcp-tests" "so_perf_org_players"))
+        (define performance (table "memcp-tests" "so_perf_performance"))
+        (define players (table "memcp-tests" "so_perf_players"))
+        (define selected_org
+          (scan_recset tx org_players '("org_id")
+            (lambda (org_id) (equal? org_id 1))))
+        (define selected_performance
+          (recset_project_join tx selected_org '("player_id") performance '("player_id")))
+        (define year_performance
+          (scan_recset tx selected_performance '("year")
+            (lambda (year) (equal? year 2019))))
+        (define row_count
+          (scan_order tx year_performance '() (lambda () true)
+            '("hashed_player_id") '(<) 0 0 5000
+            '("player_id" "fps_score" "hashed_player_id")
+            (lambda (player_id fps_score hashed_player_id)
+              (scan tx players '("player_id")
+                (lambda (id) (equal? id (outer player_id)))
+                '("business_name" "first_name" "last_name")
+                (lambda (business_name first_name last_name)
+                  (list business_name (outer fps_score) (outer hashed_player_id)
+                    first_name last_name))
+                (lambda (_old row) row) nil nil false))
+            (lambda (acc row) (if (nil? row) acc (+ acc 1))) 0 false))
+        (if (equal? row_count 5000) "ok" (error "wrong DISTINCT semijoin result")))
+
+cleanup:
+  - sql: "DROP VIEW IF EXISTS so_perf_join_view"
+  - sql: "DROP TABLE IF EXISTS so_perf_plots"
+  - sql: "DROP TABLE IF EXISTS so_perf_bars"
+  - sql: "DROP TABLE IF EXISTS so_perf_foos"
+  - sql: "DROP TABLE IF EXISTS so_perf_products"
+  - sql: "DROP TABLE IF EXISTS so_perf_images"
+  - sql: "DROP TABLE IF EXISTS so_perf_accounts"
+  - sql: "DROP TABLE IF EXISTS so_perf_transactions"
+  - sql: "DROP TABLE IF EXISTS so_perf_search"
+  - sql: "DROP TABLE IF EXISTS so_perf_a"
+  - sql: "DROP TABLE IF EXISTS so_perf_b"
+  - sql: "DROP TABLE IF EXISTS so_perf_c"
+  - sql: "DROP TABLE IF EXISTS so_perf_d"
+  - sql: "DROP TABLE IF EXISTS so_perf_nodes"
+  - sql: "DROP TABLE IF EXISTS so_perf_sensors"
+  - sql: "DROP TABLE IF EXISTS so_perf_measures"
+  - sql: "DROP TABLE IF EXISTS so_perf_t1"
+  - sql: "DROP TABLE IF EXISTS so_perf_t2"
+  - sql: "DROP TABLE IF EXISTS so_perf_t3"
+  - sql: "DROP TABLE IF EXISTS so_perf_players"
+  - sql: "DROP TABLE IF EXISTS so_perf_performance"
+  - sql: "DROP TABLE IF EXISTS so_perf_org_players"
