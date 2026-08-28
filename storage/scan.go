@@ -441,6 +441,47 @@ const (
 	uniquePointScanBufferSize = 8
 )
 
+type fullScanIDBuffer struct {
+	values [defaultScanBufferSize]uint32
+}
+
+type pointScanIDBuffer struct {
+	values [uniquePointScanBufferSize]uint32
+}
+
+// The index iterator callback makes a dynamically sized []uint32 escape even
+// though it is consumed before scan returns. Reuse the two calibrated batch
+// sizes instead of paying for a heap allocation on every scan. sync.Pool keeps
+// concurrent scans independent and permits the runtime to discard idle memory.
+var fullScanIDBufferPool = sync.Pool{
+	New: func() any { return new(fullScanIDBuffer) },
+}
+
+var pointScanIDBufferPool = sync.Pool{
+	New: func() any { return new(pointScanIDBuffer) },
+}
+
+func acquireScanIDBuffer(size int) ([]uint32, *fullScanIDBuffer, *pointScanIDBuffer) {
+	if size == defaultScanBufferSize {
+		buffer := fullScanIDBufferPool.Get().(*fullScanIDBuffer)
+		return buffer.values[:], buffer, nil
+	}
+	if size == uniquePointScanBufferSize {
+		buffer := pointScanIDBufferPool.Get().(*pointScanIDBuffer)
+		return buffer.values[:], nil, buffer
+	}
+	return make([]uint32, size), nil, nil
+}
+
+func releaseScanIDBuffer(full *fullScanIDBuffer, point *pointScanIDBuffer) {
+	if full != nil {
+		fullScanIDBufferPool.Put(full)
+	}
+	if point != nil {
+		pointScanIDBufferPool.Put(point)
+	}
+}
+
 // scanBufferSize keeps full scans batched while avoiding a 4 KiB allocation
 // for the common join case where an exact unique key can yield at most one
 // currently visible row. A few slots remain for stale index entries left by
@@ -1043,7 +1084,8 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	}
 
 	// filter phase: iterateIndex fills the reusable buffer, callback filters in-place and flushes to MapReducer
-	buf := make([]uint32, t.t.scanBufferSize(boundaries))
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(t.t.scanBufferSize(boundaries))
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	hadValue := false
 
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
