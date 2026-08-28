@@ -20,6 +20,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+import os
+import signal
 import sys
 import tempfile
 import threading
@@ -45,11 +47,13 @@ from run_sql_tests import (  # noqa: E402
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
+    request_shared_supervisor_restart,
     resolve_timing_samples,
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
     suite_execution_mode,
 )
+from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
@@ -197,6 +201,25 @@ class InterruptedRequestContractTest(unittest.TestCase):
         self.assertFalse(runner.execute_sql.call_args.kwargs["retry_on_connection_failure"])
         restart.assert_called_once_with()
 
+    def test_connect_only_shutdown_waits_for_the_shared_supervisor(self) -> None:
+        runner = SQLTestRunner("http://localhost:23456")
+        runner.ensure_database = lambda _database: None
+        runner.execute_sql = mock.Mock(return_value=None)
+
+        with mock.patch("run_sql_tests.wait_for_sql_ready", return_value=True) as wait:
+            self.assertTrue(runner.run_test_case({
+                "name": "shared restart",
+                "sql": "SHUTDOWN",
+            }, "memcp-tests"))
+
+        wait.assert_called_once_with(
+            "http://localhost:23456",
+            "root",
+            "admin",
+            "memcp-tests",
+            timeout=10,
+        )
+
 
 class AtomicJSONObserverContractTest(unittest.TestCase):
     def test_accepts_complete_atomic_replacements(self) -> None:
@@ -284,7 +307,50 @@ class FailFastParallelContractTest(unittest.TestCase):
 
 
 class SuiteIsolationContractTest(unittest.TestCase):
-    def test_isolated_restart_suite_owns_a_managed_server(self) -> None:
+    def test_exclusive_suites_may_share_fixture_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("first", "second"):
+                (root / f"{name}.yaml").write_text(
+                    "metadata:\n"
+                    "  isolated: true\n"
+                    "test_cases:\n"
+                    "  - name: reset shared diagnostics\n"
+                    "    sql: TRUNCATE TABLE shared_diagnostics\n",
+                    encoding="utf-8",
+                )
+            self.assertEqual(mutable_table_collisions(root), {})
+
+    def test_parallel_suites_may_not_share_fixture_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("first", "second"):
+                (root / f"{name}.yaml").write_text(
+                    "metadata:\n"
+                    "  description: parallel fixture contract\n"
+                    "test_cases:\n"
+                    "  - name: create fixture\n"
+                    "    sql: CREATE TABLE duplicate_fixture (id INT)\n",
+                    encoding="utf-8",
+                )
+            self.assertEqual(
+                set(mutable_table_collisions(root)),
+                {"duplicate_fixture"},
+            )
+
+    def test_shared_restart_request_targets_only_the_declared_supervisor(self) -> None:
+        with mock.patch.dict(os.environ, {"MEMCP_TEST_SUPERVISOR_PID": "12345"}):
+            with mock.patch("run_sql_tests.os.kill") as kill:
+                self.assertTrue(request_shared_supervisor_restart())
+        kill.assert_called_once_with(12345, signal.SIGUSR1)
+
+    def test_shared_restart_request_is_disabled_without_a_supervisor(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch("run_sql_tests.os.kill") as kill:
+                self.assertFalse(request_shared_supervisor_restart())
+        kill.assert_not_called()
+
+    def test_isolated_restart_suite_is_exclusive_on_the_shared_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             spec = Path(tmp) / "restart.yaml"
             spec.write_text(
@@ -295,9 +361,9 @@ class SuiteIsolationContractTest(unittest.TestCase):
                 "    sql: SHUTDOWN\n",
                 encoding="utf-8",
             )
-            self.assertEqual(suite_execution_mode(str(spec)), "managed_subprocess")
+            self.assertEqual(suite_execution_mode(str(spec)), "exclusive")
 
-    def test_shared_restart_suite_keeps_the_direct_managed_server(self) -> None:
+    def test_restart_suite_is_exclusive_on_the_shared_server(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             spec = Path(tmp) / "restart.yaml"
             spec.write_text(
@@ -306,21 +372,37 @@ class SuiteIsolationContractTest(unittest.TestCase):
                 "    sql: SHUTDOWN\n",
                 encoding="utf-8",
             )
-            self.assertEqual(suite_execution_mode(str(spec)), "direct")
+            self.assertEqual(suite_execution_mode(str(spec)), "exclusive")
 
-    def test_precommit_hook_delegates_managed_restart_suites_to_the_runner(self) -> None:
+    def test_plain_isolated_suite_is_exclusive_on_the_shared_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "isolated.yaml"
+            spec.write_text(
+                "metadata:\n"
+                "  isolated: true\n"
+                "test_cases:\n"
+                "  - name: select\n"
+                "    sql: SELECT 1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(suite_execution_mode(str(spec)), "exclusive")
+
+    def test_precommit_hook_never_allocates_suite_local_data_directories(self) -> None:
         hook = (Path(__file__).resolve().parents[1] / "git-pre-commit").read_text(
             encoding="utf-8",
         )
-        self.assertIn('if [ "$mode" = "managed_subprocess" ]; then', hook)
-        self.assertIn(
-            'python3 -u run_sql_tests.py "$tf" "${runner_args[@]}"',
-            hook,
-        )
+        self.assertNotIn("managed_subprocess", hook)
+        self.assertNotIn("managed_data_dir", hook)
         self.assertIn(
             'python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}"',
             hook,
         )
+
+    def test_precommit_hook_runs_safe_suites_in_parallel_by_default(self) -> None:
+        hook = (Path(__file__).resolve().parents[1] / "git-pre-commit").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn('fail_fast_mode="${MEMCP_FAIL_FAST:-0}"', hook)
 
 if __name__ == "__main__":
     unittest.main()

@@ -63,6 +63,7 @@ import random
 import tempfile
 import ctypes
 import select
+import signal
 import struct
 from pathlib import Path
 from base64 import b64encode
@@ -1152,9 +1153,22 @@ class SQLTestRunner:
                     if not self._restart_handler():
                         return self._record_fail(name, "Restart failed after SHUTDOWN", query, None, None, is_noncritical)
                 else:
-                    # No restart handler (--connect-only): wait until SQL endpoint is actually ready again.
+                    # In connect-only mode the shared test supervisor owns the
+                    # process. Give graceful finalization a bounded window,
+                    # then ask that supervisor to terminate a stuck old process
+                    # and restart the same data directory.
                     restart_timeout = int(test_case.get("restart_timeout", 120))
-                    if not wait_for_sql_ready(self.base_url, tc_user, tc_pass, database, timeout=restart_timeout):
+                    grace_timeout = min(10, restart_timeout)
+                    ready = wait_for_sql_ready(
+                        self.base_url, tc_user, tc_pass, database,
+                        timeout=grace_timeout,
+                    )
+                    if not ready and request_shared_supervisor_restart():
+                        ready = wait_for_sql_ready(
+                            self.base_url, tc_user, tc_pass, database,
+                            timeout=max(1, restart_timeout - grace_timeout),
+                        )
+                    if not ready:
                         return self._record_fail(name, "Restart timeout: SQL not ready after SHUTDOWN", query, None, None, is_noncritical)
                 self._record_success(name, is_noncritical)
                 return True
@@ -1672,6 +1686,22 @@ def wait_for_sql_ready(base_url: str, username: str = "root", password: str = "a
 def wait_for_memcp(port=4321, timeout=30) -> bool:
     return wait_for_sql_ready(f"http://localhost:{port}", timeout=timeout)
 
+
+def request_shared_supervisor_restart() -> bool:
+    """Request replacement of the shared test process, if one owns this run."""
+    value = os.environ.get("MEMCP_TEST_SUPERVISOR_PID", "")
+    try:
+        supervisor_pid = int(value)
+    except ValueError:
+        return False
+    if supervisor_pid <= 1:
+        return False
+    try:
+        os.kill(supervisor_pid, signal.SIGUSR1)
+        return True
+    except OSError:
+        return False
+
 _memcp_log_file: str = ""
 
 def start_memcp_process(port: int, enable_mysql: bool = False) -> subprocess.Popen | None:
@@ -1797,15 +1827,17 @@ def suite_requires_managed_restart(spec_file: str) -> bool:
 
 
 def suite_execution_mode(spec_file: str) -> str:
-    """Choose whether a suite shares the server or owns a managed instance."""
+    """Choose concurrent or exclusive scheduling on the shared server.
+
+    Isolation is a scheduling barrier, not a storage-lifecycle boundary.  A
+    restart suite must run alone, but it must come back on the same data
+    directory so persistence and cross-feature interaction remain observable.
+    """
     metadata = load_suite_metadata(spec_file)
-    requires_restart = suite_requires_managed_restart(spec_file)
-    if requires_restart and metadata.get("isolated"):
-        return "managed_subprocess"
-    if requires_restart:
-        return "direct"
-    if metadata.get("isolated") or metadata.get("requires_mysql"):
-        return "subprocess"
+    if (suite_requires_managed_restart(spec_file)
+            or metadata.get("isolated")
+            or metadata.get("requires_mysql")):
+        return "exclusive"
     return "parallel"
 
 
@@ -1849,30 +1881,10 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
         ordered_specs = prioritize_spec_files(spec_files)
         print(f"🧪 Running {len(ordered_specs)} suites (fail-fast)")
         for idx, spec_file in enumerate(ordered_specs):
-            mode = suite_execution_mode(spec_file)
-            if mode == "managed_subprocess":
-                ok, output = run_spec_subprocess(spec_file, None, log_times, False, True)
-                if output:
-                    print(output, end="" if output.endswith("\n") else "\n")
-            elif mode == "direct":
-                if restart_handler is None and connect_only:
-                    print(f"❌ {spec_file}: suite requires restart handling and cannot run with --connect-only")
-                    remaining_specs = len(ordered_specs) - idx - 1
-                    if remaining_specs > 0:
-                        print(f"⏭️  Fail-fast skipped {remaining_specs} suite files after the first failure")
-                    return False
-                runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=True)
-                if restart_handler is not None:
-                    runner.set_restart_handler(restart_handler)
-                ok = runner.run_test_spec(spec_file)
-            elif mode == "subprocess":
-                ok, output = run_spec_subprocess(spec_file, port, log_times, True, True)
-                if output:
-                    print(output, end="" if output.endswith("\n") else "\n")
-            else:
-                ok, output = run_spec_subprocess(spec_file, port, log_times, True, True)
-                if output:
-                    print(output, end="" if output.endswith("\n") else "\n")
+            runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=True)
+            if restart_handler is not None:
+                runner.set_restart_handler(restart_handler)
+            ok = runner.run_test_spec(spec_file)
 
             if not ok:
                 remaining_specs = len(ordered_specs) - idx - 1
@@ -1892,21 +1904,18 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
 
     suite_status: Dict[str, bool] = {}
     parallel_specs: List[str] = []
-    sequential_specs: List[Tuple[str, str]] = []
+    exclusive_specs: List[str] = []
     for spec_file in spec_files:
         # Scheduling contract:
-        # - isolated restart/SHUTDOWN suites own a fresh managed server/datadir.
-        # - other restart/SHUTDOWN suites run sequentially with managed restarts
-        #   against the shared server/datadir.
-        # - metadata.isolated also means sequential execution on that same
-        #   shared database, never a fresh datadir.
+        # - isolated, MySQL, and restart/SHUTDOWN suites run exclusively.
+        # - all suites retain the shared server and data directory.
         # - only non-isolated, non-restart suites may use the parallel
         #   connect-only worker pool.
         mode = suite_execution_mode(spec_file)
         if mode == "parallel":
             parallel_specs.append(spec_file)
         else:
-            sequential_specs.append((mode, spec_file))
+            exclusive_specs.append(spec_file)
 
     def record_result(spec_file: str, ok: bool, output: str) -> None:
         suite_status[spec_file] = ok
@@ -1923,24 +1932,11 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             ok, output = future.result()
             record_result(spec_file, ok, output)
 
-    for mode, spec_file in sequential_specs:
-        if mode == "managed_subprocess":
-            ok, output = run_spec_subprocess(spec_file, None, log_times, False, False)
-            record_result(spec_file, ok, output)
-        elif mode == "direct":
-            if restart_handler is None and connect_only:
-                suite_status[spec_file] = False
-                print(f"❌ {spec_file}: suite requires restart handling and cannot run with --connect-only")
-                continue
-            suite_status[spec_file] = True
-            runner = SQLTestRunner(base_url, log_times=log_times)
-            if restart_handler is not None:
-                runner.set_restart_handler(restart_handler)
-            ok = runner.run_test_spec(spec_file)
-            suite_status[spec_file] = ok
-        else:
-            ok, output = run_spec_subprocess(spec_file, port, log_times, True, False)
-            record_result(spec_file, ok, output)
+    for spec_file in exclusive_specs:
+        runner = SQLTestRunner(base_url, log_times=log_times)
+        if restart_handler is not None:
+            runner.set_restart_handler(restart_handler)
+        suite_status[spec_file] = runner.run_test_spec(spec_file)
 
     failed_files = [spec_file for spec_file in spec_files if not suite_status.get(spec_file, False)]
     if failed_files:

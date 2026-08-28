@@ -22,6 +22,10 @@ import sys
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from run_sql_tests import suite_execution_mode
+
 
 TABLE_MUTATION = re.compile(
     r"""(?ix)
@@ -45,19 +49,29 @@ def sql_fragments(value):
             yield from sql_fragments(child)
 
 
-def main() -> int:
+def mutable_table_collisions(root: Path = Path("tests")):
     owners = defaultdict(set)
-    for path in sorted(Path("tests").rglob("*.yaml")):
+    for path in sorted(root.rglob("*.yaml")):
         with path.open("r", encoding="utf-8") as handle:
             spec = yaml.safe_load(handle) or {}
         metadata = spec.get("metadata", {}) if isinstance(spec, dict) else {}
         if metadata.get("ci", True) is False or metadata.get("disabled"):
             continue
+        # Exclusive suites never overlap any other suite. Reusing a fixture or
+        # a shared diagnostic table there is therefore safe; isolation remains
+        # a scheduling property rather than a request for separate storage.
+        if suite_execution_mode(str(path)) != "parallel":
+            continue
         for sql in sql_fragments(spec):
             for match in TABLE_MUTATION.finditer(sql):
                 owners[(match.group(1) or match.group(2)).lower()].add(str(path))
 
-    collisions = {name: paths for name, paths in owners.items() if len(paths) > 1}
+    return {name: paths for name, paths in owners.items() if len(paths) > 1}
+
+
+def main() -> int:
+    collisions = mutable_table_collisions()
+
     if not collisions:
         return 0
 
