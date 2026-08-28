@@ -9,7 +9,6 @@ metadata:
   description: "PostgreSQL, MySQL, and MariaDB Stack Overflow query shapes"
   isolated: true
   ci: false
-  max_time: 180
 
 setup:
   - sql: "DROP VIEW IF EXISTS so_perf_join_view"
