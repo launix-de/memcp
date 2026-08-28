@@ -344,6 +344,74 @@ func slugify(s string) string {
 	return out
 }
 
+const documentationPreambleStart = "<!-- BEGIN CHAPTER PREAMBLE -->"
+const documentationPreambleEnd = "<!-- END CHAPTER PREAMBLE -->"
+
+var documentationPreambles = map[string]string{
+	"Arithmetic / Logic":               "Arithmetic and logic functions provide numeric operations, comparisons, type predicates, SQL truth handling, and the reduction primitives used by compiled expressions.",
+	"Associative Lists / Dictionaries": "Associative-list functions build and transform key/value data in the functional Scheme runtime, including lookup, filtering, mapping, reduction, and structural indexing.",
+	"Dashboard Metrics":                "Dashboard metrics expose process and HTTP activity for operational displays and diagnostics. They report observations from the current MemCP process, not a multi-node cluster.",
+	"Date":                             "Date functions parse, format, compare, truncate, and calculate with SQL temporal values while preserving the declared SQL result type where required.",
+	"General":                          "General functions are declarations that are available before a more specific documentation chapter is selected.",
+	"IO":                               "IO functions provide controlled access to streams, files, environment data, HTTP helpers, serialization, and process-facing input or output facilities.",
+	"JIT Compilation":                  "JIT functions inspect and request native compilation of supported Scheme procedures. Unsupported procedures retain interpreted semantics.",
+	"Lists":                            "Lists are the primary immutable collection and code representation in MemCP Scheme. This chapter covers construction, traversal, transformation, reduction, and sequence generation.",
+	"Parsers":                          "Parser functions construct and run composable packrat parsers used by the SQL frontends and other structured-input modules.",
+	"SCM Builtins":                     "SCM builtins form the core Scheme language: evaluation, quoting, functions, control flow, type conversion, pattern matching, optimization, and execution support.",
+	"Storage":                          "Storage functions manage databases, tables, columns, scans, indexes, computed data, and persistence. They are the low-level primitives used by generated SQL plans.",
+	"Streams":                          "Stream functions adapt producers and consumers for text, compression, decompression, and incremental data processing without requiring one complete in-memory value.",
+	"Strings":                          "String functions cover validation, Unicode-aware manipulation, matching, collation, encoding, hashing, JSON conversion, and SQL-compatible text operations.",
+	"Sync":                             "Synchronization functions provide thread-safe sessions, promises, caches, locks, and coordination primitives for explicitly shared state in otherwise functional Scheme code.",
+	"Timezone":                         "Timezone functions convert temporal values between zones and provide MySQL- and PostgreSQL-compatible current-time and timestamp operations.",
+	"Transactions":                     "Transaction functions manage implicit and explicit transaction contexts, including cursor-stability execution and snapshot/OCC commit paths.",
+	"Vectors":                          "Vector functions operate on numeric list representations for dot products and compatibility scoring modes. Validate dimensions and the exact mode semantics before treating a result as a mathematical distance.",
+	"Window Functions":                 "Window and streaming helpers maintain ordered buffers, emit bounded results, and support the runtime machinery used by compiled window plans.",
+}
+
+func defaultDocumentationPreamble(title string) string {
+	if preamble := strings.TrimSpace(documentationPreambles[title]); preamble != "" {
+		return preamble
+	}
+	return fmt.Sprintf("This chapter documents the %s functions available in the current MemCP runtime.", title)
+}
+
+// readDocumentationPreamble keeps hand-written chapter introductions separate
+// from generated function entries. Marker-delimited text may itself contain ##
+// headings. Files generated before the markers were introduced retain the text
+// between their # chapter heading and first ## function heading.
+func readDocumentationPreamble(path string, title string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultDocumentationPreamble(title), nil
+		}
+		return "", err
+	}
+
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	if start := strings.Index(content, documentationPreambleStart); start >= 0 {
+		start += len(documentationPreambleStart)
+		if end := strings.Index(content[start:], documentationPreambleEnd); end >= 0 {
+			if preamble := strings.TrimSpace(content[start : start+end]); preamble != "" {
+				return preamble, nil
+			}
+		}
+	}
+
+	heading := "# " + title
+	if strings.HasPrefix(content, heading) {
+		rest := strings.TrimLeft(content[len(heading):], "\n")
+		if end := strings.Index(rest, "\n## "); end >= 0 {
+			rest = rest[:end]
+		}
+		if preamble := strings.TrimSpace(rest); preamble != "" {
+			return preamble, nil
+		}
+	}
+
+	return defaultDocumentationPreamble(title), nil
+}
+
 // WriteDocumentation generates Markdown docs:
 // - index.md with links to chapters
 // - one <chapter>.md file per chapter, containing all functions of that chapter
@@ -429,6 +497,10 @@ func WriteDocumentation(folder string) error {
 			continue
 		}
 		fp := filepath.Join(folder, ch.Slug+".md")
+		preamble, err := readDocumentationPreamble(fp, ch.Title)
+		if err != nil {
+			return fmt.Errorf("failed to preserve preamble from %s: %w", fp, err)
+		}
 		f, err := os.Create(fp)
 		if err != nil {
 			return fmt.Errorf("failed to create %s: %w", fp, err)
@@ -436,6 +508,7 @@ func WriteDocumentation(folder string) error {
 
 		// Chapter header
 		fmt.Fprintf(f, "# %s\n\n", ch.Title)
+		fmt.Fprintf(f, "%s\n\n%s\n\n%s\n\n", documentationPreambleStart, preamble, documentationPreambleEnd)
 
 		// Functions in this chapter
 		for _, def := range ch.Fns {
