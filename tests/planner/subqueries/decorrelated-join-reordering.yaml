@@ -157,7 +157,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_order"
+        - "scan_join_order"
         - "djr_site"
         - "djr_assignment"
       result_not_contains:
@@ -174,7 +174,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_order"
+        - "scan_join_order"
         - "djr_assignment"
         - "djr_site"
       result_not_contains:

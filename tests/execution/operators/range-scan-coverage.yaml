@@ -482,7 +482,7 @@ test_cases:
 
   - name: "Ordered selective join exposes calibratable carrier alternatives"
     sql: |
-      EXPLAIN PHYSICAL CALIBRATE
+      EXPLAIN PHYSICAL CALIBRATE DISCOVER
       SELECT f.*
       FROM ordered_join_fact AS f
       INNER JOIN ordered_join_dim AS d ON f.dim_id = d.id
@@ -492,8 +492,8 @@ test_cases:
     expect:
       rows: 2
       contains:
-        - 'projected_candidate_keyset'
-        - 'ordered_postfilter'
+        - 'legacy_join_tree'
+        - 'scan_join_order'
         - 'result_equal'
 
   - name: "Create selective text RecSet driver"
