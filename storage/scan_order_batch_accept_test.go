@@ -143,6 +143,52 @@ func TestScanOrderBatchAcceptMixedOrderAcrossShards(t *testing.T) {
 	}
 }
 
+func TestCollectOrderedCandidateBatchPrunesRangePartitions(t *testing.T) {
+	table := setupBatchAcceptTable(t, "tbatchacceptpartitionorder", 30)
+	RebuildTable(table, true, false)
+	if !table.beginManualRepartition() {
+		t.Fatal("manual repartition was not claimed")
+	}
+	table.repartition([]shardDimension{table.NewShardDimension("id", 3)})
+
+	readIDs := func(records []orderedBatchRecord) []int64 {
+		ids := make([]int64, len(records))
+		for i, record := range records {
+			release := record.shard.GetRead()
+			ids[i] = int64(scm.ToInt(record.shard.ColumnReaderTx(nil, "id")(record.recid)))
+			release()
+		}
+		return ids
+	}
+	collect := func(operator string, offset int, limit int) ([]orderedBatchRecord, *recSet, bool) {
+		relation := scm.OptimizeProcToSerialFunction(scm.Eval(scm.NewSymbol(operator), &scm.Globalenv))
+		return collectPartitionOrderedCandidateBatch(nil, scanOrderTableSpec{table: table},
+			[]scm.Scmer{scm.NewString("id")}, []func(...scm.Scmer) scm.Scmer{relation}, offset, limit)
+	}
+
+	ascending, ascendingBatch, ok := collect("<", 4, 5)
+	if !ok {
+		t.Fatal("ascending range-partition order did not use the pruning path")
+	}
+	if got, want := readIDs(ascending), []int64{4, 5, 6, 7, 8}; !equalInt64s(got, want) {
+		t.Fatalf("ascending partition batch = %v, want %v", got, want)
+	}
+	if ascendingBatch.count != 5 {
+		t.Fatalf("ascending batch count = %d, want 5", ascendingBatch.count)
+	}
+
+	descending, descendingBatch, ok := collect(">", 3, 5)
+	if !ok {
+		t.Fatal("descending range-partition order did not use the pruning path")
+	}
+	if got, want := readIDs(descending), []int64{26, 25, 24, 23, 22}; !equalInt64s(got, want) {
+		t.Fatalf("descending partition batch = %v, want %v", got, want)
+	}
+	if descendingBatch.count != 5 {
+		t.Fatalf("descending batch count = %d, want 5", descendingBatch.count)
+	}
+}
+
 func TestScanOrderBatchAcceptRejectsNonSubset(t *testing.T) {
 	table := setupBatchAcceptTable(t, "tbatchacceptsubset", 10)
 	allRows := table.scanRecSet(nil, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }))

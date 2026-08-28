@@ -3481,14 +3481,22 @@ candidate RecSet. */
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe decision_scope)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe driver_order_partitioning decision_scope)
 	(begin
 		(define stage (nth membership 0))
+		(define driver_order_partitioned (if (nil? driver_order_partitioning)
+			false (cadr driver_order_partitioning)))
+		(if (nil? driver_order_partitioning) true
+			(planner_record_guard_condition (list (quote equal?)
+				(list (quote table_order_partitioned?)
+					(list (quote table) (source_schema src) (source_relation src))
+					(car driver_order_partitioning))
+				driver_order_partitioned)))
 		/* Some late RecSet consumers are introduced after reorder telemetry was
 		attached. Reconstruct only the candidate's scalar work from the existing
 		logical stage; this is one formula walk, never an alternative plan build. */
 		(define facts (merge (list (membership_candidate_work_facts stage) (gs_facts stage))))
-		(define cost_facts (qassoc_set
+		(define consumer_facts (qassoc_set
 			(if (equal? consumer (quote aggregate))
 				(qassoc_set facts (quote membership_consumer) (quote aggregate))
 				facts)
@@ -3502,6 +3510,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(max (coalesceNil downstream_probe_branches 0)
 					(qassoc_get facts (quote membership_downstream_probe_branches) 0))
 				0)))
+		(define cost_facts (qassoc_set consumer_facts
+			(quote membership_driver_order_partitioned) driver_order_partitioned))
 		(define driver_probe_supported (and allow_driver_probe
 			(membership_driver_subscan_supported? stage)))
 		(define raw_expr (recset_project_join_expr_for_membership_raw src membership))
@@ -3836,6 +3846,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(membership_driver_input_rows driver_rows facts) facts))
 							(list "observed_projected_driver_rows" observed_rows)
 							(list "driver_input_rows" source_rows)
+							(list "driver_order_partitioned" driver_order_partitioned)
 							(list "driver_rows" driver_rows)
 							(list "prefiltered_driver_rows" prefiltered_driver_rows)
 							(list "projection_interval_lower_rows" (if observation_supported 0 nil))
@@ -3908,7 +3919,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define recset_project_join_expr_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch)
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
-			src membership consumer driver_rows_override allow_ordered_batch nil 0 true
+			src membership consumer driver_rows_override allow_ordered_batch nil 0 true nil
 			(quote expression)))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
@@ -5193,7 +5204,11 @@ ever-larger subtrees. */
 						(concat "__group_count_recset_" (stable_structural_hash membership_expr true))
 						(list (quote lambda) '() membership_expr)))
 				(list (quote scan)
-					'(session "__memcp_tx")
+					/* Computed group columns outlive the physical request which creates
+					them. Resolve the transaction from ComputeColumn's rebound runtime
+					session instead of letting rewrite_physical_transaction_reads capture
+					a request-local __physical_query_tx slot in this stored closure. */
+					(list (list (quote context) "session") "__memcp_tx")
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -6606,3 +6621,18 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_scan_invocation_ns 3027639)
 (define planner_membership_ordered_recset_sort_unit_ns 1)
 /* END GENERATED COST CONSTANTS */
+
+/* scan_join_order reuses the calibrated scan/filter/map work units. The
+structural formula belongs to the lowerer; tools/costgen owns every numeric
+coefficient used here. */
+(define planner_scan_join_order_cost (lambda (input_rows joined_rows table_count output_rows)
+	(planner_cost
+		(+ planner_membership_ordered_scan_invocation_ns
+			(* (- table_count 1) planner_membership_scan_invocation_ns))
+		(+ (* input_rows planner_membership_scan_row_ns)
+			(* input_rows (- table_count 1) planner_membership_map_column_row_ns))
+		(* joined_rows planner_membership_expression_operation_row_ns)
+		0 0
+		(* output_rows planner_membership_map_column_row_ns)
+		(* joined_rows 8)
+		0 output_rows 0.65)))

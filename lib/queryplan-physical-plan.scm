@@ -2666,12 +2666,12 @@ strictly cheaper. */
 		(and (source_is_base_table? (gs_input stage))
 			(and (scalar_order_lookup_cache_unique_input? stage)
 				(and (not (nil? target))
-				(and (source_is_base_table? target)
-					(and (not (empty_list? input_cols))
-						(and (not (reduce input_cols (lambda (missing col)
-							(or missing (nil? col))) false))
-							(and (equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
-								(and (empty_list? (query_expr_session_reads stage))
+					(and (source_is_base_table? target)
+						(and (not (empty_list? input_cols))
+							(and (not (reduce input_cols (lambda (missing col)
+								(or missing (nil? col))) false))
+								(and (equal? (qassoc_get (gs_facts stage) (quote condition) true) true)
+									(and (empty_list? (query_expr_session_reads stage))
 										(and (not (nil? parts))
 											(empty_list? (nth parts 1))))))))))))))
 
@@ -2761,14 +2761,14 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 								'() '() 0 1 nil))
 							(select_scalar_order_lookup_cache_candidate
 								(list target stage requested_col column_name
-								(list (quote createcolumn)
-									(source_table_expr target)
-									column_name "any"
-									(quoted_runtime_list '())
-									(quoted_runtime_list '("temp" true))
-									(cons (quote list) input_cols)
-									(list (quote lambda) params lookup_expr))
-								stage_source))))))))))))
+									(list (quote createcolumn)
+										(source_table_expr target)
+										column_name "any"
+										(quoted_runtime_list '())
+										(quoted_runtime_list '("temp" true))
+										(cons (quote list) input_cols)
+										(list (quote lambda) params lookup_expr))
+									stage_source))))))))))))
 
 (define replace_scalar_order_lookup_with_cache (lambda (candidate expr)
 	(if (nil? candidate)
@@ -3781,16 +3781,16 @@ RecSet; membership edges retain their own physical operators. */
 			(qassoc_get facts (quote membership_candidate_scan_invocations) probe_branches)))
 		(define driver_scan_invocations (max 1
 			(qassoc_get facts (quote membership_driver_scan_invocations) 1)))
-		/* scan_order_batch_accept requests disjoint windows, but the current
-		ordered primitive has no resumable cursor. Every window therefore pays
-		for another ordered traversal of the driver, irrespective of how few
-		rows that window returns. Keep this explicit so calibration can price
-		the implementation that is actually emitted. */
-		/* Reuse the calibrated scan_order work unit. Without a resumable cursor,
-		each batch repeats the same quadratic ordered traversal; a separate linear
-		coefficient would describe the same operator inconsistently. */
-		(define ordered_driver_work_units (* batches
-			(/ (* driver_input_rows driver_input_rows) 1000000)))
+		/* A one-dimensional range partition on the leading ORDER BY column turns
+		each candidate window into a prefix of disjoint ordered shard runs. Batch
+		growth revisits earlier prefixes, but its geometric series is bounded by
+		twice the final visited prefix. Free or incompatible shards retain the
+		calibrated full ordered traversal per batch. */
+		(define order_partitioned (qassoc_get facts
+			(quote membership_driver_order_partitioned) false))
+		(define ordered_driver_work_units (if order_partitioned
+			(* 2 visited_rows)
+			(* batches (/ (* driver_input_rows driver_input_rows) 1000000))))
 		(define candidate_fraction (if (and (number? driver_input_rows) (> driver_input_rows 0))
 			(min 1 (/ visited_rows driver_input_rows)) 1))
 		/* Disjoint driver batches may contain the same foreign-key value. In the
@@ -3886,6 +3886,8 @@ RecSet; membership edges retain their own physical operators. */
 					(and bounded
 						(or (empty_list? order_items)
 							(not (empty_list? (source_primary_key_columns src)))))))
+				(define source_order_partitioning
+					(planner_source_order_partitioning src order_items))
 				(define membership_plans (filter (map memberships (lambda (membership)
 					(begin
 						(define plan (recset_project_join_plan_for_membership_using
@@ -3901,6 +3903,7 @@ RecSet; membership edges retain their own physical operators. */
 								alias raw_condition))
 								(count (expr_probe_stages raw_condition)))
 							(not row_number_membership_consumer)
+							source_order_partitioning
 							(quote single_source)))
 						(if (nil? plan) nil (list membership plan)))))
 					(lambda (entry) (not (nil? entry)))))
@@ -4467,7 +4470,25 @@ semantics and drops projection-only nullable lookups. */
 downstream lookup cannot multiply driver rows. This is a physical access-path
 candidate: logical join order remains unchanged, while the filtered lookup is
 projected back onto the ordered driver before scan_order applies Top-K. */
-(define ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition offset limit)
+(define planner_source_order_partitioning (lambda (src order_items)
+	/* Runtime-materialized group carriers are table-shaped physical sources, but
+	they do not exist while alternatives are enumerated and carry no catalog shard
+	partitioning guarantee. Only persistent catalog tables can contribute this
+	physical fact to costing and its matching runtime guard. */
+	(if (or (not (source_is_base_table? src))
+		(or (physical_helper_relation? (source_relation src))
+			(or (information_schema_source? (source_schema src) (source_relation src))
+				(empty_list? order_items))))
+		nil
+		(match (car order_items)
+			'(expr _direction) (begin
+				(define col (direct_column_name_for_alias src expr))
+				(if (nil? col) nil
+					(list col (table_order_partitioned?
+						(table (source_schema src) (source_relation src)) col))))
+			_ nil))))
+
+(define ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
 	(if (or (not (single_source? remaining_sources))
 		(or (source_outer? src) (source_outer? (car remaining_sources))))
 		nil
@@ -4522,6 +4543,7 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(list (quote membership_candidate_probe_branches) 1)
 						(list (quote membership_candidate_cache_backed) false)
 						(list (quote membership_driver_input_rows) driver_input_rows)
+						(list (quote membership_driver_rows) requested_rows)
 						(list (quote membership_driver_scan_invocations) 1)
 						(list (quote membership_driver_filter_columns) 0)
 						(list (quote membership_driver_map_columns) 0)
@@ -4530,10 +4552,15 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(list (quote membership_order_limit) (planner_literal_value limit))
 						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
+					(define order_partitioning (planner_source_order_partitioning src order_items))
+					(define cost_work (if (nil? order_partitioning) work
+						(cons (list (quote membership_driver_order_partitioned)
+							(cadr order_partitioning)) work)))
 					(define candidate_cost (membership_projection_cost
-						lookup_input_rows lookup_rows requested_rows work))
+						lookup_input_rows lookup_rows requested_rows cost_work))
 					(define driver_cost (membership_ordered_driver_probe_cost
-						lookup_input_rows lookup_rows requested_rows work))
+						lookup_input_rows lookup_rows requested_rows cost_work))
+					(define batch_cost (ordered_batch_accept_cost cost_work))
 					(define lookup_cols (extract_columns_for_alias lookup lookup_condition))
 					(define lookup_recset (list (quote scan_recset)
 						'(session "__memcp_tx")
@@ -4550,22 +4577,27 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(quoted_runtime_list (cadr edge_columns))))
 					(list carrier candidate_cost driver_cost lookup_rows
 						(membership_projected_driver_rows lookup_input_rows lookup_rows
-							driver_input_rows work)
-						lookup_condition lookup_estimate exact))))))))
+							driver_input_rows cost_work)
+						lookup_condition lookup_estimate exact batch_cost order_partitioning)))))))
 
-(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition offset limit)
+(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
 	(begin
 		(define candidate (ordered_join_projected_candidate
-			sources default_alias src remaining_sources condition offset limit))
+			sources default_alias src remaining_sources condition order_items offset limit))
 		(if (nil? candidate)
 			nil
 			(begin
 				(define decision_id (concat "ordered_join_carrier:"
 					(source_alias src) ":" (source_alias (car remaining_sources))))
-				(define normal_choice (if (planner_cost_better? (nth candidate 1) (nth candidate 2))
-					"projected_candidate_keyset" "ordered_postfilter"))
+				(define normal_choice (car (reduce (list
+					(list "ordered_postfilter" (nth candidate 2))
+					(list "ordered_batch_accept" (nth candidate 8)))
+					(lambda (best alternative)
+						(if (planner_cost_better? (cadr alternative) (cadr best))
+							alternative best))
+					(list "projected_candidate_keyset" (nth candidate 1)))))
 				(define chosen (planner_physical_choice decision_id normal_choice
-					(list "projected_candidate_keyset" "ordered_postfilter")))
+					(list "projected_candidate_keyset" "ordered_postfilter" "ordered_batch_accept")))
 				(define forced (planner_physical_override decision_id))
 				(define lookup (car remaining_sources))
 				(define lookup_input_rows (planner_source_row_count lookup))
@@ -4599,12 +4631,22 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(list "candidate_rows" (nth candidate 3))
 						(list "projected_driver_rows" (nth candidate 4))
 						(list "driver_input_rows" (planner_source_row_count src))
-						(list "carrier_exact" (nth candidate 7))))
+						(list "carrier_exact" (nth candidate 7))
+						(list "driver_order_partitioned" (if (nil? (nth candidate 9))
+							false (cadr (nth candidate 9))))))
 					(list "alternatives" (list
 						(list (list "plan" "projected_candidate_keyset")
 							(list "cost" (planner_cost_explain (nth candidate 1))))
 						(list (list "plan" "ordered_postfilter")
-							(list "cost" (planner_cost_explain (nth candidate 2))))))))
+							(list "cost" (planner_cost_explain (nth candidate 2))))
+						(list (list "plan" "ordered_batch_accept")
+							(list "cost" (planner_cost_explain (nth candidate 8))))))))
+				(if (nil? (nth candidate 9)) true
+					(planner_record_guard_condition (list (quote equal?)
+						(list (quote table_order_partitioned?)
+							(list (quote table) (source_schema src) (source_relation src))
+							(car (nth candidate 9)))
+						(cadr (nth candidate 9)))))
 				(if (equal? chosen "projected_candidate_keyset")
 					(list (car candidate) (nth candidate 7)) nil))))))
 
@@ -4612,7 +4654,212 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 zero, one, or many complete values. stream_window_reduce owns SQL OFFSET/LIMIT
 over those values, so neither driver cardinality nor a scalar-purpose tag can
 move the window to the wrong tree level. */
-(define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
+(define scan_join_order_column_ref_using (lambda (sources default_alias expr)
+	(reduce (produceN (count sources)) (lambda (found index)
+		(if (not (nil? found))
+			found
+			(begin
+				(define src (nth sources index))
+				(define col (direct_column_name_for_alias src expr))
+				(if (nil? col) nil (list index col))))) nil)))
+
+(define scan_join_order_join_clause (lambda (sources current_index term)
+	(begin
+		(define current (nth sources current_index))
+		(reduce (produceN current_index) (lambda (found previous_index)
+			(if (not (nil? found))
+				found
+				(begin
+					(define parts (union_semijoin_equal_parts
+						(nth sources previous_index) current term))
+					(if (nil? parts) nil
+						(list previous_index (cadr parts) (car parts)))))) nil))))
+
+(define scan_join_order_terms (lambda (sources plan final_condition)
+	(merge_unique (list
+		(split_and_terms (coalesceNil final_condition true))
+		(merge (map sources (lambda (src)
+			(split_and_terms (coalesceNil (source_join_expr src) true)))))
+		(map (join_optimizer_tree_predicates plan) join_order_pred_expr)))))
+
+(define scan_join_order_local_terms (lambda (sources default_alias src index terms)
+	(filter terms (lambda (term)
+		(begin
+			(define aliases (join_hypergraph_expr_aliases
+				default_alias (source_aliases sources) term))
+			(or (and (empty_list? aliases) (equal? index 0))
+				(and (single_source? aliases)
+					(equal? (car aliases) (source_alias src)))))))))
+
+(define scan_join_order_refs_for_exprs (lambda (sources default_alias exprs)
+	(merge (map (produceN (count sources)) (lambda (index)
+		(begin
+			(define src (nth sources index))
+			(map (join_cols_for_alias sources default_alias (source_alias src) exprs)
+				(lambda (col) (list index col)))))))))
+
+(define scan_join_order_ref_params (lambda (sources refs)
+	(map refs (lambda (ref)
+		(symbol (concat (source_alias (nth sources (car ref))) "." (cadr ref)))))))
+
+(define scan_join_order_order_entry (lambda (sources default_alias item)
+	(match item
+		'(expr _dir) (begin
+			(define ref (scan_join_order_column_ref_using sources default_alias expr))
+			(if (nil? ref)
+				nil
+				(list ref (car (order_relations_for_source
+					(nth sources (car ref)) (list item))))))
+		_ nil)))
+
+/* Cost the established two-table carrier without constructing its RecSet AST.
+This keeps physical enumeration side-effect free until the outer cost decision
+has selected a lowerer. */
+(define ordered_join_projected_candidate_cost (lambda (sources default_alias src remaining_sources condition order_items offset limit)
+	(if (or (not (single_source? remaining_sources))
+		(or (source_outer? src) (source_outer? (car remaining_sources))))
+		nil
+		(begin
+			(define lookup (car remaining_sources))
+			(define terms (merge (list
+				(split_and_terms (coalesceNil condition true))
+				(split_and_terms (coalesceNil (source_join_expr src) true))
+				(split_and_terms (coalesceNil (source_join_expr lookup) true)))))
+			(define edge_columns (candidate_recset_edge_columns
+				sources default_alias lookup src terms))
+			(define lookup_input_rows (planner_source_row_count lookup))
+			(define driver_input_rows (planner_source_row_count src))
+			(define lookup_condition (candidate_recset_local_condition
+				sources default_alias (source_alias lookup) terms true))
+			(define lookup_estimate (if (and (number? lookup_input_rows)
+				(not (empty_list? (car edge_columns))))
+				(planner_source_filter_estimate lookup lookup_condition 512)
+				nil))
+			(define lookup_rows (if (nil? lookup_estimate) nil
+				(planner_estimated_matching_rows lookup_estimate
+					lookup_input_rows lookup_input_rows)))
+			(define requested_rows (if (number? (planner_literal_value limit))
+				(+ (coalesceNil (planner_literal_value offset) 0)
+					(planner_literal_value limit)) nil))
+			(if (or (empty_list? (car edge_columns))
+				(or (not (number? lookup_rows))
+					(or (not (number? driver_input_rows))
+						(or (not (number? requested_rows)) (<= requested_rows 0)))))
+				nil
+				(begin
+					(define lookup_work (membership_source_work_profile
+						lookup lookup_condition true))
+					(define work (merge (list lookup_work (list
+						(list (quote membership_candidate_input_rows) lookup_input_rows)
+						(list (quote membership_candidate_estimated_rows) lookup_rows)
+						(list (quote membership_candidate_probe_branches) 1)
+						(list (quote membership_candidate_cache_backed) false)
+						(list (quote membership_driver_input_rows) driver_input_rows)
+						(list (quote membership_driver_rows) requested_rows)
+						(list (quote membership_driver_scan_invocations) 1)
+						(list (quote membership_driver_filter_columns) 0)
+						(list (quote membership_driver_map_columns) 0)
+						(list (quote membership_driver_expression_operations) 0)
+						(list (quote membership_order_limit_driver) true)
+						(list (quote membership_order_limit) (planner_literal_value limit))
+						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
+						(list (quote membership_downstream_probe_branches) 0)))))
+					(define order_partitioning (planner_source_order_partitioning src order_items))
+					(define cost_work (if (nil? order_partitioning) work
+						(cons (list (quote membership_driver_order_partitioned)
+							(cadr order_partitioning)) work)))
+					(define candidate_cost (membership_projection_cost
+						lookup_input_rows lookup_rows requested_rows cost_work))
+					(define driver_cost (membership_ordered_driver_probe_cost
+						lookup_input_rows lookup_rows requested_rows cost_work))
+					(define batch_cost (ordered_batch_accept_cost cost_work))
+					(define projected_rows (membership_projected_driver_rows
+						lookup_input_rows lookup_rows driver_input_rows cost_work))
+					/* Keep the probe cardinality aligned with the selected legacy carrier.
+					The projected candidate touches projected_rows driver records. The
+					ordered post-filter must instead visit enough driver rows to find the
+					requested hits; cross-table anti-correlation can make that the complete
+					driver even when the final join cardinality is tiny. */
+					(define ordered_visited_rows (membership_expected_driver_rows_visited
+						lookup_input_rows lookup_rows requested_rows cost_work))
+					(define best (reduce (list
+						(list batch_cost ordered_visited_rows)
+						(list driver_cost ordered_visited_rows))
+						(lambda (current alternative)
+							(if (planner_cost_better? (car alternative) (car current))
+								alternative current))
+						(list candidate_cost projected_rows)))
+					(list (car best) (cadr best))))))))
+
+/* Enumerate metadata only. No scan, RecSet, keytable or callback AST is built
+until the caller has selected this physical alternative. */
+(define scan_join_order_spec (lambda (all_sources plan default_alias needed_exprs final_condition order_items offset_value limit_value stages facts)
+	(begin
+		(define aliases (join_optimizer_tree_aliases plan))
+		(define sources (join_optimizer_sources_for_order all_sources aliases))
+		(define offset (coalesceNil (planner_literal_value offset_value) 0))
+		(define limit (coalesceNil (planner_literal_value limit_value) -1))
+		(define terms (scan_join_order_terms sources plan final_condition))
+		(define joins (map (produceN (- (count sources) 1)) (lambda (raw_index)
+			(begin
+				(define index (+ raw_index 1))
+				(filter (map terms (lambda (term)
+					(scan_join_order_join_clause sources index term)))
+					(lambda (clause) (not (nil? clause))))))))
+		(define consumed_join_terms (filter terms (lambda (term)
+			(reduce (produceN (- (count sources) 1)) (lambda (found raw_index)
+				(or found (not (nil? (scan_join_order_join_clause
+					sources (+ raw_index 1) term))))) false))))
+		(define local_terms (map (produceN (count sources)) (lambda (index)
+			(scan_join_order_local_terms sources default_alias
+				(nth sources index) index terms))))
+		(define all_local_terms (merge local_terms))
+		(define residual_terms (filter terms (lambda (term)
+			(and (not (contains? consumed_join_terms term))
+				(not (contains? all_local_terms term))))))
+		(define order_entries (map order_items (lambda (item)
+			(scan_join_order_order_entry sources default_alias item))))
+		(define source_rows (map sources planner_source_row_count))
+		(define known_rows (reduce source_rows (lambda (known rows)
+			(and known (number? rows))) true))
+		(define input_rows (if known_rows (reduce source_rows + 0) nil))
+		(define joined_rows (qassoc_get facts (quote join_estimated_rows) nil))
+		(define output_rows (if (and (number? limit) (>= limit 0))
+			(min (coalesceNil joined_rows limit) (+ offset limit)) joined_rows))
+		(define supported (and (>= (count sources) 2)
+			(and (empty_list? stages)
+				(and (number? input_rows)
+					(and (number? joined_rows)
+						(and (number? offset)
+							(and (>= limit 0)
+								(and (not (empty_list? order_items))
+									(and (reduce sources (lambda (ok src)
+										(and ok (and (source_is_base_table? src)
+											(not (source_outer? src))))) true)
+										(and (reduce joins (lambda (ok clauses)
+											(and ok (not (empty_list? clauses)))) true)
+											(reduce order_entries (lambda (ok entry)
+												(and ok (not (nil? entry)))) true)))))))))))
+		(if (not supported)
+			nil
+			(list
+				(list (quote sources) sources)
+				(list (quote joins) joins)
+				(list (quote local_terms) local_terms)
+				(list (quote residual) (combine_where_terms residual_terms true))
+				(list (quote order_entries) order_entries)
+				(list (quote map_refs) (scan_join_order_refs_for_exprs
+					sources default_alias needed_exprs))
+				(list (quote input_rows) input_rows)
+				(list (quote joined_rows) joined_rows)
+				(list (quote output_rows) output_rows)
+				(list (quote table_count) (count sources))
+				(list (quote offset) offset)
+				(list (quote limit) limit)
+				(list (quote cost) (planner_scan_join_order_cost
+					input_rows joined_rows (count sources) output_rows)))))))
+
+(define join_ordered_streaming_limit_legacy_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
 		(define ordered_aliases (join_optimizer_tree_aliases plan))
 		(define ordered_sources (join_optimizer_sources_for_order all_sources ordered_aliases))
@@ -4622,16 +4869,6 @@ move the window to the wrong tree level. */
 		(define offset (coalesceNil (planner_literal_value offset_value) 0))
 		(define limit (coalesceNil (planner_literal_value limit_value) -1))
 		(define target (if (< limit 0) -1 (+ offset limit)))
-		(define projected_join_choice (if (and (>= target 0)
-			(downstream_sources_at_most_one_driver_row?
-				ordered_sources default_alias final_condition stages))
-			(choose_ordered_join_projected_candidate all_sources default_alias src
-				remaining_sources final_condition offset_value limit_value)
-			nil))
-		(define projected_join_carrier (if (nil? projected_join_choice)
-			nil (car projected_join_choice)))
-		(define projected_join_exact (if (nil? projected_join_choice)
-			false (cadr projected_join_choice)))
 		(define acceptance_probe_work_rows (coalesceNil
 			(probe_limit_work_rows limit_value)
 			(if (< target 0) nil target)))
@@ -4647,6 +4884,18 @@ move the window to the wrong tree level. */
 			ordered_sources default_alias src order_items stages final_condition '()))
 		(define driver_order_items (nth order_parts 0))
 		(define remaining_order_items (nth order_parts 1))
+		(define driver_order_partitioning
+			(planner_source_order_partitioning src driver_order_items))
+		(define projected_join_choice (if (and (>= target 0)
+			(downstream_sources_at_most_one_driver_row?
+				ordered_sources default_alias final_condition stages))
+			(choose_ordered_join_projected_candidate all_sources default_alias src
+				remaining_sources final_condition driver_order_items offset_value limit_value)
+			nil))
+		(define projected_join_carrier (if (nil? projected_join_choice)
+			nil (car projected_join_choice)))
+		(define projected_join_exact (if (nil? projected_join_choice)
+			false (cadr projected_join_choice)))
 		(define membership (driver_membership_for_source src raw_condition))
 		/* A RecSet batch represents driver membership, not join multiplicity. The
 		consumer is therefore available exactly when the remaining join tree is a
@@ -4670,7 +4919,9 @@ move the window to the wrong tree level. */
 				(+ (count (acceptance_required_sources
 					remaining_sources default_alias final_condition))
 					(count (expr_probe_stages final_condition)))
-				true (quote ordered_join_stream))))
+				true
+				driver_order_partitioning
+				(quote ordered_join_stream))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		/* A scalar truth carrier over the complete driver would defeat adaptive
@@ -4845,6 +5096,143 @@ move the window to the wrong tree level. */
 		(if use_membership_keyset
 			(wrap_membership_keyset_bindings membership_keysets window_expr)
 			window_expr))))
+
+(define scan_join_order_emit_plan (lambda (spec default_alias needed_exprs value_builder reduce_expr neutral_expr stages)
+	(begin
+		(define sources (qassoc_get spec (quote sources) '()))
+		(define local_terms (qassoc_get spec (quote local_terms) '()))
+		(define residual (qassoc_get spec (quote residual) true))
+		(define order_entries (qassoc_get spec (quote order_entries) '()))
+		(define map_refs (qassoc_get spec (quote map_refs) '()))
+		(define filtercols (map (produceN (count sources)) (lambda (index)
+			(begin
+				(define src (nth sources index))
+				(join_cols_for_alias sources default_alias (source_alias src)
+					(list (combine_where_terms (nth local_terms index) true)))))))
+		(define filterfns (map (produceN (count sources)) (lambda (index)
+			(begin
+				(define src (nth sources index))
+				(define cols (nth filtercols index))
+				(list (quote lambda)
+					(map cols (lambda (col)
+						(scan_callback_symbol_for_alias (source_alias src) col)))
+					(lower_column_expr_for_alias src
+						(combine_where_terms (nth local_terms index) true)))))))
+		(define residual_refs (scan_join_order_refs_for_exprs
+			sources default_alias (list residual)))
+		(define join_filter (if (equal? residual true)
+			nil
+			(list (quote lambda)
+				(scan_join_order_ref_params sources residual_refs)
+				(lower_column_expr_for_join_truth_context
+					sources default_alias residual
+					(qassoc_get spec (quote output_rows) nil)))))
+		(define map_body (value_builder
+			(qassoc_get spec (quote output_rows) nil) nil))
+		(list (quote scan_join_order)
+			'(session "__memcp_tx")
+			(cons (quote list) (map sources (lambda (src)
+				(source_table_expr_using stages src))))
+			(quoted_runtime_list filtercols)
+			(cons (quote list) filterfns)
+			(quoted_runtime_list (qassoc_get spec (quote joins) '()))
+			(quoted_runtime_list residual_refs)
+			join_filter
+			(quoted_runtime_list (map order_entries car))
+			(cons (quote list) (map order_entries cadr))
+			0
+			(qassoc_get spec (quote offset) 0)
+			(qassoc_get spec (quote limit) -1)
+			(quoted_runtime_list map_refs)
+			(list (quote lambda)
+				(scan_join_order_ref_params sources map_refs)
+				map_body)
+			reduce_expr neutral_expr nil false neutral_expr))))
+
+(define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
+	(begin
+		(define spec (scan_join_order_spec all_sources plan default_alias needed_exprs
+			final_condition order_items offset_value limit_value stages facts))
+		(if (nil? spec)
+			(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
+				output_exprs needed_exprs final_condition order_items offset_value limit_value
+				stages facts value_builder reduce_expr neutral_expr)
+			(begin
+				(define joined_rows (qassoc_get spec (quote joined_rows) 0))
+				(define input_rows (qassoc_get spec (quote input_rows) 0))
+				(define output_rows (qassoc_get spec (quote output_rows) 0))
+				(define scan_cost (qassoc_get spec (quote cost) nil))
+				/* join_estimated_cost is the optimizer's scalar DP rank. Physical
+				alternatives compare the calibrated cost-domain record instead. */
+				(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
+				(define sources (qassoc_get spec (quote sources) '()))
+				/* Mirror the legacy lowerer's cardinality guard: a projected RecSet is
+				a semijoin carrier and cannot represent a multiplying lookup. */
+				(define projected_legacy_cost (if
+					(downstream_sources_at_most_one_driver_row?
+						sources default_alias final_condition stages)
+					(ordered_join_projected_candidate_cost
+						all_sources default_alias (car sources) (cdr sources)
+						final_condition order_items offset_value limit_value)
+					nil))
+				(define driver_input_rows (planner_source_row_count (car sources)))
+				(define logical_legacy_cost (if (nil? estimated_legacy_cost)
+					(planner_cost_add
+						(planner_scan_cost input_rows 0.5)
+						(planner_join_work_cost joined_rows 0.5)
+						joined_rows 0.5)
+					estimated_legacy_cost))
+				/* The legacy ordered tree performs one downstream lookup per driver
+				row. A projected carrier reduces that work to its exact projected
+				driver cardinality; otherwise the complete ordered input remains live. */
+				(define legacy_probe_rows (if (nil? projected_legacy_cost)
+					driver_input_rows (cadr projected_legacy_cost)))
+				(define legacy_base_cost (if (nil? projected_legacy_cost)
+					/* The DP join cost does not include the ordered root scan that this
+					lowerer adds. Use Costgen's scan_order invocation calibration; a
+					projected carrier already includes its complete scan startup. */
+					(planner_cost_add logical_legacy_cost
+						(planner_cost planner_membership_ordered_scan_invocation_ns
+							0 0 0 0 0 0 0 0 0.65)
+						legacy_probe_rows 0.65)
+					(car projected_legacy_cost)))
+				(define legacy_cost (planner_cost_add legacy_base_cost
+					(planner_join_work_cost legacy_probe_rows 0.65)
+					(coalesceNil joined_rows legacy_probe_rows) 0.65))
+				(define normal_choice (if (planner_cost_better? scan_cost legacy_cost)
+					"scan_join_order" "legacy_join_tree"))
+				(define decision_id (concat "scan_join_order:"
+					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
+				(define alternatives (list "legacy_join_tree" "scan_join_order"))
+				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
+				(define forced (planner_physical_override decision_id))
+				(planner_record_physical_decision (list
+					(list "decision_id" decision_id)
+					(list "decision" "scan_join_order")
+					(list "decision_site" "ordered_join_stream")
+					(list "chosen" chosen)
+					(list "normally_chosen" normal_choice)
+					(list "selection" (if (nil? forced) "cost" "calibration_override"))
+					(list "reason" (if (nil? forced) "lowest_total_ns" "calibration_override"))
+					(list "inputs" (list
+						(list "join_input_rows" input_rows)
+						(list "join_estimated_rows" joined_rows)
+						(list "join_output_rows" output_rows)
+						(list "join_table_count" (qassoc_get spec (quote table_count) 0))
+						(list "join_legacy_probe_rows" legacy_probe_rows)
+						(list "limit" (qassoc_get spec (quote limit) -1))
+						(list "offset" (qassoc_get spec (quote offset) 0))))
+					(list "alternatives" (list
+						(list (list "plan" "legacy_join_tree")
+							(list "cost" (planner_cost_explain legacy_cost)))
+						(list (list "plan" "scan_join_order")
+							(list "cost" (planner_cost_explain scan_cost)))))))
+				(if (equal? chosen "scan_join_order")
+					(scan_join_order_emit_plan spec default_alias needed_exprs
+						value_builder reduce_expr neutral_expr stages)
+					(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
+						output_exprs needed_exprs final_condition order_items offset_value limit_value
+						stages facts value_builder reduce_expr neutral_expr)))))))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -5268,7 +5656,7 @@ topology inequality by bounded binary search and guard that crossover. */
 						crossover_rows)))
 			(define alternatives (list candidate_plan "fused_base_scan"))
 			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-			(define forced (planner_physical_override decision_id))
+			(define forced nil)
 			(planner_record_physical_decision (list
 				(list "decision_id" decision_id)
 				(list "decision" "scan_access_path")
@@ -5377,6 +5765,8 @@ topology inequality by bounded binary search and guard that crossover. */
 			(query_limit_active? offset_value limit_value)))
 		(define row_number_membership_consumer
 			(membership_row_number_consumer? membership direct_order_limit))
+		(define current_order_partitioning
+			(planner_source_order_partitioning src current_order_items))
 		(define membership_plan (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
 			nil
 			(recset_project_join_plan_for_membership_using src membership
@@ -5395,7 +5785,9 @@ topology inequality by bounded binary search and guard that crossover. */
 					(count (merge_unique (list
 						(expr_probe_stages final_condition)
 						(physical_scalar_truth_plan_stages scalar_plan)))))
-				(not row_number_membership_consumer) (quote join_leaf))))
+				(not row_number_membership_consumer)
+				current_order_partitioning
+				(quote join_leaf))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		(define residual_probe_work_rows (membership_plan_residual_work_rows
@@ -7980,7 +8372,10 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		(define kind (qassoc_get decision "decision" nil))
 		(if (equal? kind "membership_carrier")
 			(physical_membership_operator_family plan)
-			"unknown"))))
+			(if (equal? kind "scan_join_order")
+				(if (physical_expr_has_head? plan (quote scan_join_order))
+					"scan_join_order" "legacy_join_tree")
+				"unknown")))))
 
 /* recset_project_join is adaptive only inside the physical operator: actual
 source-key and per-shard target cardinalities are available there, while the
@@ -8049,7 +8444,8 @@ potentially large calibrated SELECT result. */
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" "unknown"))
 		(define decision_kind (qassoc_get decision "decision" nil))
-		(define expected_family (if (equal? decision_kind "membership_carrier")
+		(define expected_family (if (or (equal? decision_kind "membership_carrier")
+			(equal? decision_kind "scan_join_order"))
 			variant operator_family))
 		(define consistent (equal? operator_family expected_family))
 		(define baseline_hash_key (concat "hash:" decision_id))
@@ -8131,6 +8527,11 @@ potentially large calibrated SELECT result. */
 							"driver_map_columns" (physical_calibration_input decision "driver_map_columns")
 							"driver_expression_operations" (physical_calibration_input decision "driver_expression_operations")
 							"driver_expression_depth" (physical_calibration_input decision "driver_expression_depth")
+							"join_input_rows" (physical_calibration_input decision "join_input_rows")
+							"join_estimated_rows" (physical_calibration_input decision "join_estimated_rows")
+							"join_output_rows" (physical_calibration_input decision "join_output_rows")
+							"join_table_count" (physical_calibration_input decision "join_table_count")
+							"join_legacy_probe_rows" (physical_calibration_input decision "join_legacy_probe_rows")
 							"rows" (quote __calibration_rows)
 							"result_hash" (quote __calibration_hash)
 							"result_equal" (quote __calibration_equal)))))

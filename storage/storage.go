@@ -797,6 +797,24 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_order_partitioned?",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			t := TableFromScmer(a[0])
+			column := scm.String(a[1])
+			topology := t.activeTopology()
+			return scm.NewBool(topology.mode == ShardModePartition &&
+				len(topology.dimensions) == 1 && topology.dimensions[0].Column == column)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "reports whether a table has one range-partition dimension matching the leading ORDER BY column; this immutable-topology check lets physical costing account for ordered shard pruning",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "column"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_selectivity_estimate",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1693,6 +1711,7 @@ func Init(en scm.Env) {
 			Optimize: optimizeScanOrderMulti,
 		},
 	})
+	declareScanJoinOrder(&en)
 	scm.Declare(&en, &scm.Declaration{
 		Name: "createdatabase",
 

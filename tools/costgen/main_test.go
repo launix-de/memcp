@@ -112,6 +112,32 @@ func TestRowFeaturesKeepsBroadTextRowsAndBytesSeparate(t *testing.T) {
 	}
 }
 
+func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	base := calibrationRow{
+		Decision: "scan_join_order", JoinInputRows: value(25_000),
+		JoinEstimatedRows: value(4_000), JoinOutputRows: value(72),
+		JoinTableCount: value(2), JoinLegacyProbeRows: value(600),
+	}
+	base.Plan = "scan_join_order"
+	scanFeatures, err := rowFeatures(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanFeatures[0] != 1 || scanFeatures[1] != 25_000 || scanFeatures[15] != 1 ||
+		scanFeatures[3] != 25_072 || scanFeatures[4] != 4_000 || scanFeatures[18] != 0 {
+		t.Fatalf("ordered join scan features = %v", scanFeatures)
+	}
+	base.Plan = "legacy_join_tree"
+	legacyFeatures, err := rowFeatures(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyFeatures[18] != 600 {
+		t.Fatalf("legacy ordered join probe work = %v, want 600", legacyFeatures[18])
+	}
+}
+
 func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 	value := func(v float64) *float64 { return &v }
 	row := calibrationRow{
@@ -141,6 +167,15 @@ func TestRowFeaturesModelsAdaptiveOrderedBatchWork(t *testing.T) {
 	}
 	if features[15] != 4 {
 		t.Fatalf("ordered scan invocations = %v, want 4", features[15])
+	}
+	row.DriverOrderPartitioned = true
+	partitionedFeatures, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partitionedFeatures[12] != 200 {
+		t.Fatalf("partition-pruned ordered batch work = %v, want twice the 100-row prefix",
+			partitionedFeatures[12])
 	}
 }
 
@@ -353,6 +388,48 @@ func TestDecisionAlternativesAcceptsDirectFilterConsumer(t *testing.T) {
 	}
 	if len(groups["filter"]) != 2 {
 		t.Fatalf("unexpected alternatives: %+v", groups)
+	}
+}
+
+func TestDecisionAlternativesAcceptsOrderedJoinFamily(t *testing.T) {
+	rows := []observation{
+		{caseName: "join", decision: "scan_join_order", plan: "legacy_join_tree"},
+		{caseName: "join", decision: "scan_join_order", plan: "scan_join_order"},
+	}
+	groups, err := decisionAlternatives(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups["join"]) != 2 {
+		t.Fatalf("unexpected ordered join alternatives: %+v", groups)
+	}
+}
+
+func TestValidateDecisionOrderingUsesOrderedJoinCostBoundary(t *testing.T) {
+	legacy := func(name string, measured, estimated float64) observation {
+		return observation{
+			caseName: name, decision: "scan_join_order", plan: "legacy_join_tree",
+			y: measured, currentEstimate: estimated, x: make([]float64, 19),
+		}
+	}
+	ordered := func(name string, measured float64) observation {
+		features := make([]float64, 19)
+		features[0], features[1], features[3], features[4], features[15] = 1, 25_000, 25_001, 1, 1
+		return observation{
+			caseName: name, decision: "scan_join_order", plan: "scan_join_order",
+			y: measured, x: features,
+		}
+	}
+	rows := []observation{
+		legacy("point", 70e6, 3.2e6), ordered("point", 230e6),
+		legacy("broad", 439e6, 5.7e6), ordered("broad", 1.2e6),
+	}
+	constants := constants{
+		scanInvocationNS: 122_080, scanRowNS: 1, mapColumnRowNS: 32,
+		expressionOperationNS: 220, orderedScanInvocationNS: 3_027_639,
+	}
+	if err := validateDecisionOrdering(rows, constants); err != nil {
+		t.Fatal(err)
 	}
 }
 

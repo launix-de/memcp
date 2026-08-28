@@ -211,7 +211,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_order"
+        - "scan_join_order"
       result_not_contains:
         - "(sort rows"
         - "(slice sorted"
@@ -304,7 +304,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_order"
+        - "scan_join_order"
         - "ord_tree_a"
         - "ord_tree_b"
         - "ord_tree_c"
@@ -762,7 +762,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "stream_window_reduce"
+        - "scan_join_order"
       result_not_contains:
         - "__join_order_intermediate"
         - ".join-order:"
@@ -939,6 +939,73 @@ test_cases:
         - val: 350007
     cleanup:
       - sql: "DROP TABLE IF EXISTS ord_stress"
+
+  - name: "Ordered equi-join top-k preserves SQL result"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_join_order_driver"
+      - sql: "DROP TABLE IF EXISTS ord_join_order_lookup"
+      - sql: "CREATE TABLE ord_join_order_driver (id INT PRIMARY KEY, lookup_id INT, score INT)"
+      - sql: "CREATE TABLE ord_join_order_lookup (id INT PRIMARY KEY, enabled INT)"
+      - sql: "INSERT INTO ord_join_order_lookup (id, enabled) VALUES (1, 1), (2, 0)"
+      - sql: "INSERT INTO ord_join_order_driver (id, lookup_id, score) VALUES (1, 1, 10), (2, 2, 20), (3, 1, 30)"
+      - scm: "(rebuild)"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled = 1
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 3
+        - id: 1
+
+  - name: "Ordered equi-join exposes both physical alternatives"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE DISCOVER
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled = 1
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      contains:
+        - "scan_join_order"
+        - "legacy_join_tree"
+
+  - name: "Sparse ordered join costs all visited driver rows"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_join_order_driver"
+      - sql: "DROP TABLE IF EXISTS ord_join_order_lookup"
+      - sql: "CREATE TABLE ord_join_order_driver (id INT PRIMARY KEY, lookup_id INT, score INT)"
+      - sql: "CREATE TABLE ord_join_order_lookup (driver_id INT, enabled INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "ord_join_order_driver") '("id" "lookup_id" "score")
+              (map (produceN 2000) (lambda (i) (list (+ i 1) (+ i 1) i))))
+            (insert (table "memcp-tests" "ord_join_order_lookup") '("driver_id" "enabled")
+              (map (produceN 2000) (lambda (i)
+                (list (+ i 1) (if (equal? i 0) 1 0)))))
+            (rebuild)
+            true)
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.id = l.driver_id
+      WHERE l.enabled = 1
+      ORDER BY d.score DESC
+      LIMIT 1
+    expect:
+      result_contains:
+        - "chosen scan_join_order"
+        - "join_legacy_probe_rows 2000"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_join_order_driver"
+      - sql: "DROP TABLE IF EXISTS ord_join_order_lookup"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ord_t"

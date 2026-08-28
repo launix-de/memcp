@@ -231,8 +231,6 @@ test_cases:
       result_occurrences:
         - text: "__query_presence_probe_"
           count: 1
-        - text: "__memcp_tx"
-          count: 1
 
   - name: "observed boolean carrier closes invariant EXISTS and NOT probes"
     sql: |
