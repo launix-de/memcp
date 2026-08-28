@@ -1162,7 +1162,12 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		ss = SessionStateFromTx(currentTx)
 	}
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionProgram := scm.PrepareSerialProc(condition)
+	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	var conditionFn func(...scm.Scmer) scm.Scmer
+	if !conditionAlwaysTrue && conditionProgram.Kind != scm.SerialProcNativeArgConstant {
+		conditionFn = scm.OptimizeProcToSerialFunction(condition)
+	}
 
 	// prepare filter function
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1224,26 +1229,32 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	}
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
-	ccols := make([]ColumnStorage, len(conditionCols))
-	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsCachedReader := make([]bool, len(conditionCols))
-	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	for i, k := range conditionCols { // iterate over columns
-		if k == "$recset_contains" {
-			fnptr := recSetContainsClosure(t)
-			if recsetBoundaryCoversCondition {
-				fnptr = recSetAlreadyMatchedClosure()
+	var ccols []ColumnStorage
+	var cReaders []ColumnReader
+	var cNeedsCachedReader []bool
+	var conditionGetters []mapArgGetter
+	if !conditionAlwaysTrue {
+		ccols = make([]ColumnStorage, len(conditionCols))
+		cReaders = make([]ColumnReader, len(conditionCols))
+		cNeedsCachedReader = make([]bool, len(conditionCols))
+		conditionGetters = make([]mapArgGetter, len(conditionCols))
+		for i, k := range conditionCols { // iterate over columns
+			if k == "$recset_contains" {
+				fnptr := recSetContainsClosure(t)
+				if recsetBoundaryCoversCondition {
+					fnptr = recSetAlreadyMatchedClosure()
+				}
+				getter := func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+				conditionGetters[i] = getter
+				continue
 			}
-			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewClosure(fnptr, id)
+			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+			if _, ok := ccols[i].(*StorageComputeProxy); ok {
+				cNeedsCachedReader[i] = true
 			}
-			conditionGetters[i] = getter
-			continue
-		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if _, ok := ccols[i].(*StorageComputeProxy); ok {
-			cNeedsCachedReader[i] = true
 		}
 	}
 	// initialize main_count lazily if needed
@@ -1322,68 +1333,81 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			}
 			survivedBuf = survived
 
-			// pass 2: bulk-fetch every non-getter condition column for the
-			// main-storage survivors of this batch, one call per column.
-			mainIds := mainIdsBuf[:0]
-			for _, idx := range survived {
-				if idx < t.main_count {
-					mainIds = append(mainIds, idx)
-				}
-			}
-			mainIdsBuf = mainIds
-			for i := range ccols {
-				if conditionGetters[i] != nil {
-					continue
-				}
-				if cap(colBufs[i]) < len(mainIds) {
-					colBufs[i] = make([]scm.Scmer, len(mainIds))
-				}
-				colBufs[i] = colBufs[i][:len(mainIds)]
-				if len(mainIds) == 0 {
-					continue
-				}
-				if cNeedsCachedReader[i] {
-					cReaders[i].GetValueMulti(mainIds, colBufs[i], 1)
-				} else {
-					ccols[i].GetValueMulti(mainIds, colBufs[i], 1)
-				}
-			}
-
-			// pass 3: evaluate the condition per row using the pre-fetched
-			// main-storage values; delta rows are still read one at a time.
-			outN := 0
-			mainBufIdx := 0
-			for _, idx := range survived {
-				if idx < t.main_count {
-					for i := range ccols {
-						if conditionGetters[i] != nil {
-							cdataset[i] = conditionGetters[i](idx, 0)
-						} else {
-							cdataset[i] = colBufs[i][mainBufIdx]
-						}
-					}
-					mainBufIdx++
-				} else {
-					// value from delta storage
-					for i, k := range conditionCols { // iterate over columns
-						if conditionGetters[i] != nil {
-							cdataset[i] = conditionGetters[i](idx, 0)
-						} else if cNeedsCachedReader[i] {
-							cdataset[i] = cReaders[i].GetValue(idx)
-						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-							cdataset[i] = ccols[i].GetValue(idx)
-						} else {
-							cdataset[i] = t.getDelta(int(idx-t.main_count), k) // fill value
+			outN := len(survived)
+			if conditionAlwaysTrue {
+				copy(batch, survived)
+			} else {
+				// pass 2: bulk-fetch every non-getter condition column for the
+				// main-storage survivors of this batch, one call per column.
+				mainIds := mainIdsBuf[:0]
+				if conditionProgram.Kind != scm.SerialProcNativeArgConstant {
+					for _, idx := range survived {
+						if idx < t.main_count {
+							mainIds = append(mainIds, idx)
 						}
 					}
 				}
-				// check condition
-				if !scm.ToBool(conditionFn(cdataset...)) {
-					continue // condition did not match
+				mainIdsBuf = mainIds
+				for i := range ccols {
+					if conditionProgram.Kind == scm.SerialProcNativeArgConstant {
+						continue
+					}
+					if conditionGetters[i] != nil {
+						continue
+					}
+					if cap(colBufs[i]) < len(mainIds) {
+						colBufs[i] = make([]scm.Scmer, len(mainIds))
+					}
+					colBufs[i] = colBufs[i][:len(mainIds)]
+					if len(mainIds) == 0 {
+						continue
+					}
+					if cNeedsCachedReader[i] {
+						cReaders[i].GetValueMulti(mainIds, colBufs[i], 1)
+					} else {
+						ccols[i].GetValueMulti(mainIds, colBufs[i], 1)
+					}
 				}
 
-				batch[outN] = idx
-				outN++
+				// Pass 3 dispatches once per batch. Simple binary predicates read
+				// only their argument column and call the native primitive directly;
+				// general expressions retain the existing interpreter adapter.
+				if conditionProgram.Kind == scm.SerialProcNativeArgConstant {
+					outN = t.filterNativeArgConstantScanBatch(survived, conditionCols, ccols, cReaders, conditionGetters, &conditionProgram)
+					copy(batch, survived[:outN])
+				} else {
+					outN = 0
+					mainBufIdx := 0
+					for _, idx := range survived {
+						if idx < t.main_count {
+							for i := range ccols {
+								if conditionGetters[i] != nil {
+									cdataset[i] = conditionGetters[i](idx, 0)
+								} else {
+									cdataset[i] = colBufs[i][mainBufIdx]
+								}
+							}
+							mainBufIdx++
+						} else {
+							for i, k := range conditionCols {
+								if conditionGetters[i] != nil {
+									cdataset[i] = conditionGetters[i](idx, 0)
+								} else if cNeedsCachedReader[i] {
+									cdataset[i] = cReaders[i].GetValue(idx)
+								} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+									cdataset[i] = ccols[i].GetValue(idx)
+								} else {
+									cdataset[i] = t.getDelta(int(idx-t.main_count), k)
+								}
+							}
+						}
+						if !scm.ToBool(conditionFn(cdataset...)) {
+							continue
+						}
+						batch[outN] = idx
+						outN++
+					}
+				}
 			}
 			// grow result if needed, then flush filtered batch
 			for resultN+outN > resultCap {
