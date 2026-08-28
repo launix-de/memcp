@@ -1101,7 +1101,15 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 		return notFoundValue
 	}
 	mapperAlreadyLocked := foundShard.hasWriteOwnerForTx(currentTx)
-	mapper := foundShard.OpenMapReducer(callbackCols, callback, aggregate, mapperAlreadyLocked, 0, nil, currentTx)
+	var mapperStorage ShardMapReducer
+	var mapperWorkspace shardMapReducerWorkspace
+	mapper := &mapperStorage
+	if mapReducerCanUseReadWorkspace(callbackCols) {
+		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+		foundShard.initReadMapReducer(&mapperStorage, callbackCols, callback, aggregate, mapperAlreadyLocked, currentTx)
+	} else {
+		mapper = foundShard.OpenMapReducer(callbackCols, callback, aggregate, mapperAlreadyLocked, 0, nil, currentTx)
+	}
 	result := mapper.Stream(neutral, []uint32{foundID}, nil)
 	mapper.FlushSideEffects()
 	return result

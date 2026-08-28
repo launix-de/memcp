@@ -29,6 +29,7 @@ package storage
 //	_WithAutocommit – full HTTP handler path: GLS + autocommit transaction
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/launix-de/memcp/scm"
@@ -203,6 +204,65 @@ func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {
 	defer mutationMapper.Close()
 	if len(mutationMapper.isUpdate) != 1 || !mutationMapper.isUpdate[0] || len(mutationMapper.setClosureFn) != 1 {
 		t.Fatal("mutation mapper did not initialize mutation metadata")
+	}
+}
+
+func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
+	const dbName = "test_scan_read_mapper_workspace"
+	databases.Remove(dbName)
+	t.Cleanup(func() { databases.Remove(dbName) })
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	columns := make([]string, inlineMapReducerColumns+1)
+	for i := range columns {
+		columns[i] = "c" + strconv.Itoa(i)
+		tbl.CreateColumn(columns[i], "INT", nil, nil)
+	}
+	mainRows := make([][]scm.Scmer, 2)
+	for rowIndex := range mainRows {
+		mainRows[rowIndex] = make([]scm.Scmer, len(columns))
+		for columnIndex := range mainRows[rowIndex] {
+			mainRows[rowIndex][columnIndex] = scm.NewInt(int64(rowIndex*20 + columnIndex + 1))
+		}
+	}
+	tbl.Insert(columns, mainRows, nil, scm.NewNil(), false, nil)
+	result := GetDatabase(dbName).rebuild(true, false, true)
+	if len(result.errors) > 0 {
+		t.Fatalf("rebuild errors: %v", result.errors)
+	}
+
+	shard := tbl.Shards[0]
+	mapLast := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[len(args)-1] })
+	reduceLast := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[1] })
+
+	// A small projection uses the inline workspace. MapOne follows Stream to
+	// ensure it reads its requested row instead of reusing prefetched values.
+	var inlineMapper ShardMapReducer
+	var inlineWorkspace shardMapReducerWorkspace
+	prepareReadMapReducerStorage(&inlineMapper, &inlineWorkspace, 2)
+	shard.initReadMapReducer(&inlineMapper, columns[:2], mapLast, reduceLast, false, nil)
+	inlineMapper.Stream(scm.NewNil(), []uint32{0}, nil)
+	if got := inlineMapper.MapOne(1).Int(); got != mainRows[1][1].Int() {
+		t.Fatalf("inline main-row projection = %d, want %d", got, mainRows[1][1].Int())
+	}
+
+	// Wider projections use the allocation-backed fallback rather than
+	// truncating the caller-owned inline arrays.
+	var mapper ShardMapReducer
+	var workspace shardMapReducerWorkspace
+	prepareReadMapReducerStorage(&mapper, &workspace, len(columns))
+	shard.initReadMapReducer(&mapper, columns, mapLast, reduceLast, false, nil)
+	if got := mapper.Stream(scm.NewNil(), []uint32{0}, nil).Int(); got != mainRows[0][len(columns)-1].Int() {
+		t.Fatalf("wide main-row projection = %d, want %d", got, mainRows[0][len(columns)-1].Int())
+	}
+
+	deltaRow := make([]scm.Scmer, len(columns))
+	for i := range deltaRow {
+		deltaRow[i] = scm.NewInt(int64(100 + i))
+	}
+	tbl.Insert(columns, [][]scm.Scmer{deltaRow}, nil, scm.NewNil(), false, nil)
+	if got := mapper.MapOne(shard.main_count).Int(); got != deltaRow[len(deltaRow)-1].Int() {
+		t.Fatalf("wide delta-row projection = %d, want %d", got, deltaRow[len(deltaRow)-1].Int())
 	}
 }
 
