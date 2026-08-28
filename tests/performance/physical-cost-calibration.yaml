@@ -6,7 +6,7 @@
 
 metadata:
   version: "1.0"
-  description: "Physical membership cost calibration workload"
+  description: "Physical operator cost calibration workload"
   isolated: true
   ci: false
   physical_calibration: true
@@ -14,10 +14,8 @@ metadata:
   compile_state: "cached_plan_execution_only"
 
 setup:
-  # Keep the 100k-row text relation in one authoritative generation. Cold
-  # multi-shard statistics are a separate fallback workload and must not be
-  # mixed into the known-statistics coefficient fit.
-  - scm: '(settings "ShardSize" 125000)'
+  # Keep the production default shard size. Rebuild supplies the automatic
+  # partitioning used by ordinary query plans and the ordered-join fanout.
   - sql: "DROP TABLE IF EXISTS pc_files_small"
   - sql: "DROP TABLE IF EXISTS pc_docs_small"
   - sql: "DROP TABLE IF EXISTS pc_files_large"
@@ -132,6 +130,34 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS pc_files_wide"
 
 test_cases:
+  - name: "ordered equi-join top-k"
+    physical_calibration: true
+    calibration_holdout: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_large d
+      JOIN pc_files_large f ON d.file_id = f.id
+      WHERE f.id = 4999
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+
+  - name: "ordered filtered join top-k"
+    physical_calibration: true
+    calibration_holdout: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id
+      FROM pc_docs_large d
+      JOIN pc_files_large f ON d.file_id = f.id
+      WHERE f.filename LIKE '%hit%'
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+
   - name: "small broad UNION membership"
     physical_calibration: true
     warmup: 1

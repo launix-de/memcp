@@ -168,6 +168,11 @@ type calibrationRow struct {
 	DriverMapColumns                 *float64 `json:"driver_map_columns"`
 	DriverExpressionOperations       *float64 `json:"driver_expression_operations"`
 	DriverExpressionDepth            *float64 `json:"driver_expression_depth"`
+	JoinInputRows                    *float64 `json:"join_input_rows"`
+	JoinEstimatedRows                *float64 `json:"join_estimated_rows"`
+	JoinOutputRows                   *float64 `json:"join_output_rows"`
+	JoinTableCount                   *float64 `json:"join_table_count"`
+	JoinLegacyProbeRows              *float64 `json:"join_legacy_probe_rows"`
 	ResultEqual                      bool     `json:"result_equal"`
 	Rows                             int64    `json:"rows"`
 	ResultHash                       string   `json:"result_hash"`
@@ -278,7 +283,7 @@ func main() {
 	// must not be mistaken for additional equations of this coefficient model.
 	membershipObservations := filterDecisionObservations(observations, "membership_carrier")
 	training := filterObservations(membershipObservations, false)
-	allTraining := filterObservations(observations, false)
+	allTraining := filterObservations(membershipObservations, false)
 	carrierTraining := filterCarrierObservations(training)
 	fitTraining := filterCompleteExactPairs(carrierTraining)
 	if err := validateMeasurementSignal(fitTraining); err != nil {
@@ -310,6 +315,18 @@ func main() {
 		}
 	}
 	printDecisionOrdering(membershipObservations, c)
+	orderedJoinObservations := filterDecisionObservations(observations, "scan_join_order")
+	if len(orderedJoinObservations) > 0 {
+		// scan_join_order deliberately reuses the calibrated scan/map/expression
+		// work units instead of introducing an independently fitted coefficient
+		// set. Its forced variants still form a mandatory ordering check: this
+		// catches a lowerer formula which compiles but chooses the wrong operator.
+		if err := validateDecisionOrdering(orderedJoinObservations, c); err != nil {
+			fatal(fmt.Errorf("scan_join_order: %w", err))
+		}
+		printModelComparison("scan_join_order", orderedJoinObservations, c)
+		printDecisionOrdering(orderedJoinObservations, c)
+	}
 	if *patch {
 		if err := patchQueryplan(queryplanPath, c); err != nil {
 			fatal(err)
@@ -948,7 +965,12 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 	if row.EstimatedNS == nil || row.WholeQueryExecutionNS <= 0 {
 		return fmt.Errorf("forced race variant has incomplete measurements: %+v", row)
 	}
-	if row.CandidateInputRows == nil || row.CandidateRows == nil ||
+	if row.Decision == "scan_join_order" {
+		if row.JoinInputRows == nil || row.JoinEstimatedRows == nil ||
+			row.JoinOutputRows == nil || row.JoinTableCount == nil || row.JoinLegacyProbeRows == nil {
+			return fmt.Errorf("ordered join variant has incomplete measurements: %+v", row)
+		}
+	} else if row.CandidateInputRows == nil || row.CandidateRows == nil ||
 		row.DriverInputRows == nil || row.DriverRows == nil || row.ExpectedDriverRowsVisited == nil {
 		return fmt.Errorf("membership variant has incomplete measurements: %+v", row)
 	}
@@ -1104,6 +1126,25 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	if row.Decision == "scan_join_order" {
+		if row.JoinInputRows == nil || row.JoinEstimatedRows == nil ||
+			row.JoinOutputRows == nil || row.JoinTableCount == nil {
+			return nil, fmt.Errorf("ordered join work profile contains nil inputs: %+v", row)
+		}
+		features := make([]float64, 19)
+		features[0] = math.Max(0, *row.JoinTableCount-1)
+		features[15] = 1
+		features[1] = *row.JoinInputRows
+		features[3] = *row.JoinOutputRows + *row.JoinInputRows*math.Max(0, *row.JoinTableCount-1)
+		features[4] = *row.JoinEstimatedRows
+		if row.Plan == "legacy_join_tree" {
+			if row.JoinLegacyProbeRows == nil {
+				return nil, fmt.Errorf("ordered legacy join profile has nil probe rows: %+v", row)
+			}
+			features[18] = *row.JoinLegacyProbeRows
+		}
+		return features, nil
+	}
 	scanInvocations := *row.CandidateScanInvocations + *row.DriverScanInvocations
 	driverWorkRows := *row.DriverInputRows
 	adaptiveProbeRows, adaptiveSortWork := 0.0, 0.0
@@ -1684,6 +1725,12 @@ func fitNonnegative(x [][]float64, y []float64) ([]float64, error) {
 }
 
 func estimatedNS(row observation, c constants) float64 {
+	if row.decision == "scan_join_order" && row.plan == "legacy_join_tree" {
+		// The legacy alternative is an already costed composite join tree. Its
+		// planner-reported estimate is the authoritative baseline; rowFeatures
+		// only expands the new scan_join_order operator into generated work units.
+		return row.currentEstimate
+	}
 	beta := []float64{
 		float64(c.scanInvocationNS),
 		float64(c.scanRowNS),
@@ -1802,11 +1849,25 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 		switch row.plan {
 		case "candidate_keyset", "driver_order_membership_probe", "driver_filter_join_probe", "ordered_batch_accept", "prefiltered_candidate_keyset":
 			groups[row.caseName][row.plan] = row
+		case "legacy_join_tree", "scan_join_order":
+			if row.decision != "scan_join_order" {
+				return nil, fmt.Errorf("plan %q belongs to scan_join_order, got decision %q", row.plan, row.decision)
+			}
+			groups[row.caseName][row.plan] = row
 		default:
 			return nil, fmt.Errorf("unsupported plan %q", row.plan)
 		}
 	}
 	for name, plans := range groups {
+		if decisions[name] == "scan_join_order" {
+			if _, legacy := plans["legacy_join_tree"]; !legacy {
+				return nil, fmt.Errorf("incomplete ordered join alternatives for %q", name)
+			}
+			if _, ordered := plans["scan_join_order"]; !ordered {
+				return nil, fmt.Errorf("incomplete ordered join alternatives for %q", name)
+			}
+			continue
+		}
 		if _, ok := plans["candidate_keyset"]; !ok {
 			return nil, fmt.Errorf("incomplete alternatives for %q", name)
 		}

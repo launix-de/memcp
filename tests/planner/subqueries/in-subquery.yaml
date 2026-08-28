@@ -242,6 +242,47 @@ test_cases:
         - ID: 9992
         - ID: 9991
         - ID: 9990
+
+  - name: "Computed membership calibration prepares its candidate cache"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT ID
+      FROM membership_event
+      WHERE event_time >= 9990
+        AND (entity_kind = 'root' OR entity_key IN (
+          SELECT CONCAT('narrow_a:', ID)
+          FROM membership_narrow_key_a
+          WHERE enabled = 1
+        ))
+    expect:
+      rows: 2
+      contains:
+        - "candidate_keyset"
+        - "driver_filter_join_probe"
+        - "result_equal"
+      not_contains:
+        - "result_equal false"
+
+  - name: "Cached computed membership calibration rebinds its transaction"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT ID
+      FROM membership_event
+      WHERE event_time >= 9990
+        AND (entity_kind = 'root' OR entity_key IN (
+          SELECT CONCAT('narrow_a:', ID)
+          FROM membership_narrow_key_a
+          WHERE enabled = 1
+        ))
+    expect:
+      rows: 2
+      contains:
+        - "candidate_keyset"
+        - "driver_filter_join_probe"
+        - "result_equal"
+      not_contains:
+        - "result_equal false"
+
   - name: "IN subquery - files with render results"
     sql: |
       SELECT ID, name FROM in_fop_files

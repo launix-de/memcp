@@ -12,6 +12,28 @@ metadata:
   max_time: 180
 
 setup:
+  - sql: "DROP VIEW IF EXISTS so_perf_join_view"
+  - sql: "DROP TABLE IF EXISTS so_perf_plots"
+  - sql: "DROP TABLE IF EXISTS so_perf_bars"
+  - sql: "DROP TABLE IF EXISTS so_perf_foos"
+  - sql: "DROP TABLE IF EXISTS so_perf_products"
+  - sql: "DROP TABLE IF EXISTS so_perf_images"
+  - sql: "DROP TABLE IF EXISTS so_perf_accounts"
+  - sql: "DROP TABLE IF EXISTS so_perf_transactions"
+  - sql: "DROP TABLE IF EXISTS so_perf_search"
+  - sql: "DROP TABLE IF EXISTS so_perf_a"
+  - sql: "DROP TABLE IF EXISTS so_perf_b"
+  - sql: "DROP TABLE IF EXISTS so_perf_c"
+  - sql: "DROP TABLE IF EXISTS so_perf_d"
+  - sql: "DROP TABLE IF EXISTS so_perf_nodes"
+  - sql: "DROP TABLE IF EXISTS so_perf_sensors"
+  - sql: "DROP TABLE IF EXISTS so_perf_measures"
+  - sql: "DROP TABLE IF EXISTS so_perf_t1"
+  - sql: "DROP TABLE IF EXISTS so_perf_t2"
+  - sql: "DROP TABLE IF EXISTS so_perf_t3"
+  - sql: "DROP TABLE IF EXISTS so_perf_players"
+  - sql: "DROP TABLE IF EXISTS so_perf_performance"
+  - sql: "DROP TABLE IF EXISTS so_perf_org_players"
   # https://stackoverflow.com/questions/50367835/postgresql-slow-query-with-limit-and-order-by
   - sql: "CREATE TABLE so_perf_plots (id INT PRIMARY KEY, fk_id VARCHAR(36), created_at BIGINT) ENGINE=memory"
   # https://stackoverflow.com/questions/6037843/extremely-slow-postgresql-query-with-order-and-limit-clauses
@@ -41,7 +63,7 @@ setup:
   - sql: "CREATE TABLE so_perf_t3 (pid INT) ENGINE=memory"
   # https://stackoverflow.com/questions/79828237/postgresql-query-performance-with-three-large-tables-distinct-and-pagination
   - sql: "CREATE TABLE so_perf_players (player_id INT PRIMARY KEY, business_name VARCHAR(32), first_name VARCHAR(32), last_name VARCHAR(32)) ENGINE=memory"
-  - sql: "CREATE TABLE so_perf_performance (player_id INT, hashed_player_id VARCHAR(32), fps_score INT, year INT, UNIQUE(year, player_id, hashed_player_id)) ENGINE=memory"
+  - sql: "CREATE TABLE so_perf_performance (player_id INT, hashed_player_id VARCHAR(32), fps_score INT, year INT) ENGINE=memory"
   - sql: "CREATE TABLE so_perf_org_players (org_id INT, player_id INT) ENGINE=memory"
   - scm: |
       (begin
@@ -119,11 +141,11 @@ test_cases:
     sql: "SELECT f.id, f.bar_id FROM so_perf_foos f JOIN so_perf_bars b ON f.bar_id = b.id WHERE b.baz_id = 13266 ORDER BY f.id DESC LIMIT 5"
     expect: {rows: 5}
 
-  - name: "SO 6037843 exposes costed carrier alternatives"
+  - name: "SO 6037843 exposes costed ordered join alternatives"
     sql: "EXPLAIN PHYSICAL SELECT f.id FROM so_perf_foos f JOIN so_perf_bars b ON f.bar_id = b.id WHERE b.baz_id = 13266 ORDER BY f.id DESC LIMIT 5"
     expect:
       rows: 1
-      result_contains: ["ordered_join_carrier", "projected_candidate_keyset", "ordered_postfilter"]
+      result_contains: ["scan_join_order", "legacy_join_tree", "lowest_total_ns"]
 
   - name: "SO 6037843 handwritten scan_join_order"
     scm: |

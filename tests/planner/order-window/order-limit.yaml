@@ -211,7 +211,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_order"
+        - "scan_join_order"
       result_not_contains:
         - "(sort rows"
         - "(slice sorted"
@@ -762,7 +762,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "stream_window_reduce"
+        - "scan_join_order"
       result_not_contains:
         - "__join_order_intermediate"
         - ".join-order:"
@@ -939,6 +939,45 @@ test_cases:
         - val: 350007
     cleanup:
       - sql: "DROP TABLE IF EXISTS ord_stress"
+
+  - name: "Ordered equi-join top-k preserves SQL result"
+    setup:
+      - sql: "DROP TABLE IF EXISTS ord_join_order_driver"
+      - sql: "DROP TABLE IF EXISTS ord_join_order_lookup"
+      - sql: "CREATE TABLE ord_join_order_driver (id INT PRIMARY KEY, lookup_id INT, score INT)"
+      - sql: "CREATE TABLE ord_join_order_lookup (id INT PRIMARY KEY, enabled INT)"
+      - sql: "INSERT INTO ord_join_order_lookup (id, enabled) VALUES (1, 1), (2, 0)"
+      - sql: "INSERT INTO ord_join_order_driver (id, lookup_id, score) VALUES (1, 1, 10), (2, 2, 20), (3, 1, 30)"
+      - scm: "(rebuild)"
+    sql: |
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled = 1
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      rows: 2
+      data:
+        - id: 3
+        - id: 1
+
+  - name: "Ordered equi-join exposes both physical alternatives"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE DISCOVER
+      SELECT d.id
+      FROM ord_join_order_driver d
+      JOIN ord_join_order_lookup l ON d.lookup_id = l.id
+      WHERE l.enabled = 1
+      ORDER BY d.score DESC
+      LIMIT 2
+    expect:
+      contains:
+        - "scan_join_order"
+        - "legacy_join_tree"
+    cleanup:
+      - sql: "DROP TABLE IF EXISTS ord_join_order_driver"
+      - sql: "DROP TABLE IF EXISTS ord_join_order_lookup"
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ord_t"

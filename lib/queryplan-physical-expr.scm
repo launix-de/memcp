@@ -5193,7 +5193,11 @@ ever-larger subtrees. */
 						(concat "__group_count_recset_" (stable_structural_hash membership_expr true))
 						(list (quote lambda) '() membership_expr)))
 				(list (quote scan)
-					'(session "__memcp_tx")
+					/* Computed group columns outlive the physical request which creates
+					them. Resolve the transaction from ComputeColumn's rebound runtime
+					session instead of letting rewrite_physical_transaction_reads capture
+					a request-local __physical_query_tx slot in this stored closure. */
+					(list (list (quote context) "session") "__memcp_tx")
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -6606,3 +6610,18 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_scan_invocation_ns 3027639)
 (define planner_membership_ordered_recset_sort_unit_ns 1)
 /* END GENERATED COST CONSTANTS */
+
+/* scan_join_order reuses the calibrated scan/filter/map work units. The
+structural formula belongs to the lowerer; tools/costgen owns every numeric
+coefficient used here. */
+(define planner_scan_join_order_cost (lambda (input_rows joined_rows table_count output_rows)
+	(planner_cost
+		(+ planner_membership_ordered_scan_invocation_ns
+			(* (- table_count 1) planner_membership_scan_invocation_ns))
+		(+ (* input_rows planner_membership_scan_row_ns)
+			(* input_rows (- table_count 1) planner_membership_map_column_row_ns))
+		(* joined_rows planner_membership_expression_operation_row_ns)
+		0 0
+		(* output_rows planner_membership_map_column_row_ns)
+		(* joined_rows 8)
+		0 output_rows 0.65)))

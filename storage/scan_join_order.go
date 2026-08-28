@@ -21,6 +21,49 @@ import "runtime"
 import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
+func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm.Scmer, *scm.TypeDescriptor) {
+	const mapIdx, reduceIdx, neutralIdx, reduce2Idx, outerIdx, notFoundIdx = 14, 15, 16, 17, 18, 19
+	rawMap := v[mapIdx]
+	rawReduce := scm.NewNil()
+	rawReduce2 := scm.NewNil()
+	if len(v) > reduceIdx {
+		rawReduce = v[reduceIdx]
+	}
+	if len(v) > reduce2Idx {
+		rawReduce2 = v[reduce2Idx]
+	}
+	for i := 1; i < mapIdx && i < len(v); i++ {
+		v[i], _ = oc.OptimizeSub(v[i], true)
+	}
+	neutralType := unknownScanType()
+	if len(v) > neutralIdx {
+		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
+		neutralType = normalizeScanType(neutralType)
+	}
+	if !rawReduce.IsNil() {
+		oc.SetCallbackReturnFlow(scm.CallbackReturnFlow(rawMap, rawReduce, 1))
+	}
+	oc.Ome.IncrLoopDepth()
+	optimizedMap, mapType := oc.OptimizeSub(rawMap, true)
+	v[mapIdx] = optimizedMap
+	mapType = normalizeScanType(mapType)
+	resultType := neutralType
+	if !rawReduce.IsNil() {
+		v[reduceIdx], resultType = oc.OptimizeReducerCallback(rawReduce, neutralType, mapType)
+	}
+	if !rawReduce2.IsNil() {
+		v[reduce2Idx], resultType = oc.OptimizeReducerCallback(rawReduce2, resultType, resultType)
+	}
+	if len(v) > outerIdx {
+		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
+	}
+	if len(v) > notFoundIdx {
+		v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
+	}
+	oc.Ome.DecrLoopDepth()
+	return scm.NewSlice(v), resultType
+}
+
 // scanJoinOrderColumn identifies one physical column in the joined tuple.
 // Table is the zero-based position in scanJoinOrderSpec.inputs.
 type scanJoinOrderColumn struct {
@@ -1364,13 +1407,14 @@ func declareScanJoinOrder(en *scm.Env) {
 				{Kind: "int", Label: "limit", Description: "joined rows emitted in final order; -1 is unlimited"},
 				{Kind: "list", Label: "mapColumns", Description: "joined columns supplied to the sole outer map callback", Element: joinedColumn},
 				{Kind: "func", Label: "map", Description: "map callback evaluated only for final OFFSET/LIMIT rows"},
-				{Kind: "func|nil", Label: "reduce", Description: "reducer applied inside each shard-combination runner; with no reduce2 it is also used by the global ordered collector", Optional: true},
+				{Kind: "func|nil", Label: "reduce", Description: "global reducer; when reduce2 is supplied, this becomes the runner-local first-stage reducer", Optional: true},
 				{Kind: "any", Label: "neutral", Description: "optional reducer neutral value", Optional: true},
-				{Kind: "func|nil", Label: "reduce2", Description: "optional global reducer combining runner-local reduce results; permitted only with offset 0 and unlimited limit -1", Optional: true},
+				{Kind: "func|nil", Label: "reduce2", Description: "optional global second-stage reducer combining runner-local reduce results; permitted only with offset 0 and unlimited limit -1", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "optional whole-scan NULL fallback", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "optional result when no joined row is emitted", Optional: true},
 			},
-			Return: &scm.TypeDescriptor{Kind: "any"},
+			Return:   &scm.TypeDescriptor{Kind: "any"},
+			Optimize: optimizeScanJoinOrder,
 		},
 	})
 }
