@@ -832,7 +832,11 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		}
 	}
 
-	var buf [1024]uint32 // stack-allocated batch buffer (4 KB, fits in L1)
+	// The optional record visitor makes this batch escape even though ordered
+	// scans consume it synchronously. Keep one exclusive, pointer-free 4 KiB
+	// workspace per active merge instead of allocating it for every invocation.
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	bufN := 0
 	var bufShard *shardqueue
 	breakCaught := false
@@ -1275,8 +1279,15 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 		// iterate over items (indexed)
 		// TODO(memcp): iterateIndexSorted(boundaries, sortcols) to emit tuples in ORDER BY sequence.
-		var buf [1024]uint32
+		buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+		defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 		resultCap := 1024
+		if limitPartitionCols == 0 && limit >= 0 && limit < resultCap {
+			resultCap = limit
+		}
+		if resultCap < 1 {
+			resultCap = 1
+		}
 		result.items = make([]uint32, resultCap)
 		resultN := 0
 		usageWeight := orderedScanIndexUsageWeight(boundaries, int(visibleUpper), limit)
@@ -1286,7 +1297,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		// GetValue call per row per column.
 		var survivedBuf, mainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
-		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], usageWeight, limit, func(index *StorageIndex, active bool) {
+		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
 				resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
 			}

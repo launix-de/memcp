@@ -592,8 +592,9 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 		}
 		return scm.ToBool(conditionFn(cdataset...))
 	}
-	var buf [1024]uint32
-	t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], true, &exactLikeMain, func(batch []uint32) bool {
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
+	t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, true, &exactLikeMain, func(batch []uint32) bool {
 		for _, idx := range batch {
 			if idx >= visibleUpper {
 				continue
@@ -1556,8 +1557,9 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 			return true
 		})
 	} else {
-		var buf [1024]uint32
-		t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, len(t.inserts), buf[:], true, nil, evaluateBatch)
+		buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+		defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
+		t.iterateIndexMatchAware(currentTx, boundaries, lower, upperLast, len(t.inserts), buf, true, nil, evaluateBatch)
 	}
 	return builder.finish()
 }

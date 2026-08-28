@@ -842,8 +842,9 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	found := false
 	var foundID uint32
 
-	var buf [8]uint32
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(uniquePointScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
 		}
@@ -1391,7 +1392,8 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		mutationSeen = make(map[uint64]struct{}, 128)
 	}
 
-	var buf [1024]uint32
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	var batchBuf [1024]uint32
 	hadValue := false
 	batchCount := len(batchdata) / stride
@@ -1406,7 +1408,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			activeLower, activeUpperLast = indexFromBoundaries(activeBoundaries)
 		}
 
-		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
 			outN := 0
 			for _, idx := range batch {
