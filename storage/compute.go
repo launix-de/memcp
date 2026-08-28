@@ -316,7 +316,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 		t.schema.schemalock.Unlock()
 		panic("ComputeOrderedColumn: column " + t.Name + "." + name + " does not exist")
 	}
-
+	t.hasOrderedColumns.Store(true)
 	// Register triggers while the table-local DDL contract is held. Durable
 	// columns publish synchronously; reconstructible temp metadata joins the next
 	// complete schema snapshot.

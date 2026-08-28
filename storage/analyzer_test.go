@@ -22,6 +22,88 @@ import (
 	"github.com/launix-de/memcp/scm"
 )
 
+var benchmarkBoundaries boundaries
+
+func BenchmarkExtractBoundariesEqual(b *testing.B) {
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal?"),
+		scm.NewSymbol("x"),
+		scm.NewInt(42),
+	})
+	condition := buildProc([]string{"x"}, body)
+	columns := []string{"id"}
+	var storage [4]columnboundaries
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkBoundaries = extractBoundariesInto(storage[:0], columns, condition)
+	}
+}
+
+func BenchmarkExtractBoundariesAnd(b *testing.B) {
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("and"),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal?"),
+			scm.NewSymbol("tenant"),
+			scm.NewInt(42),
+		}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol(">="),
+			scm.NewSymbol("created"),
+			scm.NewInt(100),
+		}),
+	})
+	condition := buildProc([]string{"tenant", "created"}, body)
+	columns := []string{"tenant", "created"}
+	var storage [4]columnboundaries
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchmarkBoundaries = extractBoundariesInto(storage[:0], columns, condition)
+	}
+}
+
+func TestSimpleAndBoundariesReuseCallerStorage(t *testing.T) {
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("and"),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal?"),
+			scm.NewSymbol("tenant"),
+			scm.NewInt(42),
+		}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol(">="),
+			scm.NewSymbol("created"),
+			scm.NewInt(100),
+		}),
+	})
+	condition := buildProc([]string{"tenant", "created"}, body)
+	columns := []string{"tenant_id", "created_at"}
+	var storage [4]columnboundaries
+
+	got := extractBoundariesInto(storage[:0], columns, condition)
+	if len(got) != 2 {
+		t.Fatalf("simple AND boundaries = %d, want 2", len(got))
+	}
+	if &got[0] != &storage[0] {
+		t.Fatal("simple AND did not reuse caller-owned boundary storage")
+	}
+	if got[0].col != "tenant_id" || got[0].matcher != EqualMatcher || got[0].lower.Int() != 42 {
+		t.Fatalf("unexpected equality boundary: %#v", got[0])
+	}
+	if got[1].col != "created_at" || got[1].matcher != RangeMatcher || got[1].lower.Int() != 100 || !got[1].lowerInclusive {
+		t.Fatalf("unexpected range boundary: %#v", got[1])
+	}
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		benchmarkBoundaries = extractBoundariesInto(storage[:0], columns, condition)
+	})
+	if allocs != 0 {
+		t.Fatalf("simple AND extraction allocated %.2f times per run, want 0", allocs)
+	}
+}
+
 // buildProc constructs a Proc with the given param names and body AST.
 func buildProc(params []string, body scm.Scmer) scm.Scmer {
 	paramSlice := make([]scm.Scmer, len(params))

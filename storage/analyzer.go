@@ -166,21 +166,117 @@ func (b columnboundaries) Binding() scm.Scmer { return b.lower }
 func (b columnboundaries) Collation() string  { return b.collation }
 
 type indexAnalyzeContext struct {
-	resolveParameter func(scm.Scmer) (string, bool)
-	resolveColumn    func(scm.Scmer) (string, bool)
-	extractConstant  func(scm.Scmer) (scm.Scmer, bool)
-	functionIs       func(scm.Scmer, string) bool
+	proc          *scm.Proc
+	params        []scm.Scmer
+	conditionCols []string
 }
 
 func (c *indexAnalyzeContext) ResolveParameter(v scm.Scmer) (string, bool) {
-	return c.resolveParameter(v)
+	v = v.WithoutSourceInfo()
+	if v.IsSymbol() {
+		name := v.String()
+		for i, sym := range c.params {
+			if i < len(c.conditionCols) && sym.IsSymbol() && sym.String() == name {
+				return c.conditionCols[i], true
+			}
+		}
+	}
+	if v.IsNthLocalVar() {
+		idx := int(v.NthLocalVar())
+		if idx < len(c.conditionCols) {
+			return c.conditionCols[idx], true
+		}
+	}
+	return "", false
 }
-func (c *indexAnalyzeContext) ResolveColumn(v scm.Scmer) (string, bool) { return c.resolveColumn(v) }
+
+func (c *indexAnalyzeContext) ResolveColumn(v scm.Scmer) (string, bool) {
+	name, ok := c.ResolveParameter(v)
+	if !ok || isScanPseudoColName(name) {
+		return "", false
+	}
+	return name, true
+}
+
+func (c *indexAnalyzeContext) resolveBatchSubidx(v scm.Scmer) (int, bool) {
+	name, ok := c.ResolveParameter(v)
+	if !ok {
+		return 0, false
+	}
+	return parseBatchPseudoColName(name)
+}
+
+func (c *indexAnalyzeContext) resolveOuterReference(v scm.Scmer) (scm.Scmer, bool) {
+	depth := 0
+	for {
+		parts, ok := scmerSlice(v)
+		if !ok || len(parts) != 2 || !scanSymbolIs(parts[0], "outer") {
+			break
+		}
+		depth++
+		v = parts[1]
+	}
+	if depth == 0 {
+		return scm.NewNil(), false
+	}
+
+	env := c.proc.En
+	for level := 1; level < depth && env != nil; level++ {
+		env = env.Outer
+	}
+	if env == nil {
+		return scm.NewNil(), false
+	}
+	if v.IsSymbol() {
+		sym := scm.Symbol(v.String())
+		if binding := env.FindRead(sym); binding != nil {
+			value, ok := binding.Vars[sym]
+			return value, ok
+		}
+	}
+	if v.IsNthLocalVar() {
+		idx := int(v.NthLocalVar())
+		if idx < len(env.VarsNumbered) {
+			return env.VarsNumbered[idx], true
+		}
+	}
+	return scm.NewNil(), false
+}
+
 func (c *indexAnalyzeContext) ExtractConstant(v scm.Scmer) (scm.Scmer, bool) {
-	return c.extractConstant(v)
+	v = v.WithoutSourceInfo()
+	if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() || v.IsCustom(TagRecSet) {
+		return v, true
+	}
+	if v.IsSymbol() {
+		if value, ok := c.proc.En.Vars[scm.Symbol(v.String())]; ok {
+			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsCustom(TagRecSet) {
+				return value, true
+			}
+		}
+	}
+	if value, ok := c.resolveOuterReference(v); ok {
+		if value.IsInt() || value.IsFloat() || value.IsString() || value.IsCustom(TagRecSet) {
+			return value, true
+		}
+	}
+	if isIndependent(c.params, v) {
+		if value, ok := evalIndependentScmer(v, c.proc.En); ok {
+			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsBool() || value.IsNil() || value.IsCustom(TagRecSet) {
+				return value, true
+			}
+		}
+	}
+	return scm.NewNil(), false
 }
+
 func (c *indexAnalyzeContext) FunctionIs(v scm.Scmer, name string) bool {
-	return c.functionIs(v, name)
+	v = v.WithoutSourceInfo()
+	if v.SymbolEquals(name) {
+		return true
+	}
+	declaration := scm.DeclarationForValue(v)
+	return declaration != nil && declaration.Name == name
 }
 
 // boundaryValueEqual compares boundary values in index-order semantics.
@@ -340,133 +436,176 @@ func widenBounds(a, b boundaries) boundaries {
 	return a[:n]
 }
 
-// analyzes a lambda expression for value boundaries, so the best index can be found
-func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
-	var p scm.Proc
+func conditionAnalyzeContext(conditionCols []string, condition scm.Scmer) (indexAnalyzeContext, bool) {
+	var p *scm.Proc
 	if condition.IsProc() {
-		p = *condition.Proc()
+		p = condition.Proc()
 	} else if si, ok := condition.Any().(scm.Proc); ok {
 		// fallback for legacy tagAny procs
-		p = si
+		p = &si
 	} else {
-		// native Go function - no boundary extraction possible (full scan)
-		return nil
+		return indexAnalyzeContext{}, false
 	}
 	var params []scm.Scmer
 	if p.Params.IsSlice() {
 		params = p.Params.Slice()
 	}
-	resolveLabel := func(node scm.Scmer) (string, bool) {
-		node = node.WithoutSourceInfo()
-		if node.IsSymbol() {
-			name := node.String()
-			for i, sym := range params {
-				if sym.IsSymbol() && sym.String() == name {
-					return conditionCols[i], true
-				}
-			}
-		}
-		if node.IsNthLocalVar() {
-			idx := int(node.NthLocalVar())
-			if idx < len(conditionCols) {
-				return conditionCols[idx], true
-			}
-		}
-		return "", false
-	}
-	// resolveColVar maps a node to a column name.
-	// Handles both symbol params (linear scan, no alloc) and NthLocalVar(i).
-	resolveColVar := func(node scm.Scmer) (string, bool) {
-		if name, ok := resolveLabel(node); ok {
-			if !isScanPseudoColName(name) {
-				return name, true
-			}
-		}
-		return "", false
-	}
-	resolveBatchSubidx := func(node scm.Scmer) (int, bool) {
-		if name, ok := resolveLabel(node); ok {
-			return parseBatchPseudoColName(name)
-		}
-		return 0, false
-	}
-	resolveOuterReference := func(node scm.Scmer) (scm.Scmer, bool) {
-		depth := 0
-		for {
-			parts, ok := scmerSlice(node)
-			if !ok || len(parts) != 2 || !scanSymbolIs(parts[0], "outer") {
-				break
-			}
-			depth++
-			node = parts[1]
-		}
-		if depth == 0 {
-			return scm.NewNil(), false
-		}
+	return indexAnalyzeContext{
+		proc:          p,
+		params:        params,
+		conditionCols: conditionCols,
+	}, true
+}
 
-		env := p.En
-		for level := 1; level < depth && env != nil; level++ {
-			env = env.Outer
-		}
-		if env == nil {
-			return scm.NewNil(), false
-		}
-		if node.IsSymbol() {
-			sym := scm.Symbol(node.String())
-			if binding := env.FindRead(sym); binding != nil {
-				value, ok := binding.Vars[sym]
-				return value, ok
-			}
-		}
-		if node.IsNthLocalVar() {
-			idx := int(node.NthLocalVar())
-			if idx < len(env.VarsNumbered) {
-				return env.VarsNumbered[idx], true
-			}
-		}
-		return scm.NewNil(), false
+func conditionMayHaveBoundaries(condition scm.Scmer) bool {
+	if condition.IsProc() {
+		return true
 	}
-	// analyze condition for AND clauses, equal? < > <= >= BETWEEN
-	extractConstant := func(v scm.Scmer) (scm.Scmer, bool) {
-		v = v.WithoutSourceInfo()
-		if v.IsInt() || v.IsFloat() || v.IsString() || v.IsBool() || v.IsCustom(TagRecSet) {
-			return v, true
+	_, ok := condition.Any().(scm.Proc)
+	return ok
+}
+
+func extractCustomBoundary(ctx indexAnalyzeContext, node scm.Scmer) (columnboundaries, bool) {
+	for _, analyzer := range boundaryMatchers {
+		if analyzer == EqualMatcher || analyzer == RangeMatcher {
+			continue
 		}
-		if v.IsSymbol() {
-			if val2, ok := p.En.Vars[scm.Symbol(v.String())]; ok {
-				if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
-					return val2, true
-				}
+		if boundary, found := analyzer.Analyze(&ctx, node); found {
+			return boundary, true
+		}
+	}
+	return columnboundaries{}, false
+}
+
+func unwrapAnalyzeNode(ctx *indexAnalyzeContext, node scm.Scmer) scm.Scmer {
+	for {
+		items, sliced := scmerSlice(node)
+		if !sliced || len(items) != 2 || !ctx.FunctionIs(items[0], "optimize") {
+			return node
+		}
+		node = items[1]
+	}
+}
+
+// extractSingleBoundary recognizes one indexable predicate without
+// constructing the recursive general-analyzer closure or an intermediate
+// singleton slice.
+func extractSingleBoundary(ctx *indexAnalyzeContext, node scm.Scmer) (columnboundaries, bool) {
+	node = unwrapAnalyzeNode(ctx, node)
+	v, ok := scmerSlice(node)
+	if !ok || len(v) < 2 {
+		return columnboundaries{}, false
+	}
+	makeComparison := func(columnNode, valueNode scm.Scmer, matcher IndexAnalyzer, lower bool, inclusive bool) (columnboundaries, bool) {
+		col, columnOK := ctx.ResolveColumn(columnNode)
+		if !columnOK {
+			return columnboundaries{}, false
+		}
+		bound := columnboundaries{col: col, matcher: matcher}
+		if value, constant := ctx.ExtractConstant(valueNode); constant {
+			if matcher == EqualMatcher {
+				bound.lower, bound.upper = value, value
+				bound.lowerInclusive, bound.upperInclusive = true, true
+			} else if lower {
+				bound.lower, bound.lowerInclusive = value, inclusive
+			} else {
+				bound.upper, bound.upperInclusive = value, inclusive
+			}
+			return bound, true
+		}
+		if subidx, batch := ctx.resolveBatchSubidx(valueNode); batch {
+			if matcher == EqualMatcher {
+				bound.lowerBatch, bound.upperBatch = true, true
+				bound.lowerBatchSubidx, bound.upperBatchSubidx = subidx, subidx
+				bound.lowerInclusive, bound.upperInclusive = true, true
+			} else if lower {
+				bound.lowerBatch, bound.lowerBatchSubidx, bound.lowerInclusive = true, subidx, inclusive
+			} else {
+				bound.upperBatch, bound.upperBatchSubidx, bound.upperInclusive = true, subidx, inclusive
+			}
+			return bound, true
+		}
+		return columnboundaries{}, false
+	}
+	if len(v) >= 3 && (ctx.FunctionIs(v[0], "equal?") || ctx.FunctionIs(v[0], "equal??")) {
+		if bound, found := makeComparison(v[1], v[2], EqualMatcher, true, true); found {
+			return bound, true
+		}
+		return makeComparison(v[2], v[1], EqualMatcher, true, true)
+	}
+	if len(v) >= 3 && (ctx.FunctionIs(v[0], "<") || ctx.FunctionIs(v[0], "<=")) {
+		inclusive := ctx.FunctionIs(v[0], "<=")
+		if bound, found := makeComparison(v[1], v[2], RangeMatcher, false, inclusive); found {
+			return bound, true
+		}
+		return makeComparison(v[2], v[1], RangeMatcher, true, inclusive)
+	}
+	if len(v) >= 3 && (ctx.FunctionIs(v[0], ">") || ctx.FunctionIs(v[0], ">=")) {
+		inclusive := ctx.FunctionIs(v[0], ">=")
+		if bound, found := makeComparison(v[1], v[2], RangeMatcher, true, inclusive); found {
+			return bound, true
+		}
+		return makeComparison(v[2], v[1], RangeMatcher, false, inclusive)
+	}
+	if ctx.FunctionIs(v[0], "nil?") {
+		if col, found := ctx.ResolveColumn(v[1]); found {
+			return columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}, true
+		}
+	}
+	return extractCustomBoundary(*ctx, node)
+}
+
+// extractSimpleBoundaries appends the dominant simple predicate class directly
+// into caller-owned storage. Flat or nested AND trees remain allocation-free;
+// OR widening and computed-column synthesis retain the complete general path.
+func extractSimpleBoundaries(ctx *indexAnalyzeContext, node scm.Scmer, storage boundaries) (boundaries, bool) {
+	node = unwrapAnalyzeNode(ctx, node)
+	items, sliced := scmerSlice(node)
+	if sliced && len(items) > 1 && items[0].SymbolEquals("and") {
+		result := storage
+		for _, child := range items[1:] {
+			var ok bool
+			result, ok = extractSimpleBoundaries(ctx, child, result)
+			if !ok {
+				return storage, false
 			}
 		}
-		if val2, ok := resolveOuterReference(v); ok {
-			if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsCustom(TagRecSet) {
-				return val2, true
-			}
-		}
-		if isIndependent(params, v) {
-			if val2, ok := evalIndependentScmer(v, p.En); ok {
-				if val2.IsInt() || val2.IsFloat() || val2.IsString() || val2.IsBool() || val2.IsNil() || val2.IsCustom(TagRecSet) {
-					return val2, true
-				}
-			}
-		}
-		return scm.NewNil(), false
+		return result, true
 	}
-	funcIs := func(head scm.Scmer, name string) bool {
-		head = head.WithoutSourceInfo()
-		if head.SymbolEquals(name) {
-			return true
+	boundary, ok := extractSingleBoundary(ctx, node)
+	if !ok {
+		return storage, false
+	}
+	return addConstraint(storage, boundary), true
+}
+
+func extractBoundariesInto(storage boundaries, conditionCols []string, condition scm.Scmer) boundaries {
+	ctx, ok := conditionAnalyzeContext(conditionCols, condition)
+	if ok {
+		if result, simple := extractSimpleBoundaries(&ctx, ctx.proc.Body, storage); simple {
+			return result
 		}
-		d := scm.DeclarationForValue(head)
-		return d != nil && d.Name == name
 	}
-	analyzeContext := &indexAnalyzeContext{
-		resolveParameter: resolveLabel,
-		resolveColumn:    resolveColVar,
-		extractConstant:  extractConstant,
-		functionIs:       funcIs,
+	return append(storage, extractBoundariesGeneral(conditionCols, condition)...)
+}
+
+// analyzes a lambda expression for value boundaries, so the best index can be found
+func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
+	return extractBoundariesInto(nil, conditionCols, condition)
+}
+
+// extractBoundariesGeneral retains the complete recursive analyzer for OR
+// widening, computed columns and any future shape not handled by the simple
+// allocation-free path.
+func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) boundaries {
+	analyzeContextValue, ok := conditionAnalyzeContext(conditionCols, condition)
+	if !ok {
+		// native Go function - no boundary extraction possible (full scan)
+		return nil
 	}
+	analyzeContext := &analyzeContextValue
+	p := analyzeContext.proc
+	params := analyzeContext.params
 	// traverseCondition returns boundaries for a single AST node.
 	// nil means "unknown node, no bounds extractable".
 	// AND: merge children (intersect). OR: widen children (union).
@@ -479,7 +618,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 		if len(v) == 0 {
 			return nil
 		}
-		if funcIs(v[0], "optimize") && len(v) == 2 {
+		if analyzeContext.FunctionIs(v[0], "optimize") && len(v) == 2 {
 			return traverseCondition(v[1])
 		}
 		for _, analyzer := range boundaryMatchers {
@@ -487,21 +626,21 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				return boundaries{boundary}
 			}
 		}
-		if funcIs(v[0], "equal?") || funcIs(v[0], "equal??") {
-			if col, ok := resolveColVar(v[1]); ok {
-				if v2, ok := extractConstant(v[2]); ok {
+		if analyzeContext.FunctionIs(v[0], "equal?") || analyzeContext.FunctionIs(v[0], "equal??") {
+			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
+				if v2, ok := analyzeContext.ExtractConstant(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
-				if subidx, ok := resolveBatchSubidx(v[2]); ok {
+				if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// reversed: (equal? const col)
-			if col, ok := resolveColVar(v[2]); ok {
-				if v2, ok := extractConstant(v[1]); ok {
+			if col, ok := analyzeContext.ResolveColumn(v[2]); ok {
+				if v2, ok := analyzeContext.ExtractConstant(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true}}
 				}
-				if subidx, ok := resolveBatchSubidx(v[1]); ok {
+				if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
@@ -516,7 +655,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						}
 					}
 				} else if isRawDataset(params, v[1]) {
-					if subidx, ok := resolveBatchSubidx(v[2]); ok {
+					if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
@@ -535,7 +674,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						}
 					}
 				} else if isRawDataset(params, v[2]) {
-					if subidx, ok := resolveBatchSubidx(v[1]); ok {
+					if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
@@ -545,22 +684,22 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			return nil
-		} else if funcIs(v[0], "<") || funcIs(v[0], "<=") {
+		} else if analyzeContext.FunctionIs(v[0], "<") || analyzeContext.FunctionIs(v[0], "<=") {
 			incl := v[0].SymbolEquals("<=")
-			if col, ok := resolveColVar(v[1]); ok {
-				if v2, ok := extractConstant(v[2]); ok {
+			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
+				if v2, ok := analyzeContext.ExtractConstant(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
-				if subidx, ok := resolveBatchSubidx(v[2]); ok {
+				if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
 			// reversed: (< const col) means col > const, (<= const col) means col >= const
-			if col, ok := resolveColVar(v[2]); ok {
-				if v2, ok := extractConstant(v[1]); ok {
+			if col, ok := analyzeContext.ResolveColumn(v[2]); ok {
+				if v2, ok := analyzeContext.ExtractConstant(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
-				if subidx, ok := resolveBatchSubidx(v[1]); ok {
+				if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
 				}
 			}
@@ -575,7 +714,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						}
 					}
 				} else if isRawDataset(params, v[1]) {
-					if subidx, ok := resolveBatchSubidx(v[2]); ok {
+					if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
@@ -595,7 +734,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						}
 					}
 				} else if isRawDataset(params, v[2]) {
-					if subidx, ok := resolveBatchSubidx(v[1]); ok {
+					if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
@@ -605,22 +744,22 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			return nil
-		} else if funcIs(v[0], ">") || funcIs(v[0], ">=") {
+		} else if analyzeContext.FunctionIs(v[0], ">") || analyzeContext.FunctionIs(v[0], ">=") {
 			incl := v[0].SymbolEquals(">=")
-			if col, ok := resolveColVar(v[1]); ok {
-				if v2, ok := extractConstant(v[2]); ok {
+			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
+				if v2, ok := analyzeContext.ExtractConstant(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false}}
 				}
-				if subidx, ok := resolveBatchSubidx(v[2]); ok {
+				if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx}}
 				}
 			}
 			// reversed: (> const col) means col < const, (>= const col) means col <= const
-			if col, ok := resolveColVar(v[2]); ok {
-				if v2, ok := extractConstant(v[1]); ok {
+			if col, ok := analyzeContext.ResolveColumn(v[2]); ok {
+				if v2, ok := analyzeContext.ExtractConstant(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl}}
 				}
-				if subidx, ok := resolveBatchSubidx(v[1]); ok {
+				if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
 					return boundaries{columnboundaries{col: col, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx}}
 				}
 			}
@@ -635,7 +774,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						}
 					}
 				} else if isRawDataset(params, v[1]) {
-					if subidx, ok := resolveBatchSubidx(v[2]); ok {
+					if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
 						canon := canonicalColName(v[1], params, conditionCols)
 						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
@@ -655,7 +794,7 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 						}
 					}
 				} else if isRawDataset(params, v[2]) {
-					if subidx, ok := resolveBatchSubidx(v[1]); ok {
+					if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
 						canon := canonicalColName(v[2], params, conditionCols)
 						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
@@ -665,9 +804,9 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 				}
 			}
 			return nil
-		} else if funcIs(v[0], "nil?") && len(v) >= 2 {
+		} else if analyzeContext.FunctionIs(v[0], "nil?") && len(v) >= 2 {
 			// IS NULL: (nil? col)
-			if col, ok := resolveColVar(v[1]); ok {
+			if col, ok := analyzeContext.ResolveColumn(v[1]); ok {
 				return boundaries{columnboundaries{col: col, matcher: EqualMatcher, lower: scm.NewNil(), lowerInclusive: true, upper: scm.NewNil(), upperInclusive: true}}
 			}
 			return nil
@@ -1140,7 +1279,7 @@ func scmerStructEqual(a, b scm.Scmer) bool {
 	return false
 }
 
-func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
+func indexFromBoundariesInto(storage []scm.Scmer, cols boundaries) (lower []scm.Scmer, upperLast scm.Scmer) {
 	if len(cols) > 0 {
 		sortedEnd := 0
 		for sortedEnd < len(cols) && cols[sortedEnd].matcher.IsSorted() {
@@ -1164,7 +1303,11 @@ func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scme
 		if effectiveLen == 0 {
 			return nil, scm.NewNil()
 		}
-		lower = make([]scm.Scmer, effectiveLen)
+		if cap(storage) >= effectiveLen {
+			lower = storage[:effectiveLen]
+		} else {
+			lower = make([]scm.Scmer, effectiveLen)
+		}
 		for i, v := range cols[:effectiveLen] {
 			lower[i] = v.lower
 		}
@@ -1173,4 +1316,8 @@ func indexFromBoundaries(cols boundaries) (lower []scm.Scmer, upperLast scm.Scme
 		}
 	}
 	return
+}
+
+func indexFromBoundaries(cols boundaries) ([]scm.Scmer, scm.Scmer) {
+	return indexFromBoundariesInto(nil, cols)
 }
