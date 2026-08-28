@@ -185,6 +185,27 @@ func TestSparseOrderedRecSetBuildsCompressedInversePositions(t *testing.T) {
 	}
 }
 
+func TestRepeatedLargeOrderedRecSetUsesInversePositions(t *testing.T) {
+	const rows = 100_000
+	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetlargeinverse", rows)
+	order := buildRankOrderIndex(t, tbl)
+	ids := make(map[int64]bool, 2_912)
+	for id := int64(0); id < 2_912; id++ {
+		ids[id] = true
+	}
+	source := recSetForIDs(tbl, ids)
+	want := []int64{0, 1, 2, 3, 4}
+
+	// The first scan builds the compressed RecID-to-index-position map. The
+	// second exercises its heap-backed path because the RecSet exceeds the
+	// 1024-entry stack scratch buffer.
+	for attempt := range 2 {
+		if got := scanOrderedRecSetIDsWithOrder(tbl, source, len(want), order); !equalInt64s(got, want) {
+			t.Fatalf("large ordered RecSet attempt %d rows = %v, want %v", attempt+1, got, want)
+		}
+	}
+}
+
 func TestDenseOrderedRecSetKeepsIndexDrivenTraversal(t *testing.T) {
 	const rows = 4_000
 	tbl := setupAdaptiveRecSetOrderTable(t, "trecsetdenseorder", rows)

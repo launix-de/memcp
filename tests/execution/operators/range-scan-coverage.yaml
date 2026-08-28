@@ -18,6 +18,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_dim"
   - sql: "DROP TABLE IF EXISTS perf_tiny"
+  - sql: "DROP TABLE IF EXISTS ordered_join_fact"
+  - sql: "DROP TABLE IF EXISTS ordered_join_dim"
   - sql: "DROP TABLE IF EXISTS selective_text_driver"
   - sql: "DROP TABLE IF EXISTS selective_text_dim"
   - sql: "DROP TABLE IF EXISTS selective_text_peer"
@@ -425,6 +427,74 @@ test_cases:
     sql: "INSERT INTO perf_tiny VALUES (1, 1)"
     expect:
       affected_rows: 1
+
+  - name: "Create ordered selective join fixture"
+    setup:
+      - sql: "CREATE TABLE ordered_join_dim (id INT PRIMARY KEY, filter_id INT)"
+      - sql: "CREATE TABLE ordered_join_fact (id INT PRIMARY KEY, dim_id INT)"
+    scm: |
+      (begin
+        (insert (table "memcp-tests" "ordered_join_dim") '("id" "filter_id")
+          (map (produceN 8192) (lambda (i)
+            (list (+ i 1) (if (< i 16) 13266 (+ i 20000))))))
+        (insert (table "memcp-tests" "ordered_join_fact") '("id" "dim_id")
+          (map (produceN 20000) (lambda (i)
+            (list (+ i 1) (if (< i 160) (+ 1 (floor (/ i 10))) 17)))))
+        (rebuild)
+        20000)
+    expect:
+      data: [20000]
+
+  - name: "Ordered selective join projects an exact candidate carrier"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT f.*
+      FROM ordered_join_fact AS f
+      INNER JOIN ordered_join_dim AS d ON f.dim_id = d.id
+      WHERE d.filter_id = 13266
+      ORDER BY f.id DESC
+      LIMIT 5 OFFSET 0
+    expect:
+      rows: 1
+      result_contains:
+        - 'ordered_join_carrier'
+        - 'chosen projected_candidate_keyset'
+        - 'carrier_exact true'
+        - 'recset_project_join'
+        - 'chosen carrier_only'
+
+  - name: "Parameterized ordered selective join keeps Top-K semantics"
+    sql: |
+      SELECT f.*
+      FROM ordered_join_fact AS f
+      INNER JOIN ordered_join_dim AS d ON f.dim_id = d.id
+      WHERE d.filter_id = 13266
+      ORDER BY f.id DESC
+      LIMIT 5 OFFSET 0
+    expect:
+      rows: 5
+      data:
+        - {id: 160, dim_id: 16}
+        - {id: 159, dim_id: 16}
+        - {id: 158, dim_id: 16}
+        - {id: 157, dim_id: 16}
+        - {id: 156, dim_id: 16}
+
+  - name: "Ordered selective join exposes calibratable carrier alternatives"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT f.*
+      FROM ordered_join_fact AS f
+      INNER JOIN ordered_join_dim AS d ON f.dim_id = d.id
+      WHERE d.filter_id = 13266
+      ORDER BY f.id DESC
+      LIMIT 5 OFFSET 0
+    expect:
+      rows: 2
+      contains:
+        - 'projected_candidate_keyset'
+        - 'ordered_postfilter'
+        - 'result_equal'
 
   - name: "Create selective text RecSet driver"
     sql: "CREATE TABLE selective_text_driver (id INT PRIMARY KEY, dim_id INT, search VARCHAR(40))"
@@ -1068,6 +1138,8 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS perf_main"
   - sql: "DROP TABLE IF EXISTS perf_dim"
   - sql: "DROP TABLE IF EXISTS perf_tiny"
+  - sql: "DROP TABLE IF EXISTS ordered_join_fact"
+  - sql: "DROP TABLE IF EXISTS ordered_join_dim"
   - sql: "DROP TABLE IF EXISTS selective_text_driver"
   - sql: "DROP TABLE IF EXISTS selective_text_dim"
   - sql: "DROP TABLE IF EXISTS selective_text_peer"

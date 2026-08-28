@@ -555,6 +555,19 @@ test_cases:
         - { owner_id: 1, owner_name: "Alice", total: 10 }
         - { owner_id: 2, owner_name: "Bob", total: 7 }
 
+  - name: "PostgreSQL explicit INNER JOIN supports ordered LIMIT"
+    sql: |
+      SELECT lhs.id AS id
+      FROM psql_data AS lhs
+      INNER JOIN psql_data AS rhs ON lhs.id = rhs.id
+      WHERE rhs.name = 'Alice'
+      ORDER BY lhs.id DESC
+      LIMIT 1
+    expect:
+      rows: 1
+      data:
+        - { id: 4 }
+
   - name: "PostgreSQL CREATE VIEW stores and expands parser IR"
     sql: |
       CREATE VIEW psql_data_view (view_id, view_name)
