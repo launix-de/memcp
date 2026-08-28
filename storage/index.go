@@ -969,13 +969,13 @@ func rebuildIndexes(candidates []*StorageIndex, t2 *storageShard) {
 
 // fullScan iterates all record IDs (main + delta) in natural order.
 // Used when the index is not built yet or was evicted.
-func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func([]uint32) bool) {
+func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, matchers []IndexRowMatcher, callback func([]uint32) bool) {
 	bufN := 0
 	for i := uint32(0); i < s.t.main_count; i++ {
 		buf[bufN] = i
 		bufN++
 		if bufN == len(buf) {
-			if !callback(buf[:bufN]) {
+			if !emitRowMatchers(matchers, buf[:bufN], callback) {
 				return
 			}
 			bufN = 0
@@ -985,14 +985,14 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, callback func(
 		buf[bufN] = s.t.main_count + uint32(i)
 		bufN++
 		if bufN == len(buf) {
-			if !callback(buf[:bufN]) {
+			if !emitRowMatchers(matchers, buf[:bufN], callback) {
 				return
 			}
 			bufN = 0
 		}
 	}
 	if bufN > 0 {
-		callback(buf[:bufN])
+		emitRowMatchers(matchers, buf[:bufN], callback)
 	}
 }
 
@@ -1417,30 +1417,30 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		})
 	}
 
-	callback = s.bindRowMatchers(bounds, cols, func() []IndexHook {
+	matchers := s.bindRowMatchers(bounds, cols, func() []IndexHook {
 		if persistent && state != nil {
 			return state.indexHooks
 		}
 		return nil
-	}(), persistent, exactMain, callback)
+	}(), persistent, exactMain)
 	for len(items) > 0 {
 		count := len(items)
 		if count > len(buf) {
 			count = len(buf)
 		}
 		copy(buf, items[:count])
-		if !callback(buf[:count]) {
+		if !emitRowMatchers(matchers, buf[:count], callback) {
 			return
 		}
 		items = items[count:]
 	}
 }
 
-// bindRowMatchers binds every non-ordering boundary once for this index run.
-// The returned callback applies the resulting functions in place to every
-// batch; no allocation or lock is added to the per-batch path.
-func (s *StorageIndex) bindRowMatchers(bounds boundaries, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool, callback func([]uint32) bool) func([]uint32) bool {
-	matchers := make([]IndexRowMatcher, 0, len(bounds))
+// bindRowMatchers returns only matcher state. The terminal callback deliberately
+// stays outside this value: storing it in a returned wrapper closure makes the
+// complete shard scan state escape even though index iteration is synchronous.
+func (s *StorageIndex) bindRowMatchers(bounds boundaries, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool) []IndexRowMatcher {
+	var matchers []IndexRowMatcher
 	for colIdx, bound := range bounds {
 		if bound.matcher == nil || bound.matcher.IsSorted() {
 			continue
@@ -1467,24 +1467,23 @@ func (s *StorageIndex) bindRowMatchers(bounds boundaries, cols []colGetter, hook
 			matchers = append(matchers, matcher)
 		}
 	}
-	if len(matchers) == 0 {
-		return callback
-	}
 	// Candidate matchers never replace the original predicate. This is
 	// required for approximate indexes such as n-grams and harmless for exact
 	// matchers such as RecSet membership.
-	if exactMain != nil {
+	if len(matchers) > 0 && exactMain != nil {
 		*exactMain = false
 	}
-	return func(ids []uint32) bool {
-		for _, matcher := range matchers {
-			ids = matcher(ids)
-			if len(ids) == 0 {
-				return true
-			}
+	return matchers
+}
+
+func emitRowMatchers(matchers []IndexRowMatcher, ids []uint32, callback func([]uint32) bool) bool {
+	for _, matcher := range matchers {
+		ids = matcher(ids)
+		if len(ids) == 0 {
+			return true
 		}
-		return callback(ids)
 	}
+	return callback(ids)
 }
 
 func (s *StorageIndex) estimateHookCandidates(tx *TxContext, bounds boundaries) (uint32, uint32, bool) {
@@ -1600,8 +1599,8 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 			if selected != nil {
 				selected(s, false)
 			}
-			callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
-			s.fullScan(maxInsertIndex, buf, callback)
+			matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+			s.fullScan(maxInsertIndex, buf, matchers, callback)
 			return
 		} else {
 			// Rebuild index without blocking on index mutex contention.
@@ -1612,8 +1611,8 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 				if selected != nil {
 					selected(s, false)
 				}
-				callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
-				s.fullScan(maxInsertIndex, buf, callback)
+				matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+				s.fullScan(maxInsertIndex, buf, matchers, callback)
 				return
 			}
 			if state.active {
@@ -1636,8 +1635,8 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
-		callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
-		s.fullScan(maxInsertIndex, buf, callback)
+		matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+		s.fullScan(maxInsertIndex, buf, matchers, callback)
 		return
 	}
 	if !state.active {
@@ -1646,8 +1645,8 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
-		callback = s.bindRowMatchers(bounds, cols, nil, false, exactMain, callback)
-		s.fullScan(maxInsertIndex, buf, callback)
+		matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+		s.fullScan(maxInsertIndex, buf, matchers, callback)
 		return
 	}
 	snapMainIndexes := state.mainIndexes
@@ -1797,7 +1796,7 @@ start_scan:
 	}
 
 	rawCallback := callback
-	callback = s.bindRowMatchers(bounds, cols, snapIndexHooks, true, exactMain, callback)
+	matchers := s.bindRowMatchers(bounds, cols, snapIndexHooks, true, exactMain)
 	adaptiveSwitchRows := int64(0)
 	if options != nil && hasRecSetBoundary && maxInsertIndex == 0 {
 		adaptiveSwitchRows = orderedRecSetSwitchRows(recsetPart.count)
@@ -1843,7 +1842,7 @@ start_scan:
 		buf[bufN] = id
 		bufN++
 		if bufN == len(buf) {
-			if !callback(buf[:bufN]) {
+			if !emitRowMatchers(matchers, buf[:bufN], callback) {
 				stopped = true
 			}
 			bufN = 0
@@ -1932,7 +1931,7 @@ start_scan:
 			// optimistic LIMIT-only estimate, so continue from the next un-emitted
 			// index position through the inverse RecSet kernel.
 			if bufN > 0 {
-				if !callback(buf[:bufN]) {
+				if !emitRowMatchers(matchers, buf[:bufN], callback) {
 					stopped = true
 				}
 				bufN = 0
@@ -1948,7 +1947,7 @@ start_scan:
 		}
 	}
 	if bufN > 0 && !stopped {
-		callback(buf[:bufN])
+		emitRowMatchers(matchers, buf[:bufN], callback)
 	}
 }
 

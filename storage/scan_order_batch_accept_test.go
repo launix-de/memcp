@@ -309,12 +309,12 @@ func TestShardMapReducerBulkReadsFinalMapColumns(t *testing.T) {
 		mainBulkReaders: []ColumnReader{first, second, nil},
 		args:            make([]scm.Scmer, 3),
 		reduceArgs:      make([]scm.Scmer, 2),
-		mapFn: func(values ...scm.Scmer) scm.Scmer {
+		mapProgram: scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			got = append(got, int64(scm.ToInt(values[0])+scm.ToInt(values[1])+scm.ToInt(values[2])))
 			return values[0]
-		},
-		reduceFn:  func(values ...scm.Scmer) scm.Scmer { return values[1] },
-		mainCount: 4,
+		})),
+		reduceProgram: scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })),
+		mainCount:     4,
 	}
 	mapper.Stream(scm.NewNil(), []uint32{3, 1, 2}, nil)
 

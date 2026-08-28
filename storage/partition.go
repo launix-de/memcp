@@ -144,40 +144,56 @@ func (t *table) shardResultBufferSize() int {
 	return size
 }
 
-func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnboundaries, callback_old func(*storageShard, bool)) <-chan struct{} {
+func traceShardScanCallback(callback func(*storageShard, bool), shard *storageShard, solo bool) {
+	scm.Trace.Duration(fmt.Sprintf("%p", shard), "shard", func() {
+		callback(shard, solo)
+	})
+}
+
+// runSingleShardScan keeps panic-safe resource release outside the topology
+// retry loop. Defers inside that loop cannot be open-coded by Go and used to
+// allocate a separate closure for every ordinary one-shard scan.
+func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shard *storageShard, callback func(*storageShard, bool)) {
+	defer topology.releaseOperation()
+	defer shard.activeScanners.Add(-1)
+	release := shard.acquireReadForScan(currentTx)
+	defer release()
+	if scm.Trace == nil {
+		callback(shard, true)
+	} else {
+		traceShardScanCallback(callback, shard, true)
+	}
+}
+
+func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, callback func(*storageShard, bool)) <-chan struct{} {
+	return runFanoutTasks(currentTx, len(shards), func(i int, synchronous bool) {
+		shard := shards[i]
+		defer topology.releaseOperation()
+		defer shard.activeScanners.Add(-1)
+		release := shard.acquireReadForScan(currentTx)
+		defer release()
+		if scm.Trace == nil {
+			callback(shard, synchronous)
+		} else {
+			traceShardScanCallback(callback, shard, synchronous)
+		}
+	})
+}
+
+func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnboundaries, callback func(*storageShard, bool)) <-chan struct{} {
 	// Keep shard acquisition outside physical scan callbacks. In clustered mode
 	// this is the orchestration point that can choose a local SHARED copy or send
 	// the whole shard-local scan pipeline to a remote holder; row readers must not
 	// perform another resource acquisition from inside the callback.
-	callback := callback_old
-	if scm.Trace != nil {
-		// hook on tracing
-		callback = func(s *storageShard, solo bool) {
-			scm.Trace.Duration(fmt.Sprintf("%p", s), "shard", func() {
-				callback_old(s, solo)
-			})
-		}
-	}
-
-	runWorkers := func(shards []*storageShard, topology *tableShardTopology) <-chan struct{} {
-		return runFanoutTasks(currentTx, len(shards), func(i int, synchronous bool) {
-			s := shards[i]
-			defer topology.releaseOperation()
-			defer s.activeScanners.Add(-1)
-			release := s.acquireReadForScan(currentTx)
-			defer release()
-			callback(s, synchronous)
-		})
-	}
-
 	for {
 		topology := t.activeTopology()
 		var relevant []*storageShard
 		if topology.mode == ShardModeFree {
-			relevant = make([]*storageShard, 0, len(topology.shards))
-			for _, s := range topology.shards {
-				if s != nil {
-					relevant = append(relevant, s)
+			relevant = topology.shards
+			for _, shard := range relevant {
+				if shard == nil {
+					relevant = collectRelevantShards(nil, boundaries, topology.shards)
+					break
 				}
 			}
 		} else {
@@ -208,15 +224,10 @@ func (t *table) iterateShardsParallel(currentTx *TxContext, boundaries []columnb
 		}
 
 		if len(relevant) == 1 {
-			s := relevant[0]
-			defer topology.releaseOperation()
-			defer s.activeScanners.Add(-1)
-			release := s.acquireReadForScan(currentTx)
-			defer release()
-			callback(s, true)
+			runSingleShardScan(currentTx, topology, relevant[0], callback)
 			return nil
 		}
-		return runWorkers(relevant, topology)
+		return runParallelShardScans(currentTx, relevant, topology, callback)
 	}
 }
 

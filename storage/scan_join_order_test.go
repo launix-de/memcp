@@ -317,3 +317,32 @@ func TestScanJoinOrderReduce2CombinesUnlimitedRunnerPartials(t *testing.T) {
 		t.Fatalf("global reduce2 calls = %d, want 2", globalReduceCalls.Load())
 	}
 }
+
+func TestScanJoinOrderUsesSerialCountPipeline(t *testing.T) {
+	database := "tscanjoinorderserialcount"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	left := setupScanJoinOrderTable(t, database, "left_rows", []string{"key_col"}, [][]scm.Scmer{
+		{scm.NewInt(1)}, {scm.NewInt(2)}, {scm.NewInt(3)},
+	})
+	right := setupScanJoinOrderTable(t, database, "right_rows", []string{"key_col"}, [][]scm.Scmer{
+		{scm.NewInt(1)}, {scm.NewInt(2)}, {scm.NewInt(3)},
+	})
+	mapFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count mapper", "(lambda (value) 1)"), &scm.Globalenv, nil), &scm.Globalenv)
+	reduceFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count reducer", "(lambda (acc value) (+ acc value))"), &scm.Globalenv, nil), &scm.Globalenv)
+	result := scanJoinOrder(nil, scanJoinOrderSpec{
+		inputs: []scanJoinOrderInput{
+			{table: left},
+			{table: right, sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
+		},
+		limit:    -1,
+		mapCols:  []scanJoinOrderColumn{{table: 0, column: "key_col"}},
+		mapFn:    mapFn,
+		reduceFn: reduceFn,
+		neutral:  scm.NewInt(0),
+	})
+	if result.Int() != 3 {
+		t.Fatalf("serial COUNT pipeline result = %v, want 3", result)
+	}
+}

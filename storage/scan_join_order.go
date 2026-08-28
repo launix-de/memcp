@@ -194,11 +194,19 @@ func scanJoinTrue() scm.Scmer {
 	return scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 }
 
-func scanJoinOrderReducer(reducer scm.Scmer) func(...scm.Scmer) scm.Scmer {
-	if reducer.IsNil() {
-		return func(values ...scm.Scmer) scm.Scmer { return values[1] }
+func scanJoinOrderOuterResult(spec *scanJoinOrderSpec, result scm.Scmer) scm.Scmer {
+	mapProgram := scm.PrepareSerialProc(spec.mapFn)
+	reduce := spec.reduceFn
+	if reduce.IsNil() {
+		reduce = scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
 	}
-	return scm.OptimizeProcToSerialFunction(reducer)
+	reduceProgram := scm.PrepareSerialProc(reduce)
+	nulls := make([]scm.Scmer, len(spec.mapCols))
+	for i := range nulls {
+		nulls[i] = scm.NewNil()
+	}
+	args := [2]scm.Scmer{result, mapProgram.Call(nulls)}
+	return reduceProgram.Call(args[:])
 }
 
 func appendScanJoinColumn(cols []string, indexes map[string]int, col string) ([]string, map[string]int) {
@@ -734,15 +742,32 @@ func reduceScanJoinOrderTuples(currentTx *TxContext, spec *scanJoinOrderSpec, tu
 	if len(tuples) == 0 {
 		return result, false
 	}
-	mapFn := scm.OptimizeProcToSerialFunction(spec.mapFn)
-	reduceFn := scanJoinOrderReducer(spec.reduceFn)
+	mapProgram := scm.PrepareSerialProc(spec.mapFn)
+	reduceProgram := scm.PrepareSerialProc(spec.reduceFn)
+	if spec.reduceFn.IsNil() {
+		reduceProgram = scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }))
+	}
+	var reduceArgs [2]scm.Scmer
+	reduceValue := func(acc scm.Scmer, value scm.Scmer) scm.Scmer {
+		reduceArgs[0], reduceArgs[1] = acc, value
+		return reduceProgram.Call(reduceArgs[:])
+	}
 	if spec.reduce2Fn.IsNil() {
+		// Keep scan_join_order aligned with the scan callback pipeline: COUNT(*)
+		// is one addition per accepted batch, not one callback pair per row.
+		if mapProgram.Kind == scm.SerialProcConstant && mapProgram.Value.IsInt() && mapProgram.Value.Int() == 1 && reduceProgram.IsNative(scm.Symbol("+")) {
+			reduceArgs[0] = result
+			reduceArgs[1] = scm.NewInt(int64(len(tuples)))
+			result = reduceProgram.Function(reduceArgs[:]...)
+			*emitted += len(tuples)
+			return result, true
+		}
 		readers := newScanJoinOrderMapReaders(currentTx, spec)
 		defer readers.close()
 		var args []scm.Scmer
 		for _, tuple := range tuples {
 			args = readers.values(tuple, args)
-			result = reduceFn(result, mapFn(args...))
+			result = reduceValue(result, mapProgram.Call(args))
 			*emitted++
 		}
 		return result, true
@@ -753,29 +778,43 @@ func reduceScanJoinOrderTuples(currentTx *TxContext, spec *scanJoinOrderSpec, tu
 	tasks := (len(tuples) + chunkSize - 1) / chunkSize
 	partials := make([]scm.Scmer, tasks)
 	done := runFanoutTasks(currentTx, tasks, func(task int, _ bool) {
-		localMap := scm.OptimizeProcToSerialFunction(spec.mapFn)
-		localReduce := scanJoinOrderReducer(spec.reduceFn)
+		localMap := scm.PrepareSerialProc(spec.mapFn)
+		localReduce := scm.PrepareSerialProc(spec.reduceFn)
+		if spec.reduceFn.IsNil() {
+			localReduce = scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }))
+		}
 		readers := newScanJoinOrderMapReaders(currentTx, spec)
 		defer readers.close()
 		partial := spec.neutral
+		var localReduceArgs [2]scm.Scmer
 		start := task * chunkSize
 		end := start + chunkSize
 		if end > len(tuples) {
 			end = len(tuples)
 		}
+		if localMap.Kind == scm.SerialProcConstant && localMap.Value.IsInt() && localMap.Value.Int() == 1 && localReduce.IsNative(scm.Symbol("+")) {
+			localReduceArgs[0] = partial
+			localReduceArgs[1] = scm.NewInt(int64(end - start))
+			partials[task] = localReduce.Function(localReduceArgs[:]...)
+			return
+		}
 		var args []scm.Scmer
 		for i := start; i < end; i++ {
 			args = readers.values(tuples[i], args)
-			partial = localReduce(partial, localMap(args...))
+			localReduceArgs[0] = partial
+			localReduceArgs[1] = localMap.Call(args)
+			partial = localReduce.Call(localReduceArgs[:])
 		}
 		partials[task] = partial
 	})
 	if done != nil {
 		<-done
 	}
-	reduce2Fn := scm.OptimizeProcToSerialFunction(spec.reduce2Fn)
+	reduce2Program := scm.PrepareSerialProc(spec.reduce2Fn)
+	var reduce2Args [2]scm.Scmer
 	for _, partial := range partials {
-		result = reduce2Fn(result, partial)
+		reduce2Args[0], reduce2Args[1] = result, partial
+		result = reduce2Program.Call(reduce2Args[:])
 	}
 	*emitted += len(tuples)
 	return result, true
@@ -793,12 +832,18 @@ func scanJoinOrderBatch(currentTx *TxContext, spec *scanJoinOrderSpec, driverRef
 	if spec.joinFilter.IsNil() || len(tuples) == 0 {
 		return tuples
 	}
-	filterFn := scm.OptimizeProcToSerialFunction(spec.joinFilter)
+	filterProgram := scm.PrepareSerialProc(spec.joinFilter)
+	if filterProgram.Kind == scm.SerialProcConstant {
+		if scm.ToBool(filterProgram.Value) {
+			return tuples
+		}
+		return tuples[:0]
+	}
 	filtered := tuples[:0]
 	var args []scm.Scmer
 	for _, tuple := range tuples {
 		args = scanJoinOrderTupleValues(spec, tuple, spec.joinFilterCols, args)
-		if scm.ToBool(filterFn(args...)) {
+		if scm.ToBool(filterProgram.Call(args)) {
 			filtered = append(filtered, tuple)
 		}
 	}
@@ -839,7 +884,6 @@ func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm
 			driverSortCols = append(driverSortCols, scm.NewString(ref.column))
 		}
 	}
-	reduceFn := scanJoinOrderReducer(spec.reduceFn)
 	result := spec.neutral
 	driverOffset := 0
 	accepted := 0
@@ -889,12 +933,7 @@ func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm
 		batchSize *= 2
 	}
 	if !hadValue && spec.isOuter {
-		mapFn := scm.OptimizeProcToSerialFunction(spec.mapFn)
-		nulls := make([]scm.Scmer, len(spec.mapCols))
-		for i := range nulls {
-			nulls[i] = scm.NewNil()
-		}
-		return reduceFn(result, mapFn(nulls...))
+		return scanJoinOrderOuterResult(&spec, result)
 	}
 	if !hadValue {
 		return spec.notFoundValue
@@ -1038,18 +1077,25 @@ func sortAndCapScanJoinOrderTuples(spec *scanJoinOrderSpec, tuples []*scanJoinOr
 func runScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderSpec, combination []*scanJoinOrderShardStream, keep int) []*scanJoinOrderTuple {
 	_ = currentTx
 	collector := &scanJoinOrderTopKCollector{spec: spec, keep: keep}
-	var filterFn func(...scm.Scmer) scm.Scmer
+	var filterProgram *scm.SerialProc
 	if !spec.joinFilter.IsNil() {
-		filterFn = scm.OptimizeProcToSerialFunction(spec.joinFilter)
+		prepared := scm.PrepareSerialProc(spec.joinFilter)
+		if prepared.Kind == scm.SerialProcConstant {
+			if !scm.ToBool(prepared.Value) {
+				return nil
+			}
+		} else {
+			filterProgram = &prepared
+		}
 	}
 	records := make([]*scanJoinOrderRecord, len(combination))
 	var enumerate func(int)
 	enumerate = func(inputIndex int) {
 		if inputIndex == len(combination) {
 			tuple := &scanJoinOrderTuple{records: append([]*scanJoinOrderRecord(nil), records...)}
-			if filterFn != nil {
+			if filterProgram != nil {
 				args := scanJoinOrderTupleValues(spec, tuple, spec.joinFilterCols, nil)
-				if !scm.ToBool(filterFn(args...)) {
+				if !scm.ToBool(filterProgram.Call(args)) {
 					return
 				}
 			}
@@ -1092,27 +1138,46 @@ func runScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderS
 func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderSpec, combination []*scanJoinOrderShardStream) (scm.Scmer, int) {
 	result := spec.neutral
 	count := 0
-	mapFn := scm.OptimizeProcToSerialFunction(spec.mapFn)
-	reduceFn := scanJoinOrderReducer(spec.reduceFn)
+	mapProgram := scm.PrepareSerialProc(spec.mapFn)
+	reduce := spec.reduceFn
+	if reduce.IsNil() {
+		reduce = scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
+	}
+	reduceProgram := scm.PrepareSerialProc(reduce)
+	countPipeline := mapProgram.Kind == scm.SerialProcConstant && mapProgram.Value.IsInt() && mapProgram.Value.Int() == 1 && reduceProgram.IsNative(scm.Symbol("+"))
+	var reduceArgs [2]scm.Scmer
 	readers := newScanJoinOrderMapReaders(currentTx, spec)
 	defer readers.close()
-	var filterFn func(...scm.Scmer) scm.Scmer
+	var filterProgram *scm.SerialProc
 	if !spec.joinFilter.IsNil() {
-		filterFn = scm.OptimizeProcToSerialFunction(spec.joinFilter)
+		prepared := scm.PrepareSerialProc(spec.joinFilter)
+		if prepared.Kind == scm.SerialProcConstant {
+			if !scm.ToBool(prepared.Value) {
+				return result, 0
+			}
+		} else {
+			filterProgram = &prepared
+		}
 	}
 	records := make([]*scanJoinOrderRecord, len(combination))
 	var enumerate func(int)
 	enumerate = func(inputIndex int) {
 		if inputIndex == len(combination) {
 			tuple := &scanJoinOrderTuple{records: records}
-			if filterFn != nil {
+			if filterProgram != nil {
 				filterArgs := scanJoinOrderTupleValues(spec, tuple, spec.joinFilterCols, nil)
-				if !scm.ToBool(filterFn(filterArgs...)) {
+				if !scm.ToBool(filterProgram.Call(filterArgs)) {
 					return
 				}
 			}
+			if countPipeline {
+				count++
+				return
+			}
 			mapArgs := readers.values(tuple, nil)
-			result = reduceFn(result, mapFn(mapArgs...))
+			reduceArgs[0] = result
+			reduceArgs[1] = mapProgram.Call(mapArgs)
+			result = reduceProgram.Call(reduceArgs[:])
 			count++
 			return
 		}
@@ -1139,6 +1204,11 @@ func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrd
 	for _, driverRecord := range combination[0].records {
 		records[0] = driverRecord
 		enumerate(1)
+	}
+	if countPipeline && count > 0 {
+		reduceArgs[0] = result
+		reduceArgs[1] = scm.NewInt(int64(count))
+		result = reduceProgram.Function(reduceArgs[:]...)
 	}
 	return result, count
 }
@@ -1241,23 +1311,23 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		if done != nil {
 			<-done
 		}
-		reduce2Fn := scm.OptimizeProcToSerialFunction(spec.reduce2Fn)
+		reduce2Program := scm.PrepareSerialProc(spec.reduce2Fn)
+		var reduce2Args [2]scm.Scmer
 		result := spec.neutral
 		total := 0
 		for runner, partial := range partials {
 			if counts[runner] == 0 {
 				continue
 			}
-			result = reduce2Fn(result, partial)
+			reduce2Args[0], reduce2Args[1] = result, partial
+			result = reduce2Program.Call(reduce2Args[:])
 			total += counts[runner]
 		}
 		if total > 0 {
 			return result
 		}
 		if spec.isOuter {
-			mapFn := scm.OptimizeProcToSerialFunction(spec.mapFn)
-			reduceFn := scanJoinOrderReducer(spec.reduceFn)
-			return reduceFn(spec.neutral, mapFn(make([]scm.Scmer, len(spec.mapCols))...))
+			return scanJoinOrderOuterResult(&spec, spec.neutral)
 		}
 		return spec.notFoundValue
 	}
@@ -1279,9 +1349,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	}
 	if len(joined) == 0 {
 		if spec.isOuter {
-			mapFn := scm.OptimizeProcToSerialFunction(spec.mapFn)
-			reduceFn := scanJoinOrderReducer(spec.reduceFn)
-			return reduceFn(spec.neutral, mapFn(make([]scm.Scmer, len(spec.mapCols))...))
+			return scanJoinOrderOuterResult(&spec, spec.neutral)
 		}
 		return spec.notFoundValue
 	}

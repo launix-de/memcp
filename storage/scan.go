@@ -20,12 +20,40 @@ import "fmt"
 import "time"
 import "runtime/debug"
 import "strings"
+import "sync"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
 	r     interface{}
 	stack string
+}
+
+const scanAnalyzeScratchCapacity = 8
+
+// scanAnalyzeScratch owns the short-lived physical analyzer output until all
+// parallel shard consumers have completed. A pool is preferable to a caller
+// stack array here: the shard callback escapes into goroutines, which would
+// force the complete stack array onto the heap on every scan. Most SQL scans
+// fit in these inline buffers; unusual wide predicates retain the ordinary
+// append fallback without changing analyzer semantics.
+type scanAnalyzeScratch struct {
+	boundaries [scanAnalyzeScratchCapacity]columnboundaries
+	lower      [scanAnalyzeScratchCapacity]scm.Scmer
+}
+
+var scanAnalyzeScratchPool = sync.Pool{
+	New: func() any { return new(scanAnalyzeScratch) },
+}
+
+func acquireScanAnalyzeScratch() *scanAnalyzeScratch {
+	return scanAnalyzeScratchPool.Get().(*scanAnalyzeScratch)
+}
+
+func releaseScanAnalyzeScratch(scratch *scanAnalyzeScratch) {
+	clear(scratch.boundaries[:])
+	clear(scratch.lower[:])
+	scanAnalyzeScratchPool.Put(scratch)
 }
 
 func (s scanError) Error() string {
@@ -413,6 +441,47 @@ const (
 	uniquePointScanBufferSize = 8
 )
 
+type fullScanIDBuffer struct {
+	values [defaultScanBufferSize]uint32
+}
+
+type pointScanIDBuffer struct {
+	values [uniquePointScanBufferSize]uint32
+}
+
+// The index iterator callback makes a dynamically sized []uint32 escape even
+// though it is consumed before scan returns. Reuse the two calibrated batch
+// sizes instead of paying for a heap allocation on every scan. sync.Pool keeps
+// concurrent scans independent and permits the runtime to discard idle memory.
+var fullScanIDBufferPool = sync.Pool{
+	New: func() any { return new(fullScanIDBuffer) },
+}
+
+var pointScanIDBufferPool = sync.Pool{
+	New: func() any { return new(pointScanIDBuffer) },
+}
+
+func acquireScanIDBuffer(size int) ([]uint32, *fullScanIDBuffer, *pointScanIDBuffer) {
+	if size == defaultScanBufferSize {
+		buffer := fullScanIDBufferPool.Get().(*fullScanIDBuffer)
+		return buffer.values[:], buffer, nil
+	}
+	if size == uniquePointScanBufferSize {
+		buffer := pointScanIDBufferPool.Get().(*pointScanIDBuffer)
+		return buffer.values[:], nil, buffer
+	}
+	return make([]uint32, size), nil, nil
+}
+
+func releaseScanIDBuffer(full *fullScanIDBuffer, point *pointScanIDBuffer) {
+	if full != nil {
+		fullScanIDBufferPool.Put(full)
+	}
+	if point != nil {
+		pointScanIDBufferPool.Put(point)
+	}
+}
+
 // scanBufferSize keeps full scans batched while avoiding a 4 KiB allocation
 // for the common join case where an exact unique key can yield at most one
 // currently visible row. A few slots remain for stale index entries left by
@@ -459,10 +528,20 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCo
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	touchTempColumns(t, conditionCols, nil)
-	boundaries := extractBoundaries(conditionCols, condition)
+	var scratch *scanAnalyzeScratch
+	var boundaries boundaries
+	if source != nil || conditionMayHaveBoundaries(condition) {
+		scratch = acquireScanAnalyzeScratch()
+		defer releaseScanAnalyzeScratch(scratch)
+		boundaries = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
+	}
 	reorderByFrequency(boundaries, t)
 	boundaries = appendRecSetBoundary(boundaries, source)
-	lower, upperLast := indexFromBoundaries(boundaries)
+	var lowerStorage []scm.Scmer
+	if scratch != nil {
+		lowerStorage = scratch.lower[:0]
+	}
+	lower, upperLast := indexFromBoundariesInto(lowerStorage, boundaries)
 	for _, b := range boundaries {
 		t.AddPartitioningScore([]string{b.col})
 	}
@@ -547,10 +626,20 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 	// Measure analysis time (boundary extraction, sharding hints)
 	analyzeStart := time.Now()
 	/* analyze query */
-	boundaries := extractBoundaries(conditionCols, condition)
+	var scratch *scanAnalyzeScratch
+	var boundaries boundaries
+	if source != nil || conditionMayHaveBoundaries(condition) {
+		scratch = acquireScanAnalyzeScratch()
+		defer releaseScanAnalyzeScratch(scratch)
+		boundaries = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
+	}
 	reorderByFrequency(boundaries, t)
 	boundaries = appendRecSetBoundary(boundaries, source)
-	lower, upperLast := indexFromBoundaries(boundaries)
+	var lowerStorage []scm.Scmer
+	if scratch != nil {
+		lowerStorage = scratch.lower[:0]
+	}
+	lower, upperLast := indexFromBoundariesInto(lowerStorage, boundaries)
 	if Settings.ScanDebugging {
 		dbg := fmt.Sprintf("[SCAN] %s.%s", t.schema.Name, t.Name)
 		for _, b := range boundaries {
@@ -668,7 +757,10 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 	// log statistics (best-effort, async so it doesn't add latency)
 	execNs := time.Since(execStart).Nanoseconds()
 	if Settings.ScanDebugging || candidateCount > int64(Settings.AnalyzeMinItems) {
-		go func(anNs, exNs int64) {
+		// Boundaries may live in pooled scan scratch. Encode them before the
+		// asynchronous logger starts so no reference outlives this scan.
+		indexColsEnc := boundaryIndexCols(boundaries)
+		go func(anNs, exNs int64, indexColsEnc string) {
 			defer func() { _ = recover() }()
 			filterEnc := ""
 			if proc, ok := condition.Any().(scm.Proc); ok {
@@ -680,9 +772,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 				}
 				filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 			}
-			indexColsEnc := boundaryIndexCols(boundaries)
 			safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", indexColsEnc, inputCount, candidateCount, outCount, anNs, exNs)
-		}(analyzeNs, execNs)
+		}(analyzeNs, execNs, indexColsEnc)
 	}
 	return akkumulator
 }
@@ -692,39 +783,182 @@ func (t *storageShard) scanExists(boundaries boundaries, lower []scm.Scmer, uppe
 	return found
 }
 
+func (t *storageShard) filterVisibleScanBatch(batch []uint32, visibleUpper uint32, hasMutationCallback bool, currentTx *TxContext, mutationSeen map[uint32]struct{}) int {
+	outN := 0
+	for _, idx := range batch {
+		effectiveIdx := idx
+		if effectiveIdx >= visibleUpper {
+			continue
+		}
+		if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+			if t.deletions.Get(uint(effectiveIdx)) {
+				if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
+					effectiveIdx = followIdx
+				} else {
+					continue
+				}
+			}
+			if _, ok := mutationSeen[effectiveIdx]; ok {
+				continue
+			}
+			mutationSeen[effectiveIdx] = struct{}{}
+		}
+		if currentTx != nil && currentTx.Mode == TxACID {
+			if !currentTx.IsVisible(t, effectiveIdx) {
+				continue
+			}
+		} else if t.deletions.Get(uint(effectiveIdx)) {
+			continue
+		}
+		batch[outN] = effectiveIdx
+		outN++
+	}
+	return outN
+}
+
+func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, conditionFn func(...scm.Scmer) scm.Scmer) int {
+	outN := 0
+	for _, effectiveIdx := range batch {
+		if effectiveIdx < t.main_count {
+			for i, reader := range cReaders {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(effectiveIdx, 0)
+				} else {
+					cdataset[i] = reader.GetValue(effectiveIdx)
+				}
+			}
+		} else {
+			for i, col := range conditionCols {
+				if getter := conditionGetters[i]; getter != nil {
+					cdataset[i] = getter(effectiveIdx, 0)
+				} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+					cdataset[i] = cReaders[i].GetValue(effectiveIdx)
+				} else {
+					cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), col)
+				}
+			}
+		}
+		if !scm.ToBool(conditionFn(cdataset...)) {
+			continue
+		}
+		batch[outN] = effectiveIdx
+		outN++
+	}
+	return outN
+}
+
+func (t *storageShard) filterNativeArgConstantScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, condition *scm.SerialProc) int {
+	argument := int(condition.Argument)
+	if argument < 0 || argument >= len(conditionCols) {
+		panic("serial filter argument outside condition columns")
+	}
+	var call [2]scm.Scmer
+	outN := 0
+	for _, idx := range batch {
+		var value scm.Scmer
+		if getter := conditionGetters[argument]; getter != nil {
+			value = getter(idx, 0)
+		} else if idx < t.main_count {
+			value = cReaders[argument].GetValue(idx)
+		} else if _, isProxy := ccols[argument].(*StorageComputeProxy); isProxy {
+			value = cReaders[argument].GetValue(idx)
+		} else {
+			value = t.getDelta(int(idx-t.main_count), conditionCols[argument])
+		}
+		if condition.ConstantFirst {
+			call[0], call[1] = condition.Value, value
+		} else {
+			call[0], call[1] = value, condition.Value
+		}
+		if !scm.ToBool(condition.Function(call[:]...)) {
+			continue
+		}
+		batch[outN] = idx
+		outN++
+	}
+	return outN
+}
+
+func (t *storageShard) filterVisibleBatchedScanBatch(batch []uint32, batchIDs []uint32, batchID uint32, visibleUpper uint32, hasMutationCallback bool, currentTx *TxContext, mutationSeen map[uint64]struct{}) int {
+	outN := 0
+	for _, idx := range batch {
+		effectiveIdx := idx
+		if effectiveIdx >= visibleUpper {
+			continue
+		}
+		if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
+			if t.deletions.Get(uint(effectiveIdx)) {
+				if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
+					effectiveIdx = followIdx
+				} else {
+					continue
+				}
+			}
+			key := uint64(batchID)<<32 | uint64(effectiveIdx)
+			if _, ok := mutationSeen[key]; ok {
+				continue
+			}
+			mutationSeen[key] = struct{}{}
+		}
+		if currentTx != nil && currentTx.Mode == TxACID {
+			if !currentTx.IsVisible(t, effectiveIdx) {
+				continue
+			}
+		} else if t.deletions.Get(uint(effectiveIdx)) {
+			continue
+		}
+		batch[outN] = effectiveIdx
+		batchIDs[outN] = batchID
+		outN++
+	}
+	return outN
+}
+
 func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) (uint32, bool) {
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionProgram := scm.PrepareSerialProc(condition)
+	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	var conditionFn func(...scm.Scmer) scm.Scmer
+	if !conditionAlwaysTrue && conditionProgram.Kind != scm.SerialProcNativeArgConstant {
+		conditionFn = scm.OptimizeProcToSerialFunction(condition)
+	}
 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
-	ccols := make([]ColumnStorage, len(conditionCols))
-	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsCachedReader := make([]bool, len(conditionCols))
-	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	for i, k := range conditionCols {
-		if k == "$recset_contains" {
-			fnptr := recSetContainsClosure(t)
-			if recsetBoundaryCoversCondition {
-				fnptr = recSetAlreadyMatchedClosure()
+	var ccols []ColumnStorage
+	var cReaders []ColumnReader
+	var cNeedsCachedReader []bool
+	var conditionGetters []mapArgGetter
+	var cdataset []scm.Scmer
+	if !conditionAlwaysTrue {
+		ccols = make([]ColumnStorage, len(conditionCols))
+		cReaders = make([]ColumnReader, len(conditionCols))
+		cNeedsCachedReader = make([]bool, len(conditionCols))
+		conditionGetters = make([]mapArgGetter, len(conditionCols))
+		for i, k := range conditionCols {
+			if k == "$recset_contains" {
+				fnptr := recSetContainsClosure(t)
+				if recsetBoundaryCoversCondition {
+					fnptr = recSetAlreadyMatchedClosure()
+				}
+				conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+				continue
 			}
-			conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
-				return scm.NewClosure(fnptr, id)
+			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+			if _, ok := ccols[i].(*StorageComputeProxy); ok {
+				cNeedsCachedReader[i] = true
 			}
-			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if _, ok := ccols[i].(*StorageComputeProxy); ok {
-			cNeedsCachedReader[i] = true
-		}
+		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
-	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	locked := false
 	if !skipShardReadLock {
@@ -751,10 +985,52 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	found := false
 	var foundID uint32
 
-	var buf [8]uint32
-	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(uniquePointScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
+	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		if stop != nil && stop.Load() {
 			return false
+		}
+		if conditionAlwaysTrue {
+			for _, idx := range batch {
+				if idx >= visibleUpper {
+					continue
+				}
+				if acidMode {
+					if !currentTx.IsVisible(t, idx) {
+						continue
+					}
+				} else if t.deletions.Get(uint(idx)) {
+					continue
+				}
+				found = true
+				foundID = idx
+				return false
+			}
+			return true
+		}
+		if conditionProgram.Kind == scm.SerialProcNativeArgConstant {
+			var candidate [1]uint32
+			for _, idx := range batch {
+				if idx >= visibleUpper {
+					continue
+				}
+				if acidMode {
+					if !currentTx.IsVisible(t, idx) {
+						continue
+					}
+				} else if t.deletions.Get(uint(idx)) {
+					continue
+				}
+				candidate[0] = idx
+				if t.filterNativeArgConstantScanBatch(candidate[:], conditionCols, ccols, cReaders, conditionGetters, &conditionProgram) == 0 {
+					continue
+				}
+				found = true
+				foundID = idx
+				return false
+			}
+			return true
 		}
 		for _, idx := range batch {
 			if idx >= visibleUpper {
@@ -813,7 +1089,12 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		ss = SessionStateFromTx(currentTx)
 	}
 
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionProgram := scm.PrepareSerialProc(condition)
+	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	var conditionFn func(...scm.Scmer) scm.Scmer
+	if !conditionAlwaysTrue && conditionProgram.Kind != scm.SerialProcNativeArgConstant {
+		conditionFn = scm.OptimizeProcToSerialFunction(condition)
+	}
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -828,8 +1109,15 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
 	t.ensureMainCount(false)
-	scanCols := append(append([]string(nil), conditionCols...), callbackCols...)
-	orderedProxies := t.orderedScanProxies(scanCols, currentTx)
+	// Most scans do not read an ordered computed column. Keep discovery on the
+	// caller's stack and inspect the two existing column slices directly, so the
+	// correctness preflight below adds no heap work to an ordinary scan.
+	var orderedProxies []*StorageComputeProxy
+	if t.hasOrderedScanProxy(conditionCols, currentTx) || t.hasOrderedScanProxy(callbackCols, currentTx) {
+		var orderedProxyStorage [4]*StorageComputeProxy
+		orderedProxies = t.appendOrderedScanProxies(orderedProxyStorage[:0], conditionCols, currentTx)
+		orderedProxies = t.appendOrderedScanProxies(orderedProxies, callbackCols, currentTx)
+	}
 	prepareOrdered := func() {
 		if len(orderedProxies) == 0 {
 			return
@@ -857,6 +1145,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		}
 	}
 	orderedReadyLocked := func() bool {
+		if len(orderedProxies) == 0 {
+			return true
+		}
 		upper := t.main_count + uint32(len(t.inserts))
 		for id := uint32(0); id < upper; id++ {
 			if currentTx != nil && currentTx.Mode == TxACID {
@@ -907,32 +1198,42 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
 	// condition column readers
-	ccols := make([]ColumnStorage, len(conditionCols))
-	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsCachedReader := make([]bool, len(conditionCols))
-	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	for i, k := range conditionCols {
-		if k == "$recset_contains" {
-			fnptr := recSetContainsClosure(t)
-			if recsetBoundaryCoversCondition {
-				fnptr = recSetAlreadyMatchedClosure()
+	var ccols []ColumnStorage
+	var cReaders []ColumnReader
+	var conditionGetters []mapArgGetter
+	var cdataset []scm.Scmer
+	if !conditionAlwaysTrue {
+		ccols = make([]ColumnStorage, len(conditionCols))
+		cReaders = make([]ColumnReader, len(conditionCols))
+		conditionGetters = make([]mapArgGetter, len(conditionCols))
+		for i, k := range conditionCols {
+			if k == "$recset_contains" {
+				fnptr := recSetContainsClosure(t)
+				if recsetBoundaryCoversCondition {
+					fnptr = recSetAlreadyMatchedClosure()
+				}
+				getter := func(id uint32, batchid uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+				conditionGetters[i] = getter
+				continue
 			}
-			getter := func(id uint32, batchid uint32) scm.Scmer {
-				return scm.NewClosure(fnptr, id)
-			}
-			conditionGetters[i] = getter
-			continue
+			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if _, ok := ccols[i].(*StorageComputeProxy); ok {
-			cNeedsCachedReader[i] = true
-		}
+		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
-	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	// MapReducer for map+reduce phase (builds column readers internally)
-	mapper := t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, 0, nil, currentTx)
+	var mapperStorage ShardMapReducer
+	var mapperWorkspace shardMapReducerWorkspace
+	mapper := &mapperStorage
+	if mapReducerCanUseReadWorkspace(callbackCols) {
+		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+		t.initReadMapReducer(&mapperStorage, callbackCols, callback, aggregate, skipShardReadLock, currentTx)
+	} else {
+		mapper = t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, 0, nil, currentTx)
+	}
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
 	locked := false
@@ -975,71 +1276,19 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	}
 
 	// filter phase: iterateIndex fills the reusable buffer, callback filters in-place and flushes to MapReducer
-	buf := make([]uint32, t.t.scanBufferSize(boundaries))
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(t.t.scanBufferSize(boundaries))
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	hadValue := false
 
 	t.iterateIndex(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 		candidateCount += int64(len(batch))
-		// filter in-place: overwrite batch with passing IDs
-		outN := 0
-		for _, idx := range batch {
-			effectiveIdx := idx
-			if effectiveIdx >= visibleUpper {
-				continue
-			}
-			if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
-				if t.deletions.Get(uint(effectiveIdx)) {
-					if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
-						effectiveIdx = followIdx
-					} else {
-						continue
-					}
-				}
-				// Multiple stale index entries can resolve to the same current row.
-				// Mutate each current row at most once per statement.
-				if _, ok := mutationSeen[effectiveIdx]; ok {
-					continue
-				}
-				mutationSeen[effectiveIdx] = struct{}{}
-			}
-			if currentTx != nil && currentTx.Mode == TxACID {
-				if !currentTx.IsVisible(t, effectiveIdx) {
-					continue
-				}
-			} else if t.deletions.Get(uint(effectiveIdx)) {
-				continue // item is on delete list
-			}
-
-			// condition check
-			if effectiveIdx < t.main_count {
-				for i, k := range cReaders {
-					if getter := conditionGetters[i]; getter != nil {
-						cdataset[i] = getter(effectiveIdx, 0)
-					} else {
-						cdataset[i] = k.GetValue(effectiveIdx)
-					}
-				}
+		outN := t.filterVisibleScanBatch(batch, visibleUpper, hasMutationCallback, currentTx, mutationSeen)
+		if !conditionAlwaysTrue && outN > 0 {
+			if conditionProgram.Kind == scm.SerialProcNativeArgConstant {
+				outN = t.filterNativeArgConstantScanBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, &conditionProgram)
 			} else {
-				for i, k := range conditionCols {
-					if getter := conditionGetters[i]; getter != nil {
-						cdataset[i] = getter(effectiveIdx, 0)
-					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-						cdataset[i] = cReaders[i].GetValue(effectiveIdx)
-					} else {
-						cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
-					}
-				}
+				outN = t.filterConditionScanBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, conditionFn)
 			}
-			var condResult bool
-			var condVal scm.Scmer
-			condVal = conditionFn(cdataset...)
-			condResult = scm.ToBool(condVal)
-			if !condResult {
-				continue
-			}
-
-			batch[outN] = effectiveIdx
-			outN++
 		}
 		if outN > 0 {
 			if hasMutationCallback {
@@ -1113,13 +1362,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	return akkumulator, outCount, candidateCount
 }
 
-// orderedScanProxies returns the ORC-backed columns that a scan may read.
+// appendOrderedScanProxies appends the ORC-backed columns that a scan may read.
 // They must be made valid before the shard lock is acquired: an on-demand ORC
 // repair takes shard write locks and therefore cannot run under a scan-held
-// shard read or write lock.
-func (t *storageShard) orderedScanProxies(cols []string, currentTx *TxContext) []*StorageComputeProxy {
-	seen := make(map[*StorageComputeProxy]struct{})
-	result := make([]*StorageComputeProxy, 0)
+// shard read or write lock. The caller supplies stack capacity for the normal
+// case; linear deduplication is cheaper than allocating a map for a handful of
+// projected columns.
+func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, cols []string, currentTx *TxContext) []*StorageComputeProxy {
 	for _, col := range cols {
 		if col == "$recset_contains" || col == "$update" || col == "$break" ||
 			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
@@ -1133,13 +1382,43 @@ func (t *storageShard) orderedScanProxies(cols []string, currentTx *TxContext) [
 		if !ok || !proxy.isOrdered {
 			continue
 		}
-		if _, exists := seen[proxy]; exists {
+		seen := false
+		for _, existing := range result {
+			if existing == proxy {
+				seen = true
+				break
+			}
+		}
+		if seen {
 			continue
 		}
-		seen[proxy] = struct{}{}
 		result = append(result, proxy)
 	}
 	return result
+}
+
+// hasOrderedScanProxy keeps the overwhelmingly common non-ORC path free of
+// proxy-list storage. It deliberately performs only the same stable column
+// lookup appendOrderedScanProxies would perform; ORC scans pay the second pass.
+func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) bool {
+	if !t.t.hasOrderedColumns.Load() {
+		return false
+	}
+	for _, col := range cols {
+		if col == "$recset_contains" || col == "$update" || col == "$break" ||
+			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
+			strings.HasPrefix(col, "$increment:") || strings.HasPrefix(col, "$set:") {
+			continue
+		}
+		if _, ok := parseBatchPseudoColName(col); ok {
+			continue
+		}
+		proxy, ok := t.getColumnStorageOrPanicEx(col, false, currentTx).(*StorageComputeProxy)
+		if ok && proxy.isOrdered {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
@@ -1150,7 +1429,12 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		ss = SessionStateFromTx(currentTx)
 	}
 
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionProgram := scm.PrepareSerialProc(condition)
+	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
+	var conditionFn func(...scm.Scmer) scm.Scmer
+	if !conditionAlwaysTrue {
+		conditionFn = scm.OptimizeProcToSerialFunction(condition)
+	}
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -1186,35 +1470,51 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	t.ensureMainCount(skipShardReadLock)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
-	ccols := make([]ColumnStorage, len(conditionCols))
-	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsCachedReader := make([]bool, len(conditionCols))
-	conditionBatchSubidx := make([]int, len(conditionCols))
-	conditionGetters := make([]mapArgGetter, len(conditionCols))
-	for i, k := range conditionCols {
-		if k == "$recset_contains" {
-			fnptr := recSetContainsClosure(t)
-			if recsetBoundaryCoversCondition {
-				fnptr = recSetAlreadyMatchedClosure()
+	var ccols []ColumnStorage
+	var cReaders []ColumnReader
+	var cNeedsCachedReader []bool
+	var conditionBatchSubidx []int
+	var conditionGetters []mapArgGetter
+	var cdataset []scm.Scmer
+	if !conditionAlwaysTrue {
+		ccols = make([]ColumnStorage, len(conditionCols))
+		cReaders = make([]ColumnReader, len(conditionCols))
+		cNeedsCachedReader = make([]bool, len(conditionCols))
+		conditionBatchSubidx = make([]int, len(conditionCols))
+		conditionGetters = make([]mapArgGetter, len(conditionCols))
+		for i, k := range conditionCols {
+			if k == "$recset_contains" {
+				fnptr := recSetContainsClosure(t)
+				if recsetBoundaryCoversCondition {
+					fnptr = recSetAlreadyMatchedClosure()
+				}
+				conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
+					return scm.NewClosure(fnptr, id)
+				}
+				continue
 			}
-			conditionGetters[i] = func(id uint32, _ uint32) scm.Scmer {
-				return scm.NewClosure(fnptr, id)
+			if subidx, ok := parseBatchPseudoColName(k); ok {
+				conditionBatchSubidx[i] = subidx + 1
+				continue
 			}
-			continue
+			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
+			if _, ok := ccols[i].(*StorageComputeProxy); ok {
+				cNeedsCachedReader[i] = true
+			}
 		}
-		if subidx, ok := parseBatchPseudoColName(k); ok {
-			conditionBatchSubidx[i] = subidx + 1
-			continue
-		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if _, ok := ccols[i].(*StorageComputeProxy); ok {
-			cNeedsCachedReader[i] = true
-		}
+		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
-	cdataset := make([]scm.Scmer, len(conditionCols))
 
-	mapper := t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, stride, batchdata, currentTx)
+	var mapperStorage ShardMapReducer
+	var mapperWorkspace shardMapReducerWorkspace
+	mapper := &mapperStorage
+	if stride == 0 && mapReducerCanUseReadWorkspace(callbackCols) {
+		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+		t.initReadMapReducer(&mapperStorage, callbackCols, callback, aggregate, skipShardReadLock, currentTx)
+	} else {
+		mapper = t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, stride, batchdata, currentTx)
+	}
 	defer mapper.Close()
 
 	locked := false
@@ -1243,7 +1543,8 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		mutationSeen = make(map[uint64]struct{}, 128)
 	}
 
-	var buf [1024]uint32
+	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
+	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
 	var batchBuf [1024]uint32
 	hadValue := false
 	batchCount := len(batchdata) / stride
@@ -1258,70 +1559,46 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 			activeLower, activeUpperLast = indexFromBoundaries(activeBoundaries)
 		}
 
-		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf[:], 1, nil, func(batch []uint32) bool {
+		t.iterateIndex(currentTx, activeBoundaries, activeLower, activeUpperLast, maxInsertIndex, buf, 1, nil, func(batch []uint32) bool {
 			candidateCount += int64(len(batch))
-			outN := 0
-			for _, idx := range batch {
-				effectiveIdx := idx
-				if effectiveIdx >= visibleUpper {
-					continue
-				}
-				if hasMutationCallback && (currentTx == nil || currentTx.Mode != TxACID) {
-					if t.deletions.Get(uint(effectiveIdx)) {
-						if followIdx, ok := t.resolveVisiblePrimaryRecidLocked(effectiveIdx); ok {
-							effectiveIdx = followIdx
-						} else {
-							continue
+			outN := t.filterVisibleBatchedScanBatch(batch, batchBuf[:], uint32(batchid), visibleUpper, hasMutationCallback, currentTx, mutationSeen)
+			if !conditionAlwaysTrue {
+				filteredN := 0
+				for _, effectiveIdx := range batch[:outN] {
+					if effectiveIdx < t.main_count {
+						for i, k := range ccols {
+							if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
+								cdataset[i] = batchdata[batchid*stride+subidx]
+							} else if getter := conditionGetters[i]; getter != nil {
+								cdataset[i] = getter(effectiveIdx, uint32(batchid))
+							} else if cNeedsCachedReader[i] {
+								cdataset[i] = cReaders[i].GetValue(effectiveIdx)
+							} else {
+								cdataset[i] = k.GetValue(effectiveIdx)
+							}
+						}
+					} else {
+						for i, k := range conditionCols {
+							if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
+								cdataset[i] = batchdata[batchid*stride+subidx]
+							} else if getter := conditionGetters[i]; getter != nil {
+								cdataset[i] = getter(effectiveIdx, uint32(batchid))
+							} else if cNeedsCachedReader[i] {
+								cdataset[i] = cReaders[i].GetValue(effectiveIdx)
+							} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
+								cdataset[i] = ccols[i].GetValue(effectiveIdx)
+							} else {
+								cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
+							}
 						}
 					}
-					key := (uint64(uint32(batchid)) << 32) | uint64(effectiveIdx)
-					if _, ok := mutationSeen[key]; ok {
+					if !scm.ToBool(conditionFn(cdataset...)) {
 						continue
 					}
-					mutationSeen[key] = struct{}{}
+					batch[filteredN] = effectiveIdx
+					filteredN++
 				}
-				if currentTx != nil && currentTx.Mode == TxACID {
-					if !currentTx.IsVisible(t, effectiveIdx) {
-						continue
-					}
-				} else if t.deletions.Get(uint(effectiveIdx)) {
-					continue
-				}
-
-				if effectiveIdx < t.main_count {
-					for i, k := range ccols {
-						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
-							cdataset[i] = batchdata[batchid*stride+subidx]
-						} else if getter := conditionGetters[i]; getter != nil {
-							cdataset[i] = getter(effectiveIdx, uint32(batchid))
-						} else if cNeedsCachedReader[i] {
-							cdataset[i] = cReaders[i].GetValue(effectiveIdx)
-						} else {
-							cdataset[i] = k.GetValue(effectiveIdx)
-						}
-					}
-				} else {
-					for i, k := range conditionCols {
-						if subidx := conditionBatchSubidx[i] - 1; subidx >= 0 {
-							cdataset[i] = batchdata[batchid*stride+subidx]
-						} else if getter := conditionGetters[i]; getter != nil {
-							cdataset[i] = getter(effectiveIdx, uint32(batchid))
-						} else if cNeedsCachedReader[i] {
-							cdataset[i] = cReaders[i].GetValue(effectiveIdx)
-						} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
-							cdataset[i] = ccols[i].GetValue(effectiveIdx)
-						} else {
-							cdataset[i] = t.getDelta(int(effectiveIdx-t.main_count), k)
-						}
-					}
-				}
-				if !scm.ToBool(conditionFn(cdataset...)) {
-					continue
-				}
-
-				batch[outN] = effectiveIdx
-				batchBuf[outN] = uint32(batchid)
-				outN++
+				outN = filteredN
 			}
 			if outN > 0 {
 				if hasMutationCallback {
