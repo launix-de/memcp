@@ -1317,7 +1317,15 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
-	mapper := t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, 0, nil, currentTx)
+	var mapperStorage ShardMapReducer
+	var mapperWorkspace shardMapReducerWorkspace
+	mapper := &mapperStorage
+	if mapReducerCanUseReadWorkspace(callbackCols) {
+		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
+		t.initReadMapReducer(&mapperStorage, callbackCols, callback, aggregate, skipShardReadLock, currentTx)
+	} else {
+		mapper = t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, 0, nil, currentTx)
+	}
 	defer mapper.Close()
 
 	locked := false
