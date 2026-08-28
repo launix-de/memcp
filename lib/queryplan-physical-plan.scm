@@ -4149,7 +4149,14 @@ downstream lookup cannot multiply driver rows. This is a physical access-path
 candidate: logical join order remains unchanged, while the filtered lookup is
 projected back onto the ordered driver before scan_order applies Top-K. */
 (define planner_source_order_partitioning (lambda (src order_items)
-	(if (or (not (source_is_base_table? src)) (empty_list? order_items))
+	/* Runtime-materialized group carriers are table-shaped physical sources, but
+	they do not exist while alternatives are enumerated and carry no catalog shard
+	partitioning guarantee. Only persistent catalog tables can contribute this
+	physical fact to costing and its matching runtime guard. */
+	(if (or (not (source_is_base_table? src))
+		(or (physical_helper_relation? (source_relation src))
+			(or (information_schema_source? (source_schema src) (source_relation src))
+				(empty_list? order_items))))
 		nil
 		(match (car order_items)
 			'(expr _direction) (begin
