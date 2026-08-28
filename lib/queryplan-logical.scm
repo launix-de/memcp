@@ -510,6 +510,7 @@ prepare stage creates. */
 (define os_mapfn (lambda (node) (nth node 8)))
 (define os_reducefn (lambda (node) (nth node 9)))
 (define os_reduceinit (lambda (node) (nth node 10)))
+(define os_facts (lambda (node) (if (window_stage? node) (nth node 11) '())))
 
 (define make_window_stage (lambda (id source column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit facts)
 	(list (quote window-stage)
@@ -3639,7 +3640,18 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 							(make_window_offset_mapfn partition_cols value_col)
 							(make_window_offset_reducefn offset (not (empty_list? partition_exprs)))
 							(if (empty_list? partition_exprs) (list (quote list)) (list (quote list) (list (quote list)) nil))
-							(list (list (quote kind) (quote ordered-window)))))
+							(list
+								(list (quote kind) (quote ordered-window))
+								(list (quote window_function) fn)
+								(list (quote window_offset) offset)
+								(list (quote window_value_column) value_col)
+								/* The ORC fallback implements LEAD by reversing its scan.
+								Keep the semantic forward order as a logical fact so physical
+								lowering can instead stream the window in output order. */
+								(list (quote window_stream_sortdirs)
+									(merge (list
+										(map partition_exprs (lambda (_expr) false))
+										order_dirs))))))
 						(qp_any (list
 							(list (quote get_column) alias false col false)
 							(list stage)

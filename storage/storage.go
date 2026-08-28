@@ -1997,8 +1997,9 @@ func Init(en scm.Env) {
 			var orcSortCols []string
 			var orcSortDirs []bool
 			var orcPartCount int
+			var orcFilterCols []string
 			var orcMapCols []string
-			var orcMapFn, orcReduceFn, orcReduceInit scm.Scmer
+			var orcFilterFn, orcMapFn, orcReduceFn, orcReduceInit scm.Scmer
 			for i := 0; i+1 < len(typeparams); i += 2 {
 				key := scm.String(typeparams[i])
 				val := typeparams[i+1]
@@ -2013,6 +2014,10 @@ func Init(en scm.Env) {
 					}
 				case "partitioncount":
 					orcPartCount = scm.ToInt(val)
+				case "filtercols":
+					orcFilterCols = scmerSliceToStrings(mustScmerSlice(val, "filtercols"))
+				case "filter":
+					orcFilterFn = val
 				case "mapcols":
 					orcMapCols = scmerSliceToStrings(mustScmerSlice(val, "mapcols"))
 				case "mapfn":
@@ -2040,10 +2045,11 @@ func Init(en scm.Env) {
 			// 3. "Always materialize, but correctly" means the runtime path may reuse
 			//    an already-populated temp column; it must not silently fall back to a
 			//    throwaway one-shot computation because the column already exists.
-			// 4. filtercols/filter further narrow which keys need eager materialization;
-			//    they do not change the identity of the canonical temp column itself.
+			// 4. filtercols/filter define an ordered column's input domain. The
+			//    planner therefore includes the predicate recipe in its canonical
+			//    temp-column name; this entrypoint must preserve that identity.
 			if len(orcSortCols) > 0 {
-				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, orcPartCount, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
+				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, orcPartCount, orcFilterCols, orcFilterFn, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
 				return scm.NewBool(true)
 			}
 

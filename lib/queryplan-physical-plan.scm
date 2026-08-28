@@ -1621,11 +1621,28 @@ outer joins. */
 
 (define lower_window_stage_prepare (lambda (stage)
 	(match stage
-		'(_ id source column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit _facts)
-		(lower_orc_stage_prepare (make_orc_stage
-			id source column
-			sortcols sortdirs partitioncount
-			mapcols mapfn reducefn reduceinit))
+		'(_ _id source column sortcols sortdirs partitioncount mapcols mapfn reducefn reduceinit facts)
+		(begin
+			(if (not (source_is_base_table? source))
+				(neumann_fail "build_queryplan" "window-stage lowering only supports base tables")
+				true)
+			(list (quote createcolumn)
+				(source_table_expr source)
+				column
+				"any"
+				(quoted_runtime_list '())
+				(list (quote list)
+					"temp" true
+					"sortcols" (quoted_runtime_list sortcols)
+					"sortdirs" (cons (quote list) sortdirs)
+					"partitioncount" partitioncount
+					"filtercols" (quoted_runtime_list
+						(qassoc_get facts (quote physical_filtercols) '()))
+					"filter" (qassoc_get facts (quote physical_filterfn) nil)
+					"mapcols" (quoted_runtime_list mapcols)
+					"mapfn" mapfn
+					"reducefn" reducefn
+					"reduceinit" reduceinit)))
 		_ (neumann_fail "build_queryplan" "malformed window-stage"))))
 
 (define lower_orc_stage_materialize (lambda (stage)
@@ -1647,10 +1664,35 @@ outer joins. */
 				false))
 		_ nil)))
 
+(define lower_window_stage_materialize (lambda (stage)
+	(match stage
+		'(_ _id src col _sortcols _sortdirs _partitioncount _mapcols _mapfn _reducefn _reduceinit facts)
+		(if (not (source_is_base_table? src))
+			(neumann_fail "build_queryplan" "window materialization expects base table source")
+			(begin
+				(define filtercols (qassoc_get facts (quote physical_filtercols) '()))
+				(define filterfn (qassoc_get facts (quote physical_filterfn)
+					(list (quote lambda) '() true)))
+				(list (quote scan)
+					'(session "__memcp_tx")
+					(source_table_expr src)
+					(quoted_runtime_list filtercols)
+					filterfn
+					(quoted_runtime_list (list col))
+					(list (quote lambda) (list (quote __orc_value))
+						(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1))
+					(quote +)
+					0
+					nil
+					false)))
+		_ nil)))
+
 (define lower_stage_materialize (lambda (stage)
-	(if (or (orc_stage? stage) (window_stage? stage))
+	(if (orc_stage? stage)
 		(lower_orc_stage_materialize stage)
-		nil)))
+		(if (window_stage? stage)
+			(lower_window_stage_materialize stage)
+			nil))))
 
 (define lower_stage_materialize_all (lambda (stages)
 	(filter (map (coalesceNil stages '()) lower_stage_materialize)
@@ -1812,6 +1854,281 @@ outer joins. */
 		(and
 			(equal? (order_cols_for_alias src order_items) sortcols)
 			(equal? (serialize (order_dirs order_items)) (serialize (window_scan_dirs sortdirs)))))))
+
+/* Offset windows are streamable when the result has no requested order or its
+order is exactly the semantic PARTITION BY + window ORDER BY sequence. Only an
+incompatible consumer order needs the ORC materialization barrier. This is a
+physical decision: the logical window-stage remains independent of scan/ORC. */
+(define window_offset_stage? (lambda (stage)
+	(and (window_stage? stage)
+		(equal? (qassoc_get (os_facts stage) (quote kind) nil) (quote ordered-window))
+		(or
+			(equal? (qassoc_get (os_facts stage) (quote window_function) nil) "LAG")
+			(equal? (qassoc_get (os_facts stage) (quote window_function) nil) "LEAD")))))
+
+(define window_offset_order_compatible? (lambda (src order_items stage)
+	(if (empty_list? order_items)
+		true
+		(and
+			(equal? (order_cols_for_alias src order_items) (os_sortcols stage))
+			(equal?
+				(serialize (order_dirs order_items))
+				(serialize (window_scan_dirs
+					(qassoc_get (os_facts stage) (quote window_stream_sortdirs) (os_sortdirs stage)))))))))
+
+(define window_offset_column_position (lambda (columns target position)
+	(match columns
+		(cons col rest) (if (equal? col target) position
+			(window_offset_column_position rest target (+ position 1)))
+		_ (neumann_fail "build_queryplan" (concat "window input column not found: " target)))))
+
+(define window_offset_slot_symbol (lambda (slot column)
+	(symbol (concat "__window_slot_" slot "_" column))))
+
+(define window_offset_emit_params (lambda (window_size stride selected_slot alias mapcols)
+	(merge (map (produceN window_size) (lambda (slot)
+		(map (produceN stride) (lambda (column)
+			(if (equal? slot selected_slot)
+				(symbol (concat alias "." (nth mapcols column)))
+				(window_offset_slot_symbol slot column)))))))))
+
+(define replace_window_offset_expr (lambda (src replacements expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase column col_ignorecase)
+			(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+				(qassoc_get replacements column expr) expr)
+		((quote get_column) tblvar tbl_ignorecase column col_ignorecase)
+			(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+				(qassoc_get replacements column expr) expr)
+		(cons head tail) (cons head (map tail (lambda (item)
+			(replace_window_offset_expr src replacements item))))
+		_ expr)))
+
+(define window_offset_fresh_state_expr (lambda (skip window_size stride)
+	(cons (quote list) (merge (list
+		(list skip 0 stride)
+		(map (produceN (* window_size stride)) (lambda (_index) nil)))))))
+
+(define window_offset_stage_stream_dirs (lambda (stage)
+	(qassoc_get (os_facts stage) (quote window_stream_sortdirs) (os_sortdirs stage))))
+
+/* An ORC is a persistent computed column, so an incompatible consumer order
+cannot reuse the unfiltered window column when SQL WHERE narrows its input.
+Physical lowering gives that query domain its own canonical column recipe. The
+logical window-stage remains unchanged and contains no createcolumn artifact. */
+(define filtered_window_stage (lambda (stage src condition filtercols filterfn)
+	(begin
+		(define filtered_col (canonical_orc_column_name "filtered_window" src
+			(list
+				(os_column stage)
+				filtercols
+				(lower_column_expr_for_alias src condition))))
+		(define facts (qassoc_set
+			(qassoc_set (os_facts stage) (quote physical_filtercols) filtercols)
+			(quote physical_filterfn) filterfn))
+		(make_window_stage
+			(nth stage 1) src filtered_col
+			(os_sortcols stage) (os_sortdirs stage) (os_partitioncount stage)
+			(os_mapcols stage) (os_mapfn stage) (os_reducefn stage) (os_reduceinit stage)
+			facts))))
+
+(define filtered_window_stages (lambda (stages src condition filtercols filterfn)
+	(map stages (lambda (stage)
+		(if (window_offset_stage? stage)
+			(filtered_window_stage stage src condition filtercols filterfn)
+			stage)))))
+
+(define filtered_window_replacements (lambda (src old_stages new_stages)
+	(mapIndex old_stages (lambda (index stage)
+		(if (window_offset_stage? stage)
+			(list (os_column stage)
+				(list (quote get_column) (source_alias src) false
+					(os_column (nth new_stages index)) false))
+			(list (os_column stage)
+				(list (quote get_column) (source_alias src) false (os_column stage) false)))))))
+
+(define filtered_window_catalog (lambda (catalog physical_stages)
+	(begin
+		(define stage_index (reduce physical_stages (lambda (index stage)
+			(set_assoc index (logical_stage_key stage) stage)) '()))
+		(map catalog (lambda (stage)
+			(coalesceNil (get_assoc stage_index (logical_stage_key stage)) stage))))))
+
+(define query_block_with_filtered_window_orcs (lambda (block)
+	(match (qb_sources block)
+		(cons src rest) (begin
+			(define condition (combine_where (qb_where block) (source_join_expr src)))
+			(if (or (not (empty_list? rest))
+				(or (not (source_is_base_table? src))
+					(or (equal? condition true)
+						(empty_list? (filter (qb_stages block) window_offset_stage?)))))
+				block
+				(begin
+					/* A session-bound predicate cannot identify a shared computed column.
+					Fail instead of caching one session's window for another session. */
+					(if (not (empty_list? (query_expr_session_reads condition)))
+						(neumann_fail "build_queryplan"
+							"incompatible ordered window with session-dependent WHERE needs a query-local carrier")
+						true)
+					(define filtercols (extract_columns_for_alias src condition))
+					(define filterfn (list (quote lambda)
+						(map filtercols (lambda (column)
+							(scan_callback_symbol_for_alias (source_alias src) column)))
+						(lower_column_expr_for_alias src condition)))
+					(define physical_stages (filtered_window_stages
+						(qb_stages block) src condition filtercols filterfn))
+					(define replacements (filtered_window_replacements
+						src (qb_stages block) physical_stages))
+					(define rewrite (lambda (expr)
+						(replace_window_offset_expr src replacements expr)))
+					(define catalog (filtered_window_catalog
+						(query_block_stage_catalog block) physical_stages))
+					(make_query_block
+						(qb_schema block)
+						(qb_sources block)
+						(rewrite (qb_fields block))
+						(qb_where block)
+						(qb_group block)
+						(if (nil? (qb_having block)) nil (rewrite (qb_having block)))
+						(if (nil? (qb_order block)) nil (rewrite (qb_order block)))
+						(qb_limit block)
+						(qb_offset block)
+						(rewrite (qb_hidden block))
+						physical_stages
+						(qassoc_set_without (qb_facts block)
+							(quote stage_catalog) catalog (quote lowering_catalog))))))
+		_ block)))
+
+(define window_offset_stages_compatible? (lambda (stages reference)
+	(reduce stages (lambda (compatible stage)
+		(and compatible
+			(and (window_offset_stage? stage)
+				(and (equal? (source_schema (os_source stage)) (source_schema (os_source reference)))
+					(and (equal? (source_relation (os_source stage)) (source_relation (os_source reference)))
+						(and (equal? (os_sortcols stage) (os_sortcols reference))
+							(and (equal? (os_partitioncount stage) (os_partitioncount reference))
+								(equal? (serialize (window_offset_stage_stream_dirs stage))
+									(serialize (window_offset_stage_stream_dirs reference)))))))))) true)))
+
+(define window_offset_max_for_function (lambda (stages fn)
+	(reduce stages (lambda (largest stage)
+		(if (equal? (qassoc_get (os_facts stage) (quote window_function) nil) fn)
+			(max largest (qassoc_get (os_facts stage) (quote window_offset) 1))
+			largest)) 0)))
+
+(define lower_fused_window_offset_block (lambda (block)
+	(match (qb_stages block)
+		(cons stage rest) (if (not (window_offset_stages_compatible? (cons stage rest) stage))
+			nil
+			(match (qb_sources block)
+				(cons src src_rest) (if (or (not (empty_list? src_rest))
+					(or (not (source_is_base_table? src))
+						(or (not (nil? (qb_limit block))) (not (nil? (qb_offset block))))))
+					nil
+					(if (or
+						(not (equal? (source_schema (os_source stage)) (source_schema src)))
+						(not (equal? (source_relation (os_source stage)) (source_relation src))))
+						nil
+						(if (not (window_offset_order_compatible? src (coalesceNil (qb_order block) '()) stage))
+							nil
+							(begin
+								(define stages (cons stage rest))
+								(define facts (os_facts stage))
+								(define max_lag (window_offset_max_for_function stages "LAG"))
+								(define max_lead (window_offset_max_for_function stages "LEAD"))
+								(define fields (expand_query_block_fields (list src) (qb_fields block)))
+								(define condition (combine_where (qb_where block) (source_join_expr src)))
+								(define filtercols (merge_unique (list (extract_columns_for_alias src condition))))
+								(define fieldcols (merge_unique (extract_assoc fields (lambda (_title expr)
+									(extract_columns_for_alias src expr)))))
+								(define mapcols (merge_unique (list
+									(filter fieldcols (lambda (column) (not (contains? (map stages os_column) column))))
+									(merge (map stages os_mapcols)))))
+								(define stride (count mapcols))
+								(define window_size (+ max_lag max_lead 1))
+								(define selected_slot max_lag)
+								(define emit_params (window_offset_emit_params
+									window_size stride selected_slot (source_alias src) mapcols))
+								(define replacements (map stages (lambda (window_stage)
+									(begin
+										(define stage_facts (os_facts window_stage))
+										(define stage_fn (qassoc_get stage_facts (quote window_function) nil))
+										(define stage_offset (qassoc_get stage_facts (quote window_offset) 1))
+										(define value_col (qassoc_get stage_facts (quote window_value_column) nil))
+										(define value_slot (if (equal? stage_fn "LAG")
+											(- selected_slot stage_offset) (+ selected_slot stage_offset)))
+										(list (os_column window_stage)
+											(window_offset_slot_symbol value_slot
+												(window_offset_column_position mapcols value_col 0)))))))
+								/* The selected row receives its ordinary alias.column parameter
+								names. Only the logical window column is replaced, so the standard
+								expression lowerer still owns SQL value semantics. */
+								(define emit_expr (list (quote lambda) emit_params
+									(list (quote resultrow) (cons (quote list)
+										(map_assoc fields (lambda (_title expr)
+											(lower_column_expr_for_alias src
+												(replace_window_offset_expr src replacements expr))))))))
+								(define filter_expr (list (quote lambda)
+									(map filtercols (lambda (column)
+										(scan_callback_symbol_for_alias (source_alias src) column)))
+									(lower_column_expr_for_alias src condition)))
+								(define map_expr (list (quote lambda)
+									(map mapcols (lambda (column) (symbol (concat (source_alias src) "." column))))
+									(cons (quote list) (map mapcols (lambda (column)
+										(symbol (concat (source_alias src) "." column)))))))
+								(define fresh_window (window_offset_fresh_state_expr
+									max_lead window_size stride))
+								(define partition_cols (slice (os_sortcols stage) 0 (os_partitioncount stage)))
+								(define row_partition (if (empty_list? partition_cols)
+									nil
+									(if (single_source? partition_cols)
+										(list (quote nth) (quote mapped)
+											(window_offset_column_position mapcols (car partition_cols) 0))
+										(cons (quote list) (map partition_cols (lambda (column)
+											(list (quote nth) (quote mapped)
+												(window_offset_column_position mapcols column 0))))))))
+								(define reduce_expr (list (quote lambda) (list (quote state) (quote mapped))
+									(list (quote begin)
+										(list (quote define) (quote initialized) (list (quote car) (quote state)))
+										(list (quote define) (quote previous_partition) (list (quote cadr) (quote state)))
+										(list (quote define) (quote old_window) (list (quote nth) (quote state) 2))
+										(list (quote define) (quote current_partition) row_partition)
+										(list (quote define) (quote same_partition) (list (quote and)
+											(quote initialized)
+											(list (quote equal?) (quote previous_partition) (quote current_partition))))
+										(list (quote define) (quote active_window) (list (quote if)
+											(quote same_partition)
+											(quote old_window)
+											(list (quote begin)
+												(list (quote if) (list (quote and) (quote initialized) (> max_lead 0))
+													(list (quote window_flush) (quote old_window) emit_expr max_lead)
+													nil)
+												fresh_window)))
+										(list (quote window_mut) (quote active_window) emit_expr (quote mapped))
+										(list (quote list) true (quote current_partition) (quote active_window)))))
+								(define scan_expr (list (quote scan_order)
+									'(session "__memcp_tx")
+									(source_table_expr src)
+									(cons (quote list) filtercols)
+									filter_expr
+									(quoted_runtime_list (os_sortcols stage))
+									(cons (quote list) (window_scan_dirs
+										(window_offset_stage_stream_dirs stage)))
+									0 0 -1
+									(cons (quote list) mapcols)
+									map_expr reduce_expr
+									(list (quote list) false nil fresh_window)
+									(source_outer? src)))
+								(if (> max_lead 0)
+									(list
+										(list (quote lambda) (list (quote final_state))
+											(list (quote if) (list (quote car) (quote final_state))
+												(list (quote window_flush) (list (quote nth) (quote final_state) 2) emit_expr max_lead)
+												nil))
+										scan_expr)
+									scan_expr)))))
+				_ nil))
+		_ nil)))
 
 (define lower_fused_row_number_block (lambda (block)
 	(match (qb_stages block)
@@ -2623,10 +2940,15 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(lower_grouped_query_block_with_stages block)
 			(begin
-				(define fused_row_number (lower_fused_row_number_block block))
-				(if (not (nil? fused_row_number))
-					fused_row_number
-					(lower_simple_query_block_with_cataloged_stages block)))))))
+				(define fused_window_offset (lower_fused_window_offset_block block))
+				(if (not (nil? fused_window_offset))
+					fused_window_offset
+					(begin
+						(define fused_row_number (lower_fused_row_number_block block))
+						(if (not (nil? fused_row_number))
+							fused_row_number
+							(lower_simple_query_block_with_cataloged_stages
+								(query_block_with_filtered_window_orcs block)))))))))))
 
 (define lower_query_block_with_stages (lambda (block)
 	(lower_query_block_with_cataloged_stages (query_block_with_full_stage_catalog block))))
