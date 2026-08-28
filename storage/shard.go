@@ -508,6 +508,7 @@ func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnS
 		proxy.sessionKeys = extractSessionKeys(proxy.computor)
 		if col != nil && len(col.OrcSortCols) > 0 {
 			proxy.isOrdered = true
+			u.t.hasOrderedColumns.Store(true)
 		}
 		return proxy
 	}
@@ -517,6 +518,7 @@ func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnS
 	// ordered proxy so readers/rebuilds never publish the placeholder as a real
 	// user-visible value column.
 	if proxy := u.makeComputedColumnProxy(colName, col); proxy != nil {
+		u.t.hasOrderedColumns.Store(true)
 		return proxy
 	}
 	return columnstorage

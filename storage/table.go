@@ -522,8 +522,12 @@ type table struct {
 	// orcMu serializes ORC recomputes: only one full scan_order pass at a time per table.
 	orcMu          sync.Mutex
 	orcRecomputing int32 // atomic: >0 means an ORC recompute is in progress (skip re-entry in GetValue)
-
-	lastAccessed uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
+	// hasOrderedColumns is a monotonic runtime hint for the scan fast path.
+	// False proves that no ORC preflight is necessary; stale true is harmless
+	// after temporary-column eviction because the shard-level check remains
+	// authoritative.
+	hasOrderedColumns atomic.Bool
+	lastAccessed      uint64 // atomic; UnixNano timestamp for CacheManager LRU of TempKeytable
 
 	// creationMu is held while a newly published table runs its synchronous
 	// oninit hook. Concurrent if-not-exists calls wait on the same barrier.

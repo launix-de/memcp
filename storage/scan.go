@@ -20,12 +20,40 @@ import "fmt"
 import "time"
 import "runtime/debug"
 import "strings"
+import "sync"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
 type scanError struct {
 	r     interface{}
 	stack string
+}
+
+const scanAnalyzeScratchCapacity = 8
+
+// scanAnalyzeScratch owns the short-lived physical analyzer output until all
+// parallel shard consumers have completed. A pool is preferable to a caller
+// stack array here: the shard callback escapes into goroutines, which would
+// force the complete stack array onto the heap on every scan. Most SQL scans
+// fit in these inline buffers; unusual wide predicates retain the ordinary
+// append fallback without changing analyzer semantics.
+type scanAnalyzeScratch struct {
+	boundaries [scanAnalyzeScratchCapacity]columnboundaries
+	lower      [scanAnalyzeScratchCapacity]scm.Scmer
+}
+
+var scanAnalyzeScratchPool = sync.Pool{
+	New: func() any { return new(scanAnalyzeScratch) },
+}
+
+func acquireScanAnalyzeScratch() *scanAnalyzeScratch {
+	return scanAnalyzeScratchPool.Get().(*scanAnalyzeScratch)
+}
+
+func releaseScanAnalyzeScratch(scratch *scanAnalyzeScratch) {
+	clear(scratch.boundaries[:])
+	clear(scratch.lower[:])
+	scanAnalyzeScratchPool.Put(scratch)
 }
 
 func (s scanError) Error() string {
@@ -459,10 +487,20 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCo
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	touchTempColumns(t, conditionCols, nil)
-	boundaries := extractBoundaries(conditionCols, condition)
+	var scratch *scanAnalyzeScratch
+	var boundaries boundaries
+	if source != nil || conditionMayHaveBoundaries(condition) {
+		scratch = acquireScanAnalyzeScratch()
+		defer releaseScanAnalyzeScratch(scratch)
+		boundaries = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
+	}
 	reorderByFrequency(boundaries, t)
 	boundaries = appendRecSetBoundary(boundaries, source)
-	lower, upperLast := indexFromBoundaries(boundaries)
+	var lowerStorage []scm.Scmer
+	if scratch != nil {
+		lowerStorage = scratch.lower[:0]
+	}
+	lower, upperLast := indexFromBoundariesInto(lowerStorage, boundaries)
 	for _, b := range boundaries {
 		t.AddPartitioningScore([]string{b.col})
 	}
@@ -547,10 +585,20 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 	// Measure analysis time (boundary extraction, sharding hints)
 	analyzeStart := time.Now()
 	/* analyze query */
-	boundaries := extractBoundaries(conditionCols, condition)
+	var scratch *scanAnalyzeScratch
+	var boundaries boundaries
+	if source != nil || conditionMayHaveBoundaries(condition) {
+		scratch = acquireScanAnalyzeScratch()
+		defer releaseScanAnalyzeScratch(scratch)
+		boundaries = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
+	}
 	reorderByFrequency(boundaries, t)
 	boundaries = appendRecSetBoundary(boundaries, source)
-	lower, upperLast := indexFromBoundaries(boundaries)
+	var lowerStorage []scm.Scmer
+	if scratch != nil {
+		lowerStorage = scratch.lower[:0]
+	}
+	lower, upperLast := indexFromBoundariesInto(lowerStorage, boundaries)
 	if Settings.ScanDebugging {
 		dbg := fmt.Sprintf("[SCAN] %s.%s", t.schema.Name, t.Name)
 		for _, b := range boundaries {
@@ -668,7 +716,10 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 	// log statistics (best-effort, async so it doesn't add latency)
 	execNs := time.Since(execStart).Nanoseconds()
 	if Settings.ScanDebugging || candidateCount > int64(Settings.AnalyzeMinItems) {
-		go func(anNs, exNs int64) {
+		// Boundaries may live in pooled scan scratch. Encode them before the
+		// asynchronous logger starts so no reference outlives this scan.
+		indexColsEnc := boundaryIndexCols(boundaries)
+		go func(anNs, exNs int64, indexColsEnc string) {
 			defer func() { _ = recover() }()
 			filterEnc := ""
 			if proc, ok := condition.Any().(scm.Proc); ok {
@@ -680,9 +731,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 				}
 				filterEnc = encodeScmerToString(proc.Body, conditionCols, params)
 			}
-			indexColsEnc := boundaryIndexCols(boundaries)
 			safeLogScan(t.schema.Name, t.Name, false, filterEnc, "", indexColsEnc, inputCount, candidateCount, outCount, anNs, exNs)
-		}(analyzeNs, execNs)
+		}(analyzeNs, execNs, indexColsEnc)
 	}
 	return akkumulator
 }
@@ -828,8 +878,15 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	// ensureMainCount then loads at least one column to initialize main_count.
 	t.ensureLoaded()
 	t.ensureMainCount(false)
-	scanCols := append(append([]string(nil), conditionCols...), callbackCols...)
-	orderedProxies := t.orderedScanProxies(scanCols, currentTx)
+	// Most scans do not read an ordered computed column. Keep discovery on the
+	// caller's stack and inspect the two existing column slices directly, so the
+	// correctness preflight below adds no heap work to an ordinary scan.
+	var orderedProxies []*StorageComputeProxy
+	if t.hasOrderedScanProxy(conditionCols, currentTx) || t.hasOrderedScanProxy(callbackCols, currentTx) {
+		var orderedProxyStorage [4]*StorageComputeProxy
+		orderedProxies = t.appendOrderedScanProxies(orderedProxyStorage[:0], conditionCols, currentTx)
+		orderedProxies = t.appendOrderedScanProxies(orderedProxies, callbackCols, currentTx)
+	}
 	prepareOrdered := func() {
 		if len(orderedProxies) == 0 {
 			return
@@ -857,6 +914,9 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		}
 	}
 	orderedReadyLocked := func() bool {
+		if len(orderedProxies) == 0 {
+			return true
+		}
 		upper := t.main_count + uint32(len(t.inserts))
 		for id := uint32(0); id < upper; id++ {
 			if currentTx != nil && currentTx.Mode == TxACID {
@@ -1113,13 +1173,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 	return akkumulator, outCount, candidateCount
 }
 
-// orderedScanProxies returns the ORC-backed columns that a scan may read.
+// appendOrderedScanProxies appends the ORC-backed columns that a scan may read.
 // They must be made valid before the shard lock is acquired: an on-demand ORC
 // repair takes shard write locks and therefore cannot run under a scan-held
-// shard read or write lock.
-func (t *storageShard) orderedScanProxies(cols []string, currentTx *TxContext) []*StorageComputeProxy {
-	seen := make(map[*StorageComputeProxy]struct{})
-	result := make([]*StorageComputeProxy, 0)
+// shard read or write lock. The caller supplies stack capacity for the normal
+// case; linear deduplication is cheaper than allocating a map for a handful of
+// projected columns.
+func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, cols []string, currentTx *TxContext) []*StorageComputeProxy {
 	for _, col := range cols {
 		if col == "$recset_contains" || col == "$update" || col == "$break" ||
 			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
@@ -1133,13 +1193,43 @@ func (t *storageShard) orderedScanProxies(cols []string, currentTx *TxContext) [
 		if !ok || !proxy.isOrdered {
 			continue
 		}
-		if _, exists := seen[proxy]; exists {
+		seen := false
+		for _, existing := range result {
+			if existing == proxy {
+				seen = true
+				break
+			}
+		}
+		if seen {
 			continue
 		}
-		seen[proxy] = struct{}{}
 		result = append(result, proxy)
 	}
 	return result
+}
+
+// hasOrderedScanProxy keeps the overwhelmingly common non-ORC path free of
+// proxy-list storage. It deliberately performs only the same stable column
+// lookup appendOrderedScanProxies would perform; ORC scans pay the second pass.
+func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) bool {
+	if !t.t.hasOrderedColumns.Load() {
+		return false
+	}
+	for _, col := range cols {
+		if col == "$recset_contains" || col == "$update" || col == "$break" ||
+			strings.HasPrefix(col, "NEW.") || strings.HasPrefix(col, "$invalidate:") ||
+			strings.HasPrefix(col, "$increment:") || strings.HasPrefix(col, "$set:") {
+			continue
+		}
+		if _, ok := parseBatchPseudoColName(col); ok {
+			continue
+		}
+		proxy, ok := t.getColumnStorageOrPanicEx(col, false, currentTx).(*StorageComputeProxy)
+		if ok && proxy.isOrdered {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
