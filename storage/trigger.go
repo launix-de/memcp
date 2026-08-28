@@ -20,6 +20,7 @@ import "fmt"
 import "errors"
 import "sync/atomic"
 import "encoding/json"
+import "strings"
 import "github.com/launix-de/memcp/scm"
 
 // TriggerTiming defines when a trigger fires
@@ -206,25 +207,27 @@ func (tr TriggerDescription) releaseTarget() {
 }
 
 type persistedTriggerDescription struct {
-	Name      string        `json:"name"`
-	Timing    TriggerTiming `json:"timing"`
-	Func      *scm.Scmer    `json:"func,omitempty"`
-	SourceSQL string        `json:"source_sql,omitempty"`
-	IsSystem  bool          `json:"is_system,omitempty"`
-	Hidden    bool          `json:"hidden,omitempty"`
-	Priority  int           `json:"priority,omitempty"`
-	Async     bool          `json:"async,omitempty"`
+	Name           string        `json:"name"`
+	Timing         TriggerTiming `json:"timing"`
+	Func           *scm.Scmer    `json:"func,omitempty"`
+	SourceSQL      string        `json:"source_sql,omitempty"`
+	IsSystem       bool          `json:"is_system,omitempty"`
+	Hidden         bool          `json:"hidden,omitempty"`
+	Priority       int           `json:"priority,omitempty"`
+	Async          bool          `json:"async,omitempty"`
+	RequiresTarget bool          `json:"requires_target,omitempty"`
 }
 
 func (tr TriggerDescription) MarshalJSON() ([]byte, error) {
 	persist := persistedTriggerDescription{
-		Name:      tr.Name,
-		Timing:    tr.Timing,
-		SourceSQL: tr.SourceSQL,
-		IsSystem:  tr.IsSystem,
-		Hidden:    tr.Hidden,
-		Priority:  tr.Priority,
-		Async:     tr.Async,
+		Name:           tr.Name,
+		Timing:         tr.Timing,
+		SourceSQL:      tr.SourceSQL,
+		IsSystem:       tr.IsSystem,
+		Hidden:         tr.Hidden,
+		Priority:       tr.Priority,
+		Async:          tr.Async,
+		RequiresTarget: tr.Acquire != nil,
 	}
 	// SQL triggers can be restored from source_sql on load; persisting the
 	// compiled Scheme AST would bloat schema.json dramatically.
@@ -249,12 +252,29 @@ func (tr *TriggerDescription) UnmarshalJSON(data []byte) error {
 	tr.Async = persist.Async
 	tr.FuncPlan = scm.NewNil()
 	tr.VectorFunc = scm.NewNil()
+	// Cache-maintenance triggers carry a process-local target pin. The function
+	// cannot be serialized, and its table or column may no longer exist after a
+	// restart. Keep the trigger inert until cache preparation finds/recreates the
+	// canonical target and rebinds it with SetTriggerTarget.
+	if persist.RequiresTarget || restoredTriggerRequiresRuntimeTarget(tr.Name) {
+		tr.Acquire = unavailableTriggerTarget
+	}
 	if persist.Func != nil {
 		tr.Func = *persist.Func
 	} else {
 		tr.Func = scm.NewNil()
 	}
 	return nil
+}
+
+func unavailableTriggerTarget() bool { return false }
+
+func restoredTriggerRequiresRuntimeTarget(name string) bool {
+	// Older schema files predate requires_target. These are all current
+	// internal trigger families whose bodies address an evictable cache target.
+	return strings.HasPrefix(name, ".kt_cleanup:") ||
+		strings.HasPrefix(name, ".cache:") ||
+		strings.HasPrefix(name, ".orcdep:")
 }
 
 func triggerScmerMissing(v scm.Scmer) bool {
