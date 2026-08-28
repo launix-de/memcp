@@ -330,6 +330,28 @@ func (s *OverlayBlob) finish() {
 	}
 	s.Base.finish()
 }
+
+// appendBlobReferences adds the content-addressed objects owned by this column
+// generation. References are generation metadata: cleanup may delete a blob
+// only after every active generation supplied this proof.
+func (s *OverlayBlob) appendBlobReferences(dst map[string]struct{}, count uint32) {
+	if len(s.refs) > 0 {
+		for hash := range s.refs {
+			dst[hash] = struct{}{}
+		}
+		return
+	}
+	for i := uint32(0); i < count; i++ {
+		value := s.Base.GetValue(i)
+		if !value.IsString() {
+			continue
+		}
+		raw := value.String()
+		if len(raw) == 33 && raw[0] == '!' && raw[1] != '!' {
+			dst[fmt.Sprintf("%x", []byte(raw[1:]))] = struct{}{}
+		}
+	}
+}
 func (s *OverlayBlob) proposeCompression(i uint32) ColumnStorage {
 	// dont't propose another pass
 	return nil

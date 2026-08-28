@@ -1,0 +1,115 @@
+# Copyright (C) 2026  MemCP Contributors
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "Storage ownership accounting and persistent blob lifecycle"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS lifecycle_accounting"
+  - sql: "CREATE TABLE lifecycle_accounting (id INT PRIMARY KEY, payload TEXT) ENGINE=SAFE"
+
+test_cases:
+  - name: "Global stat exposes disjoint ownership totals"
+    scm: |
+      (begin
+        (define values (stat))
+        (and
+          (has_assoc? values "process_memory")
+          (has_assoc? values "evictable_memory")
+          (has_assoc? values "non_evictable_process_memory")
+          (has_assoc? values "shard_column_size")
+          (has_assoc? values "index_size")
+          (equal? (get_assoc values "shard_memory") (get_assoc values "evictable_memory"))
+          (>= (get_assoc values "process_memory") (get_assoc values "evictable_memory"))))
+    expect:
+      data: [true]
+
+  - name: "Schema stat labels owner payload as an estimate rather than RSS"
+    scm: |
+      (begin
+        (define summary (stat "memcp-tests"))
+        (and
+          (strlike summary "%Disjoint owner-payload estimate (not RSS%")
+          (strlike summary "%Base%Indexes%Temp columns%String dicts%Metadata%Total%")
+          (strlike summary "%total owner payload estimate%")))
+    expect:
+      data: [true]
+
+  - name: "Persistent blob metadata is not registered as a temporary keytable"
+    scm: |
+      (begin
+        (define before (get_assoc (stat) "temp_keytable_count"))
+        (insert
+          (table "memcp-tests" "lifecycle_accounting")
+          '("id" "payload")
+          (list (list 1 (concat (sha256 "blob-a") (sha256 "blob-b") (sha256 "blob-c")
+            (sha256 "blob-d") (sha256 "blob-e") (sha256 "blob-f") (sha256 "blob-g")
+            (sha256 "blob-h") (sha256 "blob-i") (sha256 "blob-j") (sha256 "blob-k")
+            (sha256 "blob-l") (sha256 "blob-m") (sha256 "blob-n") (sha256 "blob-o")
+            (sha256 "blob-p") (sha256 "blob-q") (sha256 "blob-r") (sha256 "blob-s")
+            (sha256 "blob-t") (sha256 "blob-u") (sha256 "blob-v") (sha256 "blob-w")
+            (sha256 "blob-x") (sha256 "blob-y") (sha256 "blob-z") (sha256 "blob-aa")
+            (sha256 "blob-ab") (sha256 "blob-ac") (sha256 "blob-ad") (sha256 "blob-ae")
+            (sha256 "blob-af") (sha256 "blob-ag"))))
+          '() (lambda () true) false)
+        (rebuild (table "memcp-tests" "lifecycle_accounting") true false)
+        (equal? before (get_assoc (stat) "temp_keytable_count")))
+    expect:
+      data: [true]
+
+  - name: "Create a separately owned temporary computed column"
+    scm: &prepare_temp_column |
+      (createcolumn
+        (table "memcp-tests" "lifecycle_accounting")
+        "cached_length" "int" '() '("temp" true)
+        '("payload") (lambda (payload) (strlen payload)))
+
+  - name: "Repeated temp-column preparation sets rather than accumulates its size"
+    scm: |
+      (begin
+        (define before (get_assoc (stat) "temp_column_size"))
+        (createcolumn
+          (table "memcp-tests" "lifecycle_accounting")
+          "cached_length" "int" '() '("temp" true)
+          '("payload") (lambda (payload) (strlen payload)))
+        (equal? before (get_assoc (stat) "temp_column_size")))
+    expect:
+      data: [true]
+
+  - name: "Computed value remains correct before restart"
+    sql: "SELECT id, cached_length FROM lifecycle_accounting"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          cached_length: 2112
+
+  - name: "Restart after publishing the blob generation"
+    action: restart
+
+  - name: "Persistent blob payload survives restart"
+    sql: "SELECT id, LENGTH(payload) AS payload_length FROM lifecycle_accounting"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          payload_length: 2112
+
+  - name: "Canonical temp-column preparation repairs the restarted cache"
+    scm: *prepare_temp_column
+
+  - name: "Reprepared computed value is correct after restart"
+    sql: "SELECT cached_length FROM lifecycle_accounting"
+    expect:
+      rows: 1
+      data:
+        - cached_length: 2112
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS lifecycle_accounting"

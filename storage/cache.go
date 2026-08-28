@@ -28,7 +28,6 @@ import (
 	"time"
 
 	units "github.com/docker/go-units"
-	"github.com/launix-de/memcp/scm"
 )
 
 // EvictableType identifies the kind of cached object for factor lookup and stat reporting.
@@ -254,6 +253,7 @@ type cacheOp struct {
 	del                any
 	updatePtr          any
 	updateDelta        int64
+	setSize            bool
 	budgetUpdate       bool
 	budgetVal          int64
 	persistedBudgetVal int64
@@ -392,6 +392,18 @@ func (cm *CacheManager) UpdateSize(pointer any, delta int64) {
 	<-done
 }
 
+// SetSize replaces the accounted size of pointer. Use it after recomputing an
+// owner's complete footprint; unlike UpdateSize, repeated calls with the same
+// observation are idempotent.
+func (cm *CacheManager) SetSize(pointer any, size int64) {
+	if cm.opChan == nil || cm.stopped.Load() {
+		return
+	}
+	done := make(chan struct{})
+	cm.opChan <- cacheOp{updatePtr: pointer, updateDelta: size, setSize: true, done: done}
+	<-done
+}
+
 // UpdateSizeAsync queues an ownership-local size change without waiting for
 // eviction. It is intended for callers that already hold storage locks. Such
 // objects serialize enqueue order with their own lock; the single manager then
@@ -502,7 +514,11 @@ func (cm *CacheManager) run() {
 			} else if op.del != nil {
 				cm.removeByPointer(op.del)
 			} else if op.updatePtr != nil {
-				cm.updateSizeInternal(op.updatePtr, op.updateDelta)
+				if op.setSize {
+					cm.setSizeInternal(op.updatePtr, op.updateDelta)
+				} else {
+					cm.updateSizeInternal(op.updatePtr, op.updateDelta)
+				}
 			} else if op.budgetUpdate {
 				cm.memoryBudget = op.budgetVal
 				cm.persistedBudget = op.persistedBudgetVal
@@ -568,7 +584,6 @@ func (cm *CacheManager) addInternal(item *softItem) {
 		// re-registration: update in place
 		delta := item.size - old.size
 		cm.currentMemory += delta
-		scm.AdjustMemStats(delta)
 		cm.sizeByType[old.evictType] -= old.size
 		cm.countByType[old.evictType]--
 		cm.sizeByType[item.evictType] += item.size
@@ -591,7 +606,6 @@ func (cm *CacheManager) addInternal(item *softItem) {
 	}
 	cm.itemMap[item.pointer] = item
 	cm.currentMemory += item.size
-	scm.AdjustMemStats(item.size)
 	cm.sizeByType[item.evictType] += item.size
 	cm.countByType[item.evictType]++
 	heap.Push(&cm.h, item)
@@ -613,7 +627,6 @@ func (cm *CacheManager) removeInternal(pointer any, freedByType *[numEvictableTy
 		return
 	}
 	cm.currentMemory -= item.size
-	scm.AdjustMemStats(-item.size)
 	cm.sizeByType[item.evictType] -= item.size
 	cm.countByType[item.evictType]--
 	if freedByType != nil {
@@ -638,13 +651,23 @@ func (cm *CacheManager) updateSizeInternal(pointer any, delta int64) {
 		delta = -item.size
 	}
 	cm.currentMemory += delta
-	scm.AdjustMemStats(delta)
 	cm.sizeByType[item.evictType] += delta
 	item.size += delta
 	item.evictionScore = item.size * evictableWeights[item.evictType]
 	if item.heapIndex >= 0 {
 		heap.Fix(&cm.h, item.heapIndex)
 	}
+}
+
+func (cm *CacheManager) setSizeInternal(pointer any, size int64) {
+	item, ok := cm.itemMap[pointer]
+	if !ok {
+		return
+	}
+	if size < 0 {
+		size = 0
+	}
+	cm.updateSizeInternal(pointer, size-item.size)
 }
 
 // telemetryWeight calibrates telemetry (rebuild-decayed usage score) against
@@ -699,7 +722,6 @@ func (cm *CacheManager) applyEviction(candidate evictionCandidate, mode eviction
 		return 0
 	}
 	cm.currentMemory -= freed
-	scm.AdjustMemStats(-freed)
 	cm.sizeByType[item.evictType] -= freed
 	freedByType[item.evictType] += freed
 	item.size -= freed
@@ -800,14 +822,10 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 
 	// log summary
 	if totalFreed > 0 {
-		shardColsOnly := freedByType[TypeShard] - freedByType[TypeIndex]
-		if shardColsOnly < 0 {
-			shardColsOnly = 0
-		}
 		log.Printf("memory pressure: freed %s total (%s temp columns, %s shard columns, %s indexes, %s keytables, %s cache entries, %s string dicts)",
 			units.BytesSize(float64(totalFreed)),
 			units.BytesSize(float64(freedByType[TypeTempColumn])),
-			units.BytesSize(float64(shardColsOnly)),
+			units.BytesSize(float64(freedByType[TypeShard])),
 			units.BytesSize(float64(freedByType[TypeIndex])),
 			units.BytesSize(float64(freedByType[TypeTempKeytable])),
 			units.BytesSize(float64(freedByType[TypeCacheEntry])),
@@ -818,12 +836,8 @@ func (cm *CacheManager) evict(currentUsage, budget, additionalSize int64, typeFi
 
 // FormatStat returns a human-readable string of the cache state.
 func (cs CacheStat) FormatStat() string {
-	shardColsOnly := cs.SizeByType[TypeShard] - cs.SizeByType[TypeIndex]
-	if shardColsOnly < 0 {
-		shardColsOnly = 0
-	}
-	// Child caches are included in their top-level owner's size and count as one
-	// object. This keeps global cache metadata independent of child cardinality.
+	// Every byte has one owner. Indexes, materialized string dictionaries and
+	// temp columns are therefore disjoint from their parent shard totals.
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("TotalBudget = %s\tPersistedBudget = %s\tTracked = %s\tPersisted = %s\n",
@@ -833,7 +847,7 @@ func (cs CacheStat) FormatStat() string {
 		units.BytesSize(float64(cs.PersistedMemory))))
 	b.WriteString("Type                     \tCount\tSize\n")
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Temp columns", cs.CountByType[TypeTempColumn], units.BytesSize(float64(cs.SizeByType[TypeTempColumn]))))
-	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Shard columns", cs.CountByType[TypeShard], units.BytesSize(float64(shardColsOnly))))
+	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Shard columns", cs.CountByType[TypeShard], units.BytesSize(float64(cs.SizeByType[TypeShard]))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Indexes", cs.CountByType[TypeIndex], units.BytesSize(float64(cs.SizeByType[TypeIndex]))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Temp keytables", cs.CountByType[TypeTempKeytable], units.BytesSize(float64(cs.SizeByType[TypeTempKeytable]))))
 	b.WriteString(fmt.Sprintf("%-25s\t%d\t%s\n", "Cache entries", cs.CountByType[TypeCacheEntry], units.BytesSize(float64(cs.SizeByType[TypeCacheEntry]))))

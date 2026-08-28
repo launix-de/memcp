@@ -274,16 +274,13 @@ func (s *storageShard) recordNextInsertRange(oldStartRecid, newStartRecid uint32
 func (s *storageShard) computeSizeLocked() uint {
 	var result uint = 14*8 + 32*8 // heuristic for columns map
 	if s.srState != COLD {
-		for _, c := range s.columns {
-			if c != nil {
-				result += c.ComputeSize()
+		for name, c := range s.columns {
+			if c != nil && s.ownsColumnMemory(name) {
+				result += ownedColumnMemory(c)
 			}
 		}
 		result += s.deletions.ComputeSize()
 		result += scm.ComputeSize(scm.NewAny(s.inserts))
-		for _, idx := range s.Indexes {
-			result += idx.ComputeSize()
-		}
 		return result
 	}
 	result += s.deletions.ComputeSize()
@@ -292,28 +289,84 @@ func (s *storageShard) computeSizeLocked() uint {
 }
 
 func (s *storageShard) ComputeSize() uint {
-	var result uint = 14*8 + 32*8 // heuristic for columns map
-	if s.srState != COLD {
-		s.mu.RLock()
-		for _, c := range s.columns {
-			if c != nil {
-				result += c.ComputeSize()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.computeSizeLocked()
+}
+
+func (s *storageShard) ownsColumnMemory(name string) bool {
+	if s.t == nil {
+		return true
+	}
+	for _, column := range s.t.Columns {
+		if column.Name == name {
+			return !column.IsTemp
+		}
+	}
+	return true
+}
+
+// ownedColumnMemory excludes child allocations which have their own cache
+// registration. The column object still reports its complete diagnostic size;
+// ownership is resolved only where the shard total is assembled.
+func ownedColumnMemory(storage ColumnStorage) uint {
+	if storage == nil {
+		return 0
+	}
+	size := storage.ComputeSize()
+	materialized := materializedDictionaryMemory(storage)
+	if materialized <= size {
+		size -= materialized
+	}
+	return size
+}
+
+// materializedDictionaryMemory follows storage wrappers because a compressed
+// StorageString may be nested below OverlayBlob, StoragePrefix, or a computed
+// column proxy. Every materialized dictionary is a separately weighted
+// TypeStringDict cache owner and must therefore be excluded from its parent's
+// bytes at every nesting depth.
+func materializedDictionaryMemory(storage any) uint {
+	switch typed := storage.(type) {
+	case *StorageString:
+		if !typed.compressed {
+			return 0
+		}
+		typed.dictMu.RLock()
+		size := uint(len(typed.dictionary))
+		typed.dictMu.RUnlock()
+		return size
+	case *OverlayBlob:
+		if typed.Base == nil {
+			return 0
+		}
+		return materializedDictionaryMemory(typed.Base)
+	case *StoragePrefix:
+		return materializedDictionaryMemory(&typed.values)
+	case *StorageComputeProxy:
+		var size uint
+		typed.mu.RLock()
+		if typed.main != nil {
+			size += materializedDictionaryMemory(typed.main)
+		}
+		typed.mu.RUnlock()
+		typed.variantsMu.RLock()
+		variants := make([]*storageComputeVariant, 0, len(typed.variants))
+		for _, variant := range typed.variants {
+			variants = append(variants, variant)
+		}
+		typed.variantsMu.RUnlock()
+		for _, variant := range variants {
+			variant.mu.RLock()
+			if variant.main != nil {
+				size += materializedDictionaryMemory(variant.main)
 			}
+			variant.mu.RUnlock()
 		}
-		s.mu.RUnlock()
-		result += s.deletions.ComputeSize()
-		result += scm.ComputeSize(scm.NewAny(s.inserts))
-		for _, idx := range s.Indexes {
-			result += idx.ComputeSize()
-		}
-		return result
+		return size
+	default:
+		return 0
 	}
-	result += s.deletions.ComputeSize()
-	result += scm.ComputeSize(scm.NewAny(s.inserts))
-	for _, idx := range s.Indexes {
-		result += idx.ComputeSize()
-	}
-	return result
 }
 
 type shardStatsSnapshot struct {
@@ -756,9 +809,9 @@ func (s *storageShard) ensureLoaded() {
 	s.mu.Unlock()
 	atomic.StoreUint64(&s.lastAccessed, uint64(time.Now().UnixNano()))
 	// register with CacheManager (skip Memory-engine shards and temp tables)
-	if s.t.PersistencyMode == Cache && !strings.HasPrefix(s.t.Name, ".") {
+	if s.t.PersistencyMode == Cache && !s.t.isEphemeralQueryTable() {
 		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
-	} else if s.t.PersistencyMode != Memory && !strings.HasPrefix(s.t.Name, ".") {
+	} else if s.t.PersistencyMode != Memory && !s.t.isEphemeralQueryTable() {
 		GlobalCache.AddItem(s, int64(s.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 }
@@ -779,6 +832,10 @@ func shardCleanup(ptr any, freedByType *[numEvictableTypes]int64) bool {
 	if len(s.inserts) > 0 || s.deletions.Count() > 0 {
 		s.mu.Unlock()
 		return false // has unflushed deltas, skip eviction (rebuild will flush them)
+	}
+	if s.logfile != nil {
+		s.logfile.Close()
+		s.logfile = nil
 	}
 	// remove indexes from CacheManager (recursive free)
 	for _, idx := range s.Indexes {
@@ -2461,6 +2518,8 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		onFirstInsertId = nil
 	}
 
+	var insertedBytes int64
+	indexDeltaBytes := make(map[*StorageIndex]int64)
 	for _, row := range values {
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
 		for _, c := range t.t.Columns {
@@ -2485,6 +2544,7 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			}
 		}
 		t.inserts = append(t.inserts, newrow)
+		insertedBytes += int64(scm.ComputeSize(scm.NewAny(newrow)))
 
 		// also notify indices
 		for _, index := range t.Indexes {
@@ -2496,6 +2556,9 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
 				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
+				// The row payload belongs to the shard. The index owns only its
+				// B-tree entry/node overhead until rebuild produces compact arrays.
+				indexDeltaBytes[index] += 32
 			}
 			index.mu.Unlock()
 		}
@@ -2523,11 +2586,16 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			t.t.mu.Unlock()
 		}
 	}
-	// Size tracking happens on rebuild only (computeSizeLocked gives accurate malloc-aware size).
-	// For temp keytables we still do a cheap heuristic update here (they are never rebuilt).
-	if strings.HasPrefix(t.t.Name, ".") {
-		delta := int64(len(values)) * int64(len(t.deltaColumns)) * 16
-		GlobalCache.UpdateSize(t.t, delta)
+	// Charge only the new allocation to each disjoint CacheManager owner. A
+	// rebuild later replaces these deltas with each owner's absolute measured
+	// size; insert must not traverse an ever-growing shard or index here.
+	if t.t.isEphemeralQueryTable() {
+		GlobalCache.UpdateSize(t.t, insertedBytes)
+	} else if t.t.PersistencyMode != Memory {
+		GlobalCache.UpdateSizeAsync(t, insertedBytes)
+		for index, delta := range indexDeltaBytes {
+			GlobalCache.UpdateSizeAsync(index, delta)
+		}
 	}
 }
 
@@ -2829,6 +2897,7 @@ func (t *storageShard) RemoveFromDisk() {
 		for _, col := range t.t.Columns {
 			t.t.schema.persistence.RemoveColumn(t.uuid.String(), col.Name)
 		}
+		t.t.schema.persistence.RemoveColumn(t.uuid.String(), blobManifestColumn)
 		t.t.schema.persistence.RemoveLog(t.uuid.String())
 	})
 }
@@ -2851,6 +2920,7 @@ func discardUnpublishedShard(s *storageShard) {
 	for _, col := range s.t.Columns {
 		s.t.schema.persistence.RemoveColumn(s.uuid.String(), col.Name)
 	}
+	s.t.schema.persistence.RemoveColumn(s.uuid.String(), blobManifestColumn)
 	s.t.schema.persistence.RemoveLog(s.uuid.String())
 }
 
@@ -2873,6 +2943,7 @@ func (s *storageShard) removePersistence() {
 	for _, col := range s.t.Columns {
 		s.t.schema.persistence.RemoveColumn(s.uuid.String(), col.Name)
 	}
+	s.t.schema.persistence.RemoveColumn(s.uuid.String(), blobManifestColumn)
 	s.t.schema.persistence.RemoveLog(s.uuid.String())
 }
 
@@ -2901,7 +2972,7 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 		// Only reached via explicit ALTER TABLE ENGINE=memory/cache.
 		GlobalCache.Remove(s)
 		s.removePersistence()
-		if newMode == Cache && !strings.HasPrefix(s.t.Name, ".") {
+		if newMode == Cache && !s.t.isEphemeralQueryTable() {
 			s.srState = SHARED
 			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 		} else {
@@ -2925,19 +2996,20 @@ func transitionShardEngine(s *storageShard, oldMode, newMode PersistencyMode) {
 			cs.Serialize(f)
 			finishColumnWrite(f, newMode == Safe)
 		}
+		writeBlobManifest(s)
 		// open logfile for Safe/Logged
 		if newMode == Safe || newMode == Logged {
 			s.logfile = s.t.schema.persistence.OpenLog(s.uuid.String())
 		}
 		s.srState = SHARED
-		if !strings.HasPrefix(s.t.Name, ".") {
+		if !s.t.isEphemeralQueryTable() {
 			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeShard, shardCleanup, shardLastUsed, nil)
 		}
 
 	case oldMode == Memory && newMode == Cache:
 		// Memory → Cache: register with CacheManager as TypeCacheEntry
 		s.srState = SHARED
-		if !strings.HasPrefix(s.t.Name, ".") {
+		if !s.t.isEphemeralQueryTable() {
 			GlobalCache.AddItem(s, int64(s.computeSizeLocked()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
 		}
 
@@ -3096,12 +3168,16 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 						result.t.schema.persistence.RemoveColumn(result.uuid.String(), col.Name)
 					}()
 				}
+				func() {
+					defer func() { _ = recover() }()
+					result.t.schema.persistence.RemoveColumn(result.uuid.String(), blobManifestColumn)
+				}()
 			}
 			// Re-register old shard with CacheManager if we deregistered it
 			if removedFromCache && t.t != nil {
-				if t.t.PersistencyMode == Cache && !strings.HasPrefix(t.t.Name, ".") {
+				if t.t.PersistencyMode == Cache && !t.t.isEphemeralQueryTable() {
 					GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
-				} else if t.t.PersistencyMode != Memory && !strings.HasPrefix(t.t.Name, ".") {
+				} else if t.t.PersistencyMode != Memory && !t.t.isEphemeralQueryTable() {
 					GlobalCache.AddItem(t, int64(t.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 				}
 			}
@@ -3433,15 +3509,16 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 		GlobalCache.Remove(t)
 		removedFromCache = true
 	}
+	writeBlobManifest(result)
 	// Unlock result before registration (ComputeSize needs RLock)
 	result.exitWriteOwner()
 	result.mu.Unlock()
 	resultLocked = false
 	// Register the new shard with CacheManager
 	atomic.StoreUint64(&result.lastAccessed, uint64(time.Now().UnixNano()))
-	if result.t.PersistencyMode == Cache && !strings.HasPrefix(result.t.Name, ".") {
+	if result.t.PersistencyMode == Cache && !result.t.isEphemeralQueryTable() {
 		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeCacheEntry, cacheShardCleanup, shardLastUsed, nil)
-	} else if result.t.PersistencyMode != Memory && !strings.HasPrefix(result.t.Name, ".") {
+	} else if result.t.PersistencyMode != Memory && !result.t.isEphemeralQueryTable() {
 		GlobalCache.AddItem(result, int64(result.ComputeSize()), TypeShard, shardCleanup, shardLastUsed, nil)
 	}
 	return result

@@ -25,44 +25,26 @@ import "runtime"
 import "sync/atomic"
 import "github.com/jtolds/gls"
 
-// cachedMemStats provides a cached version of runtime.ReadMemStats.
-// The cache is refreshed when older than 1 minute. Between refreshes,
-// Alloc and HeapAlloc are adjusted by deltas reported via AdjustMemStats.
+// cachedMemStats provides a cached version of runtime.ReadMemStats. Cache
+// ownership accounting must not be added to this snapshot: those allocations
+// are already part of the Go heap, and doing so would double-count them.
 var (
 	cachedStats     runtime.MemStats
 	cachedStatsTime time.Time
 	cachedStatsMu   sync.Mutex
-	memStatsDelta   int64 // accumulated delta since last refresh
 )
 
-// CachedMemStats returns a cached runtime.MemStats, refreshing only when
-// the cache is older than 1 minute. Between refreshes, Alloc and HeapAlloc
-// are adjusted by tracked deltas from the CacheManager.
+// CachedMemStats returns a runtime snapshot cached for one minute. Operational
+// endpoints use process RSS and CacheManager ownership counters for live data;
+// this function deliberately avoids expensive runtime scans on every request.
 func CachedMemStats() runtime.MemStats {
 	cachedStatsMu.Lock()
 	defer cachedStatsMu.Unlock()
 	if time.Since(cachedStatsTime) > time.Minute {
 		runtime.ReadMemStats(&cachedStats)
 		cachedStatsTime = time.Now()
-		memStatsDelta = 0
 	}
-	result := cachedStats
-	if memStatsDelta > 0 {
-		result.Alloc += uint64(memStatsDelta)
-		result.HeapAlloc += uint64(memStatsDelta)
-	} else if memStatsDelta < 0 && uint64(-memStatsDelta) < result.Alloc {
-		result.Alloc -= uint64(-memStatsDelta)
-		result.HeapAlloc -= uint64(-memStatsDelta)
-	}
-	return result
-}
-
-// AdjustMemStats adjusts the cached memory stats by a delta (in bytes).
-// Call this when tracked memory changes (e.g. CacheManager add/remove).
-func AdjustMemStats(delta int64) {
-	cachedStatsMu.Lock()
-	memStatsDelta += delta
-	cachedStatsMu.Unlock()
+	return cachedStats
 }
 
 /* promise: single-value cell (thread-safe via CAS spin-lock on cells[1].aux) */
