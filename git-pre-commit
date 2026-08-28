@@ -41,7 +41,7 @@ if ! python3 tools/check_test_table_names.py; then
   exit 1
 fi
 
-fail_fast_mode="${MEMCP_FAIL_FAST:-1}"
+fail_fast_mode="${MEMCP_FAIL_FAST:-0}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --fail-fast)
@@ -261,12 +261,29 @@ done
 #   the same state. The default is a port-scoped temporary store; callers may
 #   set MEMCP_TEST_DATA_DIR to pin a specific test store.
 # - The selected data directory must never be deleted by this hook.
-# - ordinary "isolated" suites are serialized on the shared database.
-# - isolated restart/SHUTDOWN suites own a temporary MemCP process and data
-#   directory, so stopping their server cannot race the shared supervisor.
+# - "isolated" means exclusive scheduling on the shared database; it never
+#   creates a suite-local process or data directory.
+# - restart/SHUTDOWN suites run exclusively. The supervisor starts MemCP again
+#   with the same data directory before the suite continues.
 
 run_memcp_forever() {
-  trap 'kill $memcp_pid 2>/dev/null; exit 0' TERM INT
+  terminate_memcp_child() {
+    if [ -z "${memcp_pid:-}" ]; then
+      return
+    fi
+    kill "$memcp_pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      if ! kill -0 "$memcp_pid" 2>/dev/null; then
+        return
+      fi
+      sleep 0.1
+    done
+    kill -9 "$memcp_pid" 2>/dev/null || true
+  }
+  trap 'terminate_memcp_child; exit 0' TERM INT
+  # A connect-only restart suite uses this signal only after graceful
+  # SHUTDOWN failed to complete. The loop then restarts the same data store.
+  trap 'terminate_memcp_child' USR1
   while true; do
     echo "🚀 (re)Starting MemCP on port $test_port..."
     pkill -f "memcp.*--api-port=$test_port" || true
@@ -376,8 +393,8 @@ PY
 # Scheduling contract:
 # - shared suites may run in parallel against the long-lived shared MemCP
 #   process
-# - every other suite runs sequentially; managed_subprocess suites additionally
-#   own the MemCP process which their restart cases stop and replace
+# - every exclusive suite runs sequentially against that same process lifecycle
+#   and data directory
 for tf in "${test_files_arr[@]}"; do
   if [ "$(suite_mode "$tf")" = "parallel" ]; then
     parallel_tests+=("$tf")
@@ -399,32 +416,23 @@ run_one() {
   local tf="$1"
   local out="$2"
   local statusf="$3"
-  local mode
-  local managed_data_dir
   local rc
   local -a runner_args=()
   if [ "$fail_fast_mode" -eq 1 ]; then
     runner_args+=("--fail-fast")
   fi
-  mode="$(suite_mode "$tf")"
-  if [ "$mode" = "managed_subprocess" ]; then
-    managed_data_dir="$tmpdir/managed-$(basename "$tf" .yaml)"
-    MEMCP_TEST_DATA_DIR="$managed_data_dir" \
-      python3 -u run_sql_tests.py "$tf" "${runner_args[@]}" > "$out" 2>&1
-    rc=$?
-  else
-    if ! wait_for_sql_ready 180 1; then
-      echo "FAIL" > "$statusf"
-      {
-        flock -x 9
-        echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
-        echo ""
-      } 9>>"$lockfile"
-      return
-    fi
-    python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}" > "$out" 2>&1
-    rc=$?
+  if ! wait_for_sql_ready 180 1; then
+    echo "FAIL" > "$statusf"
+    {
+      flock -x 9
+      echo "❌ $tf: MemCP did not become SQL-ready before running this suite"
+      echo ""
+    } 9>>"$lockfile"
+    return
   fi
+  MEMCP_TEST_SUPERVISOR_PID="$supervisor_pid" \
+    python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}" > "$out" 2>&1
+  rc=$?
   if [ $rc -eq 0 ]; then
     echo OK > "$statusf"
   else

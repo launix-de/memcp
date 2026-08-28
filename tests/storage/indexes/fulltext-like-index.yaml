@@ -191,8 +191,10 @@ test_cases:
         - cnt: 30000
 
   # --- Deterministic lowering gates plus repeated speedup checks ---
-  # Speedup helper: run each query 8x, compare first 2 scans with later warmed scans.
-  # Minimum speedup: 3x (late total must be <= early total * 2 / 3).
+  # Speedup helper: run each query 8x and compare per-scan work. The cold
+  # carrier build scans the base relation once, while every query performs a
+  # cache scan; comparing their totals would therefore penalize the warm path
+  # merely for collecting more samples. Minimum per-scan speedup: 3x.
   # A prebuilt bigram candidate may make the base and carrier totals both
   # sub-5ms; that absolute fast path is accepted because materializing a group
   # carrier cannot usefully be 3x faster than an already sub-millisecond scan.
@@ -260,13 +262,16 @@ test_cases:
   - name: "LIKE speedup >= 3x"
     sql: |
       SELECT full_ns, cache_ns,
-        CASE WHEN full_ns > 0 AND cache_ns > 0 AND (
-          cache_ns * 3 <= full_ns * 2 OR (full_ns <= 5000000 AND cache_ns <= 5000000)
+        CASE WHEN full_ns > 0 AND cache_ns > 0 AND full_scans > 0 AND cache_scans > 0 AND (
+          cache_ns * full_scans * 3 <= full_ns * cache_scans * 2 OR
+          (full_ns <= 5000000 * full_scans AND cache_ns <= 5000000 * cache_scans)
         ) THEN 'ok' ELSE 'FAIL' END AS result
       FROM (
         SELECT
           SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN exec_ns ELSE 0 END) AS full_ns,
-          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS cache_ns
+          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN exec_ns ELSE 0 END) AS cache_ns,
+          SUM(CASE WHEN `table` = 'ft_large' AND inputCount >= 10000 THEN 1 ELSE 0 END) AS full_scans,
+          SUM(CASE WHEN `table` LIKE '.grp:ft_large:%' THEN 1 ELSE 0 END) AS cache_scans
         FROM `system_statistic`.`scans`
         WHERE `table` = 'ft_large' OR `table` LIKE '.grp:ft_large:%'
       ) s

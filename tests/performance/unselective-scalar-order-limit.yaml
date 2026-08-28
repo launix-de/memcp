@@ -137,8 +137,8 @@ test_cases:
     max_time: 1.5
     max_plan_size: 100000
     setup:
+      - sql: "TRUNCATE TABLE `system_statistic`.`scans`"
       - scm: '(settings "ScanDebugging" true)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` LIKE '.grp:query:%'"
     sql: |
       SELECT projected.id, projected.access_1, projected.access_2,
         projected.access_3, projected.access_4
@@ -211,8 +211,8 @@ test_cases:
 
   - name: "Ordered ACL preserves late projection results"
     setup:
+      - sql: "TRUNCATE TABLE `system_statistic`.`scans`"
       - scm: '(settings "ScanDebugging" true)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests'"
     sql: |
       SELECT projected.id, projected.uploaded_at
       FROM (
@@ -257,8 +257,8 @@ test_cases:
 
   - name: "Nested direct outer correlation preserves scalar results"
     setup:
+      - sql: "TRUNCATE TABLE `system_statistic`.`scans`"
       - scm: '(settings "ScanDebugging" true)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests' AND `table` LIKE '.grp:usol_text_inner:%'"
     sql: |
       SELECT outer_row.id, (
         SELECT (

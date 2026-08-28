@@ -18,11 +18,52 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 package storage
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/launix-de/NonLockingReadMap"
 )
+
+func TestPersistedKeytableTriggerWaitsForRuntimeTarget(t *testing.T) {
+	original := TriggerDescription{
+		Name:     ".kt_cleanup:.grp:query:test|items|AFTER DELETE",
+		Timing:   AfterDelete,
+		IsSystem: true,
+		Acquire:  func() bool { return true },
+	}
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var restored TriggerDescription
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.acquireTarget() {
+		t.Fatal("persisted keytable trigger ran before its ephemeral target was rebound")
+	}
+
+	tbl := &table{Triggers: []TriggerDescription{restored}}
+	if !tbl.SetTriggerTarget(original.Name, func() bool { return true }, func() {}) {
+		t.Fatal("restored keytable trigger was not reusable")
+	}
+	if !tbl.Triggers[0].acquireTarget() {
+		t.Fatal("rebound keytable trigger did not acquire its runtime target")
+	}
+}
+
+func TestLegacyPersistedCacheTriggerWaitsForRuntimeTarget(t *testing.T) {
+	encoded := []byte(`{"name":".cache:.grp:query:test:agg|scan0|items|AFTER DELETE","timing":5,"is_system":true}`)
+	var restored TriggerDescription
+	if err := json.Unmarshal(encoded, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.acquireTarget() {
+		t.Fatal("legacy cache trigger ran before its ephemeral target was rebound")
+	}
+}
 
 func TestDropTriggerDoesNotHoldSchemaLockWhileWaitingForTableDDL(t *testing.T) {
 	db := &database{Name: "trigger-lock-order", srState: COLD}

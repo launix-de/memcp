@@ -174,8 +174,8 @@ test_cases:
   - name: "outer count prunes unused derived and sorter lookups"
     max_time: 3
     setup:
+      - sql: "TRUNCATE TABLE `system_statistic`.`scans`"
       - scm: '(settings "ScanDebugging" true)'
-      - sql: "DELETE FROM system_statistic.scans WHERE schema = 'memcp-tests' AND `table` = 'bqm_unused_lookup'"
     sql: |
       SELECT COUNT(*) AS permitted_count, COUNT(counted._count) AS counted_count
       FROM (
@@ -887,8 +887,8 @@ test_cases:
   - name: "start tracing bounded projected ACL preparation"
     session_id: "bqm_projection_prepare"
     setup:
+      - sql: "TRUNCATE TABLE `system_statistic`.`scans`"
       - scm: '(settings "ScanDebugging" true)'
-      - sql: "DELETE FROM `system_statistic`.`scans` WHERE `schema` = 'memcp-tests'"
     sql: "SET @bqm_projection_actor = 7"
 
   - name: "bounded projected ACL remains correct"
