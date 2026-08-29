@@ -15,6 +15,7 @@ todos/
 .perf_baseline.json
 .perf_baseline.json.lock
 .perf_baseline.json.tmp
+.perf_runner_gate.lock
 .gocache/
 .gomodcache/
 __pycache__/

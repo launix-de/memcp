@@ -43,6 +43,7 @@ from run_sql_tests import (  # noqa: E402
     is_error_response,
     load_performance_scale,
     observe_atomic_json,
+    performance_server_gate,
     performance_architecture,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
@@ -59,6 +60,37 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_perf_gate_allows_parallel_work_and_serializes_measurement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            gate_path = str(Path(directory) / "perf.lock")
+            shared_entered = threading.Event()
+            release_shared = threading.Event()
+            exclusive_entered = threading.Event()
+
+            def shared_worker() -> None:
+                with performance_server_gate():
+                    shared_entered.set()
+                    release_shared.wait(2)
+
+            def exclusive_worker() -> None:
+                with performance_server_gate(exclusive=True):
+                    exclusive_entered.set()
+
+            with (
+                mock.patch("run_sql_tests.PERF_TEST_ENABLED", True),
+                mock.patch("run_sql_tests.PERF_GATE_FILE", gate_path),
+            ):
+                shared = threading.Thread(target=shared_worker)
+                exclusive = threading.Thread(target=exclusive_worker)
+                shared.start()
+                self.assertTrue(shared_entered.wait(1))
+                exclusive.start()
+                self.assertFalse(exclusive_entered.wait(0.05))
+                release_shared.set()
+                self.assertTrue(exclusive_entered.wait(1))
+                shared.join(1)
+                exclusive.join(1)
+
     def test_timing_samples_default_and_explicit_repetitions(self) -> None:
         self.assertEqual(resolve_timing_samples({}, False), 1)
         self.assertEqual(resolve_timing_samples({}, True), 5)
