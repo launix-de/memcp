@@ -1043,9 +1043,9 @@ func init() {
 		Fn: nil,
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a symbol or list without evaluating it",
 			Params: []*TypeDescriptor{
-				{Kind: "symbol", Label: "symbol", Description: "symbol to quote"},
+				{Kind: "any", Label: "value", Description: "value to quote"},
 			},
-			Return: &TypeDescriptor{Kind: "symbol"},
+			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 		},
 	})
