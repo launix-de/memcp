@@ -2160,8 +2160,8 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(qassoc_get planned (quote tree) nil)
 				predicates)))))
 
-(define join_optimizer_reorder_result (lambda (tree strategy dp_entries cost cardinality cost_components)
-	(list tree strategy dp_entries cost cardinality cost_components)))
+(define join_optimizer_reorder_result (lambda (tree strategy dp_entries cost cardinality cost_components properties)
+	(list tree strategy dp_entries cost cardinality cost_components properties)))
 
 (define join_optimizer_required_order_aliases (lambda (sources default_alias order_items)
 	(reduce (order_exprs order_items) (lambda (aliases expr)
@@ -2221,6 +2221,69 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(join_optimizer_required_order_prefix (cdr sources) required_aliases condition stages
 				(append prefix (source_alias (car sources))))
 			prefix))))
+
+/* Keep one complete DPHyp result for every base-table driver which can realize
+the required order. Combined ordered joins have directional work: the driver
+brakes at LIMIT while every other input is prepared for joined lookup. A single
+memo winner for a set of aliases would discard that physical property before
+the lowerer can cost it. */
+(define join_optimizer_ordered_source_rows (lambda (stage_catalog sources default_alias graph src)
+	(begin
+		(define fallback (join_optimizer_source_rows
+			stage_catalog sources default_alias graph src))
+		(define base_rows (planner_source_row_count src))
+		(define condition (join_optimizer_source_local_condition graph src))
+		(if (or (not (number? base_rows)) (equal? condition true))
+			fallback
+			(begin
+				(define estimate (planner_source_filter_estimate src condition 512))
+				(max 1 (planner_estimated_matching_rows estimate base_rows fallback)))))))
+
+(define join_optimizer_ordered_driver_work (lambda (sources base_row_catalog filtered_row_catalog planned target)
+	(begin
+		(define ordered_sources (join_optimizer_sources_for_order sources
+			(join_optimizer_tree_aliases (qassoc_get planned (quote tree) nil))))
+		(define base_rows (map ordered_sources (lambda (src)
+			(qassoc_get base_row_catalog (source_alias src) 1))))
+		(define driver_filtered_rows
+			(qassoc_get filtered_row_catalog (source_alias (car ordered_sources)) (car base_rows)))
+		(define driver_rows (planner_ordered_driver_rows_visited
+			(car base_rows) driver_filtered_rows target))
+		(define inner_rows (reduce (cdr base_rows) + 0))
+		(define joined_rows (qassoc_get planned (quote cardinality) 1))
+		(list (planner_scan_join_order_orientation_cost driver_rows inner_rows
+			(count ordered_sources) target)
+			driver_rows inner_rows joined_rows))))
+
+(define join_optimizer_ordered_driver_candidate_better? (lambda (current candidate)
+	(if (nil? current)
+		true
+		(planner_cost_better? (cadr candidate) (cadr current)))))
+
+(define join_optimizer_plan_ordered_drivers (lambda (stage_catalog relation_units sources default_alias graph ordered_drivers target)
+	(begin
+		(define base_row_catalog (map sources (lambda (src)
+			(list (source_alias src)
+				(coalesceNil (planner_source_row_count src)
+					(join_optimizer_source_rows stage_catalog sources default_alias graph src))))))
+		(define filtered_row_catalog (map sources (lambda (src)
+			(list (source_alias src)
+				(join_optimizer_ordered_source_rows
+					stage_catalog sources default_alias graph src)))))
+		(reduce ordered_drivers (lambda (state driver)
+			(begin
+				(define planned (join_optimizer_plan_segment stage_catalog relation_units
+					sources sources default_alias graph (list driver)))
+				(define work (join_optimizer_ordered_driver_work
+					sources base_row_catalog filtered_row_catalog planned target))
+				(define candidate (list planned (car work)
+					driver))
+				(list (if (join_optimizer_ordered_driver_candidate_better? (car state) candidate)
+					candidate (car state))
+					(append (cadr state) (list (list driver
+						(qassoc_get (car work) (quote total_ns) nil)
+						(nth work 1) (nth work 2) (nth work 3)))))))
+			(list nil '())))))
 
 (define join_optimizer_reorder_sources (lambda (stage_catalog block graph)
 	(begin
@@ -2297,19 +2360,45 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(join_optimizer_reorder_result
 				(join_optimizer_left_deep_tree sources)
 				(if preserve_row_number_driver (quote preserve-row-number-limit) (quote fixed))
-				0 nil nil nil)
+				0 nil nil nil '())
 			(begin
-				(define planned (join_optimizer_plan_segment
-					stage_catalog
-					(qassoc_get (qb_facts block) (quote join_relation_units) '())
-					sources segment default_alias graph required_order_property))
+				(define relation_units
+					(qassoc_get (qb_facts block) (quote join_relation_units) '()))
+				(define literal_limit (planner_literal_value (qb_limit block)))
+				(define literal_offset (coalesceNil
+					(planner_literal_value (qb_offset block)) 0))
+				(define enumerate_ordered_drivers (and
+					(number? literal_limit)
+					(and (>= literal_limit 0)
+						(and (number? literal_offset)
+							(and (empty_list? required_order_aliases)
+								(and (> (count ordered_drivers) 1)
+									(and (empty_list? (qb_stages block))
+										(reduce sources (lambda (supported src)
+											(and supported (and (source_is_base_table? src)
+												(join_optimizer_inner_source? stage_catalog src)))) true))))))))
+				(define ordered_driver_plans (if enumerate_ordered_drivers
+					(join_optimizer_plan_ordered_drivers stage_catalog relation_units
+						sources default_alias graph ordered_drivers (+ literal_offset literal_limit)) nil))
+				(define ordered_choice (if (nil? ordered_driver_plans) nil
+					(car ordered_driver_plans)))
+				(define planned (if (nil? ordered_choice)
+					(join_optimizer_plan_segment stage_catalog relation_units
+						sources segment default_alias graph required_order_property)
+					(car ordered_choice)))
 				(join_optimizer_reorder_result
 					(qassoc_get planned (quote tree) nil)
 					(qassoc_get planned (quote strategy) (quote fixed))
 					(qassoc_get planned (quote dp_entries) 0)
 					(qassoc_get planned (quote cost) nil)
 					(qassoc_get planned (quote cardinality) nil)
-					(qassoc_get planned (quote cost_components) nil)))))))
+					(qassoc_get planned (quote cost_components) nil)
+					(list
+						(list (quote ordered_driver_candidates) ordered_drivers)
+						(list (quote selected_ordered_driver)
+							(if (nil? ordered_choice) nil (nth ordered_choice 2)))
+						(list (quote ordered_driver_costs)
+							(if (nil? ordered_driver_plans) '() (cadr ordered_driver_plans))))))))))
 
 (define join_optimizer_telemetry (lambda (graph reordered)
 	(list
@@ -2320,6 +2409,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 		(list (quote join_estimated_cost) (nth reordered 3))
 		(list (quote join_estimated_rows) (nth reordered 4))
 		(list (quote join_cost) (nth reordered 5))
+		(list (quote join_order_properties) (nth reordered 6))
 		(list (quote join_dp_state_budget) (join_order_dp_state_budget))
 		(list (quote join_graph_nodes) (count (qassoc_get graph (quote nodes) '())))
 		(list (quote join_graph_edges) (count (qassoc_get graph (quote edges) '())))

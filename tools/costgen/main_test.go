@@ -116,6 +116,7 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	value := func(v float64) *float64 { return &v }
 	base := calibrationRow{
 		Decision: "scan_join_order", JoinInputRows: value(25_000),
+		JoinDriverRows: value(10_000), JoinInnerRows: value(15_000),
 		JoinEstimatedRows: value(4_000), JoinOutputRows: value(72),
 		JoinTableCount: value(2), JoinLegacyProbeRows: value(600),
 	}

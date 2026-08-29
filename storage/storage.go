@@ -852,7 +852,11 @@ func Init(en scm.Env) {
 				if shard == nil {
 					continue
 				}
-				estimate := shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx)
+				estimate := func() filteredRowEstimate {
+					release := shard.GetRead()
+					defer release()
+					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx)
+				}()
 				if estimate.examined == 0 {
 					continue
 				}

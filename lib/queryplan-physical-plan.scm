@@ -4749,10 +4749,17 @@ move the window to the wrong tree level. */
 	(map refs (lambda (ref)
 		(symbol (concat (source_alias (nth sources (car ref))) "." (cadr ref)))))))
 
-(define scan_join_order_order_entry (lambda (sources default_alias item)
+(define scan_join_order_order_entry (lambda (sources default_alias terms item)
 	(match item
 		'(expr _dir) (begin
-			(define ref (scan_join_order_column_ref_using sources default_alias expr))
+			(define driver (car sources))
+			(define direct_ref (scan_join_order_column_ref_using sources default_alias expr))
+			(define equivalent (if (and (not (nil? direct_ref))
+				(equal? (car direct_ref) 0)) nil
+				(reduce terms (lambda (found term)
+					(coalesceNil found (join_term_driver_equivalent driver expr term))) nil)))
+			(define ref (if (nil? equivalent) direct_ref
+				(scan_join_order_column_ref_using sources default_alias equivalent)))
 			(if (nil? ref)
 				nil
 				(list ref (car (order_relations_for_source
@@ -4868,11 +4875,30 @@ until the caller has selected this physical alternative. */
 			(and (not (contains? consumed_join_terms term))
 				(not (contains? all_local_terms term))))))
 		(define order_entries (map order_items (lambda (item)
-			(scan_join_order_order_entry sources default_alias item))))
+			(scan_join_order_order_entry sources default_alias terms item))))
 		(define source_rows (map sources planner_source_row_count))
 		(define known_rows (reduce source_rows (lambda (known rows)
 			(and known (number? rows))) true))
 		(define input_rows (if known_rows (reduce source_rows + 0) nil))
+		(define filtered_rows (if known_rows
+			(map (produceN (count sources)) (lambda (index)
+				(begin
+					(define src (nth sources index))
+					(define base_rows (nth source_rows index))
+					(define local_condition
+						(combine_where_terms (nth local_terms index) true))
+					(if (equal? local_condition true)
+						base_rows
+						(begin
+							(define estimate
+								(planner_source_filter_estimate src local_condition 512))
+							(max 1 (planner_estimated_matching_rows estimate
+								base_rows base_rows))))))) nil))
+		(define driver_rows (if (empty_list? filtered_rows) nil
+			(planner_ordered_driver_rows_visited (car source_rows) (car filtered_rows)
+				(+ offset limit))))
+		(define inner_rows (if (empty_list? source_rows) nil
+			(reduce (cdr source_rows) + 0)))
 		(define joined_rows (qassoc_get facts (quote join_estimated_rows) nil))
 		(define output_rows (if (and (number? limit) (>= limit 0))
 			(min (coalesceNil joined_rows limit) (+ offset limit)) joined_rows))
@@ -4901,6 +4927,8 @@ until the caller has selected this physical alternative. */
 				(list (quote map_refs) (scan_join_order_refs_for_exprs
 					sources default_alias needed_exprs))
 				(list (quote input_rows) input_rows)
+				(list (quote driver_rows) driver_rows)
+				(list (quote inner_rows) inner_rows)
 				(list (quote joined_rows) joined_rows)
 				(list (quote output_rows) output_rows)
 				(list (quote table_count) (count sources))
@@ -5201,7 +5229,10 @@ until the caller has selected this physical alternative. */
 
 (define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
-		(define spec (scan_join_order_spec all_sources plan default_alias needed_exprs
+		/* scan_join_order owns filters, joins, residuals, and ordering in separate
+		operator arguments. Keep its late map boundary projection-only so columns
+		already consumed by those paths are not materialized a second time. */
+		(define spec (scan_join_order_spec all_sources plan default_alias output_exprs
 			final_condition order_items offset_value limit_value stages facts))
 		(if (nil? spec)
 			(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
@@ -5290,6 +5321,8 @@ until the caller has selected this physical alternative. */
 						"calibration_override"))
 					(list "inputs" (list
 						(list "join_input_rows" input_rows)
+						(list "join_driver_rows" (qassoc_get spec (quote driver_rows) nil))
+						(list "join_inner_rows" (qassoc_get spec (quote inner_rows) nil))
 						(list "join_estimated_rows" joined_rows)
 						(list "join_output_rows" output_rows)
 						(list "join_table_count" (qassoc_get spec (quote table_count) 0))
@@ -9219,6 +9252,8 @@ potentially large calibrated SELECT result. */
 							"driver_expression_operations" (physical_calibration_input decision "driver_expression_operations")
 							"driver_expression_depth" (physical_calibration_input decision "driver_expression_depth")
 							"join_input_rows" (physical_calibration_input decision "join_input_rows")
+							"join_driver_rows" (physical_calibration_input decision "join_driver_rows")
+							"join_inner_rows" (physical_calibration_input decision "join_inner_rows")
 							"join_estimated_rows" (physical_calibration_input decision "join_estimated_rows")
 							"join_output_rows" (physical_calibration_input decision "join_output_rows")
 							"join_table_count" (physical_calibration_input decision "join_table_count")

@@ -171,6 +171,8 @@ type calibrationRow struct {
 	DriverExpressionOperations       *float64 `json:"driver_expression_operations"`
 	DriverExpressionDepth            *float64 `json:"driver_expression_depth"`
 	JoinInputRows                    *float64 `json:"join_input_rows"`
+	JoinDriverRows                   *float64 `json:"join_driver_rows"`
+	JoinInnerRows                    *float64 `json:"join_inner_rows"`
 	JoinEstimatedRows                *float64 `json:"join_estimated_rows"`
 	JoinOutputRows                   *float64 `json:"join_output_rows"`
 	JoinTableCount                   *float64 `json:"join_table_count"`
@@ -1054,7 +1056,7 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 		return fmt.Errorf("forced race variant has incomplete measurements: %+v", row)
 	}
 	if row.Decision == "scan_join_order" {
-		if row.JoinInputRows == nil || row.JoinEstimatedRows == nil ||
+		if row.JoinInputRows == nil || row.JoinDriverRows == nil || row.JoinInnerRows == nil || row.JoinEstimatedRows == nil ||
 			row.JoinOutputRows == nil || row.JoinTableCount == nil || row.JoinLegacyProbeRows == nil {
 			return fmt.Errorf("ordered join variant has incomplete measurements: %+v", row)
 		}
@@ -1248,7 +1250,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		return features, nil
 	}
 	if row.Decision == "scan_join_order" {
-		if row.JoinInputRows == nil || row.JoinEstimatedRows == nil ||
+		if row.JoinInputRows == nil || row.JoinDriverRows == nil || row.JoinInnerRows == nil || row.JoinEstimatedRows == nil ||
 			row.JoinOutputRows == nil || row.JoinTableCount == nil {
 			return nil, fmt.Errorf("ordered join work profile contains nil inputs: %+v", row)
 		}

@@ -2382,14 +2382,13 @@ retain the scalar's complete value, including SQL NULL. */
 			nil)
 		_ nil)))
 
-(define order_expr_driver_equivalent (lambda (sources driver expr)
-	(reduce (cdr sources) (lambda (found src)
-		(if (not (nil? found))
-			found
-			(reduce (split_and_terms (coalesceNil (source_join_expr src) true))
-				(lambda (equivalent term)
-					(coalesceNil equivalent (join_term_driver_equivalent driver expr term))) nil)))
-		nil)))
+(define order_expr_driver_equivalent (lambda (sources driver expr condition)
+	(reduce (merge_unique (list
+		(split_and_terms (coalesceNil condition true))
+		(merge (map sources (lambda (src)
+			(split_and_terms (coalesceNil (source_join_expr src) true)))))))
+		(lambda (equivalent term)
+			(coalesceNil equivalent (join_term_driver_equivalent driver expr term))) nil)))
 
 (define scan_order_unique_lookup_sort_column (lambda (sources default_alias driver lookup expr stages condition)
 	(begin
@@ -2428,7 +2427,7 @@ retain the scalar's complete value, including SQL NULL. */
 	(if (order_expr_belongs_to_source? driver expr)
 		(scan_order_sort_column_for_alias driver expr)
 		(begin
-			(define equivalent (order_expr_driver_equivalent sources driver expr))
+			(define equivalent (order_expr_driver_equivalent sources driver expr condition))
 			(if (not (nil? equivalent))
 				(scan_order_sort_column_for_alias driver equivalent)
 				(begin
@@ -2447,7 +2446,7 @@ retain the scalar's complete value, including SQL NULL. */
 	(reduce (order_exprs order_items) (lambda (supported expr)
 		(and supported (or
 			(order_expr_belongs_to_source? driver expr)
-			(not (nil? (order_expr_driver_equivalent sources driver expr)))
+			(not (nil? (order_expr_driver_equivalent sources driver expr condition)))
 			(not (nil? (order_expr_unique_lookup_source sources driver default_alias expr stages condition)))))) true)))
 
 (define split_order_items_for_join_driver (lambda (sources default_alias driver order_items stages condition accepted)
@@ -6683,3 +6682,18 @@ coefficient used here. */
 		(* output_rows planner_membership_map_column_row_ns)
 		(* joined_rows 8)
 		0 output_rows 0.65)))
+
+/* Directional ORDER/LIMIT planning compares equal operator families, so fixed
+startup cancels out. The driver can brake after enough local matches while
+every inner input must be prepared completely. Keep this property score out of
+the absolute scan_join_order-versus-legacy calibration. */
+(define planner_ordered_driver_rows_visited (lambda (input_rows filtered_rows target)
+	(if (or (not (number? input_rows)) (not (number? filtered_rows)))
+		input_rows
+		(if (<= filtered_rows 0)
+			input_rows
+			(min input_rows (max target (* target (/ input_rows filtered_rows))))))))
+
+(define planner_scan_join_order_orientation_cost (lambda (driver_rows inner_rows table_count target)
+	(planner_scan_join_order_cost (+ driver_rows inner_rows)
+		target table_count target)))
