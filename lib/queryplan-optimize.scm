@@ -2005,6 +2005,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 					(list (quote membership_candidate_cache_backed) (qassoc_get facts (quote membership_candidate_cache_backed) false))
 					(list (quote membership_candidate_expression_operations) (qassoc_get facts (quote membership_candidate_expression_operations) 0))
 					(list (quote membership_candidate_expression_depth) (qassoc_get facts (quote membership_candidate_expression_depth) 0))
+					(list (quote membership_candidate_index_filter_rows) (qassoc_get facts (quote membership_candidate_index_filter_rows) nil))
 					(list (quote membership_candidate_broad_text_match_rows) (qassoc_get facts (quote membership_candidate_broad_text_match_rows) 0))
 					(list (quote membership_candidate_broad_text_match_bytes) (qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0))
 					(list (quote membership_candidate_filter_value_rows) (qassoc_get facts (quote membership_candidate_filter_value_rows) nil))
@@ -2822,22 +2823,34 @@ their tighter direct bound; this product is only an additional candidate. */
 		(if (qassoc_get estimate (quote capped) false) (quote sampled) (quote exact)))))
 
 (define planner_merge_estimate_population (lambda (estimates)
-	(if (reduce estimates (lambda (found estimate)
+	(if (and (not (empty_list? estimates))
+		(reduce estimates (lambda (all_hooks estimate)
+			(and all_hooks (equal? (planner_estimate_population estimate)
+				(quote index_hook_candidates)))) true))
+		(quote index_hook_candidates)
+		(if (reduce estimates (lambda (found estimate)
 		(or found (equal? (planner_estimate_population estimate) (quote index_candidates)))) false)
 		(quote index_candidates)
 		(if (reduce estimates (lambda (found estimate)
 			(or found (equal? (planner_estimate_population estimate) (quote recset_candidates)))) false)
 			(quote recset_candidates)
-			(quote table_rows)))))
+			(quote table_rows))))))
 
 (define planner_merge_estimate_coverage (lambda (estimates)
-	(if (reduce estimates (lambda (found estimate)
-		(or found (equal? (planner_estimate_coverage estimate) (quote lower_bound)))) false)
-		(quote lower_bound)
-		(if (reduce estimates (lambda (found estimate)
-			(or found (equal? (planner_estimate_coverage estimate) (quote sampled)))) false)
+	(begin
+		(define has_lower (reduce estimates (lambda (found estimate)
+			(or found (equal? (planner_estimate_coverage estimate) (quote lower_bound)))) false))
+		(define has_upper (reduce estimates (lambda (found estimate)
+			(or found (equal? (planner_estimate_coverage estimate) (quote upper_bound)))) false))
+		(define has_sampled (reduce estimates (lambda (found estimate)
+			(or found (equal? (planner_estimate_coverage estimate) (quote sampled)))) false))
+		/* Adding UNION branch cardinalities preserves a one-sided bound only when
+		every inexact branch points in the same direction. Mixed bounds describe an
+		interval, while a sampled branch remains a sample of the complete sum. */
+		(if (or has_sampled (and has_lower has_upper))
 			(quote sampled)
-			(quote exact)))))
+			(if has_lower (quote lower_bound)
+				(if has_upper (quote upper_bound) (quote exact)))))))
 
 (define planner_query_block_input_rows (lambda (block)
 	(planner_add_estimates (map (qb_sources block) planner_source_row_count))))
@@ -3108,6 +3121,7 @@ either physical alternative or sampling the table again. */
 			(list (quote membership_candidate_map_columns) (qassoc_get work (quote map_columns) (count (gs_keys stage))))
 			(list (quote membership_candidate_expression_operations) (qassoc_get work (quote expression_operations) 0))
 			(list (quote membership_candidate_expression_depth) (qassoc_get work (quote expression_depth) 0))
+			(list (quote membership_candidate_index_filter_rows) (qassoc_get work (quote input_rows) nil))
 			(list (quote membership_candidate_broad_text_match_rows) (qassoc_get work (quote broad_text_match_rows) 0))
 			(list (quote membership_candidate_broad_text_match_bytes) (qassoc_get work (quote broad_text_match_bytes) 0))
 			(list (quote membership_candidate_filter_value_rows) (qassoc_get work (quote filter_value_rows) nil))
@@ -3206,6 +3220,18 @@ carrier crossover. */
 		(define consumer (if (query_block_has_aggregates? block) (quote aggregate)
 			(if ordered_driver (quote order_limit) (quote filter))))
 		(define candidate_work (membership_candidate_work_profile stage))
+		/* Index hooks narrow the rows which reach the residual predicate but do not
+		replace it. Cost filter callbacks and text bytes over that conservative
+		candidate bound, not over the complete source. Keep the logical cardinality
+		separate: an approximate hook upper bound is physical work, not proof that
+		those rows satisfy LIKE/MATCH. */
+		(define index_filter_rows (if (and
+			(equal? estimate_population (quote index_hook_candidates))
+			(and (number? estimate_rows) (number? candidate_rows)))
+			(min candidate_rows estimate_rows)
+			candidate_rows))
+		(define index_filter_fraction (if (and (number? candidate_rows) (> candidate_rows 0))
+			(min 1 (/ index_filter_rows candidate_rows)) 1))
 		(define driver_work (membership_driver_work_profile driver sources block))
 		(list
 			(list (quote membership_stage_id) (gs_id stage))
@@ -3233,16 +3259,19 @@ carrier crossover. */
 			(list (quote membership_candidate_cache_backed) (not (union_block? (gs_input stage))))
 			(list (quote membership_candidate_expression_operations) (qassoc_get candidate_work (quote expression_operations) 0))
 			(list (quote membership_candidate_expression_depth) (qassoc_get candidate_work (quote expression_depth) 0))
-			(list (quote membership_candidate_broad_text_match_rows) (qassoc_get candidate_work (quote broad_text_match_rows) 0))
-			(list (quote membership_candidate_broad_text_match_bytes) (qassoc_get candidate_work (quote broad_text_match_bytes) 0))
+			(list (quote membership_candidate_index_filter_rows) index_filter_rows)
+			(list (quote membership_candidate_broad_text_match_rows)
+				(* (qassoc_get candidate_work (quote broad_text_match_rows) 0) index_filter_fraction))
+			(list (quote membership_candidate_broad_text_match_bytes)
+				(* (qassoc_get candidate_work (quote broad_text_match_bytes) 0) index_filter_fraction))
 			(list (quote membership_candidate_filter_value_rows)
-				(coalesceNil (qassoc_get candidate_work (quote filter_value_rows) nil)
+				(* index_filter_fraction (coalesceNil (qassoc_get candidate_work (quote filter_value_rows) nil)
 					(if (number? candidate_rows)
-						(* candidate_rows (qassoc_get candidate_work (quote filter_columns) 0)) nil)))
+						(* candidate_rows (qassoc_get candidate_work (quote filter_columns) 0)) 0))))
 			(list (quote membership_candidate_expression_operation_rows)
-				(coalesceNil (qassoc_get candidate_work (quote expression_operation_rows) nil)
+				(* index_filter_fraction (coalesceNil (qassoc_get candidate_work (quote expression_operation_rows) nil)
 					(if (number? candidate_rows)
-						(* candidate_rows (qassoc_get candidate_work (quote expression_operations) 0)) nil)))
+						(* candidate_rows (qassoc_get candidate_work (quote expression_operations) 0)) 0))))
 			(list (quote membership_driver_scan_invocations) (qassoc_get driver_work (quote scan_invocations) (if (nil? driver) 0 1)))
 			(list (quote membership_driver_filter_columns) (qassoc_get driver_work (quote filter_columns) 0))
 			(list (quote membership_driver_map_columns) (qassoc_get driver_work (quote map_columns) 0))
@@ -3335,7 +3364,10 @@ consumer rebuild that relation once per driver row. */
 					(and (query_block? branch)
 						(and (single_real_source? (qb_sources branch))
 							(source_is_base_table? (single_real_source (qb_sources branch))))))) true)
-			true))))
+			(if (query_block? input)
+				(and (single_real_source? (qb_sources input))
+					(source_is_base_table? (single_real_source (qb_sources input))))
+				(source_is_base_table? input))))))
 
 (define driver_membership_probe_expr_for_strategy (lambda (stage probe strategy)
 	(if (and (equal? strategy (quote driver_filter_join_probe))
@@ -3836,6 +3868,8 @@ ordered batch is executable and what its actual driver workload is. */
 				(list (quote membership_driver_condition) driver_condition)
 				(list (quote membership_driver_rows) driver_rows))
 			(membership_candidate_work_facts stage)
+			/* merge is right-biased: stage telemetry is authoritative over
+			the reconstructed late-consumer fallback. */
 			(gs_facts stage))))))
 
 (define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)

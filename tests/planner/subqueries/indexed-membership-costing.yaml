@@ -1,0 +1,180 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Indexed membership costing regressions
+
+metadata:
+  version: "1.0"
+  description: "Preserve approximate-index bounds through membership costing"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS imc_acl"
+  - sql: "DROP TABLE IF EXISTS imc_assignment"
+  - sql: "DROP TABLE IF EXISTS imc_domain"
+  - sql: "DROP TABLE IF EXISTS imc_override"
+  - sql: "DROP TABLE IF EXISTS imc_document"
+  - sql: "DROP TABLE IF EXISTS imc_file"
+  - sql: "CREATE TABLE imc_file (id INT PRIMARY KEY, filename VARCHAR(64), search VARCHAR(4096))"
+  - sql: "CREATE TABLE imc_document (id INT PRIMARY KEY, file_id INT, sort_key INT)"
+  - sql: "CREATE TABLE imc_acl (document_id INT PRIMARY KEY, allowed INT)"
+  - sql: "CREATE TABLE imc_domain (id INT PRIMARY KEY, direct_flag INT)"
+  - sql: "CREATE TABLE imc_assignment (domain_id INT, actor_id INT, allowed INT)"
+  - sql: "CREATE TABLE imc_override (domain_id INT, actor_id INT, allowed INT)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "imc_file") '("id" "filename" "search")
+          (map (produceN 640) (lambda (i)
+            (list i
+              (concat "file-" (string i))
+              (if (equal? (mod i 256) 0)
+                (concat "prefix-klaus-suffix-" (string i))
+                (string_repeat "kl--la--au--us--" 128))))))
+        (insert (table "memcp-tests" "imc_document") '("id" "file_id" "sort_key")
+          (map (produceN 1250) (lambda (i) (list i (mod i 640) i))))
+        (insert (table "memcp-tests" "imc_acl") '("document_id" "allowed")
+          (map (produceN 1250) (lambda (i) (list i 1))))
+        (insert (table "memcp-tests" "imc_domain") '("id" "direct_flag")
+          (map (produceN 640) (lambda (i) (list i (if (equal? (mod i 11) 0) 1 0)))))
+        (insert (table "memcp-tests" "imc_assignment") '("domain_id" "actor_id" "allowed")
+          (map (produceN 320) (lambda (i) (list (* i 2) 7 1))))
+        (insert (table "memcp-tests" "imc_override") '("domain_id" "actor_id" "allowed")
+          (map (produceN 214) (lambda (i) (list (* i 3) 7 1))))
+        (rebuild))
+  # Two scans cross the normal adaptive-index savings threshold. The EXPLAIN
+  # cases below must therefore consume the hook's explicit upper bound rather
+  # than a bounded table sample.
+  - sql: "SELECT id FROM imc_file WHERE search LIKE '%klaus%'"
+  - sql: "SELECT id FROM imc_file WHERE search LIKE '%klaus%'"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS imc_acl"
+  - sql: "DROP TABLE IF EXISTS imc_assignment"
+  - sql: "DROP TABLE IF EXISTS imc_domain"
+  - sql: "DROP TABLE IF EXISTS imc_override"
+  - sql: "DROP TABLE IF EXISTS imc_document"
+  - sql: "DROP TABLE IF EXISTS imc_file"
+
+test_cases:
+  - name: "UNION estimate algebra preserves hook upper bounds"
+    scm: |
+      (begin
+        (define estimates (list
+          (list (list 'population 'index_hook_candidates) (list 'coverage 'exact))
+          (list (list 'population 'index_hook_candidates) (list 'coverage 'upper_bound))))
+        (if (and
+          (equal? (planner_merge_estimate_population estimates) 'index_hook_candidates)
+          (equal? (planner_merge_estimate_coverage estimates) 'upper_bound))
+          true
+          (error "UNION estimate metadata lost its index-hook upper bound")))
+
+  - name: "Calibration family ignores an unrelated key index"
+    scm: |
+      (begin
+        (define mixed_plan (list
+          (list 'recset_key_index 'tx 'acl_rows '("id"))
+          (list 'recset_project_join 'tx 'search_rows '("id") 'documents '("file_id"))))
+        (define decision (list
+          (list "decision" "membership_carrier")
+          (list "chosen" "candidate_keyset")))
+        (if (equal? (physical_operator_family_for_decision mixed_plan decision)
+          "candidate_keyset")
+          true
+          (error "unrelated key index stole the candidate carrier family")))
+
+  - name: "Exact candidate preparation dominates cumulative batching"
+    scm: |
+      (if (and
+        (equal? (membership_choice_after_exact_candidate_preparation
+          (list "value-key" "metric-key") "ordered_batch_accept")
+          "candidate_keyset")
+        (equal? (membership_choice_after_exact_candidate_preparation
+          nil "ordered_batch_accept")
+          "ordered_batch_accept"))
+        true
+        (error "exact prepared candidate did not dominate repeated batching"))
+
+  - name: "UNION membership retains approximate index coverage"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT d.id
+      FROM imc_document d
+      WHERE d.file_id IN (
+        SELECT f.id FROM imc_file f WHERE f.filename LIKE '%klaus%'
+        UNION
+        SELECT f.id FROM imc_file f WHERE f.search LIKE '%klaus%'
+      )
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      result_contains:
+        - "membership_carrier"
+        - "candidate_index_filter_rows"
+
+  - name: "Calibration attributes an ACL key index to its own decision"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT d.id
+      FROM imc_document d
+      WHERE d.file_id IN (
+        SELECT f.id FROM imc_file f WHERE f.filename LIKE '%klaus%'
+        UNION
+        SELECT f.id FROM imc_file f WHERE f.search LIKE '%klaus%'
+      )
+        AND COALESCE((
+          SELECT a.allowed
+          FROM imc_acl a
+          WHERE a.document_id = d.id
+          LIMIT 1
+        ), 0) = 1
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      result_contains:
+        - "candidate_keyset"
+        - "ordered_batch_accept"
+        - "operator_consistent"
+        - "result_equal"
+      result_not_contains:
+        - "operator_consistent false"
+        - "result_equal false"
+
+  - name: "Indexed candidate carriers agree through a compound ACL suffix"
+    max_time: 5.0
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT d.id
+      FROM imc_document d
+      WHERE d.file_id IN (
+        SELECT f.id FROM imc_file f WHERE f.filename LIKE '%file-1%'
+        UNION
+        SELECT f.id FROM imc_file f WHERE f.search LIKE '%klaus%'
+      )
+        AND COALESCE((
+          SELECT CASE WHEN domain.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE FROM imc_assignment assignment
+              WHERE assignment.domain_id = domain.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed FROM imc_override override
+              WHERE override.domain_id = domain.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM imc_domain domain
+          WHERE domain.id = d.file_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      result_contains:
+        - "candidate_keyset"
+        - "ordered_batch_accept"
+        - "result_equal"
+      result_not_contains:
+        - '"operator_consistent": false'
+        - '"result_equal": false'

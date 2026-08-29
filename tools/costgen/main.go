@@ -160,6 +160,7 @@ type calibrationRow struct {
 	CandidateCacheBacked             bool     `json:"candidate_cache_backed"`
 	CandidateExpressionOperations    *float64 `json:"candidate_expression_operations"`
 	CandidateExpressionDepth         *float64 `json:"candidate_expression_depth"`
+	CandidateIndexFilterRows         *float64 `json:"candidate_index_filter_rows"`
 	CandidateBroadTextMatchRows      *float64 `json:"candidate_broad_text_match_rows"`
 	CandidateBroadTextMatchBytes     *float64 `json:"candidate_broad_text_match_bytes"`
 	CandidateFilterValueRows         *float64 `json:"candidate_filter_value_rows"`
@@ -801,7 +802,13 @@ func runCalibrationVariantsSeparately(server *memcpServer, query string, test te
 			rows[i].ResultEqual = equal
 		}
 		if !equal {
-			return nil, nil, errors.New("separately executed variants returned different results")
+			results := make([]string, 0, len(rows))
+			for _, row := range rows {
+				results = append(results, fmt.Sprintf("%s(rows=%d,hash=%s)",
+					row.Plan, row.Rows, row.ResultHash))
+			}
+			return nil, nil, fmt.Errorf("separately executed variants returned different results: %s",
+				strings.Join(results, ", "))
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].Plan < rows[j].Plan })
 		if run >= warmup {
@@ -1065,6 +1072,7 @@ func validateRows(rows []calibrationRow) error {
 			row.CandidateScanInvocations, row.CandidateFilterColumns,
 			row.CandidateMapColumns, row.CandidateCacheMapColumns,
 			row.CandidateExpressionOperations, row.CandidateExpressionDepth,
+			row.CandidateIndexFilterRows,
 			row.CandidateBroadTextMatchRows, row.CandidateBroadTextMatchBytes,
 			row.DriverScanInvocations, row.DriverFilterColumns,
 			row.DriverMapColumns, row.DriverExpressionOperations,
@@ -1077,6 +1085,9 @@ func validateRows(rows []calibrationRow) error {
 		}
 		if *row.CandidateBroadTextMatchRows > 0 && *row.CandidateBroadTextMatchBytes <= 0 {
 			return fmt.Errorf("broad-text decision has no value-byte statistics: %+v", row)
+		}
+		if *row.CandidateIndexFilterRows < 0 || *row.CandidateIndexFilterRows > *row.CandidateInputRows {
+			return fmt.Errorf("candidate index filter rows exceed their input: %+v", row)
 		}
 		if row.WholeQueryExecutionNS <= 0 {
 			return fmt.Errorf("invalid whole_query_execution_ns for %s", row.Plan)
