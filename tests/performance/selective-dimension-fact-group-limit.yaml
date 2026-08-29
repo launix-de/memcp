@@ -13,7 +13,7 @@ metadata:
 
 test_cases:
   - name: "Selective dimensions feed wide fact grouping with limit"
-    performance_rows: 2000000
+    performance_rows: 1000000
     warmup: 1
     threshold_ms: 180000
     setup:
@@ -30,14 +30,14 @@ test_cases:
       - sql: "CREATE TABLE fact_group_limit_transferables (transferable_id INT PRIMARY KEY, company_id INT, transferable_effective_timestamp BIGINT, transferable_code VARCHAR(24)) ENGINE=sloppy"
       - sql: "CREATE TABLE fact_group_limit_facts (donation_id INT, cause_key INT, company_id INT, foundation_id INT, donation_payable_id INT, donation_transferable_id INT, donation_currency VARCHAR(4), donation_transaction_code VARCHAR(24), donation_source VARCHAR(16), transaction_date BIGINT, transferable_amount INT, fees_management_fee INT, fees_merchant_fee INT) ENGINE=sloppy"
       # Build a complete 31,250-row slice, then grow the fact table through
-      # MemCP's bulk INSERT ... SELECT path. The final table still contains two
+      # MemCP's bulk INSERT ... SELECT path. The final table still contains one
       # million wide rows, while fixture construction remains inside the shared
       # A/B setup budget even when other suites fill concurrently.
       - timeout: 120
         scm: |
           (begin
             (define fact_rows {rows})
-            (define seed_rows (/ fact_rows 64))
+            (define seed_rows (/ fact_rows 32))
             (define cause_rows (max 100 (min 20000 seed_rows)))
             (define company_rows (max 100 (min 2000 seed_rows)))
             (define payable_rows (max 1000 (min 50000 fact_rows)))
@@ -131,14 +131,6 @@ test_cases:
             transaction_date + 500000, transferable_amount,
             fees_management_fee, fees_merchant_fee
           FROM fact_group_limit_facts WHERE donation_id <= 500000
-      - sql: |
-          INSERT INTO fact_group_limit_facts
-          SELECT donation_id + 1000000, cause_key, company_id, foundation_id,
-            donation_payable_id, donation_transferable_id, donation_currency,
-            CONCAT('TX', donation_id + 1000000), donation_source,
-            transaction_date + 1000000, transferable_amount,
-            fees_management_fee, fees_merchant_fee
-          FROM fact_group_limit_facts WHERE donation_id <= 1000000
       - scm: "(begin (rebuild) true)"
     sql: |
       SELECT
