@@ -32,6 +32,7 @@ import sys
 import os
 import threading
 import fcntl
+from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Dependency checks with clear install hints
@@ -181,6 +182,26 @@ PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
+PERF_SETUP_MAX_TIME_SEC = float(os.environ.get("PERF_SETUP_MAX_TIME_SEC", "120"))
+PERF_GATE_FILE = os.environ.get("PERF_GATE_FILE", ".perf_runner_gate.lock")
+_perf_gate_context = threading.local()
+
+
+@contextmanager
+def performance_server_gate(exclusive: bool = False):
+    """Allow fixture work concurrently while keeping timed queries uncontended."""
+    if not PERF_TEST_ENABLED or getattr(_perf_gate_context, "exclusive", False):
+        yield
+        return
+    with open(PERF_GATE_FILE, "a", encoding="utf-8") as gate:
+        fcntl.flock(gate.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        previous = getattr(_perf_gate_context, "exclusive", False)
+        _perf_gate_context.exclusive = exclusive
+        try:
+            yield
+        finally:
+            _perf_gate_context.exclusive = previous
+            fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
 # Wall-clock budgets are expressed for a reference CPU.  A fixed SHA-256
 # workload, measured before MemCP starts in the full test hook, maps that budget
 # to the current machine.  The workload is deliberately independent of MemCP:
@@ -678,7 +699,8 @@ class SQLTestRunner:
                     if resp and resp.status_code == 200:
                         parts.append(f"[SQL] {step['sql'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "scm" in step:
-                    resp = requests.post(f"{self.base_url}/scm", data=step["scm"], headers=self.auth_header, timeout=5)
+                    with performance_server_gate():
+                        resp = requests.post(f"{self.base_url}/scm", data=step["scm"], headers=self.auth_header, timeout=5)
                     if resp and resp.status_code == 200:
                         parts.append(f"[SCM] {step['scm'][:80]}\n       → {resp.text.strip()[:500]}")
                 elif "psql" in step:
@@ -765,7 +787,8 @@ class SQLTestRunner:
         attempts = 5 if retry_on_connection_failure else 1
         for attempt in range(attempts):
             try:
-                return requests.post(url, data=body, headers=headers, timeout=timeout)
+                with performance_server_gate():
+                    return requests.post(url, data=body, headers=headers, timeout=timeout)
             except Exception:
                 if not retry_on_connection_failure:
                     return None
@@ -796,7 +819,8 @@ class SQLTestRunner:
                 headers = dict(headers)
                 headers.setdefault("Content-Type", "text/plain; charset=utf-8")
             body = query.encode("utf-8") if isinstance(query, str) else query
-            return requests.post(url, data=body, headers=headers, timeout=timeout)
+            with performance_server_gate():
+                return requests.post(url, data=body, headers=headers, timeout=timeout)
         except Exception as e:
             print(f"Error executing SPARQL: {e}")
             return None
@@ -805,7 +829,8 @@ class SQLTestRunner:
         try:
             self.ensure_database(database)
             url = f"{self.base_url}/rdf/{quote(database, safe='')}/load_ttl"
-            response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
+            with performance_server_gate():
+                response = requests.post(url, data=ttl_data, headers=self.auth_header, timeout=10)
             return response is not None and response.status_code == 200
         except Exception as e:
             print(f"Error loading TTL data: {e}")
@@ -953,6 +978,7 @@ class SQLTestRunner:
         test_setup_steps = test_case.get("setup")
         heap_bytes = 0
         if test_setup_steps and isinstance(test_setup_steps, list):
+            setup_started = time.monotonic()
             for step in test_setup_steps:
                 # Inline RAM guard between every setup step — catches large
                 # inserts before the next one starts (monitor thread alone is
@@ -961,13 +987,23 @@ class SQLTestRunner:
                     trip_ram_abort(f"setup step of {name}")
                 if ram_pressure_abort.is_set():
                     return self._record_fail(name, "Aborted: RAM pressure during setup", None, None, None, is_noncritical)
+                setup_remaining = PERF_SETUP_MAX_TIME_SEC - (time.monotonic() - setup_started)
+                if is_perf_test and setup_remaining <= 0:
+                    return self._record_fail(
+                        name, f"Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit",
+                        None, None, None, is_noncritical,
+                    )
                 if "sql" in step:
                     sql_code = step["sql"]
                     if is_perf_test:
                         sql_code = sql_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     resp = self.execute_sql(
                         database, sql_code, syntax=self.suite_syntax,
-                        session_id=session_id, timeout=int(step.get("timeout", 600)),
+                        session_id=session_id,
+                        timeout=(
+                            max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
+                            if is_perf_test else int(step.get("timeout", 600))
+                        ),
                     )
                     expect_error = self._step_expects_error(step)
                     if resp is None:
@@ -984,7 +1020,12 @@ class SQLTestRunner:
                         scm = scm.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     url = f"{self.base_url}/scm"
                     try:
-                        resp = requests.post(url, data=scm, headers=self.auth_header, timeout=600)
+                        with performance_server_gate():
+                            resp = requests.post(
+                                url, data=scm, headers=self.auth_header,
+                                timeout=(max(1, min(600, math.ceil(setup_remaining)))
+                                         if is_perf_test else 600),
+                            )
                     except Exception as e:
                         return self._record_fail(name, f"Setup SCM error: {e}", scm, None, None, is_noncritical)
                     if resp is None or resp.status_code != 200:
@@ -1010,7 +1051,8 @@ class SQLTestRunner:
             ))
             try:
                 url = f"{self.base_url}/scm"
-                resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=scm_timeout)
+                with performance_server_gate(exclusive=is_perf_test):
+                    resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=scm_timeout)
             except Exception as e:
                 if self._expect_interrupted_ok(expect):
                     self._record_success(name, is_noncritical)
@@ -1054,7 +1096,8 @@ class SQLTestRunner:
                 step_timeout = int(step.get("timeout", 30))
                 if "scm" in step:
                     url = f"{self.base_url}/scm"
-                    return requests.post(url, data=step["scm"], headers=self.auth_header, timeout=step_timeout)
+                    with performance_server_gate():
+                        return requests.post(url, data=step["scm"], headers=self.auth_header, timeout=step_timeout)
                 else:
                     return self.execute_sql(database, step["sql"],
                                             session_id=step.get("session_id"),
@@ -1313,17 +1356,6 @@ class SQLTestRunner:
                 warmup_runs = resolve_warmup_runs(test_case, is_perf_test)
             except ValueError as exc:
                 return self._record_fail(name, str(exc), query, None, None, is_noncritical)
-            if warmup_runs:
-                for _ in range(warmup_runs):
-                    self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
-
-            # Get memcp PID and start CPU measurement for perf tests
-            memcp_pid = find_memcp_pid() if is_perf_test else None
-            start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
-
-            # Execute query. Performance tests and explicitly sampled short
-            # SELECTs report the median so one scheduler/GC pause cannot mask
-            # their steady-state behavior.
             try:
                 repeat = resolve_timing_samples(test_case, is_perf_test)
             except ValueError as exc:
@@ -1333,26 +1365,38 @@ class SQLTestRunner:
                     name, "timing_samples/repetitions is only supported for SELECT queries",
                     query, None, None, is_noncritical,
                 )
-            samples_ns: list = []
-            response = None
-            for _ in range(repeat):
-                start_ns = time.monotonic_ns()
-                response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(
-                    database, query, auth_header, active_syntax,
-                    session_id=session_id, timeout=sql_timeout, params=sql_params,
-                    retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
-                )
-                samples_ns.append(time.monotonic_ns() - start_ns)
-                if response is None or response.status_code != 200:
-                    break  # don't hammer a broken endpoint
-            samples_ns.sort()
-            elapsed_ns = samples_ns[len(samples_ns) // 2]  # median
-            elapsed_ms = elapsed_ns / 1_000_000
-            elapsed_sec = elapsed_ms / 1000
 
-            if self.log_times:
-                min_ns, max_ns = samples_ns[0], samples_ns[-1]
-                print(f"QUERY_TIME median_ns={elapsed_ns} total_ns={sum(samples_ns)} min_ns={min_ns} max_ns={max_ns} n={len(samples_ns)} warmup={warmup_runs} name={name}")
+            # Fixture work in other YAML workers uses shared locks. Holding the
+            # exclusive lock across warmup and samples creates an uncontended
+            # measurement window without serializing the fill phases.
+            gate = performance_server_gate(exclusive=True) if is_perf_test else nullcontext()
+            with gate:
+                if warmup_runs:
+                    for _ in range(warmup_runs):
+                        self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
+
+                memcp_pid = find_memcp_pid() if is_perf_test else None
+                start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
+                samples_ns: list = []
+                response = None
+                for _ in range(repeat):
+                    start_ns = time.monotonic_ns()
+                    response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(
+                        database, query, auth_header, active_syntax,
+                        session_id=session_id, timeout=sql_timeout, params=sql_params,
+                        retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
+                    )
+                    samples_ns.append(time.monotonic_ns() - start_ns)
+                    if response is None or response.status_code != 200:
+                        break  # don't hammer a broken endpoint
+                samples_ns.sort()
+                elapsed_ns = samples_ns[len(samples_ns) // 2]  # median
+                elapsed_ms = elapsed_ns / 1_000_000
+                elapsed_sec = elapsed_ms / 1000
+
+                if self.log_times:
+                    min_ns, max_ns = samples_ns[0], samples_ns[-1]
+                    print(f"QUERY_TIME median_ns={elapsed_ns} total_ns={sum(samples_ns)} min_ns={min_ns} max_ns={max_ns} n={len(samples_ns)} warmup={warmup_runs} name={name}")
 
             # End CPU measurement
             end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
@@ -1478,13 +1522,26 @@ class SQLTestRunner:
     def run_setup(self, setup_steps: List[Dict], database: str) -> bool:
         self.setup_operations = []
         self.current_database = database
+        setup_started = time.monotonic()
         for idx, step in enumerate(setup_steps, start=1):
             self.setup_operations.append(step)
+            if PERF_TEST_ENABLED and check_ram_pressure():
+                trip_ram_abort(f"suite setup step {idx}")
+            if PERF_TEST_ENABLED and ram_pressure_abort.is_set():
+                print(f"❌ Setup step {idx} aborted: RAM pressure")
+                return False
+            setup_remaining = PERF_SETUP_MAX_TIME_SEC - (time.monotonic() - setup_started)
+            if PERF_TEST_ENABLED and setup_remaining <= 0:
+                print(f"❌ Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit")
+                return False
             expect_error = self._step_expects_error(step)
             if "sql" in step:
                 resp = self.execute_sql(
                     database, step['sql'], syntax=self.suite_syntax,
-                    timeout=int(step.get("timeout", 600)),
+                    timeout=(
+                        max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
+                        if PERF_TEST_ENABLED else int(step.get("timeout", 600))
+                    ),
                 )
                 if resp is None:
                     print(f"❌ Setup step {idx} failed: no response")
@@ -1505,7 +1562,12 @@ class SQLTestRunner:
                 scm_code = step["scm"]
                 try:
                     url = f"{self.base_url}/scm"
-                    resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=600)
+                    with performance_server_gate():
+                        resp = requests.post(
+                            url, data=scm_code, headers=self.auth_header,
+                            timeout=(max(1, min(600, math.ceil(setup_remaining)))
+                                     if PERF_TEST_ENABLED else 600),
+                        )
                 except Exception as e:
                     print(f"❌ Setup step {idx} failed: SCM exception: {e}")
                     print(f"    SCM: {scm_code[:300]}")
@@ -1942,6 +2004,7 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
         return True
 
     max_jobs = normalize_jobs(jobs)
+
     print(f"🧪 Running {len(spec_files)} suites (parallel where safe, jobs={max_jobs})")
 
     suite_status: Dict[str, bool] = {}
@@ -1953,7 +2016,13 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
         # - all suites retain the shared server and data directory.
         # - only non-isolated, non-restart suites may use the parallel
         #   connect-only worker pool.
-        mode = suite_execution_mode(spec_file)
+        metadata = load_suite_metadata(spec_file)
+        perf_parallel_safe = (
+            PERF_TEST_ENABLED
+            and not suite_requires_managed_restart(spec_file)
+            and not metadata.get("requires_mysql")
+        )
+        mode = "parallel" if perf_parallel_safe else suite_execution_mode(spec_file)
         if mode == "parallel":
             parallel_specs.append(spec_file)
         else:
