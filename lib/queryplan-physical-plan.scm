@@ -2933,6 +2933,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 						(if (empty_list? direct_group_join_stages) '()
 							(list (list (quote define) (quote __direct_group_usage)
 								(list (quote newsession)))))
+						(direct_group_join_prepare_recipe_exprs direct_group_join_stages)
 						(direct_group_join_warm_prepare_exprs direct_group_join_stages)
 						(if (nil? scalar_order_cache) '() (list (nth scalar_order_cache 4)))
 						probe_recipe_prepares
@@ -5955,7 +5956,7 @@ only the structural work counts are specific to this operator. */
 						planner_membership_scan_invocation_ns)
 					(* input_rows (+ planner_membership_scan_row_ns
 						(* aggregate_width planner_membership_map_column_row_ns)))
-					(* invocations planner_membership_group_cache_probe_row_ns)
+					(* invocations planner_group_relation_probe_ns)
 					0 0
 					(* input_rows planner_group_relation_build_row_ns)
 					(* group_rows (+ 8 (* aggregate_width 8)))
@@ -6190,10 +6191,34 @@ the costgen threshold. */
 			(max 1 (qassoc_get (cadr costs) (quote total_ns)
 				planner_membership_group_cache_startup_ns))))))
 
-(define direct_group_join_async_build_expr (lambda (stage canonical_name)
+(define direct_group_join_prepare_recipe_symbol (lambda (stage)
+	(symbol (concat "__direct_group_prepare_recipe_"
+		(stable_structural_hash (direct_group_join_canonical_name stage) true)))))
+
+(define direct_group_join_prepare_recipe_binding (lambda (stage)
 	(begin
 		(define prepare_expr
 			(lower_group_stage_prepare_using (list stage) (list stage) stage true nil))
+		(list (quote define)
+			(direct_group_join_prepare_recipe_symbol stage)
+			(list (quote quote) prepare_expr)))))
+
+(define direct_group_join_prepare_recipe_exprs (lambda (stages)
+	(if (direct_group_join_calibration_active?)
+		'()
+		(begin
+			(define unique_stages (extract_assoc
+				(reduce (coalesceNil stages '()) (lambda (by_name stage)
+					(set_assoc by_name (direct_group_join_canonical_name stage) stage)) '())
+				(lambda (_name stage) stage)))
+			(map unique_stages direct_group_join_prepare_recipe_binding)))))
+
+(define direct_group_join_eval_prepare_recipe_expr (lambda (stage)
+	(list (quote eval)
+		(list (quote optimize) (direct_group_join_prepare_recipe_symbol stage)))))
+
+(define direct_group_join_async_build_expr (lambda (stage canonical_name)
+	(begin
 		(list (quote setTimeout)
 			(list (quote lambda) '()
 				(list (quote try)
@@ -6205,8 +6230,7 @@ the costgen threshold. */
 										(list (quote with_autocommit) (quote __group_cache_build_session)
 											(list (quote lambda) '()
 												(list (quote !begin)
-													(list (quote eval)
-														(list (quote optimize) (list (quote quote) prepare_expr)))
+												(direct_group_join_eval_prepare_recipe_expr stage)
 													(list (quote group_cache_candidate_delete)
 														canonical_name))))))
 								(list (quote newsession))))
@@ -6244,12 +6268,14 @@ the costgen threshold. */
 			(list (quote group_cache_candidate_delete) canonical_name)))))
 
 (define direct_group_join_usage_flush_exprs (lambda (stages)
-	(begin
-		(define unique_stages (extract_assoc
-			(reduce (coalesceNil stages '()) (lambda (by_name stage)
-				(set_assoc by_name (direct_group_join_canonical_name stage) stage)) '())
-			(lambda (_name stage) stage)))
-		(map unique_stages direct_group_join_usage_flush_expr))))
+	(if (direct_group_join_calibration_active?)
+		'()
+		(begin
+			(define unique_stages (extract_assoc
+				(reduce (coalesceNil stages '()) (lambda (by_name stage)
+					(set_assoc by_name (direct_group_join_canonical_name stage) stage)) '())
+				(lambda (_name stage) stage)))
+			(map unique_stages direct_group_join_usage_flush_expr)))))
 
 /* A cache can predate aggregate columns first requested by this query. Extend
 an existing carrier once at query scope before joined probes use it; a missing
@@ -6257,8 +6283,6 @@ carrier remains on the measured direct path and is never built eagerly. */
 (define direct_group_join_warm_prepare_expr (lambda (stage)
 	(begin
 		(define cache_promise (quote __direct_group_warm_cache_lookup))
-		(define prepare_expr
-			(lower_group_stage_prepare_using (list stage) (list stage) stage true nil))
 		(list
 			(list (quote lambda) (list cache_promise)
 				(list (quote !begin)
@@ -6274,7 +6298,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 						(list (quote equal?) (list cache_promise "state") false)
 						(list (quote error) (list cache_promise "value"))
 						(list (quote if) (list (quote nil?) (list cache_promise "value"))
-							nil prepare_expr))))
+							nil (direct_group_join_eval_prepare_recipe_expr stage)))))
 			(list (quote newpromise)
 				(list (quote append_mut) (list (symbol "!!list") 2) nil nil))))))
 

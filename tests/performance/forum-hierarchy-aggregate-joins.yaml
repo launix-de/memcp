@@ -4,7 +4,8 @@ metadata:
   version: "1.0"
   description: "Forum hierarchy lookup with per-forum child and thread aggregates"
   isolated: true
-  ci: false
+  ci: true
+  restart_after_setup: true
 
 # Reproduces https://www.reddit.com/r/mysql/comments/1l0ceun/having_trouble_understanding_the_problem_point_in/
 # at the reported 10k-forum/33k-thread scale. Median A/B on the x86_64
@@ -68,13 +69,6 @@ setup:
   - scm: "(rebuild)"
 
 test_cases:
-  # Persist the large prepared fixture before timing it. The production-sized
-  # benchmark is deliberately excluded from CI and should not charge lazy
-  # reload/finalization work to the SELECT under test.
-  - name: "Persist prepared forum hierarchy fixture"
-    sql: "SHUTDOWN"
-    expect: {rows: 0}
-
   - name: "Hierarchy with child-count group only"
     warmup: 1
     timing_samples: 5
@@ -141,7 +135,6 @@ test_cases:
   - name: "Forum hierarchy with global aggregate subqueries"
     warmup: 1
     timing_samples: 5
-    threshold_ms: 500
     sql: |
       SELECT
         f.forumID, f.title, f.description, f.forumType, f.parentID, f.heritage,

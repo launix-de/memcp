@@ -213,6 +213,28 @@ test_cases:
         - "decision direct_group_join"
         - "probe_invocations 4"
 
+  - name: "Direct grouped join calibration emits both requested operators"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT c.id, totals.total_amount
+      FROM gs_customers c
+      LEFT JOIN (
+        SELECT customer, SUM(amount) AS total_amount
+        FROM gs_orders
+        GROUP BY customer
+      ) totals ON totals.customer = c.name
+      ORDER BY c.id
+    expect:
+      rows: 2
+      result_contains:
+        - '"plan": "group_carrier"'
+        - '"plan": "direct_group_join"'
+        - '"operator_consistent": true'
+        - '"result_equal": true'
+      result_not_contains:
+        - '"operator_consistent": false'
+        - '"result_equal": false'
+
   - name: "Outer GROUP BY on aggregate alias from left-joined derived table"
     sql: |
       SELECT order_count, COUNT(*) AS customer_count

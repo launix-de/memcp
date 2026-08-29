@@ -124,7 +124,7 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanFeatures[0] != 1 || scanFeatures[1] != 25_000 || scanFeatures[21] != 1 ||
+	if scanFeatures[0] != 1 || scanFeatures[1] != 25_000 || scanFeatures[22] != 1 ||
 		scanFeatures[3] != 25_072 || scanFeatures[4] != 4_000 || scanFeatures[18] != 0 {
 		t.Fatalf("ordered join scan features = %v", scanFeatures)
 	}
@@ -159,16 +159,16 @@ func TestRowFeaturesModelsDirectGroupedJoinAlternatives(t *testing.T) {
 		t.Fatal(err)
 	}
 	if carrier[0] != 1 || carrier[1] != 1000 || carrier[3] != 2000 ||
-		carrier[10] != 10 || carrier[19] != 1 || carrier[20] != 1000 {
+		carrier[19] != 1 || carrier[20] != 1000 || carrier[21] != 10 {
 		t.Fatalf("group carrier features = %v", carrier)
 	}
 }
 
-func TestFitGroupRelationSeparatesStartupAndBuildWork(t *testing.T) {
-	row := func(caseName, plan string, measured, inputRows float64) observation {
-		features := make([]float64, 22)
+func TestFitGroupRelationSeparatesStartupBuildAndProbeWork(t *testing.T) {
+	row := func(caseName, plan string, measured, inputRows, probes float64) observation {
+		features := make([]float64, 23)
 		if plan == "group_carrier" {
-			features[19], features[20] = 1, inputRows
+			features[19], features[20], features[21] = 1, inputRows, probes
 		}
 		return observation{
 			caseName: caseName, decision: "direct_group_join", plan: plan,
@@ -176,17 +176,20 @@ func TestFitGroupRelationSeparatesStartupAndBuildWork(t *testing.T) {
 		}
 	}
 	rows := []observation{
-		row("small", "direct_group_join", 100, 10),
-		row("small", "group_carrier", 1101, 10),
-		row("medium", "direct_group_join", 200, 50),
-		row("medium", "group_carrier", 5201, 50),
+		row("small", "direct_group_join", 100, 10, 10),
+		row("small", "group_carrier", 1201, 10, 10),
+		row("medium", "direct_group_join", 200, 50, 20),
+		row("medium", "group_carrier", 5401, 50, 20),
+		row("wide", "direct_group_join", 300, 50, 100),
+		row("wide", "group_carrier", 6301, 50, 100),
 	}
-	startup, build, err := fitGroupRelation(rows, constants{})
+	startup, build, probe, err := fitGroupRelation(rows, constants{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if startup != 1 || build != 100 {
-		t.Fatalf("group relation fit = (%d, %d), want (1, 100)", startup, build)
+	if startup != 1 || build != 100 || probe != 10 {
+		t.Fatalf("group relation fit = (%d, %d, %d), want (1, 100, 10)",
+			startup, build, probe)
 	}
 }
 
@@ -461,12 +464,12 @@ func TestValidateDecisionOrderingUsesOrderedJoinCostBoundary(t *testing.T) {
 	legacy := func(name string, measured, estimated float64) observation {
 		return observation{
 			caseName: name, decision: "scan_join_order", plan: "legacy_join_tree",
-			y: measured, currentEstimate: estimated, x: make([]float64, 22),
+			y: measured, currentEstimate: estimated, x: make([]float64, 23),
 		}
 	}
 	ordered := func(name string, measured float64) observation {
-		features := make([]float64, 22)
-		features[0], features[1], features[3], features[4], features[21] = 1, 25_000, 25_001, 1, 1
+		features := make([]float64, 23)
+		features[0], features[1], features[3], features[4], features[22] = 1, 25_000, 25_001, 1, 1
 		return observation{
 			caseName: name, decision: "scan_join_order", plan: "scan_join_order",
 			y: measured, x: features,

@@ -6664,8 +6664,9 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_scan_invocation_ns 3027639)
 (define planner_membership_ordered_recset_sort_unit_ns 1)
 (define planner_group_relation_startup_ns 1)
-(define planner_group_relation_build_row_ns 40356)
-(define planner_scan_join_order_startup_ns 1413251)
+(define planner_group_relation_build_row_ns 40028)
+(define planner_group_relation_probe_ns 476577)
+(define planner_scan_join_order_startup_ns 1802018)
 /* END GENERATED COST CONSTANTS */
 
 /* scan_join_order reuses the calibrated scan/filter/map work units. The
