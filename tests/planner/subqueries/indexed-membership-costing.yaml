@@ -23,22 +23,22 @@ setup:
   - scm: |
       (begin
         (insert (table "memcp-tests" "imc_file") '("id" "filename" "search")
-          (map (produceN 768) (lambda (i)
+          (map (produceN 640) (lambda (i)
             (list i
               (concat "file-" (string i))
               (if (equal? (mod i 256) 0)
                 (concat "prefix-klaus-suffix-" (string i))
                 (string_repeat "kl--la--au--us--" 128))))))
         (insert (table "memcp-tests" "imc_document") '("id" "file_id" "sort_key")
-          (map (produceN 1500) (lambda (i) (list i (mod i 768) i))))
+          (map (produceN 1250) (lambda (i) (list i (mod i 640) i))))
         (insert (table "memcp-tests" "imc_acl") '("document_id" "allowed")
-          (map (produceN 1500) (lambda (i) (list i 1))))
+          (map (produceN 1250) (lambda (i) (list i 1))))
         (insert (table "memcp-tests" "imc_domain") '("id" "direct_flag")
-          (map (produceN 768) (lambda (i) (list i (if (equal? (mod i 11) 0) 1 0)))))
+          (map (produceN 640) (lambda (i) (list i (if (equal? (mod i 11) 0) 1 0)))))
         (insert (table "memcp-tests" "imc_assignment") '("domain_id" "actor_id" "allowed")
-          (map (produceN 384) (lambda (i) (list (* i 2) 7 1))))
+          (map (produceN 320) (lambda (i) (list (* i 2) 7 1))))
         (insert (table "memcp-tests" "imc_override") '("domain_id" "actor_id" "allowed")
-          (map (produceN 256) (lambda (i) (list (* i 3) 7 1))))
+          (map (produceN 214) (lambda (i) (list (* i 3) 7 1))))
         (rebuild))
   # Two scans cross the normal adaptive-index savings threshold. The EXPLAIN
   # cases below must therefore consume the hook's explicit upper bound rather
