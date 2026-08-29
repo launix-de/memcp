@@ -1202,12 +1202,22 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* Locking reads are accepted for MySQL compatibility. MemCP's
 		transaction layer owns visibility and write serialization. */
 		(? (atom "FOR" true) (atom "UPDATE" true))
-	) (list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition
-			(if distinct (extract_assoc (merge cols) (lambda (_title expr) expr)) group)
-			having order limit offset '() '()
-			(merge (list
-				(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '())
-				(if distinct (list (list (quote select_distinct) true)) '()))))))
+	) (begin
+			(define projected_exprs (extract_assoc (merge cols) (lambda (_title expr) expr)))
+			/* GROUP BY already makes the result unique when every grouping key is
+			projected. Preserve that explicit group instead of replacing it with the
+			DISTINCT projection (which may contain aggregate expressions). */
+			(define distinct_preserved_by_group (and distinct
+				(and (not (nil? group))
+					(and (not (empty_list? group))
+						(reduce group (lambda (preserved expr)
+							(and preserved (contains? projected_exprs expr))) true)))))
+			(list (quote query-block) schema (if (nil? from) '() (merge from)) (merge cols) condition
+				(if (and distinct (not distinct_preserved_by_group)) projected_exprs group)
+				having order limit offset '() '()
+				(merge (list
+					(if calc_found_rows (list (list (quote sql_calc_found_rows) true)) '())
+					(if distinct (list (list (quote select_distinct) true)) '())))))))
 	(define sql_select (parser (or
 		(parser '(
 			(define left sql_select_core)

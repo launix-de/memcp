@@ -171,6 +171,21 @@ test_cases:
           post_type: wp_template
           post_status: publish
 
+  - name: "DISTINCT preserves a projected GROUP BY key with aggregates"
+    sql: |
+      SELECT DISTINCT post_type, COUNT(*) AS posts
+      FROM wpcompat_posts
+      WHERE post_type IN ('post', 'wp_template')
+      GROUP BY post_type
+      ORDER BY post_type
+    expect:
+      rows: 2
+      data:
+        - post_type: post
+          posts: 3
+        - post_type: wp_template
+          posts: 1
+
   - name: "Grouping by a primary key permits every source column after a LEFT JOIN"
     sql: |
       SELECT wpcompat_posts.*

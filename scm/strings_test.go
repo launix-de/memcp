@@ -47,6 +47,56 @@ func TestStrLikeCollationUncasedPattern(t *testing.T) {
 	}
 }
 
+func TestStrLikeCollationASCIIFastPaths(t *testing.T) {
+	tests := []struct {
+		value   string
+		pattern string
+		want    bool
+	}{
+		{"A,C", "%a%", true},
+		{"A,C", "%b%", false},
+		{"Alpha", "a%", true},
+		{"Alpha", "%HA", true},
+		{"Alpha", "ALPHA", true},
+		{"Straße", "%STRASSE%", false},
+		{"Straße", "%straße%", true},
+	}
+	for _, test := range tests {
+		if got := StrLikeCollation(test.value, test.pattern, "utf8mb4_general_ci"); got != test.want {
+			t.Errorf("StrLikeCollation(%q, %q) = %v, want %v", test.value, test.pattern, got, test.want)
+		}
+	}
+}
+
+func TestStrLikeCollationASCIIFastPathAllocations(t *testing.T) {
+	allocations := testing.AllocsPerRun(1000, func() {
+		if !StrLikeCollation("A,C", "%a%", "utf8mb4_general_ci") {
+			t.Fatal("ASCII contains pattern should match")
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("ASCII contains LIKE allocated %.2f objects per call, want 0", allocations)
+	}
+}
+
+func BenchmarkStrLikeCollationDynamicCategory(b *testing.B) {
+	b.ReportAllocs()
+	for index := 0; index < b.N; index++ {
+		if !StrLikeCollation("A,C", "%a%", "utf8mb4_general_ci") {
+			b.Fatal("ASCII contains pattern should match")
+		}
+	}
+}
+
+func BenchmarkStrLikeCollationDynamicCategoryLegacy(b *testing.B) {
+	b.ReportAllocs()
+	for index := 0; index < b.N; index++ {
+		if !StrLikeFold("A,C", "%a%") {
+			b.Fatal("ASCII contains pattern should match")
+		}
+	}
+}
+
 func TestStrLikeEscapedWildcards(t *testing.T) {
 	if !StrLike("_transient_sample", `\_transient\_%`) {
 		t.Fatal("escaped underscores should match literal underscores")
