@@ -227,6 +227,91 @@ func likePatternNeedsCaseFold(pattern string) bool {
 	return false
 }
 
+func asciiFoldByte(value byte) byte {
+	if value >= 'A' && value <= 'Z' {
+		return value + ('a' - 'A')
+	}
+	return value
+}
+
+func asciiFoldEqual(left, right string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := 0; index < len(left); index++ {
+		if left[index] >= utf8.RuneSelf || right[index] >= utf8.RuneSelf || asciiFoldByte(left[index]) != asciiFoldByte(right[index]) {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiFoldContains(value, needle string) (bool, bool) {
+	if len(needle) > len(value) {
+		return false, true
+	}
+	for offset := 0; offset <= len(value)-len(needle); offset++ {
+		matched := true
+		for index := 0; index < len(needle); index++ {
+			left, right := value[offset+index], needle[index]
+			if left >= utf8.RuneSelf || right >= utf8.RuneSelf {
+				return false, false
+			}
+			if asciiFoldByte(left) != asciiFoldByte(right) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+// strLikeASCIIFold handles the exact/prefix/suffix/contains forms emitted by
+// ordinary SQL predicates without allocating lower-cased copies per row. The
+// second return value is false whenever Unicode or general wildcard matching
+// must retain the canonical StrLikeFold path.
+func strLikeASCIIFold(value, pattern string) (bool, bool) {
+	if strings.ContainsAny(pattern, "_\\\\") {
+		return false, false
+	}
+	wildcards := strings.Count(pattern, "%")
+	switch {
+	case wildcards == 0:
+		for index := 0; index < len(value); index++ {
+			if value[index] >= utf8.RuneSelf {
+				return false, false
+			}
+		}
+		for index := 0; index < len(pattern); index++ {
+			if pattern[index] >= utf8.RuneSelf {
+				return false, false
+			}
+		}
+		return asciiFoldEqual(value, pattern), true
+	case wildcards == 1 && len(pattern) > 0 && pattern[0] == '%':
+		needle := pattern[1:]
+		if len(needle) > len(value) {
+			return false, true
+		}
+		matched, ascii := asciiFoldContains(value[len(value)-len(needle):], needle)
+		return matched, ascii
+	case wildcards == 1 && len(pattern) > 0 && pattern[len(pattern)-1] == '%':
+		needle := pattern[:len(pattern)-1]
+		if len(needle) > len(value) {
+			return false, true
+		}
+		matched, ascii := asciiFoldContains(value[:len(needle)], needle)
+		return matched, ascii
+	case wildcards == 2 && len(pattern) >= 2 && pattern[0] == '%' && pattern[len(pattern)-1] == '%':
+		return asciiFoldContains(value, pattern[1:len(pattern)-1])
+	default:
+		return false, false
+	}
+}
+
 // StrLikeCollation is the canonical LIKE implementation shared by the Scheme
 // builtin and storage match indexes. Keeping both paths here guarantees that an
 // exact cached match set has the same case semantics as residual evaluation.
@@ -237,6 +322,9 @@ func StrLikeCollation(str, pattern, collation string) bool {
 		// Keep '_' on the folded path because folding may change its byte width.
 		if !likePatternNeedsCaseFold(pattern) {
 			return StrLike(str, pattern)
+		}
+		if matched, handled := strLikeASCIIFold(str, pattern); handled {
+			return matched
 		}
 		return StrLikeFold(str, pattern)
 	}

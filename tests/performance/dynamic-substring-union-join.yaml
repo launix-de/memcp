@@ -1,0 +1,226 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Reproduction of https://www.reddit.com/r/mysql/comments/1r88gsz/query_performance_issue/
+# The 1:10 development fixture preserves the reported distinct counts and
+# selectivities. The original-scale measurements use the same formulas with
+# 6,000,000 transactions and are intentionally kept outside CI.
+
+metadata:
+  version: "1.0"
+  description: "Dynamic substring join and repeated UNION scans"
+  isolated: true
+  ci: false
+
+setup:
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_risk_checks"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_config_v2"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_config_v1"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_config_all"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_transactions"
+  - sql: "CREATE TABLE dynamic_substring_transactions (id INT PRIMARY KEY, instruction_id INT, batch_id INT, entity_id VARCHAR(16), timestamp_seg BIGINT, category_code VARCHAR(4)) ENGINE=sloppy"
+  - sql: "CREATE TABLE dynamic_substring_config_v1 (id INT PRIMARY KEY, unit_id INT, instruction_id INT, cat_list VARCHAR(32), hold_cat_list VARCHAR(32), job_expression VARCHAR(32)) ENGINE=sloppy"
+  - sql: "CREATE TABLE dynamic_substring_config_v2 (id INT PRIMARY KEY, unit_id INT, instruction_id INT, cat_list VARCHAR(32), hold_cat_list VARCHAR(32), job_expression VARCHAR(32)) ENGINE=sloppy"
+  - sql: "CREATE TABLE dynamic_substring_config_all (id INT PRIMARY KEY, unit_id INT, instruction_id INT, cat_list VARCHAR(32), hold_cat_list VARCHAR(32), job_expression VARCHAR(32)) ENGINE=sloppy"
+  - sql: "CREATE TABLE dynamic_substring_risk_checks (instruction_id INT PRIMARY KEY, hold_flag INT) ENGINE=sloppy"
+  - scm: |
+      (map (produceN 6) (lambda (batch)
+        (insert (table "memcp-tests" "dynamic_substring_transactions")
+          '("id" "instruction_id" "batch_id" "entity_id" "timestamp_seg" "category_code")
+          (map (produceN 100000) (lambda (offset)
+            (begin
+              (define i (+ (* batch 100000) offset))
+              (list i
+                (mod i 18400)
+                (if (< i 100000) nil (mod i 150000))
+                (if (< i 500000) "E0756" (concat "E" (string (+ 1000 (mod i 192)))))
+                (mod i 21800)
+                (nth '("A" "B" "C" "D") (mod i 4)))))))))
+  - scm: |
+      (insert (table "memcp-tests" "dynamic_substring_config_v1")
+        '("id" "unit_id" "instruction_id" "cat_list" "hold_cat_list" "job_expression")
+        (map (produceN 44000) (lambda (i)
+          (list i (mod i 48) (mod i 18400)
+            (if (equal? (mod i 3) 0) "A,C" "B,D")
+            (if (equal? (mod i 5) 0) "A,B" "C,D")
+            (if (equal? (mod i 4) 0) "0 20 * * ? *" "other")))))
+  - scm: |
+      (insert (table "memcp-tests" "dynamic_substring_config_v2")
+        '("id" "unit_id" "instruction_id" "cat_list" "hold_cat_list" "job_expression")
+        (map (produceN 1000) (lambda (i)
+          (list i 100 (mod i 18400) "A,C" "B,D"
+            (if (equal? (mod i 2) 0) "0 20 * * ? *" "other")))))
+  - scm: |
+      (insert (table "memcp-tests" "dynamic_substring_config_all")
+        '("id" "unit_id" "instruction_id" "cat_list" "hold_cat_list" "job_expression")
+        (map (produceN 45000) (lambda (i)
+          (if (< i 44000)
+            (list i (mod i 48) (mod i 18400)
+              (if (equal? (mod i 3) 0) "A,C" "B,D")
+              (if (equal? (mod i 5) 0) "A,B" "C,D")
+              (if (equal? (mod i 4) 0) "0 20 * * ? *" "other"))
+            ((lambda (j)
+              (list i 100 (mod j 18400) "A,C" "B,D"
+                (if (equal? (mod j 2) 0) "0 20 * * ? *" "other")))
+              (- i 44000))))))
+  - scm: |
+      (insert (table "memcp-tests" "dynamic_substring_risk_checks")
+        '("instruction_id" "hold_flag")
+        (map (produceN 18400) (lambda (i)
+          (list i (if (equal? (mod i 40) 0) 0 1)))))
+  - scm: "(rebuild)"
+
+test_cases:
+  - name: "Dynamic substring join with grouping"
+    sql: |
+      SELECT DISTINCT
+        cfg.unit_id,
+        cfg.instruction_id,
+        cfg.cat_list,
+        cfg.hold_cat_list,
+        MIN(txn.timestamp_seg) AS earliest_seg
+      FROM dynamic_substring_transactions txn
+      JOIN dynamic_substring_config_v1 cfg
+        ON cfg.instruction_id = txn.instruction_id
+      LEFT JOIN dynamic_substring_risk_checks rc
+        ON txn.instruction_id = rc.instruction_id
+      WHERE txn.timestamp_seg < 671
+        AND txn.batch_id IS NULL
+        AND txn.entity_id = 'E0756'
+        AND (cfg.cat_list LIKE CONCAT('%', txn.category_code, '%')
+          OR cfg.hold_cat_list LIKE CONCAT('%', txn.category_code, '%'))
+        AND cfg.job_expression = '0 20 * * ? *'
+        AND (rc.instruction_id IS NULL OR rc.hold_flag = 0)
+      GROUP BY cfg.unit_id
+    expect: {rows: 214}
+
+  - name: "Dynamic substring joins across UNION branches"
+    warmup: 1
+    repetitions: 5
+    threshold_ms: 180000
+    sql: &original_query |
+      SELECT DISTINCT
+        cfg.unit_id,
+        cfg.instruction_id,
+        cfg.cat_list,
+        cfg.hold_cat_list,
+        MIN(txn.timestamp_seg) AS earliest_seg
+      FROM dynamic_substring_transactions txn
+      JOIN dynamic_substring_config_v1 cfg
+        ON cfg.instruction_id = txn.instruction_id
+      LEFT JOIN dynamic_substring_risk_checks rc
+        ON txn.instruction_id = rc.instruction_id
+      WHERE txn.timestamp_seg < 671
+        AND txn.batch_id IS NULL
+        AND txn.entity_id = 'E0756'
+        AND (cfg.cat_list LIKE CONCAT('%', txn.category_code, '%')
+          OR cfg.hold_cat_list LIKE CONCAT('%', txn.category_code, '%'))
+        AND cfg.job_expression = '0 20 * * ? *'
+        AND (rc.instruction_id IS NULL OR rc.hold_flag = 0)
+      GROUP BY cfg.unit_id
+      UNION
+      SELECT DISTINCT
+        cfg.unit_id,
+        cfg.instruction_id,
+        cfg.cat_list,
+        cfg.hold_cat_list,
+        MIN(txn.timestamp_seg) AS earliest_seg
+      FROM dynamic_substring_transactions txn
+      JOIN dynamic_substring_config_v2 cfg
+        ON cfg.instruction_id = txn.instruction_id
+      LEFT JOIN dynamic_substring_risk_checks rc
+        ON txn.instruction_id = rc.instruction_id
+      WHERE txn.timestamp_seg < 671
+        AND txn.batch_id IS NULL
+        AND txn.entity_id = 'E0756'
+        AND (cfg.cat_list LIKE CONCAT('%', txn.category_code, '%')
+          OR cfg.hold_cat_list LIKE CONCAT('%', txn.category_code, '%'))
+        AND cfg.job_expression = '0 20 * * ? *'
+        AND (rc.instruction_id IS NULL OR rc.hold_flag = 0)
+      GROUP BY cfg.unit_id
+    expect: {rows: 231}
+
+  - name: "Dynamic substring join with a unified relation"
+    warmup: 1
+    repetitions: 5
+    threshold_ms: 180000
+    sql: |
+      SELECT DISTINCT
+        cfg.unit_id,
+        cfg.instruction_id,
+        cfg.cat_list,
+        cfg.hold_cat_list,
+        MIN(txn.timestamp_seg) AS earliest_seg
+      FROM dynamic_substring_transactions txn
+      JOIN dynamic_substring_config_all cfg
+        ON cfg.instruction_id = txn.instruction_id
+      LEFT JOIN dynamic_substring_risk_checks rc
+        ON txn.instruction_id = rc.instruction_id
+      WHERE txn.timestamp_seg < 671
+        AND txn.batch_id IS NULL
+        AND txn.entity_id = 'E0756'
+        AND (cfg.cat_list LIKE CONCAT('%', txn.category_code, '%')
+          OR cfg.hold_cat_list LIKE CONCAT('%', txn.category_code, '%'))
+        AND cfg.job_expression = '0 20 * * ? *'
+        AND (rc.instruction_id IS NULL OR rc.hold_flag = 0)
+      GROUP BY cfg.unit_id
+    expect: {rows: 231}
+
+  - name: "Dynamic substring join with deterministic grouping"
+    warmup: 1
+    repetitions: 5
+    threshold_ms: 180000
+    sql: |
+      SELECT
+        cfg.unit_id,
+        MIN(cfg.instruction_id) AS instruction_id,
+        MIN(cfg.cat_list) AS cat_list,
+        MIN(cfg.hold_cat_list) AS hold_cat_list,
+        MIN(txn.timestamp_seg) AS earliest_seg
+      FROM dynamic_substring_transactions txn
+      JOIN dynamic_substring_config_all cfg
+        ON cfg.instruction_id = txn.instruction_id
+      LEFT JOIN dynamic_substring_risk_checks rc
+        ON txn.instruction_id = rc.instruction_id
+      WHERE txn.timestamp_seg < 671
+        AND txn.batch_id IS NULL
+        AND txn.entity_id = 'E0756'
+        AND (cfg.cat_list LIKE CONCAT('%', txn.category_code, '%')
+          OR cfg.hold_cat_list LIKE CONCAT('%', txn.category_code, '%'))
+        AND cfg.job_expression = '0 20 * * ? *'
+        AND (rc.instruction_id IS NULL OR rc.hold_flag = 0)
+      GROUP BY cfg.unit_id
+    expect: {rows: 7}
+
+  - name: "Dynamic substring join physical plan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT DISTINCT
+        cfg.unit_id,
+        cfg.instruction_id,
+        cfg.cat_list,
+        cfg.hold_cat_list,
+        MIN(txn.timestamp_seg) AS earliest_seg
+      FROM dynamic_substring_transactions txn
+      JOIN dynamic_substring_config_v1 cfg
+        ON cfg.instruction_id = txn.instruction_id
+      LEFT JOIN dynamic_substring_risk_checks rc
+        ON txn.instruction_id = rc.instruction_id
+      WHERE txn.timestamp_seg < 7
+        AND txn.batch_id IS NULL
+        AND txn.entity_id = 'E0756'
+        AND (cfg.cat_list LIKE CONCAT('%', txn.category_code, '%')
+          OR cfg.hold_cat_list LIKE CONCAT('%', txn.category_code, '%'))
+        AND cfg.job_expression = '0 20 * * ? *'
+        AND (rc.instruction_id IS NULL OR rc.hold_flag = 0)
+      GROUP BY cfg.unit_id
+    expect:
+      rows: 1
+      result_contains:
+        - "physical"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_risk_checks"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_config_v2"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_config_v1"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_config_all"
+  - sql: "DROP TABLE IF EXISTS dynamic_substring_transactions"
