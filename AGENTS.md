@@ -247,6 +247,19 @@ Before merging any PR that touches storage, persistence, DDL, or cleanup code:
 - [ ] ENGINE semantics table above remains accurate (update if behaviour changes).
 - [ ] `AfterDropTable` / trigger callbacks reviewed for unintended side-effects.
 
+## Query Optimization and Cost Planning
+To optimize memcp for a query you must consider the following steps:
+ - first run and measure the query
+ - EXPLAIN the query to get the scm code, also EXPLAIN IR, EXPLAIN PHYSICAL and EXPLAIN REORDER to get additional info
+ - measure the single parts of the query by sending extracted scm commands via http API
+ - use (help) to get info about the storage operators
+ - reasseble different plans - using several scan variants, recsets and so on and measure them
+ - find the optimal plan
+ - review the planner+lowerer aswell as tools/costgen code
+ - refactor those code parts to a generic algorithm such that your handcrafted optimal plan is within the search space and will be estimated as the cheapest plan
+ - make sure you do not produce performance regressions -> there is a CI runner with A/B benchmarks master vs PR - it does not allow to decrease query performance more than 20%
+ - do not run the fulltest alone - always commit no-verify after the needle testcases work and look sane, push PR and watch the CI's results
+
 ## Release Process
 
 ### Version Numbering
