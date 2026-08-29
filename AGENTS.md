@@ -171,17 +171,6 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - Do not call goroutines on small data batches or single-item loops
 - Avoid lock/unlock inside loops
 
-## Performance Benchmarking & A/B Testing
-- Go microbenchmarks live next to the code under test: `storage/storage-enum_test.go`, etc.
-- Run benchmarks: `go test ./storage/ -bench 'BenchmarkEnumPerElem' -run '^$' -benchtime=1s`
-- For A/B comparisons, build two binaries and use `benchstat`:
-  ```
-  git stash && go test ./storage/ -bench '...' -count=5 > /tmp/bench_A.txt
-  git stash pop && go test ./storage/ -bench '...' -count=5 > /tmp/bench_B.txt
-  benchstat /tmp/bench_A.txt /tmp/bench_B.txt
-  ```
-- When adding a `--binary` flag or build tag for alternative code paths, test both variants under the same benchmark harness to compare.
-
 ## Data Safety Policy
 
 Preventing user-visible data loss is a first-class requirement. Every code
