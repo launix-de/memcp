@@ -3799,7 +3799,10 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 		(define base_cost (planner_cost_add (planner_cost_add
 			(planner_cost_add
 				(membership_common_scan_cost candidate_input_rows candidate_rows consumer_work_rows
-					(membership_work_value work (quote membership_candidate_map_columns) 1) 0 work)
+					(membership_work_value work (quote membership_candidate_map_columns) 1)
+					(membership_work_value work (quote membership_ordered_scan_invocations)
+						(if (membership_work_value work (quote membership_order_limit_driver) false) 1 0))
+					work)
 				(planner_cost 0
 					(+
 						(* (membership_work_value work (quote membership_candidate_broad_text_match_rows) 0)

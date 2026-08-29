@@ -4611,6 +4611,7 @@ carrier into thousands of fictional downstream probes. */
 						(list (quote membership_driver_map_columns) 0)
 						(list (quote membership_driver_expression_operations) 0)
 						(list (quote membership_order_limit_driver) true)
+						(list (quote membership_ordered_scan_invocations) 0)
 						(list (quote membership_order_limit) (planner_literal_value limit))
 						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
@@ -4618,8 +4619,13 @@ carrier into thousands of fictional downstream probes. */
 					(define cost_work (if (nil? order_partitioning) work
 						(cons (list (quote membership_driver_order_partitioned)
 							(cadr order_partitioning)) work)))
-					(define candidate_cost (membership_projection_cost
-						lookup_input_rows lookup_rows requested_rows cost_work))
+					/* membership_projection_cost owns scans and row work. This join
+					carrier additionally constructs a recset_project_join boundary;
+					charge its Costgen-calibrated fixed startup exactly once. */
+					(define candidate_cost (planner_cost_add
+						(membership_projection_cost
+							lookup_input_rows lookup_rows requested_rows cost_work)
+						(planner_recset_carrier_cost 0 0) requested_rows 0.65))
 					(define driver_cost (membership_ordered_driver_probe_cost
 						lookup_input_rows lookup_rows requested_rows cost_work))
 					(define batch_cost (ordered_batch_accept_cost cost_work))
@@ -4843,6 +4849,7 @@ has selected a lowerer. */
 						(list (quote membership_driver_map_columns) 0)
 						(list (quote membership_driver_expression_operations) 0)
 						(list (quote membership_order_limit_driver) true)
+						(list (quote membership_ordered_scan_invocations) 0)
 						(list (quote membership_order_limit) (planner_literal_value limit))
 						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
@@ -4850,8 +4857,12 @@ has selected a lowerer. */
 					(define cost_work (if (nil? order_partitioning) work
 						(cons (list (quote membership_driver_order_partitioned)
 							(cadr order_partitioning)) work)))
-					(define candidate_cost (membership_projection_cost
-						lookup_input_rows lookup_rows requested_rows cost_work))
+					/* Match ordered_join_projected_candidate: the projected join owns
+					a physical RecSet-carrier startup beyond its scan and row work. */
+					(define candidate_cost (planner_cost_add
+						(membership_projection_cost
+							lookup_input_rows lookup_rows requested_rows cost_work)
+						(planner_recset_carrier_cost 0 0) requested_rows 0.65))
 					(define driver_cost (membership_ordered_driver_probe_cost
 						lookup_input_rows lookup_rows requested_rows cost_work))
 					(define batch_cost (ordered_batch_accept_cost cost_work))
@@ -5308,21 +5319,10 @@ until the caller has selected this physical alternative. */
 						(planner_membership_downstream_probe_cost legacy_probe_rows)
 						(planner_cost 0 0 0 0 0 0 0 0 0 0.65))
 					(coalesceNil joined_rows legacy_probe_rows) 0.65))
-				(define projected_legacy_exact (and (not (nil? projected_legacy_cost))
-					(nth projected_legacy_cost 2)))
-				(define scan_clear_winner
-					(planner_cost_clear_winner? scan_cost legacy_cost))
-				(define legacy_clear_winner
-					(planner_cost_clear_winner? legacy_cost scan_cost))
-				(define fuzzy_exact_carrier (and projected_legacy_exact
-					(and (not legacy_lookup_values_required)
-						(and (not scan_clear_winner) (not legacy_clear_winner)))))
-				(define normal_choice (if scan_clear_winner
-					"scan_join_order"
-					(if (or legacy_clear_winner fuzzy_exact_carrier)
-						"legacy_join_tree"
-						(if (planner_cost_better? scan_cost legacy_cost)
-							"scan_join_order" "legacy_join_tree"))))
+				/* Both alternatives are fully costed in the same generated cost domain.
+				Do not override a close comparison with an operator-specific preference. */
+				(define normal_choice (if (planner_cost_better? scan_cost legacy_cost)
+					"scan_join_order" "legacy_join_tree"))
 				(define decision_id (concat "scan_join_order:"
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
 				(define alternatives (list "legacy_join_tree" "scan_join_order"))
@@ -5336,7 +5336,7 @@ until the caller has selected this physical alternative. */
 					(list "normally_chosen" normal_choice)
 					(list "selection" (if (nil? forced) "cost" "calibration_override"))
 					(list "reason" (if (nil? forced)
-						(if fuzzy_exact_carrier "fuzzy_exact_projected_carrier" "cost_dominance")
+						"lowest_total_ns"
 						"calibration_override"))
 					(list "inputs" (list
 						(list "join_input_rows" input_rows)
