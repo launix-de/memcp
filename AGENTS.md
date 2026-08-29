@@ -249,7 +249,8 @@ Before merging any PR that touches storage, persistence, DDL, or cleanup code:
 
 ## Query Optimization and Cost Planning
 To optimize memcp for a query you must consider the following steps:
- - first run and measure the query
+ - first add a perf-capable unit test into tests/ with setup and measurement configuration
+ - then run and measure the query
  - EXPLAIN the query to get the scm code, also EXPLAIN IR, EXPLAIN PHYSICAL and EXPLAIN REORDER to get additional info
  - measure the single parts of the query by sending extracted scm commands via http API
  - use (help) to get info about the storage operators
@@ -257,7 +258,9 @@ To optimize memcp for a query you must consider the following steps:
  - find the optimal plan
  - review the planner+lowerer aswell as tools/costgen code
  - refactor those code parts to a generic algorithm such that your handcrafted optimal plan is within the search space and will be estimated as the cheapest plan
- - make sure you do not produce performance regressions -> there is a CI runner with A/B benchmarks master vs PR - it does not allow to decrease query performance more than 20%
+ - once the existing operators do not yield any more speedup but you think, there is more potential, you are allowed to dig into operator's internas: optimizing corner cases, reducing allocations, introducing new operators or intermediate result buffers like recset
+ - for operators, regard the following hints: Avoid further branches inside loops. Try to keep setup and loops allocation-free (e.g. using stack buffers), parallelize big workloads into big-enough chunks (often at shard boundaries), cap the number of parallel goroutines of one operator by the session/transaction's boundaries.
+ - make sure you do not produce performance regressions -> there is a CI runner with A/B benchmarks master vs PR - it does not allow to decrease query performance more than 20% for any of the test cases.
  - do not run the fulltest alone - always commit no-verify after the needle testcases work and look sane, push PR and watch the CI's results
 
 ## Release Process
