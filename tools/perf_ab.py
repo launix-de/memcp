@@ -32,6 +32,16 @@ from typing import Any
 import yaml
 
 
+# The legacy matrix benchmark treats {rows} as a matrix dimension and therefore
+# performs cubic work. Its old local auto-calibrator converges near 100-300;
+# starting it with the linear-test default of 10,000 exhausts CI memory before
+# a base measurement exists. Keep this trusted bootstrap workload in the
+# harness until the suite declares performance_rows itself.
+BOOTSTRAP_ROWS = {
+    "tests/performance/baseline.yaml::Perf: MATRIX MULT": 100,
+}
+
+
 class PerformanceFailure(RuntimeError):
     """A missing, invalid, or regressed performance measurement."""
 
@@ -70,7 +80,7 @@ def measurement_map(payload: dict[str, Any], suite: str) -> dict[str, dict[str, 
     return result
 
 
-def performance_cases(suite: Path) -> list[dict[str, Any]]:
+def performance_cases(suite: Path, suite_id: str | None = None) -> list[dict[str, Any]]:
     with suite.open("r", encoding="utf-8") as handle:
         document = yaml.safe_load(handle) or {}
     metadata = document.get("metadata", {})
@@ -88,6 +98,10 @@ def performance_cases(suite: Path) -> list[dict[str, Any]]:
         for measured, name in expanded:
             if "threshold_ms" not in measured:
                 continue
+            if "repetitions" in measured and "timing_samples" in measured:
+                raise PerformanceFailure(
+                    f"{suite}:{name}: use either repetitions or timing_samples, not both"
+                )
             regression = measured.get("max_regression_pct", default_regression)
             if (
                 isinstance(regression, bool)
@@ -97,19 +111,50 @@ def performance_cases(suite: Path) -> list[dict[str, Any]]:
                 raise PerformanceFailure(
                     f"{suite}:{name}: max_regression_pct must be from 10 through 30"
                 )
-            cases.append({"name": name, "max_regression_pct": float(regression)})
+            repetitions = measured.get(
+                "repetitions", measured.get("timing_samples", 5)
+            )
+            if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
+                raise PerformanceFailure(
+                    f"{suite}:{name}: repetitions must be a positive integer"
+                )
+            warmup = measured.get("warmup", 2)
+            if warmup is True:
+                warmup = 2
+            elif warmup is False:
+                warmup = 0
+            if not isinstance(warmup, int) or warmup < 0:
+                raise PerformanceFailure(
+                    f"{suite}:{name}: warmup must be a non-negative integer or boolean"
+                )
+            cases.append({
+                "name": name,
+                "max_regression_pct": float(regression),
+                "repetitions": repetitions,
+                "warmup": warmup,
+            })
+            identity = f"{suite_id}::{name}" if suite_id else None
+            cases[-1]["rows"] = int(
+                measured.get(
+                    "performance_rows",
+                    BOOTSTRAP_ROWS.get(identity, 10_000),
+                )
+            )
+            if cases[-1]["rows"] < 1:
+                raise PerformanceFailure(f"{suite}:{name}: performance_rows must be positive")
     return cases
 
 
-def parse_runner_output(output: str, suite: Path) -> dict[str, Any]:
+def parse_runner_output(output: str, suite: Path, suite_id: str | None = None) -> dict[str, Any]:
     timing_pattern = re.compile(
-        r"^QUERY_TIME median_ns=(\d+) min_ns=\d+ max_ns=\d+ n=\d+ name=(.*)$"
+        r"^QUERY_TIME median_ns=\d+ total_ns=(\d+) min_ns=\d+ max_ns=\d+ "
+        r"n=(\d+) warmup=(\d+) name=(.*)$"
     )
     success_pattern = re.compile(
         r"^✅ .*? \([0-9.]+ms / [0-9.]+ms, ([0-9,]+) rows(?:,|\))"
     )
     observed_timings = [
-        (int(match.group(1)), match.group(2))
+        (int(match.group(1)), int(match.group(2)), int(match.group(3)), match.group(4))
         for line in output.splitlines()
         if (match := timing_pattern.match(line))
     ]
@@ -118,11 +163,11 @@ def parse_runner_output(output: str, suite: Path) -> dict[str, Any]:
         for line in output.splitlines()
         if (match := success_pattern.match(line))
     ]
-    expected = performance_cases(suite)
+    expected = performance_cases(suite, suite_id)
     remaining = Counter(case["name"] for case in expected)
     timings: list[tuple[int, str]] = []
     for timing in observed_timings:
-        name = timing[1]
+        name = timing[3]
         if remaining[name] > 0:
             timings.append(timing)
             remaining[name] -= 1
@@ -132,7 +177,7 @@ def parse_runner_output(output: str, suite: Path) -> dict[str, Any]:
             f"{len(timings)} timings and {len(rows)} row counts"
         )
     measurements: list[dict[str, Any]] = []
-    for expected_case, (median_ns, actual_name), row_count in zip(expected, timings, rows):
+    for expected_case, (total_ns, repetitions, warmup, actual_name), row_count in zip(expected, timings, rows):
         if actual_name != expected_case["name"]:
             raise PerformanceFailure(
                 f"{suite.name}: expected measurement {expected_case['name']!r}, "
@@ -141,12 +186,25 @@ def parse_runner_output(output: str, suite: Path) -> dict[str, Any]:
         measurements.append(
             {
                 "name": actual_name,
-                "time_ms": median_ns / 1_000_000,
+                "total_ms": total_ns / 1_000_000,
+                "repetitions": repetitions,
+                "warmup": warmup,
                 "rows": row_count,
                 "max_regression_pct": expected_case["max_regression_pct"],
             }
         )
     return {"schema_version": 1, "measurements": measurements}
+
+
+def write_workload_baseline(tree: Path, suite: Path, suite_id: str) -> None:
+    """Give both revisions the same trusted row counts without timing allowances."""
+    baseline = {
+        case["name"]: {"rows": case["rows"]}
+        for case in performance_cases(suite, suite_id)
+    }
+    with (tree / ".perf_baseline.json").open("w", encoding="utf-8") as handle:
+        json.dump(baseline, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 def compare_measurements(
@@ -164,15 +222,20 @@ def compare_measurements(
         baseline = base[identity]
         current = candidate[identity]
         try:
-            base_ms = float(baseline["time_ms"])
-            candidate_ms = float(current["time_ms"])
+            base_total_ms = float(baseline["total_ms"])
+            candidate_total_ms = float(current["total_ms"])
+            base_repetitions = int(baseline["repetitions"])
+            candidate_repetitions = int(current["repetitions"])
+            base_warmup = int(baseline["warmup"])
+            candidate_warmup = int(current["warmup"])
             max_regression_pct = float(baseline["max_regression_pct"])
             base_rows = int(baseline["rows"])
             candidate_rows = int(current["rows"])
         except (KeyError, TypeError, ValueError) as exc:
             errors.append(f"{identity}: invalid numeric measurement: {exc}")
             continue
-        if base_ms <= 0 or candidate_ms <= 0:
+        if (base_total_ms <= 0 or candidate_total_ms <= 0
+                or base_repetitions < 1 or candidate_repetitions < 1):
             errors.append(f"{identity}: timings must be greater than zero")
             continue
         if not 10 <= max_regression_pct <= 30:
@@ -185,8 +248,14 @@ def compare_measurements(
             )
             continue
 
+        base_ms = base_total_ms / base_repetitions
+        candidate_ms = candidate_total_ms / candidate_repetitions
+        warmup_bonus_pct = (
+            100.0 if base_warmup > 0 and candidate_warmup == 0 else 0.0
+        )
+        allowed_pct = max_regression_pct + warmup_bonus_pct
         ratio = candidate_ms / base_ms
-        allowed_ratio = 1.0 + max_regression_pct / 100.0
+        allowed_ratio = 1.0 + allowed_pct / 100.0
         regressed = ratio > allowed_ratio
         comparison = {
             "id": identity,
@@ -194,6 +263,11 @@ def compare_measurements(
             "candidate_ms": candidate_ms,
             "ratio": ratio,
             "max_regression_pct": max_regression_pct,
+            "warmup_bonus_pct": warmup_bonus_pct,
+            "base_repetitions": base_repetitions,
+            "candidate_repetitions": candidate_repetitions,
+            "base_warmup": base_warmup,
+            "candidate_warmup": candidate_warmup,
             "regressed": regressed,
             "rows": base_rows,
         }
@@ -201,7 +275,7 @@ def compare_measurements(
         if regressed:
             errors.append(
                 f"{identity}: {candidate_ms:.3f}ms is {(ratio - 1) * 100:.1f}% slower "
-                f"than {base_ms:.3f}ms (allowed {max_regression_pct:g}%)"
+                f"than {base_ms:.3f}ms per repetition (allowed {allowed_pct:g}%)"
             )
     return comparisons, errors
 
@@ -210,6 +284,7 @@ def run_suite(
     tree: Path,
     runner: Path,
     suite: Path,
+    suite_id: str,
     samples: int,
     timeout: int,
 ) -> dict[str, Any]:
@@ -217,10 +292,11 @@ def run_suite(
     environment.update(
         {
             "PERF_TEST": "1",
-            "PERF_CALIBRATE": "1",
+            "PERF_NORECALIBRATE": "1",
             "PERF_REPEAT": str(samples),
         }
     )
+    write_workload_baseline(tree, suite, suite_id)
     command = [sys.executable, str(runner), str(suite), "--log-times"]
     completed = subprocess.run(
         command,
@@ -237,7 +313,7 @@ def run_suite(
         raise PerformanceFailure(
             f"{tree.name}: {suite.name} failed with exit code {completed.returncode}"
         )
-    return parse_runner_output(completed.stdout, suite)
+    return parse_runner_output(completed.stdout, suite, suite_id)
 
 
 def parse_args() -> argparse.Namespace:
@@ -288,10 +364,12 @@ def main() -> int:
         )
         for tree, destination, label in order:
             print(f"\n=== {relative}: {label} ===", flush=True)
+            tree_suite = tree / relative
             payload = run_suite(
                 tree,
                 runner,
-                suite,
+                tree_suite,
+                relative,
                 args.samples,
                 args.suite_timeout,
             )
@@ -318,7 +396,8 @@ def main() -> int:
         print(
             f"{marker} {item['id']}: {item['base_ms']:.3f}ms -> "
             f"{item['candidate_ms']:.3f}ms ({(item['ratio'] - 1) * 100:+.1f}%, "
-            f"limit +{item['max_regression_pct']:g}%)"
+            f"limit +{item['max_regression_pct'] + item['warmup_bonus_pct']:g}%, "
+            f"{item['base_repetitions']} -> {item['candidate_repetitions']} repetitions)"
         )
     if errors:
         raise PerformanceFailure("\n".join(errors))

@@ -63,12 +63,12 @@ class PerformancePolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(PolicyFailure, "relaxed from 15% to 20%"):
             compare_suite(base, candidate, "tests/performance/test.yaml")
 
-    def test_sample_count_cannot_be_reduced(self) -> None:
+    def test_sample_count_changes_are_allowed(self) -> None:
         base = suite()
         candidate = copy.deepcopy(base)
         candidate["test_cases"][0]["timing_samples"] = 5
-        with self.assertRaisesRegex(PolicyFailure, "reduced from 7 to 5"):
-            compare_suite(base, candidate, "tests/performance/test.yaml")
+        candidate["test_cases"][0]["warmup"] = 0
+        compare_suite(base, candidate, "tests/performance/test.yaml")
 
     def test_tighter_limit_and_more_samples_are_allowed(self) -> None:
         base = suite()

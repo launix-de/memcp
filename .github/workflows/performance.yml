@@ -54,15 +54,17 @@ jobs:
         run: |
           harness=base/tools/perf_ab.py
           harness_tests=base/tools/test_perf_ab.py
+          runner=base/run_sql_tests.py
           if [ ! -f "$harness" ]; then
             harness=candidate/tools/perf_ab.py
             harness_tests=candidate/tools/test_perf_ab.py
+            runner=candidate/run_sql_tests.py
           fi
           python3 "$harness_tests"
           python3 "$harness" \
             --base-tree base \
             --candidate-tree candidate \
-            --runner base/run_sql_tests.py \
+            --runner "$runner" \
             --samples 5 \
             --output perf-results.json
 

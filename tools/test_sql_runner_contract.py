@@ -49,6 +49,7 @@ from run_sql_tests import (  # noqa: E402
     publish_performance_scale,
     request_shared_supervisor_restart,
     resolve_timing_samples,
+    resolve_warmup_runs,
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
     sql_request_is_retry_safe,
@@ -58,16 +59,25 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
-    def test_timing_samples_default_and_explicit_median(self) -> None:
+    def test_timing_samples_default_and_explicit_repetitions(self) -> None:
         self.assertEqual(resolve_timing_samples({}, False), 1)
         self.assertEqual(resolve_timing_samples({}, True), 5)
         self.assertEqual(resolve_timing_samples({"timing_samples": 3}, False), 3)
+        self.assertEqual(resolve_timing_samples({"timing_samples": 100}, True), 100)
+        self.assertEqual(resolve_timing_samples({"repetitions": 100}, True), 100)
 
-    def test_timing_samples_rejects_ambiguous_or_empty_samples(self) -> None:
-        for invalid in (True, 0, 2, 2.5, "3"):
+    def test_timing_samples_rejects_invalid_or_empty_samples(self) -> None:
+        for invalid in (True, 0, -1, 2.5, "3"):
             with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(ValueError, "positive odd integer"):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
                     resolve_timing_samples({"timing_samples": invalid}, False)
+
+    def test_warmup_is_a_run_count_with_boolean_compatibility(self) -> None:
+        self.assertEqual(resolve_warmup_runs({}, True), 2)
+        self.assertEqual(resolve_warmup_runs({"warmup": True}, True), 2)
+        self.assertEqual(resolve_warmup_runs({"warmup": 1}, True), 1)
+        self.assertEqual(resolve_warmup_runs({"warmup": 0}, True), 0)
+        self.assertEqual(resolve_warmup_runs({}, False), 0)
 
     def test_cold_planner_budget_allows_bounded_measurement_jitter(self) -> None:
         self.assertEqual(PLANNER_TIME_TOLERANCE_FACTOR, 1.2)

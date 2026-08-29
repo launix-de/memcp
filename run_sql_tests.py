@@ -314,11 +314,29 @@ def scaled_compile_time_limit_ms(reference_ms: float, calibration: Dict[str, Any
 
 
 def resolve_timing_samples(test_case: Dict[str, Any], is_perf_test: bool) -> int:
-    """Return an odd sample count so the timed result has an unambiguous median."""
+    """Return the number of measured query repetitions."""
     default = PERF_REPEAT if is_perf_test else 1
-    raw = test_case.get("timing_samples", default)
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1 or raw % 2 == 0:
-        raise ValueError("timing_samples must be a positive odd integer")
+    has_samples = "timing_samples" in test_case
+    has_repetitions = "repetitions" in test_case
+    if has_samples and has_repetitions:
+        raise ValueError("use either timing_samples or repetitions, not both")
+    raw = test_case.get("repetitions", test_case.get("timing_samples", default))
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("timing_samples/repetitions must be a positive integer")
+    return raw
+
+
+def resolve_warmup_runs(test_case: Dict[str, Any], is_perf_test: bool) -> int:
+    """Return the number of unmeasured runs before a performance measurement."""
+    if not is_perf_test:
+        return 0
+    raw = test_case.get("warmup", 2)
+    if raw is True:
+        return 2
+    if raw is False:
+        return 0
+    if not isinstance(raw, int) or raw < 0:
+        raise ValueError("warmup must be a non-negative integer or boolean")
     return raw
 
 
@@ -1290,9 +1308,13 @@ class SQLTestRunner:
                                                      f"Query plan too large (compile-time blowup): {plan_size} chars > {plan_size_limit}",
                                                      query, explain_resp, test_case.get("expect"), is_noncritical, on_fail_diag=diag)
 
-            # Warmup runs for performance tests (2 unmeasured runs before the measured one)
-            if is_perf_test and test_case.get("warmup", True):
-                for _ in range(2):
+            # Warmup runs are deliberately outside the measured repetition total.
+            try:
+                warmup_runs = resolve_warmup_runs(test_case, is_perf_test)
+            except ValueError as exc:
+                return self._record_fail(name, str(exc), query, None, None, is_noncritical)
+            if warmup_runs:
+                for _ in range(warmup_runs):
                     self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
 
             # Get memcp PID and start CPU measurement for perf tests
@@ -1306,9 +1328,9 @@ class SQLTestRunner:
                 repeat = resolve_timing_samples(test_case, is_perf_test)
             except ValueError as exc:
                 return self._record_fail(name, str(exc), query, None, None, is_noncritical)
-            if "timing_samples" in test_case and not query.lstrip().upper().startswith("SELECT"):
+            if ("timing_samples" in test_case or "repetitions" in test_case) and not query.lstrip().upper().startswith("SELECT"):
                 return self._record_fail(
-                    name, "timing_samples is only supported for SELECT queries",
+                    name, "timing_samples/repetitions is only supported for SELECT queries",
                     query, None, None, is_noncritical,
                 )
             samples_ns: list = []
@@ -1330,7 +1352,7 @@ class SQLTestRunner:
 
             if self.log_times:
                 min_ns, max_ns = samples_ns[0], samples_ns[-1]
-                print(f"QUERY_TIME median_ns={elapsed_ns} min_ns={min_ns} max_ns={max_ns} n={len(samples_ns)} name={name}")
+                print(f"QUERY_TIME median_ns={elapsed_ns} total_ns={sum(samples_ns)} min_ns={min_ns} max_ns={max_ns} n={len(samples_ns)} warmup={warmup_runs} name={name}")
 
             # End CPU measurement
             end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None

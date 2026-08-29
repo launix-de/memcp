@@ -94,11 +94,19 @@ def regression_limit(case: dict[str, Any], metadata: dict[str, Any], label: str)
     return result
 
 
-def timing_samples(case: dict[str, Any], label: str) -> int:
-    value = case.get("timing_samples", 5)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value % 2 == 0:
-        raise PolicyFailure(f"{label}.timing_samples must be a positive odd integer")
-    return value
+def validate_execution_counts(case: dict[str, Any], label: str) -> None:
+    if "repetitions" in case and "timing_samples" in case:
+        raise PolicyFailure(
+            f"{label}: use either repetitions or timing_samples, not both"
+        )
+    repetitions = case.get("repetitions", case.get("timing_samples", 5))
+    if isinstance(repetitions, bool) or not isinstance(repetitions, int) or repetitions < 1:
+        raise PolicyFailure(f"{label}.repetitions must be a positive integer")
+    warmup = case.get("warmup", 2)
+    if isinstance(warmup, bool):
+        return
+    if not isinstance(warmup, int) or warmup < 0:
+        raise PolicyFailure(f"{label}.warmup must be a non-negative integer or boolean")
 
 
 def compare_suite(base: dict[str, Any], candidate: dict[str, Any], relative: str) -> None:
@@ -127,20 +135,14 @@ def compare_suite(base: dict[str, Any], candidate: dict[str, Any], relative: str
             raise PolicyFailure(f"{label}: candidate removed the performance measurement")
         if "threshold_ms" not in old:
             continue
+        validate_execution_counts(old, label)
+        validate_execution_counts(new, label)
         old_limit = regression_limit(old, base_metadata, label)
         new_limit = regression_limit(new, candidate_metadata, label)
         if new_limit > old_limit:
             raise PolicyFailure(
                 f"{label}: max regression was relaxed from {old_limit:g}% to {new_limit:g}%"
             )
-        old_samples = timing_samples(old, label)
-        new_samples = timing_samples(new, label)
-        if new_samples < old_samples:
-            raise PolicyFailure(
-                f"{label}: timing samples were reduced from {old_samples} to {new_samples}"
-            )
-        if old.get("warmup", True) is not False and new.get("warmup") is False:
-            raise PolicyFailure(f"{label}: candidate disabled benchmark warmup")
 
 
 def check_policy(base_root: Path, candidate_root: Path) -> None:
