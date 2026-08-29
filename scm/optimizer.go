@@ -2157,13 +2157,13 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 				v[i] = unwrapConstListFromCode(v[i])
 			}
 			result := d.Fn(v[1:]...)
-			result = wrapConstListForCode(result)
 			td := &TypeDescriptor{Transfer: true, Const: true, Length: UnknownLength}
 			if d.Type != nil && d.Type.Return != nil {
 				td = &TypeDescriptor{Transfer: true, Const: true, Kind: d.Type.Return.Kind,
 					Params: d.Type.Return.Params, Return: d.Type.Return.Return,
 					HasSideEffects: d.Type.Return.HasSideEffects, Length: d.Type.Return.Length}
 			}
+			result = wrapConstListForCode(result, td, false)
 			return result, td
 		}
 		if d.Type != nil && d.Type.Return != nil {
@@ -2261,19 +2261,26 @@ func (oc *OptimizerContext) applyDefaultOptimizationWithTypes(v []Scmer, useResu
 	return optimizedCall{code: code, typeInfo: typeInfo, argumentTypes: argumentTypes}
 }
 
+const constListQuoteThreshold = 32
+
 // wrapConstListForCode wraps a constant-folded Scmer value so it can safely
 // be embedded in generated code. Raw list/slice values would be misinterpreted
-// as function calls by Eval, so they are wrapped as (list ...) calls recursively.
-// Symbols are wrapped in (quote sym) so they evaluate to the symbol value rather
-// than being looked up as variable references.
+// as function calls by Eval. The optimizer's return descriptor is authoritative:
+// large constant lists are retained behind one non-transferable quote. Symbols are
+// also quoted so they evaluate to the symbol value rather than being looked up
+// as variable references.
 // Only wraps plain slices — FastDicts are left as-is since they are self-evaluating.
-func wrapConstListForCode(val Scmer) Scmer {
+func wrapConstListForCode(val Scmer, resultType *TypeDescriptor, embedded bool) Scmer {
 	if val.IsSlice() {
+		if !embedded && resultType != nil && resultType.Const && len(val.Slice()) >= constListQuoteThreshold {
+			resultType.Transfer = false
+			return NewSlice([]Scmer{NewSymbol("quote"), val})
+		}
 		list := val.Slice()
 		packed := make([]Scmer, 1, len(list)+1)
 		packed[0] = NewSymbol("list")
 		for _, elem := range list {
-			packed = append(packed, wrapConstListForCode(elem))
+			packed = append(packed, wrapConstListForCode(elem, resultType, true))
 		}
 		return NewSlice(packed)
 	}
@@ -2283,10 +2290,13 @@ func wrapConstListForCode(val Scmer) Scmer {
 	return val
 }
 
-// unwrapConstListFromCode is the inverse of wrapConstListForCode: it recursively
-// strips (list ...) wrappers so that the raw data values can be passed to a
-// foldable function at constant-fold time.
+// unwrapConstListFromCode is the inverse of wrapConstListForCode: it extracts
+// quoted values and still accepts the legacy recursive (list ...) encoding so
+// that raw data values can be passed to a foldable function at constant-fold time.
 func unwrapConstListFromCode(val Scmer) Scmer {
+	if list, ok := scmerSlice(val); ok && len(list) == 2 && scmerIsSymbol(list[0], "quote") {
+		return list[1]
+	}
 	if list, ok := scmerSlice(val); ok && len(list) > 0 && (isList(list[0]) || scmerIsSymbol(list[0], "list")) {
 		items := make([]Scmer, len(list)-1)
 		for i, elem := range list[1:] {
