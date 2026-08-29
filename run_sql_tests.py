@@ -1568,7 +1568,7 @@ class SQLTestRunner:
                 f"PERF_AB {name}: {float(baseline_time):.3f}ms -> "
                 f"{elapsed_ms:.3f}ms per repetition ({change_pct:+.1f}%)"
             )
-        if is_perf_test and elapsed_ms > threshold_ms:
+        if is_perf_test and PERF_AB_MODE != "record" and elapsed_ms > threshold_ms:
             diag = self._run_on_fail(test_case, database)
             return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
                                      test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
@@ -1890,6 +1890,12 @@ class SQLTestRunner:
                         test_cases.append(expanded)
             else:
                 test_cases.append(tc)
+
+        if PERF_AB_MODE:
+            test_cases = [
+                test_case for test_case in test_cases
+                if "threshold_ms" in test_case
+            ]
 
         # Preserve declared concurrency in every mode. Fail-fast stops only
         # after the complete parallel group containing the first failure.

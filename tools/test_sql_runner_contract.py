@@ -398,6 +398,24 @@ class AtomicJSONObserverContractTest(unittest.TestCase):
 
 
 class FailFastParallelContractTest(unittest.TestCase):
+    def test_ab_mode_skips_non_measurement_cases_in_performance_suite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "performance.yaml"
+            spec.write_text(
+                "metadata: {description: A/B selection}\n"
+                "test_cases:\n"
+                "  - {name: correctness helper, sql: SELECT 1}\n"
+                "  - {name: measured query, sql: SELECT 1, threshold_ms: 30000}\n",
+                encoding="utf-8",
+            )
+            runner = SQLTestRunner("http://localhost:1")
+            runner.ensure_database = lambda _database: None
+            observed = []
+            runner.run_test_case = lambda case, _database: observed.append(case["name"]) or True
+            with mock.patch("run_sql_tests.PERF_AB_MODE", "record"):
+                self.assertTrue(runner.run_test_spec(str(spec)))
+        self.assertEqual(observed, ["measured query"])
+
     def test_performance_suite_setups_finish_before_measurement_phase(self) -> None:
         specs = ["tests/performance/a.yaml", "tests/performance/b.yaml"]
         barrier = threading.Barrier(2)
