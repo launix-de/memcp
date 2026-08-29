@@ -1,0 +1,399 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Performance regressions for ordered LIKE searches combined with a compound
+# correlated ACL. The performance CI runner executes this suite explicitly;
+# ordinary SQL CI must not pay for the production-scale fixture.
+
+metadata:
+  version: "1.0"
+  description: "Ordered direct and projected LIKE searches with compound ACLs"
+  isolated: true
+  ci: false
+
+fixture_setup: &like_acl_fixture
+  - sql: "DROP TABLE IF EXISTS pla_assignment"
+  - sql: "DROP TABLE IF EXISTS pla_override"
+  - sql: "DROP TABLE IF EXISTS pla_document"
+  - sql: "DROP TABLE IF EXISTS pla_file"
+  - sql: "DROP TABLE IF EXISTS pla_site"
+  - sql: "CREATE TABLE pla_site (id INT PRIMARY KEY, direct_flag INT) ENGINE=sloppy"
+  - sql: "CREATE TABLE pla_assignment (site_id INT, actor_id INT, allowed INT) ENGINE=sloppy"
+  - sql: "CREATE TABLE pla_override (site_id INT, actor_id INT, allowed INT) ENGINE=sloppy"
+  - sql: |
+      CREATE TABLE pla_file (
+        id INT PRIMARY KEY,
+        filename VARCHAR(255),
+        search_text VARCHAR(1024)
+      ) ENGINE=sloppy
+  - sql: |
+      CREATE TABLE pla_document (
+        id INT PRIMARY KEY,
+        site_id INT,
+        tenant_id INT,
+        file_id INT,
+        inventory_no VARCHAR(64),
+        sort_key INT
+      ) ENGINE=sloppy
+  - scm: |
+      (begin
+        (define file_count (max 100 (floor (/ {rows} 2))))
+        (insert (table "memcp-tests" "pla_site") '("id" "direct_flag")
+          (map (produceN 64) (lambda (i)
+            (list i (if (equal? (mod i 16) 0) 1 0)))))
+        (insert (table "memcp-tests" "pla_assignment") '("site_id" "actor_id" "allowed")
+          (map (produceN 32) (lambda (i) (list (* i 2) 7 1))))
+        (insert (table "memcp-tests" "pla_override") '("site_id" "actor_id" "allowed")
+          (map (produceN 22) (lambda (i) (list (* i 3) 7 1))))
+        (insert (table "memcp-tests" "pla_file") '("id" "filename" "search_text")
+          (map (produceN file_count) (lambda (i)
+            (list i
+              (if (equal? (mod i 100) 0)
+                (concat "rare-document-file-" (string i))
+                (if (equal? (mod i 5) 0)
+                  (concat "common-document-file-" (string i))
+                  (concat "ordinary-file-" (string i))))
+              (concat
+                (string_repeat
+                  (if (equal? (mod i 128) 0)
+                    "rare-document-text-"
+                    (if (equal? (mod i 7) 0) "common-document-text-" "ordinary-text-"))
+                  8)
+                (string i))))))
+        (insert (table "memcp-tests" "pla_document")
+          '("id" "site_id" "tenant_id" "file_id" "inventory_no" "sort_key")
+          (map (produceN {rows}) (lambda (i)
+            (list i (mod i 64) (mod i 32) (mod i file_count)
+              (if (equal? (mod i 100) 0)
+                (concat "inv-special-" (string i))
+                (if (equal? (mod i 4) 0)
+                  (concat "inv-common-" (string i))
+                  (concat "inventory-" (string i))))
+              i))))
+        (rebuild))
+  # Warm the two adaptive substring hooks used by the projected search. The
+  # measured cases still warm their complete query plan independently.
+  - sql: "SELECT id FROM pla_file WHERE filename LIKE '%common-document%'"
+  - sql: "SELECT id FROM pla_file WHERE search_text LIKE '%common-document%'"
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS pla_assignment"
+  - sql: "DROP TABLE IF EXISTS pla_override"
+  - sql: "DROP TABLE IF EXISTS pla_document"
+  - sql: "DROP TABLE IF EXISTS pla_file"
+  - sql: "DROP TABLE IF EXISTS pla_site"
+
+test_cases:
+  - name: "Perf: ordered direct LIKE no-hit with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT d.*
+      FROM pla_document d
+      WHERE d.inventory_no LIKE '%definitely-absent-token%'
+        AND COALESCE((
+          SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pla_assignment assignment
+              WHERE assignment.site_id = site.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pla_override override
+              WHERE override.site_id = site.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pla_site site
+          WHERE site.id = d.site_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      rows: 0
+
+  - name: "Perf: ordered selective direct LIKE with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT d.*
+      FROM pla_document d
+      WHERE d.inventory_no LIKE '%inv-special%'
+        AND COALESCE((
+          SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pla_assignment assignment
+              WHERE assignment.site_id = site.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pla_override override
+              WHERE override.site_id = site.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pla_site site
+          WHERE site.id = d.site_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      rows: 72
+
+  - name: "Perf: ordered broad direct LIKE with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT d.*
+      FROM pla_document d
+      WHERE d.inventory_no LIKE '%inv-common%'
+        AND COALESCE((
+          SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pla_assignment assignment
+              WHERE assignment.site_id = site.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pla_override override
+              WHERE override.site_id = site.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pla_site site
+          WHERE site.id = d.site_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      rows: 72
+
+  - name: "Perf: ordered projected LIKE no-hit with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT d.*
+      FROM pla_document d
+      WHERE d.file_id IN (
+        SELECT filename_file.id
+        FROM pla_file filename_file
+        WHERE filename_file.filename LIKE '%definitely-absent-token%'
+        UNION
+        SELECT search_file.id
+        FROM pla_file search_file
+        WHERE search_file.search_text LIKE '%definitely-absent-token%'
+      )
+        AND COALESCE((
+          SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pla_assignment assignment
+              WHERE assignment.site_id = site.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pla_override override
+              WHERE override.site_id = site.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pla_site site
+          WHERE site.id = d.site_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      rows: 0
+
+  - name: "Perf: ordered broad projected LIKE with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT d.*
+      FROM pla_document d
+      WHERE d.file_id IN (
+        SELECT filename_file.id
+        FROM pla_file filename_file
+        WHERE filename_file.filename LIKE '%common-document%'
+        UNION
+        SELECT search_file.id
+        FROM pla_file search_file
+        WHERE search_file.search_text LIKE '%common-document%'
+      )
+        AND COALESCE((
+          SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pla_assignment assignment
+              WHERE assignment.site_id = site.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pla_override override
+              WHERE override.site_id = site.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pla_site site
+          WHERE site.id = d.site_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      rows: 72
+
+  - name: "Perf: ordered selective projected LIKE with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT d.*
+      FROM pla_document d
+      WHERE d.file_id IN (
+        SELECT filename_file.id
+        FROM pla_file filename_file
+        WHERE filename_file.filename LIKE '%rare-document%'
+        UNION
+        SELECT search_file.id
+        FROM pla_file search_file
+        WHERE search_file.search_text LIKE '%rare-document%'
+      )
+        AND COALESCE((
+          SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pla_assignment assignment
+              WHERE assignment.site_id = site.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pla_override override
+              WHERE override.site_id = site.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pla_site site
+          WHERE site.id = d.site_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      rows: 72
+
+  - name: "Perf: tenant-prefiltered projected LIKE with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT d.*
+      FROM pla_document d
+      WHERE d.tenant_id = 24
+        AND d.file_id IN (
+          SELECT filename_file.id
+          FROM pla_file filename_file
+          WHERE filename_file.filename LIKE '%common-document%'
+          UNION
+          SELECT search_file.id
+          FROM pla_file search_file
+          WHERE search_file.search_text LIKE '%common-document%'
+        )
+        AND COALESCE((
+          SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+            EXISTS (
+              SELECT TRUE
+              FROM pla_assignment assignment
+              WHERE assignment.site_id = site.id
+                AND assignment.actor_id = 7
+                AND assignment.allowed = 1
+              LIMIT 1
+            ) OR COALESCE((
+              SELECT override.allowed
+              FROM pla_override override
+              WHERE override.site_id = site.id
+                AND override.actor_id = 7
+              LIMIT 1
+            ), FALSE)
+          ) END
+          FROM pla_site site
+          WHERE site.id = d.site_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY d.sort_key DESC
+      LIMIT 72
+    expect:
+      rows: 72
+
+  - name: "Perf: exact projected LIKE count with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM (
+        SELECT d.id
+        FROM pla_document d
+        WHERE d.file_id IN (
+          SELECT filename_file.id
+          FROM pla_file filename_file
+          WHERE filename_file.filename LIKE '%common-document%'
+          UNION
+          SELECT search_file.id
+          FROM pla_file search_file
+          WHERE search_file.search_text LIKE '%common-document%'
+        )
+          AND COALESCE((
+            SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+              EXISTS (
+                SELECT TRUE
+                FROM pla_assignment assignment
+                WHERE assignment.site_id = site.id
+                  AND assignment.actor_id = 7
+                  AND assignment.allowed = 1
+                LIMIT 1
+              ) OR COALESCE((
+                SELECT override.allowed
+                FROM pla_override override
+                WHERE override.site_id = site.id
+                  AND override.actor_id = 7
+                LIMIT 1
+              ), FALSE)
+            ) END
+            FROM pla_site site
+            WHERE site.id = d.site_id
+            LIMIT 1
+          ), FALSE)
+          AND TRUE
+      ) counted
+    expect:
+      rows: 1
