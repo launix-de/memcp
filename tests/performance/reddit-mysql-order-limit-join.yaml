@@ -1,0 +1,97 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Reproduction of https://www.reddit.com/r/mysql/comments/fl03ml/filesort_fixedadded_when_addingremoving_2_bits_of/
+# at the cardinalities stated in the post. The fixture retains MemCP's default
+# shard size and delegates physical partitioning to rebuild.
+
+metadata:
+  version: "1.0"
+  description: "Reddit MySQL ordered filtered join at original cardinality"
+  isolated: true
+  ci: false
+
+setup:
+  - sql: "DROP TABLE IF EXISTS reddit_mysql_test2"
+  - sql: "DROP TABLE IF EXISTS reddit_mysql_account"
+  - sql: "CREATE TABLE reddit_mysql_account (id INT PRIMARY KEY, age INT, gender VARCHAR(8)) ENGINE=memory"
+  - sql: "CREATE TABLE reddit_mysql_test2 (id INT PRIMARY KEY, account_id INT, active BOOLEAN) ENGINE=memory"
+  - scm: |
+      (insert (table "memcp-tests" "reddit_mysql_account") '("id" "age" "gender")
+        (map (produceN 700000) (lambda (i)
+          (list (+ i 1) (+ 10 (mod i 80))
+            (if (equal? (mod i 2) 0) "MALE" "FEMALE")))))
+  - scm: |
+      (insert (table "memcp-tests" "reddit_mysql_test2") '("id" "account_id" "active")
+        (map (produceN 1000000) (lambda (i)
+          (list (+ i 1) (+ 1 (mod i 700000))
+            (not (equal? (mod i 3) 0))))))
+  - scm: "(rebuild)"
+
+test_cases:
+  # A/B on the original-scale fixture with identical six-column output and
+  # result hashes, warm PR-647 runs on the reference host: forced legacy join
+  # median 682 ms; forced scan_join_order median 514 ms; automatic 523 ms.
+  - name: "Reddit MySQL original query"
+    physical_calibration: true
+    calibration_holdout: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
+    threshold_ms: 180000
+    sql: |
+      SELECT t.*, a.*
+      FROM reddit_mysql_test2 t
+      JOIN reddit_mysql_account a ON t.account_id = a.id
+      WHERE t.id > 0
+        AND t.active = TRUE
+        AND a.age BETWEEN 18 AND 80
+        AND a.gender = 'MALE'
+      ORDER BY t.id DESC
+      LIMIT 20
+    expect: {rows: 20}
+
+  - name: "Reddit MySQL plan costs both ordered join strategies"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT t.*, a.*
+      FROM reddit_mysql_test2 t
+      JOIN reddit_mysql_account a ON t.account_id = a.id
+      WHERE t.id > 0
+        AND t.active = TRUE
+        AND a.age BETWEEN 18 AND 80
+        AND a.gender = 'MALE'
+      ORDER BY t.id DESC
+      LIMIT 20
+    expect:
+      rows: 1
+      result_contains:
+        - "chosen scan_join_order"
+        - "scan_join_order"
+        - "legacy_join_tree"
+        - "lowest_total_ns"
+
+  - name: "Reddit MySQL handwritten scan_join_order"
+    timing_samples: 5
+    scm: |
+      (begin
+        (define found
+          (scan_join_order (session "__memcp_tx")
+            (list
+              (table "memcp-tests" "reddit_mysql_test2")
+              (table "memcp-tests" "reddit_mysql_account"))
+            (list (list "id" "active") (list "age" "gender"))
+            (list
+              (lambda (id active) (and (> id 0) (equal? active true)))
+              (lambda (age gender)
+                (and (and (>= age 18) (<= age 80)) (equal? gender "MALE"))))
+            (list (list (list 0 "account_id" "id")))
+            (list) nil
+            (list (list 0 "id")) (list >)
+            0 0 20
+            (list (list 0 "id"))
+            (lambda (_id) 1) + 0))
+        (if (equal? found 20) "ok" (error "wrong scan_join_order row count")))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS reddit_mysql_test2"
+  - sql: "DROP TABLE IF EXISTS reddit_mysql_account"

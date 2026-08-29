@@ -1895,11 +1895,11 @@ physical decision: the logical window-stage remains independent of scan/ORC. */
 (define replace_window_offset_expr (lambda (src replacements expr)
 	(match expr
 		((symbol get_column) tblvar tbl_ignorecase column col_ignorecase)
-			(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
-				(qassoc_get replacements column expr) expr)
+		(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			(qassoc_get replacements column expr) expr)
 		((quote get_column) tblvar tbl_ignorecase column col_ignorecase)
-			(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
-				(qassoc_get replacements column expr) expr)
+		(if (source_alias_matches? src (source_alias src) tblvar tbl_ignorecase)
+			(qassoc_get replacements column expr) expr)
 		(cons head tail) (cons head (map tail (lambda (item)
 			(replace_window_offset_expr src replacements item))))
 		_ expr)))
@@ -4488,6 +4488,16 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 						(table (source_schema src) (source_relation src)) col))))
 			_ nil))))
 
+(define ordered_join_lookup_values_required? (lambda (remaining_sources default_alias output_exprs order_items)
+	(if (empty_list? remaining_sources)
+		false
+		(begin
+			(define lookup_alias (source_alias (car remaining_sources)))
+			(or (reduce output_exprs (lambda (found expr)
+				(or found (expr_refs_alias? default_alias lookup_alias expr))) false)
+				(reduce order_items (lambda (found item)
+					(or found (expr_refs_alias? default_alias lookup_alias item))) false))))))
+
 (define ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
 	(if (or (not (single_source? remaining_sources))
 		(or (source_outer? src) (source_outer? (car remaining_sources))))
@@ -4939,9 +4949,9 @@ until the caller has selected this physical alternative. */
 		column reaches projection, the lookup is semantically dead after the carrier
 		is built. Keeping it would repeat the filtered relation scan for each Top-K
 		row even though the projected RecSet already proved existence. */
-		(define projected_join_lookup_output_required (reduce output_exprs (lambda (found expr)
-			(or found (expr_refs_alias? default_alias
-				(source_alias (car remaining_sources)) expr))) false))
+		(define projected_join_lookup_output_required
+			(ordered_join_lookup_values_required?
+				remaining_sources default_alias output_exprs remaining_order_items))
 		(define projected_join_projection_elidable (and projected_join_exact
 			(and (empty_list? remaining_order_items)
 				(not projected_join_lookup_output_required))))
@@ -5187,6 +5197,9 @@ until the caller has selected this physical alternative. */
 				driver cardinality; otherwise the complete ordered input remains live. */
 				(define legacy_probe_rows (if (nil? projected_legacy_cost)
 					driver_input_rows (cadr projected_legacy_cost)))
+				(define legacy_lookup_values_required
+					(ordered_join_lookup_values_required?
+						(cdr sources) default_alias output_exprs order_items))
 				(define legacy_base_cost (if (nil? projected_legacy_cost)
 					/* The DP join cost does not include the ordered root scan that this
 					lowerer adds. Use Costgen's scan_order invocation calibration; a
@@ -5197,7 +5210,13 @@ until the caller has selected this physical alternative. */
 						legacy_probe_rows 0.65)
 					(car projected_legacy_cost)))
 				(define legacy_cost (planner_cost_add legacy_base_cost
-					(planner_join_work_cost legacy_probe_rows 0.65)
+					/* Each surviving ordered-driver row starts the complete downstream
+					lookup pipeline. Price that physical scan boundary with Costgen's
+					generated probe coefficient only when lookup values remain live.
+					An exact carrier-only projection has no downstream scan to charge. */
+					(if (or (nil? projected_legacy_cost) legacy_lookup_values_required)
+						(planner_membership_downstream_probe_cost legacy_probe_rows)
+						(planner_cost 0 0 0 0 0 0 0 0 0 0.65))
 					(coalesceNil joined_rows legacy_probe_rows) 0.65))
 				(define normal_choice (if (planner_cost_better? scan_cost legacy_cost)
 					"scan_join_order" "legacy_join_tree"))
