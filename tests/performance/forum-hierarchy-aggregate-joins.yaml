@@ -1,0 +1,279 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
+metadata:
+  version: "1.0"
+  description: "Forum hierarchy lookup with per-forum child and thread aggregates"
+  isolated: true
+  ci: false
+
+# Reproduces https://www.reddit.com/r/mysql/comments/1l0ceun/having_trouble_understanding_the_problem_point_in/
+# at the reported 10k-forum/33k-thread scale. Median A/B on the x86_64
+# reference host: 4,077ms before direct grouped joins, 8.9ms afterwards.
+
+setup:
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_users"
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_posts"
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_threads"
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_forums"
+  - sql: "CREATE TABLE forum_hierarchy_forums (forumID INT PRIMARY KEY, title VARCHAR(64), description VARCHAR(64), forumType VARCHAR(16), parentID INT, heritage VARCHAR(128), `order` INT, gameID INT, threadCount INT) ENGINE=sloppy"
+  - sql: "CREATE TABLE forum_hierarchy_threads (threadID INT PRIMARY KEY, forumID INT, postCount INT, lastPostID INT) ENGINE=sloppy"
+  - sql: "CREATE TABLE forum_hierarchy_posts (postID INT PRIMARY KEY, authorID INT, datePosted BIGINT) ENGINE=sloppy"
+  - sql: "CREATE TABLE forum_hierarchy_users (userID INT PRIMARY KEY, username VARCHAR(32)) ENGINE=sloppy"
+  - scm: |
+      (insert (table "memcp-tests" "forum_hierarchy_forums")
+        '("forumID" "title" "description" "forumType" "parentID" "heritage" "order" "gameID" "threadCount")
+        (map (produceN 10000) (lambda (i)
+          (begin
+            (define id (+ i 1))
+            (list id (concat "Forum " (string id)) "Description" "forum"
+              (if (<= id 8) (- id 1) 0)
+              (if (<= id 8)
+                (nth '("/0001/" "/0001/0002/" "/0001/0002/0003/" "/0001/0002/0003/0004/" "/0001/0002/0003/0004/0005/" "/0001/0002/0003/0004/0005/0006/" "/0001/0002/0003/0004/0005/0006/0007/" "/0001/0002/0003/0004/0005/0006/0007/0008/") (- id 1))
+                (concat "/root/" (string id) "/"))
+              (mod id 100) (mod id 50) (mod id 17))))))
+  - scm: |
+      (insert (table "memcp-tests" "forum_hierarchy_threads")
+        '("threadID" "forumID" "postCount" "lastPostID")
+        (map (produceN 33669) (lambda (i)
+          (begin
+            (define id (+ i 1))
+            (list id (+ 1 (mod i 10000)) (+ 1 (mod i 40)) id)))))
+  - scm: |
+      (insert (table "memcp-tests" "forum_hierarchy_posts")
+        '("postID" "authorID" "datePosted")
+        (map (produceN 33669) (lambda (i)
+          (begin
+            (define id (+ i 1))
+            (list id (+ 1 (mod i 1000)) (+ 1700000000 id))))))
+  - scm: |
+      (insert (table "memcp-tests" "forum_hierarchy_users")
+        '("userID" "username")
+        (map (produceN 1000) (lambda (i)
+          (list (+ i 1) (concat "user" (string (+ i 1)))))))
+  - scm: "(rebuild)"
+  # Feed representative equality probes into the automatic partition scorer,
+  # then persist the selected layout. Shard size remains the production default.
+  - scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define forums (table "memcp-tests" "forum_hierarchy_forums"))
+        (define threads (table "memcp-tests" "forum_hierarchy_threads"))
+        (map (produceN 8) (lambda (i)
+          (begin
+            (define forum_id (+ i 1))
+            (scan tx forums '("parentID") (lambda (parentID) (equal?? parentID forum_id))
+              '() (lambda () 1) + 0 + false)
+            (scan tx threads '("forumID") (lambda (threadForumID) (equal?? threadForumID forum_id))
+              '("postCount") (lambda (postCount) postCount) + nil nil false)))))
+  - scm: "(rebuild)"
+
+test_cases:
+  # Persist the large prepared fixture before timing it. The production-sized
+  # benchmark is deliberately excluded from CI and should not charge lazy
+  # reload/finalization work to the SELECT under test.
+  - name: "Persist prepared forum hierarchy fixture"
+    sql: "SHUTDOWN"
+    expect: {rows: 0}
+
+  - name: "Hierarchy with child-count group only"
+    warmup: 1
+    timing_samples: 5
+    threshold_ms: 500
+    sql: |
+      SELECT f.forumID, cc.childCount
+      FROM forum_hierarchy_forums f
+      LEFT JOIN (
+        SELECT parentID AS forumID, COUNT(forumID) AS childCount
+        FROM forum_hierarchy_forums GROUP BY parentID
+      ) cc ON cc.forumID = f.forumID
+      INNER JOIN forum_hierarchy_forums p ON p.forumID = 8
+        AND p.heritage LIKE CONCAT(f.heritage, '%')
+      ORDER BY LENGTH(f.heritage)
+    expect: {rows: 8}
+
+  - name: "Hierarchy with thread group only"
+    warmup: 1
+    timing_samples: 5
+    threshold_ms: 500
+    sql: |
+      SELECT f.forumID, t.numPosts
+      FROM forum_hierarchy_forums f
+      INNER JOIN forum_hierarchy_forums p ON p.forumID = 8
+        AND p.heritage LIKE CONCAT(f.heritage, '%')
+      LEFT JOIN (
+        SELECT forumID, SUM(postCount) AS numPosts
+        FROM forum_hierarchy_threads GROUP BY forumID
+      ) t ON f.forumID = t.forumID
+      ORDER BY LENGTH(f.heritage)
+    expect: {rows: 8}
+
+  - name: "Grouped aggregate output without downstream join"
+    sql: |
+      SELECT f.forumID, t.maxPostID
+      FROM forum_hierarchy_forums f
+      LEFT JOIN (
+        SELECT forumID, MAX(lastPostID) AS maxPostID
+        FROM forum_hierarchy_threads
+        GROUP BY forumID
+      ) t ON f.forumID = t.forumID
+      WHERE f.forumID = 8
+    expect:
+      rows: 1
+      data:
+        - {forumID: 8, maxPostID: 30008}
+
+  - name: "Grouped aggregate output used by downstream join"
+    sql: |
+      SELECT f.forumID, t.maxPostID, lp.postID
+      FROM forum_hierarchy_forums f
+      LEFT JOIN (
+        SELECT forumID, MAX(lastPostID) AS maxPostID
+        FROM forum_hierarchy_threads
+        GROUP BY forumID
+      ) t ON f.forumID = t.forumID
+      LEFT JOIN forum_hierarchy_posts lp ON t.maxPostID = lp.postID
+      WHERE f.forumID = 8
+    expect:
+      rows: 1
+      data:
+        - {forumID: 8, maxPostID: 30008, postID: 30008}
+
+  - name: "Forum hierarchy with global aggregate subqueries"
+    warmup: 1
+    timing_samples: 5
+    threshold_ms: 500
+    sql: |
+      SELECT
+        f.forumID, f.title, f.description, f.forumType, f.parentID, f.heritage,
+        cc.childCount, f.`order`, f.gameID, f.threadCount,
+        t.numPosts AS postCount, t.lastPostID, u.userID, u.username, lp.datePosted
+      FROM forum_hierarchy_forums f
+      LEFT JOIN (
+        SELECT parentID AS forumID, COUNT(forumID) AS childCount
+        FROM forum_hierarchy_forums
+        GROUP BY parentID
+      ) cc ON cc.forumID = f.forumID
+      INNER JOIN forum_hierarchy_forums p ON p.forumID = 8
+        AND p.heritage LIKE CONCAT(f.heritage, '%')
+      LEFT JOIN (
+        SELECT forumID, SUM(postCount) AS numPosts, MAX(lastPostID) AS lastPostID
+        FROM forum_hierarchy_threads
+        GROUP BY forumID
+      ) t ON f.forumID = t.forumID
+      LEFT JOIN forum_hierarchy_posts lp ON t.lastPostID = lp.postID
+      LEFT JOIN forum_hierarchy_users u ON lp.authorID = u.userID
+      ORDER BY LENGTH(f.heritage)
+    expect: {rows: 8}
+
+  - name: "Forum hierarchy original physical plan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT f.forumID, cc.childCount, t.numPosts, t.lastPostID
+      FROM forum_hierarchy_forums f
+      LEFT JOIN (
+        SELECT parentID AS forumID, COUNT(forumID) AS childCount
+        FROM forum_hierarchy_forums
+        GROUP BY parentID
+      ) cc ON cc.forumID = f.forumID
+      INNER JOIN forum_hierarchy_forums p ON p.forumID = 8
+        AND p.heritage LIKE CONCAT(f.heritage, '%')
+      LEFT JOIN (
+        SELECT forumID, SUM(postCount) AS numPosts, MAX(lastPostID) AS lastPostID
+        FROM forum_hierarchy_threads
+        GROUP BY forumID
+      ) t ON f.forumID = t.forumID
+      ORDER BY LENGTH(f.heritage)
+    expect:
+      rows: 1
+      result_contains: ["physical", "direct_group_join", "chosen direct_group_join"]
+
+  - name: "Forum hierarchy with correlated aggregates after hierarchy filtering"
+    warmup: 1
+    timing_samples: 5
+    threshold_ms: 500
+    sql: |
+      SELECT
+        f.forumID, f.title, f.description, f.forumType, f.parentID, f.heritage,
+        (SELECT COUNT(*)
+          FROM forum_hierarchy_forums child
+          WHERE child.parentID = f.forumID) AS childCount,
+        f.`order`, f.gameID, f.threadCount,
+        (SELECT SUM(th.postCount)
+          FROM forum_hierarchy_threads th
+          WHERE th.forumID = f.forumID) AS postCount,
+        lp.postID AS lastPostID, u.userID, u.username, lp.datePosted
+      FROM forum_hierarchy_forums f
+      INNER JOIN forum_hierarchy_forums p ON p.forumID = 8
+        AND p.heritage LIKE CONCAT(f.heritage, '%')
+      LEFT JOIN forum_hierarchy_posts lp ON lp.postID = (
+        SELECT MAX(last_thread.lastPostID)
+        FROM forum_hierarchy_threads last_thread
+        WHERE last_thread.forumID = f.forumID
+      )
+      LEFT JOIN forum_hierarchy_users u ON lp.authorID = u.userID
+      ORDER BY LENGTH(f.heritage)
+    expect: {rows: 8}
+
+  - name: "Forum hierarchy correlated aggregate physical plan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT f.forumID,
+        (SELECT COUNT(*) FROM forum_hierarchy_forums child
+          WHERE child.parentID = f.forumID) AS childCount,
+        (SELECT SUM(th.postCount) FROM forum_hierarchy_threads th
+          WHERE th.forumID = f.forumID) AS postCount
+      FROM forum_hierarchy_forums f
+      INNER JOIN forum_hierarchy_forums p ON p.forumID = 8
+        AND p.heritage LIKE CONCAT(f.heritage, '%')
+      ORDER BY LENGTH(f.heritage)
+    expect:
+      rows: 1
+      result_contains: ["physical"]
+
+  - name: "Forum hierarchy handwritten hierarchy-first scan pipeline"
+    timing_samples: 5
+    scm: |
+      (begin
+        (define tx (session "__memcp_tx"))
+        (define forums (table "memcp-tests" "forum_hierarchy_forums"))
+        (define threads (table "memcp-tests" "forum_hierarchy_threads"))
+        (define posts (table "memcp-tests" "forum_hierarchy_posts"))
+        (define users (table "memcp-tests" "forum_hierarchy_users"))
+        (define selected_heritage
+          (scan tx forums '("forumID") (lambda (forumID) (equal? forumID 8))
+            '("heritage") (lambda (heritage) heritage)
+            (lambda (_old value) value) nil nil false))
+        (define found
+          (scan tx forums '("heritage")
+            (lambda (heritage) (strlike selected_heritage (concat heritage "%")))
+            '("forumID")
+            (lambda (forumID)
+              (begin
+                (define child_count
+                  (scan tx forums '("parentID") (lambda (parentID) (equal?? parentID forumID))
+                    '() (lambda () 1) + 0 + false))
+                (define thread_stats
+                  (scan tx threads '("forumID") (lambda (threadForumID) (equal?? threadForumID forumID))
+                    '("postCount" "lastPostID") (lambda (postCount lastPostID) (list postCount lastPostID))
+                    (lambda (acc row) (list (+ (car acc) (car row)) (max (cadr acc) (cadr row))))
+                    '(0 0)
+                    (lambda (acc row) (list (+ (car acc) (car row)) (max (cadr acc) (cadr row))))
+                    false))
+                (define post
+                  (scan tx posts '("postID") (lambda (postID) (equal?? postID (cadr thread_stats)))
+                    '("authorID" "datePosted") (lambda (authorID datePosted) (list authorID datePosted))
+                    (lambda (_old row) row) nil nil true))
+                (define username
+                  (if (nil? post) nil
+                    (scan tx users '("userID") (lambda (userID) (equal?? userID (car post)))
+                      '("username") (lambda (value) value)
+                      (lambda (_old value) value) nil nil true)))
+                (list forumID child_count (car thread_stats) (cadr thread_stats) username)))
+            (lambda (count _row) (+ count 1)) 0 + false))
+        (if (equal? found 8) "ok" (error (concat "wrong hierarchy row count: " found))))
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_users"
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_posts"
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_threads"
+  - sql: "DROP TABLE IF EXISTS forum_hierarchy_forums"
