@@ -3314,6 +3314,12 @@ below it remain guarded, but do not precompute an exact projection merely to
 choose between alternatives whose complete runtime is already negligible. */
 (define planner_adaptive_observation_budget_ns 100000000)
 
+/* A prepared exact candidate is already the strongest reusable boundary for
+an ordered scan. The storage operator adapts its traversal to the RecSet's
+runtime cardinality, so rebuilding cumulative prefixes cannot win afterward. */
+(define membership_choice_after_exact_candidate_preparation (lambda (observation_keys estimated_choice)
+	(if (nil? observation_keys) estimated_choice "candidate_keyset")))
+
 /* Return the cheapest executable carrier for one candidate cardinality. This
 single cost comparison is used both while lowering and by the query-cache
 guard. The guard therefore asserts the actual planner inequality instead of
@@ -3495,6 +3501,9 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 		/* Some late RecSet consumers are introduced after reorder telemetry was
 		attached. Reconstruct only the candidate's scalar work from the existing
 		logical stage; this is one formula walk, never an alternative plan build. */
+		/* merge is right-biased. Reorder telemetry owns statistics-sensitive
+		physical work, so place it after the late-consumer fallback; otherwise the
+		fallback replaces index-reduced row and byte counts. */
 		(define facts (merge (list (membership_candidate_work_facts stage) (gs_facts stage))))
 		(define consumer_facts (qassoc_set
 			(if (equal? consumer (quote aggregate))
@@ -3730,20 +3739,15 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define observed_rows (if (nil? observation_keys)
 					nil
 					(planner_queryplan_observed_metric decision_id)))
-				(define planning_projected_rows (if (number? observed_rows)
-					observed_rows
-					(membership_projected_driver_rows candidate_input_rows candidate_rows
-						(membership_driver_input_rows driver_rows facts) facts)))
-				(define observed_candidate_choice (and (number? crossover)
-					(<= planning_projected_rows crossover)))
-				(if (nil? observation_keys)
-					nil
-					(planner_record_guard_condition
-						(list (if observed_candidate_choice (quote <=) (quote >))
-							(list (quote session) (cadr observation_keys)) crossover)))
-				(define normal_choice (if (nil? observation_keys)
-					estimated_normal_choice
-					(if observed_candidate_choice "candidate_keyset" "ordered_batch_accept")))
+				/* Once the exact projected RecSet has been prepared, candidate consumption
+				dominates rebuilding successive ordered prefixes around that same value.
+				scan_order already chooses adaptively between inverse-position sorting and
+				a base-index membership walk. This is therefore an operator-equivalence
+				dominance, not another selectivity threshold. Source-row guards below still
+				invalidate the cached preparation decision when the workload grows. */
+				(define normal_choice
+					(membership_choice_after_exact_candidate_preparation
+						observation_keys estimated_normal_choice))
 				/* Source-local estimates may become precise after the first execution
 				builds an autoindex. Re-evaluate the same complete carrier inequality in
 				the cache guard. This is intentionally outside the adaptive scan kernel:
@@ -3874,6 +3878,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 								(qassoc_get facts (quote membership_candidate_cache_backed) false))
 							(list "candidate_expression_operations" (qassoc_get facts (quote membership_candidate_expression_operations) 0))
 							(list "candidate_expression_depth" (qassoc_get facts (quote membership_candidate_expression_depth) 0))
+							(list "candidate_index_filter_rows" (qassoc_get facts (quote membership_candidate_index_filter_rows) nil))
 							(list "candidate_broad_text_match_rows" (qassoc_get facts (quote membership_candidate_broad_text_match_rows) 0))
 							(list "candidate_broad_text_match_bytes" (qassoc_get facts (quote membership_candidate_broad_text_match_bytes) 0))
 							(list "candidate_filter_value_rows" (qassoc_get facts (quote membership_candidate_filter_value_rows) nil))

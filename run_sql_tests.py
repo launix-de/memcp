@@ -169,18 +169,26 @@ def observe_atomic_json(path: Path, duration_seconds: float) -> Tuple[int, Optio
     return reads, None
 
 # Performance test configuration
-PERF_TEST_ENABLED = os.environ.get("PERF_TEST", "0") == "1"
+PERF_AB_MODE = os.environ.get("PERF_AB_MODE", "").strip().lower()
+if PERF_AB_MODE not in ("", "record", "compare"):
+    raise ValueError("PERF_AB_MODE must be 'record' or 'compare'")
+PERF_TEST_ENABLED = os.environ.get("PERF_TEST", "0") == "1" or bool(PERF_AB_MODE)
 PERF_CALIBRATE = os.environ.get("PERF_CALIBRATE", "0") == "1"  # reset baselines to current times
 PERF_NORECALIBRATE = os.environ.get("PERF_NORECALIBRATE", "0") == "1"  # freeze row counts for bisecting
 PERF_EXPLAIN = os.environ.get("PERF_EXPLAIN", "0") == "1"  # show query plans
-PERF_BASELINE_FILE = ".perf_baseline.json"
-PERF_THRESHOLD_FACTOR = 1.1  # 10% tolerance over baseline
+PERF_BASELINE_FILE = os.environ.get("PERF_BASELINE_FILE", ".perf_baseline.json")
+PERF_BASELINE_SEED = os.environ.get("PERF_BASELINE_SEED", "")
+PERF_DEFAULT_REGRESSION_PCT = 20.0
 PERF_TARGET_MIN_MS = 10000  # target minimum query time (10s)
 PERF_TARGET_MAX_MS = 20000  # target maximum query time (20s)
 PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
-PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))  # measured runs per test; median reported
+PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))
+PERF_MIN_MEASURE_MS = float(os.environ.get("PERF_MIN_MEASURE_MS", "250"))
+PERF_SETUP_MAX_TIME_SEC = float(os.environ.get("PERF_SETUP_MAX_TIME_SEC", "120"))
+PERF_GATE_FILE = os.environ.get("PERF_GATE_FILE", ".perf_runner_gate.lock")
+_perf_gate_context = threading.local()
 # Wall-clock budgets are expressed for a reference CPU.  A fixed SHA-256
 # workload, measured before MemCP starts in the full test hook, maps that budget
 # to the current machine.  The workload is deliberately independent of MemCP:
@@ -219,6 +227,35 @@ MEMCP_START_TIMEOUT = int(os.environ.get("MEMCP_START_TIMEOUT", "180"))
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
 FAILURE_MAP_KEY = "failures"
+CI_WORKLOAD_KEY = "_ci_workload"
+
+
+class PerformanceGate:
+    """Let fixture requests overlap, but give timed queries an exclusive window."""
+
+    def __init__(self, exclusive: bool = False):
+        self.exclusive = exclusive
+        self.gate = None
+
+    def __enter__(self):
+        if not PERF_TEST_ENABLED or getattr(_perf_gate_context, "exclusive", False):
+            return self
+        self.gate = open(PERF_GATE_FILE, "a", encoding="utf-8")
+        fcntl.flock(
+            self.gate.fileno(), fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH
+        )
+        _perf_gate_context.exclusive = self.exclusive
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.gate is not None:
+            _perf_gate_context.exclusive = False
+            fcntl.flock(self.gate.fileno(), fcntl.LOCK_UN)
+            self.gate.close()
+
+
+def performance_server_gate(exclusive: bool = False) -> PerformanceGate:
+    return PerformanceGate(exclusive)
 
 
 def performance_architecture(machine: Optional[str] = None) -> str:
@@ -314,12 +351,77 @@ def scaled_compile_time_limit_ms(reference_ms: float, calibration: Dict[str, Any
 
 
 def resolve_timing_samples(test_case: Dict[str, Any], is_perf_test: bool) -> int:
-    """Return an odd sample count so the timed result has an unambiguous median."""
+    """Return the number of measured repetitions for one test case."""
+    if "repetitions" in test_case and "timing_samples" in test_case:
+        raise ValueError("use either repetitions or timing_samples, not both")
     default = PERF_REPEAT if is_perf_test else 1
-    raw = test_case.get("timing_samples", default)
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1 or raw % 2 == 0:
-        raise ValueError("timing_samples must be a positive odd integer")
+    raw = test_case.get("repetitions", test_case.get("timing_samples", default))
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("repetitions must be a positive integer")
     return raw
+
+
+def resolve_warmup_runs(test_case: Dict[str, Any], is_perf_test: bool) -> int:
+    if not is_perf_test:
+        return 0
+    raw = test_case.get("warmup", 2)
+    if raw is True:
+        return 2
+    if raw is False:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError("warmup must be a non-negative integer or boolean")
+    return raw
+
+
+def performance_case_key(spec_file: str, name: str) -> str:
+    normalized = Path(spec_file).as_posix()
+    marker = "tests/"
+    position = normalized.rfind(marker)
+    if position >= 0:
+        normalized = normalized[position:]
+    return f"{normalized}::{name}"
+
+
+def performance_case_fingerprint(
+    test_case: Dict[str, Any], suite_setup: Any = None, suite_syntax: Any = None
+) -> str:
+    """Protect the measured workload while allowing timing-policy changes."""
+    protected = {
+        key: value for key, value in test_case.items()
+        if key not in {"repetitions", "timing_samples", "warmup"}
+    }
+    payload = json.dumps(
+        {"suite_setup": suite_setup or [], "suite_syntax": suite_syntax, "test": protected},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def performance_regression_pct(test_case: Dict[str, Any], metadata: Dict[str, Any]) -> float:
+    value = test_case.get(
+        "max_regression_pct",
+        metadata.get("max_regression_pct", PERF_DEFAULT_REGRESSION_PCT),
+    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 10 <= float(value) <= 30:
+        raise ValueError("max_regression_pct must be from 10 through 30")
+    return float(value)
+
+
+def performance_ab_threshold_ms(
+    baseline_time_per_repetition_ms: float,
+    max_regression_pct: float,
+    baseline_warmup: int,
+    candidate_warmup: int,
+) -> float:
+    warmup_bonus_pct = 100.0 if baseline_warmup > 0 and candidate_warmup == 0 else 0.0
+    return baseline_time_per_repetition_ms * (
+        1.0 + (max_regression_pct + warmup_bonus_pct) / 100.0
+    )
+
+
+def adaptive_measurement_complete(repetitions: int, total_ns: int) -> bool:
+    return repetitions >= 5 and total_ns >= PERF_MIN_MEASURE_MS * 1_000_000
 
 
 def planner_time_limit_with_tolerance_ms(
@@ -362,6 +464,25 @@ def _write_runner_config(config: Dict[str, Any]) -> None:
         json.dump(config, f, indent=2)
         f.write("\n")
     os.replace(tmp_file, PERF_BASELINE_FILE)
+
+
+def initialize_performance_recording() -> None:
+    config: Dict[str, Any] = {"schema_version": 1}
+    if PERF_BASELINE_SEED:
+        with open(PERF_BASELINE_SEED, 'r', encoding='utf-8') as handle:
+            seed = json.load(handle)
+        if seed.get("schema_version") != 1:
+            raise ValueError("performance baseline seed has an unsupported schema")
+        default_rows = seed.get("default_rows", PERF_DEFAULT_ROWS)
+        if isinstance(default_rows, bool) or not isinstance(default_rows, int) or default_rows < 1:
+            raise ValueError("performance baseline seed default_rows must be positive")
+        config[CI_WORKLOAD_KEY] = {"default_rows": default_rows}
+        for key, rows in seed.get("rows", {}).items():
+            if (not isinstance(key, str) or isinstance(rows, bool)
+                    or not isinstance(rows, int) or rows < 1):
+                raise ValueError("performance baseline seed rows must map names to positive integers")
+            config[key] = {"rows": rows}
+    _write_runner_config(config)
 
 def _update_runner_config(mutator) -> Dict[str, Any]:
     Path(RUNNER_CONFIG_LOCK_FILE).touch(exist_ok=True)
@@ -430,6 +551,8 @@ def max_rows_for_ram(bytes_per_row: int = 1024) -> int:
 
 # Global RAM pressure flag — set by monitor thread OR inline checks, read everywhere.
 ram_pressure_abort = threading.Event()
+_ram_monitor_lock = threading.Lock()
+_ram_monitor_started = False
 
 def trip_ram_abort(reason: str):
     """Record RAM abort, kill memcp so it releases RAM immediately, set the flag."""
@@ -457,9 +580,14 @@ def ram_monitor_loop(interval: float = 0.5):
 
 def start_ram_monitor():
     """Start the background RAM monitor thread (daemon — dies with main process)."""
-    t = threading.Thread(target=ram_monitor_loop, daemon=True)
-    t.start()
-    return t
+    global _ram_monitor_started
+    with _ram_monitor_lock:
+        if _ram_monitor_started:
+            return None
+        _ram_monitor_started = True
+        t = threading.Thread(target=ram_monitor_loop, daemon=True)
+        t.start()
+        return t
 
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False, fail_fast=False, performance_calibration=None):
@@ -484,6 +612,7 @@ class SQLTestRunner:
         self._test_context = threading.local()
         self.perf_baselines = {}  # test_name -> {"time_ms": float, "rows": int}
         self.perf_results = {}  # test_name -> {"time_ms": float, "rows": int}
+        self.perf_seen = set()
         self.log_times = log_times  # emit QUERY_TIME ns=... lines for A/B benchmarking
         self.fail_fast = fail_fast
         self.current_spec_file = None
@@ -504,7 +633,7 @@ class SQLTestRunner:
             self.load_perf_baselines()
 
     def _bump_failure_counter(self, key: str):
-        if not key:
+        if not key or PERF_AB_MODE:
             return
 
         def mutate(config: Dict[str, Any]) -> None:
@@ -534,6 +663,10 @@ class SQLTestRunner:
         max_rows = max_rows_for_ram()
 
         def mutate(config: Dict[str, Any]) -> None:
+            if PERF_AB_MODE == "record":
+                for key, result in self.perf_results.items():
+                    config[key] = result
+                return
             if PERF_NORECALIBRATE:
                 # Just update times, keep existing rows
                 for name, result in self.perf_results.items():
@@ -901,26 +1034,82 @@ class SQLTestRunner:
             return self._record_fail(name, "max_compile_metrics must be a mapping",
                                      query, None, None, is_noncritical)
         perf_rows = PERF_DEFAULT_ROWS  # default row count
+        perf_key = None
+        baseline = {}
+        warmup_runs = 0
+        repeat = 1
+        max_regression_pct = PERF_DEFAULT_REGRESSION_PCT
         if is_perf_test:
-            # Get baseline data if available
-            baseline = self.perf_baselines.get(name, {})
+            perf_key = performance_case_key(self.current_spec_file or "?", name)
+            self.perf_seen.add(perf_key)
+            workload_config = self.perf_baselines.get(CI_WORKLOAD_KEY, {})
+            ci_default_rows = (
+                workload_config.get("default_rows", PERF_DEFAULT_ROWS)
+                if isinstance(workload_config, dict) else PERF_DEFAULT_ROWS
+            )
+            declared_rows = test_case.get("performance_rows", ci_default_rows)
+            baseline = self.perf_baselines.get(
+                perf_key, self.perf_baselines.get(name, {})
+            )
             if isinstance(baseline, dict):
-                baseline_time = baseline.get("time_ms")
-                baseline_rows = baseline.get("rows", PERF_DEFAULT_ROWS)
+                baseline_time = baseline.get(
+                    "time_per_repetition_ms", baseline.get("time_ms")
+                )
+                baseline_rows = baseline.get(
+                    "rows", declared_rows
+                )
             else:
                 # Legacy format: just a number
                 baseline_time = baseline
-                baseline_rows = PERF_DEFAULT_ROWS
+                baseline_rows = declared_rows
 
-            # Use baseline time × 1.3 as threshold ONLY if in target range
-            # During scaling, use YAML threshold (generous)
-            if baseline_time and not PERF_CALIBRATE and baseline_time >= PERF_TARGET_MIN_MS:
-                threshold_ms = baseline_time * PERF_THRESHOLD_FACTOR
-            else:
-                threshold_ms = yaml_threshold_ms
+            try:
+                if (isinstance(baseline_rows, bool)
+                        or not isinstance(baseline_rows, int) or baseline_rows < 1):
+                    raise ValueError("performance_rows must be a positive integer")
+                repeat = resolve_timing_samples(test_case, True)
+                warmup_runs = resolve_warmup_runs(test_case, True)
+                max_regression_pct = performance_regression_pct(
+                    test_case, self.suite_metadata
+                )
+            except ValueError as exc:
+                return self._record_fail(name, str(exc), query, None, None, is_noncritical)
 
-            # Use baseline rows (which may have been scaled), capped by current RAM
-            perf_rows = min(baseline_rows, max_rows_for_ram())
+            fingerprint = performance_case_fingerprint(
+                test_case,
+                getattr(self, "current_suite_setup", []),
+                self.suite_metadata.get("syntax"),
+            )
+            if (PERF_AB_MODE == "compare" and baseline_time
+                    and baseline.get("workload_sha256") != fingerprint):
+                return self._record_fail(
+                    name,
+                    "Measured workload differs from trusted base; only repetitions/timing_samples and warmup may change",
+                    query, None, None, is_noncritical,
+                )
+
+            threshold_ms = yaml_threshold_ms
+            if PERF_AB_MODE == "compare" and baseline_time:
+                max_regression_pct = float(
+                    baseline.get("max_regression_pct", PERF_DEFAULT_REGRESSION_PCT)
+                )
+                if not 10 <= max_regression_pct <= 30:
+                    return self._record_fail(
+                        name, "Baseline max_regression_pct must be from 10 through 30",
+                        query, None, None, is_noncritical,
+                    )
+                threshold_ms = performance_ab_threshold_ms(
+                    float(baseline_time), max_regression_pct,
+                    int(baseline.get("warmup", 2)), warmup_runs,
+                )
+
+            # A/B workloads must be identical. The RAM guard aborts instead of
+            # silently shrinking only the candidate side.
+            perf_rows = (
+                int(baseline_rows)
+                if PERF_AB_MODE == "compare" and baseline_time
+                else min(int(baseline_rows), max_rows_for_ram())
+            )
 
             if not PERF_TEST_ENABLED:
                 print(f"⏭️  {name} (skipped - set PERF_TEST=1 to run)")
@@ -935,6 +1124,7 @@ class SQLTestRunner:
         test_setup_steps = test_case.get("setup")
         heap_bytes = 0
         if test_setup_steps and isinstance(test_setup_steps, list):
+            setup_started = time.monotonic()
             for step in test_setup_steps:
                 # Inline RAM guard between every setup step — catches large
                 # inserts before the next one starts (monitor thread alone is
@@ -943,14 +1133,25 @@ class SQLTestRunner:
                     trip_ram_abort(f"setup step of {name}")
                 if ram_pressure_abort.is_set():
                     return self._record_fail(name, "Aborted: RAM pressure during setup", None, None, None, is_noncritical)
+                setup_remaining = PERF_SETUP_MAX_TIME_SEC - (time.monotonic() - setup_started)
+                if PERF_TEST_ENABLED and setup_remaining <= 0:
+                    return self._record_fail(
+                        name, f"Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit",
+                        None, None, None, is_noncritical,
+                    )
                 if "sql" in step:
                     sql_code = step["sql"]
                     if is_perf_test:
                         sql_code = sql_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
-                    resp = self.execute_sql(
-                        database, sql_code, syntax=self.suite_syntax,
-                        session_id=session_id, timeout=int(step.get("timeout", 600)),
-                    )
+                    with performance_server_gate():
+                        resp = self.execute_sql(
+                            database, sql_code, syntax=self.suite_syntax,
+                            session_id=session_id,
+                            timeout=(
+                                max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
+                                if PERF_TEST_ENABLED else int(step.get("timeout", 600))
+                            ),
+                        )
                     expect_error = self._step_expects_error(step)
                     if resp is None:
                         return self._record_fail(name, "Setup SQL failed: no response", sql_code, None, None, is_noncritical)
@@ -966,7 +1167,12 @@ class SQLTestRunner:
                         scm = scm.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     url = f"{self.base_url}/scm"
                     try:
-                        resp = requests.post(url, data=scm, headers=self.auth_header, timeout=600)
+                        with performance_server_gate():
+                            resp = requests.post(
+                                url, data=scm, headers=self.auth_header,
+                                timeout=(max(1, min(600, math.ceil(setup_remaining)))
+                                         if PERF_TEST_ENABLED else 600),
+                            )
                     except Exception as e:
                         return self._record_fail(name, f"Setup SCM error: {e}", scm, None, None, is_noncritical)
                     if resp is None or resp.status_code != 200:
@@ -1290,51 +1496,61 @@ class SQLTestRunner:
                                                      f"Query plan too large (compile-time blowup): {plan_size} chars > {plan_size_limit}",
                                                      query, explain_resp, test_case.get("expect"), is_noncritical, on_fail_diag=diag)
 
-            # Warmup runs for performance tests (2 unmeasured runs before the measured one)
-            if is_perf_test and test_case.get("warmup", True):
-                for _ in range(2):
-                    self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
-
-            # Get memcp PID and start CPU measurement for perf tests
-            memcp_pid = find_memcp_pid() if is_perf_test else None
-            start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
-
-            # Execute query. Performance tests and explicitly sampled short
-            # SELECTs report the median so one scheduler/GC pause cannot mask
-            # their steady-state behavior.
-            try:
-                repeat = resolve_timing_samples(test_case, is_perf_test)
-            except ValueError as exc:
-                return self._record_fail(name, str(exc), query, None, None, is_noncritical)
-            if "timing_samples" in test_case and not query.lstrip().upper().startswith("SELECT"):
+            if not is_perf_test:
+                try:
+                    repeat = resolve_timing_samples(test_case, False)
+                except ValueError as exc:
+                    return self._record_fail(name, str(exc), query, None, None, is_noncritical)
+            if ("timing_samples" in test_case or "repetitions" in test_case) and not query.lstrip().upper().startswith("SELECT"):
                 return self._record_fail(
-                    name, "timing_samples is only supported for SELECT queries",
+                    name, "timing_samples/repetitions is only supported for SELECT queries",
                     query, None, None, is_noncritical,
                 )
-            samples_ns: list = []
-            response = None
-            for _ in range(repeat):
-                start_ns = time.monotonic_ns()
-                response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(
-                    database, query, auth_header, active_syntax,
-                    session_id=session_id, timeout=sql_timeout, params=sql_params,
-                    retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
+            gate = performance_server_gate(exclusive=True) if is_perf_test else PerformanceGate()
+            with gate:
+                for _ in range(warmup_runs):
+                    self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(database, query, auth_header, active_syntax, timeout=sql_timeout)
+
+                memcp_pid = find_memcp_pid() if is_perf_test else None
+                start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
+                samples_ns: list = []
+                response = None
+                adaptive_repetitions = (
+                    is_perf_test
+                    and "repetitions" not in test_case
+                    and "timing_samples" not in test_case
                 )
-                samples_ns.append(time.monotonic_ns() - start_ns)
-                if response is None or response.status_code != 200:
-                    break  # don't hammer a broken endpoint
-            samples_ns.sort()
-            elapsed_ns = samples_ns[len(samples_ns) // 2]  # median
-            elapsed_ms = elapsed_ns / 1_000_000
-            elapsed_sec = elapsed_ms / 1000
+                measured_total_ns = 0
+                for _ in range(repeat):
+                    start_ns = time.monotonic_ns()
+                    response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(
+                        database, query, auth_header, active_syntax,
+                        session_id=session_id, timeout=sql_timeout, params=sql_params,
+                        retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
+                    )
+                    sample_ns = time.monotonic_ns() - start_ns
+                    samples_ns.append(sample_ns)
+                    measured_total_ns += sample_ns
+                    if response is None or response.status_code != 200:
+                        break  # don't hammer a broken endpoint
+                    if adaptive_repetitions and adaptive_measurement_complete(
+                        len(samples_ns), measured_total_ns
+                    ):
+                        break
 
-            if self.log_times:
-                min_ns, max_ns = samples_ns[0], samples_ns[-1]
-                print(f"QUERY_TIME median_ns={elapsed_ns} min_ns={min_ns} max_ns={max_ns} n={len(samples_ns)} name={name}")
+                total_ns = measured_total_ns
+                elapsed_ns = total_ns / len(samples_ns)
+                elapsed_ms = elapsed_ns / 1_000_000
+                elapsed_sec = elapsed_ms / 1000
 
-            # End CPU measurement
-            end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
-            cpu_pct = measure_cpu_load(memcp_pid, start_cpu, end_cpu, elapsed_sec) if memcp_pid else None
+                if self.log_times:
+                    print(
+                        f"QUERY_TIME total_ns={total_ns} n={len(samples_ns)} "
+                        f"time_per_repetition_ns={elapsed_ns:.0f} warmup={warmup_runs} name={name}"
+                    )
+
+                end_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
+                cpu_pct = measure_cpu_load(memcp_pid, start_cpu, end_cpu, elapsed_sec) if memcp_pid else None
 
         if response is None:
             expect = test_case.get("expect", {})
@@ -1346,7 +1562,13 @@ class SQLTestRunner:
         results = self.parse_jsonl_response(response)
 
         # Check performance threshold
-        if is_perf_test and elapsed_ms > threshold_ms:
+        if is_perf_test and PERF_AB_MODE == "compare" and baseline_time:
+            change_pct = (elapsed_ms / float(baseline_time) - 1.0) * 100.0
+            print(
+                f"PERF_AB {name}: {float(baseline_time):.3f}ms -> "
+                f"{elapsed_ms:.3f}ms per repetition ({change_pct:+.1f}%)"
+            )
+        if is_perf_test and PERF_AB_MODE != "record" and elapsed_ms > threshold_ms:
             diag = self._run_on_fail(test_case, database)
             return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
                                      test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)
@@ -1372,8 +1594,17 @@ class SQLTestRunner:
             if is_perf_test:
                 heap_mb = heap_bytes / (1024 * 1024) if heap_bytes else None
                 self._record_success(name, is_noncritical, elapsed_ms, threshold_ms, perf_rows, heap_mb, cpu_pct)
-                # Store result for baseline update (time and row count)
-                self.perf_results[name] = {"time_ms": elapsed_ms, "rows": perf_rows}
+                result = {
+                    "time_ms": elapsed_ms,
+                    "time_per_repetition_ms": elapsed_ms,
+                    "total_ms": total_ns / 1_000_000,
+                    "repetitions": len(samples_ns),
+                    "warmup": warmup_runs,
+                    "rows": perf_rows,
+                    "max_regression_pct": max_regression_pct,
+                    "workload_sha256": fingerprint,
+                }
+                self.perf_results[perf_key if PERF_AB_MODE else name] = result
             else:
                 self._record_success(name, is_noncritical)
             return True
@@ -1456,14 +1687,28 @@ class SQLTestRunner:
     def run_setup(self, setup_steps: List[Dict], database: str) -> bool:
         self.setup_operations = []
         self.current_database = database
+        setup_started = time.monotonic()
         for idx, step in enumerate(setup_steps, start=1):
             self.setup_operations.append(step)
+            if check_ram_pressure():
+                trip_ram_abort(f"suite setup step {idx}")
+            if ram_pressure_abort.is_set():
+                print("❌ Setup aborted due to RAM pressure")
+                return False
+            setup_remaining = PERF_SETUP_MAX_TIME_SEC - (time.monotonic() - setup_started)
+            if PERF_TEST_ENABLED and setup_remaining <= 0:
+                print(f"❌ Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit")
+                return False
             expect_error = self._step_expects_error(step)
             if "sql" in step:
-                resp = self.execute_sql(
-                    database, step['sql'], syntax=self.suite_syntax,
-                    timeout=int(step.get("timeout", 600)),
-                )
+                with performance_server_gate():
+                    resp = self.execute_sql(
+                        database, step['sql'], syntax=self.suite_syntax,
+                        timeout=(
+                            max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
+                            if PERF_TEST_ENABLED else int(step.get("timeout", 600))
+                        ),
+                    )
                 if resp is None:
                     print(f"❌ Setup step {idx} failed: no response")
                     print(f"    SQL: {step.get('sql','')[:300]}")
@@ -1483,7 +1728,12 @@ class SQLTestRunner:
                 scm_code = step["scm"]
                 try:
                     url = f"{self.base_url}/scm"
-                    resp = requests.post(url, data=scm_code, headers=self.auth_header, timeout=600)
+                    with performance_server_gate():
+                        resp = requests.post(
+                            url, data=scm_code, headers=self.auth_header,
+                            timeout=(max(1, min(600, math.ceil(setup_remaining)))
+                                     if PERF_TEST_ENABLED else 600),
+                        )
                 except Exception as e:
                     print(f"❌ Setup step {idx} failed: SCM exception: {e}")
                     print(f"    SCM: {scm_code[:300]}")
@@ -1510,7 +1760,8 @@ class SQLTestRunner:
 
     def run_cleanup(self, cleanup_steps: List[Dict], database: str) -> None:
         for step in cleanup_steps:
-            self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
+            with performance_server_gate():
+                self.execute_sql(database, step['sql'], syntax=self.suite_syntax)
 
     def _step_expects_error(self, step: Any) -> bool:
         if not isinstance(step, dict):
@@ -1554,7 +1805,21 @@ class SQLTestRunner:
     # ----------------------
     # Spec Runner
     # ----------------------
-    def run_test_spec(self, spec_file: str) -> bool:
+    def prepare_test_spec(self, spec_file: str) -> bool:
+        """Run a suite's top-level setup without starting any test case."""
+        with open(spec_file, 'r') as f:
+            spec = yaml.safe_load(f) or {}
+        metadata = spec.get('metadata', {}) or {}
+        self.current_spec_file = spec_file
+        self.suite_metadata = metadata
+        self.suite_syntax = self._normalize_syntax(metadata.get("syntax"))
+        self.current_suite_setup = spec.get('setup') or []
+        self.ensure_runner_config_loaded()
+        self.ensure_database(self.default_database)
+        setup = spec.get('setup')
+        return not setup or self.run_setup(setup, self.default_database)
+
+    def run_test_spec(self, spec_file: str, setup_done: bool = False) -> bool:
         with open(spec_file, 'r') as f:
             spec = yaml.safe_load(f)
 
@@ -1562,6 +1827,7 @@ class SQLTestRunner:
         metadata = spec.get('metadata', {})
         self.suite_metadata = metadata or {}
         self.suite_syntax = self._normalize_syntax(self.suite_metadata.get("syntax"))
+        self.current_suite_setup = spec.get('setup') or []
         database = self.default_database
 
         if metadata.get('disabled'):
@@ -1593,7 +1859,7 @@ class SQLTestRunner:
         raw_cases = spec.get('test_cases', [])
         total_declared_cases = sum(int(tc.get('repeat', 1)) * len(tc.get('tests', [])) if isinstance(tc, dict) and 'repeat' in tc else 1 for tc in raw_cases)
 
-        if spec.get('setup') and not self.run_setup(spec['setup'], database):
+        if not setup_done and spec.get('setup') and not self.run_setup(spec['setup'], database):
             print("❌ Setup failed")
             self._bump_failure_counter(_suite_failure_key(spec_file))
             if self.fail_fast and total_declared_cases > 0:
@@ -1624,6 +1890,12 @@ class SQLTestRunner:
                         test_cases.append(expanded)
             else:
                 test_cases.append(tc)
+
+        if PERF_AB_MODE:
+            test_cases = [
+                test_case for test_case in test_cases
+                if "threshold_ms" in test_case
+            ]
 
         # Preserve declared concurrency in every mode. Fail-fast stops only
         # after the complete parallel group containing the first failure.
@@ -1674,8 +1946,23 @@ class SQLTestRunner:
         print("="*60)
 
         # Update performance baselines on success (or in calibration mode)
-        if PERF_TEST_ENABLED and self.perf_results and (failed_crit == 0 or PERF_CALIBRATE):
+        if (PERF_TEST_ENABLED and PERF_AB_MODE != "compare" and self.perf_results
+                and (failed_crit == 0 or PERF_CALIBRATE)):
             self.save_perf_baselines()
+
+        if PERF_AB_MODE == "compare":
+            prefix = performance_case_key(spec_file, "").removesuffix("::") + "::"
+            expected = {
+                key for key in self.perf_baselines
+                if isinstance(key, str) and key.startswith(prefix)
+            }
+            missing = sorted(expected - self.perf_seen)
+            for key in missing:
+                self._record_fail(
+                    key, "Performance case from baseline is missing in candidate",
+                    None, None, None,
+                )
+            failed_crit = self.failed_critical
 
         # Print memcp log on critical failures to aid debugging
         if failed_crit > 0:
@@ -1742,7 +2029,10 @@ def start_memcp_process(port: int, enable_mysql: bool = False) -> subprocess.Pop
         if not enable_mysql:
             cmd.append("--disable-mysql")
         cmd.append("lib/main.scm")
-        proc = subprocess.Popen(cmd, cwd=os.path.dirname(os.path.abspath(__file__)),
+        worktree = os.environ.get(
+            "MEMCP_TEST_WORKTREE", os.path.dirname(os.path.abspath(__file__))
+        )
+        proc = subprocess.Popen(cmd, cwd=worktree,
            env=env, stdin=subprocess.PIPE, stdout=logfile, stderr=logfile, text=True)
         if not wait_for_memcp(port, timeout=MEMCP_START_TIMEOUT):
             print_memcp_log(tail=50)
@@ -1874,6 +2164,28 @@ def normalize_jobs(jobs: Optional[int]) -> int:
     return jobs
 
 
+def discover_performance_ci_suites(root: Path = Path("tests/performance")) -> List[str]:
+    suites = []
+    for path in sorted(root.rglob("*.yaml")):
+        with path.open('r', encoding='utf-8') as handle:
+            spec = yaml.safe_load(handle) or {}
+        metadata = spec.get("metadata", {}) or {}
+        if metadata.get("ci", True) is False:
+            continue
+        cases = spec.get("test_cases", [])
+        has_measurement = any(
+            "threshold_ms" in inner
+            for case in cases if isinstance(case, dict)
+            for inner in (case.get("tests", []) if "repeat" in case else [case])
+            if isinstance(inner, dict)
+        )
+        if has_measurement:
+            suites.append(path.as_posix())
+    if not suites:
+        raise ValueError("no CI performance suites with threshold_ms found")
+    return suites
+
+
 def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, connect_only: bool, fail_fast: bool) -> Tuple[bool, str]:
     cmd = [sys.executable, os.path.abspath(__file__), spec_file]
     if connect_only and port is not None:
@@ -1896,6 +2208,50 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
         if restart_handler is not None:
             runner.set_restart_handler(restart_handler)
         return runner.run_test_spec(spec_files[0])
+
+    if PERF_TEST_ENABLED:
+        max_jobs = normalize_jobs(jobs)
+        print(
+            f"🧪 Preparing {len(spec_files)} performance suites in parallel "
+            f"(jobs={max_jobs})"
+        )
+        runners = {
+            spec_file: SQLTestRunner(base_url, log_times=log_times)
+            for spec_file in spec_files
+        }
+        with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+            futures = {
+                executor.submit(runners[spec_file].prepare_test_spec, spec_file): spec_file
+                for spec_file in spec_files
+            }
+            prepared = {future: future.result() for future in as_completed(futures)}
+        failed_setup = [futures[future] for future, ok in prepared.items() if not ok]
+        if failed_setup:
+            print("❌ Performance setup failed; no measurements were started:")
+            for spec_file in failed_setup:
+                print(f"   ❌ {spec_file}")
+            return False
+
+        print(
+            "⏱️  All suite setups complete; continuing fixture work in parallel "
+            "with exclusive timed-query windows"
+        )
+        with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+            futures = {
+                executor.submit(
+                    runners[spec_file].run_test_spec, spec_file, True
+                ): spec_file
+                for spec_file in spec_files
+            }
+            measured = {future: future.result() for future in as_completed(futures)}
+        failed_files = [futures[future] for future, ok in measured.items() if not ok]
+        if failed_files:
+            print("❌ Performance suites failed:")
+            for spec_file in failed_files:
+                print(f"   ❌ {spec_file}")
+            return False
+        print("🎉 All performance suites passed!")
+        return True
 
     if fail_fast:
         ordered_specs = prioritize_spec_files(spec_files)
@@ -1972,22 +2328,25 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
 
 
 def print_usage() -> None:
-    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--port N] [--connect-only] [--jobs N] [--fail-fast]")
+    print("Usage: python3 run_sql_tests.py <test_spec.yaml> [<test_spec2.yaml> ...] [port] [--perf-ci] [--port N] [--connect-only] [--jobs N] [--fail-fast]")
 
 
-def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, bool, Optional[int], bool]:
+def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, bool, Optional[int], bool, bool]:
     spec_files: List[str] = []
     port: Optional[int] = None
     connect_only = False
     log_times = False
     jobs: Optional[int] = None
     fail_fast = False
+    perf_ci = False
 
     i = 0
     while i < len(argv):
         arg = argv[i]
         if arg == "--connect-only":
             connect_only = True
+        elif arg == "--perf-ci":
+            perf_ci = True
         elif arg == "--fail-fast":
             fail_fast = True
         elif arg == "--log-times":
@@ -2027,7 +2386,7 @@ def parse_cli_args(argv: List[str]) -> Tuple[List[str], Optional[int], bool, boo
             spec_files.append(arg)
         i += 1
 
-    return spec_files, port, connect_only, log_times, jobs, fail_fast
+    return spec_files, port, connect_only, log_times, jobs, fail_fast, perf_ci
 
 
 def main():
@@ -2040,11 +2399,36 @@ def main():
     performance_calibration = load_performance_scale()
     publish_performance_scale(performance_calibration)
 
-    spec_files, port, connect_only, log_times, jobs, fail_fast = parse_cli_args(sys.argv[1:])
+    spec_files, port, connect_only, log_times, jobs, fail_fast, perf_ci = parse_cli_args(sys.argv[1:])
+
+    if perf_ci:
+        if spec_files:
+            raise ValueError("--perf-ci discovers its suites; do not pass YAML paths")
+        spec_files = discover_performance_ci_suites()
+        if PERF_AB_MODE == "compare":
+            baseline_suites = {
+                key.split("::", 1)[0]
+                for key in _load_runner_config()
+                if isinstance(key, str) and key.startswith("tests/") and "::" in key
+            }
+            missing_suites = sorted(path for path in baseline_suites if not Path(path).is_file())
+            if missing_suites:
+                raise ValueError(
+                    "candidate deleted baseline performance suites: "
+                    + ", ".join(missing_suites)
+                )
+            spec_files = sorted(set(spec_files) | baseline_suites)
 
     if not spec_files:
         print_usage()
         sys.exit(1)
+
+    if PERF_AB_MODE == "record" and not connect_only:
+        initialize_performance_recording()
+    elif PERF_AB_MODE == "compare":
+        baseline = _load_runner_config()
+        if baseline.get("schema_version") != 1:
+            raise ValueError("performance A/B baseline is missing or has an unsupported schema")
 
     if port is None:
         if connect_only:

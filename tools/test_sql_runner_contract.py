@@ -40,15 +40,24 @@ from run_sql_tests import (  # noqa: E402
     PERFORMANCE_SCALE_ENV,
     PLANNER_TIME_TOLERANCE_FACTOR,
     SQLTestRunner,
+    _load_runner_config,
+    adaptive_measurement_complete,
     is_error_response,
+    initialize_performance_recording,
     load_performance_scale,
     observe_atomic_json,
+    performance_ab_threshold_ms,
+    performance_case_fingerprint,
+    performance_case_key,
     performance_architecture,
+    performance_regression_pct,
     performance_scale_from_samples,
     planner_time_limit_with_tolerance_ms,
     publish_performance_scale,
     request_shared_supervisor_restart,
     resolve_timing_samples,
+    resolve_warmup_runs,
+    run_test_specs,
     scaled_compile_time_limit_ms,
     scaled_wall_clock_limit_ms,
     sql_request_is_retry_safe,
@@ -58,16 +67,85 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
-    def test_timing_samples_default_and_explicit_median(self) -> None:
+    def test_ci_workload_seed_initializes_safe_rows(self) -> None:
+        seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "baseline.json"
+            with mock.patch("run_sql_tests.PERF_BASELINE_SEED", str(seed)), \
+                    mock.patch("run_sql_tests.PERF_BASELINE_FILE", str(baseline)):
+                initialize_performance_recording()
+                config = _load_runner_config()
+        self.assertEqual(config["_ci_workload"]["default_rows"], 1000)
+        self.assertEqual(
+            config["tests/performance/baseline.yaml::Perf: MATRIX MULT"]["rows"],
+            30,
+        )
+
+    def test_repetitions_default_and_explicit_count(self) -> None:
         self.assertEqual(resolve_timing_samples({}, False), 1)
         self.assertEqual(resolve_timing_samples({}, True), 5)
         self.assertEqual(resolve_timing_samples({"timing_samples": 3}, False), 3)
+        self.assertEqual(resolve_timing_samples({"repetitions": 100}, True), 100)
 
-    def test_timing_samples_rejects_ambiguous_or_empty_samples(self) -> None:
-        for invalid in (True, 0, 2, 2.5, "3"):
+    def test_repetitions_reject_ambiguous_or_empty_counts(self) -> None:
+        for invalid in (True, 0, 2.5, "3"):
             with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(ValueError, "positive odd integer"):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
                     resolve_timing_samples({"timing_samples": invalid}, False)
+
+    def test_repetitions_and_timing_samples_are_mutually_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "either repetitions or timing_samples"):
+            resolve_timing_samples({"repetitions": 5, "timing_samples": 5}, True)
+
+    def test_adaptive_measurement_requires_five_runs_and_time_budget(self) -> None:
+        with mock.patch("run_sql_tests.PERF_MIN_MEASURE_MS", 250):
+            self.assertFalse(adaptive_measurement_complete(4, 1_000_000_000))
+            self.assertFalse(adaptive_measurement_complete(100, 249_999_999))
+            self.assertTrue(adaptive_measurement_complete(5, 250_000_000))
+
+    def test_warmup_accepts_zero_and_counts(self) -> None:
+        self.assertEqual(resolve_warmup_runs({}, True), 2)
+        self.assertEqual(resolve_warmup_runs({"warmup": False}, True), 0)
+        self.assertEqual(resolve_warmup_runs({"warmup": 7}, True), 7)
+
+    def test_ab_metric_is_per_repetition_and_cold_candidate_gets_bonus(self) -> None:
+        self.assertEqual(performance_ab_threshold_ms(100, 20, 2, 2), 120)
+        self.assertAlmostEqual(performance_ab_threshold_ms(100, 20, 2, 0), 220)
+
+    def test_regression_limit_is_bounded_and_case_overrides_suite(self) -> None:
+        self.assertEqual(performance_regression_pct({}, {}), 20)
+        self.assertEqual(
+            performance_regression_pct({"max_regression_pct": 15}, {"max_regression_pct": 25}),
+            15,
+        )
+        with self.assertRaisesRegex(ValueError, "10 through 30"):
+            performance_regression_pct({"max_regression_pct": 31}, {})
+
+    def test_performance_identity_is_stable_across_worktrees(self) -> None:
+        self.assertEqual(
+            performance_case_key("/tmp/base/tests/performance/a.yaml", "query"),
+            "tests/performance/a.yaml::query",
+        )
+
+    def test_workload_fingerprint_allows_only_repetition_and_warmup_changes(self) -> None:
+        base = {
+            "name": "query", "sql": "SELECT 1", "threshold_ms": 30000,
+            "repetitions": 5, "warmup": 2,
+        }
+        timing_change = dict(base, repetitions=100, warmup=0)
+        query_change = dict(base, sql="SELECT 2")
+        self.assertEqual(
+            performance_case_fingerprint(base),
+            performance_case_fingerprint(timing_change),
+        )
+        self.assertNotEqual(
+            performance_case_fingerprint(base),
+            performance_case_fingerprint(query_change),
+        )
+        self.assertNotEqual(
+            performance_case_fingerprint(base, [{"sql": "INSERT INTO t VALUES (1)"}]),
+            performance_case_fingerprint(base, [{"sql": "INSERT INTO t VALUES (2)"}]),
+        )
 
     def test_cold_planner_budget_allows_bounded_measurement_jitter(self) -> None:
         self.assertEqual(PLANNER_TIME_TOLERANCE_FACTOR, 1.2)
@@ -320,6 +398,49 @@ class AtomicJSONObserverContractTest(unittest.TestCase):
 
 
 class FailFastParallelContractTest(unittest.TestCase):
+    def test_ab_mode_skips_non_measurement_cases_in_performance_suite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            spec = Path(tmp) / "performance.yaml"
+            spec.write_text(
+                "metadata: {description: A/B selection}\n"
+                "test_cases:\n"
+                "  - {name: correctness helper, sql: SELECT 1}\n"
+                "  - {name: measured query, sql: SELECT 1, threshold_ms: 30000}\n",
+                encoding="utf-8",
+            )
+            runner = SQLTestRunner("http://localhost:1")
+            runner.ensure_database = lambda _database: None
+            observed = []
+            runner.run_test_case = lambda case, _database: observed.append(case["name"]) or True
+            with mock.patch("run_sql_tests.PERF_AB_MODE", "record"):
+                self.assertTrue(runner.run_test_spec(str(spec)))
+        self.assertEqual(observed, ["measured query"])
+
+    def test_performance_suite_setups_finish_before_measurement_phase(self) -> None:
+        specs = ["tests/performance/a.yaml", "tests/performance/b.yaml"]
+        barrier = threading.Barrier(2)
+        events = []
+        lock = threading.Lock()
+
+        def prepare(_runner, spec_file):
+            barrier.wait(timeout=1)
+            with lock:
+                events.append(("prepare", spec_file))
+            return True
+
+        def measure(_runner, spec_file, setup_done=False):
+            self.assertTrue(setup_done)
+            self.assertEqual(sum(kind == "prepare" for kind, _ in events), 2)
+            events.append(("measure", spec_file))
+            return True
+
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch.object(SQLTestRunner, "prepare_test_spec", prepare), \
+                mock.patch.object(SQLTestRunner, "run_test_spec", measure):
+            self.assertTrue(run_test_specs(specs, "http://localhost:1", 1, True, 2))
+
+        self.assertCountEqual(events[2:], [("measure", specs[0]), ("measure", specs[1])])
+
     def test_fail_fast_preserves_parallel_groups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             spec = Path(tmp) / "parallel.yaml"
