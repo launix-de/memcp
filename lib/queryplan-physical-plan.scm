@@ -3641,8 +3641,8 @@ as it would for an ordinary scan input. */
 			(begin
 				(define stage (nth membership 0))
 				(define facts (merge (list
-					(membership_candidate_work_facts stage)
-					(gs_facts stage))))
+					(gs_facts stage)
+					(membership_candidate_work_facts stage))))
 				(define candidate_input_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_input_rows) nil)
 					(planner_stage_input_rows (gs_input stage))))
@@ -8390,7 +8390,26 @@ ordering run. Storage artifacts begin in build_queryplan. */
 	(begin
 		(define kind (qassoc_get decision "decision" nil))
 		(if (equal? kind "membership_carrier")
-			(physical_membership_operator_family plan)
+			(begin
+				(define chosen (qassoc_get decision "chosen" nil))
+				/* A compound query may contain key indexes and projected RecSets for
+				unrelated ACL stages. Validate the primitive required by this decision's
+				chosen alternative instead of assigning the whole plan to the first
+				operator family found globally. Falling back to the global classifier
+				still makes a genuinely unreachable forced alternative fail calibration. */
+				(if (or
+					(and (equal? chosen "ordered_batch_accept")
+						(physical_expr_has_head? plan (quote scan_order_batch_accept)))
+					(and (equal? chosen "prefiltered_candidate_keyset")
+						(physical_prefiltered_membership_expr? plan))
+					(and (equal? chosen "candidate_keyset")
+						(physical_expr_has_head? plan (quote recset_project_join)))
+					(and (equal? chosen "driver_order_membership_probe")
+						(physical_expr_has_head? plan (quote recset_key_index)))
+					(and (equal? chosen "driver_filter_join_probe")
+						(not (physical_expr_has_head? plan (quote scan_order_batch_accept)))))
+					chosen
+					(physical_membership_operator_family plan)))
 			(if (equal? kind "scan_join_order")
 				(if (physical_expr_has_head? plan (quote scan_join_order))
 					"scan_join_order" "legacy_join_tree")
@@ -8537,6 +8556,7 @@ potentially large calibrated SELECT result. */
 							"candidate_cache_backed" (physical_calibration_input decision "candidate_cache_backed")
 							"candidate_expression_operations" (physical_calibration_input decision "candidate_expression_operations")
 							"candidate_expression_depth" (physical_calibration_input decision "candidate_expression_depth")
+							"candidate_index_filter_rows" (physical_calibration_input decision "candidate_index_filter_rows")
 							"candidate_broad_text_match_rows" (physical_calibration_input decision "candidate_broad_text_match_rows")
 							"candidate_broad_text_match_bytes" (physical_calibration_input decision "candidate_broad_text_match_bytes")
 							"candidate_filter_value_rows" (physical_calibration_input decision "candidate_filter_value_rows")
