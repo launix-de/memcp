@@ -583,6 +583,17 @@ logical trees consumed before physical scan lowering. */
 				(< (qassoc_get candidate (quote memory_bytes) 0)
 					(qassoc_get current (quote memory_bytes) 0)))))))
 
+/* Cost confidence defines a one-sided uncertainty interval for fuzzy physical
+choices. A candidate is a clear winner only when its confidence-adjusted upper
+estimate remains below the other alternative's point estimate. Callers with an
+exact bounded fallback may prefer it while those intervals overlap. */
+(define planner_cost_clear_winner? (lambda (candidate current)
+	(begin
+		(define candidate_confidence (max 0.01
+			(qassoc_get candidate (quote confidence) 0.01)))
+		(< (/ (qassoc_get candidate (quote total_ns) 0) candidate_confidence)
+			(qassoc_get current (quote total_ns) 0)))))
+
 /* Calibrated generic storage facts. They are deliberately free of SQL
 semantics; SCM combines them according to the candidate being evaluated. */
 (define planner_scan_cost (lambda (rows confidence)
@@ -1026,6 +1037,114 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 		(if (cadr connected)
 			(list nil 0)
 			(join_order_dphyp_connected nodes aliases predicates (car connected) required_drivers))))))
+
+/* A fused join reducer needs a left-deep logical tree, but that requirement is
+not permission for the physical lowerer to reorder a bushy winner. Keep a
+second DP state family for this physical property and compare its calibrated
+whole-pipeline cost with the unrestricted logical winner. */
+(define join_order_pipeline_width (lambda (required_property)
+	(qassoc_get (coalesceNil required_property '()) (quote pipeline_reduce_width) nil)))
+
+(define join_order_pipeline_probe_rows (lambda (plan)
+	(if (nil? plan)
+		nil
+		(match (join_order_plan_tree plan)
+			((symbol join-leaf) _alias _predicates) 0
+			((quote join-leaf) _alias _predicates) 0
+			((symbol join-leaf) _alias) 0
+			((quote join-leaf) _alias) 0
+			((symbol join-node) kind _left right _predicates)
+			(if (and (equal? kind (quote inner))
+				(single_source? (join_optimizer_tree_aliases right)))
+				(begin
+					(define left (join_order_plan_left plan))
+					(define prior (join_order_pipeline_probe_rows left))
+					(if (number? prior)
+						(+ prior (join_order_plan_cardinality left)) nil))
+				nil)
+			((quote join-node) kind _left right _predicates)
+			(if (and (equal? kind (quote inner))
+				(single_source? (join_optimizer_tree_aliases right)))
+				(begin
+					(define left (join_order_plan_left plan))
+					(define prior (join_order_pipeline_probe_rows left))
+					(if (number? prior)
+						(+ prior (join_order_plan_cardinality left)) nil))
+				nil)
+			_ nil))))
+
+(define join_order_pipeline_cost (lambda (nodes plan width)
+	(begin
+		(define probe_rows (join_order_pipeline_probe_rows plan))
+		(if (or (nil? plan) (not (number? probe_rows)))
+			nil
+			(begin
+				(define input_rows (reduce (join_order_plan_aliases plan)
+					(lambda (rows alias)
+						(+ rows (cadr (join_order_find_node nodes alias)))) 0))
+				(planner_scan_join_order_cost input_rows probe_rows
+					(join_order_plan_cardinality plan)
+					(count (join_order_plan_aliases plan))
+					(join_order_plan_cardinality plan) width))))))
+
+(define join_order_pipeline_plan_better? (lambda (nodes width candidate current)
+	(if (nil? current)
+		true
+		(planner_cost_better?
+			(join_order_pipeline_cost nodes candidate width)
+			(join_order_pipeline_cost nodes current width)))))
+
+(define join_order_pipeline_set_plan (lambda (nodes universe predicates plans aliases width)
+	(reduce aliases (lambda (best right_alias)
+		(begin
+			(define left_aliases (join_order_set_difference universe aliases (list right_alias)))
+			(define left (get_assoc plans (join_order_set_key left_aliases) nil))
+			(define right (get_assoc plans (join_order_set_key (list right_alias)) nil))
+			(define candidate (if (and (not (nil? left))
+				(and (not (nil? right))
+					(join_order_connected? predicates left_aliases (list right_alias))))
+				(join_order_join_plan universe predicates left right) nil))
+			(if (and (not (nil? candidate))
+				(join_order_pipeline_plan_better? nodes width candidate best))
+				candidate best))) nil)))
+
+(define join_order_pipeline_fill (lambda (nodes universe predicates remaining plans entries width)
+	(if (empty_list? remaining)
+		(list (get_assoc plans (join_order_set_key universe) nil) entries)
+		(begin
+			(define aliases (car remaining))
+			(define plan (if (single_source? aliases)
+				(join_order_leaf_plan (join_order_find_node nodes (car aliases)))
+				(join_order_pipeline_set_plan nodes universe predicates plans aliases width)))
+			(join_order_pipeline_fill nodes universe predicates (cdr remaining)
+				(if (nil? plan) plans (set_assoc plans (join_order_set_key aliases) plan))
+				(if (nil? plan) entries (+ entries 1)) width)))))
+
+(define join_order_pipeline_candidate (lambda (nodes aliases predicates connected required_property)
+	(begin
+		(define width (join_order_pipeline_width required_property))
+		(if (not (number? width))
+			(list nil 0)
+			(join_order_pipeline_fill nodes aliases predicates
+				(join_order_sort_sets connected) '() 0 width)))))
+
+(define join_order_plan_with_cost (lambda (plan cost)
+	(list
+		(join_order_plan_tree plan)
+		(join_order_plan_aliases plan)
+		(join_order_plan_cardinality plan)
+		(qassoc_get cost (quote total_ns) 0)
+		(join_order_plan_size plan)
+		(join_order_plan_atomic? plan)
+		(join_order_driver_cardinality plan)
+		(join_order_plan_left plan)
+		(join_order_plan_right plan)
+		(join_order_plan_cardinality_expr plan)
+		(qassoc_get cost (quote total_ns) 0)
+		(join_order_plan_driver_expr plan)
+		cost
+		(join_order_plan_pending_kind plan)
+		(join_order_plan_pending_requirements plan))))
 
 (define join_order_alias_position (lambda (aliases alias)
 	(reduce (produceN (count aliases)) (lambda (found i)
@@ -1772,16 +1891,35 @@ running DP over a wide projection-only graph. */
 				source_order_plan nil)))
 		(define selected (if (nil? completion_plan) result
 			(list completion_plan (+ (cadr result) 1))))
-		(if (nil? (car selected))
+		(define pipeline_result (if (or (not (number? (join_order_pipeline_width required_drivers)))
+			(cadr connected_count))
+			(list nil 0)
+			(join_order_pipeline_candidate nodes aliases predicates
+				(car connected_count) required_drivers)))
+		(define pipeline_plan (car pipeline_result))
+		(define pipeline_cost (if (nil? pipeline_plan) nil
+			(join_order_pipeline_cost nodes pipeline_plan
+				(join_order_pipeline_width required_drivers))))
+		(define pipeline_wins (and (not (nil? pipeline_plan))
+			(and (join_order_plan_satisfies_driver_property? pipeline_plan required_drivers)
+				(or (nil? (car selected))
+					(planner_cost_better? pipeline_cost
+						(join_order_plan_cost_domain (car selected)))))))
+		(define chosen_plan (if pipeline_wins
+			(join_order_plan_with_cost pipeline_plan pipeline_cost) (car selected)))
+		(define chosen_entries (+ (cadr selected)
+			(if pipeline_wins (cadr pipeline_result) 0)))
+		(if (nil? chosen_plan)
 			(neumann_fail "join_reorder" (concat "SCM join ordering could not construct a connected plan: " (string (list nodes predicates result))))
-			(if (not (join_order_plan_satisfies_driver_property? (car selected) required_drivers))
+			(if (not (join_order_plan_satisfies_driver_property? chosen_plan required_drivers))
 				(neumann_fail "join_reorder" "costed join plan cannot preserve the required ORDER BY driver")
 				(join_order_result (if (not (nil? functional_relation_plan))
 					(quote functional-relations)
-					(if (nil? completion_plan) strategy
-						(if (equal? completion_plan forced_order_plan)
-							(quote ordered-property) (quote source-order-completion))))
-					(car selected) (cadr selected) predicates)))))))
+					(if pipeline_wins (quote pipeline-left-deep)
+						(if (nil? completion_plan) strategy
+							(if (equal? completion_plan forced_order_plan)
+								(quote ordered-property) (quote source-order-completion)))))
+					chosen_plan chosen_entries predicates)))))))
 
 (define make_join_optimizer_leaf (lambda (alias)
 	(list (quote join-leaf) alias '())))
@@ -2181,6 +2319,22 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(and complete (join_optimizer_source_column_constant_bound?
 					sources default_alias src col condition))) true))) false))))
 
+(define join_optimizer_source_local_condition (lambda (graph src)
+	(combine_where
+		(source_join_expr src)
+		(combine_where_terms
+			(map (join_optimizer_local_predicates graph (source_alias src))
+				(lambda (entry) (qassoc_get entry (quote predicate) true)))
+			true))))
+
+(define join_optimizer_constant_unique_order_prefix_aliases (lambda (sources default_alias graph stages)
+	(map (filter sources (lambda (src)
+		(and (join_optimizer_inner_source? stages src)
+			(join_optimizer_source_constant_unique_point?
+				sources default_alias src
+				(join_optimizer_source_local_condition graph src)))))
+		source_alias)))
+
 (define join_optimizer_required_order_prefix (lambda (sources required_aliases condition stages prefix)
 	(if (or (empty_list? sources)
 		(or (empty_list? required_aliases)
@@ -2233,9 +2387,43 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(join_optimizer_required_order_prefix sources raw_required_order_aliases
 					(coalesceNil (qb_where block) true) stage_catalog '())
 				raw_required_order_aliases))))
-		(define required_order_property (if (empty_list? required_order_aliases)
-			ordered_drivers
+		/* A constant unique lookup emits at most one row and therefore cannot alter
+		the order of a following ordered scan. Putting every such inner source before
+		the ordered driver strictly dominates repeating the same point lookup from
+		every driver row. Express that proof through the existing ordered-prefix
+		property so DP and the lowerer keep one shared notion of valid order. */
+		(define constant_unique_aliases
+			(join_optimizer_constant_unique_order_prefix_aliases
+				sources default_alias graph stage_catalog))
+		/* A singleton can technically be reported as an ordered driver because its
+		downstream scan supplies the order. It must still remain in the prefix: using
+		it as the repeated ordered root would throw away the singleton proof. Prefer
+		the first non-singleton ordered source as the actual order producer. */
+		(define non_singleton_ordered_drivers (filter ordered_drivers (lambda (alias)
+			(not (contains? constant_unique_aliases alias)))))
+		(define selected_ordered_driver (if (not (empty_list? non_singleton_ordered_drivers))
+			(car non_singleton_ordered_drivers)
+			(if (empty_list? ordered_drivers) nil (car ordered_drivers))))
+		(define dominant_singleton_prefix (if (nil? selected_ordered_driver)
+			'()
+			(filter constant_unique_aliases (lambda (alias)
+				(not (equal? alias selected_ordered_driver))))))
+		(define base_required_order_property (if (empty_list? required_order_aliases)
+			(if (empty_list? dominant_singleton_prefix)
+				ordered_drivers
+				(list (list (quote ordered_aliases)
+					(merge (list dominant_singleton_prefix (list selected_ordered_driver))))))
 			(list (list (quote ordered_aliases) required_order_aliases))))
+		(define pipeline_reduce_width (if (and (empty_list? (coalesceNil (qb_order block) '()))
+			(and (empty_list? (coalesceNil (qb_stages block) '()))
+				(or (not (empty_list? (coalesceNil (qb_group block) '())))
+					(query_block_has_aggregates? block))))
+			(+ (count (coalesceNil (qb_group block) '()))
+				(count (coalesceNil (qb_fields block) '()))) nil))
+		(define required_order_property (if (number? pipeline_reduce_width)
+			(append base_required_order_property
+				(list (quote pipeline_reduce_width) pipeline_reduce_width))
+			base_required_order_property))
 		(define preserve_row_number_driver (and
 			(not (empty_list? segment))
 			(query_limit_active? (qb_offset block) (qb_limit block))
@@ -2829,12 +3017,12 @@ their tighter direct bound; this product is only an additional candidate. */
 				(quote index_hook_candidates)))) true))
 		(quote index_hook_candidates)
 		(if (reduce estimates (lambda (found estimate)
-		(or found (equal? (planner_estimate_population estimate) (quote index_candidates)))) false)
-		(quote index_candidates)
-		(if (reduce estimates (lambda (found estimate)
-			(or found (equal? (planner_estimate_population estimate) (quote recset_candidates)))) false)
-			(quote recset_candidates)
-			(quote table_rows))))))
+			(or found (equal? (planner_estimate_population estimate) (quote index_candidates)))) false)
+			(quote index_candidates)
+			(if (reduce estimates (lambda (found estimate)
+				(or found (equal? (planner_estimate_population estimate) (quote recset_candidates)))) false)
+				(quote recset_candidates)
+				(quote table_rows))))))
 
 (define planner_merge_estimate_coverage (lambda (estimates)
 	(begin

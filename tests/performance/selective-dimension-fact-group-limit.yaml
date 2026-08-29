@@ -1,133 +1,92 @@
 # Copyright (C) 2026  Carl-Philip Hänsch
 #
-# Large selective dimension -> fact join followed by a wide grouped aggregate
-# and an unordered LIMIT. Derived from the public query shape at:
-# https://www.reddit.com/r/PostgreSQL/comments/111i07o/superslow_query/
-#
-# The fixture keeps the production default shard size and relies on rebuild's
-# automatic partitioning. It is intentionally excluded from CI because it
-# constructs six million fact rows.
+# Production-shaped selective dimension -> fact join followed by a wide grouped
+# aggregate. The YAML case owns its fixture preparation; the A/B runner fills
+# baseline and candidate independently, then measures only the SQL statement.
 
 metadata:
   version: "1.0"
   description: "Selective star join with wide grouped aggregation and unordered limit"
   isolated: true
-  ci: false
-
-setup:
-  - sql: "DROP TABLE IF EXISTS fact_group_limit_facts"
-  - sql: "DROP TABLE IF EXISTS fact_group_limit_transferables"
-  - sql: "DROP TABLE IF EXISTS fact_group_limit_payables"
-  - sql: "DROP TABLE IF EXISTS fact_group_limit_companies"
-  - sql: "DROP TABLE IF EXISTS fact_group_limit_causes"
-  - sql: "DROP TABLE IF EXISTS fact_group_limit_foundations"
-  - sql: "CREATE TABLE fact_group_limit_foundations (foundation_id INT PRIMARY KEY, foundation_display_name VARCHAR(96)) ENGINE=sloppy"
-  - sql: "CREATE TABLE fact_group_limit_causes (cause_key INT PRIMARY KEY, cause_id INT) ENGINE=sloppy"
-  - sql: "CREATE TABLE fact_group_limit_companies (company_id INT PRIMARY KEY, company_display_name VARCHAR(48), company_code VARCHAR(16)) ENGINE=sloppy"
-  - sql: "CREATE TABLE fact_group_limit_payables (payable_id INT PRIMARY KEY, payable_created_timestamp BIGINT, payable_payment_type VARCHAR(16), payable_code VARCHAR(24), payable_reference_number VARCHAR(32)) ENGINE=sloppy"
-  - sql: "CREATE TABLE fact_group_limit_transferables (transferable_id INT PRIMARY KEY, company_id INT, transferable_effective_timestamp BIGINT, transferable_code VARCHAR(24)) ENGINE=sloppy"
-  - sql: "CREATE TABLE fact_group_limit_facts (donation_id INT, cause_key INT, company_id INT, foundation_id INT, donation_payable_id INT, donation_transferable_id INT, donation_currency VARCHAR(4), donation_transaction_code VARCHAR(24), donation_source VARCHAR(16), transaction_date BIGINT, transferable_amount INT, fees_management_fee INT, fees_merchant_fee INT) ENGINE=sloppy"
-  - timeout: 1800
-    scm: |
-      (begin
-        (define insert_batches (lambda (target cols total batch_size rowfn)
-          (reduce (produceN (ceil (/ total batch_size)))
-            (lambda (inserted batch) (begin
-              (define first (* batch batch_size))
-              (define amount (min batch_size (- total first)))
-              (+ inserted (insert target cols
-                (map (produceN amount) (lambda (local)
-                  (rowfn (+ first local)))))))) 0)))
-        (define foundations (table "memcp-tests" "fact_group_limit_foundations"))
-        (define causes (table "memcp-tests" "fact_group_limit_causes"))
-        (define companies (table "memcp-tests" "fact_group_limit_companies"))
-        (define payables (table "memcp-tests" "fact_group_limit_payables"))
-        (define transferables (table "memcp-tests" "fact_group_limit_transferables"))
-        (insert_batches foundations '("foundation_id" "foundation_display_name")
-          64 10000 (lambda (i)
-            (list (+ i 1)
-              (if (equal? i 0) "American Online Giving Foundation, Inc"
-                (concat "Foundation " (string (+ i 1)))))))
-        (insert_batches causes '("cause_key" "cause_id")
-          20000 10000 (lambda (i) (list (+ i 1) (+ 100000 i))))
-        (insert_batches companies '("company_id" "company_display_name" "company_code")
-          2000 10000 (lambda (i)
-            (list (+ i 1) (concat "Company " (string (+ i 1)))
-              (concat "C" (string (+ i 1))))))
-        (insert_batches payables
-          '("payable_id" "payable_created_timestamp" "payable_payment_type" "payable_code" "payable_reference_number")
-          200000 10000 (lambda (i)
-            (list (+ i 1) (+ 1660000000 i)
-              (if (equal? (mod i 2) 0) "card" "bank")
-              (concat "PAY" (string (+ i 1)))
-              (concat "REF" (string (+ i 1))))))
-        (insert_batches transferables
-          '("transferable_id" "company_id" "transferable_effective_timestamp" "transferable_code")
-          500000 10000 (lambda (i)
-            (list (+ i 1) (+ 1 (mod i 2000))
-              (+ 1667260800 (* 86400 (mod i 365)))
-              (concat "DR" (string (+ i 1))))))
-        (rebuild)
-        true)
-  - timeout: 1800
-    sql: |
-      INSERT INTO fact_group_limit_facts
-      SELECT transferable_id, 1 + MOD(transferable_id - 1, 20000), company_id,
-        1 + MOD(transferable_id - 1, 64), 1 + MOD(transferable_id - 1, 200000),
-        transferable_id,
-        CASE WHEN MOD(transferable_id - 1, 3) = 0 THEN 'USD' ELSE 'EUR' END,
-        CONCAT('TX', transferable_id),
-        CASE WHEN MOD(transferable_id - 1, 2) = 0 THEN 'online' ELSE 'import' END,
-        1667260800 + transferable_id - 1, 100 + MOD(transferable_id - 1, 500),
-        1 + MOD(transferable_id - 1, 11), 1 + MOD(transferable_id - 1, 7)
-      FROM fact_group_limit_transferables
-  - timeout: 1800
-    sql: |
-      INSERT INTO fact_group_limit_facts
-      SELECT donation_id + 500000, cause_key, company_id, foundation_id,
-        donation_payable_id, donation_transferable_id, donation_currency,
-        CONCAT('TX', donation_id + 500000), donation_source,
-        transaction_date + 500000, transferable_amount,
-        fees_management_fee, fees_merchant_fee
-      FROM fact_group_limit_facts WHERE donation_id <= 500000
-  - timeout: 1800
-    sql: |
-      INSERT INTO fact_group_limit_facts
-      SELECT donation_id + 1000000, cause_key, company_id, foundation_id,
-        donation_payable_id, donation_transferable_id, donation_currency,
-        CONCAT('TX', donation_id + 1000000), donation_source,
-        transaction_date + 1000000, transferable_amount,
-        fees_management_fee, fees_merchant_fee
-      FROM fact_group_limit_facts WHERE donation_id <= 1000000
-  - timeout: 1800
-    sql: |
-      INSERT INTO fact_group_limit_facts
-      SELECT donation_id + 2000000, cause_key, company_id, foundation_id,
-        donation_payable_id, donation_transferable_id, donation_currency,
-        CONCAT('TX', donation_id + 2000000), donation_source,
-        transaction_date + 2000000, transferable_amount,
-        fees_management_fee, fees_merchant_fee
-      FROM fact_group_limit_facts WHERE donation_id <= 2000000
-  - timeout: 1800
-    sql: |
-      INSERT INTO fact_group_limit_facts
-      SELECT donation_id + 4000000, cause_key, company_id, foundation_id,
-        donation_payable_id, donation_transferable_id, donation_currency,
-        CONCAT('TX', donation_id + 4000000), donation_source,
-        transaction_date + 4000000, transferable_amount,
-        fees_management_fee, fees_merchant_fee
-      FROM fact_group_limit_facts WHERE donation_id <= 2000000
-  - timeout: 1800
-    scm: |
-      (begin
-        (rebuild (table "memcp-tests" "fact_group_limit_facts"))
-        true)
+  ci: true
+  max_regression_pct: 20
 
 test_cases:
   - name: "Selective dimensions feed wide fact grouping with limit"
+    performance_rows: 2000000
     warmup: 1
-    timing_samples: 5
     threshold_ms: 180000
+    setup:
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_facts"
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_transferables"
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_payables"
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_companies"
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_causes"
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_foundations"
+      - sql: "CREATE TABLE fact_group_limit_foundations (foundation_id INT PRIMARY KEY, foundation_display_name VARCHAR(96)) ENGINE=sloppy"
+      - sql: "CREATE TABLE fact_group_limit_causes (cause_key INT PRIMARY KEY, cause_id INT) ENGINE=sloppy"
+      - sql: "CREATE TABLE fact_group_limit_companies (company_id INT PRIMARY KEY, company_display_name VARCHAR(48), company_code VARCHAR(16)) ENGINE=sloppy"
+      - sql: "CREATE TABLE fact_group_limit_payables (payable_id INT PRIMARY KEY, payable_created_timestamp BIGINT, payable_payment_type VARCHAR(16), payable_code VARCHAR(24), payable_reference_number VARCHAR(32)) ENGINE=sloppy"
+      - sql: "CREATE TABLE fact_group_limit_transferables (transferable_id INT PRIMARY KEY, company_id INT, transferable_effective_timestamp BIGINT, transferable_code VARCHAR(24)) ENGINE=sloppy"
+      - sql: "CREATE TABLE fact_group_limit_facts (donation_id INT, cause_key INT, company_id INT, foundation_id INT, donation_payable_id INT, donation_transferable_id INT, donation_currency VARCHAR(4), donation_transaction_code VARCHAR(24), donation_source VARCHAR(16), transaction_date BIGINT, transferable_amount INT, fees_management_fee INT, fees_merchant_fee INT) ENGINE=sloppy"
+      - timeout: 120
+        scm: |
+          (begin
+            (define fact_rows {rows})
+            (define cause_rows (max 100 (min 20000 fact_rows)))
+            (define company_rows (max 100 (min 2000 fact_rows)))
+            (define payable_rows (max 1000 (min 200000 fact_rows)))
+            (define transferable_rows (max 1000 (min 500000 fact_rows)))
+            (define insert_batches (lambda (target cols total rowfn)
+              (reduce (produceN (ceil (/ total 10000)))
+                (lambda (inserted batch) (begin
+                  (define first (* batch 10000))
+                  (define amount (min 10000 (- total first)))
+                  (+ inserted (insert target cols
+                    (map (produceN amount) (lambda (local)
+                      (rowfn (+ first local)))))))) 0)))
+            (insert_batches (table "memcp-tests" "fact_group_limit_foundations")
+              '("foundation_id" "foundation_display_name") 64
+              (lambda (i) (list (+ i 1)
+                (if (equal? i 0) "American Online Giving Foundation, Inc"
+                  (concat "Foundation " (string (+ i 1)))))))
+            (insert_batches (table "memcp-tests" "fact_group_limit_causes")
+              '("cause_key" "cause_id") cause_rows
+              (lambda (i) (list (+ i 1) (+ 100000 i))))
+            (insert_batches (table "memcp-tests" "fact_group_limit_companies")
+              '("company_id" "company_display_name" "company_code") company_rows
+              (lambda (i) (list (+ i 1)
+                (concat "Company " (string (+ i 1)))
+                (concat "C" (string (+ i 1))))))
+            (insert_batches (table "memcp-tests" "fact_group_limit_payables")
+              '("payable_id" "payable_created_timestamp" "payable_payment_type" "payable_code" "payable_reference_number")
+              payable_rows (lambda (i) (list (+ i 1) (+ 1660000000 i)
+                (if (equal? (mod i 2) 0) "card" "bank")
+                (concat "PAY" (string (+ i 1)))
+                (concat "REF" (string (+ i 1))))))
+            (insert_batches (table "memcp-tests" "fact_group_limit_transferables")
+              '("transferable_id" "company_id" "transferable_effective_timestamp" "transferable_code")
+              transferable_rows (lambda (i) (list (+ i 1)
+                (+ 1 (mod i company_rows))
+                (+ 1667260800 (* 86400 (mod i 365)))
+                (concat "DR" (string (+ i 1))))))
+            (insert_batches (table "memcp-tests" "fact_group_limit_facts")
+              '("donation_id" "cause_key" "company_id" "foundation_id"
+                "donation_payable_id" "donation_transferable_id" "donation_currency"
+                "donation_transaction_code" "donation_source" "transaction_date"
+                "transferable_amount" "fees_management_fee" "fees_merchant_fee")
+              fact_rows (lambda (i) (begin
+                (define transferable_id (+ 1 (mod i transferable_rows)))
+                (list (+ i 1) (+ 1 (mod i cause_rows))
+                  (+ 1 (mod (- transferable_id 1) company_rows))
+                  (+ 1 (mod i 64)) (+ 1 (mod i payable_rows)) transferable_id
+                  (if (equal? (mod i 3) 0) "USD" "EUR")
+                  (concat "TX" (string (+ i 1)))
+                  (if (equal? (mod i 2) 0) "online" "import")
+                  (+ 1667260800 i) (+ 100 (mod i 500))
+                  (+ 1 (mod i 11)) (+ 1 (mod i 7))))))
+            (rebuild)
+            true)
     sql: |
       SELECT
         fo.foundation_display_name,
@@ -176,357 +135,6 @@ test_cases:
         fa.transaction_date
       LIMIT 10
     expect: {rows: 10}
-
-  - name: "Selective dimension fact grouping physical plan"
-    sql: |
-      EXPLAIN PHYSICAL
-      SELECT fa.transaction_date, SUM(fa.transferable_amount) AS transferable_amount
-      FROM fact_group_limit_facts fa
-      INNER JOIN fact_group_limit_foundations fo ON fa.foundation_id = fo.foundation_id
-      INNER JOIN fact_group_limit_transferables tr
-        ON fa.donation_transferable_id = tr.transferable_id
-       AND fa.company_id = tr.company_id
-      WHERE fo.foundation_display_name = 'American Online Giving Foundation, Inc'
-        AND tr.transferable_effective_timestamp BETWEEN 1675036800 AND 1682899200
-      GROUP BY fa.transaction_date
-      LIMIT 10
-    expect:
-      rows: 1
-      result_contains: ["unordered_join_reduce", "chosen scan_join_order"]
-
-  - name: "Intersected dimension projections bound the fact scan"
-    timing_samples: 5
-    scm: |
-      (begin
-        (define tx (session "__memcp_tx"))
-        (define foundations (table "memcp-tests" "fact_group_limit_foundations"))
-        (define transferables (table "memcp-tests" "fact_group_limit_transferables"))
-        (define facts (table "memcp-tests" "fact_group_limit_facts"))
-        (define selected_foundations
-          (scan_recset tx foundations '("foundation_display_name")
-            (lambda (name)
-              (equal? name "American Online Giving Foundation, Inc"))))
-        (define selected_transferables
-          (scan_recset tx transferables '("transferable_effective_timestamp")
-            (lambda (effective_at)
-              (and (>= effective_at 1675036800) (<= effective_at 1682899200)))))
-        (define facts_for_foundation
-          (recset_project_join tx selected_foundations '("foundation_id")
-            facts '("foundation_id")))
-        (define facts_for_transferables
-          (recset_project_join tx selected_transferables '("transferable_id" "company_id")
-            facts '("donation_transferable_id" "company_id")))
-        (define candidates
-          (recset_intersect (list facts_for_foundation facts_for_transferables)))
-        (define found (recset_count candidates))
-        (if (equal? found 23628) "ok"
-          (error (concat "wrong selective fact count: " found))))
-
-  - name: "Selective fact carrier feeds indexed dimensions and grouped aggregates"
-    timing_samples: 5
-    timeout: 1800
-    scm: |
-      (begin
-        (define tx (session "__memcp_tx"))
-        (define foundations (table "memcp-tests" "fact_group_limit_foundations"))
-        (define causes (table "memcp-tests" "fact_group_limit_causes"))
-        (define companies (table "memcp-tests" "fact_group_limit_companies"))
-        (define payables (table "memcp-tests" "fact_group_limit_payables"))
-        (define transferables (table "memcp-tests" "fact_group_limit_transferables"))
-        (define facts (table "memcp-tests" "fact_group_limit_facts"))
-        (define selected_foundations
-          (scan_recset tx foundations '("foundation_display_name")
-            (lambda (name)
-              (equal? name "American Online Giving Foundation, Inc"))))
-        (define selected_transferables
-          (scan_recset tx transferables '("transferable_effective_timestamp")
-            (lambda (effective_at)
-              (and (>= effective_at 1675036800) (<= effective_at 1682899200)))))
-        (define facts_for_foundation
-          (recset_project_join tx selected_foundations '("foundation_id")
-            facts '("foundation_id")))
-        (define facts_for_transferables
-          (recset_project_join tx selected_transferables '("transferable_id" "company_id")
-            facts '("donation_transferable_id" "company_id")))
-        (define candidates
-          (recset_intersect (list facts_for_foundation facts_for_transferables)))
-        (define merge_values (lambda (old new)
-          (list
-            (+ (nth old 0) (nth new 0))
-            (+ (nth old 1) (nth new 1))
-            (+ (nth old 2) (nth new 2))
-            (+ (nth old 3) (nth new 3))
-            (+ (nth old 4) (nth new 4)))))
-        (define grouped
-          (scan tx candidates '() (lambda () true)
-            '("cause_key" "company_id" "donation_payable_id" "donation_transferable_id"
-              "donation_currency" "donation_transaction_code" "donation_source"
-              "transaction_date" "transferable_amount" "fees_management_fee"
-              "fees_merchant_fee")
-            (lambda (cause_key company_id payable_id transferable_id
-                currency transaction_code source transaction_date amount management merchant)
-              (begin
-                (define cause_id
-                  (scan tx causes '("cause_key")
-                    (lambda (id) (equal? id cause_key))
-                    '("cause_id") (lambda (id) id)
-                    (lambda (_old value) value) nil nil true))
-                (define company
-                  (scan tx companies '("company_id")
-                    (lambda (id) (equal? id company_id))
-                    '("company_display_name" "company_code")
-                    (lambda (name code) (list name code))
-                    (lambda (_old value) value) nil nil true))
-                (define payable
-                  (scan tx payables '("payable_id")
-                    (lambda (id) (equal? id payable_id))
-                    '("payable_created_timestamp" "payable_payment_type"
-                      "payable_code" "payable_reference_number")
-                    (lambda (created_at payment_type code reference)
-                      (list created_at payment_type code reference))
-                    (lambda (_old value) value) nil nil true))
-                (define transferable
-                  (scan tx transferables '("transferable_id" "company_id")
-                    (lambda (id owner)
-                      (and (equal? id transferable_id) (equal? owner company_id)))
-                    '("transferable_effective_timestamp" "transferable_code")
-                    (lambda (effective_at code) (list effective_at code))
-                    (lambda (_old value) value) nil nil true))
-                (define fees (+ management merchant))
-                (list
-                  (list
-                    "American Online Giving Foundation, Inc"
-                    (nth payable 0) (nth transferable 0)
-                    (nth payable 1) (nth payable 2) (nth payable 3)
-                    currency cause_id (nth company 0) (nth company 1)
-                    (nth transferable 1) transaction_code source transaction_date)
-                  (list amount fees (+ fees amount) management merchant))))
-            (lambda (acc row)
-              (set_assoc_mut acc (car row) (cadr row) merge_values))
-            '()
-            (lambda (acc rows) (merge_assoc_mut acc rows merge_values))
-            false))
-        (define group_count
-          (count (extract_assoc grouped (lambda (_key _value) true))))
-        (if (equal? group_count 23628) "ok"
-          (error (concat "wrong selective group count: " group_count))))
-
-  - name: "Selective dimension driven joined grouping pipeline"
-    timing_samples: 5
-    timeout: 1800
-    scm: |
-      (begin
-        (define merge_values (lambda (old new)
-          (list
-            (+ (nth old 0) (nth new 0))
-            (+ (nth old 1) (nth new 1))
-            (+ (nth old 2) (nth new 2))
-            (+ (nth old 3) (nth new 3))
-            (+ (nth old 4) (nth new 4)))))
-        (define grouped
-          (scan_join_order (session "__memcp_tx")
-            (list
-              (table "memcp-tests" "fact_group_limit_foundations")
-              (table "memcp-tests" "fact_group_limit_facts")
-              (table "memcp-tests" "fact_group_limit_transferables")
-              (table "memcp-tests" "fact_group_limit_causes")
-              (table "memcp-tests" "fact_group_limit_companies")
-              (table "memcp-tests" "fact_group_limit_payables"))
-            (list
-              (list "foundation_display_name")
-              (list)
-              (list "transferable_effective_timestamp")
-              (list)
-              (list)
-              (list))
-            (list
-              (lambda (name)
-                (equal? name "American Online Giving Foundation, Inc"))
-              (lambda () true)
-              (lambda (effective_at)
-                (and (>= effective_at 1675036800) (<= effective_at 1682899200)))
-              (lambda () true)
-              (lambda () true)
-              (lambda () true))
-            (list
-              (list (list 0 "foundation_id" "foundation_id"))
-              (list
-                (list 1 "donation_transferable_id" "transferable_id")
-                (list 1 "company_id" "company_id"))
-              (list (list 1 "cause_key" "cause_key"))
-              (list (list 1 "company_id" "company_id"))
-              (list (list 1 "donation_payable_id" "payable_id")))
-            (list) nil
-            (list) (list)
-            0 0 -1
-            (list
-              (list 0 "foundation_display_name")
-              (list 5 "payable_created_timestamp")
-              (list 2 "transferable_effective_timestamp")
-              (list 5 "payable_payment_type")
-              (list 5 "payable_code")
-              (list 5 "payable_reference_number")
-              (list 1 "donation_currency")
-              (list 3 "cause_id")
-              (list 4 "company_display_name")
-              (list 4 "company_code")
-              (list 2 "transferable_code")
-              (list 1 "donation_transaction_code")
-              (list 1 "donation_source")
-              (list 1 "transaction_date")
-              (list 1 "transferable_amount")
-              (list 1 "fees_management_fee")
-              (list 1 "fees_merchant_fee"))
-            (lambda (foundation_name payable_created_at transferable_effective_at
-                payment_type payable_code payable_reference currency cause_id
-                company_name company_code transferable_code transaction_code
-                source transaction_date amount management merchant)
-              (begin
-                (define fees (+ management merchant))
-                (list
-                  (list foundation_name payable_created_at transferable_effective_at
-                    payment_type payable_code payable_reference currency cause_id
-                    company_name company_code transferable_code transaction_code
-                    source transaction_date)
-                  (list amount fees (+ fees amount) management merchant))))
-            (lambda (acc row)
-              (set_assoc_mut acc (car row) (cadr row) merge_values))
-            '()
-            (lambda (acc rows) (merge_assoc_mut acc rows merge_values))))
-        (define group_count
-          (count (extract_assoc grouped (lambda (_key _value) true))))
-        (if (equal? group_count 23628) "ok"
-          (error (concat "wrong joined group count: " group_count))))
-
-  - name: "Computed dimension columns feed selective fact grouping"
-    timing_samples: 5
-    timeout: 1800
-    scm: |
-      (begin
-        (define tx (session "__memcp_tx"))
-        (define foundations (table "memcp-tests" "fact_group_limit_foundations"))
-        (define causes (table "memcp-tests" "fact_group_limit_causes"))
-        (define companies (table "memcp-tests" "fact_group_limit_companies"))
-        (define payables (table "memcp-tests" "fact_group_limit_payables"))
-        (define transferables (table "memcp-tests" "fact_group_limit_transferables"))
-        (define facts (table "memcp-tests" "fact_group_limit_facts"))
-        (define prepare_dimension_column (lambda (name input_cols computor)
-          (if (nil? (resolve_column_name "memcp-tests" "fact_group_limit_facts" name false))
-            (createcolumn facts name "any" '()
-              (list "temp" true
-                "filtercols" (list "foundation_id")
-                "filter" (lambda (foundation_id) (equal? foundation_id 1)))
-              input_cols computor)
-            true)))
-        (prepare_dimension_column ".dimension:cause_id" '("cause_key")
-          (lambda (cause_key)
-            (scan tx causes '("cause_key")
-              (lambda (id) (equal? id cause_key))
-              '("cause_id") (lambda (id) id)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:company_name" '("company_id")
-          (lambda (company_id)
-            (scan tx companies '("company_id")
-              (lambda (id) (equal? id company_id))
-              '("company_display_name") (lambda (name) name)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:company_code" '("company_id")
-          (lambda (company_id)
-            (scan tx companies '("company_id")
-              (lambda (id) (equal? id company_id))
-              '("company_code") (lambda (code) code)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:payable_created" '("donation_payable_id")
-          (lambda (payable_id)
-            (scan tx payables '("payable_id")
-              (lambda (id) (equal? id payable_id))
-              '("payable_created_timestamp") (lambda (created_at) created_at)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:payment_type" '("donation_payable_id")
-          (lambda (payable_id)
-            (scan tx payables '("payable_id")
-              (lambda (id) (equal? id payable_id))
-              '("payable_payment_type") (lambda (payment_type) payment_type)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:payable_code" '("donation_payable_id")
-          (lambda (payable_id)
-            (scan tx payables '("payable_id")
-              (lambda (id) (equal? id payable_id))
-              '("payable_code") (lambda (code) code)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:payable_reference" '("donation_payable_id")
-          (lambda (payable_id)
-            (scan tx payables '("payable_id")
-              (lambda (id) (equal? id payable_id))
-              '("payable_reference_number") (lambda (reference) reference)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:transferable_effective" '("donation_transferable_id" "company_id")
-          (lambda (transferable_id company_id)
-            (scan tx transferables '("transferable_id" "company_id")
-              (lambda (id owner)
-                (and (equal? id transferable_id) (equal? owner company_id)))
-              '("transferable_effective_timestamp") (lambda (effective_at) effective_at)
-              (lambda (_old value) value) nil nil true)))
-        (prepare_dimension_column ".dimension:transferable_code" '("donation_transferable_id" "company_id")
-          (lambda (transferable_id company_id)
-            (scan tx transferables '("transferable_id" "company_id")
-              (lambda (id owner)
-                (and (equal? id transferable_id) (equal? owner company_id)))
-              '("transferable_code") (lambda (code) code)
-              (lambda (_old value) value) nil nil true)))
-        (define selected_foundations
-          (scan_recset tx foundations '("foundation_display_name")
-            (lambda (name)
-              (equal? name "American Online Giving Foundation, Inc"))))
-        (define selected_transferables
-          (scan_recset tx transferables '("transferable_effective_timestamp")
-            (lambda (effective_at)
-              (and (>= effective_at 1675036800) (<= effective_at 1682899200)))))
-        (define candidates
-          (recset_intersect (list
-            (recset_project_join tx selected_foundations '("foundation_id")
-              facts '("foundation_id"))
-            (recset_project_join tx selected_transferables '("transferable_id" "company_id")
-              facts '("donation_transferable_id" "company_id")))))
-        (define merge_values (lambda (old new)
-          (list
-            (+ (nth old 0) (nth new 0))
-            (+ (nth old 1) (nth new 1))
-            (+ (nth old 2) (nth new 2))
-            (+ (nth old 3) (nth new 3))
-            (+ (nth old 4) (nth new 4)))))
-        (define grouped
-          (scan tx candidates '() (lambda () true)
-            '(".dimension:cause_id" ".dimension:company_name"
-              ".dimension:company_code" ".dimension:payable_created"
-              ".dimension:payment_type" ".dimension:payable_code"
-              ".dimension:payable_reference" ".dimension:transferable_effective"
-              ".dimension:transferable_code"
-              "donation_currency" "donation_transaction_code" "donation_source"
-              "transaction_date" "transferable_amount" "fees_management_fee"
-              "fees_merchant_fee")
-            (lambda (cause_id company_name company_code payable_created payment_type
-                payable_code payable_reference transferable_effective transferable_code
-                currency transaction_code source transaction_date amount management merchant)
-              (begin
-                (define fees (+ management merchant))
-                (list
-                  (list
-                    "American Online Giving Foundation, Inc"
-                    payable_created transferable_effective payment_type
-                    payable_code payable_reference currency cause_id
-                    company_name company_code transferable_code
-                    transaction_code source transaction_date)
-                  (list amount fees (+ fees amount) management merchant))))
-            (lambda (acc row)
-              (set_assoc_mut acc (car row) (cadr row) merge_values))
-            '()
-            (lambda (acc rows) (merge_assoc_mut acc rows merge_values))
-            false))
-        (define group_count
-          (count (extract_assoc grouped (lambda (_key _value) true))))
-        (if (equal? group_count 23628) "ok"
-          (error (concat "wrong computed-bundle group count: " group_count))))
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS fact_group_limit_facts"

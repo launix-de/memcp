@@ -103,6 +103,52 @@ def get_process_cpu_times(pid: int) -> Optional[Tuple[float, float]]:
     except:
         return None
 
+def find_memcp_pid_for_url(base_url: str) -> Optional[int]:
+    """Find the MemCP instance owned by this runner's HTTP endpoint."""
+    try:
+        port = int(base_url.rsplit(':', 1)[1])
+        result = subprocess.run(
+            ['pgrep', '-f', f'memcp.*--api-port={port}'],
+            capture_output=True, text=True, timeout=2,
+        )
+        for pid_str in result.stdout.splitlines():
+            if pid_str.strip():
+                return int(pid_str.strip())
+    except Exception:
+        pass
+    return None
+
+def wait_for_performance_setup_quiescence(
+    base_url: str, timeout: Optional[float] = None,
+    sample_interval: float = 0.25, quiet_period: float = 1.0,
+) -> bool:
+    """Wait until asynchronous fixture rebuild work stops consuming CPU."""
+    if timeout is None:
+        timeout = PERF_SETUP_MAX_TIME_SEC
+    pid = find_memcp_pid_for_url(base_url)
+    if pid is None:
+        return False
+    started = time.monotonic()
+    previous_at = started
+    previous_cpu = get_process_cpu_times(pid)
+    quiet_since = None
+    while previous_cpu is not None and time.monotonic() - started < timeout:
+        if ram_pressure_abort.wait(sample_interval):
+            return False
+        now = time.monotonic()
+        current_cpu = get_process_cpu_times(pid)
+        if current_cpu is None:
+            return False
+        cpu_fraction = max(0.0, current_cpu - previous_cpu) / max(0.001, now - previous_at)
+        if cpu_fraction <= 0.05:
+            quiet_since = quiet_since or now
+            if now - quiet_since >= quiet_period:
+                return True
+        else:
+            quiet_since = None
+        previous_at, previous_cpu = now, current_cpu
+    return False
+
 def measure_cpu_load(pid: int, start_cpu: float, end_cpu: float, elapsed_sec: float) -> Optional[float]:
     """Calculate CPU load as percentage of total CPU capacity.
     Returns percentage where 100% = one core fully utilized, NUM_CPUS*100% = all cores."""
@@ -618,10 +664,39 @@ class SQLTestRunner:
         self.current_spec_file = None
         self._config_loaded = False
         self.performance_calibration = performance_calibration or load_performance_scale()
+        self._perf_round_setup_barrier = None
+        self._perf_round_done_barrier = None
+        self._perf_round_failed = None
+        self._perf_round_count = 0
+        self._perf_setup_semaphore = None
 
     def set_restart_handler(self, fn):
         """Install a restart handler callable that restarts MemCP (returns True on success)."""
         self._restart_handler = fn
+
+    def abort_performance_round(self) -> None:
+        """Release every suite promptly when one parallel fixture setup fails."""
+        if self._perf_round_failed is not None:
+            self._perf_round_failed.set()
+        for barrier in (self._perf_round_setup_barrier, self._perf_round_done_barrier):
+            if barrier is not None:
+                try:
+                    barrier.abort()
+                except threading.BrokenBarrierError:
+                    pass
+
+    def restart_server_after_setup(self, database: str) -> bool:
+        """Gracefully persist all prepared fixtures, then restart the managed server."""
+        if self._restart_handler is None:
+            print("❌ restart_after_setup requires a runner-managed MemCP process")
+            return False
+        response = self.execute_sql(
+            database, "SHUTDOWN", retry_on_connection_failure=False,
+        )
+        if response is not None and response.status_code >= 500:
+            print(f"❌ SHUTDOWN after setup failed: HTTP {response.status_code}")
+            return False
+        return self._restart_handler()
 
     def load_perf_baselines(self):
         """Load runner config from disk, including perf baselines and failure stats."""
@@ -1123,6 +1198,13 @@ class SQLTestRunner:
         # Supports {rows} and {database} template placeholders for perf tests
         test_setup_steps = test_case.get("setup")
         heap_bytes = 0
+
+        def fail_setup(reason, statement=None, response=None, expected=None):
+            self.abort_performance_round()
+            return self._record_fail(
+                name, reason, statement, response, expected, is_noncritical,
+            )
+
         if test_setup_steps and isinstance(test_setup_steps, list):
             setup_started = time.monotonic()
             for step in test_setup_steps:
@@ -1132,53 +1214,67 @@ class SQLTestRunner:
                 if check_ram_pressure():
                     trip_ram_abort(f"setup step of {name}")
                 if ram_pressure_abort.is_set():
-                    return self._record_fail(name, "Aborted: RAM pressure during setup", None, None, None, is_noncritical)
+                    return fail_setup("Aborted: RAM pressure during setup")
                 setup_remaining = PERF_SETUP_MAX_TIME_SEC - (time.monotonic() - setup_started)
                 if PERF_TEST_ENABLED and setup_remaining <= 0:
-                    return self._record_fail(
-                        name, f"Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit",
-                        None, None, None, is_noncritical,
-                    )
+                    return fail_setup(f"Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit")
                 if "sql" in step:
                     sql_code = step["sql"]
                     if is_perf_test:
                         sql_code = sql_code.replace("{rows}", str(perf_rows)).replace("{database}", database)
-                    with performance_server_gate():
-                        resp = self.execute_sql(
-                            database, sql_code, syntax=self.suite_syntax,
-                            session_id=session_id,
-                            timeout=(
-                                max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
-                                if PERF_TEST_ENABLED else int(step.get("timeout", 600))
-                            ),
-                        )
+                    if self._perf_setup_semaphore is not None:
+                        if not self._perf_setup_semaphore.acquire(timeout=max(0, setup_remaining)):
+                            return fail_setup(f"Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit")
+                        setup_remaining = PERF_SETUP_MAX_TIME_SEC - (time.monotonic() - setup_started)
+                    try:
+                        with performance_server_gate():
+                            resp = self.execute_sql(
+                                database, sql_code, syntax=self.suite_syntax,
+                                session_id=session_id,
+                                timeout=(
+                                    max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
+                                    if PERF_TEST_ENABLED else int(step.get("timeout", 600))
+                                ),
+                            )
+                    finally:
+                        if self._perf_setup_semaphore is not None:
+                            self._perf_setup_semaphore.release()
                     expect_error = self._step_expects_error(step)
                     if resp is None:
-                        return self._record_fail(name, "Setup SQL failed: no response", sql_code, None, None, is_noncritical)
+                        return fail_setup("Setup SQL failed: no response", sql_code)
                     if expect_error:
                         if resp.status_code == 200 and "Error" not in resp.text:
-                            return self._record_fail(name, "Setup SQL expected error but succeeded", sql_code, resp, {"error": True}, is_noncritical)
+                            return fail_setup(
+                                "Setup SQL expected error but succeeded",
+                                sql_code, resp, {"error": True},
+                            )
                     else:
                         if resp.status_code != 200 or "Error" in resp.text:
-                            return self._record_fail(name, "Setup SQL failed", sql_code, resp, None, is_noncritical)
+                            return fail_setup("Setup SQL failed", sql_code, resp)
                 elif "scm" in step:
                     scm = step["scm"]
                     if is_perf_test:
                         scm = scm.replace("{rows}", str(perf_rows)).replace("{database}", database)
                     url = f"{self.base_url}/scm"
                     try:
-                        with performance_server_gate():
-                            resp = requests.post(
-                                url, data=scm, headers=self.auth_header,
-                                timeout=(
-                                    max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
-                                    if PERF_TEST_ENABLED else int(step.get("timeout", 600))
-                                ),
-                            )
+                        if self._perf_setup_semaphore is not None:
+                            if not self._perf_setup_semaphore.acquire(timeout=max(0, setup_remaining)):
+                                return fail_setup(f"Setup exceeded {PERF_SETUP_MAX_TIME_SEC:g}s limit")
+                            setup_remaining = PERF_SETUP_MAX_TIME_SEC - (time.monotonic() - setup_started)
+                        try:
+                            with performance_server_gate():
+                                resp = requests.post(
+                                    url, data=scm, headers=self.auth_header,
+                                    timeout=(max(1, min(600, math.ceil(setup_remaining)))
+                                             if PERF_TEST_ENABLED else 600),
+                                )
+                        finally:
+                            if self._perf_setup_semaphore is not None:
+                                self._perf_setup_semaphore.release()
                     except Exception as e:
-                        return self._record_fail(name, f"Setup SCM error: {e}", scm, None, None, is_noncritical)
+                        return fail_setup(f"Setup SCM error: {e}", scm)
                     if resp is None or resp.status_code != 200:
-                        return self._record_fail(name, "Setup SCM failed", scm, resp, None, is_noncritical)
+                        return fail_setup("Setup SCM failed", scm, resp)
                     # Extract heap stats from response if available
                     try:
                         result = json.loads(resp.text.strip())
@@ -1186,6 +1282,24 @@ class SQLTestRunner:
                             heap_bytes = result[1]
                     except:
                         pass
+
+        # A/B suites advance in lockstep: every YAML prepares its next timed
+        # case in parallel, then all asynchronous rebuild work must settle
+        # before any runner can enter an exclusive measurement window.
+        if is_perf_test and self._perf_round_setup_barrier is not None:
+            try:
+                self._perf_round_setup_barrier.wait(
+                    timeout=PERF_SETUP_MAX_TIME_SEC * 2 + 10,
+                )
+            except threading.BrokenBarrierError:
+                if self._perf_round_failed is not None:
+                    self._perf_round_failed.set()
+            if self._perf_round_failed is not None and self._perf_round_failed.is_set():
+                return self._record_fail(
+                    name,
+                    f"Fixture preparation did not quiesce within {PERF_SETUP_MAX_TIME_SEC:g}s",
+                    None, None, None, is_noncritical,
+                )
 
         # Scheme code execution via /scm endpoint
         scm_code = test_case.get("scm")
@@ -1235,7 +1349,6 @@ class SQLTestRunner:
         # Multi-step test case: steps list with per-step session_id + optional background
         steps = test_case.get("steps")
         if steps:
-            import threading
             bg_results: list = []  # [(step_dict, response_or_exception)]
             bg_threads: list = []
 
@@ -1871,6 +1984,11 @@ class SQLTestRunner:
             print(f"⏱️  Suite duration: {self._format_duration(time.perf_counter() - suite_start)}")
             return False
 
+        if (PERF_TEST_ENABLED and not setup_done and metadata.get('restart_after_setup')
+                and not self.restart_server_after_setup(database)):
+            print("❌ Restart after setup failed")
+            return False
+
         # Expand repeat blocks into flat test_cases list, then run.
         # A repeat block looks like: { repeat: N, delay_ms: 50, tests: [...] }
         # The inner tests are duplicated N times with iteration-suffixed names
@@ -1901,33 +2019,59 @@ class SQLTestRunner:
                 if "threshold_ms" in test_case
             ]
 
-        # Preserve declared concurrency in every mode. Fail-fast stops only
-        # after the complete parallel group containing the first failure.
-        i = 0
-        while i < len(test_cases):
-            tc = test_cases[i]
-            if '_delay_ms' in tc:
-                time.sleep(tc['_delay_ms'] / 1000.0)
-                i += 1
-                continue
-            group = tc.get('parallel')
-            if group:
-                group_tests = [tc]
-                j = i + 1
-                while j < len(test_cases) and test_cases[j].get('parallel') == group:
-                    group_tests.append(test_cases[j])
-                    j += 1
-                print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
-                self._run_parallel_group(group_tests, database)
-                i = j
-            else:
-                self.run_test_case(tc, database)
-                i += 1
-            if self.fail_fast and self.failed_critical > 0:
-                remaining_tests = sum(1 for pending in test_cases[i:] if '_delay_ms' not in pending)
-                if remaining_tests > 0:
-                    print(f"⏭️  Fail-fast skipped {remaining_tests} tests after the first failure")
-                break
+        if PERF_AB_MODE and self._perf_round_count:
+            # Each suite contributes at most one case to a round. Empty suites
+            # still join both barriers so shorter YAMLs cannot let another
+            # suite begin its next fill while measurements are in progress.
+            for round_index in range(self._perf_round_count):
+                if round_index < len(test_cases):
+                    self.run_test_case(test_cases[round_index], database)
+                    if self.failed_critical > 0:
+                        self.abort_performance_round()
+                else:
+                    try:
+                        self._perf_round_setup_barrier.wait(
+                            timeout=PERF_SETUP_MAX_TIME_SEC * 2 + 10,
+                        )
+                    except threading.BrokenBarrierError:
+                        if self._perf_round_failed is not None:
+                            self._perf_round_failed.set()
+                try:
+                    self._perf_round_done_barrier.wait(
+                        timeout=PERF_SETUP_MAX_TIME_SEC * 2 + 10,
+                    )
+                except threading.BrokenBarrierError:
+                    if self._perf_round_failed is not None:
+                        self._perf_round_failed.set()
+                    break
+        else:
+            # Preserve declared concurrency in every mode. Fail-fast stops only
+            # after the complete parallel group containing the first failure.
+            i = 0
+            while i < len(test_cases):
+                tc = test_cases[i]
+                if '_delay_ms' in tc:
+                    time.sleep(tc['_delay_ms'] / 1000.0)
+                    i += 1
+                    continue
+                group = tc.get('parallel')
+                if group:
+                    group_tests = [tc]
+                    j = i + 1
+                    while j < len(test_cases) and test_cases[j].get('parallel') == group:
+                        group_tests.append(test_cases[j])
+                        j += 1
+                    print(f"⚡ Running {len(group_tests)} tests in parallel group '{group}'")
+                    self._run_parallel_group(group_tests, database)
+                    i = j
+                else:
+                    self.run_test_case(tc, database)
+                    i += 1
+                if self.fail_fast and self.failed_critical > 0:
+                    remaining_tests = sum(1 for pending in test_cases[i:] if '_delay_ms' not in pending)
+                    if remaining_tests > 0:
+                        print(f"⏭️  Fail-fast skipped {remaining_tests} tests after the first failure")
+                    break
 
         if spec.get('cleanup'):
             self.run_cleanup(spec['cleanup'], database)
@@ -2190,6 +2334,23 @@ def discover_performance_ci_suites(root: Path = Path("tests/performance")) -> Li
     return suites
 
 
+def performance_measurement_count(spec_file: str) -> int:
+    """Count the timed cases that participate in A/B measurement rounds."""
+    with open(spec_file, 'r') as handle:
+        spec = yaml.safe_load(handle) or {}
+    count = 0
+    for case in spec.get("test_cases", []):
+        if not isinstance(case, dict):
+            continue
+        inner_cases = case.get("tests", []) if "repeat" in case else [case]
+        multiplier = int(case.get("repeat", 1)) if "repeat" in case else 1
+        count += multiplier * sum(
+            1 for inner in inner_cases
+            if isinstance(inner, dict) and "threshold_ms" in inner
+        )
+    return count
+
+
 def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, connect_only: bool, fail_fast: bool) -> Tuple[bool, str]:
     cmd = [sys.executable, os.path.abspath(__file__), spec_file]
     if connect_only and port is not None:
@@ -2207,7 +2368,7 @@ def run_spec_subprocess(spec_file: str, port: Optional[int], log_times: bool, co
 
 def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: bool, jobs: Optional[int],
                    restart_handler=None, connect_only: bool = False, fail_fast: bool = False) -> bool:
-    if len(spec_files) == 1:
+    if len(spec_files) == 1 and not PERF_TEST_ENABLED:
         runner = SQLTestRunner(base_url, log_times=log_times, fail_fast=fail_fast)
         if restart_handler is not None:
             runner.set_restart_handler(restart_handler)
@@ -2223,6 +2384,9 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
             spec_file: SQLTestRunner(base_url, log_times=log_times)
             for spec_file in spec_files
         }
+        if restart_handler is not None:
+            for runner in runners.values():
+                runner.set_restart_handler(restart_handler)
         with ThreadPoolExecutor(max_workers=max_jobs) as executor:
             futures = {
                 executor.submit(runners[spec_file].prepare_test_spec, spec_file): spec_file
@@ -2236,11 +2400,43 @@ def run_test_specs(spec_files: List[str], base_url: str, port: int, log_times: b
                 print(f"   ❌ {spec_file}")
             return False
 
+
+        restart_suites = [
+            spec_file for spec_file, runner in runners.items()
+            if runner.suite_metadata.get("restart_after_setup")
+        ]
+        if restart_suites:
+            print(
+                "🔄 Persisting prepared fixtures and restarting MemCP once before "
+                f"measurement ({len(restart_suites)} suite(s) requested it)"
+            )
+            if not next(iter(runners.values())).restart_server_after_setup(
+                    next(iter(runners.values())).default_database):
+                print("❌ Shared restart after performance setup failed")
+                return False
+
+        round_count = max(performance_measurement_count(spec_file) for spec_file in spec_files)
+        round_failed = threading.Event()
+
+        def settle_fixture_work():
+            if not wait_for_performance_setup_quiescence(base_url):
+                round_failed.set()
+
+        setup_barrier = threading.Barrier(len(spec_files), action=settle_fixture_work)
+        done_barrier = threading.Barrier(len(spec_files))
+        setup_semaphore = threading.Semaphore(max_jobs)
+        for runner in runners.values():
+            runner._perf_round_setup_barrier = setup_barrier
+            runner._perf_round_done_barrier = done_barrier
+            runner._perf_round_failed = round_failed
+            runner._perf_round_count = round_count
+            runner._perf_setup_semaphore = setup_semaphore
+
         print(
-            "⏱️  All suite setups complete; continuing fixture work in parallel "
-            "with exclusive timed-query windows"
+            f"⏱️  All suite setups complete; running {round_count} fill/measure "
+            "round(s) with parallel fixture work and serial timed queries"
         )
-        with ThreadPoolExecutor(max_workers=max_jobs) as executor:
+        with ThreadPoolExecutor(max_workers=len(spec_files)) as executor:
             futures = {
                 executor.submit(
                     runners[spec_file].run_test_spec, spec_file, True

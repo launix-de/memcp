@@ -5220,7 +5220,9 @@ that actually owns the title consumes the reference. */
 								(begin
 									(define staged (make_grouped_derived_stage_source src alias inner))
 									(list
-										(merge (list (nth staged 0) tail_sources))
+										(merge (list
+											(nth staged 0)
+											(rewrite_sources_join_for_derived alias (nth staged 1) tail_sources)))
 										(cons (list alias (nth staged 1)) tail_rewrites)
 										tail_wheres
 										(cons (nth staged 2) (merge (list (qb_stages inner) tail_stages)))))
