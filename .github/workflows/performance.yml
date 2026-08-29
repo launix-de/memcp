@@ -15,10 +15,56 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  performance-ab:
-    name: performance-ab
+  discover:
+    name: discover-performance-suites
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      suites: ${{ steps.suites.outputs.suites }}
+
+    steps:
+      - name: Check out exact base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Install discovery dependency
+        run: pip install PyYAML
+
+      - name: Discover trusted CI performance suites
+        id: suites
+        shell: bash
+        run: |
+          suites=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import yaml
+
+          selected = []
+          for path in sorted(Path("base/tests/performance").rglob("*.yaml")):
+              with path.open(encoding="utf-8") as handle:
+                  document = yaml.safe_load(handle) or {}
+              if document.get("metadata", {}).get("ci", True) is not False:
+                  selected.append({
+                      "id": len(selected),
+                      "suite": path.relative_to("base").as_posix(),
+                  })
+          if not selected:
+              raise SystemExit("trusted base contains no CI performance suites")
+          print(json.dumps(selected, separators=(",", ":")))
+          PY
+          )
+          echo "suites=$suites" >> "$GITHUB_OUTPUT"
+
+  measure:
+    name: performance-ab / ${{ matrix.entry.suite }}
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJson(needs.discover.outputs.suites) }}
 
     steps:
       - name: Check out merge candidate
@@ -65,6 +111,7 @@ jobs:
             --base-tree base \
             --candidate-tree candidate \
             --runner "$runner" \
+            --suite "${{ matrix.entry.suite }}" \
             --samples 5 \
             --output perf-results.json
 
@@ -72,6 +119,20 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: performance-ab-results
+          name: performance-ab-${{ matrix.entry.id }}
           path: perf-results.json
           if-no-files-found: warn
+
+  performance-ab:
+    name: performance-ab
+    if: always()
+    needs: [discover, measure]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every performance comparison
+        env:
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          MEASURE_RESULT: ${{ needs.measure.result }}
+        run: |
+          test "$DISCOVER_RESULT" = success
+          test "$MEASURE_RESULT" = success
