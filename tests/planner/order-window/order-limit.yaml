@@ -292,7 +292,7 @@ test_cases:
     expect:
       data: [true]
 
-  - name: "Bushy ordered join lowers without physical reordering"
+  - name: "Bushy ordered join lowers without rebuilding its independent subtree"
     sql: |
       EXPLAIN SELECT a.id
       FROM ord_tree_a a
