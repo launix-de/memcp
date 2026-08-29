@@ -28,12 +28,16 @@ setup:
   - scm: "(rebuild)"
 
 test_cases:
-  # A/B on the original-scale fixture, warm runs on the reference host:
-  # automatic SQL median 597 ms; handwritten scan_join_order median 465 ms;
-  # prebuilt filtered-account keyset plus ordered batch median 616 ms.
+  # A/B on the original-scale fixture with identical six-column output and
+  # result hashes, warm PR-647 runs on the reference host: forced legacy join
+  # median 682 ms; forced scan_join_order median 514 ms; automatic 523 ms.
   - name: "Reddit MySQL original query"
+    physical_calibration: true
+    calibration_holdout: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
     threshold_ms: 180000
-    timing_samples: 5
     sql: |
       SELECT t.*, a.*
       FROM reddit_mysql_test2 t
@@ -61,6 +65,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
+        - "chosen scan_join_order"
         - "scan_join_order"
         - "legacy_join_tree"
         - "lowest_total_ns"
