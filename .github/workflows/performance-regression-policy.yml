@@ -1,0 +1,40 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Performance Regression Policy
+
+on:
+  pull_request_target:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  protected-performance-policy:
+    name: protected-performance-policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out trusted policy
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+
+      - name: Check out candidate as data
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+
+      - name: Install policy dependencies
+        run: pip install PyYAML
+
+      - name: Apply trusted performance policy
+        run: |
+          python3 policy/tools/test_performance_policy.py
+          python3 policy/tools/check_performance_policy.py \
+            --base-root policy \
+            --candidate-root candidate

@@ -13,6 +13,8 @@ go.sum
 docs/
 todos/
 .perf_baseline.json
+.perf_baseline.json.lock
+.perf_baseline.json.tmp
 .gocache/
 .gomodcache/
 __pycache__/

@@ -1,0 +1,75 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Performance A/B
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memcp-performance
+  cancel-in-progress: false
+
+jobs:
+  performance-ab:
+    name: performance-ab
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out merge candidate
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: candidate
+
+      - name: Check out exact base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+
+      - name: Install benchmark dependencies
+        run: pip install requests PyYAML
+
+      - name: Build base
+        working-directory: base
+        run: go build -o memcp
+
+      - name: Build merge candidate
+        working-directory: candidate
+        run: go build -o memcp
+
+      - name: Run independent performance assertion
+        shell: bash
+        run: |
+          harness=base/tools/perf_ab.py
+          harness_tests=base/tools/test_perf_ab.py
+          if [ ! -f "$harness" ]; then
+            harness=candidate/tools/perf_ab.py
+            harness_tests=candidate/tools/test_perf_ab.py
+          fi
+          python3 "$harness_tests"
+          python3 "$harness" \
+            --base-tree base \
+            --candidate-tree candidate \
+            --runner base/run_sql_tests.py \
+            --samples 5 \
+            --output perf-results.json
+
+      - name: Upload performance comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-ab-results
+          path: perf-results.json
+          if-no-files-found: warn
