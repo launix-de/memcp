@@ -91,13 +91,13 @@ func TestFormatTypeSignatureHandlesUnionContainers(t *testing.T) {
 }
 
 func TestWriteDocumentationUsesRecursiveTypeDescriptors(t *testing.T) {
-	oldTitles, oldDeclarations, oldHashes := declaration_titles, declarations, declarations_hash
+	oldTitles, oldDeclarations, oldFunctions := declaration_titles, declarations, declarationsByFunction
 	defer func() {
-		declaration_titles, declarations, declarations_hash = oldTitles, oldDeclarations, oldHashes
+		declaration_titles, declarations, declarationsByFunction = oldTitles, oldDeclarations, oldFunctions
 	}()
 	declaration_titles = nil
 	declarations = make(map[string]*Declaration)
-	declarations_hash = make(map[string]*Declaration)
+	declarationsByFunction = make(map[uintptr]*Declaration)
 
 	DeclareTitle("Nested")
 	env := Env{Vars: make(Vars)}
@@ -132,13 +132,13 @@ func TestWriteDocumentationUsesRecursiveTypeDescriptors(t *testing.T) {
 }
 
 func TestHelpUsesRecursiveTypeDescriptors(t *testing.T) {
-	oldTitles, oldDeclarations, oldHashes := declaration_titles, declarations, declarations_hash
+	oldTitles, oldDeclarations, oldFunctions := declaration_titles, declarations, declarationsByFunction
 	defer func() {
-		declaration_titles, declarations, declarations_hash = oldTitles, oldDeclarations, oldHashes
+		declaration_titles, declarations, declarationsByFunction = oldTitles, oldDeclarations, oldFunctions
 	}()
 	declaration_titles = nil
 	declarations = make(map[string]*Declaration)
-	declarations_hash = make(map[string]*Declaration)
+	declarationsByFunction = make(map[uintptr]*Declaration)
 
 	env := Env{Vars: make(Vars)}
 	Declare(&env, &Declaration{

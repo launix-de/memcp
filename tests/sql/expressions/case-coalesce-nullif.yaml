@@ -56,6 +56,19 @@ test_cases:
         - id: 1
         - id: 7
 
+  - name: "Nested boolean scan callback preserves SQL NULL truth semantics"
+    sql: |
+      SELECT id FROM ccn_data
+      WHERE (amount > 40 AND amount < 250 AND (status = 1 OR category = 'B'))
+         OR (amount IS NULL AND status IS NULL)
+      ORDER BY id
+    expect:
+      rows: 3
+      data:
+        - id: 1
+        - id: 2
+        - id: 8
+
   - name: "EXPLAIN hoists invariant CASE dispatch outside scan filter"
     session_id: "ccn_invariant_filter"
     sql: |

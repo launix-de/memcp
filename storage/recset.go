@@ -500,10 +500,6 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
-	var conditionFn func(...scm.Scmer) scm.Scmer
-	if !conditionAlwaysTrue {
-		conditionFn = scm.OptimizeProcToSerialFunction(condition)
-	}
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -602,7 +598,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 				}
 			}
 		}
-		return scm.ToBool(conditionFn(cdataset...))
+		return scm.ToBool(conditionProgram.Call(cdataset))
 	}
 	buf, pooledFullBuf, pooledPointBuf := acquireScanIDBuffer(defaultScanBufferSize)
 	defer releaseScanIDBuffer(pooledFullBuf, pooledPointBuf)
@@ -1472,10 +1468,6 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, conditionCols []string, condition scm.Scmer, currentTx *TxContext, ss *scm.SessionState) recSetShard {
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
-	var conditionFn func(...scm.Scmer) scm.Scmer
-	if !conditionAlwaysTrue {
-		conditionFn = scm.OptimizeProcToSerialFunction(condition)
-	}
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
@@ -1566,7 +1558,7 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 				}
 			}
 		}
-		builder.add(idx, scm.ToBool(conditionFn(cdataset...)))
+		builder.add(idx, scm.ToBool(conditionProgram.Call(cdataset)))
 	}
 	evaluateBatch := func(batch []uint32) bool {
 		for _, idx := range batch {

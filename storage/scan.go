@@ -816,7 +816,7 @@ func (t *storageShard) filterVisibleScanBatch(batch []uint32, visibleUpper uint3
 	return outN
 }
 
-func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, conditionFn func(...scm.Scmer) scm.Scmer) int {
+func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []string, ccols []ColumnStorage, cReaders []ColumnReader, conditionGetters []mapArgGetter, cdataset []scm.Scmer, condition *scm.SerialProc) int {
 	outN := 0
 	for _, effectiveIdx := range batch {
 		if effectiveIdx < t.main_count {
@@ -838,7 +838,7 @@ func (t *storageShard) filterConditionScanBatch(batch []uint32, conditionCols []
 				}
 			}
 		}
-		if !scm.ToBool(conditionFn(cdataset...)) {
+		if !scm.ToBool(condition.Call(cdataset)) {
 			continue
 		}
 		batch[outN] = effectiveIdx
@@ -920,10 +920,6 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	}
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
-	var conditionFn func(...scm.Scmer) scm.Scmer
-	if !conditionAlwaysTrue && conditionProgram.Kind != scm.SerialProcNativeArgConstant {
-		conditionFn = scm.OptimizeProcToSerialFunction(condition)
-	}
 
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1066,7 +1062,7 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 					}
 				}
 			}
-			if scm.ToBool(conditionFn(cdataset...)) {
+			if scm.ToBool(conditionProgram.Call(cdataset)) {
 				found = true
 				foundID = idx
 				return false
@@ -1091,10 +1087,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
-	var conditionFn func(...scm.Scmer) scm.Scmer
-	if !conditionAlwaysTrue && conditionProgram.Kind != scm.SerialProcNativeArgConstant {
-		conditionFn = scm.OptimizeProcToSerialFunction(condition)
-	}
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -1287,7 +1279,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 			if conditionProgram.Kind == scm.SerialProcNativeArgConstant {
 				outN = t.filterNativeArgConstantScanBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, &conditionProgram)
 			} else {
-				outN = t.filterConditionScanBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, conditionFn)
+				outN = t.filterConditionScanBatch(batch[:outN], conditionCols, ccols, cReaders, conditionGetters, cdataset, &conditionProgram)
 			}
 		}
 		if outN > 0 {
@@ -1431,10 +1423,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
-	var conditionFn func(...scm.Scmer) scm.Scmer
-	if !conditionAlwaysTrue {
-		conditionFn = scm.OptimizeProcToSerialFunction(condition)
-	}
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
@@ -1592,7 +1580,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 							}
 						}
 					}
-					if !scm.ToBool(conditionFn(cdataset...)) {
+					if !scm.ToBool(conditionProgram.Call(cdataset)) {
 						continue
 					}
 					batch[filteredN] = effectiveIdx

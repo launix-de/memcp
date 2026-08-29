@@ -81,8 +81,26 @@ func procCanUseNumberedOnly(params, body Scmer, numVars int) bool {
 	return !procBodyUsesNamedParam(body, named)
 }
 
-// to optimize lambdas serially; the resulting function MUST NEVER run on multiple threads simultanously since state is reduced to save mallocs
+// OptimizeProcToSerialFunction is the compatibility adapter for callers which
+// still require a Go variadic function. New physical hot paths must use
+// PrepareSerialProc and caller-owned []Scmer frames: Eval's temporary variadic
+// call arrays otherwise escape once per nested expression and row. The returned
+// function MUST NEVER run on multiple threads simultaneously because its
+// environment is reused to avoid allocations.
 func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
+	if val.GetTag() == tagFunc {
+		return val.Func()
+	}
+	if val.GetTag() == tagAny {
+		if fn, ok := val.Any().(func(...Scmer) Scmer); ok {
+			return fn
+		}
+	}
+	borrowed := optimizeProcToSerialBorrowed(val)
+	return func(args ...Scmer) Scmer { return borrowed(args) }
+}
+
+func optimizeProcToSerialBorrowed(val Scmer) func([]Scmer) Scmer {
 	/* API contract:
 	- the returned func must only be called with the correct number of declared parameters
 	- thus we will perform no boundary checks
@@ -91,14 +109,15 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	- TODO: we want to hook up the JIT here to produce some machine code for hotpaths
 	*/
 	if val.IsNil() {
-		return func(...Scmer) Scmer { return NewNil() }
+		return func([]Scmer) Scmer { return NewNil() }
 	}
 	if val.GetTag() == tagFunc {
-		return val.Func()
+		fn := val.Func()
+		return func(args []Scmer) Scmer { return fn(args...) }
 	}
 	if val.GetTag() == tagAny {
 		if fn, ok := val.Any().(func(...Scmer) Scmer); ok {
-			return fn
+			return func(args []Scmer) Scmer { return fn(args...) }
 		}
 	}
 
@@ -111,14 +130,14 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 		// Not a lambda/proc: treat as constant value and return it regardless of args.
 		// This avoids attempting to Apply() non-callables like true/0/"x" which would panic.
 		captured := val
-		return func(args ...Scmer) Scmer { return captured }
+		return func([]Scmer) Scmer { return captured }
 	}
 	p := *proc
 	// A Proc keeps its source body even after native compilation. Execute the
 	// attached entry point now; future scan specialization may recompile the same
 	// filter/map/reduce body against concrete storage and column types first.
 	if p.Compiled != nil {
-		return func(args ...Scmer) Scmer {
+		return func(args []Scmer) Scmer {
 			return p.Compiled.Call(args...)
 		}
 	}
@@ -127,7 +146,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	switch p.Body.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagString:
 		constant := p.Body
-		return func(...Scmer) Scmer { return constant }
+		return func([]Scmer) Scmer { return constant }
 	}
 
 	// Fast-path: lambda body is exactly one of its parameters -> return that arg directly
@@ -139,7 +158,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 		// numbered locals: (var i)
 		if body.IsNthLocalVar() {
 			idx := int(body.NthLocalVar())
-			return func(args ...Scmer) Scmer {
+			return func(args []Scmer) Scmer {
 				return args[idx]
 			}
 		}
@@ -157,7 +176,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 				}
 				if ps.IsSymbol() && mustSymbol(ps) == bSym {
 					idx := i
-					return func(args ...Scmer) Scmer {
+					return func(args []Scmer) Scmer {
 						return args[idx]
 					}
 				}
@@ -177,6 +196,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 	}
 	var vars Vars
 	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, numVars), Outer: p.En, Nodefine: false}
+	body := prepareSerialExpr(&p, p.Body)
 	params := p.Params
 	if stripped, ok := scmerStripSourceInfo(params); ok {
 		params = stripped
@@ -204,7 +224,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 					en.Vars = vars
 				}
 			}
-			return func(args ...Scmer) Scmer {
+			return func(args []Scmer) Scmer {
 				for i := 0; i < numVars; i++ {
 					if i < len(args) {
 						en.VarsNumbered[i] = args[i]
@@ -228,12 +248,12 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 						}
 					}
 				}
-				return Eval(p.Body, en)
+				return body(en)
 			}
 		}
 		vars = make(Vars, len(paramSlice))
 		en.Vars = vars
-		return func(args ...Scmer) Scmer {
+		return func(args []Scmer) Scmer {
 			for i, param := range paramSlice {
 				if stripped, ok := scmerStripSourceInfo(param); ok {
 					param = stripped
@@ -248,7 +268,7 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 					en.Vars[sym] = NewNil()
 				}
 			}
-			return Eval(p.Body, en)
+			return body(en)
 		}
 	}
 	if params.IsSymbol() {
@@ -262,24 +282,24 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 					en.Vars = vars
 				}
 			}
-			return func(args ...Scmer) Scmer {
-				argsList := NewSlice(args)
+			return func(args []Scmer) Scmer {
+				argsList := NewSlice(append([]Scmer(nil), args...))
 				en.VarsNumbered[0] = argsList
 				if bindNamed {
 					en.Vars[sym] = argsList
 				}
-				return Eval(p.Body, en)
+				return body(en)
 			}
 		}
 		vars = make(Vars, 1)
 		en.Vars = vars
-		return func(args ...Scmer) Scmer {
-			en.Vars[sym] = NewSlice(args)
-			return Eval(p.Body, en)
+		return func(args []Scmer) Scmer {
+			en.Vars[sym] = NewSlice(append([]Scmer(nil), args...))
+			return body(en)
 		}
 	}
-	return func(args ...Scmer) Scmer {
-		return Eval(p.Body, en)
+	return func(args []Scmer) Scmer {
+		return body(en)
 	}
 }
 

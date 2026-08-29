@@ -278,14 +278,18 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	hadValue := false
 	if limit == 0 {
 		if isOuter {
-			callbackFn := scm.OptimizeProcToSerialFunction(callback)
-			reduceFn := scm.OptimizeProcToSerialFunction(aggregate)
-			return reduceFn(result, callbackFn(buildOuterNullCallbackRow(callbackCols)...))
+			callbackProgram := scm.PrepareSerialProc(callback)
+			reduceProgram := scm.PrepareSerialProc(aggregate)
+			var reduceArgs [2]scm.Scmer
+			reduceArgs[0] = result
+			reduceArgs[1] = callbackProgram.Call(buildOuterNullCallbackRow(callbackCols))
+			return reduceProgram.Call(reduceArgs[:])
 		}
 		return notFoundValue
 	}
 
-	filterFn := scm.OptimizeProcToSerialFunction(batchFilter)
+	filterProgram := scm.PrepareSerialProc(batchFilter)
+	var filterArgs [1]scm.Scmer
 	mappers := make(map[*storageShard]*ShardMapReducer)
 	defer func() {
 		for _, mapper := range mappers {
@@ -321,7 +325,8 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 		if len(records) == 0 {
 			break
 		}
-		accepted := validateAcceptedBatch(currentTx, batch, filterFn(NewRecSetScmer(batch)))
+		filterArgs[0] = NewRecSetScmer(batch)
+		accepted := validateAcceptedBatch(currentTx, batch, filterProgram.Call(filterArgs[:]))
 
 		var pendingShard *storageShard
 		pending := make([]uint32, 0, len(records))
@@ -377,9 +382,12 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	}
 
 	if !hadValue && isOuter {
-		callbackFn := scm.OptimizeProcToSerialFunction(callback)
-		reduceFn := scm.OptimizeProcToSerialFunction(aggregate)
-		result = reduceFn(result, callbackFn(buildOuterNullCallbackRow(callbackCols)...))
+		callbackProgram := scm.PrepareSerialProc(callback)
+		reduceProgram := scm.PrepareSerialProc(aggregate)
+		var reduceArgs [2]scm.Scmer
+		reduceArgs[0] = result
+		reduceArgs[1] = callbackProgram.Call(buildOuterNullCallbackRow(callbackCols))
+		result = reduceProgram.Call(reduceArgs[:])
 		hadValue = true
 	}
 	if !hadValue && !isOuter {
