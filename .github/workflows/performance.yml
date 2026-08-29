@@ -1,0 +1,91 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: Performance A/B
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-ab-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  performance-ab:
+    name: performance-ab
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out merge candidate
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: candidate
+
+      - name: Check out exact base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+
+      - name: Install test dependencies
+        run: pip install requests PyYAML
+
+      - name: Build base and candidate
+        shell: bash
+        run: |
+          (cd base && go build -o memcp)
+          (cd candidate && go build -o memcp)
+
+      - name: Measure base and candidate with the SQL test runner
+        shell: bash
+        run: |
+          runner="$GITHUB_WORKSPACE/base/run_sql_tests.py"
+          if ! grep -q 'PERF_AB_MODE' "$runner"; then
+            runner="$GITHUB_WORKSPACE/candidate/run_sql_tests.py"
+          fi
+          baseline="$GITHUB_WORKSPACE/perf-baseline.json"
+          seed="$GITHUB_WORKSPACE/base/tests/performance/ci-workloads.json"
+          if [ ! -f "$seed" ]; then
+            seed="$GITHUB_WORKSPACE/candidate/tests/performance/ci-workloads.json"
+          fi
+
+          (cd base && env \
+            PERF_AB_MODE=record \
+            PERF_BASELINE_FILE="$baseline" \
+            PERF_BASELINE_SEED="$seed" \
+            PERF_REPEAT=100 \
+            PERF_MIN_MEASURE_MS=250 \
+            PERF_SETUP_MAX_TIME_SEC=120 \
+            MEMCP_TEST_JOBS=4 \
+            MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/base" \
+            MEMCP_TEST_DATA_DIR=/tmp/memcp-perf-base \
+            python3 -u "$runner" --perf-ci --jobs 4 --log-times)
+
+          (cd candidate && env \
+            PERF_AB_MODE=compare \
+            PERF_BASELINE_FILE="$baseline" \
+            PERF_REPEAT=100 \
+            PERF_MIN_MEASURE_MS=250 \
+            PERF_SETUP_MAX_TIME_SEC=120 \
+            MEMCP_TEST_JOBS=4 \
+            MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/candidate" \
+            MEMCP_TEST_DATA_DIR=/tmp/memcp-perf-candidate \
+            python3 -u "$runner" --perf-ci --jobs 4 --log-times)
+
+      - name: Upload measured base
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-ab-baseline
+          path: perf-baseline.json
+          if-no-files-found: warn
