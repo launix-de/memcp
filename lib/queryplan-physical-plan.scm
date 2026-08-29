@@ -4530,6 +4530,21 @@ projected back onto the ordered driver before scan_order applies Top-K. */
 				(reduce order_items (lambda (found item)
 					(or found (expr_refs_alias? default_alias lookup_alias item))) false))))))
 
+/* scan_join_order owns its join-cost order, while the legacy Top-K lowerer is
+driven by the source that supplies ORDER BY. Cost each alternative in its own
+physical source order; reusing the scan operator's order here can turn a point
+carrier into thousands of fictional downstream probes. */
+(define ordered_join_legacy_cost_sources (lambda (sources order_items)
+	(begin
+		(define drivers (filter sources (lambda (src)
+			(order_items_belong_to_source? src order_items))))
+		(if (not (single_source? drivers))
+			nil
+			(begin
+				(define driver (car drivers))
+				(cons driver (filter sources (lambda (src)
+					(not (equal? (source_alias src) (source_alias driver)))))))))))
+
 (define ordered_join_projected_candidate_exact? (lambda (sources default_alias src lookup terms)
 	(begin
 		(define lookup_alias (source_alias lookup))
@@ -5247,16 +5262,19 @@ until the caller has selected this physical alternative. */
 				alternatives compare the calibrated cost-domain record instead. */
 				(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
 				(define sources (qassoc_get spec (quote sources) '()))
+				(define legacy_sources
+					(ordered_join_legacy_cost_sources sources order_items))
 				/* Mirror the legacy lowerer's cardinality guard: a projected RecSet is
 				a semijoin carrier and cannot represent a multiplying lookup. */
-				(define projected_legacy_cost (if
+				(define projected_legacy_cost (if (and (not (nil? legacy_sources))
 					(downstream_sources_at_most_one_driver_row?
-						sources default_alias final_condition stages)
+						legacy_sources default_alias final_condition stages))
 					(ordered_join_projected_candidate_cost
-						all_sources default_alias (car sources) (cdr sources)
+						all_sources default_alias (car legacy_sources) (cdr legacy_sources)
 						final_condition order_items offset_value limit_value)
 					nil))
-				(define driver_input_rows (planner_source_row_count (car sources)))
+				(define driver_input_rows (planner_source_row_count
+					(car (if (nil? legacy_sources) sources legacy_sources))))
 				(define logical_legacy_cost (if (nil? estimated_legacy_cost)
 					(planner_cost_add
 						(planner_scan_cost input_rows 0.5)
@@ -5270,7 +5288,8 @@ until the caller has selected this physical alternative. */
 					driver_input_rows (cadr projected_legacy_cost)))
 				(define legacy_lookup_values_required
 					(ordered_join_lookup_values_required?
-						(cdr sources) default_alias output_exprs order_items))
+						(if (nil? legacy_sources) '() (cdr legacy_sources))
+						default_alias output_exprs order_items))
 				(define legacy_base_cost (if (nil? projected_legacy_cost)
 					/* The DP join cost does not include the ordered root scan that this
 					lowerer adds. Use Costgen's scan_order invocation calibration; a
@@ -6371,8 +6390,8 @@ the costgen threshold. */
 											(group_stage_cache_schema stage)
 											(group_stage_cache_relation stage) true))
 									(list (quote lambda) (list (quote __group_cache_cleanup_error)) nil))
-								(list (quote error) (quote __group_cache_build_error))))))
-				0)))))
+								(list (quote error) (quote __group_cache_build_error)))))))
+			0))))
 
 (define direct_group_join_usage_flush_expr (lambda (stage)
 	(begin

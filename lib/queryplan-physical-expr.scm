@@ -6730,10 +6730,10 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_scan_invocation_ns 3027639)
 (define planner_membership_ordered_recset_sort_unit_ns 1)
 (define planner_group_relation_startup_ns 1)
-(define planner_group_relation_build_row_ns 46079)
-(define planner_group_relation_probe_ns 73707)
-(define planner_scan_join_order_startup_ns 565347)
-(define planner_scan_join_order_build_row_ns 29)
+(define planner_group_relation_build_row_ns 39474)
+(define planner_group_relation_probe_ns 432873)
+(define planner_scan_join_order_startup_ns 278653)
+(define planner_scan_join_order_build_row_ns 22)
 (define planner_scan_join_order_probe_row_ns 1)
 /* END GENERATED COST CONSTANTS */
 

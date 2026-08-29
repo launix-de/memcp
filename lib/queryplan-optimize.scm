@@ -3708,7 +3708,7 @@ physical alternative. */
 					(min driver_input_rows (/ requested_rows density))
 					driver_input_rows))))))
 
-(define membership_common_scan_cost (lambda (candidate_input_rows candidate_rows driver_rows candidate_map_columns work)
+(define membership_common_scan_cost (lambda (candidate_input_rows candidate_rows driver_rows candidate_map_columns ordered_scan_invocations work)
 	(begin
 		(define scan_invocations (+
 			(membership_work_value work (quote membership_candidate_scan_invocations) 1)
@@ -3725,8 +3725,8 @@ physical alternative. */
 			(* driver_rows (membership_work_value work (quote membership_driver_expression_operations) 0))))
 		(planner_cost
 			(+ (* scan_invocations planner_membership_scan_invocation_ns)
-				(if (membership_work_value work (quote membership_order_limit_driver) false)
-					planner_membership_ordered_scan_invocation_ns 0))
+				(* ordered_scan_invocations
+					planner_membership_ordered_scan_invocation_ns))
 			(+
 				(* (+ candidate_input_rows driver_rows) planner_membership_scan_row_ns)
 				(* filter_value_rows planner_membership_filter_column_row_ns)
@@ -3799,7 +3799,7 @@ owned by the membership-carrier guard; do not create another consumer guard. */
 		(define base_cost (planner_cost_add (planner_cost_add
 			(planner_cost_add
 				(membership_common_scan_cost candidate_input_rows candidate_rows consumer_work_rows
-					(membership_work_value work (quote membership_candidate_map_columns) 1) work)
+					(membership_work_value work (quote membership_candidate_map_columns) 1) 0 work)
 				(planner_cost 0
 					(+
 						(* (membership_work_value work (quote membership_candidate_broad_text_match_rows) 0)
@@ -3913,7 +3913,9 @@ calibrated components used by the other membership carriers. */
 				(membership_work_value work
 					(if cache_backed (quote membership_candidate_cache_map_columns)
 						(quote membership_candidate_map_columns))
-					(if cache_backed 2 1)) work)
+					(if cache_backed 2 1))
+				(if (membership_work_value work (quote membership_order_limit_driver) false) 1 0)
+				work)
 			(if cache_backed
 				(planner_cost planner_membership_group_cache_startup_ns 0
 					(* visited_rows planner_membership_group_cache_probe_row_ns)

@@ -292,7 +292,7 @@ test_cases:
     expect:
       data: [true]
 
-  - name: "Bushy ordered join lowers without rebuilding its independent subtree"
+  - name: "Bushy ordered join lowers without physical reordering"
     sql: |
       EXPLAIN SELECT a.id
       FROM ord_tree_a a
@@ -304,12 +304,12 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_join_order"
         - "ord_tree_a"
         - "ord_tree_b"
         - "ord_tree_c"
         - "ord_tree_d"
       result_not_contains:
+        - "scan_join_order"
         - "(sort rows"
         - "(slice sorted"
 
