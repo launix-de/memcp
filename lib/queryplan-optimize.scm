@@ -583,6 +583,17 @@ logical trees consumed before physical scan lowering. */
 				(< (qassoc_get candidate (quote memory_bytes) 0)
 					(qassoc_get current (quote memory_bytes) 0)))))))
 
+/* Cost confidence defines a one-sided uncertainty interval for fuzzy physical
+choices. A candidate is a clear winner only when its confidence-adjusted upper
+estimate remains below the other alternative's point estimate. Callers with an
+exact bounded fallback may prefer it while those intervals overlap. */
+(define planner_cost_clear_winner? (lambda (candidate current)
+	(begin
+		(define candidate_confidence (max 0.01
+			(qassoc_get candidate (quote confidence) 0.01)))
+		(< (/ (qassoc_get candidate (quote total_ns) 0) candidate_confidence)
+			(qassoc_get current (quote total_ns) 0)))))
+
 /* Calibrated generic storage facts. They are deliberately free of SQL
 semantics; SCM combines them according to the candidate being evaluated. */
 (define planner_scan_cost (lambda (rows confidence)
@@ -2181,6 +2192,22 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(and complete (join_optimizer_source_column_constant_bound?
 					sources default_alias src col condition))) true))) false))))
 
+(define join_optimizer_source_local_condition (lambda (graph src)
+	(combine_where
+		(source_join_expr src)
+		(combine_where_terms
+			(map (join_optimizer_local_predicates graph (source_alias src))
+				(lambda (entry) (qassoc_get entry (quote predicate) true)))
+			true))))
+
+(define join_optimizer_constant_unique_order_prefix_aliases (lambda (sources default_alias graph stages)
+	(map (filter sources (lambda (src)
+		(and (join_optimizer_inner_source? stages src)
+			(join_optimizer_source_constant_unique_point?
+				sources default_alias src
+				(join_optimizer_source_local_condition graph src)))))
+		source_alias)))
+
 (define join_optimizer_required_order_prefix (lambda (sources required_aliases condition stages prefix)
 	(if (or (empty_list? sources)
 		(or (empty_list? required_aliases)
@@ -2233,8 +2260,32 @@ source catalog. join_plan remains the single owner of physical join order. */
 				(join_optimizer_required_order_prefix sources raw_required_order_aliases
 					(coalesceNil (qb_where block) true) stage_catalog '())
 				raw_required_order_aliases))))
+		/* A constant unique lookup emits at most one row and therefore cannot alter
+		the order of a following ordered scan. Putting every such inner source before
+		the ordered driver strictly dominates repeating the same point lookup from
+		every driver row. Express that proof through the existing ordered-prefix
+		property so DP and the lowerer keep one shared notion of valid order. */
+		(define constant_unique_aliases
+			(join_optimizer_constant_unique_order_prefix_aliases
+				sources default_alias graph stage_catalog))
+		/* A singleton can technically be reported as an ordered driver because its
+		downstream scan supplies the order. It must still remain in the prefix: using
+		it as the repeated ordered root would throw away the singleton proof. Prefer
+		the first non-singleton ordered source as the actual order producer. */
+		(define non_singleton_ordered_drivers (filter ordered_drivers (lambda (alias)
+			(not (contains? constant_unique_aliases alias)))))
+		(define selected_ordered_driver (if (not (empty_list? non_singleton_ordered_drivers))
+			(car non_singleton_ordered_drivers)
+			(if (empty_list? ordered_drivers) nil (car ordered_drivers))))
+		(define dominant_singleton_prefix (if (nil? selected_ordered_driver)
+			'()
+			(filter constant_unique_aliases (lambda (alias)
+				(not (equal? alias selected_ordered_driver))))))
 		(define required_order_property (if (empty_list? required_order_aliases)
-			ordered_drivers
+			(if (empty_list? dominant_singleton_prefix)
+				ordered_drivers
+				(list (list (quote ordered_aliases)
+					(merge (list dominant_singleton_prefix (list selected_ordered_driver))))))
 			(list (list (quote ordered_aliases) required_order_aliases))))
 		(define preserve_row_number_driver (and
 			(not (empty_list? segment))

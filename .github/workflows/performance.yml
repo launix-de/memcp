@@ -49,17 +49,21 @@ jobs:
       - name: Measure base and candidate with the SQL test runner
         shell: bash
         run: |
-          runner="$GITHUB_WORKSPACE/base/run_sql_tests.py"
-          if ! grep -q 'PERF_AB_MODE' "$runner"; then
-            runner="$GITHUB_WORKSPACE/candidate/run_sql_tests.py"
-          fi
+          # The candidate runner defines the A/B protocol under review (including
+          # shared prepare/restart metadata); MEMCP_TEST_WORKTREE still supplies
+          # the exact binary and Scheme library for each measured side.
+          runner="$GITHUB_WORKSPACE/candidate/run_sql_tests.py"
           baseline="$GITHUB_WORKSPACE/perf-baseline.json"
           seed="$GITHUB_WORKSPACE/base/tests/performance/ci-workloads.json"
           if [ ! -f "$seed" ]; then
             seed="$GITHUB_WORKSPACE/candidate/tests/performance/ci-workloads.json"
           fi
 
-          (cd base && env \
+          # Discover YAMLs from the candidate for both sides. This makes newly
+          # added performance suites part of the A/B baseline without copying or
+          # running a separate fill workload; MEMCP_TEST_WORKTREE still selects
+          # the exact base binary and Scheme library.
+          (cd candidate && env \
             PERF_AB_MODE=record \
             PERF_BASELINE_FILE="$baseline" \
             PERF_BASELINE_SEED="$seed" \

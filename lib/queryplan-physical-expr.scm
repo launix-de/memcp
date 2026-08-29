@@ -6132,6 +6132,14 @@ once and every base-only leaf remains a vectorized domain scan. */
 	(map (coalesceNil sources '()) (lambda (src)
 		(physicalize_stage_output_source stages src)))))
 
+(define physicalize_stage_output_sources_except (lambda (stages sources retained_stage_ids)
+	(map (coalesceNil sources '()) (lambda (src)
+		(if (and (stage_output_relation? (source_relation src))
+			(contains? retained_stage_ids
+				(stage_output_relation_id (source_relation src))))
+			src
+			(physicalize_stage_output_source stages src))))))
+
 (define stage_outputs_from_sources_using (lambda (stages sources)
 	(unique_stages_by_id (filter (map (coalesceNil sources '()) (lambda (src)
 		(match src
@@ -6260,13 +6268,37 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		source_join_expr)))
 
 (define direct_group_probe_stage_for_block_source (lambda (stages sources src consumers)
-	(if (expr_refs_alias? nil (source_alias src) (source_join_consumers_except sources src))
-		nil
-		(direct_group_probe_stage_for_source stages src consumers))))
+	(direct_group_probe_stage_for_source stages src
+		(list consumers (source_join_consumers_except sources src)))))
 
 (define direct_group_probe_aggregates_safe? (lambda (stage)
 	(reduce (stage_aggregates_for_fields (gs_output stage)) (lambda (safe ag)
-		(and safe (nil? (nth ag 2)))) true)))
+		/* A hidden COUNT(*) in the transformed stage distinguishes an empty LEFT
+		probe from a matched COUNT group whose visible value is zero. */
+		(and safe (or (aggregate_count_like? ag) (nil? (nth ag 2))))) true)))
+
+(define direct_group_probe_aggregates_with_presence (lambda (stage)
+	(begin
+		(define aggregates (stage_aggregates_for_fields (gs_output stage)))
+		(define needs_presence (reduce aggregates
+			(lambda (needed ag)
+				(or needed (and (not (aggregate_count_like? ag))
+					(not (nil? (nth ag 2)))))) false))
+		(if needs_presence
+			(dedupe_aggregates_by_col
+				(merge (list aggregates (list aggregate_count_descriptor))))
+			aggregates))))
+
+(define direct_group_probe_rebind_input_expr (lambda (input_src expr)
+	(match expr
+		((symbol get_column) _alias _alias_ignorecase column column_ignorecase)
+		(list (quote get_column) (source_alias input_src) false column column_ignorecase)
+		((quote get_column) alias alias_ignorecase column column_ignorecase)
+		(direct_group_probe_rebind_input_expr input_src
+			(list (symbol "get_column") alias alias_ignorecase column column_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(direct_group_probe_rebind_input_expr input_src item))))
+		_ expr)))
 
 (define direct_group_probe_stage_for_source (lambda (stages src consumers)
 	(if (or (nil? consumers)
@@ -6279,12 +6311,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 				(begin
 					(define input (direct_group_probe_input stage))
 					(define lookups (if (nil? input) nil (direct_group_probe_lookup_keys stage src)))
-					(if (or (not (nil? (qassoc_get (gs_facts stage) (quote purpose) nil)))
-						(or (nil? input)
-							(or (nil? lookups)
-								(or (not (equal? (coalesceNil (gs_having stage) true) true))
-									(or (not (direct_group_probe_aggregates_safe? stage))
-										(not (direct_group_probe_consumers_safe? stage src consumers)))))))
+					(if (reduce (list
+						(not (nil? (qassoc_get (gs_facts stage) (quote purpose) nil)))
+						(nil? input)
+						(nil? lookups)
+						(not (equal? (coalesceNil (gs_having stage) true) true))
+						(stage_has_residual_outer_refs? stage)
+						(not (direct_group_probe_aggregates_safe? stage))
+						(not (direct_group_probe_consumers_safe? stage src consumers)))
+						(lambda (blocked item) (or blocked item)) false)
 						nil
 						(begin
 							(define input_src (car (qb_sources input)))
@@ -6305,14 +6340,17 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 								(gs_id stage)
 								input_src
 								(gs_domain stage)
-								(gs_keys stage)
-								(gs_aggregates stage)
+								(map (gs_keys stage) (lambda (key)
+									(direct_group_probe_rebind_input_expr input_src key)))
+								(map (direct_group_probe_aggregates_with_presence stage) (lambda (ag)
+									(direct_group_probe_rebind_input_expr input_src ag)))
 								(gs_having stage)
 								(gs_output stage)
 								(gs_order stage)
 								(gs_limit stage)
 								(gs_offset stage)
-								(qassoc_set facts (quote condition) condition)))))))))))
+								(qassoc_set facts (quote condition)
+									(direct_group_probe_rebind_input_expr input_src condition)))))))))))
 
 (define presence_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))
@@ -6625,6 +6663,10 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_driver_input_row_ns 1)
 (define planner_membership_ordered_scan_invocation_ns 3027639)
 (define planner_membership_ordered_recset_sort_unit_ns 1)
+(define planner_group_relation_startup_ns 1)
+(define planner_group_relation_build_row_ns 40028)
+(define planner_group_relation_probe_ns 476577)
+(define planner_scan_join_order_startup_ns 1802018)
 /* END GENERATED COST CONSTANTS */
 
 /* scan_join_order reuses the calibrated scan/filter/map work units. The
@@ -6632,7 +6674,7 @@ structural formula belongs to the lowerer; tools/costgen owns every numeric
 coefficient used here. */
 (define planner_scan_join_order_cost (lambda (input_rows joined_rows table_count output_rows)
 	(planner_cost
-		(+ planner_membership_ordered_scan_invocation_ns
+		(+ planner_scan_join_order_startup_ns
 			(* (- table_count 1) planner_membership_scan_invocation_ns))
 		(+ (* input_rows planner_membership_scan_row_ns)
 			(* input_rows (- table_count 1) planner_membership_map_column_row_ns))

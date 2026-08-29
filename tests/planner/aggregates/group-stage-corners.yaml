@@ -169,6 +169,72 @@ test_cases:
         - customer: "Bob"
           cnt: 2
 
+  - name: "Aggregate alias remains bound in a downstream join"
+    sql: |
+      SELECT c.id, latest.max_order_id, selected.id AS selected_id
+      FROM gs_customers c
+      LEFT JOIN (
+        SELECT customer, MAX(id) AS max_order_id
+        FROM gs_orders
+        GROUP BY customer
+      ) latest ON latest.customer = c.name
+      LEFT JOIN gs_orders selected ON latest.max_order_id = selected.id
+      ORDER BY c.id
+    expect:
+      rows: 4
+      data:
+        - id: 1
+          max_order_id: 6
+          selected_id: 6
+        - id: 2
+          max_order_id: 5
+          selected_id: 5
+        - id: 3
+          max_order_id: 4
+          selected_id: 4
+        - id: 4
+          max_order_id: null
+          selected_id: null
+
+  - name: "Direct grouped join costs one key probe per outer row"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT c.id, totals.total_amount
+      FROM gs_customers c
+      LEFT JOIN (
+        SELECT customer, SUM(amount) AS total_amount
+        FROM gs_orders
+        GROUP BY customer
+      ) totals ON totals.customer = c.name
+      ORDER BY c.id
+    expect:
+      rows: 1
+      result_contains:
+        - "decision direct_group_join"
+        - "probe_invocations 4"
+
+  - name: "Direct grouped join calibration emits both requested operators"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE
+      SELECT c.id, totals.total_amount
+      FROM gs_customers c
+      LEFT JOIN (
+        SELECT customer, SUM(amount) AS total_amount
+        FROM gs_orders
+        GROUP BY customer
+      ) totals ON totals.customer = c.name
+      ORDER BY c.id
+    expect:
+      rows: 2
+      result_contains:
+        - '"plan": "group_carrier"'
+        - '"plan": "direct_group_join"'
+        - '"operator_consistent": true'
+        - '"result_equal": true'
+      result_not_contains:
+        - '"operator_consistent": false'
+        - '"result_equal": false'
+
   - name: "Outer GROUP BY on aggregate alias from left-joined derived table"
     sql: |
       SELECT order_count, COUNT(*) AS customer_count

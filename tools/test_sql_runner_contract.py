@@ -435,11 +435,100 @@ class FailFastParallelContractTest(unittest.TestCase):
             return True
 
         with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.performance_measurement_count", return_value=1), \
                 mock.patch.object(SQLTestRunner, "prepare_test_spec", prepare), \
                 mock.patch.object(SQLTestRunner, "run_test_spec", measure):
             self.assertTrue(run_test_specs(specs, "http://localhost:1", 1, True, 2))
 
         self.assertCountEqual(events[2:], [("measure", specs[0]), ("measure", specs[1])])
+
+    def test_performance_setup_restart_runs_once_before_measurements(self) -> None:
+        specs = ["tests/performance/a.yaml", "tests/performance/b.yaml"]
+        events = []
+
+        def prepare(runner, spec_file):
+            runner.suite_metadata = {
+                "restart_after_setup": spec_file == specs[0],
+            }
+            events.append(("prepare", spec_file))
+            return True
+
+        def restart(_runner, _database):
+            self.assertEqual(sum(kind == "prepare" for kind, _ in events), 2)
+            events.append(("restart", "shared"))
+            return True
+
+        def measure(_runner, spec_file, setup_done=False):
+            self.assertTrue(setup_done)
+            self.assertEqual(sum(kind == "restart" for kind, _ in events), 1)
+            events.append(("measure", spec_file))
+            return True
+
+        with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                mock.patch("run_sql_tests.performance_measurement_count", return_value=1), \
+                mock.patch.object(SQLTestRunner, "prepare_test_spec", prepare), \
+                mock.patch.object(SQLTestRunner, "restart_server_after_setup", restart), \
+                mock.patch.object(SQLTestRunner, "run_test_spec", measure):
+            self.assertTrue(run_test_specs(specs, "http://localhost:1", 1, True, 2))
+
+        self.assertEqual(sum(kind == "restart" for kind, _ in events), 1)
+
+    def test_performance_rounds_finish_all_fills_before_serial_measurements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.yaml"
+            second = Path(tmp) / "second.yaml"
+            first.write_text(
+                "metadata: {description: first}\n"
+                "test_cases:\n"
+                "  - {name: first-1, sql: SELECT 1, threshold_ms: 100}\n"
+                "  - {name: first-2, sql: SELECT 1, threshold_ms: 100}\n",
+                encoding="utf-8",
+            )
+            second.write_text(
+                "metadata: {description: second}\n"
+                "test_cases:\n"
+                "  - {name: second-1, sql: SELECT 1, threshold_ms: 100}\n",
+                encoding="utf-8",
+            )
+            events = []
+            lock = threading.Lock()
+
+            def prepare(runner, spec_file):
+                runner.suite_metadata = {}
+                runner.current_spec_file = spec_file
+                return True
+
+            def run_case(runner, test_case, _database):
+                name = test_case["name"]
+                with lock:
+                    events.append(("fill", name))
+                runner._perf_round_setup_barrier.wait(timeout=2)
+                with lock:
+                    events.append(("measure", name))
+                return True
+
+            def settled(_base_url):
+                with lock:
+                    events.append(("settled", "round"))
+                return True
+
+            with mock.patch("run_sql_tests.PERF_TEST_ENABLED", True), \
+                    mock.patch("run_sql_tests.PERF_AB_MODE", "record"), \
+                    mock.patch("run_sql_tests.wait_for_performance_setup_quiescence", settled), \
+                    mock.patch.object(SQLTestRunner, "ensure_database"), \
+                    mock.patch.object(SQLTestRunner, "prepare_test_spec", prepare), \
+                    mock.patch.object(SQLTestRunner, "run_test_case", run_case):
+                self.assertTrue(run_test_specs(
+                    [str(first), str(second)], "http://localhost:1", 1, True, 2,
+                ))
+
+        first_round_done = max(
+            events.index(("measure", "first-1")),
+            events.index(("measure", "second-1")),
+        )
+        self.assertLess(events.index(("settled", "round")), first_round_done)
+        self.assertGreater(events.index(("fill", "first-2")), first_round_done)
+        self.assertEqual(sum(kind == "settled" for kind, _ in events), 2)
 
     def test_fail_fast_preserves_parallel_groups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

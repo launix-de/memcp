@@ -158,6 +158,59 @@ test_cases:
       ORDER BY d.sort_key DESC
       LIMIT 72
 
+  # Grouped derived relations have a materially different fixed/build cost
+  # from the in-memory membership cache. Pair two input sizes so Costgen can
+  # identify both terms while the forced direct scan validates equal results.
+  - name: "small grouped derived relation versus keyed probes"
+    physical_calibration: true
+    calibration_decision: "direct_group_join"
+    warmup: 1
+    repetitions: 3
+    sql: |
+      SELECT f.id, grouped.total
+      FROM pc_files_small f
+      LEFT JOIN (
+        SELECT file_id, SUM(p1) AS total
+        FROM pc_docs_small
+        GROUP BY file_id
+      ) grouped ON grouped.file_id = f.id
+      WHERE f.id < 10
+      ORDER BY f.id
+
+  - name: "medium grouped derived relation versus keyed probes"
+    physical_calibration: true
+    calibration_decision: "direct_group_join"
+    warmup: 1
+    repetitions: 3
+    sql: |
+      SELECT f.id, grouped.total
+      FROM pc_files_large f
+      LEFT JOIN (
+        SELECT file_id, SUM(p1) AS total
+        FROM pc_docs_large
+        GROUP BY file_id
+      ) grouped ON grouped.file_id = f.id
+      WHERE f.id < 25
+      ORDER BY f.id
+
+  # Keep the grouped input fixed while varying only the number of warm key
+  # lookups, so Costgen can separate carrier build work from probe work.
+  - name: "medium grouped derived relation with many keyed probes"
+    physical_calibration: true
+    calibration_decision: "direct_group_join"
+    warmup: 1
+    repetitions: 3
+    sql: |
+      SELECT f.id, grouped.total
+      FROM pc_files_large f
+      LEFT JOIN (
+        SELECT file_id, SUM(p1) AS total
+        FROM pc_docs_large
+        GROUP BY file_id
+      ) grouped ON grouped.file_id = f.id
+      WHERE f.id < 100
+      ORDER BY f.id
+
   - name: "small broad UNION membership"
     physical_calibration: true
     warmup: 1

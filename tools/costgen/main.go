@@ -175,6 +175,11 @@ type calibrationRow struct {
 	JoinOutputRows                   *float64 `json:"join_output_rows"`
 	JoinTableCount                   *float64 `json:"join_table_count"`
 	JoinLegacyProbeRows              *float64 `json:"join_legacy_probe_rows"`
+	ProbeInvocations                 *float64 `json:"probe_invocations"`
+	InputRows                        *float64 `json:"input_rows"`
+	GroupRows                        *float64 `json:"group_rows"`
+	RowsPerProbe                     *float64 `json:"rows_per_probe"`
+	AggregateWidth                   *float64 `json:"aggregate_width"`
 	ResultEqual                      bool     `json:"result_equal"`
 	Rows                             int64    `json:"rows"`
 	ResultHash                       string   `json:"result_hash"`
@@ -217,6 +222,10 @@ type constants struct {
 	groupCacheStartupNS        int64
 	groupCacheBuildRowNS       int64
 	groupCacheProbeRowNS       int64
+	groupRelationStartupNS     int64
+	groupRelationBuildRowNS    int64
+	groupRelationProbeNS       int64
+	scanJoinOrderStartupNS     int64
 	orderedDriverInputNS       int64
 	orderedScanInvocationNS    int64
 	orderedRecsetSortUnitNS    int64
@@ -295,6 +304,21 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	directGroupObservations := filterDecisionObservations(observations, "direct_group_join")
+	if len(directGroupObservations) > 0 {
+		startup, build, probe, fitErr := fitGroupRelation(directGroupObservations, c)
+		if fitErr != nil {
+			fatal(fmt.Errorf("direct_group_join: %w", fitErr))
+		}
+		c.groupRelationStartupNS = startup
+		c.groupRelationBuildRowNS = build
+		c.groupRelationProbeNS = probe
+		if err := validateDecisionOrdering(directGroupObservations, c); err != nil {
+			fatal(fmt.Errorf("direct_group_join: %w", err))
+		}
+		printModelComparison("direct_group_join", directGroupObservations, c)
+		printDecisionOrdering(directGroupObservations, c)
+	}
 	logStep("selected downstream probe coefficient=%d ns/probe", c.downstreamProbeRowNS)
 	if err := validateDecisionOrdering(training, c); err != nil {
 		fatal(err)
@@ -323,6 +347,11 @@ func main() {
 		// work units instead of introducing an independently fitted coefficient
 		// set. Its forced variants still form a mandatory ordering check: this
 		// catches a lowerer formula which compiles but chooses the wrong operator.
+		startup, fitErr := fitScanJoinOrderStartup(orderedJoinObservations, c)
+		if fitErr != nil {
+			fatal(fmt.Errorf("scan_join_order: %w", fitErr))
+		}
+		c.scanJoinOrderStartupNS = startup
 		if err := validateDecisionOrdering(orderedJoinObservations, c); err != nil {
 			fatal(fmt.Errorf("scan_join_order: %w", err))
 		}
@@ -335,6 +364,57 @@ func main() {
 		}
 		fmt.Println("patched", queryplanPath)
 	}
+}
+
+func fitScanJoinOrderStartup(rows []observation, c constants) (int64, error) {
+	values := make([]float64, 0)
+	without := c
+	without.scanJoinOrderStartupNS = 0
+	for _, row := range rows {
+		if row.censored || row.plan != "scan_join_order" || len(row.x) <= 22 || row.x[22] <= 0 {
+			continue
+		}
+		values = append(values, math.Max(1,
+			(row.y-estimatedNS(row, without))/row.x[22]))
+	}
+	if len(values) == 0 {
+		return 0, errors.New("no exact scan_join_order observation")
+	}
+	sort.Float64s(values)
+	return int64(math.Round(values[len(values)/2])), nil
+}
+
+func fitGroupRelation(rows []observation, c constants) (int64, int64, int64, error) {
+	groups, err := decisionAlternatives(filterRankObservations(rows))
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	x, y := make([][]float64, 0, len(groups)), make([]float64, 0, len(groups))
+	without := c
+	without.groupRelationStartupNS = 0
+	without.groupRelationBuildRowNS = 0
+	without.groupRelationProbeNS = 0
+	for _, plans := range groups {
+		carrier, carrierOK := plans["group_carrier"]
+		direct, directOK := plans["direct_group_join"]
+		if !carrierOK || !directOK || carrier.censored || direct.censored ||
+			len(carrier.x) <= 21 {
+			continue
+		}
+		residual := (carrier.y - direct.y) -
+			(estimatedNS(carrier, without) - estimatedNS(direct, without))
+		x = append(x, []float64{carrier.x[19], carrier.x[20], carrier.x[21]})
+		y = append(y, math.Max(1, residual))
+	}
+	if len(x) < 3 {
+		return 0, 0, 0, fmt.Errorf("need at least three exact carrier/direct pairs, got %d", len(x))
+	}
+	beta, err := fitNonnegative(x, y)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return int64(math.Round(beta[0])), int64(math.Round(beta[1])),
+		int64(math.Round(beta[2])), nil
 }
 
 func validateModelImprovement(rows []observation, c constants) error {
@@ -978,6 +1058,11 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 			row.JoinOutputRows == nil || row.JoinTableCount == nil || row.JoinLegacyProbeRows == nil {
 			return fmt.Errorf("ordered join variant has incomplete measurements: %+v", row)
 		}
+	} else if row.Decision == "direct_group_join" {
+		if row.ProbeInvocations == nil || row.InputRows == nil || row.GroupRows == nil ||
+			row.RowsPerProbe == nil || row.AggregateWidth == nil {
+			return fmt.Errorf("direct grouped join variant has incomplete measurements: %+v", row)
+		}
 	} else if row.CandidateInputRows == nil || row.CandidateRows == nil ||
 		row.DriverInputRows == nil || row.DriverRows == nil || row.ExpectedDriverRowsVisited == nil {
 		return fmt.Errorf("membership variant has incomplete measurements: %+v", row)
@@ -1138,14 +1223,38 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	if row.Decision == "direct_group_join" {
+		if row.ProbeInvocations == nil || row.InputRows == nil || row.GroupRows == nil ||
+			row.RowsPerProbe == nil || row.AggregateWidth == nil {
+			return nil, fmt.Errorf("direct grouped join work profile contains nil inputs: %+v", row)
+		}
+		features := make([]float64, 23)
+		if row.Plan == "direct_group_join" {
+			probedRows := *row.ProbeInvocations * *row.RowsPerProbe
+			features[0] = *row.ProbeInvocations
+			features[1] = probedRows
+			features[3] = probedRows * *row.AggregateWidth
+			features[4] = probedRows
+		} else if row.Plan == "group_carrier" {
+			features[0] = 1
+			features[1] = *row.InputRows
+			features[3] = *row.InputRows * *row.AggregateWidth
+			features[19] = 1
+			features[20] = *row.InputRows
+			features[21] = *row.ProbeInvocations
+		} else {
+			return nil, fmt.Errorf("unsupported direct grouped join plan %q", row.Plan)
+		}
+		return features, nil
+	}
 	if row.Decision == "scan_join_order" {
 		if row.JoinInputRows == nil || row.JoinEstimatedRows == nil ||
 			row.JoinOutputRows == nil || row.JoinTableCount == nil {
 			return nil, fmt.Errorf("ordered join work profile contains nil inputs: %+v", row)
 		}
-		features := make([]float64, 19)
+		features := make([]float64, 23)
 		features[0] = math.Max(0, *row.JoinTableCount-1)
-		features[15] = 1
+		features[22] = 1
 		features[1] = *row.JoinInputRows
 		features[3] = *row.JoinOutputRows + *row.JoinInputRows*math.Max(0, *row.JoinTableCount-1)
 		features[4] = *row.JoinEstimatedRows
@@ -1768,6 +1877,10 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.membershipDirectProbeRowNS),
 		float64(c.orderedRecsetSortUnitNS),
 		float64(c.downstreamProbeRowNS),
+		float64(c.groupRelationStartupNS),
+		float64(c.groupRelationBuildRowNS),
+		float64(c.groupRelationProbeNS),
+		float64(c.scanJoinOrderStartupNS),
 	}
 	total := 0.0
 	for i, value := range row.x {
@@ -1871,6 +1984,11 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 				return nil, fmt.Errorf("plan %q belongs to scan_join_order, got decision %q", row.plan, row.decision)
 			}
 			groups[row.caseName][row.plan] = row
+		case "group_carrier", "direct_group_join":
+			if row.decision != "direct_group_join" {
+				return nil, fmt.Errorf("plan %q belongs to direct_group_join, got decision %q", row.plan, row.decision)
+			}
+			groups[row.caseName][row.plan] = row
 		default:
 			return nil, fmt.Errorf("unsupported plan %q", row.plan)
 		}
@@ -1882,6 +2000,15 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 			}
 			if _, ordered := plans["scan_join_order"]; !ordered {
 				return nil, fmt.Errorf("incomplete ordered join alternatives for %q", name)
+			}
+			continue
+		}
+		if decisions[name] == "direct_group_join" {
+			if _, carrier := plans["group_carrier"]; !carrier {
+				return nil, fmt.Errorf("incomplete direct grouped join alternatives for %q", name)
+			}
+			if _, direct := plans["direct_group_join"]; !direct {
+				return nil, fmt.Errorf("incomplete direct grouped join alternatives for %q", name)
 			}
 			continue
 		}
@@ -2135,6 +2262,10 @@ func readCurrentConstants(path string) (constants, error) {
 		"planner_membership_downstream_probe_row_ns",
 		"planner_scalar_presence_probe_row_ns",
 		"planner_membership_direct_probe_row_ns",
+		"planner_group_relation_startup_ns",
+		"planner_group_relation_build_row_ns",
+		"planner_group_relation_probe_ns",
+		"planner_scan_join_order_startup_ns",
 	}
 	values := make([]int64, len(names))
 	content := string(data)
@@ -2145,6 +2276,10 @@ func readCurrentConstants(path string) (constants, error) {
 			// A one-nanosecond floor lets the first run fit new membership and
 			// ordered-scan coefficients from their physical-consumer observations.
 			if name == "planner_membership_direct_probe_row_ns" ||
+				name == "planner_group_relation_startup_ns" ||
+				name == "planner_group_relation_build_row_ns" ||
+				name == "planner_group_relation_probe_ns" ||
+				name == "planner_scan_join_order_startup_ns" ||
 				name == "planner_membership_ordered_scan_invocation_ns" ||
 				name == "planner_membership_ordered_recset_sort_unit_ns" ||
 				name == "planner_membership_downstream_probe_row_ns" {
@@ -2179,6 +2314,10 @@ func readCurrentConstants(path string) (constants, error) {
 		downstreamProbeRowNS:       values[17],
 		scalarPresenceProbeRowNS:   values[18],
 		membershipDirectProbeRowNS: values[19],
+		groupRelationStartupNS:     values[20],
+		groupRelationBuildRowNS:    values[21],
+		groupRelationProbeNS:       values[22],
+		scanJoinOrderStartupNS:     values[23],
 	}, nil
 }
 
@@ -2235,6 +2374,10 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_driver_input_row_ns %d)
 (define planner_membership_ordered_scan_invocation_ns %d)
 (define planner_membership_ordered_recset_sort_unit_ns %d)
+(define planner_group_relation_startup_ns %d)
+(define planner_group_relation_build_row_ns %d)
+(define planner_group_relation_probe_ns %d)
+(define planner_scan_join_order_startup_ns %d)
 /* END GENERATED COST CONSTANTS */`, c.scalarPresenceProbeRowNS, c.membershipDirectProbeRowNS,
 		c.downstreamProbeRowNS,
 		c.scanInvocationNS, c.scanRowNS,
@@ -2242,6 +2385,8 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 		c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
 		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS,
-		c.orderedRecsetSortUnitNS)
+		c.orderedRecsetSortUnitNS, c.groupRelationStartupNS,
+		c.groupRelationBuildRowNS, c.groupRelationProbeNS,
+		c.scanJoinOrderStartupNS)
 	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }
