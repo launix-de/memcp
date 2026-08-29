@@ -993,10 +993,13 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 	if !hadValue && isOuter && len(tables) > 0 {
 		cbCols := tables[0].callbackCols
 		cb := tables[0].callback
-		callbackFn := scm.OptimizeProcToSerialFunction(cb)
-		aggregateFn := scm.OptimizeProcToSerialFunction(aggregate)
+		callbackProgram := scm.PrepareSerialProc(cb)
+		aggregateProgram := scm.PrepareSerialProc(aggregate)
 		nullRow := buildOuterNullCallbackRow(cbCols)
-		akkumulator = aggregateFn(akkumulator, callbackFn(nullRow...))
+		var aggregateArgs [2]scm.Scmer
+		aggregateArgs[0] = akkumulator
+		aggregateArgs[1] = callbackProgram.Call(nullRow)
+		akkumulator = aggregateProgram.Call(aggregateArgs[:])
 	}
 	if !hadValue && !isOuter {
 		akkumulator = notFoundValue
@@ -1169,10 +1172,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
-	var conditionFn func(...scm.Scmer) scm.Scmer
-	if !conditionAlwaysTrue && conditionProgram.Kind != scm.SerialProcNativeArgConstant {
-		conditionFn = scm.OptimizeProcToSerialFunction(condition)
-	}
 	var acceptProgram *scm.SerialProc
 	if !accept.IsNil() {
 		prepared := scm.PrepareSerialProc(accept)
@@ -1224,13 +1223,13 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 					largs[j] = t.ColumnReaderTx(currentTx, name)
 				}
 			}
-			procFn := scm.OptimizeProcToSerialFunction(scol)
+			procFn := scm.PrepareSerialProc(scol)
+			vals := make([]scm.Scmer, len(largs))
 			result.scols[i] = func(idx uint32) scm.Scmer {
-				vals := make([]scm.Scmer, len(largs))
 				for j, getter := range largs {
 					vals[j] = getter(idx)
 				}
-				return procFn(vals...)
+				return procFn.Call(vals)
 			}
 			continue
 		}
@@ -1428,7 +1427,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 								}
 							}
 						}
-						if !scm.ToBool(conditionFn(cdataset...)) {
+						if !scm.ToBool(conditionProgram.Call(cdataset)) {
 							continue
 						}
 						batch[outN] = idx

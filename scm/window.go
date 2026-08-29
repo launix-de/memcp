@@ -131,8 +131,10 @@ func init_window() {
 			if limit == 0 {
 				return result
 			}
-			reduceFn := OptimizeProcToSerialFunction(a[2])
-			producerFn := OptimizeProcToSerialFunction(a[4])
+			reduceProgram := PrepareSerialProc(a[2])
+			producerProgram := PrepareSerialProc(a[4])
+			var reduceArgs [2]Scmer
+			var producerArgs [1]Scmer
 			seen := 0
 			emitted := 0
 			emit := NewFunc(func(values ...Scmer) Scmer {
@@ -146,11 +148,13 @@ func init_window() {
 				if limit >= 0 && emitted >= limit {
 					return result
 				}
-				result = reduceFn(result, values[0])
+				reduceArgs[0], reduceArgs[1] = result, values[0]
+				result = reduceProgram.Call(reduceArgs[:])
 				emitted++
 				return result
 			})
-			producerFn(emit)
+			producerArgs[0] = emit
+			producerProgram.Call(producerArgs[:])
 			return result
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "applies OFFSET/LIMIT and a serial reducer to complete values emitted by a nested streaming producer without collecting an intermediate relation",

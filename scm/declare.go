@@ -256,7 +256,10 @@ var NoEscape = &TypeDescriptor{Kind: "any", NoEscape: true, Length: UnknownLengt
 
 var declaration_titles []string
 var declarations map[string]*Declaration = make(map[string]*Declaration)
-var declarations_hash map[string]*Declaration = make(map[string]*Declaration)
+
+// Keying by the complete function identity preserves distinct closure contexts
+// and avoids fmt.Sprintf allocating on every prepared callback lookup.
+var declarationsByFunction map[uintptr]*Declaration = make(map[uintptr]*Declaration)
 
 func DeclareTitle(title string) {
 	declaration_titles = append(declaration_titles, "#"+title)
@@ -281,7 +284,7 @@ func Declare(env *Env, def *Declaration) {
 	}
 	declarations[def.Name] = def
 	if def.Fn != nil {
-		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
+		declarationsByFunction[FunctionIdentity(def.Fn)] = def
 		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
 	}
 }
@@ -293,7 +296,7 @@ func DeclareInSection(section string, env *Env, def *Declaration) {
 	validateDeclaration(def)
 	declarations[def.Name] = def
 	if def.Fn != nil {
-		declarations_hash[fmt.Sprintf("%p", def.Fn)] = def
+		declarationsByFunction[FunctionIdentity(def.Fn)] = def
 		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
 	}
 	if def.IsForbidden() {
@@ -690,7 +693,7 @@ func Validate(val Scmer, require string) string {
 					def = def2
 				}
 			} else if head.GetTag() == tagFunc {
-				if def2, ok := declarations_hash[fmt.Sprintf("%p", head.Func())]; ok {
+				if def2, ok := declarationsByFunction[FunctionIdentity(head.Func())]; ok {
 					def = def2
 				}
 			}
@@ -1034,7 +1037,7 @@ func DeclarationForValue(v Scmer) *Declaration {
 			return d
 		}
 	case tagFunc:
-		if d, ok := declarations_hash[fmt.Sprintf("%p", v.Func())]; ok {
+		if d, ok := declarationsByFunction[FunctionIdentity(v.Func())]; ok {
 			return d
 		}
 	case tagAny:
@@ -1049,7 +1052,7 @@ func DeclarationForValue(v Scmer) *Declaration {
 			}
 		}
 		if fn, ok := v.Any().(func(...Scmer) Scmer); ok {
-			if d, ok := declarations_hash[fmt.Sprintf("%p", fn)]; ok {
+			if d, ok := declarationsByFunction[FunctionIdentity(fn)]; ok {
 				return d
 			}
 		}

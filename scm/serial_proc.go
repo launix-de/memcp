@@ -32,8 +32,9 @@ const (
 
 // SerialProc exposes trivial executable shapes to physical operators. Callers
 // retain the original procedure when analysis or serialization needs it; not
-// duplicating it here keeps every scan mapper compact. The value is immutable
-// after preparation. The general interpreter fallback remains serial.
+// duplicating it here keeps every scan mapper compact. General programs own a
+// mutable environment and call-frame stack; prepare one per serial worker and
+// do not copy or share it after execution starts.
 type SerialProc struct {
 	Kind     SerialProcKind
 	Value    Scmer // constant result or native-function identity
@@ -42,6 +43,7 @@ type SerialProc struct {
 	// binary native call represented by SerialProcNativeArgConstant.
 	ConstantFirst bool
 	Function      func(...Scmer) Scmer
+	borrowed      func([]Scmer) Scmer
 }
 
 func serialProcBody(v Scmer) Scmer {
@@ -149,6 +151,10 @@ func serialProcNativeArgConstant(proc *Proc, body Scmer) (native Scmer, argument
 	if !ok {
 		return NewNil(), 0, NewNil(), false, false
 	}
+	declaration := DeclarationForValue(native)
+	if declaration == nil || declaration.RetainsCallArgs {
+		return NewNil(), 0, NewNil(), false, false
+	}
 	if argument, ok = serialProcArgumentIndex(proc, call[1]); ok {
 		if constant, ok = serialProcLiteral(call[2]); ok {
 			return native, argument, constant, false, true
@@ -198,7 +204,7 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	// classifying that body could silently bypass code generation semantics.
 	if proc.Compiled != nil {
 		prepared.Kind = SerialProcGeneral
-		prepared.Function = OptimizeProcToSerialFunction(source)
+		prepared.borrowed = optimizeProcToSerialBorrowed(source)
 		return prepared
 	}
 	body := serialProcBody(proc.Body)
@@ -244,12 +250,13 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	}
 
 	prepared.Kind = SerialProcGeneral
-	prepared.Function = OptimizeProcToSerialFunction(source)
+	prepared.borrowed = optimizeProcToSerialBorrowed(source)
 	return prepared
 }
 
-// Call evaluates a prepared callback. Hot physical loops should instead
-// dispatch once on Kind and use the corresponding fields directly.
+// Call evaluates a prepared callback with a caller-owned argument frame. Hot
+// physical loops should dispatch dominant simple Kinds once; compound programs
+// use Call so the prepared expression can reuse its nested native-call frames.
 func (p *SerialProc) Call(args []Scmer) Scmer {
 	switch p.Kind {
 	case SerialProcConstant:
@@ -267,7 +274,7 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 		}
 		return p.Function(call[:]...)
 	default:
-		return p.Function(args...)
+		return p.borrowed(args)
 	}
 }
 

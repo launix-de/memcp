@@ -653,7 +653,7 @@ func (p *StorageComputeProxy) compressVariant(v *storageComputeVariant, tx *TxCo
 }
 
 func (p *StorageComputeProxy) compressFilteredVariant(v *storageComputeVariant, tx *TxContext, filterCols []string, filter scm.Scmer) {
-	filterFn := scm.OptimizeProcToSerialFunction(filter)
+	filterProgram := scm.PrepareSerialProc(filter)
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
 		filterReaders[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
@@ -672,7 +672,7 @@ func (p *StorageComputeProxy) compressFilteredVariant(v *storageComputeVariant, 
 			for j := range filterReaders {
 				filterValues[j] = filterReaders[j].GetValue(i)
 			}
-			if scm.ToBool(filterFn(filterValues...)) {
+			if scm.ToBool(filterProgram.Call(filterValues)) {
 				for j := range readers {
 					colvalues[j] = readers[j].GetValue(i)
 				}

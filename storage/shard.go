@@ -2972,7 +2972,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 		}
 	}
 
-	conditionFn := scm.OptimizeProcToSerialFunction(condition)
+	conditionProgram := scm.PrepareSerialProc(condition)
 
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -3034,7 +3034,7 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 					}
 				}
 			}
-			if scm.ToBool(conditionFn(cdataset...)) {
+			if scm.ToBool(conditionProgram.Call(cdataset)) {
 				count++
 				if count >= int64(limit) {
 					capped = true
