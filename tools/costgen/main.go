@@ -217,6 +217,7 @@ type constants struct {
 	groupCacheStartupNS        int64
 	groupCacheBuildRowNS       int64
 	groupCacheProbeRowNS       int64
+	scanJoinOrderStartupNS     int64
 	orderedDriverInputNS       int64
 	orderedScanInvocationNS    int64
 	orderedRecsetSortUnitNS    int64
@@ -323,6 +324,12 @@ func main() {
 		// work units instead of introducing an independently fitted coefficient
 		// set. Its forced variants still form a mandatory ordering check: this
 		// catches a lowerer formula which compiles but chooses the wrong operator.
+		startup, fitErr := fitScanJoinOrderStartup(orderedJoinObservations, c)
+		if fitErr != nil {
+			fatal(fmt.Errorf("scan_join_order: %w", fitErr))
+		}
+		c.scanJoinOrderStartupNS = startup
+		fmt.Printf("scan join startup:    %d ns/invocation\n", c.scanJoinOrderStartupNS)
 		if err := validateDecisionOrdering(orderedJoinObservations, c); err != nil {
 			fatal(fmt.Errorf("scan_join_order: %w", err))
 		}
@@ -335,6 +342,24 @@ func main() {
 		}
 		fmt.Println("patched", queryplanPath)
 	}
+}
+
+func fitScanJoinOrderStartup(rows []observation, c constants) (int64, error) {
+	values := make([]float64, 0)
+	without := c
+	without.scanJoinOrderStartupNS = 0
+	for _, row := range rows {
+		if row.censored || row.plan != "scan_join_order" || len(row.x) <= 19 || row.x[19] <= 0 {
+			continue
+		}
+		values = append(values, math.Max(1,
+			(row.y-estimatedNS(row, without))/row.x[19]))
+	}
+	if len(values) == 0 {
+		return 0, errors.New("no exact scan_join_order observation")
+	}
+	sort.Float64s(values)
+	return int64(math.Round(values[len(values)/2])), nil
 }
 
 func validateModelImprovement(rows []observation, c constants) error {
@@ -1143,9 +1168,9 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			row.JoinOutputRows == nil || row.JoinTableCount == nil {
 			return nil, fmt.Errorf("ordered join work profile contains nil inputs: %+v", row)
 		}
-		features := make([]float64, 19)
+		features := make([]float64, 20)
 		features[0] = math.Max(0, *row.JoinTableCount-1)
-		features[15] = 1
+		features[19] = 1
 		features[1] = *row.JoinInputRows
 		features[3] = *row.JoinOutputRows + *row.JoinInputRows*math.Max(0, *row.JoinTableCount-1)
 		features[4] = *row.JoinEstimatedRows
@@ -1392,6 +1417,7 @@ func solveEquationSystem(rows []observation) (constants, error) {
 		orderedRecsetSortUnitNS:    1,
 		downstreamProbeRowNS:       1,
 		membershipDirectProbeRowNS: 1,
+		scanJoinOrderStartupNS:     1,
 	}, nil
 }
 
@@ -1768,6 +1794,7 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.membershipDirectProbeRowNS),
 		float64(c.orderedRecsetSortUnitNS),
 		float64(c.downstreamProbeRowNS),
+		float64(c.scanJoinOrderStartupNS),
 	}
 	total := 0.0
 	for i, value := range row.x {
@@ -2135,6 +2162,7 @@ func readCurrentConstants(path string) (constants, error) {
 		"planner_membership_downstream_probe_row_ns",
 		"planner_scalar_presence_probe_row_ns",
 		"planner_membership_direct_probe_row_ns",
+		"planner_scan_join_order_startup_ns",
 	}
 	values := make([]int64, len(names))
 	content := string(data)
@@ -2145,6 +2173,7 @@ func readCurrentConstants(path string) (constants, error) {
 			// A one-nanosecond floor lets the first run fit new membership and
 			// ordered-scan coefficients from their physical-consumer observations.
 			if name == "planner_membership_direct_probe_row_ns" ||
+				name == "planner_scan_join_order_startup_ns" ||
 				name == "planner_membership_ordered_scan_invocation_ns" ||
 				name == "planner_membership_ordered_recset_sort_unit_ns" ||
 				name == "planner_membership_downstream_probe_row_ns" {
@@ -2179,6 +2208,7 @@ func readCurrentConstants(path string) (constants, error) {
 		downstreamProbeRowNS:       values[17],
 		scalarPresenceProbeRowNS:   values[18],
 		membershipDirectProbeRowNS: values[19],
+		scanJoinOrderStartupNS:     values[20],
 	}, nil
 }
 
@@ -2235,6 +2265,7 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_driver_input_row_ns %d)
 (define planner_membership_ordered_scan_invocation_ns %d)
 (define planner_membership_ordered_recset_sort_unit_ns %d)
+(define planner_scan_join_order_startup_ns %d)
 /* END GENERATED COST CONSTANTS */`, c.scalarPresenceProbeRowNS, c.membershipDirectProbeRowNS,
 		c.downstreamProbeRowNS,
 		c.scanInvocationNS, c.scanRowNS,
@@ -2242,6 +2273,6 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 		c.recsetStartupNS, c.recsetBuildRowNS, c.recsetProbeRowNS,
 		c.recsetAggregateRowNS, c.groupCacheStartupNS, c.groupCacheBuildRowNS,
 		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS,
-		c.orderedRecsetSortUnitNS)
+		c.orderedRecsetSortUnitNS, c.scanJoinOrderStartupNS)
 	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }

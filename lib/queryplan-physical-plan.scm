@@ -4709,6 +4709,70 @@ move the window to the wrong tree level. */
 			(map (join_cols_for_alias sources default_alias (source_alias src) exprs)
 				(lambda (col) (list index col)))))))))
 
+(define scan_join_order_candidate_score (lambda (all_sources default_alias terms src)
+	(begin
+		(define rows (planner_source_row_count src))
+		(define local_terms (scan_join_order_local_terms
+			all_sources default_alias src 1 terms))
+		(define condition (combine_where_terms local_terms true))
+		(define estimate (if (or (not (number? rows)) (equal? condition true))
+			nil (planner_source_filter_estimate src condition 512)))
+		(define matching (if (nil? estimate) rows
+			(planner_estimated_matching_rows estimate rows rows)))
+		(list
+			(if (and (number? rows) (and (> rows 0) (number? matching)))
+				(/ matching rows) 1)
+			(coalesceNil rows 1e300)))))
+
+(define scan_join_order_score_better? (lambda (candidate current)
+	(or (< (car candidate) (car current))
+		(and (equal? (car candidate) (car current))
+			(< (cadr candidate) (cadr current))))))
+
+(define scan_join_order_connected_candidate (lambda (all_sources default_alias terms selected remaining)
+	(reduce remaining (lambda (best src)
+		(begin
+			(define trial (append selected src))
+			(define connected (reduce terms (lambda (found term)
+				(or found (not (nil? (scan_join_order_join_clause
+					trial (- (count trial) 1) term))))) false))
+			(if (not connected)
+				best
+				(begin
+					(define score (scan_join_order_candidate_score
+						all_sources default_alias terms src))
+					(if (or (nil? best) (scan_join_order_score_better? score (cadr best)))
+						(list src score) best))))) nil)))
+
+(define scan_join_order_connected_sources_tail (lambda (all_sources default_alias terms selected remaining)
+	(if (empty_list? remaining)
+		selected
+		(begin
+			(define candidate (scan_join_order_connected_candidate
+				all_sources default_alias terms selected remaining))
+			(if (nil? candidate)
+				nil
+				(begin
+					(define src (car candidate))
+					(scan_join_order_connected_sources_tail
+						all_sources default_alias terms (append selected src)
+						(filter remaining (lambda (other)
+							(not (equal? (source_alias other) (source_alias src))))))))))))
+
+/* A bushy logical tree has no executable leaf order by itself. Keep its chosen
+driver, then linearize only the physical inner-join traversal so every next
+table has an equi edge to the prefix. */
+(define scan_join_order_connected_sources (lambda (all_sources plan default_alias final_condition)
+	(begin
+		(define tree_sources (join_optimizer_sources_for_order all_sources
+			(join_optimizer_tree_aliases plan)))
+		(define terms (scan_join_order_terms all_sources plan final_condition))
+		(if (empty_list? tree_sources) '()
+			(begin
+				(define connected (scan_join_order_connected_sources_tail
+					all_sources default_alias terms (list (car tree_sources)) (cdr tree_sources)))
+				(if (nil? connected) tree_sources connected))))))
+
 (define scan_join_order_ref_params (lambda (sources refs)
 	(map refs (lambda (ref)
 		(symbol (concat (source_alias (nth sources (car ref))) "." (cadr ref)))))))
@@ -4804,10 +4868,10 @@ has selected a lowerer. */
 
 /* Enumerate metadata only. No scan, RecSet, keytable or callback AST is built
 until the caller has selected this physical alternative. */
-(define scan_join_order_spec (lambda (all_sources plan default_alias needed_exprs final_condition order_items offset_value limit_value stages facts)
+(define scan_join_order_spec (lambda (all_sources plan default_alias needed_exprs final_condition order_items offset_value limit_value stages facts unordered_reduce)
 	(begin
-		(define aliases (join_optimizer_tree_aliases plan))
-		(define sources (join_optimizer_sources_for_order all_sources aliases))
+		(define sources (scan_join_order_connected_sources
+			all_sources plan default_alias final_condition))
 		(define offset (coalesceNil (planner_literal_value offset_value) 0))
 		(define limit (coalesceNil (planner_literal_value limit_value) -1))
 		(define terms (scan_join_order_terms sources plan final_condition))
@@ -4837,13 +4901,16 @@ until the caller has selected this physical alternative. */
 		(define joined_rows (qassoc_get facts (quote join_estimated_rows) nil))
 		(define output_rows (if (and (number? limit) (>= limit 0))
 			(min (coalesceNil joined_rows limit) (+ offset limit)) joined_rows))
+		(define window_supported (and (>= limit 0) (not (empty_list? order_items))))
+		(define reduce_supported (and unordered_reduce
+			(and (equal? offset 0) (and (equal? limit -1) (empty_list? order_items)))))
 		(define supported (and (>= (count sources) 2)
 			(and (empty_list? stages)
 				(and (number? input_rows)
 					(and (number? joined_rows)
 						(and (number? offset)
-							(and (>= limit 0)
-								(and (not (empty_list? order_items))
+							(and (or window_supported reduce_supported)
+								(and (or reduce_supported (not (empty_list? order_items)))
 									(and (reduce sources (lambda (ok src)
 										(and ok (and (source_is_base_table? src)
 											(not (source_outer? src))))) true)
@@ -5108,7 +5175,7 @@ until the caller has selected this physical alternative. */
 			(wrap_membership_keyset_bindings membership_keysets window_expr)
 			window_expr))))
 
-(define scan_join_order_emit_plan (lambda (spec default_alias needed_exprs value_builder reduce_expr neutral_expr stages)
+(define scan_join_order_emit_plan (lambda (spec default_alias needed_exprs value_builder reduce_expr neutral_expr shard_reduce_expr stages)
 	(begin
 		(define sources (qassoc_get spec (quote sources) '()))
 		(define local_terms (qassoc_get spec (quote local_terms) '()))
@@ -5158,12 +5225,12 @@ until the caller has selected this physical alternative. */
 			(list (quote lambda)
 				(scan_join_order_ref_params sources map_refs)
 				map_body)
-			reduce_expr neutral_expr nil false neutral_expr))))
+			reduce_expr neutral_expr shard_reduce_expr false neutral_expr))))
 
 (define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
 		(define spec (scan_join_order_spec all_sources plan default_alias needed_exprs
-			final_condition order_items offset_value limit_value stages facts))
+			final_condition order_items offset_value limit_value stages facts false))
 		(if (nil? spec)
 			(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
 				output_exprs needed_exprs final_condition order_items offset_value limit_value
@@ -5249,10 +5316,73 @@ until the caller has selected this physical alternative. */
 							(list "cost" (planner_cost_explain scan_cost)))))))
 				(if (equal? chosen "scan_join_order")
 					(scan_join_order_emit_plan spec default_alias needed_exprs
-						value_builder reduce_expr neutral_expr stages)
+						value_builder reduce_expr neutral_expr nil stages)
 					(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
 						output_exprs needed_exprs final_condition order_items offset_value limit_value
 						stages facts value_builder reduce_expr neutral_expr)))))))
+
+/* Unordered reductions have no Top-K window, so scan_join_order may use both
+reducers: the first combines shard-tuple results locally and the second merges
+those local states globally. The physical choice deliberately shares the
+ordered operator's Costgen-owned scan, map and expression coefficients. */
+(define join_unordered_reduce_plan (lambda (all_sources plan default_alias needed_exprs
+	final_condition stages facts value_builder reduce_expr neutral_expr shard_reduce_expr legacy_plan)
+	(begin
+		(define spec (scan_join_order_spec all_sources plan default_alias needed_exprs
+			final_condition '() 0 -1 stages facts true))
+		(if (nil? spec)
+			legacy_plan
+			(begin
+				(define scan_cost (qassoc_get spec (quote cost) nil))
+				(define joined_rows (qassoc_get spec (quote joined_rows) 0))
+				(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
+				(define logical_legacy_cost (if (nil? estimated_legacy_cost)
+					(planner_cost_add
+						(planner_scan_cost (qassoc_get spec (quote input_rows) 0) 0.5)
+						(planner_join_work_cost joined_rows 0.5)
+						joined_rows 0.5)
+					estimated_legacy_cost))
+				(define legacy_scan_invocations
+					(physical_join_tree_scan_invocations plan all_sources 1))
+				(define legacy_cost (planner_cost_add logical_legacy_cost
+					(planner_cost
+						(* (max 0 (- (coalesceNil legacy_scan_invocations 1) 1))
+							planner_membership_scan_invocation_ns)
+						0 0 0 0 0 0 0 joined_rows 0.6)
+					joined_rows 0.6))
+				(define normal_choice (if (planner_cost_better? scan_cost legacy_cost)
+					"scan_join_order" "legacy_join_tree"))
+				(define decision_id (concat "scan_join_order:reduce:"
+					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
+				(define alternatives (list "legacy_join_tree" "scan_join_order"))
+				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
+				(define forced (planner_physical_override decision_id))
+				(planner_record_physical_decision (list
+					(list "decision_id" decision_id)
+					(list "decision" "scan_join_order")
+					(list "decision_site" "unordered_join_reduce")
+					(list "chosen" chosen)
+					(list "normally_chosen" normal_choice)
+					(list "selection" (if (nil? forced) "cost" "calibration_override"))
+					(list "reason" (if (nil? forced) "lowest_total_ns" "calibration_override"))
+					(list "inputs" (list
+						(list "join_input_rows" (qassoc_get spec (quote input_rows) 0))
+						(list "join_estimated_rows" joined_rows)
+						(list "join_output_rows" (qassoc_get spec (quote output_rows) 0))
+						(list "join_table_count" (qassoc_get spec (quote table_count) 0))
+						(list "join_legacy_probe_rows"
+							(coalesceNil legacy_scan_invocations joined_rows))
+						(list "limit" -1)
+						(list "offset" 0)))
+					(list "alternatives" (list
+						(list (list "plan" "legacy_join_tree")
+							(list "cost" (planner_cost_explain legacy_cost)))
+						(list (list "plan" "scan_join_order")
+							(list "cost" (planner_cost_explain scan_cost)))))))
+				(if (equal? chosen "scan_join_order")
+					(scan_join_order_emit_plan spec default_alias needed_exprs value_builder
+						reduce_expr neutral_expr shard_reduce_expr stages)
+					legacy_plan))))))
 
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
@@ -5477,6 +5607,37 @@ driver. This is physical costing metadata only; it never enters logical IR. */
 		(physical_join_tree_probe_work
 			(list (symbol "join-node") kind left right predicates) sources)
 		_ (list nil '()))))
+
+/* Count physical scan boundaries in the nested legacy tree. A right subtree is
+started once for every row produced by its left sibling; join selectivity
+controls matches, not whether the keyed lookup is attempted. */
+(define physical_join_tree_scan_invocations (lambda (tree sources multiplier)
+	(match tree
+		((symbol join-leaf) _alias _predicates) multiplier
+		((quote join-leaf) alias predicates)
+		(physical_join_tree_scan_invocations
+			(list (symbol "join-leaf") alias predicates) sources multiplier)
+		((symbol join-leaf) alias)
+		(physical_join_tree_scan_invocations
+			(list (symbol "join-leaf") alias '()) sources multiplier)
+		((quote join-leaf) alias)
+		(physical_join_tree_scan_invocations
+			(list (symbol "join-leaf") alias '()) sources multiplier)
+		((symbol join-node) _kind left right _predicates) (begin
+			(define left_work (physical_join_tree_probe_work left sources))
+			(define left_rows (car left_work))
+			(define left_invocations
+				(physical_join_tree_scan_invocations left sources multiplier))
+			(define right_multiplier (if (and (number? multiplier) (number? left_rows))
+				(* multiplier left_rows) nil))
+			(define right_invocations
+				(physical_join_tree_scan_invocations right sources right_multiplier))
+			(if (and (number? left_invocations) (number? right_invocations))
+				(+ left_invocations right_invocations) nil))
+		((quote join-node) kind left right predicates)
+		(physical_join_tree_scan_invocations
+			(list (symbol "join-node") kind left right predicates) sources multiplier)
+		_ nil)))
 
 (define join_scan_probe_context (lambda (tree sources default_rows)
 	(begin
@@ -6510,6 +6671,44 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(nth prejoin 0)
 			(lower_single_source_query_block (nth prejoin 1))))))
 
+(define direct_join_group_supported? (lambda (stage)
+	(begin
+		(define input (gs_input stage))
+		(if (not (query_block? input))
+			false
+			(begin
+				(define sources (qb_sources input))
+				(define default_alias (qassoc_get (qb_facts input) (quote default_alias)
+					(source_alias (car sources))))
+				(define plan (query_block_join_plan input sources))
+				(define spec (scan_join_order_spec sources plan default_alias
+					(merge (list (gs_keys stage) (map (gs_aggregates stage) car)))
+					(coalesceNil (qb_where input) true) '() 0 -1
+					(query_block_stage_catalog input) (qb_facts input) true))
+				(not (nil? spec)))))))
+
+/* A cold prejoin must execute the same join, write its intermediate keys and
+read them again for grouping. When fused joined reduction is supported it
+therefore dominates cold materialization structurally. An already prepared
+canonical prejoin remains the reusable warm-cache path. */
+(define lower_cold_dominant_direct_join_group (lambda (block stage)
+	(begin
+		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
+			(source_alias (car (qb_sources block)))))
+		(define prejoin_relation (prejoin_table_name block default_alias))
+		(define direct_plan (lower_direct_query_group_stage stage
+			(expand_query_block_fields (qb_sources block) (qb_fields block))
+			(qb_order block) (qb_offset block) (qb_limit block)))
+		(define prejoin_plan (lower_query_block_through_prejoin block))
+		(list (quote if)
+			(list (quote not)
+				(list (quote try)
+					(list (quote lambda) '()
+						(list (quote show) (qb_schema block) prejoin_relation true))
+					(list (quote lambda) (list (quote _missing_relation)) false)))
+			direct_plan
+			prejoin_plan))))
+
 (define membership_probe_work_rows (lambda (facts condition fallback)
 	(if (expr_contains_driver_membership? condition)
 		(coalesceNil (qassoc_get facts (quote membership_driver_rows) nil) fallback)
@@ -6808,7 +7007,7 @@ physical decision and preserve its runtime recompile gate. */
 				(define row_expr (cons row_mapper (map effective_field_exprs (lambda (expr)
 					(lower_column_expr_for_join_in_context
 						scan_sources first_alias expr projection_probe_work_rows)))))
-				(build_join_scan_reduce_using_recipe
+				(define legacy_reduce_plan (build_join_scan_reduce_using_recipe
 					(qb_schema block)
 					scan_sources
 					scan_plan
@@ -6821,6 +7020,15 @@ physical decision and preserve its runtime recompile gate. */
 					(coalesceNil (qb_limit block) -1)
 					true projection_probe_work_rows nil (query_block_stage_catalog block)
 					reduce_expr neutral_expr shard_reduce_expr scalar_plan))
+				(if (and (empty_list? order_items)
+					(and (equal? (coalesceNil (qb_offset block) 0) 0)
+						(equal? (coalesceNil (qb_limit block) -1) -1)))
+					(join_unordered_reduce_plan
+						scan_sources scan_plan first_alias effective_needed_exprs
+						effective_condition (query_block_stage_catalog block) (qb_facts block)
+						(lambda (_probe_work_rows _scalar_probe) row_expr)
+						reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
+					legacy_reduce_plan))
 			(if hierarchical_order
 				(join_ordered_streaming_limit_plan
 					(qb_schema block) scan_sources scan_plan first_alias field_exprs needed_exprs final_condition
@@ -6909,9 +7117,20 @@ physical decision and preserve its runtime recompile gate. */
 		(define fields (expand_query_block_fields (qb_sources block) (qb_fields block)))
 		(define grouped_block (expand_grouped_query_block block))
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
-			(if (physical_prejoin_supported? grouped_block)
-				(lower_query_block_through_prejoin grouped_block)
-				(lower_group_stage (make_group_stage_for_query_block grouped_block)))
+			(begin
+				(define group_stage (make_group_stage_for_query_block grouped_block))
+				(define direct_supported (and
+					(empty_list? (coalesceNil (qb_order grouped_block) '()))
+					(direct_join_group_supported? group_stage)))
+				(if direct_supported
+					(if (physical_prejoin_supported? grouped_block)
+						(lower_cold_dominant_direct_join_group grouped_block group_stage)
+						(lower_direct_query_group_stage group_stage
+							(expand_query_block_fields (qb_sources grouped_block) (qb_fields grouped_block))
+							(qb_order grouped_block) (qb_offset grouped_block) (qb_limit grouped_block)))
+					(if (physical_prejoin_supported? grouped_block)
+						(lower_query_block_through_prejoin grouped_block)
+						(lower_group_stage group_stage))))
 			(begin
 				(define sources (qb_sources block))
 				(define first_alias (qassoc_get (qb_facts block) (quote default_alias) (source_alias (car sources))))

@@ -70,6 +70,9 @@ func TestPatchQueryplanMigratesGeneratedConstantSchema(t *testing.T) {
 	if !strings.Contains(content, "(define planner_membership_ordered_recset_sort_unit_ns 7)") {
 		t.Fatalf("migrated block does not contain new constant: %s", content)
 	}
+	if !strings.Contains(content, "(define planner_scan_join_order_startup_ns 0)") {
+		t.Fatalf("migrated block does not contain scan join startup: %s", content)
+	}
 	if !strings.HasPrefix(content, "before\n") || !strings.HasSuffix(content, "\nafter\n") {
 		t.Fatalf("patch changed content outside generated block: %q", content)
 	}
@@ -124,7 +127,7 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanFeatures[0] != 1 || scanFeatures[1] != 25_000 || scanFeatures[15] != 1 ||
+	if scanFeatures[0] != 1 || scanFeatures[1] != 25_000 || scanFeatures[19] != 1 ||
 		scanFeatures[3] != 25_072 || scanFeatures[4] != 4_000 || scanFeatures[18] != 0 {
 		t.Fatalf("ordered join scan features = %v", scanFeatures)
 	}
@@ -135,6 +138,23 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	}
 	if legacyFeatures[18] != 600 {
 		t.Fatalf("legacy ordered join probe work = %v, want 600", legacyFeatures[18])
+	}
+}
+
+func TestFitScanJoinOrderStartupUsesExactOperatorResidual(t *testing.T) {
+	features := make([]float64, 20)
+	features[0], features[19] = 2, 1
+	rows := []observation{
+		{decision: "scan_join_order", plan: "scan_join_order", y: 130, x: features},
+		{decision: "scan_join_order", plan: "scan_join_order", y: 110, x: features},
+		{decision: "scan_join_order", plan: "scan_join_order", y: 120, x: features},
+	}
+	startup, err := fitScanJoinOrderStartup(rows, constants{scanInvocationNS: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startup != 100 {
+		t.Fatalf("scan join startup = %d, want median residual 100", startup)
 	}
 }
 
@@ -409,12 +429,12 @@ func TestValidateDecisionOrderingUsesOrderedJoinCostBoundary(t *testing.T) {
 	legacy := func(name string, measured, estimated float64) observation {
 		return observation{
 			caseName: name, decision: "scan_join_order", plan: "legacy_join_tree",
-			y: measured, currentEstimate: estimated, x: make([]float64, 19),
+			y: measured, currentEstimate: estimated, x: make([]float64, 20),
 		}
 	}
 	ordered := func(name string, measured float64) observation {
-		features := make([]float64, 19)
-		features[0], features[1], features[3], features[4], features[15] = 1, 25_000, 25_001, 1, 1
+		features := make([]float64, 20)
+		features[0], features[1], features[3], features[4], features[19] = 1, 25_000, 25_001, 1, 1
 		return observation{
 			caseName: name, decision: "scan_join_order", plan: "scan_join_order",
 			y: measured, x: features,
@@ -426,7 +446,7 @@ func TestValidateDecisionOrderingUsesOrderedJoinCostBoundary(t *testing.T) {
 	}
 	constants := constants{
 		scanInvocationNS: 122_080, scanRowNS: 1, mapColumnRowNS: 32,
-		expressionOperationNS: 220, orderedScanInvocationNS: 3_027_639,
+		expressionOperationNS: 220, scanJoinOrderStartupNS: 3_027_639,
 	}
 	if err := validateDecisionOrdering(rows, constants); err != nil {
 		t.Fatal(err)

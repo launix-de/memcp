@@ -130,6 +130,18 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS pc_files_wide"
 
 test_cases:
+  - name: "unordered selective joined reduction"
+    physical_calibration: true
+    calibration_holdout: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT SUM(d.p1) AS total
+      FROM pc_docs_large d
+      JOIN pc_files_large f ON d.file_id = f.id
+      WHERE f.filename LIKE '%hit%'
+
   - name: "ordered equi-join top-k"
     physical_calibration: true
     calibration_holdout: true
