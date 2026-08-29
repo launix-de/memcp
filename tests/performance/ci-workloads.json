@@ -1,0 +1,14 @@
+{
+  "copyright": "Copyright (C) 2026 Carl-Philip Hänsch",
+  "license": "GPL-3.0-or-later",
+  "schema_version": 1,
+  "default_rows": 1000,
+  "rows": {
+    "tests/performance/baseline.yaml::Perf: MATRIX MULT": 30,
+    "tests/performance/json-nested-serialization.yaml::Perf JSON delivery: emit complete flat object list": 1000,
+    "tests/performance/json-nested-serialization.yaml::Perf JSON delivery: emit complete list with item arrays": 1000,
+    "tests/performance/json-nested-serialization.yaml::Perf JSON delivery: emit complete three-level list with serial arrays": 1000,
+    "tests/performance/json-nested-serialization.yaml::Perf JSON PostgreSQL delivery: emit complete three-level list with serial arrays": 1000,
+    "tests/performance/json-nested-serialization.yaml::Perf JSON delivery control: explicit grouped item carrier": 1000
+  }
+}

@@ -177,6 +177,7 @@ PERF_CALIBRATE = os.environ.get("PERF_CALIBRATE", "0") == "1"  # reset baselines
 PERF_NORECALIBRATE = os.environ.get("PERF_NORECALIBRATE", "0") == "1"  # freeze row counts for bisecting
 PERF_EXPLAIN = os.environ.get("PERF_EXPLAIN", "0") == "1"  # show query plans
 PERF_BASELINE_FILE = os.environ.get("PERF_BASELINE_FILE", ".perf_baseline.json")
+PERF_BASELINE_SEED = os.environ.get("PERF_BASELINE_SEED", "")
 PERF_DEFAULT_REGRESSION_PCT = 20.0
 PERF_TARGET_MIN_MS = 10000  # target minimum query time (10s)
 PERF_TARGET_MAX_MS = 20000  # target maximum query time (20s)
@@ -184,6 +185,7 @@ PERF_SCALE_FACTOR = 1.3  # scale up/down by 30%
 PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))
+PERF_MIN_MEASURE_MS = float(os.environ.get("PERF_MIN_MEASURE_MS", "250"))
 PERF_SETUP_MAX_TIME_SEC = float(os.environ.get("PERF_SETUP_MAX_TIME_SEC", "120"))
 PERF_GATE_FILE = os.environ.get("PERF_GATE_FILE", ".perf_runner_gate.lock")
 _perf_gate_context = threading.local()
@@ -225,6 +227,7 @@ MEMCP_START_TIMEOUT = int(os.environ.get("MEMCP_START_TIMEOUT", "180"))
 RUNNER_CONFIG_LOCK_FILE = f"{PERF_BASELINE_FILE}.lock"
 RUNNER_META_KEY = "_runner"
 FAILURE_MAP_KEY = "failures"
+CI_WORKLOAD_KEY = "_ci_workload"
 
 
 class PerformanceGate:
@@ -417,6 +420,10 @@ def performance_ab_threshold_ms(
     )
 
 
+def adaptive_measurement_complete(repetitions: int, total_ns: int) -> bool:
+    return repetitions >= 5 and total_ns >= PERF_MIN_MEASURE_MS * 1_000_000
+
+
 def planner_time_limit_with_tolerance_ms(
     reference_budget_ms: float, calibration: Dict[str, Any]
 ) -> float:
@@ -457,6 +464,25 @@ def _write_runner_config(config: Dict[str, Any]) -> None:
         json.dump(config, f, indent=2)
         f.write("\n")
     os.replace(tmp_file, PERF_BASELINE_FILE)
+
+
+def initialize_performance_recording() -> None:
+    config: Dict[str, Any] = {"schema_version": 1}
+    if PERF_BASELINE_SEED:
+        with open(PERF_BASELINE_SEED, 'r', encoding='utf-8') as handle:
+            seed = json.load(handle)
+        if seed.get("schema_version") != 1:
+            raise ValueError("performance baseline seed has an unsupported schema")
+        default_rows = seed.get("default_rows", PERF_DEFAULT_ROWS)
+        if isinstance(default_rows, bool) or not isinstance(default_rows, int) or default_rows < 1:
+            raise ValueError("performance baseline seed default_rows must be positive")
+        config[CI_WORKLOAD_KEY] = {"default_rows": default_rows}
+        for key, rows in seed.get("rows", {}).items():
+            if (not isinstance(key, str) or isinstance(rows, bool)
+                    or not isinstance(rows, int) or rows < 1):
+                raise ValueError("performance baseline seed rows must map names to positive integers")
+            config[key] = {"rows": rows}
+    _write_runner_config(config)
 
 def _update_runner_config(mutator) -> Dict[str, Any]:
     Path(RUNNER_CONFIG_LOCK_FILE).touch(exist_ok=True)
@@ -525,6 +551,8 @@ def max_rows_for_ram(bytes_per_row: int = 1024) -> int:
 
 # Global RAM pressure flag — set by monitor thread OR inline checks, read everywhere.
 ram_pressure_abort = threading.Event()
+_ram_monitor_lock = threading.Lock()
+_ram_monitor_started = False
 
 def trip_ram_abort(reason: str):
     """Record RAM abort, kill memcp so it releases RAM immediately, set the flag."""
@@ -552,9 +580,14 @@ def ram_monitor_loop(interval: float = 0.5):
 
 def start_ram_monitor():
     """Start the background RAM monitor thread (daemon — dies with main process)."""
-    t = threading.Thread(target=ram_monitor_loop, daemon=True)
-    t.start()
-    return t
+    global _ram_monitor_started
+    with _ram_monitor_lock:
+        if _ram_monitor_started:
+            return None
+        _ram_monitor_started = True
+        t = threading.Thread(target=ram_monitor_loop, daemon=True)
+        t.start()
+        return t
 
 class SQLTestRunner:
     def __init__(self, base_url="http://localhost:4321", username="root", password="admin", default_database="memcp-tests", log_times=False, fail_fast=False, performance_calibration=None):
@@ -1009,6 +1042,12 @@ class SQLTestRunner:
         if is_perf_test:
             perf_key = performance_case_key(self.current_spec_file or "?", name)
             self.perf_seen.add(perf_key)
+            workload_config = self.perf_baselines.get(CI_WORKLOAD_KEY, {})
+            ci_default_rows = (
+                workload_config.get("default_rows", PERF_DEFAULT_ROWS)
+                if isinstance(workload_config, dict) else PERF_DEFAULT_ROWS
+            )
+            declared_rows = test_case.get("performance_rows", ci_default_rows)
             baseline = self.perf_baselines.get(
                 perf_key, self.perf_baselines.get(name, {})
             )
@@ -1017,12 +1056,12 @@ class SQLTestRunner:
                     "time_per_repetition_ms", baseline.get("time_ms")
                 )
                 baseline_rows = baseline.get(
-                    "rows", test_case.get("performance_rows", PERF_DEFAULT_ROWS)
+                    "rows", declared_rows
                 )
             else:
                 # Legacy format: just a number
                 baseline_time = baseline
-                baseline_rows = test_case.get("performance_rows", PERF_DEFAULT_ROWS)
+                baseline_rows = declared_rows
 
             try:
                 if (isinstance(baseline_rows, bool)
@@ -1476,6 +1515,12 @@ class SQLTestRunner:
                 start_cpu = get_process_cpu_times(memcp_pid) if memcp_pid else None
                 samples_ns: list = []
                 response = None
+                adaptive_repetitions = (
+                    is_perf_test
+                    and "repetitions" not in test_case
+                    and "timing_samples" not in test_case
+                )
+                measured_total_ns = 0
                 for _ in range(repeat):
                     start_ns = time.monotonic_ns()
                     response = self.execute_sparql(database, query, auth_header, timeout=sql_timeout) if is_sparql else self.execute_sql(
@@ -1483,11 +1528,17 @@ class SQLTestRunner:
                         session_id=session_id, timeout=sql_timeout, params=sql_params,
                         retry_on_connection_failure=not self._expect_interrupted_ok(test_case.get("expect")),
                     )
-                    samples_ns.append(time.monotonic_ns() - start_ns)
+                    sample_ns = time.monotonic_ns() - start_ns
+                    samples_ns.append(sample_ns)
+                    measured_total_ns += sample_ns
                     if response is None or response.status_code != 200:
                         break  # don't hammer a broken endpoint
+                    if adaptive_repetitions and adaptive_measurement_complete(
+                        len(samples_ns), measured_total_ns
+                    ):
+                        break
 
-                total_ns = sum(samples_ns)
+                total_ns = measured_total_ns
                 elapsed_ns = total_ns / len(samples_ns)
                 elapsed_ms = elapsed_ns / 1_000_000
                 elapsed_sec = elapsed_ms / 1000
@@ -2367,7 +2418,7 @@ def main():
         sys.exit(1)
 
     if PERF_AB_MODE == "record" and not connect_only:
-        _write_runner_config({"schema_version": 1})
+        initialize_performance_recording()
     elif PERF_AB_MODE == "compare":
         baseline = _load_runner_config()
         if baseline.get("schema_version") != 1:

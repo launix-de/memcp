@@ -148,7 +148,6 @@ test_cases:
   # Total work: O({rows}^3) — auto-scaler will find dim ~100-300
   # GROUP BY on joins not yet supported; raw join is the dominant cost anyway
   - name: "Perf: MATRIX MULT"
-    performance_rows: 100
     setup:
       - sql: "DROP TABLE IF EXISTS `perf_mat_a`"
       - sql: "DROP TABLE IF EXISTS `perf_mat_b`"

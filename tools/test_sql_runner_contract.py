@@ -40,7 +40,10 @@ from run_sql_tests import (  # noqa: E402
     PERFORMANCE_SCALE_ENV,
     PLANNER_TIME_TOLERANCE_FACTOR,
     SQLTestRunner,
+    _load_runner_config,
+    adaptive_measurement_complete,
     is_error_response,
+    initialize_performance_recording,
     load_performance_scale,
     observe_atomic_json,
     performance_ab_threshold_ms,
@@ -64,6 +67,20 @@ from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
 
 class PerformanceScaleContractTest(unittest.TestCase):
+    def test_ci_workload_seed_initializes_safe_rows(self) -> None:
+        seed = Path(__file__).resolve().parents[1] / "tests/performance/ci-workloads.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "baseline.json"
+            with mock.patch("run_sql_tests.PERF_BASELINE_SEED", str(seed)), \
+                    mock.patch("run_sql_tests.PERF_BASELINE_FILE", str(baseline)):
+                initialize_performance_recording()
+                config = _load_runner_config()
+        self.assertEqual(config["_ci_workload"]["default_rows"], 1000)
+        self.assertEqual(
+            config["tests/performance/baseline.yaml::Perf: MATRIX MULT"]["rows"],
+            30,
+        )
+
     def test_repetitions_default_and_explicit_count(self) -> None:
         self.assertEqual(resolve_timing_samples({}, False), 1)
         self.assertEqual(resolve_timing_samples({}, True), 5)
@@ -79,6 +96,12 @@ class PerformanceScaleContractTest(unittest.TestCase):
     def test_repetitions_and_timing_samples_are_mutually_exclusive(self) -> None:
         with self.assertRaisesRegex(ValueError, "either repetitions or timing_samples"):
             resolve_timing_samples({"repetitions": 5, "timing_samples": 5}, True)
+
+    def test_adaptive_measurement_requires_five_runs_and_time_budget(self) -> None:
+        with mock.patch("run_sql_tests.PERF_MIN_MEASURE_MS", 250):
+            self.assertFalse(adaptive_measurement_complete(4, 1_000_000_000))
+            self.assertFalse(adaptive_measurement_complete(100, 249_999_999))
+            self.assertTrue(adaptive_measurement_complete(5, 250_000_000))
 
     def test_warmup_accepts_zero_and_counts(self) -> None:
         self.assertEqual(resolve_warmup_runs({}, True), 2)
