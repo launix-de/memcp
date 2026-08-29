@@ -196,12 +196,18 @@ def parse_runner_output(output: str, suite: Path, suite_id: str | None = None) -
     return {"schema_version": 1, "measurements": measurements}
 
 
-def write_workload_baseline(tree: Path, suite: Path, suite_id: str) -> None:
+def write_workload_baseline(tree: Path, suites: list[Path], base_tree: Path) -> None:
     """Give both revisions the same trusted row counts without timing allowances."""
-    baseline = {
-        case["name"]: {"rows": case["rows"]}
-        for case in performance_cases(suite, suite_id)
-    }
+    baseline: dict[str, dict[str, int]] = {}
+    for suite in suites:
+        suite_id = suite.relative_to(base_tree).as_posix()
+        for case in performance_cases(suite, suite_id):
+            name = case["name"]
+            if name in baseline:
+                raise PerformanceFailure(
+                    f"duplicate performance case name across suites: {name}"
+                )
+            baseline[name] = {"rows": case["rows"]}
     with (tree / ".perf_baseline.json").open("w", encoding="utf-8") as handle:
         json.dump(baseline, handle, indent=2, sort_keys=True)
         handle.write("\n")
@@ -280,14 +286,36 @@ def compare_measurements(
     return comparisons, errors
 
 
-def run_suite(
+def parse_corpus_output(
+    output: str, suites: list[Path], base_tree: Path
+) -> dict[str, dict[str, Any]]:
+    blocks: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in output.splitlines():
+        if line.startswith("PERF_SUITE path="):
+            current = line.removeprefix("PERF_SUITE path=")
+            blocks[current] = []
+        elif current is not None:
+            blocks[current].append(line)
+
+    measurements: dict[str, dict[str, Any]] = {}
+    for suite in suites:
+        relative = suite.relative_to(base_tree).as_posix()
+        if relative not in blocks:
+            raise PerformanceFailure(f"{relative}: runner emitted no suite output")
+        payload = parse_runner_output("\n".join(blocks[relative]), suite, relative)
+        measurements.update(measurement_map(payload, relative))
+    return measurements
+
+
+def run_corpus(
     tree: Path,
     runner: Path,
-    suite: Path,
-    suite_id: str,
+    suites: list[Path],
+    base_tree: Path,
     samples: int,
     timeout: int,
-) -> dict[str, Any]:
+) -> dict[str, dict[str, Any]]:
     environment = os.environ.copy()
     environment.update(
         {
@@ -296,8 +324,16 @@ def run_suite(
             "PERF_REPEAT": str(samples),
         }
     )
-    write_workload_baseline(tree, suite, suite_id)
-    command = [sys.executable, str(runner), str(suite), "--log-times"]
+    write_workload_baseline(tree, suites, base_tree)
+    relative_suites = [suite.relative_to(base_tree).as_posix() for suite in suites]
+    command = [
+        sys.executable,
+        str(runner),
+        *relative_suites,
+        "--jobs",
+        os.environ.get("PERF_JOBS", "4"),
+        "--log-times",
+    ]
     completed = subprocess.run(
         command,
         cwd=tree,
@@ -311,9 +347,9 @@ def run_suite(
     print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
     if completed.returncode != 0:
         raise PerformanceFailure(
-            f"{tree.name}: {suite.name} failed with exit code {completed.returncode}"
+            f"{tree.name}: performance corpus failed with exit code {completed.returncode}"
         )
-    return parse_runner_output(completed.stdout, suite, suite_id)
+    return parse_corpus_output(completed.stdout, suites, base_tree)
 
 
 def parse_args() -> argparse.Namespace:
@@ -353,27 +389,20 @@ def main() -> int:
                 "unknown or non-CI performance suites: " + ", ".join(sorted(missing))
             )
 
-    all_base: dict[str, dict[str, Any]] = {}
-    all_candidate: dict[str, dict[str, Any]] = {}
-    for index, suite in enumerate(suites):
-        relative = suite.relative_to(base_tree).as_posix()
-        order = (
-            ((base_tree, all_base, "base"), (candidate_tree, all_candidate, "candidate"))
-            if index % 2 == 0
-            else ((candidate_tree, all_candidate, "candidate"), (base_tree, all_base, "base"))
-        )
-        for tree, destination, label in order:
-            print(f"\n=== {relative}: {label} ===", flush=True)
-            tree_suite = tree / relative
-            payload = run_suite(
-                tree,
-                runner,
-                tree_suite,
-                relative,
-                args.samples,
-                args.suite_timeout,
-            )
-            destination.update(measurement_map(payload, relative))
+    suites = [suite for suite in suites if performance_cases(
+        suite, suite.relative_to(base_tree).as_posix()
+    )]
+    if not suites:
+        raise PerformanceFailure("trusted performance corpus produced zero measurements")
+
+    print("\n=== trusted base corpus ===", flush=True)
+    all_base = run_corpus(
+        base_tree, runner, suites, base_tree, args.samples, args.suite_timeout
+    )
+    print("\n=== merge candidate corpus ===", flush=True)
+    all_candidate = run_corpus(
+        candidate_tree, runner, suites, base_tree, args.samples, args.suite_timeout
+    )
 
     if not all_base:
         raise PerformanceFailure("trusted performance corpus produced zero measurements")

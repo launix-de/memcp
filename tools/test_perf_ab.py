@@ -22,6 +22,7 @@ from pathlib import Path
 from perf_ab import (
     PerformanceFailure,
     compare_measurements,
+    parse_corpus_output,
     parse_runner_output,
     performance_cases,
 )
@@ -130,6 +131,37 @@ class PerformanceComparatorTest(unittest.TestCase):
             )
             with self.assertRaisesRegex(PerformanceFailure, "expected 1 measurements"):
                 parse_runner_output("", suite)
+
+    def test_multi_suite_output_is_split_by_runner_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base_tree = Path(directory)
+            suites = []
+            output = []
+            for index in range(2):
+                suite = base_tree / "tests" / "performance" / f"suite-{index}.yaml"
+                suite.parent.mkdir(parents=True, exist_ok=True)
+                name = f"measured query {index}"
+                suite.write_text(
+                    "metadata: {description: test}\n"
+                    "test_cases:\n"
+                    f"  - {{name: '{name}', threshold_ms: 30000, sql: SELECT 1}}\n",
+                    encoding="utf-8",
+                )
+                relative = suite.relative_to(base_tree).as_posix()
+                suites.append(suite)
+                output.extend([
+                    f"PERF_SUITE path={relative}",
+                    f"QUERY_TIME median_ns=1000000 total_ns=5000000 min_ns=1000000 max_ns=1000000 n=5 warmup=2 name={name}",
+                    f"✅ {name} (1.0ms / 30000ms, 10,000 rows, 0.10µs/row)",
+                ])
+
+            measurements = parse_corpus_output("\n".join(output), suites, base_tree)
+
+        self.assertEqual(len(measurements), 2)
+        self.assertEqual(
+            measurements["tests/performance/suite-1.yaml::measured query 1#1"]["rows"],
+            10_000,
+        )
 
     def test_cubic_matrix_uses_safe_bootstrap_dimension(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

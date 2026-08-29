@@ -1663,6 +1663,8 @@ class SQLTestRunner:
                 print("🔧 Calibration mode: resetting baselines to current times")
 
         print(f"🎯 Running suite: {metadata.get('description', spec_file)}")
+        if self.log_times:
+            print(f"PERF_SUITE path={spec_file}")
         print(f"💾 Database: {database}")
         calibration = self.performance_calibration
         print(
