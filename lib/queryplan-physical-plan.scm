@@ -3641,8 +3641,9 @@ as it would for an ordinary scan input. */
 			(begin
 				(define stage (nth membership 0))
 				(define facts (merge (list
-					(gs_facts stage)
-					(membership_candidate_work_facts stage))))
+					(membership_candidate_work_facts stage)
+					/* merge is right-biased; retain the index-reduced stage facts. */
+					(gs_facts stage))))
 				(define candidate_input_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_input_rows) nil)
 					(planner_stage_input_rows (gs_input stage))))

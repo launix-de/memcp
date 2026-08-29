@@ -3364,7 +3364,10 @@ consumer rebuild that relation once per driver row. */
 					(and (query_block? branch)
 						(and (single_real_source? (qb_sources branch))
 							(source_is_base_table? (single_real_source (qb_sources branch))))))) true)
-			true))))
+			(if (query_block? input)
+				(and (single_real_source? (qb_sources input))
+					(source_is_base_table? (single_real_source (qb_sources input))))
+				(source_is_base_table? input))))))
 
 (define driver_membership_probe_expr_for_strategy (lambda (stage probe strategy)
 	(if (and (equal? strategy (quote driver_filter_join_probe))
@@ -3864,8 +3867,10 @@ ordered batch is executable and what its actual driver workload is. */
 				(list (quote membership_driver_input_rows) driver_input_rows)
 				(list (quote membership_driver_condition) driver_condition)
 				(list (quote membership_driver_rows) driver_rows))
-			(gs_facts stage)
-			(membership_candidate_work_facts stage))))))
+			(membership_candidate_work_facts stage)
+			/* merge is right-biased: stage telemetry is authoritative over
+			the reconstructed late-consumer fallback. */
+			(gs_facts stage))))))
 
 (define membership_truth_projection_preferred? (lambda (block stage _guarded_alternative)
 	(begin

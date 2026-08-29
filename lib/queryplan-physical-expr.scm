@@ -3501,10 +3501,10 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 		/* Some late RecSet consumers are introduced after reorder telemetry was
 		attached. Reconstruct only the candidate's scalar work from the existing
 		logical stage; this is one formula walk, never an alternative plan build. */
-		/* Reorder telemetry owns statistics-sensitive physical work. The profile
-		reconstructed here is only a fallback for late consumers and must not replace
-		an index-reduced row/byte count already attached to the logical stage. */
-		(define facts (merge (list (gs_facts stage) (membership_candidate_work_facts stage))))
+		/* merge is right-biased. Reorder telemetry owns statistics-sensitive
+		physical work, so place it after the late-consumer fallback; otherwise the
+		fallback replaces index-reduced row and byte counts. */
+		(define facts (merge (list (membership_candidate_work_facts stage) (gs_facts stage))))
 		(define consumer_facts (qassoc_set
 			(if (equal? consumer (quote aggregate))
 				(qassoc_set facts (quote membership_consumer) (quote aggregate))
