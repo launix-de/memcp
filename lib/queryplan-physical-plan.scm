@@ -930,8 +930,10 @@ from silently overriding the physical planner. */
 		(define stage_lookup (if (lowering_catalog? stages)
 			stages
 			(query_block_stage_catalog rewritten)))
-		(define direct_group_sources
-			(direct_group_join_sources_for_block stage_lookup rewritten))
+		(define direct_group_selections
+			(direct_group_join_selections_for_block stage_lookup rewritten))
+		(define direct_group_sources (map direct_group_selections car))
+		(define direct_group_stages (map direct_group_selections cadr))
 		(define direct_group_stage_ids (stage_output_source_ids direct_group_sources))
 		(make_query_block
 			(qb_schema rewritten)
@@ -946,8 +948,11 @@ from silently overriding the physical planner. */
 			(qb_offset rewritten)
 			(qb_hidden rewritten)
 			(qb_stages rewritten)
-			(qassoc_set (qb_facts rewritten) (quote direct_group_join_stage_ids)
-				direct_group_stage_ids)))))
+			(qassoc_set
+				(qassoc_set (qb_facts rewritten) (quote direct_group_join_stage_ids)
+					direct_group_stage_ids)
+				(quote direct_group_join_stages)
+				direct_group_stages)))))
 
 (define query_block_with_prepared_sources_using (lambda (stages block)
 	(query_block_with_prepared_sources_using_graph
@@ -2852,7 +2857,8 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 						invariant_probe_bindings
 						probe_recipe_prepares
 						probe_recipe_bindings))
-					recipe_block))
+					recipe_block
+					'()))
 			(begin
 				(define stage_catalog (query_block_stage_catalog block))
 				(define scalar_order_cache
@@ -2889,6 +2895,9 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 							(quote direct_group_join_stage_ids) '())
 						(qassoc_get (qb_facts raw_prepared_block)
 							(quote consumed_probe_stage_ids) '()))))
+				(define direct_group_join_stages
+					(qassoc_get (qb_facts raw_prepared_block)
+						(quote direct_group_join_stages) '()))
 				(define eager_stages (filter candidate_eager_stages (lambda (stage)
 					(and (not (has_assoc? probe_marker_stage_ids (gs_id stage)))
 						(not (contains? direct_group_join_stage_ids (gs_id stage)))))))
@@ -2921,6 +2930,10 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(list
 					(merge (list
 						invariant_probe_bindings
+						(if (empty_list? direct_group_join_stages) '()
+							(list (list (quote define) (quote __direct_group_usage)
+								(list (quote newsession)))))
+						(direct_group_join_warm_prepare_exprs direct_group_join_stages)
 						(if (nil? scalar_order_cache) '() (list (nth scalar_order_cache 4)))
 						probe_recipe_prepares
 						probe_recipe_bindings
@@ -2928,7 +2941,8 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 						(prepared_stage_bindings eager_stages)
 						(lower_unique_stage_prepares_with_graph eager_dependency_graph eager_stage_lookup eager_stages)
 						(lower_stage_materialize_all eager_stages)))
-					core_block))))))
+					core_block
+					(direct_group_join_usage_flush_exprs direct_group_join_stages)))))))
 
 (define prepare_simple_query_block_physical_core (lambda (block)
 	(prepare_simple_query_block_physical_core_chosen
@@ -2941,11 +2955,14 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 		(define prepared (prepare_simple_query_block_physical_core block))
 		(define prelude (nth prepared 0))
 		(define core_block (nth prepared 1))
-		(if (empty_list? prelude)
+		(define postlude (nth prepared 2))
+		(if (and (empty_list? prelude) (empty_list? postlude))
 			(lower_query_block_core core_block)
 			(cons (quote !begin) (merge (list
 				prelude
-				(list (lower_query_block_core core_block)))))))))
+				(list (lower_query_block_core core_block))
+				postlude
+				(if (empty_list? postlude) '() (list nil)))))))))
 
 (define lower_query_block_with_cataloged_stages (lambda (block)
 	(if (empty_list? (qb_stages block))
@@ -5944,12 +5961,12 @@ only the structural work counts are specific to this operator. */
 					0 group_rows 0.7))
 				(list direct_cost carrier_cost input_rows group_rows rows_per_probe))))))
 
-(define direct_group_join_source_selected? (lambda (stages sources tree consumers src)
+(define direct_group_join_source_selection (lambda (stages sources tree consumers src)
 	(begin
 		(define stage (direct_group_probe_stage_for_block_source
 			stages sources src consumers))
 		(if (nil? stage)
-			false
+			nil
 			(begin
 				(define invocations (direct_group_join_tree_invocations
 					tree (source_alias src) sources stages 1))
@@ -5978,17 +5995,26 @@ only the structural work counts are specific to this operator. */
 					(list "alternatives" (if (nil? costs) '() (list
 						(list (list "plan" "group_carrier") (list "cost" (planner_cost_explain (cadr costs))))
 						(list (list "plan" "direct_group_join") (list "cost" (planner_cost_explain (car costs)))))))))
-				(equal? chosen "direct_group_join"))))))
+				(if (equal? chosen "direct_group_join") (list src stage) nil))))))
 
-(define direct_group_join_sources_for_block (lambda (stages block)
+(define direct_group_join_selections_for_block (lambda (stages block)
 	(begin
 		(define sources (qb_sources block))
 		(define tree (query_block_join_plan block sources))
 		(define consumers (query_block_probe_consumers block))
-		(filter sources (lambda (src)
-			(direct_group_join_source_selected? stages sources tree consumers src))))))
+		(filter (map sources (lambda (src)
+			(direct_group_join_source_selection stages sources tree consumers src)))
+			(lambda (selection) (not (nil? selection)))))))
 
-(define direct_group_join_scan_expr (lambda (all_sources default_alias stage)
+(define direct_group_join_canonical_name (lambda (stage)
+	(concat (group_stage_cache_schema stage) "\n" (group_stage_cache_relation stage))))
+
+(define direct_group_join_calibration_active? (lambda ()
+	(not (nil? (try
+		(lambda () ((context "session") "__memcp_physical_overrides"))
+		(lambda (_error) nil))))))
+
+(define direct_group_join_raw_scan_expr (lambda (all_sources default_alias stage)
 	(begin
 		(define src (gs_input stage))
 		(define keys (gs_keys stage))
@@ -6037,6 +6063,229 @@ only the structural work counts are specific to this operator. */
 				neutral_payload
 				merge_payload
 				false)))))
+
+(define direct_group_join_cache_scan_expr (lambda (all_sources default_alias stage table_expr)
+	(begin
+		(define ags (gs_aggregates stage))
+		(define key_names (group_key_cols (gs_keys stage)))
+		(define lookup_values (map (qassoc_get (gs_facts stage) (quote lookup-keys) '())
+			(lambda (expr) (lower_column_expr_for_join all_sources default_alias expr))))
+		(define aggregate_cols (map ags (lambda (ag)
+			(aggregate_col_name_using (gs_input stage) ag))))
+		(define neutral_payload
+			(runtime_cons_list_expr (map ags (lambda (ag) (nth ag 2)))))
+		(list (quote scan)
+			'(session "__memcp_tx")
+			table_expr
+			(cons (quote list) key_names)
+			(list (quote lambda) (map key_names symbol)
+				(combine_where_terms (map (produceN (count key_names)) (lambda (i)
+					(list (quote equal??) (symbol (nth key_names i)) (nth lookup_values i))))
+					true))
+			(cons (quote list) aggregate_cols)
+			(list (quote lambda) (map aggregate_cols symbol)
+				(runtime_cons_list_expr (map aggregate_cols symbol)))
+			(list (quote lambda) (list (quote __old_group_values) (quote __new_group_values))
+				(quote __new_group_values))
+			neutral_payload nil false))))
+
+/* Direct grouped probes execute inside an outer join scan. Accumulate their
+measured time in a query-local session and flush it once after the complete
+query, rather than writing planner telemetry once per joined row. Forced
+Costgen alternatives remain uninstrumented so their timings contain only the
+operator being calibrated. */
+(define direct_group_join_scan_expr (lambda (all_sources default_alias stage)
+	(begin
+		(define direct_values
+			(direct_group_join_raw_scan_expr all_sources default_alias stage))
+		(if (direct_group_join_calibration_active?)
+			direct_values
+			(begin
+				(define canonical_name (direct_group_join_canonical_name stage))
+				(define cold_values (list
+					(list (quote lambda) (list (quote __direct_group_started_ns))
+						(list
+							(list (quote lambda) (list (quote __direct_group_result))
+								(list (quote !begin)
+									(list (quote __direct_group_usage)
+										canonical_name
+										(list (quote +)
+											(list (quote coalesceNil)
+												(list (quote __direct_group_usage) canonical_name)
+												0)
+											(list (quote -) (list (quote nanotime))
+												(quote __direct_group_started_ns))))
+									(quote __direct_group_result)))
+							direct_values))
+					(list (quote nanotime))))
+				(define cache_schema (group_stage_cache_schema stage))
+				(define cache_relation (group_stage_cache_relation stage))
+				(define cache_promise (quote __direct_group_cache_lookup))
+				(list
+					(list (quote lambda) (list cache_promise)
+						(list (quote !begin)
+							(list (quote try)
+								(list (quote lambda) '()
+									(list cache_promise "value"
+										(list (quote table) cache_schema cache_relation)))
+								(list (quote lambda) (list (quote __direct_group_cache_error))
+									(list cache_promise "fail" (quote __direct_group_cache_error))))
+							(list (quote if)
+								(list (quote equal?) (list cache_promise "state") false)
+								(list (quote error) (list cache_promise "value"))
+								(list (quote if) (list (quote nil?) (list cache_promise "value"))
+									cold_values
+									(direct_group_join_cache_scan_expr all_sources default_alias stage
+										(list cache_promise "value"))))))
+					(list (quote newpromise)
+						(list (quote append_mut) (list (symbol "!!list") 2) nil nil))))))))
+
+/* Cold group-cache telemetry lives entirely in SCM. The UNIQUE collision path
+is the lookup and update: one storage access atomically adds this query's
+measured direct-probe time and resets the counter for the query that crosses
+the costgen threshold. */
+(define group_cache_candidate_accumulate (lambda (canonical_name elapsed_ns threshold_ns)
+	(begin
+		(createtable "system_statistic" "group_cache_candidates"
+			(list
+				(list "unique" "PRIMARY" (list "canonical_name"))
+				(list "column" "canonical_name" "text" (list) (list))
+				(list "column" "accumulated_ns" "int" (list) (list)))
+			(list "engine" "sloppy") true)
+		(define claim (newsession))
+		(claim "build" (>= elapsed_ns threshold_ns))
+		(insert (table "system_statistic" "group_cache_candidates")
+			'("canonical_name" "accumulated_ns")
+			(list (list canonical_name (if (>= elapsed_ns threshold_ns) 0 elapsed_ns)))
+			'("accumulated_ns" "NEW.accumulated_ns" "$update")
+			(lambda (old_accumulated_ns new_elapsed_ns $update)
+				(begin
+					(define next_accumulated_ns (+ old_accumulated_ns new_elapsed_ns))
+					(define build (>= next_accumulated_ns threshold_ns))
+					(claim "build" build)
+					($update (list "accumulated_ns"
+						(if build 0 next_accumulated_ns)))
+					true))
+			false)
+		(claim "build"))))
+
+(define group_cache_candidate_delete (lambda (canonical_name)
+	(begin
+		(define candidates (table "system_statistic" "group_cache_candidates"))
+		(if (nil? candidates)
+			0
+			(scan (session "__memcp_tx") candidates
+				'("canonical_name")
+				(lambda (candidate_name) (equal? candidate_name canonical_name))
+				'("$update")
+				(lambda ($update) ($update))
+				+ 0 nil false)))))
+
+(define direct_group_join_cache_threshold_ns (lambda (stage)
+	(begin
+		(define costs (direct_group_join_costs stage 1))
+		(if (nil? costs)
+			planner_membership_group_cache_startup_ns
+			(max 1 (qassoc_get (cadr costs) (quote total_ns)
+				planner_membership_group_cache_startup_ns))))))
+
+(define direct_group_join_async_build_expr (lambda (stage canonical_name)
+	(begin
+		(define prepare_expr
+			(lower_group_stage_prepare_using (list stage) (list stage) stage true nil))
+		(list (quote setTimeout)
+			(list (quote lambda) '()
+				(list (quote try)
+					(list (quote lambda) '()
+						(list
+							(list (quote lambda) (list (quote __group_cache_build_session))
+								(list (quote with_session) (quote __group_cache_build_session)
+									(list (quote lambda) '()
+										(list (quote with_autocommit) (quote __group_cache_build_session)
+											(list (quote lambda) '()
+												(list (quote !begin)
+													(list (quote eval)
+														(list (quote optimize) (list (quote quote) prepare_expr)))
+													(list (quote group_cache_candidate_delete)
+														canonical_name))))))
+								(list (quote newsession))))
+						(list (quote lambda) (list (quote __group_cache_build_error))
+							(list (quote !begin)
+								(list (quote try)
+									(list (quote lambda) '()
+										(list (quote droptable)
+											(group_stage_cache_schema stage)
+											(group_stage_cache_relation stage) true))
+									(list (quote lambda) (list (quote __group_cache_cleanup_error)) nil))
+								(list (quote error) (quote __group_cache_build_error))))))
+				0)))))
+
+(define direct_group_join_usage_flush_expr (lambda (stage)
+	(begin
+		(define canonical_name (direct_group_join_canonical_name stage))
+		(define elapsed_ns (list (quote __direct_group_usage) canonical_name))
+		(define cache_lookup (list (quote try)
+			(list (quote lambda) '()
+				(list (quote table) (group_stage_cache_schema stage)
+					(group_stage_cache_relation stage)))
+			(list (quote lambda) (list (quote __group_cache_lookup_error))
+				(list (quote error) (quote __group_cache_lookup_error)))))
+		(list (quote if) (list (quote nil?) cache_lookup)
+			(list (quote if)
+				(list (quote >) (list (quote coalesceNil) elapsed_ns 0) 0)
+				(list (quote if)
+					(list (quote group_cache_candidate_accumulate)
+						canonical_name elapsed_ns
+						(direct_group_join_cache_threshold_ns stage))
+					(direct_group_join_async_build_expr stage canonical_name)
+					nil)
+				nil)
+			(list (quote group_cache_candidate_delete) canonical_name)))))
+
+(define direct_group_join_usage_flush_exprs (lambda (stages)
+	(begin
+		(define unique_stages (extract_assoc
+			(reduce (coalesceNil stages '()) (lambda (by_name stage)
+				(set_assoc by_name (direct_group_join_canonical_name stage) stage)) '())
+			(lambda (_name stage) stage)))
+		(map unique_stages direct_group_join_usage_flush_expr))))
+
+/* A cache can predate aggregate columns first requested by this query. Extend
+an existing carrier once at query scope before joined probes use it; a missing
+carrier remains on the measured direct path and is never built eagerly. */
+(define direct_group_join_warm_prepare_expr (lambda (stage)
+	(begin
+		(define cache_promise (quote __direct_group_warm_cache_lookup))
+		(define prepare_expr
+			(lower_group_stage_prepare_using (list stage) (list stage) stage true nil))
+		(list
+			(list (quote lambda) (list cache_promise)
+				(list (quote !begin)
+					(list (quote try)
+						(list (quote lambda) '()
+							(list cache_promise "value"
+								(list (quote table)
+									(group_stage_cache_schema stage)
+									(group_stage_cache_relation stage))))
+						(list (quote lambda) (list (quote __direct_group_warm_cache_error))
+							(list cache_promise "fail" (quote __direct_group_warm_cache_error))))
+					(list (quote if)
+						(list (quote equal?) (list cache_promise "state") false)
+						(list (quote error) (list cache_promise "value"))
+						(list (quote if) (list (quote nil?) (list cache_promise "value"))
+							nil prepare_expr))))
+			(list (quote newpromise)
+				(list (quote append_mut) (list (symbol "!!list") 2) nil nil))))))
+
+(define direct_group_join_warm_prepare_exprs (lambda (stages)
+	(if (direct_group_join_calibration_active?)
+		'()
+		(begin
+			(define unique_stages (extract_assoc
+				(reduce (coalesceNil stages '()) (lambda (by_name stage)
+					(set_assoc by_name (direct_group_join_canonical_name stage) stage)) '())
+				(lambda (_name stage) stage)))
+			(map unique_stages direct_group_join_warm_prepare_expr)))))
 
 (define direct_group_join_presence_index (lambda (ags)
 	(reduce (produceN (count ags)) (lambda (found index)
@@ -7917,7 +8166,8 @@ every title. */
 		(define prepared (prepare_simple_query_block_physical_core
 			(query_block_with_full_stage_catalog branch)))
 		(define core_block (nth prepared 1))
-		(if (union_ordered_branch_supported? core_block)
+		(if (and (empty_list? (nth prepared 2))
+			(union_ordered_branch_supported? core_block))
 			(list (nth prepared 0) core_block nil)
 			nil))))
 
