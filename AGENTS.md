@@ -171,17 +171,6 @@ curl -s -u root:admin "http://localhost:[PORT]/sql/DBNAME" -d "SELECT 1"
 - Do not call goroutines on small data batches or single-item loops
 - Avoid lock/unlock inside loops
 
-## Performance Benchmarking & A/B Testing
-- Go microbenchmarks live next to the code under test: `storage/storage-enum_test.go`, etc.
-- Run benchmarks: `go test ./storage/ -bench 'BenchmarkEnumPerElem' -run '^$' -benchtime=1s`
-- For A/B comparisons, build two binaries and use `benchstat`:
-  ```
-  git stash && go test ./storage/ -bench '...' -count=5 > /tmp/bench_A.txt
-  git stash pop && go test ./storage/ -bench '...' -count=5 > /tmp/bench_B.txt
-  benchstat /tmp/bench_A.txt /tmp/bench_B.txt
-  ```
-- When adding a `--binary` flag or build tag for alternative code paths, test both variants under the same benchmark harness to compare.
-
 ## Data Safety Policy
 
 Preventing user-visible data loss is a first-class requirement. Every code
@@ -246,6 +235,22 @@ Before merging any PR that touches storage, persistence, DDL, or cleanup code:
 - [ ] Any new binary format bump follows the magic/version byte rules.
 - [ ] ENGINE semantics table above remains accurate (update if behaviour changes).
 - [ ] `AfterDropTable` / trigger callbacks reviewed for unintended side-effects.
+
+## Query Optimization and Cost Planning
+To optimize memcp for a query you must consider the following steps:
+ - first add a perf-capable unit test into tests/ with setup and measurement configuration
+ - then run and measure the query
+ - EXPLAIN the query to get the scm code, also EXPLAIN IR, EXPLAIN PHYSICAL and EXPLAIN REORDER to get additional info
+ - measure the single parts of the query by sending extracted scm commands via http API
+ - use (help) to get info about the storage operators
+ - reasseble different plans - using several scan variants, recsets and so on and measure them
+ - find the optimal plan
+ - review the planner+lowerer aswell as tools/costgen code
+ - refactor those code parts to a generic algorithm such that your handcrafted optimal plan is within the search space and will be estimated as the cheapest plan
+ - once the existing operators do not yield any more speedup but you think, there is more potential, you are allowed to dig into operator's internas: optimizing corner cases, reducing allocations, introducing new operators or intermediate result buffers like recset
+ - for operators, regard the following hints: Avoid further branches inside loops. Try to keep setup and loops allocation-free (e.g. using stack buffers), parallelize big workloads into big-enough chunks (often at shard boundaries), cap the number of parallel goroutines of one operator by the session/transaction's boundaries.
+ - make sure you do not produce performance regressions -> there is a CI runner with A/B benchmarks master vs PR - it does not allow to decrease query performance more than 20% for any of the test cases.
+ - do not run the fulltest alone - always commit no-verify after the needle testcases work and look sane, push PR and watch the CI's results
 
 ## Release Process
 
