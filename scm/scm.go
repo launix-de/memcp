@@ -1390,8 +1390,9 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "returntype", Label: "value", Description: "value to examine", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "returntype"},
-			Const:  true,
+			Return:   &TypeDescriptor{Kind: "returntype"},
+			Const:    true,
+			Optimize: optimizeCoalesce,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1402,8 +1403,9 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "returntype", Label: "value", Description: "value to examine", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "returntype"},
-			Const:  true,
+			Return:   &TypeDescriptor{Kind: "returntype"},
+			Const:    true,
+			Optimize: optimizeCoalesce,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

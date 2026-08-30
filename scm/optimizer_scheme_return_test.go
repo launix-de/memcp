@@ -240,6 +240,56 @@ func TestProcOwnershipSpecializationPublishesFullProc(t *testing.T) {
 	}
 }
 
+func TestProcOwnershipSpecializationFollowsCoalesceNilIntoFilter(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("proc specialization test", `(define specialize_optional_filter (lambda (values)
+		(filter (coalesceNil values '()) (lambda (value)
+			(and (> value 0) (< value 100) (not (equal? value 50)))))))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (a b c)
+		(specialize_optional_filter (list a b c)))`)
+	call := optimized.Slice()[2].Slice()
+	if !call[0].IsProc() {
+		t.Fatalf("ownership through coalesceNil did not specialize the Proc: %s", serializedTestExpr(t, env, optimized))
+	}
+	if serialized := serializedTestExpr(t, env, call[0].Proc().Body); !strings.Contains(serialized, "filter_mut") {
+		t.Fatalf("specialized Proc did not reuse the optional input list: %s", serialized)
+	}
+	got := Apply(Eval(optimized, env), NewInt(1), NewInt(50), NewInt(99))
+	if !Equal(got, NewSlice([]Scmer{NewInt(1), NewInt(99)})) {
+		t.Fatalf("specialized optional filter returned %s", String(got))
+	}
+}
+
+func TestProcOwnershipSpecializationRejectsSharedCoalesceFallback(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("proc specialization test", `(define shared_filter_fallback (list 7 8 9))`, env)
+	EvalAll("proc specialization test", `(define specialize_optional_filter_shared (lambda (values)
+		(filter (coalesceNil values shared_filter_fallback) (lambda (value) (> value 0)))))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (value)
+		(specialize_optional_filter_shared (list value)))`)
+	if call := optimized.Slice()[2].Slice(); call[0].IsProc() {
+		t.Fatalf("shared coalesceNil fallback received an ownership specialization: %s", serializedTestExpr(t, env, optimized))
+	}
+	if got := env.Vars[Symbol("shared_filter_fallback")]; !Equal(got, NewSlice([]Scmer{NewInt(7), NewInt(8), NewInt(9)})) {
+		t.Fatalf("shared fallback changed during optimization: %s", String(got))
+	}
+}
+
+func TestCoalesceConstantBranchesRemainExecutableCode(t *testing.T) {
+	env := newOptimizerTestEnv()
+	optimized := optimizeTestSource(t, env, `(coalesceNil 7 42)`)
+	if got := Eval(optimized, env); ToInt(got) != 7 {
+		t.Fatalf("optimized coalesceNil returned %s", String(got))
+	}
+
+	single := optimizeTestSource(t, env, `(coalesceNil 7)`)
+	if ToInt(single) != 7 {
+		t.Fatalf("single-argument coalesceNil did not collapse: %s", serializedTestExpr(t, env, single))
+	}
+}
+
 func TestProcOwnershipSpecializationRequiresLinearParameterUse(t *testing.T) {
 	env := newOptimizerTestEnv()
 	EvalAll("proc specialization test", `(define specialize_shared_twice (lambda (values)
@@ -292,7 +342,7 @@ func TestConcurrentProcOwnershipSpecializationPublishesOneProc(t *testing.T) {
 		(append_unique values 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)))`, env)
 	base := env.Vars[Symbol("specialize_concurrently")].Proc()
 	call := []Scmer{NewSymbol("specialize_concurrently"), NewSymbol("fresh")}
-	argTypes := []TypeInfo{tiZero, tiTransfer.WithKind(KindList)}
+	argTypes := []TypeInfo{tiZero, tiTransfer.WithTransfer().WithKind(KindList)}
 
 	const workers = 16
 	variants := make(chan Scmer, workers)
