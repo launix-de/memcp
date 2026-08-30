@@ -640,6 +640,20 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "Exact cached formula keeps optimizer-resolved session calls"
+    scm: |
+      (begin
+        (define execution_session (context "session"))
+        (execution_session "v1" 7)
+        (define formula
+          (cached_parse (newcachemap) parse_sql "memcp-tests" "SELECT ?"
+            (lambda (_schema _table _write) true)
+            "root" execution_session false))
+        (equal? (pretty_print formula 120)
+          "(resultrow '(\"?\" (session \"v1\")))"))
+    expect:
+      data: [true]
+
   - name: "Cached SQL join recompiles after cardinality guard miss"
     scm: |
       (begin

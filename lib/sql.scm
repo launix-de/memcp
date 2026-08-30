@@ -307,10 +307,14 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 		/* Parsing includes logical and physical planning. Never spend optimizer
 		work or install a variant after its requesting context was cancelled. */
 		(context "check")
-		(define plan (optimize raw_plan))
+		/* Session references must be bound before optimization. Rewriting the
+		optimized tree afterwards invalidates resolved calls and prevents the JIT
+		from seeing the final simplified expression. */
+		(define plan (optimize (sql_queryplan_bind_execution_session raw_plan)))
 		(context "check")
 		(list
-			(sql_queryplan_guard_from_session planning_session)
+			(sql_queryplan_bind_execution_session
+				(sql_queryplan_guard_from_session planning_session))
 			plan
 			(sql_queryplan_preparations_from_session planning_session)))))
 
@@ -353,12 +357,11 @@ otherwise side-effect-free guard. */
 					false
 					(begin (prepared_catalog (car preparation) true) true)))))
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
-			(define bound_plan (sql_queryplan_bind_execution_session (cadr variant)))
 			(define dispatch (if (equal? (car variant) true)
-				bound_plan
+				(cadr variant)
 				(list (quote if)
-					(sql_queryplan_bind_execution_session (car variant))
-					bound_plan tail_expr)))
+					(car variant)
+					(cadr variant) tail_expr)))
 			(if (empty_list? new_preparations)
 				dispatch
 				(cons (quote !begin)
@@ -461,9 +464,8 @@ On parse error the result is not cached. */
 			(define exact_compile (lambda ()
 				(begin
 					(define compile_policy (sql_compile_table_policy policy))
-					(sql_queryplan_bind_execution_session
-						(optimize (with_session session (lambda ()
-							(parse_fn schema parse_query compile_policy))))))))
+					(optimize (with_session session (lambda ()
+						(parse_fn schema parse_query compile_policy)))))))
 			(define formula (if (or compile_diagnostic (not guarded_select))
 				(if compile_diagnostic
 					(exact_compile)
