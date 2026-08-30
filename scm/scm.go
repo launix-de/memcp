@@ -1106,26 +1106,26 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
-			Optimize: func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-				if len(v) == 2 {
-					return oc.ApplyDefaultOptimization(v, useResult)
-				}
-				optimizedInput, inputType := oc.OptimizeSub(v[1], true)
-				v[1] = optimizedInput
-				oc.SetCallbackParamTypes([]*TypeDescriptor{optimizerTelemetryType})
-				v[2], _ = oc.OptimizeSub(v[2], true)
-				resultType := copyTypeDescriptor(inputType)
-				if resultType == nil {
-					resultType = &TypeDescriptor{Kind: "any"}
-				}
-				resultType.Const = false
-				return NewSlice(v), resultType
-			},
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["optimize"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+		},
+		Optimize: func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+			if len(v) == 2 {
+				return oc.ApplyDefaultOptimization(v, useResult)
+			}
+			optimizedInput, inputType := oc.OptimizeSub(v[1], true)
+			v[1] = optimizedInput
+			oc.SetCallbackParamTypes([]*TypeDescriptor{optimizerTelemetryType})
+			v[2], _ = oc.OptimizeSub(v[2], true)
+			resultType := copyTypeDescriptor(inputType)
+			if resultType == nil {
+				resultType = &TypeDescriptor{Kind: "any"}
+			}
+			resultType.Const = false
+			return NewSlice(v), resultType
 		},
 	})
 	DeclareSpecialForm(&Globalenv, &Declaration{
@@ -1150,10 +1150,10 @@ func init() {
 				{Kind: "returntype", Label: "true-branch...", Description: "code to evaluate if condition is true"},
 				{Kind: "any", Label: "false-branch", Description: "code to evaluate if condition is false", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "returntype"},
-			Const:    true,
-			Optimize: optimizeIf,
+			Return: &TypeDescriptor{Kind: "returntype"},
+			Const:  true,
 		},
+		Optimize: optimizeIf,
 	}, nil)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "and",
@@ -1163,10 +1163,10 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "bool", Label: "condition", Description: "condition to evaluate", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "bool"},
-			Const:    true,
-			Optimize: optimizeAnd,
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
 		},
+		Optimize: optimizeAnd,
 	}, specialAnd)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "or",
@@ -1176,10 +1176,10 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "condition", Description: "condition to evaluate", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "bool"},
-			Const:    true,
-			Optimize: optimizeOr,
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
 		},
+		Optimize: optimizeOr,
 	}, specialOr)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "coalesce",
@@ -1189,10 +1189,10 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "returntype", Label: "value", Description: "value to examine", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "returntype"},
-			Const:    true,
-			Optimize: optimizeCoalesce,
+			Return: &TypeDescriptor{Kind: "returntype"},
+			Const:  true,
 		},
+		Optimize: optimizeCoalesce,
 	}, specialCoalesce)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "coalesceNil",
@@ -1202,10 +1202,10 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "returntype", Label: "value", Description: "value to examine", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "returntype"},
-			Const:    true,
-			Optimize: optimizeCoalesce,
+			Return: &TypeDescriptor{Kind: "returntype"},
+			Const:  true,
 		},
+		Optimize: optimizeCoalesce,
 	}, specialCoalesceNil)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "define",
@@ -1792,16 +1792,16 @@ func init() {
 				{Kind: "func", Label: "condition", Description: "func that receives the current state as parameters and must return true if the loop shall be continued", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
 				{Kind: "func", Label: "step", Description: "step func that returns the next state as a list", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 FirstParameterMutable("for_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["for"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize:                 FirstParameterMutable("for_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "for_mut",

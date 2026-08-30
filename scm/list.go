@@ -675,6 +675,30 @@ func optimizerZeroLiteral(expr Scmer) bool {
 	return (expr.IsInt() && expr.Int() == 0) || (expr.IsFloat() && expr.Float() == 0)
 }
 
+// optimizedUnmappedRange extracts the bound of an already optimized
+// (produceN n) call. Mapped produceN calls need a separate consumer contract
+// because their mapper must still run before the downstream callback.
+func optimizedUnmappedRange(expr Scmer) (Scmer, bool) {
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) != 2 || !scmerIsSymbol(items[0], "produceN") {
+		return NewNil(), false
+	}
+	return items[1], true
+}
+
+func optimizeFindMapNotNull(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	items, ok := scmerSlice(result)
+	if !ok || len(items) != 3 || !scmerIsSymbol(items[0], "find_map_notnull") {
+		return result, td
+	}
+	count, ok := optimizedUnmappedRange(items[1])
+	if !ok {
+		return result, td
+	}
+	return NewSlice([]Scmer{NewSymbol("find_range_notnull"), count, items[2]}), td
+}
+
 // optimizePlannerReduceFold lowers common planner folds to physical loops. It
 // only inspects the already optimized reducer's root shape, keeping the whole
 // optimization pass linear in the expression size.
@@ -830,7 +854,20 @@ func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		return NewSlice(fused), td
 	}
 	if fused, fusedType, ok := optimizePlannerReduceFold(rv, td); ok {
+		items, isCall := scmerSlice(fused)
+		if isCall && len(items) == 3 && scmerIsSymbol(items[0], "find_map_notnull") {
+			if count, isRange := optimizedUnmappedRange(items[1]); isRange {
+				return NewSlice([]Scmer{NewSymbol("find_range_notnull"), count, items[2]}), fusedType
+			}
+		}
 		return fused, fusedType
+	}
+	if count, isRange := optimizedUnmappedRange(rv[1]); isRange {
+		fused := []Scmer{NewSymbol("reduce_range"), count, rv[2]}
+		if len(rv) == 4 {
+			fused = append(fused, rv[3])
+		}
+		return NewSlice(fused), td
 	}
 	return result, td
 }
@@ -1186,7 +1223,6 @@ func init_list() {
 			},
 			Return:         &TypeDescriptor{Kind: "list", Length: UnknownLength},
 			Const:          true,
-			Optimize:       optimizeListCall,
 			JITVirtualArgs: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
@@ -1230,6 +1266,7 @@ func init_list() {
 				return result
 			},
 		},
+		Optimize: optimizeListCall,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -1252,15 +1289,15 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "list", Description: "base list", NoEscape: true},
 			},
-			Return:   &TypeDescriptor{Kind: "int"},
-			Const:    true,
-			Optimize: optimizeCount,
+			Return: &TypeDescriptor{Kind: "int"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["count"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize: optimizeCount,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "nth",
@@ -2619,10 +2656,8 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "list", Description: "list to reverse", NoEscape: true},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 optimizeFixedLengthInput("reverse_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d2 JITValueDesc
@@ -3348,6 +3383,8 @@ func init_list() {
 				return result
 			},
 		},
+		Optimize:                 optimizeFixedLengthInput("reverse_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "append",
@@ -3362,16 +3399,16 @@ func init_list() {
 				{Kind: "list", Label: "list", Description: "base list"},
 				{Kind: "any", Label: "item...", Description: "items to add", Variadic: true},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 optimizeAppend,
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["append"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize:                 optimizeAppend,
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "append_unique",
@@ -3395,16 +3432,16 @@ func init_list() {
 				{Kind: "list", Label: "list", Description: "base list"},
 				{Kind: "any", Label: "item...", Description: "items to add", Variadic: true},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 FirstParameterMutable("append_unique_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["append_unique"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize:                 FirstParameterMutable("append_unique_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "cons",
@@ -3421,15 +3458,15 @@ func init_list() {
 				{Kind: "any", Label: "car", Description: "new head element"},
 				{Kind: "list", Label: "cdr", Description: "tail that is appended after car", NoEscape: true},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: optimizeCons,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["cons"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize: optimizeCons,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "car",
@@ -3837,9 +3874,8 @@ func init_list() {
 				{Kind: "list", Label: "list", Description: "list", NoEscape: true},
 			},
 			// cdr shares the input slice's backing array; its result is borrowed.
-			Return:   &TypeDescriptor{Kind: "list"},
-			Const:    true,
-			Optimize: optimizeCdr,
+			Return: &TypeDescriptor{Kind: "list"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d0 JITValueDesc
@@ -4288,6 +4324,7 @@ func init_list() {
 				return result
 			},
 		},
+		Optimize: optimizeCdr,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "cadr",
@@ -4711,15 +4748,15 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "list", Description: "list of lists of items", NoEscape: true, Variadic: true},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: optimizeZip,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["zip"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize: optimizeZip,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "merge",
@@ -4743,15 +4780,15 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "list", Description: "list of lists of items", NoEscape: true, Variadic: true},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: optimizeMerge,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["merge"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize: optimizeMerge,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "merge_unique",
@@ -4786,16 +4823,16 @@ func init_list() {
 			Params: []*TypeDescriptor{
 				{Kind: "list", Label: "list", Description: "list of lists of items", NoEscape: true, Variadic: true},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 optimizeMergeUnique,
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["merge_unique"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize:                 optimizeMergeUnique,
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "has?",
@@ -4842,10 +4879,8 @@ func init_list() {
 				{Kind: "list", Label: "list", Description: "list that has to be filtered", NoEscape: true},
 				{Kind: "func", Label: "condition", Description: "returns whether an item should be included", Params: []*TypeDescriptor{{Kind: "any", Label: "item", Description: "current list item"}}, Return: &TypeDescriptor{Kind: "bool", Label: "included", Description: "whether to include the item"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 optimizeFilter,
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d3 JITValueDesc
@@ -6380,6 +6415,8 @@ func init_list() {
 			},
 			JITInlineCallbacks: false,
 		},
+		Optimize:                 optimizeFilter,
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "find",
@@ -7849,10 +7886,8 @@ func init_list() {
 				{Kind: "list", Label: "list", Description: "list that has to be mapped", NoEscape: true},
 				{Kind: "func", Label: "map", Description: "transforms each item", Params: []*TypeDescriptor{{Kind: "any", Label: "item", Description: "current list item"}}, Return: &TypeDescriptor{Kind: "any", Label: "mapped_item", Description: "transformed item"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 optimizeMap,
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d2 JITValueDesc
@@ -8641,6 +8676,8 @@ func init_list() {
 			},
 			JITInlineCallbacks: true,
 		},
+		Optimize:                 optimizeMap,
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallel_map",
@@ -8699,9 +8736,7 @@ func init_list() {
 				{Kind: "list", Label: "list", Description: "list to map over in parallel", NoEscape: true},
 				{Kind: "func", Label: "fn", Description: "function applied to each element", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return:                   FreshAlloc,
-			Optimize:                 optimizeFixedLengthInput("parallel_map_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["parallel_map"].Fn, args, result)
@@ -8709,6 +8744,8 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize:                 optimizeFixedLengthInput("parallel_map_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallel_map_mut",
@@ -8792,10 +8829,8 @@ func init_list() {
 				{Kind: "list", Label: "list", Description: "list that has to be mapped", NoEscape: true},
 				{Kind: "func", Label: "map", Description: "transforms each item with its index", Params: []*TypeDescriptor{{Kind: "int", Label: "index", Description: "zero-based item index"}, {Kind: "any", Label: "item", Description: "current list item"}}, Return: &TypeDescriptor{Kind: "any", Label: "mapped_item", Description: "transformed item"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 optimizeFixedLengthInput("mapIndex_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d2 JITValueDesc
@@ -9596,6 +9631,8 @@ func init_list() {
 			},
 			JITInlineCallbacks: true,
 		},
+		Optimize:                 optimizeFixedLengthInput("mapIndex_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce",
@@ -9623,9 +9660,8 @@ func init_list() {
 				{Kind: "func", Params: []*TypeDescriptor{{Kind: "any", Transfer: true, Label: "acc", Description: "current accumulator"}, {Kind: "any", Label: "item", Description: "current list item"}}, Label: "reduce", Description: "combines the accumulator with each list item", Return: &TypeDescriptor{Kind: "any", Label: "acc", Description: "next accumulator"}},
 				{Kind: "any", Label: "neutral", Description: "(optional) initial value of the accumulator, defaults to nil", Optional: true},
 			},
-			Return:   &TypeDescriptor{Kind: "any"},
-			Const:    true,
-			Optimize: optimizeReduce,
+			Return: &TypeDescriptor{Kind: "any"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d3 JITValueDesc
@@ -11497,6 +11533,7 @@ func init_list() {
 			},
 			JITInlineCallbacks: false,
 		},
+		Optimize: optimizeReduce,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -11556,9 +11593,8 @@ func init_list() {
 				{Kind: "number", Label: "n", Description: "number of elements to produce"},
 				{Kind: "func", Label: "fn", Description: "(optional) map function applied to each index", Optional: true, Params: []*TypeDescriptor{{Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: optimizeProduceN,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d4 JITValueDesc
@@ -14409,6 +14445,7 @@ func init_list() {
 			},
 			JITInlineCallbacks: true,
 		},
+		Optimize: optimizeProduceN,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "parallelN",
@@ -14473,15 +14510,15 @@ func init_list() {
 				{Kind: "number", Label: "n", Description: "number of elements to produce"},
 				{Kind: "func", Label: "fn", Description: "map function applied to each index in parallel", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: optimizeParallelN,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["parallelN"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize: optimizeParallelN,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "produceN_mut",
@@ -19000,10 +19037,8 @@ func init_list() {
 				{Kind: "list", Label: "dict", Description: "dictionary that has to be filtered", NoEscape: true},
 				{Kind: "func", Label: "condition", Description: "returns whether a dictionary entry should be included", Params: []*TypeDescriptor{{Kind: "string", Label: "key", Description: "entry key"}, {Kind: "any", Label: "value", Description: "entry value"}}, Return: &TypeDescriptor{Kind: "bool", Label: "included", Description: "whether to include the entry"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 FirstParameterMutable("filter_assoc_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["filter_assoc"].Fn, args, result)
@@ -19011,6 +19046,8 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize:                 FirstParameterMutable("filter_assoc_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "find_assoc",
@@ -19090,9 +19127,8 @@ func init_list() {
 				{Kind: "list", Label: "dict", Description: "dictionary that has to be mapped", NoEscape: true},
 				{Kind: "func", Label: "map", Description: "transforms each dictionary value", Params: []*TypeDescriptor{{Kind: "string", Label: "key", Description: "entry key"}, {Kind: "any", Label: "value", Description: "entry value"}}, Return: &TypeDescriptor{Kind: "any", Label: "mapped_value", Description: "replacement value"}},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: optimizeAssocFixedLengthInput("map_assoc_mut"),
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["map_assoc"].Fn, args, result)
@@ -19100,6 +19136,7 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize: optimizeAssocFixedLengthInput("map_assoc_mut"),
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "reduce_assoc",
@@ -19316,10 +19353,8 @@ func init_list() {
 				{Kind: "list", Label: "dict", Description: "dictionary that has to be checked", NoEscape: true},
 				{Kind: "func", Label: "map", Description: "extracts one element per dictionary entry", Params: []*TypeDescriptor{{Kind: "string", Label: "key", Description: "entry key"}, {Kind: "any", Label: "value", Description: "entry value"}}, Return: &TypeDescriptor{Kind: "any", Label: "element", Description: "element extracted from the entry"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 optimizeExtractAssoc,
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["extract_assoc"].Fn, args, result)
@@ -19327,6 +19362,8 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize:                 optimizeExtractAssoc,
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "set_assoc",
@@ -19373,10 +19410,8 @@ func init_list() {
 				{Kind: "any", Label: "value", Description: "new value to set"},
 				{Kind: "func", Label: "merge", Description: "combines values when an existing entry is overwritten", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old", Description: "existing value"}, {Kind: "any", Label: "new", Description: "replacement value"}}, Return: &TypeDescriptor{Kind: "any", Label: "merged", Description: "value stored in the new dictionary"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 FirstParameterMutable("set_assoc_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["set_assoc"].Fn, args, result)
@@ -19384,6 +19419,8 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize:                 FirstParameterMutable("set_assoc_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "merge_assoc",
@@ -19414,10 +19451,8 @@ func init_list() {
 				{Kind: "list", Label: "dict2", Description: "input dictionary that contains the new values that have to be added"},
 				{Kind: "func", Label: "merge", Description: "combines values when both dictionaries contain an entry", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "old", Description: "value from the first dictionary"}, {Kind: "any", Label: "new", Description: "value from the second dictionary"}}, Return: &TypeDescriptor{Kind: "any", Label: "merged", Description: "value stored in the merged dictionary"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 FirstParameterMutable("merge_assoc_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["merge_assoc"].Fn, args, result)
@@ -19425,6 +19460,8 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize:                 FirstParameterMutable("merge_assoc_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 
 	// Fused physical operators: optimizer-only, forbidden from .scm code.
@@ -28305,6 +28342,102 @@ func init_list() {
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["reduce_all"].Fn, args, result)
+			},
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_range",
+
+		Fn: func(a ...Scmer) Scmer {
+			count := int(a[0].Int())
+			if count < 0 {
+				count = 0
+			}
+			result := NewNil()
+			index := 0
+			if len(a) > 2 {
+				result = a[2]
+			} else if count > 0 {
+				result = NewInt(0)
+				index = 1
+			}
+			if declaration := DeclarationForValue(a[1]); declaration != nil && declaration.RetainsCallArgs {
+				reducer := OptimizeProcToSerialFunction(a[1])
+				for index < count {
+					result = reducer(result, NewInt(int64(index)))
+					index++
+				}
+				return result
+			}
+			reducer := PrepareSerialProc(a[1])
+			var reducerArgs [2]Scmer
+			for index < count {
+				reducerArgs[0], reducerArgs[1] = result, NewInt(int64(index))
+				result = reducer.Call(reducerArgs[:])
+				index++
+			}
+			return result
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "reduces an integer range without materializing it (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "number", Label: "count"},
+				{Kind: "func", Label: "reduce", Params: []*TypeDescriptor{{Kind: "any", Transfer: true, Label: "acc"}, {Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["reduce_range"].Fn, args, result)
+			},
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "find_range_notnull",
+
+		Fn: func(a ...Scmer) Scmer {
+			count := int(a[0].Int())
+			if count < 0 {
+				count = 0
+			}
+			if declaration := DeclarationForValue(a[1]); declaration != nil && declaration.RetainsCallArgs {
+				candidate := OptimizeProcToSerialFunction(a[1])
+				for index := 0; index < count; index++ {
+					value := candidate(NewNil(), NewInt(int64(index)))
+					if !value.IsNil() {
+						return value
+					}
+				}
+				return NewNil()
+			}
+			candidate := PrepareSerialProc(a[1])
+			var candidateArgs [2]Scmer
+			candidateArgs[0] = NewNil()
+			for index := 0; index < count; index++ {
+				candidateArgs[1] = NewInt(int64(index))
+				value := candidate.Call(candidateArgs[:])
+				if !value.IsNil() {
+					return value
+				}
+			}
+			return NewNil()
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "maps an integer range until the first non-nil result without materializing it (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "number", Label: "count"},
+				{Kind: "func", Label: "candidate", Params: []*TypeDescriptor{{Kind: "any", Label: "state"}, {Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["find_range_notnull"].Fn, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -56035,6 +56168,7 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize: optimizeFindMapNotNull,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "flat_map_unique",
@@ -60112,16 +60246,16 @@ func init_list() {
 				{Kind: "list", Label: "list", NoEscape: true},
 				{Kind: "func", Label: "comparator", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
-			Return:                   FreshAlloc,
-			Const:                    true,
-			Optimize:                 FirstParameterMutable("sort_mut"),
-			OptimizeFirstArgTransfer: true,
+			Return: FreshAlloc,
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sort"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize:                 FirstParameterMutable("sort_mut"),
+		OptimizeFirstArgTransfer: true,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sort_mut",

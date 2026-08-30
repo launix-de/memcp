@@ -25,10 +25,14 @@ import "strings"
 
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
-	Name            string
-	Fn              func(...Scmer) Scmer
-	Type            *TypeDescriptor
-	RetainsCallArgs bool // native result or state may retain the variadic argument array
+	Name                     string
+	Fn                       func(...Scmer) Scmer
+	Type                     *TypeDescriptor
+	RetainsCallArgs          bool // native result or state may retain the variadic argument array
+	// Optimize owns declaration-specific rewrites. When set, the optimizer calls
+	// it instead of the default argument optimization and post-processing path.
+	Optimize                 func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
+	OptimizeFirstArgTransfer bool // the optimizer hook can consume ownership of its first argument
 }
 
 // MinParams returns the minimum number of required parameters.
@@ -76,10 +80,6 @@ type TypeDescriptor struct {
 	Return         *TypeDescriptor            // for Kind="func": return type
 	Keys           map[string]*TypeDescriptor // for Kind="assoc": per-key type info
 	Element        *TypeDescriptor            // for Kind="list": element type
-	// Custom optimizer hook for function types. When set, the optimizer calls this
-	// INSTEAD of the default arg optimization + post-processing.
-	Optimize                 func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
-	OptimizeFirstArgTransfer bool // the hook can consume ownership of its first argument
 	// Optional JIT emitter for native code generation.
 	JITEmit func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
 	// JITVirtualArgs lets an emitter consume the caller's argument array as SSA

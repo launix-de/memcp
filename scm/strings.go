@@ -10901,16 +10901,16 @@ func init_strings() {
 			return NewString(re.ReplaceAllString(String(a[0]), String(a[2])))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "replaces matches of a regex pattern in a string",
-			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}, &TypeDescriptor{Kind: "string", Label: "replacement", Description: "replacement string"}},
-			Return:   &TypeDescriptor{Kind: "string"},
-			Const:    true,
-			Optimize: optimizeRegexpReplace,
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}, &TypeDescriptor{Kind: "string", Label: "replacement", Description: "replacement string"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_replace"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize: optimizeRegexpReplace,
 	})
 
 	Declare(&Globalenv, &Declaration{
@@ -10920,10 +10920,9 @@ func init_strings() {
 			return NewString(fnvHashString(String(a[0])))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "computes a fast non-cryptographic 64-bit FNV-1a hash of a string, returns a 16-character hex string",
-			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string to hash"}},
-			Return:   &TypeDescriptor{Kind: "string"},
-			Const:    true,
-			Optimize: optimizeFNVHash,
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string to hash"}},
+			Return: &TypeDescriptor{Kind: "string"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
@@ -11063,6 +11062,7 @@ func init_strings() {
 				return result
 			},
 		},
+		Optimize: optimizeFNVHash,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "stable_structural_hash",
@@ -11144,16 +11144,16 @@ func init_strings() {
 			return NewBool(re.MatchString(String(a[0])))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "tests if a string matches a regex pattern, returns true/false",
-			Params:   []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}},
-			Return:   &TypeDescriptor{Kind: "bool"},
-			Const:    true,
-			Optimize: optimizeRegexpTest,
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "str", Description: "input string"}, &TypeDescriptor{Kind: "string", Label: "pattern", Description: "regex pattern"}},
+			Return: &TypeDescriptor{Kind: "bool"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_test"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
 		},
+		Optimize: optimizeRegexpTest,
 	})
 
 }

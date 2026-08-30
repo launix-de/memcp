@@ -196,6 +196,39 @@ func TestSpecialFormsParticipateInHelpAndDocumentation(t *testing.T) {
 	}
 }
 
+func TestDeclarationOwnsOptimizerHook(t *testing.T) {
+	oldTitles, oldDeclarations, oldFunctions := declaration_titles, declarations, declarationsByFunction
+	defer func() {
+		declaration_titles, declarations, declarationsByFunction = oldTitles, oldDeclarations, oldFunctions
+	}()
+	declaration_titles = nil
+	declarations = make(map[string]*Declaration)
+	declarationsByFunction = make(map[uintptr]*Declaration)
+
+	env := Env{Vars: make(Vars)}
+	hookCalled := false
+	Declare(&env, &Declaration{
+		Name: "declaration-hook-test",
+		Fn:   func(...Scmer) Scmer { return NewInt(1) },
+		Type: &TypeDescriptor{
+			Kind:   "func",
+			Return: &TypeDescriptor{Kind: "int"},
+		},
+		Optimize: func(_ []Scmer, _ *OptimizerContext, _ bool) (Scmer, *TypeDescriptor) {
+			hookCalled = true
+			return NewInt(42), &TypeDescriptor{Kind: "int", Const: true, Transfer: true}
+		},
+	})
+
+	optimized := Optimize(NewSlice([]Scmer{NewSymbol("declaration-hook-test")}), &env, nil)
+	if !hookCalled {
+		t.Fatal("declaration optimizer hook was not called")
+	}
+	if !optimized.IsInt() || optimized.Int() != 42 {
+		t.Fatalf("declaration optimizer hook returned %s, want 42", String(optimized))
+	}
+}
+
 func TestFunctionFactoriesDescribeReturnedFunctions(t *testing.T) {
 	tests := []struct {
 		name              string
