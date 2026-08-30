@@ -145,6 +145,18 @@ func TestSpecialFormDispatchFollowsSymbolResolution(t *testing.T) {
 	}
 }
 
+func TestOptimizerKeepsLambdaSyntaxAndLowersItsBody(t *testing.T) {
+	expression := Optimize(Read(t.Name(), "(lambda (value) (outer value))"), &Globalenv, nil)
+	items := expression.Slice()
+	if !items[0].IsSymbol() || !items[0].SymbolEquals("lambda") {
+		t.Fatalf("lambda scope boundary was lowered before callback analysis: %s", SerializeToString(expression, &Globalenv))
+	}
+	body := items[2].Slice()
+	if body[0].GetTag() != tagSpecialForm || body[0].SpecialFormName() != "outer" {
+		t.Fatalf("compiler-internal outer form remained shadowable: %s", SerializeToString(expression, &Globalenv))
+	}
+}
+
 func TestOptimizerDoesNotLowerConstructedSyntaxData(t *testing.T) {
 	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
 	expression := Optimize(Read(t.Name(), "(list (quote if) true 1 0)"), environment, nil)

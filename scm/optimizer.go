@@ -1573,11 +1573,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	if len(v) == 0 {
 		return NewSlice(v), tiZero
 	}
-	if callable, ok := resolveSpecialFormSymbol(v[0], env); ok {
-		resolved := make([]Scmer, len(v))
-		copy(resolved, v)
-		resolved[0] = callable
-		v = resolved
+	// Lambda remains syntax while its body is analyzed. Optimized query plans can
+	// retain and re-optimize callback trees (for example incremental aggregates),
+	// so turning the scope boundary into a callable here makes those later passes
+	// treat a callback value as already lowered code. Eval still resolves the
+	// registered global special form after optimization.
+	if callable, ok := resolveSpecialFormSymbol(v[0], env); ok && !scmerIsSymbol(v[0], "lambda") {
+		v[0] = callable
 	}
 	headSym, headOk := scmerSymbol(v[0])
 
@@ -1601,9 +1603,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if isConstant {
 			return inner, tiConstTransfer
 		}
-		// outer is both executable syntax and a lexical marker consumed by later
-		// optimizer passes. Keep that marker symbolic after optimizing its body.
-		v[0] = NewSymbol("outer")
 		v[1] = inner
 		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
 	}
