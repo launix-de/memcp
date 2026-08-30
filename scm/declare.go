@@ -139,7 +139,10 @@ func (ti TypeInfo) Length() int {
 	return ti.length
 }
 
-func (ti TypeInfo) WithTransfer() TypeInfo    { ti.flags |= FlagTransfer; return ti }
+func (ti TypeInfo) WithTransfer() TypeInfo {
+	ti.flags |= FlagTransfer
+	return ti
+}
 func (ti TypeInfo) WithoutTransfer() TypeInfo { ti.flags &^= FlagTransfer; return ti }
 func (ti TypeInfo) WithConst() TypeInfo       { ti.flags |= FlagConst; return ti }
 func (ti TypeInfo) WithoutConst() TypeInfo    { ti.flags &^= FlagConst; return ti }
