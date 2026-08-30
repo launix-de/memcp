@@ -17,6 +17,8 @@ Copyright (C) 2026  Carl-Philip Haensch
 package scm
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -306,12 +308,12 @@ func TestOptimizeFusesReduceOverMapThenFilter(t *testing.T) {
 	}
 }
 
-func TestOptimizeKeepsMergeUniqueOverMapOfLists(t *testing.T) {
+func TestOptimizeFusesMergeUniqueOverMapOfLists(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (values)
 		(merge_unique (map values (lambda (value) (list (+ value 1))))))`)
 	serialized := serializedTestExpr(t, env, optimized)
-	if strings.Contains(serialized, "merge_unique_map") {
-		t.Fatalf("merge_unique/map-of-lists pipeline was unsafely fused: %s", serialized)
+	if !strings.Contains(serialized, "flat_map_unique") {
+		t.Fatalf("merge_unique/map-of-lists pipeline was not fused: %s", serialized)
 	}
 
 	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
@@ -322,12 +324,21 @@ func TestOptimizeKeepsMergeUniqueOverMapOfLists(t *testing.T) {
 	}
 }
 
+func TestOptimizeKeepsMergeUniqueOverMapWithUnknownItems(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(merge_unique (map values (lambda (value) value))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if strings.Contains(serialized, "flat_map_unique") {
+		t.Fatalf("merge_unique/map with unproven mapper result was fused: %s", serialized)
+	}
+}
+
 func TestOptimizeKeepsMergeUniqueOverFilterMapOfLists(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (values)
 		(merge_unique (map (filter values (lambda (value) (> value 1))) (lambda (value) (list (* value 2))))))`)
 	serialized := serializedTestExpr(t, env, optimized)
-	if strings.Contains(serialized, "merge_unique_map_filter") {
-		t.Fatalf("merge_unique/map/filter-of-lists pipeline was unsafely fused: %s", serialized)
+	if strings.Contains(serialized, "flat_map_unique") {
+		t.Fatalf("merge_unique/map/filter-of-lists pipeline lost its filter: %s", serialized)
 	}
 
 	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
@@ -335,6 +346,44 @@ func TestOptimizeKeepsMergeUniqueOverFilterMapOfLists(t *testing.T) {
 	want := NewSlice([]Scmer{NewInt(4), NewInt(6)})
 	if !Equal(got, want) {
 		t.Fatalf("merge_unique/map/filter returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOrderedUniqueBuilderPreservesEqualAcrossHashDomains(t *testing.T) {
+	builder := orderedUniqueBuilder{}
+	for i := int64(0); i < orderedUniqueHashThreshold; i++ {
+		builder.add(NewInt(i))
+	}
+	builder.add(NewFloat(3))
+	builder.add(NewString("4"))
+	got := NewSlice(builder.result())
+	want := NewSlice([]Scmer{
+		NewInt(0), NewInt(1), NewInt(2), NewInt(3),
+		NewInt(4), NewInt(5), NewInt(6), NewInt(7),
+	})
+	if !Equal(got, want) {
+		t.Fatalf("ordered unique fallback returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOrderedUniqueBuilderPreservesFirstValueInHashDomain(t *testing.T) {
+	builder := orderedUniqueBuilder{}
+	for i := 0; i < orderedUniqueHashThreshold; i++ {
+		builder.add(NewString(fmt.Sprintf("column-%d", i)))
+	}
+	builder.add(NewSymbol("column-3"))
+	got := builder.result()
+	if len(got) != orderedUniqueHashThreshold || got[3].GetTag() != tagString {
+		t.Fatalf("ordered unique hash path did not preserve the first value: %v", got)
+	}
+
+	floatBuilder := orderedUniqueBuilder{}
+	for i := 0; i < orderedUniqueHashThreshold; i++ {
+		floatBuilder.add(NewFloat(float64(i)))
+	}
+	floatBuilder.add(NewFloat(math.Copysign(0, -1)))
+	if result := floatBuilder.result(); len(result) != orderedUniqueHashThreshold {
+		t.Fatalf("ordered unique hash path treated signed zero as distinct: %v", result)
 	}
 }
 
@@ -446,5 +495,23 @@ func BenchmarkPlannerReducerLowerings(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkPlannerFlatMapUnique(b *testing.B) {
+	values := make([]Scmer, 128)
+	for i := range values {
+		values[i] = NewString(fmt.Sprintf("column-%d", i))
+	}
+	input := NewSlice(values)
+	optimized, env := optimizeListPipeline(b, `(lambda (values)
+		(merge_unique (map values (lambda (value) (list value value)))))`)
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if result := fn(input); len(result.Slice()) != len(values) {
+			b.Fatal("unexpected benchmark result")
+		}
 	}
 }
