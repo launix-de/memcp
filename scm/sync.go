@@ -404,17 +404,21 @@ func NewContext(ctx context.Context, fn func()) {
 	}, fn)
 }
 
-// NewContextWithSession is like NewContext but uses a pre-existing Scheme session
-// instead of creating a fresh one. Used by persistent HTTP sessions so that
-// @variables set in one request are visible in subsequent requests.
-func NewContextWithSession(ctx context.Context, session Scmer, fn func()) {
+// NewContextWithSession installs a pre-existing Scheme session and any
+// request-local values in one GLS frame. Keeping one frame avoids repeating
+// goroutine stack tagging for every HTTP request.
+func NewContextWithSession(ctx context.Context, session Scmer, values map[string]any, fn func()) {
 	if mgr == nil {
 		mgr = gls.NewContextManager()
 	}
-	mgr.SetValues(gls.Values{
+	glsValues := gls.Values{
 		"session": session,
 		"context": ctx,
-	}, fn)
+	}
+	for key, value := range values {
+		glsValues[key] = value
+	}
+	mgr.SetValues(glsValues, fn)
 }
 
 func GetContext() context.Context {

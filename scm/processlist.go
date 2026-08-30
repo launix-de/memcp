@@ -59,6 +59,15 @@ type SessionState struct {
 
 }
 
+// QueryExecutionContext carries request-local state across the Scheme SQL
+// boundary without rediscovering it through goroutine-local stack inspection.
+// The transaction itself remains owned by storage and is attached by
+// with_autocommit after the executing Scheme session has been selected.
+type QueryExecutionContext struct {
+	SessionState *SessionState
+	QuerySeq     uint64
+}
+
 // GetOrCreateScmSession returns the persistent Scheme session for this SessionState,
 // creating it on first call. Used by HTTP sessions to persist @variables across requests.
 func (s *SessionState) GetOrCreateScmSession() Scmer {

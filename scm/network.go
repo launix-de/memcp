@@ -315,6 +315,13 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	ss.SetQueryContext(querySeq, ctx)
 	defer cancel()
 	defer ss.EndQuery(querySeq, "Sleep", "")
+	scmSession := ss.GetOrCreateScmSession()
+	req_scm = append(req_scm,
+		NewString("__session"),
+		scmSession,
+		NewString("__execution_context"),
+		NewAny(&QueryExecutionContext{SessionState: ss, QuerySeq: querySeq}),
+	)
 	// Watch for HTTP client disconnect and propagate to session kill
 	reqDone := make(chan struct{})
 	defer close(reqDone)
@@ -325,34 +332,32 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		case <-reqDone:
 		}
 	}(querySeq)
-	SetValues(map[string]any{"sessionStatePtr": ss, "querySeq": querySeq}, func() {
-		contextFn := func() {
-			// catch panics and print out 500 Internal Server Error
-			defer func() {
-				if r := recover(); r != nil {
-					if fmt.Sprint(r) != "websocket closed" {
-						PrintError("error in http handler: " + fmt.Sprint(r))
-					}
-					// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
-					func() {
-						defer func() { recover() }()
-						res.Header().Set("Content-Type", "text/plain")
-						res.WriteHeader(500)
-						io.WriteString(res, "500 Internal Server Error: ")
-						io.WriteString(res, fmt.Sprint(r))
-					}()
+	contextFn := func() {
+		// catch panics and print out 500 Internal Server Error
+		defer func() {
+			if r := recover(); r != nil {
+				if fmt.Sprint(r) != "websocket closed" {
+					PrintError("error in http handler: " + fmt.Sprint(r))
 				}
-			}()
-			Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
-		}
-		// Persistent HTTP sessions reuse the same Scheme session so that
-		// @variables set in one request are visible in subsequent requests.
-		if req.Header.Get("X-Session-Id") != "" {
-			NewContextWithSession(ctx, ss.GetOrCreateScmSession(), contextFn)
-		} else {
-			NewContext(ctx, contextFn)
-		}
-	})
+				// try to write error response; silently ignore if connection was hijacked (e.g. websocket)
+				func() {
+					defer func() { recover() }()
+					res.Header().Set("Content-Type", "text/plain")
+					res.WriteHeader(500)
+					io.WriteString(res, "500 Internal Server Error: ")
+					io.WriteString(res, fmt.Sprint(r))
+				}()
+			}
+		}()
+		Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
+	}
+	// Persistent HTTP sessions reuse the same Scheme session so that
+	// @variables set in one request are visible in subsequent requests. Install
+	// process-list state in the same GLS frame for both session lifetimes.
+	NewContextWithSession(ctx, scmSession, map[string]any{
+		"sessionStatePtr": ss,
+		"querySeq":        querySeq,
+	}, contextFn)
 }
 
 func scmerToGo(v Scmer) any {

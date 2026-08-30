@@ -766,17 +766,28 @@ func querySeqFromTx(tx *TxContext) uint64 {
 // is re-raised so the caller's error handler still fires. This guarantees that
 // every SQL statement executed via the HTTP or MySQL frontend runs inside a
 // transaction, enabling a single fsync per statement instead of one per write.
-func WithAutocommit(sessionFn func(...scm.Scmer) scm.Scmer, fn scm.Scmer) scm.Scmer {
+func WithAutocommit(session scm.Scmer, executionContext *scm.QueryExecutionContext, fn scm.Scmer) scm.Scmer {
+	sessionFn := session.Func()
+	var querySeq uint64
+	var sessionState *scm.SessionState
+	if executionContext != nil {
+		querySeq = executionContext.QuerySeq
+		sessionState = executionContext.SessionState
+	} else {
+		querySeq = scm.CurrentQuerySeq()
+		sessionState = scm.GetCurrentSessionState()
+	}
 	if !sessionFn(scm.NewString("transaction")).IsNil() {
 		return scm.Apply(fn)
 	}
 
 	tx := NewTxContext(TxCursorStability)
 	tx.autoCommit = true
-	tx.Session = scm.NewFunc(sessionFn)
-	tx.SessionState = scm.GetCurrentSessionState()
-	tx.querySeq.Store(scm.CurrentQuerySeq())
-	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
+	tx.Session = session
+	tx.SessionState = sessionState
+	tx.querySeq.Store(querySeq)
+	txValue := scm.NewAny(tx)
+	sessionFn(scm.NewString("__memcp_tx"), txValue)
 
 	var result scm.Scmer
 	var panicVal any
@@ -913,7 +924,11 @@ func initTransaction(en scm.Env) {
 		Name: "with_autocommit",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			return WithAutocommit(a[0].Func(), a[1])
+			var executionContext *scm.QueryExecutionContext
+			if !a[1].IsNil() {
+				executionContext, _ = a[1].Any().(*scm.QueryExecutionContext)
+			}
+			return WithAutocommit(a[0], executionContext, a[2])
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Executes fn inside an implicit TxCursorStability transaction if no explicit " +
 			"transaction is active in session. Commits on success, rolls back on error, " +
@@ -922,6 +937,7 @@ func initTransaction(en scm.Env) {
 			"fn is executed without any wrapping.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "func", Label: "session", Description: "the session function holding tx state", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "execution_context", Description: "optional request-local execution context; nil retains the legacy goroutine-local fallback"},
 				{Kind: "func", Label: "fn", Description: "zero-argument function to execute", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},

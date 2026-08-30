@@ -6442,7 +6442,7 @@ the costgen threshold. */
 							(list (quote lambda) (list (quote __group_cache_build_session))
 								(list (quote with_session) (quote __group_cache_build_session)
 									(list (quote lambda) '()
-										(list (quote with_autocommit) (quote __group_cache_build_session)
+										(list (quote with_autocommit) (quote __group_cache_build_session) nil
 											(list (quote lambda) '()
 												(list (quote !begin)
 													(direct_group_join_eval_prepare_recipe_expr stage)
