@@ -429,6 +429,15 @@ cache_key = username:schema:view-generation:hash(query-shape), retaining policy
 isolation while sharing safe SELECT plans across literal variants. Each entry
 is a variadic if chain of guarded specialized plans plus one compile miss arm.
 On parse error the result is not cached. */
+/* Frontends defer the system.user lookup until a cache producer actually
+runs. A warm plan already owns its compiled policy and must not rescan the
+user table merely to discard a newly constructed policy closure. */
+(define sql_policy_spec_resolve (lambda (policy_spec)
+	(if (and (list? policy_spec)
+		(equal? (car policy_spec) (quote sql-policy-for)))
+		(sql_policy (cadr policy_spec))
+		policy_spec)))
+
 (define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals)
 	(begin
 		(define explain_query (match (toUpper query)
@@ -460,7 +469,8 @@ On parse error the result is not cached. */
 			previous result into a cache hit. The inspected query is never run. */
 			(define exact_compile (lambda ()
 				(begin
-					(define compile_policy (sql_compile_table_policy policy))
+					(define resolved_policy (sql_policy_spec_resolve policy))
+					(define compile_policy (sql_compile_table_policy resolved_policy))
 					(optimize (with_session session (lambda ()
 						(parse_fn schema parse_query compile_policy)))))))
 			(define formula (if (or compile_diagnostic (not guarded_select))
@@ -469,7 +479,8 @@ On parse error the result is not cached. */
 					(queryplan_cache "get_or_compute" cache_key exact_compile))
 				(begin
 					(define cached_entry (queryplan_cache "get_or_compute" cache_key
-						(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query policy session))))
+						(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
+							(sql_policy_spec_resolve policy) session))))
 					(cadr cached_entry))))
 			formula)))))
 
@@ -683,7 +694,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
-					(define formula (cached_parse sql_queryplan_cache parse_sql schema query (sql_policy (req "username")) (req "username") session true))
+					(define formula (cached_parse sql_queryplan_cache parse_sql schema query
+						(list (quote sql-policy-for) (req "username")) (req "username") session true))
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
@@ -752,7 +764,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 						before parse/build so session-sensitive planner rewrites see the right values. */
 						(extract_assoc (req "query") (lambda (k v) (session k v)))
-						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username") session false))
+						(define formula (cached_parse psql_queryplan_cache parse_psql schema query
+							(list (quote sql-policy-for) (req "username")) (req "username") session false))
 						(sql_execute_formula session execution_context formula resultrow)
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
@@ -863,8 +876,10 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(set sql_parse_input (match sql_parse_input (regex "^((?s:.*));\\s*$" _ body) body sql_parse_input))
 				(define mysql_username (coalesce (session "username") "root"))
 				(define formula (if (equal? (session "syntax") "postgresql")
-					(cached_parse psql_queryplan_cache parse_psql schema sql_parse_input (sql_policy mysql_username) mysql_username session false)
-					(cached_parse sql_queryplan_cache parse_sql schema sql_parse_input (sql_policy mysql_username) mysql_username session true)))
+					(cached_parse psql_queryplan_cache parse_psql schema sql_parse_input
+						(list (quote sql-policy-for) mysql_username) mysql_username session false)
+					(cached_parse sql_queryplan_cache parse_sql schema sql_parse_input
+						(list (quote sql-policy-for) mysql_username) mysql_username session true)))
 				(sql_execute_formula session execution_context formula resultrow)
 			) sql))
 	)) (lambda (e) (begin

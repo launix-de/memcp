@@ -96,7 +96,7 @@ func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <
 	startWorker := gls.Go
 	if currentTx != nil {
 		ss := SessionStateFromTx(currentTx)
-		querySeq := scm.CurrentQuerySeq()
+		querySeq := querySeqFromTx(currentTx)
 		startWorker = func(worker func()) {
 			go func() {
 				// A worker needs one complete execution context. Nesting

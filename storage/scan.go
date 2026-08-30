@@ -526,7 +526,7 @@ func (t *table) scanExists(currentTx *TxContext, conditionCols []string, conditi
 
 func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer) bool {
 	ss := SessionStateFromTx(currentTx)
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
 	touchTempColumns(t, conditionCols, nil)
 	var scratch *scanAnalyzeScratch
 	var boundaries boundaries
@@ -604,7 +604,7 @@ func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, cond
 
 func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer, requiredBoundaries boundaries) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
 	hasMutationCallback := false
 	for _, c := range callbackCols {
 		if c == "$update" || (len(c) > 11 && c[:11] == "$increment:") {
