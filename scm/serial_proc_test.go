@@ -130,31 +130,3 @@ func TestSerialExprDetectsCapturedBeginScope(t *testing.T) {
 		t.Fatalf("capturing begin was classified as reusable: %s", source.Proc().Body.String())
 	}
 }
-
-func TestPrepareSerialProcCallsFixedLexicalProcedure(t *testing.T) {
-	env := &Env{Vars: make(Vars), Outer: &Globalenv}
-	emit := Eval(Optimize(Read("serial proc lexical callee", "(lambda (value) (begin (define next (+ value 1)) next))"), env, nil), env)
-	env.Vars[Symbol("emit")] = emit
-	outer := Eval(Optimize(Read("serial proc lexical caller", "(lambda (value) (emit value))"), env, nil), env)
-	prepared := PrepareSerialProc(outer)
-	args := []Scmer{NewInt(9)}
-	if got := prepared.Call(args).Int(); got != 10 {
-		t.Fatalf("lexical procedure result = %d, want 10", got)
-	}
-	args[0] = NewInt(14)
-	if got := prepared.Call(args).Int(); got != 15 {
-		t.Fatalf("reused lexical procedure result = %d, want 15", got)
-	}
-}
-
-func TestPrepareSerialProcKeepsRecursiveProcedureFinite(t *testing.T) {
-	env := &Env{Vars: make(Vars), Outer: &Globalenv}
-	params := NewSlice([]Scmer{NewSymbol("n")})
-	body := Read("serial proc recursive body", "(if (equal? n 0) 0 (serial_countdown (- n 1)))")
-	procedure := NewProcStruct(Proc{Params: params, Body: body, En: env})
-	env.Vars[Symbol("serial_countdown")] = procedure
-	prepared := PrepareSerialProc(procedure)
-	if got := prepared.Call([]Scmer{NewInt(4)}).Int(); got != 0 {
-		t.Fatalf("recursive lexical procedure result = %d, want 0", got)
-	}
-}
