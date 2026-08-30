@@ -350,6 +350,7 @@ type optimizerMetainfo struct {
 	variableReplacement     map[Symbol]Scmer
 	variableTypes           map[Symbol]*TypeDescriptor
 	numberedTypes           map[NthLocalVar]*TypeDescriptor
+	ownedLocalBindings      map[Symbol]bool
 	setBlacklist            []Symbol
 	nextSlot                *int // pointer to lambda's slot counter; nil outside lambda
 	pendingCallbackParams   []*TypeDescriptor
@@ -790,6 +791,7 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.variableReplacement = make(map[Symbol]Scmer)
 	result.variableTypes = ome.variableTypes
 	result.numberedTypes = ome.numberedTypes
+	result.ownedLocalBindings = ome.ownedLocalBindings
 	for k, v := range ome.variableReplacement {
 		if v.IsNthLocalVar() {
 			result.variableReplacement[k] = v
@@ -1552,7 +1554,9 @@ type localBindingFacts struct {
 	defineIdx int
 	firstUse  int
 	count     int
+	useCount  int
 	used      bool
+	captured  bool
 }
 
 func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
@@ -1641,8 +1645,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
-		var visitNode func(x Scmer, depth int, blacklist []Symbol)
-		visitNode = func(x Scmer, depth int, blacklist []Symbol) {
+		var visitNode func(x Scmer, depth int, captured bool, blacklist []Symbol)
+		visitNode = func(x Scmer, depth int, captured bool, blacklist []Symbol) {
 			if stripped, ok := scmerStripSourceInfo(x); ok {
 				x = stripped
 			}
@@ -1653,7 +1657,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 				subHead, subHeadOk := scmerSymbol(subHeadExpr)
 				if subHeadOk && (subHead == Symbol("define") || subHead == Symbol("set")) {
-					visitNode(sub[2], depth, blacklist)
+					visitNode(sub[2], depth, captured, blacklist)
 					if depth == 0 {
 						if sym, ok := scmerSymbol(sub[1]); ok {
 							variableContent[sym] = sub[2]
@@ -1665,7 +1669,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						params = stripped
 					}
 					if sym, ok := scmerSymbol(params); ok {
-						visitNode(sub[2], depth+1, append(append([]Symbol{}, blacklist...), sym))
+						visitNode(sub[2], depth+1, true, append(append([]Symbol{}, blacklist...), sym))
 					} else if list, ok := scmerSlice(params); ok {
 						blacklist2 := append([]Symbol{}, blacklist...)
 						for _, entry := range list {
@@ -1673,7 +1677,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 								blacklist2 = append(blacklist2, s)
 							}
 						}
-						visitNode(sub[2], depth+1, blacklist2)
+						visitNode(sub[2], depth+1, true, blacklist2)
 					}
 				} else if subHeadOk && (subHead == Symbol("begin") || subHead == Symbol("begin_mut")) {
 					start := 1
@@ -1681,22 +1685,22 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						start = 2
 					}
 					for i := start; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, blacklist)
+						visitNode(sub[i], depth+1, captured, blacklist)
 					}
 				} else if subHeadOk && subHead == Symbol("!begin") {
 					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth, blacklist)
+						visitNode(sub[i], depth, captured, blacklist)
 					}
 				} else if subHeadOk && subHead == Symbol("eval") {
 					usedVariables[Symbol("eval")] = 1
 					for i := 2; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, blacklist)
+						visitNode(sub[i], depth+1, captured, blacklist)
 					}
 				} else {
 					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
-					visitNode(sub[0], depth+1, blacklist)
+					visitNode(sub[0], depth+1, captured, blacklist)
 					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, blacklist)
+						visitNode(sub[i], depth+1, captured, blacklist)
 					}
 				}
 				return
@@ -1710,9 +1714,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					}
 				}
 				if !isBlacklisted {
-					if facts, tracked := bindings[sym]; tracked && !facts.used {
-						facts.firstUse = currentTopIdx
-						facts.used = true
+					if facts, tracked := bindings[sym]; tracked {
+						facts.useCount++
+						if captured {
+							facts.captured = true
+						}
+						if !facts.used {
+							facts.firstUse = currentTopIdx
+							facts.used = true
+						}
 						bindings[sym] = facts
 					}
 					if depth > 0 {
@@ -1725,10 +1735,24 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		for i := bodyStart; i < len(v); i++ {
 			currentTopIdx = i
-			visitNode(v[i], 0, nil)
+			visitNode(v[i], 0, false, nil)
 		}
 		ome2 := ome.CopySharedScope()
 		ome2.beginDepth++
+		ownedLocalBindings := make(map[Symbol]bool, len(ome.ownedLocalBindings)+len(bindings))
+		for sym, owned := range ome.ownedLocalBindings {
+			ownedLocalBindings[sym] = owned
+		}
+		for sym, facts := range bindings {
+			delete(ownedLocalBindings, sym)
+			if earliestDynamicSyntax < 0 {
+				if facts.count == 1 && facts.used && facts.firstUse > facts.defineIdx &&
+					facts.useCount == 1 && !facts.captured {
+					ownedLocalBindings[sym] = true
+				}
+			}
+		}
+		ome2.ownedLocalBindings = ownedLocalBindings
 		slotLimit := -1
 		if headSym == Symbol("begin_mut") {
 			slotIndex := 0
@@ -1987,8 +2011,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	switch {
 	case headOk && (headSym == Symbol("set") || headSym == Symbol("define")) && len(v) == 3:
 		var hasDefinedSym bool
+		var definedSym Symbol
 		if sym, ok := scmerSymbol(v[1]); ok {
 			hasDefinedSym = true
+			definedSym = sym
 			for _, black := range ome.setBlacklist {
 				if black == sym {
 					if useResult {
@@ -2007,6 +2033,17 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		var returnType TypeInfo
 		v[2], returnType = OptimizeEx(v[2], env, ome, true)
 		transferOwnership = returnType.Transfer()
+		if v[1].IsNthLocalVar() {
+			localType := returnType.ToTypeDescriptor()
+			if localType == nil {
+				localType = &TypeDescriptor{Kind: "any", Length: UnknownLength}
+			}
+			localType.Const = false
+			if !ome.ownedLocalBindings[definedSym] {
+				localType.Transfer = false
+			}
+			ome.numberedTypes[v[1].NthLocalVar()] = localType
+		}
 		if hasDefinedSym && ome.lambdaDepth == 0 && ome.beginDepth == 0 {
 			rhs := v[2]
 			if stripped, ok := scmerStripSourceInfo(rhs); ok {
