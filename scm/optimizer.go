@@ -1196,6 +1196,7 @@ func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, sta
 	specialized.OptimizerMeta = &ProcOptimizerMeta{
 		Return:    proc.OptimizerMeta.Return,
 		HasReturn: proc.OptimizerMeta.HasReturn,
+		Sequence:  proc.OptimizerMeta.Sequence,
 	}
 	variant := NewProcStruct(specialized)
 	if proc.Compiled != nil {
@@ -1557,6 +1558,45 @@ type localBindingFacts struct {
 	useCount  int
 	used      bool
 	captured  bool
+}
+
+func optimizerProcSequenceForDefinition(name Symbol, expression Scmer) procSequenceKind {
+	if name != Symbol("split_and_terms") {
+		return procSequenceNone
+	}
+	lambda, ok := scmerSlice(expression)
+	if !ok || len(lambda) < 3 || !scmerIsSymbol(lambda[0], "lambda") {
+		return procSequenceNone
+	}
+	body, ok := scmerSlice(lambda[2])
+	if !ok || len(body) < 8 || (!scmerIsSymbol(body[0], "match") && !scmerIsSymbol(body[0], "match_mut")) {
+		return procSequenceNone
+	}
+	input, ok := scmerSlice(body[1])
+	if !ok || len(input) != 3 || !scmerIsSymbol(input[0], "coalesceNil") {
+		return procSequenceNone
+	}
+	binaryPattern, ok := scmerSlice(body[2])
+	if !ok || len(binaryPattern) != 3 {
+		return procSequenceNone
+	}
+	binaryHead, ok := scmerSlice(binaryPattern[0])
+	if !ok || len(binaryHead) != 2 || !scmerIsSymbol(binaryHead[0], "symbol") || !scmerIsSymbol(binaryHead[1], "and") {
+		return procSequenceNone
+	}
+	binaryResult, ok := scmerSlice(body[3])
+	if !ok || len(binaryResult) < 2 || !scmerIsSymbol(binaryResult[0], "merge") {
+		return procSequenceNone
+	}
+	variadicPattern, ok := scmerSlice(body[4])
+	if !ok || len(variadicPattern) != 3 || !scmerIsSymbol(variadicPattern[0], "cons") {
+		return procSequenceNone
+	}
+	variadicResult, ok := scmerSlice(body[5])
+	if !ok || len(variadicResult) < 3 || !scmerIsSymbol(variadicResult[0], "if") {
+		return procSequenceNone
+	}
+	return procSequenceAndTerms
 }
 
 func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
@@ -2055,7 +2095,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				v[2] = NewSlice([]Scmer{
 					NewSymbol("optimizer_proc_return"),
 					v[2],
-					NewAny(optimizerProcReturnTemplate{Return: procReturn, HasReturn: hasReturn}),
+					NewAny(optimizerProcReturnTemplate{
+						Return:    procReturn,
+						HasReturn: hasReturn,
+						Sequence:  optimizerProcSequenceForDefinition(definedSym, v[2]),
+					}),
 				})
 			}
 		}
