@@ -1,0 +1,115 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# Production-shaped selective dimensions -> fact join followed by a grouped
+# aggregate. The YAML case owns its fixture preparation; the A/B runner fills
+# baseline and candidate independently, then measures only the SQL statement.
+
+metadata:
+  version: "1.0"
+  description: "Selective joined aggregation with an unordered limit"
+  isolated: true
+  ci: true
+  max_regression_pct: 20
+
+test_cases:
+  - name: "Selective dimensions feed fact grouping with limit"
+    performance_rows: 125000
+    warmup: 0
+    timeout: 60
+    threshold_ms: 180000
+    setup:
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_facts"
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_transferables"
+      - sql: "DROP TABLE IF EXISTS fact_group_limit_foundations"
+      - sql: "CREATE TABLE fact_group_limit_foundations (foundation_id INT PRIMARY KEY, foundation_display_name VARCHAR(96)) ENGINE=sloppy"
+      - sql: "CREATE TABLE fact_group_limit_transferables (transferable_id INT PRIMARY KEY, company_id INT, transferable_effective_timestamp BIGINT, transferable_code VARCHAR(24)) ENGINE=sloppy"
+      - sql: "CREATE TABLE fact_group_limit_facts (donation_id INT, company_id INT, foundation_id INT, donation_transferable_id INT, donation_currency VARCHAR(4), donation_source VARCHAR(16), transaction_date BIGINT, transferable_amount INT, fees_management_fee INT, fees_merchant_fee INT) ENGINE=sloppy"
+      # Build a complete 31,250-row slice, then grow the fact table through
+      # MemCP's bulk INSERT ... SELECT path. The final table still contains
+      # 125,000 wide rows, while fixture construction remains inside the shared
+      # A/B setup budget even when other suites fill concurrently.
+      - timeout: 120
+        scm: |
+          (begin
+            (define fact_rows {rows})
+            (define seed_rows (/ fact_rows 4))
+            (define transferable_rows (max 1000 (min 100000 fact_rows)))
+            (define insert_batches (lambda (target cols total rowfn)
+              (reduce (produceN (ceil (/ total 10000)))
+                (lambda (inserted batch) (begin
+                  (define first (* batch 10000))
+                  (define amount (min 10000 (- total first)))
+                  (+ inserted (insert target cols
+                    (map (produceN amount) (lambda (local)
+                      (rowfn (+ first local)))))))) 0)))
+            (insert_batches (table "memcp-tests" "fact_group_limit_foundations")
+              '("foundation_id" "foundation_display_name") 64
+              (lambda (i) (list (+ i 1)
+                (if (equal? i 0) "American Online Giving Foundation, Inc"
+                  (concat "Foundation " (string (+ i 1)))))))
+            (insert_batches (table "memcp-tests" "fact_group_limit_transferables")
+              '("transferable_id" "company_id" "transferable_effective_timestamp" "transferable_code")
+              transferable_rows (lambda (i) (list (+ i 1)
+                (+ 1 (mod i 2000))
+                (+ 1667260800 (* 86400 (mod i 365)))
+                (concat "DR" (string (+ i 1))))))
+            (insert_batches (table "memcp-tests" "fact_group_limit_facts")
+              '("donation_id" "company_id" "foundation_id"
+                "donation_transferable_id" "donation_currency" "donation_source" "transaction_date"
+                "transferable_amount" "fees_management_fee" "fees_merchant_fee")
+              seed_rows (lambda (i) (begin
+                (define transferable_id (+ 1 (mod i transferable_rows)))
+                (list (+ i 1) (+ 1 (mod (- transferable_id 1) 2000))
+                  (+ 1 (mod i 64)) transferable_id
+                  (if (equal? (mod i 3) 0) "USD" "EUR")
+                  (if (equal? (mod i 2) 0) "online" "import")
+                  (+ 1667260800 i) (+ 100 (mod i 500))
+                  (+ 1 (mod i 11)) (+ 1 (mod i 7))))))
+            true)
+      - sql: |
+          INSERT INTO fact_group_limit_facts
+          SELECT donation_id + 31250, company_id, foundation_id,
+            donation_transferable_id, donation_currency, donation_source,
+            transaction_date + 31250, transferable_amount,
+            fees_management_fee, fees_merchant_fee
+          FROM fact_group_limit_facts WHERE donation_id <= 31250
+      - sql: |
+          INSERT INTO fact_group_limit_facts
+          SELECT donation_id + 62500, company_id, foundation_id,
+            donation_transferable_id, donation_currency, donation_source,
+            transaction_date + 62500, transferable_amount,
+            fees_management_fee, fees_merchant_fee
+          FROM fact_group_limit_facts WHERE donation_id <= 62500
+      - scm: "(begin (rebuild) true)"
+    sql: |
+      SELECT
+        fo.foundation_display_name,
+        tr.transferable_effective_timestamp,
+        fa.donation_currency,
+        tr.transferable_code,
+        fa.donation_source,
+        SUM(fa.transferable_amount) AS transferable_amount,
+        SUM(fa.fees_management_fee + fa.fees_merchant_fee) AS total_fees,
+        SUM(fa.fees_management_fee + fa.fees_merchant_fee + fa.transferable_amount) AS gross_amount,
+        SUM(fa.fees_management_fee) AS management_fee,
+        SUM(fa.fees_merchant_fee) AS merchant_fee
+      FROM fact_group_limit_facts fa
+      INNER JOIN fact_group_limit_foundations fo ON fa.foundation_id = fo.foundation_id
+      INNER JOIN fact_group_limit_transferables tr
+        ON fa.donation_transferable_id = tr.transferable_id
+       AND fa.company_id = tr.company_id
+      WHERE fo.foundation_display_name = 'American Online Giving Foundation, Inc'
+        AND tr.transferable_effective_timestamp BETWEEN 1675036800 AND 1682899200
+      GROUP BY
+        fo.foundation_display_name,
+        tr.transferable_effective_timestamp,
+        fa.donation_currency,
+        tr.transferable_code,
+        fa.donation_source
+      LIMIT 10
+    expect: {rows: 10}
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fact_group_limit_facts"
+  - sql: "DROP TABLE IF EXISTS fact_group_limit_transferables"
+  - sql: "DROP TABLE IF EXISTS fact_group_limit_foundations"
