@@ -163,6 +163,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* queryplan.scm Neumann rebuild contract */
 	(import "queryplan.scm")
 	(print "testing queryplan Neumann rebuild contract ...")
+	(assert (jit? normalize_sql_syntax) (jit-enabled?) "import JIT-compiles SQL syntax normalization")
+	(assert (jit? optimize_logical_query) (jit-enabled?) "import JIT-compiles logical query optimization")
+	(assert (jit? build_queryplan) (jit-enabled?) "import JIT-compiles the query compiler entrypoint")
+	(assert (jit? build_queryplan_term) (jit-enabled?) "import JIT-compiles the query compiler term entrypoint")
 	(define tblx "t")
 	(define expr_gc (list 'get_column "t" false "id" false))
 	(assert (match expr_gc '((symbol get_column) (eval tblx) _ col _) col "no") "id" "match get_column for alias t -> id")

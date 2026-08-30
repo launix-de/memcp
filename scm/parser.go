@@ -70,9 +70,10 @@ func EvalAll(source, s string, en *Env) (expression Scmer) {
 	return evalAll(source, s, en, false)
 }
 
-// EvalAllJIT evaluates a Scheme module and attaches native implementations to
-// every top-level procedure that the current emitter can compile. Unsupported
-// procedures stay ordinary Procs and retain the interpreter as a safe fallback.
+// EvalAllJIT evaluates a Scheme module through the same parse, validate,
+// optimize, and recursive JIT pipeline as an explicit (jit ...) call.
+// Unsupported procedures stay ordinary Procs and retain the interpreter as an
+// atomic fallback.
 func EvalAllJIT(source, s string, en *Env) (expression Scmer) {
 	return evalAll(source, s, en, true)
 }
@@ -85,20 +86,37 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
 		if compileProcedures && expression.GetTag() == tagProc {
-			compiled := jitCompileForImport(expression)
-			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil && compiled.Proc().Compiled.AutoImportSafe {
+			compiled := jitCompile(expression)
+			sym, definition := topLevelDefinitionSymbol(code)
+			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil &&
+				(compiled.Proc().Compiled.AutoImportSafe || definition && jitQueryCompilerEntrypoint(sym)) {
 				expression = compiled
-				if sym, ok := topLevelDefinitionSymbol(code); ok {
+				if definition {
 					target := en.definitionTarget()
 					if target.Vars == nil {
 						target.Vars = make(Vars)
 					}
 					target.Vars[sym] = compiled
 				}
+				if JITLog {
+					entry := compiled.Proc().Compiled
+					fmt.Printf("JIT: import %s code=%p bytes=%d expressions=%d dynamic-calls=%d inlined-calls=%d\n",
+						sym, entry.CodePtr, entry.CodeLen, entry.Coverage.Expressions,
+						entry.Coverage.DynamicCalls, entry.Coverage.InlinedCalls)
+				}
 			}
 		}
 	}
 	return
+}
+
+func jitQueryCompilerEntrypoint(sym Symbol) bool {
+	switch sym {
+	case Symbol("normalize_sql_syntax"), Symbol("optimize_logical_query"), Symbol("build_queryplan"), Symbol("build_queryplan_term"):
+		return true
+	default:
+		return false
+	}
 }
 
 func topLevelDefinitionSymbol(code Scmer) (Symbol, bool) {

@@ -62,7 +62,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
 	ptr, arena, reservation := globalJITPool.Alloc(defaultCodeBufSize)
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize, arena: arena, reservation: reservation}
-	codeLen, roots, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
+	codeLen, roots, _, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
 	arena.complete(reservation, buf.stackMaps)
 	if codeLen == 0 {
 		return nil, nil
@@ -75,7 +75,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 // jitCompileProcToExec compiles a Proc body directly into writable executable memory.
 // Returns code length, GC roots, an overflow flag, and whether the call boundary
 // must provide a fresh variadic array that becomes the owned list result.
-func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, bool) {
+func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, bool, JITCoverage) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		si := body.SourceInfo()
@@ -94,7 +94,7 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int,
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
 // executable buffer using Declaration.JITEmit callbacks.
-func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, autoImportSafe bool, needsStableArgs bool) {
+func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, autoImportSafe bool, needsStableArgs bool, coverage JITCoverage) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r == jitCodeOverflowPanic {
@@ -109,6 +109,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			hiddenArgs = nil
 			autoImportSafe = false
 			needsStableArgs = false
+			coverage = JITCoverage{}
 		}
 	}()
 
@@ -254,10 +255,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			case tagFloat:
 				ctx.EmitMakeFloat(ret, desc)
 			default:
-				return 0, nil, false, false, nil, false, false
+				return 0, nil, false, false, nil, false, false, JITCoverage{}
 			}
 		default:
-			return 0, nil, false, false, nil, false, false
+			return 0, nil, false, false, nil, false, false, JITCoverage{}
 		}
 	}
 	// Unified epilog: patch SUB RSP with max frame size, then leave; ret.
@@ -274,7 +275,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs, ctx.AutoImportSafe, ctx.NeedsStableArgs
+	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs, ctx.AutoImportSafe, ctx.NeedsStableArgs, ctx.Coverage
 }
 
 func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
@@ -366,6 +367,13 @@ func jitList8(a, b, c, d, e, f, g, h Scmer) Scmer { return List(a, b, c, d, e, f
 
 func jitMakeScmerSlice(length, capacity int) []Scmer {
 	return make([]Scmer, length, capacity)
+}
+
+func jitMakeReservedList(capacity int) Scmer {
+	if capacity < 0 {
+		capacity = 0
+	}
+	return NewSlice(make([]Scmer, 0, capacity))
 }
 
 func jitStoreScmerAt(address *Scmer, value Scmer) {
@@ -1612,6 +1620,7 @@ func jitCompileRootedCallValue(ctx *JITContext, expr Scmer, sliceBase Reg) JITVa
 }
 
 func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	ctx.Coverage.DynamicCalls++
 	stackStart := ctx.BPOffset
 	callable := jitCompileRootedCallValue(ctx, callableExpr, sliceBase)
 	args := make([]JITValueDesc, 0, len(operands)+2)
@@ -1770,6 +1779,7 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 // result tells the emitter where to place the output.
 // Panics on unsupported expressions (caught by jitCompileExprBodyToExec).
 func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	ctx.Coverage.Expressions++
 	if expr.GetTag() == tagSourceInfo {
 		si := expr.SourceInfo()
 		if ctx.Arena != nil && si.source != "" {
@@ -1931,8 +1941,129 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			ctx.TrackImm(q)
 			return JITValueDesc{Loc: LocImm, Type: q.GetTag(), Imm: q}
+		case "eval", "time":
+			panic("jit: unsupported special form " + name)
+		case "define", "set":
+			if len(list) != 3 {
+				panic("jit: malformed " + name)
+			}
+			binding := list[1]
+			for binding.IsSourceInfo() {
+				binding = binding.SourceInfo().value
+			}
+			if !binding.IsSymbol() {
+				panic("jit: " + name + " target is not a symbol")
+			}
+			value := jitCompileExpr(ctx, list[2], sliceBase, result)
+			ctx.EnsureDesc(&value)
+			stored := value
+			if stored.Loc != LocRegPair && stored.Loc != LocImm && stored.Loc != LocStackPair && stored.Loc != LocInputPair {
+				pair := jitAllocTrackedPair(ctx, stored.Type)
+				stored = jitPlaceIntoPair(ctx, &stored, pair)
+			}
+			off := ctx.AllocStack(16)
+			ctx.EmitStoreScmerToStack(stored, off)
+			if ctx.Env == nil {
+				ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc)}
+			} else if ctx.Env.Vars == nil {
+				ctx.Env.Vars = make(map[Symbol]JITValueDesc)
+			}
+			ctx.Env.Vars[binding.Symbol()] = JITValueDesc{
+				Loc:           LocStackPair,
+				Type:          stored.Type,
+				StackOff:      off,
+				NoHeapPointer: stored.NoHeapPointer,
+				Rooted:        true,
+			}
+			return stored
+		case "setN":
+			if len(list) != 3 {
+				panic("jit: malformed setN")
+			}
+			targetVar := list[1]
+			for targetVar.IsSourceInfo() {
+				targetVar = targetVar.SourceInfo().value
+			}
+			if !targetVar.IsNthLocalVar() {
+				panic("jit: setN target is not a numbered local")
+			}
+			idx := int(targetVar.NthLocalVar())
+			if idx < 0 || idx >= ctx.LocalSlotCount || !ctx.SliceBaseTracksRSP {
+				panic("jit: setN target outside invocation frame")
+			}
+			value := jitCompileExpr(ctx, list[2], sliceBase, result)
+			ctx.EnsureDesc(&value)
+			if value.Loc != LocRegPair && value.Loc != LocImm && value.Loc != LocStackPair && value.Loc != LocInputPair {
+				pair := jitAllocTrackedPair(ctx, value.Type)
+				value = jitPlaceIntoPair(ctx, &value, pair)
+			}
+			ctx.EmitStoreScmerToStack(value, int32(idx*16))
+			return value
+		case "parser", "optimizer_proc_return":
+			panic("jit: unsupported special form " + name)
+		case "begin":
+			if len(list) == 1 {
+				imm := NewNil()
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			}
+			outerEnv := ctx.Env
+			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc), Outer: outerEnv}
+			defer func() { ctx.Env = outerEnv }()
+			for _, form := range list[1 : len(list)-1] {
+				value := jitCompileExpr(ctx, form, sliceBase, JITValueDesc{Loc: LocAny})
+				ctx.FreeDesc(&value)
+			}
+			return jitCompileExpr(ctx, list[len(list)-1], sliceBase, result)
+		case "begin_mut":
+			panic("jit: unsupported special form begin_mut")
+		case "!begin":
+			if len(list) == 1 {
+				imm := NewNil()
+				ctx.TrackImm(imm)
+				return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
+			}
+			for _, form := range list[1 : len(list)-1] {
+				value := jitCompileExpr(ctx, form, sliceBase, JITValueDesc{Loc: LocAny})
+				ctx.FreeDesc(&value)
+			}
+			return jitCompileExpr(ctx, list[len(list)-1], sliceBase, result)
 		case "!list":
 			return jitCompileStackList(ctx, list, sliceBase, result)
+		case "!!list":
+			var capacityExpr Scmer
+			switch {
+			case len(list) == 3 && list[1].IsNthLocalVar():
+				start := int(list[1].NthLocalVar())
+				capacity := int(ToInt(list[2]))
+				if capacity < 0 {
+					capacity = 0
+				}
+				if start < 0 || start+capacity > ctx.LocalSlotCount {
+					panic("jit: !!list slots outside invocation frame")
+				}
+				capacityExpr = NewInt(int64(capacity))
+			case len(list) == 2:
+				capacityExpr = list[1]
+			default:
+				panic("jit: malformed !!list")
+			}
+			capacity := jitCompileExpr(ctx, capacityExpr, sliceBase, JITValueDesc{Loc: LocAny})
+			ctx.AutoImportSafe = false
+			target := jitEnsureResultPair(ctx, result)
+			out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitMakeReservedList), []JITValueDesc{capacity}, target)
+			out.Type = tagSlice
+			out.KnownSliceLen = 0
+			if capacityExpr.IsInt() {
+				out.KnownSliceCap = int32(ToInt(capacityExpr))
+				if out.KnownSliceCap < 0 {
+					out.KnownSliceCap = 0
+				}
+				out.SliceSizeKnown = true
+			}
+			return out
+		case "parallel":
+			panic("jit: unsupported special form parallel")
 		case "match", "match_mut":
 			return jitCompileMatch(ctx, list, sliceBase, result)
 		case "if":
@@ -2273,6 +2404,14 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		if !ok {
 			return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 		}
+		// Higher-order declaration emitters still have an incomplete phi contract:
+		// reduce, for example, can currently lose its neutral value while inlining
+		// a callback. Keep the surrounding expression native, but invoke these
+		// declarations through their correct runtime implementation until callback
+		// lowering becomes its own JIT milestone.
+		if jitDeclarationHasCallback(decl) {
+			return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
+		}
 		if name == "strlike" {
 			panic("jit: strlike emitter is not supported")
 		}
@@ -2283,6 +2422,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 		}
 		if decl.Type != nil && decl.Type.JITEmit != nil {
+			ctx.Coverage.InlinedCalls++
 			if !jitAutoImportReturnSafe(name, decl.Type.Return) {
 				ctx.AutoImportSafe = false
 			}
@@ -2504,6 +2644,18 @@ func jitDeclarationParam(decl *Declaration, index int) *TypeDescriptor {
 		return last
 	}
 	return nil
+}
+
+func jitDeclarationHasCallback(decl *Declaration) bool {
+	if decl == nil || decl.Type == nil {
+		return false
+	}
+	for _, param := range decl.Type.Params {
+		if param != nil && param.Kind == "func" {
+			return true
+		}
+	}
+	return false
 }
 
 func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer, sliceBase Reg) JITValueDesc {
