@@ -1709,18 +1709,50 @@ particular star shape. */
 		(quote dphyp)
 		(if hypergraph (quote goo-dphyp) (quote decomposed-dphyp)))))
 
-(define join_order_record_exact_cost_inputs (lambda (nodes predicates)
+(define planner_record_table_statistics_guards (lambda (sources)
+	(reduce (filter sources source_is_base_table?) (lambda (_ src)
+		(begin
+			(define token (table_planner_statistics_token
+				(table (source_schema src) (source_relation src))))
+			(planner_record_guard_condition
+				(list (quote equal?)
+					(list (quote table_planner_statistics_token)
+						(list (quote table) (source_schema src) (source_relation src)))
+					token)))) nil)))
+
+(define planner_table_statistics_aliases (lambda (sources)
+	(map (filter sources source_is_base_table?) source_alias)))
+
+/* Equality and join selectivity depend only on immutable table statistics.
+Text-pattern priors additionally depend on the current pattern value, so keep
+that value in the guard while replacing repeated statistic derivation with one
+O(1) dependency token per base table. */
+(define planner_selectivity_value_dependent? (lambda (expr)
+	(match expr
+		((symbol strlike) _value _pattern) true
+		((quote strlike) _value _pattern) true
+		((symbol strlike) _value _pattern _collation) true
+		((quote strlike) _value _pattern _collation) true
+		_ false)))
+
+(define join_order_record_cost_dependencies (lambda (sources nodes predicates)
 	(begin
+		(planner_record_table_statistics_guards sources)
+		(define table_aliases (planner_table_statistics_aliases sources))
+		/* Derived and synthetic nodes have no table snapshot whose token can cover
+		their runtime cardinality. Preserve the exact guard for those nodes. */
 		(reduce nodes (lambda (_ node)
-			(planner_record_guard_condition
-				(list (quote equal?)
-					(if (> (count node) 2) (nth node 2) (cadr node))
-					(cadr node)))) nil)
+			(if (contains? table_aliases (car node))
+				nil
+				(planner_record_guard_condition
+					(list (quote equal?)
+						(if (> (count node) 2) (nth node 2) (cadr node))
+						(cadr node))))) nil)
 		(reduce predicates (lambda (_ predicate)
-			(planner_record_guard_condition
-				(list (quote equal?)
-					(join_order_pred_selectivity_expr predicate)
-					(join_order_pred_selectivity predicate)))) nil))))
+			(begin
+				(define expr (join_order_pred_expr predicate))
+				(if (planner_selectivity_value_dependent? expr)
+					(planner_record_session_value_guards expr) nil))) nil))))
 
 /* Every subset containing one vertex and any selection of its regular-edge
 neighbors is connected. A degree d therefore proves at least 2^d connected
@@ -1832,7 +1864,7 @@ running DP over a wide projection-only graph. */
 					(if (join_order_plan_satisfies_driver_property? plan required_drivers) plan nil))
 				nil)))))
 
-(define join_order_adaptive (lambda (nodes raw_predicates required_drivers)
+(define join_order_adaptive (lambda (sources nodes raw_predicates required_drivers)
 	(begin
 		(define aliases (map nodes car))
 		/* Non-inner join constraints are hypergraph constraints even when their ON
@@ -1862,7 +1894,7 @@ running DP over a wide projection-only graph. */
 		fixed physical driver. Guard every cost input once. Pairwise DP inequalities
 		are deterministic consequences of these inputs and retaining all of them
 		would duplicate complete intermediate plan trees. */
-		(join_order_record_exact_cost_inputs nodes predicates)
+		(join_order_record_cost_dependencies sources nodes predicates)
 		(define result (if (not (nil? functional_relation_plan))
 			(list functional_relation_plan (- (count aliases) 1))
 			(if exact
@@ -2277,7 +2309,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 										(join_optimizer_outer_requirements stages relation_units
 											segment default_alias alias_index lookup)
 										(list (source_alias driver)))))))))))
-		(define planned (join_order_adaptive
+		(define planned (join_order_adaptive segment
 			(join_optimizer_metadata_nodes stages relation_units
 				segment default_alias alias_index graph fixed_functional_pair)
 			predicates

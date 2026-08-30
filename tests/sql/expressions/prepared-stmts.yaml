@@ -587,6 +587,7 @@ test_cases:
         (planning "__memcp_queryplan_observed_session_keys" (newsession))
         (define result (with_session planning (lambda ()
           (join_order_adaptive
+            '()
             (list
               (list "left" (planning "left") (list (list (quote context) "session") "left"))
               (list "right" (planning "right") (list (list (quote context) "session") "right")))
@@ -604,6 +605,40 @@ test_cases:
           (error (concat "join guard did not track cardinality crossover: " (string guard)))))
     expect:
       data: ["ok"]
+
+  - name: "Cached-plan guard omits unused planner bindings"
+    scm: |
+      (begin
+        (define planning (sql_queryplan_compile_session (context "session")))
+        (define guard (with_session planning (lambda ()
+          (begin
+            (planner_guard_runtime_binding (list (quote +) 1 2))
+            (define used (planner_guard_runtime_binding (list (quote -) 5 3)))
+            (planner_record_guard_condition (list (quote equal?) used 2))
+            (sql_queryplan_guard_from_session planning)))))
+        (match guard
+          (cons (cons (symbol lambda) (cons parameters (cons _body '()))) arguments)
+            (and (equal? (count parameters) 1) (equal? (count arguments) 1))
+          _ false))
+    expect:
+      data: [true]
+
+  - name: "Cached formula binds runtime session without rewriting quoted data"
+    scm: |
+      (begin
+        (define quoted_session_call (list (quote session) "quoted"))
+        (define bound (sql_queryplan_bind_execution_session
+          (list (quote begin)
+            (list (quote context) "session")
+            (list (quote session) "v1")
+            (list (quote quote) quoted_session_call))))
+        (equal? bound
+          (list (quote begin)
+            (quote __memcp_execution_session)
+            (list (quote __memcp_execution_session) "v1")
+            (list (quote quote) quoted_session_call))))
+    expect:
+      data: [true]
 
   - name: "Cached SQL join recompiles after cardinality guard miss"
     scm: |

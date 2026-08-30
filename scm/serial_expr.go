@@ -23,6 +23,14 @@ package scm
 // must never be shared between physical workers.
 type serialExpr func(*Env) Scmer
 
+type serialPrepareContext struct {
+	active map[*Proc]bool
+}
+
+func newSerialPrepareContext() *serialPrepareContext {
+	return &serialPrepareContext{active: make(map[*Proc]bool)}
+}
+
 // serialCallFrames owns the nested variadic argument arrays used by one
 // serially executed callback. A frame is acquired before evaluating operands,
 // so recursive calls naturally use the next depth. Native declarations which
@@ -30,6 +38,34 @@ type serialExpr func(*Env) Scmer
 type serialCallFrames struct {
 	frames [][]Scmer
 	depth  int
+}
+
+// serialExprMayCaptureEnv detects forms which can retain the lexical scope
+// created by begin. Without one of these forms the scope is call-local scratch:
+// its map can be cleared and reused by the next serial invocation.
+func serialExprMayCaptureEnv(expression Scmer) bool {
+	expression = serialProcBody(expression)
+	if !expression.IsSlice() {
+		return false
+	}
+	items := expression.Slice()
+	if len(items) == 0 {
+		return false
+	}
+	if items[0].IsSymbol() {
+		switch items[0].String() {
+		case "quote":
+			return false
+		case "lambda", "parser":
+			return true
+		}
+	}
+	for _, item := range items {
+		if serialExprMayCaptureEnv(item) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *serialCallFrames) acquire(size int) []Scmer {
@@ -47,7 +83,7 @@ func (s *serialCallFrames) release() {
 	s.depth--
 }
 
-func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
+func prepareSerialExpr(proc *Proc, expression Scmer, context *serialPrepareContext) serialExpr {
 	expression = serialProcBody(expression)
 	if expression.IsNthLocalVar() {
 		index := int(expression.NthLocalVar())
@@ -80,8 +116,32 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 		case "quote":
 			value := items[1]
 			return func(*Env) Scmer { return value }
+		case "begin":
+			if !serialExprMayCaptureEnv(expression) {
+				operands := prepareSerialOperands(proc, items[1:], context)
+				scope := Env{Vars: make(Vars)}
+				return func(en *Env) Scmer {
+					clear(scope.Vars)
+					scope.VarsNumbered = en.VarsNumbered
+					scope.Outer = en
+					result := NewNil()
+					for _, operand := range operands {
+						result = operand(&scope)
+					}
+					return result
+				}
+			}
+		case "!begin":
+			operands := prepareSerialOperands(proc, items[1:], context)
+			return func(en *Env) Scmer {
+				result := NewNil()
+				for _, operand := range operands {
+					result = operand(en)
+				}
+				return result
+			}
 		case "and":
-			operands := prepareSerialOperands(proc, items[1:])
+			operands := prepareSerialOperands(proc, items[1:], context)
 			return func(en *Env) Scmer {
 				unknown := false
 				for _, operand := range operands {
@@ -98,7 +158,7 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 				return NewBool(true)
 			}
 		case "or":
-			operands := prepareSerialOperands(proc, items[1:])
+			operands := prepareSerialOperands(proc, items[1:], context)
 			return func(en *Env) Scmer {
 				unknown := false
 				for _, operand := range operands {
@@ -115,7 +175,7 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 				return NewBool(false)
 			}
 		case "if":
-			operands := prepareSerialOperands(proc, items[1:])
+			operands := prepareSerialOperands(proc, items[1:], context)
 			return func(en *Env) Scmer {
 				i := 0
 				for i+1 < len(operands) {
@@ -130,7 +190,7 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 				return NewNil()
 			}
 		case "coalesce", "coalesceNil":
-			operands := prepareSerialOperands(proc, items[1:])
+			operands := prepareSerialOperands(proc, items[1:], context)
 			coalesceNil := items[0].String() == "coalesceNil"
 			return func(en *Env) Scmer {
 				for i, operand := range operands {
@@ -156,7 +216,7 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 		declaration := DeclarationForValue(native)
 		if declaration != nil && !declaration.RetainsCallArgs {
 			fn := native.Func()
-			operands := prepareSerialOperands(proc, items[1:])
+			operands := prepareSerialOperands(proc, items[1:], context)
 			frames := serialCallFrames{}
 			return func(en *Env) Scmer {
 				args := frames.acquire(len(operands))
@@ -169,13 +229,55 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 		}
 	}
 
+	// A fixed lexical procedure binding is immutable for the lifetime of this
+	// callback closure. Prepare it once and pass a borrowed argument frame; the
+	// callee copies fixed parameters into its own reusable environment before it
+	// can return. Recursive bindings retain Eval's existing call semantics.
+	if callable, ok := serialProcResolveLexicalProcedure(proc, items[0]); ok {
+		callee := callable.Proc()
+		params := serialProcBody(callee.Params)
+		if params.IsSlice() && len(params.Slice()) == len(items)-1 && !context.active[callee] {
+			operands := prepareSerialOperands(proc, items[1:], context)
+			borrowed := optimizeProcToSerialBorrowedWithContext(callable, context)
+			frames := serialCallFrames{}
+			return func(en *Env) Scmer {
+				args := frames.acquire(len(operands))
+				defer frames.release()
+				for i, operand := range operands {
+					args[i] = operand(en)
+				}
+				return borrowed(args)
+			}
+		}
+	}
+
 	return func(en *Env) Scmer { return Eval(expression, en) }
 }
 
-func prepareSerialOperands(proc *Proc, expressions []Scmer) []serialExpr {
+func serialProcResolveLexicalProcedure(proc *Proc, value Scmer) (Scmer, bool) {
+	value = serialProcBody(value)
+	if value.GetTag() == tagProc {
+		return value, true
+	}
+	if !value.IsSymbol() {
+		return NewNil(), false
+	}
+	environment := proc.En
+	if environment == nil {
+		environment = &Globalenv
+	}
+	binding := environment.FindRead(mustSymbol(value))
+	if binding == nil {
+		return NewNil(), false
+	}
+	resolved, ok := binding.Vars[mustSymbol(value)]
+	return resolved, ok && resolved.GetTag() == tagProc
+}
+
+func prepareSerialOperands(proc *Proc, expressions []Scmer, context *serialPrepareContext) []serialExpr {
 	result := make([]serialExpr, len(expressions))
 	for i, expression := range expressions {
-		result[i] = prepareSerialExpr(proc, expression)
+		result[i] = prepareSerialExpr(proc, expression, context)
 	}
 	return result
 }

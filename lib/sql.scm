@@ -199,6 +199,26 @@ functional planner return value. */
 		(map (produceN (coalesceNil (preparations "count") 0))
 			(lambda (idx) (preparations (concat "preparation:" idx)))))))
 
+/* cached_parse formulas are also a public low-level interface and may be
+evaluated without sql_execute_formula. Normal SQL execution shadows this proxy
+with its concrete session; direct users retain the previous GLS lookup. */
+(define __memcp_execution_session (lambda args
+	(apply (context "session") args)))
+
+(define sql_queryplan_bind_execution_session (lambda (expr)
+	(match expr
+		((symbol quote) _value) expr
+		((symbol context) "session") (quote __memcp_execution_session)
+		((quote context) "session") (quote __memcp_execution_session)
+		(cons (symbol session) args) (cons (quote __memcp_execution_session)
+			(map args sql_queryplan_bind_execution_session))
+		(cons (quote session) args) (cons (quote __memcp_execution_session)
+			(map args sql_queryplan_bind_execution_session))
+		(cons head tail) (cons
+			(sql_queryplan_bind_execution_session head)
+			(map tail sql_queryplan_bind_execution_session))
+		_ expr)))
+
 (define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
 	(begin
 		(define covered (planning_session "__memcp_queryplan_guarded_session_keys"))
@@ -237,6 +257,15 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			(map tail sql_queryplan_runtime_guard_expr))
 		_ expr)))
 
+(define sql_queryplan_guard_references_symbol? (lambda (expr target)
+	(match expr
+		((symbol quote) _value) false
+		(cons head tail) (or
+			(sql_queryplan_guard_references_symbol? head target)
+			(reduce tail (lambda (found item)
+				(or found (sql_queryplan_guard_references_symbol? item target))) false))
+		_ (equal? expr target))))
+
 (define sql_queryplan_guard_from_session (lambda (planning_session)
 	(begin
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
@@ -253,10 +282,15 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			_ true))
 		(define binding_session (planning_session "__memcp_queryplan_guard_bindings"))
 		(define binding_catalog (planning_session "__memcp_queryplan_guard_binding_catalog"))
-		(define bindings (if (nil? binding_catalog)
+		(define all_bindings (if (nil? binding_catalog)
 			(map (binding_session) (lambda (key) (binding_session key)))
 			(map (produceN (coalesceNil (binding_session "count") 0))
 				(lambda (idx) (binding_session (concat "binding:" idx))))))
+		/* Cost enumeration may bind expressions which no surviving guard uses.
+		Materializing those lambda arguments would retain the discarded planning
+		work on every cached execution. */
+		(define bindings (filter all_bindings (lambda (binding)
+			(sql_queryplan_guard_references_symbol? raw_guard (car binding)))))
 		(sql_queryplan_runtime_guard_expr (if (empty_list? bindings)
 			raw_guard
 			(cons
@@ -319,9 +353,12 @@ otherwise side-effect-free guard. */
 					false
 					(begin (prepared_catalog (car preparation) true) true)))))
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
+			(define bound_plan (sql_queryplan_bind_execution_session (cadr variant)))
 			(define dispatch (if (equal? (car variant) true)
-				(cadr variant)
-				(list (quote if) (car variant) (cadr variant) tail_expr)))
+				bound_plan
+				(list (quote if)
+					(sql_queryplan_bind_execution_session (car variant))
+					bound_plan tail_expr)))
 			(if (empty_list? new_preparations)
 				dispatch
 				(cons (quote !begin)
@@ -424,8 +461,9 @@ On parse error the result is not cached. */
 			(define exact_compile (lambda ()
 				(begin
 					(define compile_policy (sql_compile_table_policy policy))
-					(optimize (with_session session (lambda ()
-						(parse_fn schema parse_query compile_policy)))))))
+					(sql_queryplan_bind_execution_session
+						(optimize (with_session session (lambda ()
+							(parse_fn schema parse_query compile_policy))))))))
 			(define formula (if (or compile_diagnostic (not guarded_select))
 				(if compile_diagnostic
 					(exact_compile)
@@ -440,8 +478,10 @@ On parse error the result is not cached. */
 them to with_autocommit so transaction setup does not rediscover either value
 through goroutine-local context lookups. */
 (define sql_execute_formula (lambda (session execution_context formula resultrow)
-	(with_autocommit session execution_context
-		(lambda () (eval (source "SQL Query" 1 1 formula))))))
+	(begin
+		(define __memcp_execution_session session)
+		(with_autocommit session execution_context
+			(lambda () (eval (source "SQL Query" 1 1 formula)))))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),

@@ -101,6 +101,10 @@ func OptimizeProcToSerialFunction(val Scmer) func(...Scmer) Scmer {
 }
 
 func optimizeProcToSerialBorrowed(val Scmer) func([]Scmer) Scmer {
+	return optimizeProcToSerialBorrowedWithContext(val, newSerialPrepareContext())
+}
+
+func optimizeProcToSerialBorrowedWithContext(val Scmer, context *serialPrepareContext) func([]Scmer) Scmer {
 	/* API contract:
 	- the returned func must only be called with the correct number of declared parameters
 	- thus we will perform no boundary checks
@@ -132,6 +136,8 @@ func optimizeProcToSerialBorrowed(val Scmer) func([]Scmer) Scmer {
 		captured := val
 		return func([]Scmer) Scmer { return captured }
 	}
+	context.active[proc] = true
+	defer delete(context.active, proc)
 	p := *proc
 	// A Proc keeps its source body even after native compilation. Execute the
 	// attached entry point now; future scan specialization may recompile the same
@@ -196,7 +202,7 @@ func optimizeProcToSerialBorrowed(val Scmer) func([]Scmer) Scmer {
 	}
 	var vars Vars
 	en := &Env{Vars: vars, VarsNumbered: make([]Scmer, numVars), Outer: p.En, Nodefine: false}
-	body := prepareSerialExpr(&p, p.Body)
+	body := prepareSerialExpr(&p, p.Body, context)
 	params := p.Params
 	if stripped, ok := scmerStripSourceInfo(params); ok {
 		params = stripped
