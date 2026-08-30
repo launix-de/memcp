@@ -250,7 +250,7 @@ To optimize memcp for a query you must consider the following steps:
  - once the existing operators do not yield any more speedup but you think, there is more potential, you are allowed to dig into operator's internas: optimizing corner cases, reducing allocations, introducing new operators or intermediate result buffers like recset
  - for operators, regard the following hints: Avoid further branches inside loops. Try to keep setup and loops allocation-free (e.g. using stack buffers), parallelize big workloads into big-enough chunks (often at shard boundaries), cap the number of parallel goroutines of one operator by the session/transaction's boundaries.
  - make sure you do not produce performance regressions -> there is a CI runner with A/B benchmarks master vs PR - it does not allow to decrease query performance more than 20% for any of the test cases.
- - every performance optimization PR must include A/B measurements for the query being optimized in the PR description. State the fixture/setup, warmup and sample configuration, baseline and PR latency, and the absolute or relative change. When the CI master-vs-PR result is available, add that authoritative result to the PR description as well.
+ - every performance optimization PR must include A/B measurements for the query being optimized in the PR description. State the fixture/setup, warmup and sample configuration, baseline and PR latency, and the absolute or relative change.
  - do not run the fulltest alone - always commit no-verify after the needle testcases work and look sane, push PR and watch the CI's results
 
 ## Release Process
