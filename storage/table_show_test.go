@@ -187,6 +187,10 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	})
 	atomic.StoreUint64(&tbl.Columns[1].DistinctEstimate, 17)
 	tbl.publishShowColumnsSnapshot()
+	publishedToken := tbl.PlannerStatsToken()
+	if publishedToken == 0 {
+		t.Fatal("published planner statistics have no dependency token")
+	}
 
 	root := tbl.PlannerStatistics().FastDict()
 	rowCount, ok := root.Get(scm.NewString("row_count"))
@@ -218,8 +222,15 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	if tbl.PlannerStatistics().FastDict() != root {
 		t.Fatal("planner statistics rebuilt an already-published snapshot")
 	}
+	if got := tbl.PlannerStatsToken(); got != publishedToken {
+		t.Fatalf("immutable planner statistics changed token from %d to %d", publishedToken, got)
+	}
 
 	tbl.adjustPlannerRows(9)
+	adjustedToken := tbl.PlannerStatsToken()
+	if adjustedToken == publishedToken {
+		t.Fatal("planner row-count update retained a stale dependency token")
+	}
 	updatedRoot := tbl.PlannerStatistics().FastDict()
 	updatedRows, _ := updatedRoot.Get(scm.NewString("row_count"))
 	if updatedRows.Int() != 100 {

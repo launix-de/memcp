@@ -555,6 +555,7 @@ type table struct {
 	// load it without locking; metadata writers replace the complete snapshot.
 	showColumnsSnapshot atomic.Pointer[tableShowColumnsSnapshot]
 	columnNamesSnapshot atomic.Pointer[tableColumnNamesSnapshot]
+	plannerStatsToken   atomic.Uint64 // process-unique dependency token for cached cost plans
 	// plannerRowEstimate is deliberately approximate. Rebuild/statistics
 	// publication replaces it atomically; query compilation must never load a
 	// cold shard or take a shard read lock merely to obtain a row estimate.
@@ -598,6 +599,16 @@ type table struct {
 	repartitionPendingMu         sync.Mutex
 	repartitionPendingDels       []translatedRecid
 	repartitionPendingSourceDels []pendingSourceDelete
+}
+
+var nextPlannerStatsToken atomic.Uint64
+
+func (t *table) publishPlannerStatsToken() {
+	t.plannerStatsToken.Store(nextPlannerStatsToken.Add(1))
+}
+
+func (t *table) PlannerStatsToken() uint64 {
+	return t.plannerStatsToken.Load()
 }
 
 func (t *table) signalTransactionDrain() {
@@ -810,6 +821,7 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 			replacement.statistics = stats
 			if t.showColumnsSnapshot.CompareAndSwap(nil, replacement) {
 				t.columnNamesSnapshot.Store(replacement.columnNames)
+				t.publishPlannerStatsToken()
 				return
 			}
 			continue
@@ -818,6 +830,7 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 		replacement.statistics = stats
 		if t.showColumnsSnapshot.CompareAndSwap(current, replacement) {
 			t.columnNamesSnapshot.Store(replacement.columnNames)
+			t.publishPlannerStatsToken()
 			return
 		}
 	}
@@ -1279,10 +1292,12 @@ func (t *table) adjustPlannerRows(delta int64) {
 	for {
 		current := t.showColumnsSnapshot.Load()
 		if current == nil || current.plannerValue.IsNil() {
+			t.publishPlannerStatsToken()
 			return
 		}
 		columns, ok := current.plannerValue.FastDict().Get(scm.NewString("columns"))
 		if !ok {
+			t.publishPlannerStatsToken()
 			return
 		}
 		plannerRoot := scm.NewFastDictValue(2)
@@ -1292,6 +1307,7 @@ func (t *table) adjustPlannerRows(delta int64) {
 		replacement.plannerValue = scm.NewFastDict(plannerRoot)
 		replacement.rowEstimate = uint(rowEstimate)
 		if t.showColumnsSnapshot.CompareAndSwap(current, &replacement) {
+			t.publishPlannerStatsToken()
 			return
 		}
 	}
@@ -1520,12 +1536,14 @@ func (t *table) publishShowColumnsSnapshot() scm.Scmer {
 	snapshot := t.buildShowColumnsSnapshot(t.CountEstimate())
 	t.columnNamesSnapshot.Store(snapshot.columnNames)
 	t.showColumnsSnapshot.Store(snapshot)
+	t.publishPlannerStatsToken()
 	return snapshot.value
 }
 
 func (t *table) invalidateShowColumnsSnapshot() {
 	t.publishColumnNamesSnapshot()
 	t.showColumnsSnapshot.Store(nil)
+	t.publishPlannerStatsToken()
 }
 
 // ResolveColumnName reads immutable DDL metadata without scanning SHOW rows.

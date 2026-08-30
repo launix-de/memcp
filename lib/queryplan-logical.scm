@@ -250,7 +250,7 @@ connection state. The outer session owns their concurrent flight, while the
 query generation is the scope that releases them after execution. */
 (define planner_queryplan_observation_session_expr (lambda ()
 	(list
-		(list (quote context) "session")
+		(quote __memcp_execution_session)
 		"get_or_compute_scoped"
 		(list (quote context) "query")
 		"__memcp_queryplan_observations"

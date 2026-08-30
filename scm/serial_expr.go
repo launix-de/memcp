@@ -32,6 +32,34 @@ type serialCallFrames struct {
 	depth  int
 }
 
+// serialExprMayCaptureEnv detects forms which can retain the lexical scope
+// created by begin. Without one of these forms the scope is call-local scratch:
+// its map can be cleared and reused by the next serial invocation.
+func serialExprMayCaptureEnv(expression Scmer) bool {
+	expression = serialProcBody(expression)
+	if !expression.IsSlice() {
+		return false
+	}
+	items := expression.Slice()
+	if len(items) == 0 {
+		return false
+	}
+	if items[0].IsSymbol() {
+		switch items[0].String() {
+		case "quote":
+			return false
+		case "lambda", "parser", "eval":
+			return true
+		}
+	}
+	for _, item := range items {
+		if serialExprMayCaptureEnv(item) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *serialCallFrames) acquire(size int) []Scmer {
 	depth := s.depth
 	s.depth++
@@ -80,6 +108,30 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 		case "quote":
 			value := items[1]
 			return func(*Env) Scmer { return value }
+		case "begin":
+			if !serialExprMayCaptureEnv(expression) {
+				operands := prepareSerialOperands(proc, items[1:])
+				scope := Env{Vars: make(Vars)}
+				return func(en *Env) Scmer {
+					clear(scope.Vars)
+					scope.VarsNumbered = en.VarsNumbered
+					scope.Outer = en
+					result := NewNil()
+					for _, operand := range operands {
+						result = operand(&scope)
+					}
+					return result
+				}
+			}
+		case "!begin":
+			operands := prepareSerialOperands(proc, items[1:])
+			return func(en *Env) Scmer {
+				result := NewNil()
+				for _, operand := range operands {
+					result = operand(en)
+				}
+				return result
+			}
 		case "and":
 			operands := prepareSerialOperands(proc, items[1:])
 			return func(en *Env) Scmer {

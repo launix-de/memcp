@@ -105,3 +105,32 @@ func TestPrepareSerialProcDoesNotReuseRetainedCallArguments(t *testing.T) {
 		t.Fatalf("second retained result = %d, want 2", got)
 	}
 }
+
+func TestPrepareSerialProcReusesNonCapturingBeginScope(t *testing.T) {
+	source := preparedTestProc(t, "(lambda (value) (begin (define doubled (+ value value)) (+ doubled 1)))")
+	prepared := PrepareSerialProc(source)
+	args := []Scmer{NewInt(11)}
+	if got := prepared.Call(args).Int(); got != 23 {
+		t.Fatalf("first begin result = %d, want 23", got)
+	}
+	args[0] = NewInt(4)
+	if got := prepared.Call(args).Int(); got != 9 {
+		t.Fatalf("reused begin result = %d, want 9", got)
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		prepared.Call(args)
+	}); allocations > 6 {
+		t.Fatalf("non-capturing begin allocated %.2f objects per call; body=%s", allocations, source.Proc().Body.String())
+	}
+}
+
+func TestSerialExprDetectsCapturedBeginScope(t *testing.T) {
+	source := preparedTestProc(t, "(lambda (value) (begin (define captured value) (lambda () captured)))")
+	if !serialExprMayCaptureEnv(source.Proc().Body) {
+		t.Fatalf("capturing begin was classified as reusable: %s", source.Proc().Body.String())
+	}
+	dynamic := preparedTestProc(t, "(lambda (value) (begin (define captured value) (eval '(lambda () captured))))")
+	if !serialExprMayCaptureEnv(dynamic.Proc().Body) {
+		t.Fatalf("eval-created closure was classified as reusable: %s", dynamic.Proc().Body.String())
+	}
+}
