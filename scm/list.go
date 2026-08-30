@@ -982,6 +982,107 @@ func asAssoc(v Scmer, ctx string) ([]Scmer, *FastDict) {
 	panic(fmt.Sprintf("%s expects a dictionary", ctx))
 }
 
+const orderedUniqueHashThreshold = 8
+
+type orderedUniqueBuilder struct {
+	linear       []Scmer
+	dict         *FastDict
+	hashDomain   uint8
+	hashDisabled bool
+}
+
+func orderedUniqueCanonical(value Scmer) (Scmer, uint8, bool) {
+	// FastDict hashes type tags while Equal deliberately coerces across types.
+	// Hash only a proven homogeneous domain; add degrades to the exact linear
+	// Equal path as soon as a value leaves that domain.
+	switch value.GetTag() {
+	case tagString, tagSymbol, tagCString, tagBString:
+		return NewString(value.String()), 1, true
+	case tagInt:
+		return value, 2, true
+	case tagFloat:
+		if value.Float() == 0 {
+			return NewFloat(0), 3, true
+		}
+		return value, 3, true
+	case tagBool:
+		return value, 4, true
+	case tagNil:
+		return value, 5, true
+	case tagDate:
+		return value, 6, true
+	default:
+		return NewNil(), 0, false
+	}
+}
+
+func keepOrderedUniqueFirst(oldValue, _ Scmer) Scmer {
+	return oldValue
+}
+
+func (builder *orderedUniqueBuilder) promote() {
+	if builder.hashDisabled || len(builder.linear) < orderedUniqueHashThreshold {
+		return
+	}
+	dict := NewFastDictValue(len(builder.linear))
+	domain := uint8(0)
+	for _, value := range builder.linear {
+		key, valueDomain, ok := orderedUniqueCanonical(value)
+		if !ok || (domain != 0 && domain != valueDomain) {
+			builder.hashDisabled = true
+			return
+		}
+		domain = valueDomain
+		dict.Set(key, value, keepOrderedUniqueFirst)
+	}
+	builder.linear = nil
+	builder.dict = dict
+	builder.hashDomain = domain
+}
+
+func (builder *orderedUniqueBuilder) degrade() {
+	pairs := builder.dict.Pairs
+	builder.linear = make([]Scmer, len(pairs)/2)
+	for i := range builder.linear {
+		builder.linear[i] = pairs[i*2+1]
+	}
+	builder.dict = nil
+	builder.hashDisabled = true
+}
+
+func (builder *orderedUniqueBuilder) add(value Scmer) {
+	if builder.dict != nil {
+		key, domain, ok := orderedUniqueCanonical(value)
+		if ok && domain == builder.hashDomain {
+			builder.dict.Set(key, value, keepOrderedUniqueFirst)
+			return
+		}
+		builder.degrade()
+	}
+	for _, existing := range builder.linear {
+		if Equal(value, existing) {
+			return
+		}
+	}
+	builder.linear = append(builder.linear, value)
+	builder.promote()
+}
+
+func (builder *orderedUniqueBuilder) result() []Scmer {
+	if builder.dict == nil {
+		return builder.linear
+	}
+	pairs := builder.dict.Pairs
+	length := len(pairs) / 2
+	// The builder owns the transient dictionary. Compact its insertion-ordered
+	// values over the disposable keys instead of allocating another result.
+	for i := 0; i < length; i++ {
+		pairs[i] = pairs[i*2+1]
+	}
+	clear(pairs[length:])
+	return pairs[:length:length]
+}
+
 func init_list() {
 	// list functions
 	DeclareTitle("Lists")
@@ -8565,6 +8666,34 @@ func init_list() {
 			JITEmit: nil,
 		},
 	})
+	Declare(&Globalenv, &Declaration{
+		Name: "flat_map_unique",
+
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "flat_map_unique")
+			mapper := PrepareSerialProc(a[1])
+			var mapperArgs [1]Scmer
+			builder := orderedUniqueBuilder{}
+			for _, item := range input {
+				mapperArgs[0] = item
+				for _, mapped := range asSlice(mapper.Call(mapperArgs[:]), "flat_map_unique result") {
+					builder.add(mapped)
+				}
+			}
+			return NewSlice(builder.result())
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial map, flatten, and stable unique collection (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "list"}},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
 	// _mut variants: optimizer-only, forbidden from .scm code
 	// Tier 1: same-length, zero-copy
 
@@ -9855,12 +9984,32 @@ func optimizedSingletonListItem(expr Scmer) (Scmer, bool) {
 	return NewNil(), false
 }
 
-// optimizeMergeUnique keeps merge_unique on the standard variadic path and
-// reuses an exclusively owned first argument. The common mutating-operator
-// pipeline also keeps that transferred argument heap-backed so the returned
-// list cannot alias a numbered lambda frame.
+// optimizeMergeUnique streams a mapped list-of-lists into an ordered unique
+// collector when the existing bottom-up type information proves that every
+// mapper result is a list. It does not revisit the mapper body.
 func optimizeMergeUnique(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
-	return oc.applyDefaultOptimization(v, useResult, "merge_unique_mut")
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "merge_unique_mut")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) != 2 {
+		return result, td
+	}
+	producer, ok := scmerSlice(rv[1])
+	if !ok || len(producer) != 3 ||
+		(!scmerIsSymbol(producer[0], "map") && !scmerIsSymbol(producer[0], "map_mut")) ||
+		exprMayHaveSideEffects(producer[2]) {
+		return result, td
+	}
+	producerType := optimizedArgumentType(argumentTypes, 1)
+	if producerType.Extra == nil || producerType.Extra.Element == nil || producerType.Extra.Element.Kind != "list" {
+		return result, td
+	}
+	elementType := tiZero
+	if producerType.Extra.Element.Element != nil {
+		elementType = TypeInfoFromTD(producerType.Extra.Element.Element)
+	}
+	return NewSlice([]Scmer{NewSymbol("flat_map_unique"), producer[1], producer[2]}),
+		setOptimizedCallElement(descriptorWithLength(FreshAlloc, UnknownLength), elementType)
 }
 
 func flattenConsList(v []Scmer) ([]Scmer, bool) {
