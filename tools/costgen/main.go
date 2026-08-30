@@ -171,8 +171,10 @@ type calibrationRow struct {
 	DriverExpressionOperations       *float64 `json:"driver_expression_operations"`
 	DriverExpressionDepth            *float64 `json:"driver_expression_depth"`
 	JoinInputRows                    *float64 `json:"join_input_rows"`
+	JoinProbeRows                    *float64 `json:"join_probe_rows"`
 	JoinEstimatedRows                *float64 `json:"join_estimated_rows"`
 	JoinOutputRows                   *float64 `json:"join_output_rows"`
+	JoinMapWidth                     *float64 `json:"join_map_width"`
 	JoinTableCount                   *float64 `json:"join_table_count"`
 	JoinLegacyProbeRows              *float64 `json:"join_legacy_probe_rows"`
 	ProbeInvocations                 *float64 `json:"probe_invocations"`
@@ -226,6 +228,8 @@ type constants struct {
 	groupRelationBuildRowNS    int64
 	groupRelationProbeNS       int64
 	scanJoinOrderStartupNS     int64
+	scanJoinOrderBuildRowNS    int64
+	scanJoinOrderProbeRowNS    int64
 	orderedDriverInputNS       int64
 	orderedScanInvocationNS    int64
 	orderedRecsetSortUnitNS    int64
@@ -347,11 +351,13 @@ func main() {
 		// work units instead of introducing an independently fitted coefficient
 		// set. Its forced variants still form a mandatory ordering check: this
 		// catches a lowerer formula which compiles but chooses the wrong operator.
-		startup, fitErr := fitScanJoinOrderStartup(orderedJoinObservations, c)
+		startup, build, probe, fitErr := fitScanJoinOrder(orderedJoinObservations, c)
 		if fitErr != nil {
 			fatal(fmt.Errorf("scan_join_order: %w", fitErr))
 		}
 		c.scanJoinOrderStartupNS = startup
+		c.scanJoinOrderBuildRowNS = build
+		c.scanJoinOrderProbeRowNS = probe
 		if err := validateDecisionOrdering(orderedJoinObservations, c); err != nil {
 			fatal(fmt.Errorf("scan_join_order: %w", err))
 		}
@@ -366,22 +372,28 @@ func main() {
 	}
 }
 
-func fitScanJoinOrderStartup(rows []observation, c constants) (int64, error) {
-	values := make([]float64, 0)
+func fitScanJoinOrder(rows []observation, c constants) (int64, int64, int64, error) {
+	x, y := make([][]float64, 0), make([]float64, 0)
 	without := c
 	without.scanJoinOrderStartupNS = 0
+	without.scanJoinOrderBuildRowNS = 0
+	without.scanJoinOrderProbeRowNS = 0
 	for _, row := range rows {
-		if row.censored || row.plan != "scan_join_order" || len(row.x) <= 22 || row.x[22] <= 0 {
+		if row.censored || row.plan != "scan_join_order" || len(row.x) <= 24 || row.x[22] <= 0 {
 			continue
 		}
-		values = append(values, math.Max(1,
-			(row.y-estimatedNS(row, without))/row.x[22]))
+		x = append(x, []float64{row.x[22], row.x[23], row.x[24]})
+		y = append(y, math.Max(1, row.y-estimatedNS(row, without)))
 	}
-	if len(values) == 0 {
-		return 0, errors.New("no exact scan_join_order observation")
+	if len(x) < 3 {
+		return 0, 0, 0, fmt.Errorf("need at least three exact scan_join_order observations, got %d", len(x))
 	}
-	sort.Float64s(values)
-	return int64(math.Round(values[len(values)/2])), nil
+	beta, err := fitNonnegative(x, y)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return int64(math.Round(beta[0])), int64(math.Round(beta[1])),
+		int64(math.Round(beta[2])), nil
 }
 
 func fitGroupRelation(rows []observation, c constants) (int64, int64, int64, error) {
@@ -1248,21 +1260,27 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 		return features, nil
 	}
 	if row.Decision == "scan_join_order" {
-		if row.JoinInputRows == nil || row.JoinEstimatedRows == nil ||
-			row.JoinOutputRows == nil || row.JoinTableCount == nil {
+		if row.JoinInputRows == nil || row.JoinProbeRows == nil ||
+			row.JoinEstimatedRows == nil || row.JoinOutputRows == nil ||
+			row.JoinMapWidth == nil || row.JoinTableCount == nil {
 			return nil, fmt.Errorf("ordered join work profile contains nil inputs: %+v", row)
 		}
-		features := make([]float64, 23)
-		features[0] = math.Max(0, *row.JoinTableCount-1)
-		features[22] = 1
+		features := make([]float64, 25)
+		features[0] = *row.JoinTableCount
 		features[1] = *row.JoinInputRows
-		features[3] = *row.JoinOutputRows + *row.JoinInputRows*math.Max(0, *row.JoinTableCount-1)
+		features[3] = *row.JoinOutputRows * *row.JoinMapWidth
 		features[4] = *row.JoinEstimatedRows
-		if row.Plan == "legacy_join_tree" {
+		if row.Plan == "scan_join_order" {
+			features[22] = 1
+			features[23] = *row.JoinInputRows
+			features[24] = *row.JoinProbeRows
+		} else if row.Plan == "legacy_join_tree" {
 			if row.JoinLegacyProbeRows == nil {
 				return nil, fmt.Errorf("ordered legacy join profile has nil probe rows: %+v", row)
 			}
 			features[18] = *row.JoinLegacyProbeRows
+		} else {
+			return nil, fmt.Errorf("unsupported scan_join_order plan %q", row.Plan)
 		}
 		return features, nil
 	}
@@ -1881,6 +1899,8 @@ func estimatedNS(row observation, c constants) float64 {
 		float64(c.groupRelationBuildRowNS),
 		float64(c.groupRelationProbeNS),
 		float64(c.scanJoinOrderStartupNS),
+		float64(c.scanJoinOrderBuildRowNS),
+		float64(c.scanJoinOrderProbeRowNS),
 	}
 	total := 0.0
 	for i, value := range row.x {
@@ -2266,6 +2286,8 @@ func readCurrentConstants(path string) (constants, error) {
 		"planner_group_relation_build_row_ns",
 		"planner_group_relation_probe_ns",
 		"planner_scan_join_order_startup_ns",
+		"planner_scan_join_order_build_row_ns",
+		"planner_scan_join_order_probe_row_ns",
 	}
 	values := make([]int64, len(names))
 	content := string(data)
@@ -2280,6 +2302,8 @@ func readCurrentConstants(path string) (constants, error) {
 				name == "planner_group_relation_build_row_ns" ||
 				name == "planner_group_relation_probe_ns" ||
 				name == "planner_scan_join_order_startup_ns" ||
+				name == "planner_scan_join_order_build_row_ns" ||
+				name == "planner_scan_join_order_probe_row_ns" ||
 				name == "planner_membership_ordered_scan_invocation_ns" ||
 				name == "planner_membership_ordered_recset_sort_unit_ns" ||
 				name == "planner_membership_downstream_probe_row_ns" {
@@ -2318,6 +2342,8 @@ func readCurrentConstants(path string) (constants, error) {
 		groupRelationBuildRowNS:    values[21],
 		groupRelationProbeNS:       values[22],
 		scanJoinOrderStartupNS:     values[23],
+		scanJoinOrderBuildRowNS:    values[24],
+		scanJoinOrderProbeRowNS:    values[25],
 	}, nil
 }
 
@@ -2378,6 +2404,8 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_group_relation_build_row_ns %d)
 (define planner_group_relation_probe_ns %d)
 (define planner_scan_join_order_startup_ns %d)
+(define planner_scan_join_order_build_row_ns %d)
+(define planner_scan_join_order_probe_row_ns %d)
 /* END GENERATED COST CONSTANTS */`, c.scalarPresenceProbeRowNS, c.membershipDirectProbeRowNS,
 		c.downstreamProbeRowNS,
 		c.scanInvocationNS, c.scanRowNS,
@@ -2387,6 +2415,7 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 		c.groupCacheProbeRowNS, c.orderedDriverInputNS, c.orderedScanInvocationNS,
 		c.orderedRecsetSortUnitNS, c.groupRelationStartupNS,
 		c.groupRelationBuildRowNS, c.groupRelationProbeNS,
-		c.scanJoinOrderStartupNS)
+		c.scanJoinOrderStartupNS, c.scanJoinOrderBuildRowNS,
+		c.scanJoinOrderProbeRowNS)
 	return os.WriteFile(path, []byte(content[:begin]+block+content[end:]), 0o644)
 }

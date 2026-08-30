@@ -594,7 +594,75 @@ test_cases:
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
 
+  # =================================================================
+  # 17. A costed star join can select fused reduction without a cold prejoin
+  # =================================================================
+  - name: "Create selective dimension fact reduction fixture"
+    setup:
+      - sql: "CREATE TABLE gs_star_driver (id INT PRIMARY KEY, name VARCHAR(20)) ENGINE=memory"
+      - sql: "CREATE TABLE gs_star_d1 (id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=memory"
+      - sql: "CREATE TABLE gs_star_d2 (id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=memory"
+      - sql: "CREATE TABLE gs_star_d3 (id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=memory"
+      - sql: "CREATE TABLE gs_star_d4 (id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=memory"
+      - sql: "CREATE TABLE gs_star_facts (id INT, driver_id INT, d1_id INT, d2_id INT, d3_id INT, d4_id INT, amount INT) ENGINE=memory"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "gs_star_driver") '("id" "name")
+              (map (produceN 8) (lambda (i)
+                (list (+ i 1) (if (equal? i 0) "selected" (concat "other-" i))))))
+            (define dimension_rows (map (produceN 100) (lambda (i)
+              (list (+ i 1) (concat "dimension-" i)))))
+            (insert (table "memcp-tests" "gs_star_d1") '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" "gs_star_d2") '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" "gs_star_d3") '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" "gs_star_d4") '("id" "label") dimension_rows)
+            (insert (table "memcp-tests" "gs_star_facts")
+              '("id" "driver_id" "d1_id" "d2_id" "d3_id" "d4_id" "amount")
+              (map (produceN 100000) (lambda (i)
+                (list (+ i 1) (+ 1 (mod i 8))
+                  (+ 1 (mod i 100)) (+ 1 (mod (+ i 1) 100))
+                  (+ 1 (mod (+ i 2) 100)) (+ 1 (mod (+ i 3) 100)) 1))))
+            (rebuild)
+            true)
+    sql: |
+      SELECT SUM(f.amount) AS total
+      FROM gs_star_facts f
+      JOIN gs_star_d1 d1 ON f.d1_id = d1.id
+      JOIN gs_star_d2 d2 ON f.d2_id = d2.id
+      JOIN gs_star_driver driver ON f.driver_id = driver.id
+      JOIN gs_star_d3 d3 ON f.d3_id = d3.id
+      JOIN gs_star_d4 d4 ON f.d4_id = d4.id
+      WHERE driver.name = 'selected'
+    expect:
+      rows: 1
+      data:
+        - total: 12500
+
+  - name: "Large selective star reduction chooses costed joined scan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT SUM(f.amount) AS total
+      FROM gs_star_facts f
+      JOIN gs_star_d1 d1 ON f.d1_id = d1.id
+      JOIN gs_star_d2 d2 ON f.d2_id = d2.id
+      JOIN gs_star_driver driver ON f.driver_id = driver.id
+      JOIN gs_star_d3 d3 ON f.d3_id = d3.id
+      JOIN gs_star_d4 d4 ON f.d4_id = d4.id
+      WHERE driver.name = 'selected'
+    expect:
+      rows: 1
+      result_contains:
+        - "unordered_join_reduce"
+        - "chosen scan_join_order"
+        - "legacy_join_tree"
+
 cleanup:
+  - sql: "DROP TABLE IF EXISTS gs_star_facts"
+  - sql: "DROP TABLE IF EXISTS gs_star_d4"
+  - sql: "DROP TABLE IF EXISTS gs_star_d3"
+  - sql: "DROP TABLE IF EXISTS gs_star_d2"
+  - sql: "DROP TABLE IF EXISTS gs_star_d1"
+  - sql: "DROP TABLE IF EXISTS gs_star_driver"
   - sql: "DROP TABLE IF EXISTS gs_blocked_sources"
   - sql: "DROP TABLE IF EXISTS gs_sources"
   - sql: "DROP TABLE IF EXISTS gs_parts"

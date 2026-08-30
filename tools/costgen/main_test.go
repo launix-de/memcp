@@ -116,6 +116,7 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	value := func(v float64) *float64 { return &v }
 	base := calibrationRow{
 		Decision: "scan_join_order", JoinInputRows: value(25_000),
+		JoinProbeRows: value(600), JoinMapWidth: value(3),
 		JoinEstimatedRows: value(4_000), JoinOutputRows: value(72),
 		JoinTableCount: value(2), JoinLegacyProbeRows: value(600),
 	}
@@ -124,8 +125,9 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanFeatures[0] != 1 || scanFeatures[1] != 25_000 || scanFeatures[22] != 1 ||
-		scanFeatures[3] != 25_072 || scanFeatures[4] != 4_000 || scanFeatures[18] != 0 {
+	if scanFeatures[0] != 2 || scanFeatures[1] != 25_000 || scanFeatures[22] != 1 ||
+		scanFeatures[23] != 25_000 || scanFeatures[24] != 600 ||
+		scanFeatures[3] != 216 || scanFeatures[4] != 4_000 || scanFeatures[18] != 0 {
 		t.Fatalf("ordered join scan features = %v", scanFeatures)
 	}
 	base.Plan = "legacy_join_tree"
@@ -135,6 +137,26 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	}
 	if legacyFeatures[18] != 600 {
 		t.Fatalf("legacy ordered join probe work = %v, want 600", legacyFeatures[18])
+	}
+}
+
+func TestFitScanJoinOrderSeparatesStartupBuildAndProbeWork(t *testing.T) {
+	row := func(measured, inputRows, probeRows float64) observation {
+		features := make([]float64, 25)
+		features[22], features[23], features[24] = 1, inputRows, probeRows
+		return observation{decision: "scan_join_order", plan: "scan_join_order", y: measured, x: features}
+	}
+	rows := []observation{
+		row(1_201, 10, 20),
+		row(5_401, 50, 40),
+		row(6_301, 50, 130),
+	}
+	startup, build, probe, err := fitScanJoinOrder(rows, constants{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startup != 1 || build != 100 || probe != 10 {
+		t.Fatalf("scan_join_order fit = (%d, %d, %d), want (1, 100, 10)", startup, build, probe)
 	}
 }
 
@@ -464,12 +486,13 @@ func TestValidateDecisionOrderingUsesOrderedJoinCostBoundary(t *testing.T) {
 	legacy := func(name string, measured, estimated float64) observation {
 		return observation{
 			caseName: name, decision: "scan_join_order", plan: "legacy_join_tree",
-			y: measured, currentEstimate: estimated, x: make([]float64, 23),
+			y: measured, currentEstimate: estimated, x: make([]float64, 25),
 		}
 	}
 	ordered := func(name string, measured float64) observation {
-		features := make([]float64, 23)
-		features[0], features[1], features[3], features[4], features[22] = 1, 25_000, 25_001, 1, 1
+		features := make([]float64, 25)
+		features[0], features[1], features[3], features[4], features[22] = 2, 25_000, 72, 4_000, 1
+		features[23], features[24] = 25_000, 600
 		return observation{
 			caseName: name, decision: "scan_join_order", plan: "scan_join_order",
 			y: measured, x: features,

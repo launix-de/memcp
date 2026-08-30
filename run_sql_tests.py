@@ -1846,8 +1846,10 @@ class SQLTestRunner:
                     with performance_server_gate():
                         resp = requests.post(
                             url, data=scm_code, headers=self.auth_header,
-                            timeout=(max(1, min(600, math.ceil(setup_remaining)))
-                                     if PERF_TEST_ENABLED else 600),
+                            timeout=(
+                                max(1, min(int(step.get("timeout", 600)), math.ceil(setup_remaining)))
+                                if PERF_TEST_ENABLED else int(step.get("timeout", 600))
+                            ),
                         )
                 except Exception as e:
                     print(f"❌ Setup step {idx} failed: SCM exception: {e}")

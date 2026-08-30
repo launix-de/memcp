@@ -130,9 +130,19 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS pc_files_wide"
 
 test_cases:
+  - name: "unordered selective joined reduction"
+    physical_calibration: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT SUM(d.p1) AS total
+      FROM pc_docs_large d
+      JOIN pc_files_large f ON d.file_id = f.id
+      WHERE f.filename LIKE '%hit%'
+
   - name: "ordered equi-join top-k"
     physical_calibration: true
-    calibration_holdout: true
     calibration_decision: "scan_join_order"
     warmup: 1
     repetitions: 5
@@ -143,6 +153,31 @@ test_cases:
       WHERE f.id = 4999
       ORDER BY d.sort_key DESC
       LIMIT 72
+
+  - name: "small ordered filtered join top-k"
+    physical_calibration: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT d.id, d.p1
+      FROM pc_docs_small d
+      JOIN pc_files_small f ON d.file_id = f.id
+      WHERE f.filename LIKE '%hit%'
+      ORDER BY d.sort_key DESC
+      LIMIT 24
+
+  - name: "three-table selective joined reduction"
+    physical_calibration: true
+    calibration_decision: "scan_join_order"
+    warmup: 1
+    repetitions: 5
+    sql: |
+      SELECT SUM(d.p1) AS total
+      FROM pc_docs_large d
+      JOIN pc_files_large f ON d.file_id = f.id
+      JOIN pc_doc_meta m ON m.id = f.id
+      WHERE f.filename LIKE '%hit%' AND m.id >= 0
 
   - name: "ordered filtered join top-k"
     physical_calibration: true

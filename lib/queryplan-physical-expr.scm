@@ -4835,6 +4835,15 @@ ever-larger subtrees. */
 		(list (quote get_assoc) (quote rowassoc) (aggregate_col_name (count_distinct_descriptor agg_expr)))
 		separator)))
 
+(define direct_count_distinct_read_expr (lambda (agg_expr)
+	(begin
+		(define read_expr (list (quote get_assoc) (quote rowassoc)
+			(aggregate_col_name (count_distinct_descriptor agg_expr))))
+		(list (quote if)
+			(list (quote list?) read_expr)
+			(list (quote count) read_expr)
+			(list (quote coalesceNil) read_expr 0)))))
+
 (define replace_group_probe_stage_lookup_keys (lambda (input alias grouptbl keys key_names ags key_index stage)
 	(if (not (group_stage? stage))
 		stage
@@ -5263,9 +5272,9 @@ ever-larger subtrees. */
 			(list (quote get_assoc) (quote rowassoc) (nth key_names key_idx))
 			(match expr
 				((symbol count_distinct) agg_expr)
-				(count_distinct_read_expr (quote rowassoc) agg_expr)
+				(direct_count_distinct_read_expr agg_expr)
 				((quote count_distinct) agg_expr)
-				(count_distinct_read_expr (quote rowassoc) agg_expr)
+				(direct_count_distinct_read_expr agg_expr)
 				((symbol group_concat_distinct) agg_expr separator)
 				(direct_group_concat_distinct_read_expr agg_expr separator)
 				((quote group_concat_distinct) agg_expr separator)
@@ -5477,6 +5486,51 @@ ever-larger subtrees. */
 						(list (quote lambda) (list membership_var) grouped_scan)
 						membership_table_expr)))))))
 
+/* A joined GROUP BY still materializes its aggregate state, but it need not
+materialize the complete joined relation first. This query-local form lets the
+join reducer aggregate shard-local states and merge them once at the root. */
+(define lower_direct_query_group_stage (lambda (stage fields order_items offset_value limit_value)
+	(begin
+		(define input (gs_input stage))
+		(if (not (query_block? input))
+			(neumann_fail "build_queryplan" "direct joined GROUP BY requires a query-block input")
+			true)
+		(define alias (group_stage_input_alias stage))
+		(define keys (if (empty_list? (gs_keys stage)) '(1) (gs_keys stage)))
+		(define key_names (group_key_cols keys))
+		(define ags (gs_aggregates stage))
+		(define offset_expr (coalesceNil offset_value 0))
+		(define limit_expr (coalesceNil limit_value -1))
+		(if (not (empty_list? (coalesceNil order_items '())))
+			(neumann_fail "build_queryplan" "direct joined GROUP BY requires unordered output")
+			true)
+		(define grouped_scan (build_query_grouped_assoc_plan input keys key_names ags true))
+		(define rowassoc_expr (direct_group_assoc_from_key_payload_expr key_names ags))
+		(define having_expr (replace_direct_group_expr alias keys key_names ags
+			(coalesceNil (gs_having stage) true)))
+		(define emit_expr (list (quote resultrow)
+			(direct_group_result_assoc_expr alias keys key_names ags fields)))
+		(define group_reduce (list (quote lambda)
+			(list (quote __accepted) (quote __group_key) (quote __group_payload))
+			(list (quote begin)
+				(list (quote define) (quote rowassoc) rowassoc_expr)
+				(list (quote if) having_expr
+					(list (quote if) (list (quote <) (quote __accepted) offset_expr)
+						(list (quote +) (quote __accepted) 1)
+						(list (quote if)
+							(list (quote or)
+								(list (quote equal?) limit_expr -1)
+								(list (quote <) (list (quote -) (quote __accepted) offset_expr) limit_expr))
+							(list (quote begin) emit_expr (list (quote +) (quote __accepted) 1))
+							(quote __accepted)))
+					(quote __accepted)))))
+		(list
+			(list (quote lambda) (list (quote grouped))
+				(list (quote begin)
+					(list (quote reduce_assoc) (quote grouped) group_reduce 0)
+					nil))
+			grouped_scan))))
+
 (define aggregate_payload_merge_expr (lambda (ags idx)
 	(if (>= idx (count ags))
 		(quoted_runtime_list '())
@@ -5641,7 +5695,7 @@ on the same columns. */
 					(list (quote list))))
 			grouped_expr))))
 
-(define build_query_grouped_assoc_plan (lambda (input keys key_names ags)
+(define build_query_grouped_assoc_plan (lambda (input keys key_names ags seed_empty)
 	(begin
 		(define runtime_ags (map ags query_group_aggregate_descriptor))
 		(define row_key_names (map key_names (lambda (col) (concat "__row_" col))))
@@ -5667,21 +5721,33 @@ on the same columns. */
 		(define merge_payload (list (quote lambda) (list (quote old) (quote new))
 			(aggregate_payload_merge_expr runtime_ags 0)))
 		(define combine_grouped (grouped_state_merge_expr merge_payload))
-		(finalize_query_grouped_assoc_expr ags
-			(lower_query_block_as_dataset_reduce
-				input
-				row_fields
-				(list (quote lambda)
-					(extract_assoc row_fields (lambda (title _expr) (symbol title)))
-					(runtime_cons_list_expr (list key_expr payload_expr)))
-				(list (quote lambda) (list (quote acc) (quote rowvals))
-					(list (quote set_assoc)
-						(quote acc)
-						(list (quote car) (quote rowvals))
-						(list (quote cadr) (quote rowvals))
-						merge_payload))
-				(list (quote list))
-				combine_grouped)))))
+		(define grouped_scan (lower_query_block_as_dataset_reduce
+			input
+			row_fields
+			(list (quote lambda)
+				(extract_assoc row_fields (lambda (title _expr) (symbol title)))
+				(runtime_cons_list_expr (list key_expr payload_expr)))
+			(list (quote lambda) (list (quote acc) (quote rowvals))
+				(list (quote set_assoc)
+					(quote acc)
+					(list (quote car) (quote rowvals))
+					(list (quote cadr) (quote rowvals))
+					merge_payload))
+			(list (quote list))
+			combine_grouped))
+		(define grouped_expr (if (and seed_empty (equal? keys '(1)))
+			(list (quote if)
+				(list (quote equal?) (list (quote count) (quote grouped)) 0)
+				(list (quote set_assoc)
+					(quote grouped)
+					(runtime_cons_list_expr keys)
+					(runtime_cons_list_expr (map runtime_ags (lambda (ag) (nth ag 2)))))
+				(quote grouped))
+			(quote grouped)))
+		(list
+			(list (quote lambda) (list (quote grouped))
+				(finalize_query_grouped_assoc_expr ags grouped_expr))
+			grouped_scan))))
 
 (define build_query_group_aggregates_insert_plan (lambda (input grouptbl keys key_names ags aggregate_cols)
 	(begin
@@ -5691,7 +5757,7 @@ on the same columns. */
 		(list
 			(list (quote lambda) (list (quote grouped))
 				(group_insert_finish_expr (qb_schema input) grouptbl key_names aggregate_cols false))
-			(build_query_grouped_assoc_plan input keys key_names ags)))))
+			(build_query_grouped_assoc_plan input keys key_names ags false)))))
 
 /* Produce a domain RecSet for a scalar probe leaf before entering the domain
 scan. scan_recset callbacks are batch-parallel filters, so a nested scan cannot
@@ -6664,22 +6730,25 @@ EXPLAIN PHYSICAL CALIBRATE alternative with result and operator validation. */
 (define planner_membership_ordered_scan_invocation_ns 3027639)
 (define planner_membership_ordered_recset_sort_unit_ns 1)
 (define planner_group_relation_startup_ns 1)
-(define planner_group_relation_build_row_ns 40028)
-(define planner_group_relation_probe_ns 476577)
-(define planner_scan_join_order_startup_ns 1802018)
+(define planner_group_relation_build_row_ns 39881)
+(define planner_group_relation_probe_ns 215160)
+(define planner_scan_join_order_startup_ns 296538)
+(define planner_scan_join_order_build_row_ns 24)
+(define planner_scan_join_order_probe_row_ns 1)
 /* END GENERATED COST CONSTANTS */
 
 /* scan_join_order reuses the calibrated scan/filter/map work units. The
 structural formula belongs to the lowerer; tools/costgen owns every numeric
 coefficient used here. */
-(define planner_scan_join_order_cost (lambda (input_rows joined_rows table_count output_rows)
+(define planner_scan_join_order_cost (lambda (input_rows probe_rows joined_rows table_count output_rows map_width)
 	(planner_cost
 		(+ planner_scan_join_order_startup_ns
-			(* (- table_count 1) planner_membership_scan_invocation_ns))
-		(+ (* input_rows planner_membership_scan_row_ns)
-			(* input_rows (- table_count 1) planner_membership_map_column_row_ns))
-		(* joined_rows planner_membership_expression_operation_row_ns)
+			(* table_count planner_membership_scan_invocation_ns))
+		(* input_rows (+ planner_membership_scan_row_ns
+			planner_scan_join_order_build_row_ns))
+		(+ (* probe_rows planner_scan_join_order_probe_row_ns)
+			(* joined_rows planner_membership_expression_operation_row_ns))
 		0 0
-		(* output_rows planner_membership_map_column_row_ns)
-		(* joined_rows 8)
+		(* output_rows map_width planner_membership_map_column_row_ns)
+		(* joined_rows (+ 8 (* map_width 8)))
 		0 output_rows 0.65)))
