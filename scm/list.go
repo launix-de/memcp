@@ -580,6 +580,146 @@ func mergeValidationSafeDeferredArgument(v Scmer, allowLambda bool) bool {
 	return scmerIsSymbol(inner[0], "quote") || (allowLambda && scmerIsSymbol(inner[0], "lambda"))
 }
 
+// optimizerLambdaWithBody preserves the optimized lambda frame while replacing
+// its body. This avoids another optimization or variable-remapping pass.
+func optimizerLambdaWithBody(expr Scmer, body Scmer) (Scmer, bool) {
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) < 3 || !scmerIsSymbol(items[0], "lambda") {
+		return NewNil(), false
+	}
+	rewritten := append([]Scmer(nil), items...)
+	rewritten[2] = body
+	return NewSlice(rewritten), true
+}
+
+// optimizerLambdaParamReference accepts both source symbols and already lowered
+// local-variable references.
+func optimizerLambdaParamReference(expr Scmer, params []Scmer, index int) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsNthLocalVar() {
+		return int(expr.NthLocalVar()) == index
+	}
+	if index < 0 || index >= len(params) {
+		return false
+	}
+	param, ok := scmerSymbol(params[index])
+	return ok && scmerIsSymbol(expr, string(param))
+}
+
+// optimizerNonNilPredicate recognizes the planner's exact (not (nil? value))
+// filter without analyzing the callback subtree again.
+func optimizerNonNilPredicate(expr Scmer) bool {
+	params, body, ok := optimizerLambdaParts(expr)
+	if !ok || len(params) != 1 {
+		return false
+	}
+	notCall, ok := scmerSlice(body)
+	if !ok || len(notCall) != 2 || !scmerIsSymbol(notCall[0], "not") {
+		return false
+	}
+	nilCall, ok := scmerSlice(notCall[1])
+	return ok && len(nilCall) == 2 && scmerIsSymbol(nilCall[0], "nil?") &&
+		optimizerLambdaParamReference(nilCall[1], params, 0)
+}
+
+func optimizerBoolLiteral(expr Scmer) (bool, bool) {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsBool() {
+		return expr.Bool(), true
+	}
+	if scmerIsSymbol(expr, "true") {
+		return true, true
+	}
+	if scmerIsSymbol(expr, "false") {
+		return false, true
+	}
+	return false, false
+}
+
+func optimizerNilLiteral(expr Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	return expr.IsNil() || scmerIsSymbol(expr, "nil")
+}
+
+func optimizerZeroLiteral(expr Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	return (expr.IsInt() && expr.Int() == 0) || (expr.IsFloat() && expr.Float() == 0)
+}
+
+// optimizePlannerReduceFold lowers common planner folds to physical loops. It
+// only inspects the already optimized reducer's root shape, keeping the whole
+// optimization pass linear in the expression size.
+func optimizePlannerReduceFold(rv []Scmer, td *TypeDescriptor) (Scmer, *TypeDescriptor, bool) {
+	if len(rv) != 4 {
+		return NewNil(), nil, false
+	}
+	params, body, ok := optimizerLambdaParts(rv[2])
+	if !ok || len(params) < 2 {
+		return NewNil(), nil, false
+	}
+	bodyItems, ok := scmerSlice(body)
+	if !ok || len(bodyItems) < 3 {
+		return NewNil(), nil, false
+	}
+	if len(bodyItems) == 3 && scmerIsSymbol(bodyItems[0], "+") &&
+		optimizerLambdaParamReference(bodyItems[1], params, 0) && optimizerZeroLiteral(rv[3]) {
+		callback, ok := optimizerLambdaWithBody(rv[2], bodyItems[2])
+		if !ok {
+			return NewNil(), nil, false
+		}
+		return NewSlice([]Scmer{NewSymbol("sum_map"), rv[1], callback, rv[3]}), &TypeDescriptor{Kind: "number"}, true
+	}
+	if (scmerIsSymbol(bodyItems[0], "or") || scmerIsSymbol(bodyItems[0], "and")) &&
+		optimizerLambdaParamReference(bodyItems[1], params, 0) {
+		wantNeutral := scmerIsSymbol(bodyItems[0], "and")
+		neutral, ok := optimizerBoolLiteral(rv[3])
+		if !ok || neutral != wantNeutral {
+			return NewNil(), nil, false
+		}
+		candidate := bodyItems[2]
+		if len(bodyItems) > 3 {
+			candidate = NewSlice(append([]Scmer{bodyItems[0]}, bodyItems[2:]...))
+		}
+		callback, ok := optimizerLambdaWithBody(rv[2], candidate)
+		if !ok {
+			return NewNil(), nil, false
+		}
+		name := "reduce_any"
+		if wantNeutral {
+			name = "reduce_all"
+		}
+		return NewSlice([]Scmer{NewSymbol(name), rv[1], callback}), &TypeDescriptor{Kind: "bool"}, true
+	}
+
+	if len(bodyItems) == 4 && scmerIsSymbol(bodyItems[0], "if") && optimizerNilLiteral(rv[3]) {
+		condition, ok := scmerSlice(bodyItems[1])
+		if !ok || len(condition) != 2 || !scmerIsSymbol(condition[0], "not") {
+			return NewNil(), nil, false
+		}
+		nilCall, ok := scmerSlice(condition[1])
+		if !ok || len(nilCall) != 2 || !scmerIsSymbol(nilCall[0], "nil?") ||
+			!optimizerLambdaParamReference(nilCall[1], params, 0) ||
+			!optimizerLambdaParamReference(bodyItems[2], params, 0) {
+			return NewNil(), nil, false
+		}
+		callback, ok := optimizerLambdaWithBody(rv[2], bodyItems[3])
+		if !ok {
+			return NewNil(), nil, false
+		}
+		return NewSlice([]Scmer{NewSymbol("find_map_notnull"), rv[1], callback}), td, true
+	}
+
+	return NewNil(), nil, false
+}
+
 // optimizeReduce keeps merge as a segmented producer when its flattened value
 // is consumed exactly once by reduce. reduce_segments validates all segments
 // before invoking the callback, matching merge's existing error order.
@@ -650,14 +790,17 @@ func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		return NewSlice(fused), td
 	}
 	segments, ok := optimizedMergeSegments(rv[1])
-	if !ok || !mergeValidationSafeDeferredArgument(rv[2], true) ||
-		(len(rv) == 4 && !mergeValidationSafeDeferredArgument(rv[3], false)) {
-		return result, td
+	if ok && mergeValidationSafeDeferredArgument(rv[2], true) &&
+		(len(rv) != 4 || mergeValidationSafeDeferredArgument(rv[3], false)) {
+		fused := make([]Scmer, 0, len(rv))
+		fused = append(fused, NewSymbol("reduce_segments"), segments)
+		fused = append(fused, rv[2:]...)
+		return NewSlice(fused), td
 	}
-	fused := make([]Scmer, 0, len(rv))
-	fused = append(fused, NewSymbol("reduce_segments"), segments)
-	fused = append(fused, rv[2:]...)
-	return NewSlice(fused), td
+	if fused, fusedType, ok := optimizePlannerReduceFold(rv, td); ok {
+		return fused, fusedType
+	}
+	return result, td
 }
 
 // optimizeMap is the optimizer hook for `map`. It applies default optimization
@@ -736,6 +879,9 @@ func optimizeFilter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 	case scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut"):
 		if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
 			return result, td
+		}
+		if optimizerNonNilPredicate(rv[2]) {
+			return NewSlice([]Scmer{NewSymbol("map_filter_notnull"), inner[1], inner[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
 		}
 		return NewSlice([]Scmer{NewSymbol("filter_map"), inner[1], inner[2], rv[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
 	case scmerIsSymbol(inner[0], "filter") || scmerIsSymbol(inner[0], "filter_mut"):
@@ -7068,6 +7214,149 @@ func init_list() {
 				{Kind: "func", Label: "condition", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
 			},
 			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "map_filter_notnull",
+
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "map_filter_notnull")
+			mapper := OptimizeProcToSerialFunction(a[1])
+			result := make([]Scmer, 0, len(input))
+			for _, item := range input {
+				mapped := mapper(item)
+				if !mapped.IsNil() {
+					result = append(result, mapped)
+				}
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial map and non-nil filter (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    FreshAlloc,
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "sum_map",
+
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "sum_map")
+			mapper := OptimizeProcToSerialFunction(a[1])
+			result := a[2]
+			for _, item := range input {
+				mapped := mapper(result, item)
+				if result.IsNil() || mapped.IsNil() {
+					result = NewNil()
+				} else if result.IsInt() && mapped.IsInt() {
+					result = NewInt(result.Int() + mapped.Int())
+				} else {
+					result = NewFloat(result.Float() + mapped.Float())
+				}
+			}
+			return result
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "fused serial map and numeric sum reduction (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any", Label: "sum"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "number"}},
+				{Kind: "number", Label: "zero"},
+			},
+			Return:    &TypeDescriptor{Kind: "number"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_any",
+
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "reduce_any")
+			candidate := OptimizeProcToSerialFunction(a[1])
+			state := NewBool(false)
+			for _, item := range input {
+				value := candidate(state, item)
+				if value.IsNil() {
+					state = NewNil()
+				} else if value.Bool() {
+					return NewBool(true)
+				}
+			}
+			return state
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "short-circuiting three-valued OR reduction (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "candidate", Params: []*TypeDescriptor{{Kind: "any", Label: "state"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "bool"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_all",
+
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "reduce_all")
+			candidate := OptimizeProcToSerialFunction(a[1])
+			state := NewBool(true)
+			for _, item := range input {
+				value := candidate(state, item)
+				if value.IsNil() {
+					state = NewNil()
+				} else if !value.Bool() {
+					return NewBool(false)
+				}
+			}
+			return state
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "short-circuiting three-valued AND reduction (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "candidate", Params: []*TypeDescriptor{{Kind: "any", Label: "state"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "bool"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "find_map_notnull",
+
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "find_map_notnull")
+			candidate := OptimizeProcToSerialFunction(a[1])
+			for _, item := range input {
+				value := candidate(NewNil(), item)
+				if !value.IsNil() {
+					return value
+				}
+			}
+			return NewNil()
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "maps until the first non-nil result (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "candidate", Params: []*TypeDescriptor{{Kind: "any", Label: "state"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
 			Const:     true,
 			Forbidden: true,
 
