@@ -19,6 +19,7 @@ package scm
 import (
 	"fmt"
 	"math"
+	"sort"
 	"unsafe"
 )
 
@@ -112,6 +113,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			coverage = JITCoverage{}
 		}
 	}()
+	numVars = jitRequiredLocalSlots(body, numVars)
 
 	// Free registers: all GPRs except RAX (result ptr), RBX (result aux),
 	// RSP, RBP, R11 (scratch), R12 (slice base), R14 (Go goroutine ptr "g")
@@ -276,6 +278,33 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs, ctx.AutoImportSafe, ctx.NeedsStableArgs, ctx.Coverage
+}
+
+func jitRequiredLocalSlots(expr Scmer, minimum int) int {
+	for expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	if expr.IsNthLocalVar() {
+		required := int(expr.NthLocalVar()) + 1
+		if required > minimum {
+			return required
+		}
+		return minimum
+	}
+	if !expr.IsSlice() {
+		return minimum
+	}
+	items := expr.Slice()
+	if len(items) > 0 && items[0].IsSymbol() {
+		switch string(items[0].Symbol()) {
+		case "quote", "parser", "lambda":
+			return minimum
+		}
+	}
+	for _, item := range items {
+		minimum = jitRequiredLocalSlots(item, minimum)
+	}
+	return minimum
 }
 
 func jitEnsureResultPair(ctx *JITContext, result JITValueDesc) JITValueDesc {
@@ -1615,6 +1644,54 @@ func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, ar
 	return out
 }
 
+func jitEmitGoVariadicCallFromDescs(ctx *JITContext, fn func(...Scmer) Scmer, values []JITValueDesc, result JITValueDesc) JITValueDesc {
+	argc := len(values)
+	stackStart := ctx.BPOffset
+	argsOff := int32(0)
+	if argc > 0 {
+		argsOff = ctx.AllocStack(int32(argc * 16))
+		for i := range values {
+			value := values[i]
+			ctx.EnsureDesc(&value)
+			if value.Loc != LocImm && value.Loc != LocRegPair && value.Loc != LocStackPair && value.Loc != LocInputPair {
+				pair := jitAllocTrackedPair(ctx, value.Type)
+				value = jitPlaceIntoPair(ctx, &value, pair)
+			}
+			ctx.EmitStoreScmerToStack(value, argsOff+int32(i*16))
+			ctx.FreeDesc(&value)
+		}
+	}
+	argsSlice := jitAllocTrackedPair(ctx, JITTypeUnknown)
+	stackBytes := int32(argc * 16)
+	if argc > 0 {
+		ctx.EmitSubRSP32(stackBytes)
+		for i := range values {
+			slotOff := int32(i * 16)
+			sourceOff := stackBytes + argsOff + slotOff
+			ctx.EmitMovRegMem(RegR11, RegRSP, sourceOff)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, slotOff)
+			ctx.EmitMovRegMem(RegR11, RegRSP, sourceOff+8)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, slotOff+8)
+			ctx.setStackPointer(jitStackRootFrameSP, slotOff-ctx.DynamicSP, true)
+		}
+		ctx.EmitMovRegReg(argsSlice.Reg, RegRSP)
+		ctx.EmitMovRegImm64(argsSlice.Reg2, uint64(argc))
+	} else {
+		ctx.EmitMovRegImm64(argsSlice.Reg, 0)
+		ctx.EmitMovRegImm64(argsSlice.Reg2, 0)
+	}
+	out := ctx.EmitGoCallVariadic(fn, argsSlice, result)
+	ctx.FreeDesc(&argsSlice)
+	if stackBytes != 0 {
+		ctx.EmitAddRSP32(stackBytes)
+		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+			ctx.EmitMovRegReg(ctx.SliceBase, RegRSP)
+		}
+	}
+	ctx.FreeStack(ctx.BPOffset - stackStart)
+	return out
+}
+
 func jitCompileRootedCallValueAt(ctx *JITContext, expr Scmer, sliceBase Reg, off int32) JITValueDesc {
 	value := jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
 	// Input values remain reachable through JITEntryPoint.Call's args slice for
@@ -1646,6 +1723,83 @@ func jitCompileRootedCallValueAt(ctx *JITContext, expr Scmer, sliceBase Reg, off
 func jitCompileRootedCallValue(ctx *JITContext, expr Scmer, sliceBase Reg) JITValueDesc {
 	off := ctx.AllocStack(16)
 	return jitCompileRootedCallValueAt(ctx, expr, sliceBase, off)
+}
+
+func jitVisibleSymbols(ctx *JITContext) []Symbol {
+	seen := make(map[Symbol]struct{})
+	symbols := make([]Symbol, 0)
+	for env := ctx.Env; env != nil; env = env.Outer {
+		for symbol := range env.Vars {
+			if _, exists := seen[symbol]; exists {
+				continue
+			}
+			seen[symbol] = struct{}{}
+			symbols = append(symbols, symbol)
+		}
+	}
+	sort.Slice(symbols, func(i, j int) bool { return symbols[i] < symbols[j] })
+	return symbols
+}
+
+func jitRuntimeCaptureArgExprs(ctx *JITContext) []Scmer {
+	args := []Scmer{ctx.RuntimeEnv}
+	depth := 0
+	for env := ctx.Env; env != nil; env = env.Outer {
+		args = append(args, NewAny(jitRuntimeEnvFrameMarker), NewNil())
+		symbols := make([]Symbol, 0, len(env.Vars))
+		for symbol := range env.Vars {
+			symbols = append(symbols, symbol)
+		}
+		sort.Slice(symbols, func(i, j int) bool { return symbols[i] < symbols[j] })
+		for _, symbol := range symbols {
+			key := NewSymbol(string(symbol))
+			value := Scmer(key)
+			for level := 0; level < depth; level++ {
+				value = NewSlice([]Scmer{NewSymbol("outer"), value})
+			}
+			args = append(args, NewSlice([]Scmer{NewSymbol("quote"), key}), value)
+		}
+		if depth == 0 {
+			for index := 0; index < ctx.LocalSlotCount; index++ {
+				key := NewNthLocalVar(NthLocalVar(index))
+				args = append(args, NewSlice([]Scmer{NewSymbol("quote"), key}), key)
+			}
+		}
+		depth++
+	}
+	if ctx.Env == nil {
+		args = append(args, NewAny(jitRuntimeEnvFrameMarker), NewNil())
+	}
+	return args
+}
+
+func jitCompileSpecialThunk(ctx *JITContext, body Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	symbols := jitVisibleSymbols(ctx)
+	params := make([]Scmer, 0, ctx.LocalSlotCount+len(symbols))
+	argExprs := make([]Scmer, 0, 1+ctx.LocalSlotCount+len(symbols))
+	for index := 0; index < ctx.LocalSlotCount; index++ {
+		params = append(params, NewSymbol(fmt.Sprintf("\x00jit-slot-%d", index)))
+		argExprs = append(argExprs, NewNthLocalVar(NthLocalVar(index)))
+	}
+	for _, symbol := range symbols {
+		params = append(params, NewSymbol(string(symbol)))
+		argExprs = append(argExprs, NewSymbol(string(symbol)))
+	}
+	outer, ok := ctx.RuntimeEnv.Any().(*Env)
+	if !ok || outer == nil {
+		panic("jit: invalid special-form thunk environment")
+	}
+	callable := jitCompileModeDeferred(true, NewProcStruct(Proc{
+		Params:  NewSlice(params),
+		Body:    body,
+		En:      outer,
+		NumVars: len(params),
+	}))
+	if callable.GetTag() != tagProc || callable.Proc() == nil || callable.Proc().Compiled == nil {
+		panic("jit: special-form child did not compile")
+	}
+	argExprs = append([]Scmer{callable}, argExprs...)
+	return jitEmitGoVariadicCallFromExprs(ctx, jitMakeSpecialThunk, argExprs, sliceBase, result)
 }
 
 func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
@@ -1991,8 +2145,26 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			ctx.TrackImm(q)
 			return JITValueDesc{Loc: LocImm, Type: q.GetTag(), Imm: q}
-		case "eval", "time":
-			panic("jit: unsupported special form " + name)
+		case "eval":
+			if len(list) < 2 {
+				panic("jit: eval expects an expression")
+			}
+			args := make([]Scmer, 0, 1+2*ctx.LocalSlotCount)
+			args = append(args, list[1])
+			args = append(args, jitRuntimeCaptureArgExprs(ctx)...)
+			return jitEmitGoVariadicCallFromExprs(ctx, jitEvalSpecial, args, sliceBase, result)
+		case "time":
+			if len(list) < 2 {
+				panic("jit: time expects an expression")
+			}
+			body := jitCompileSpecialThunk(ctx, list[1], sliceBase, JITValueDesc{Loc: LocAny})
+			args := []JITValueDesc{body}
+			if len(list) > 2 {
+				args = append(args, jitCompileSpecialThunk(ctx, list[2], sliceBase, JITValueDesc{Loc: LocAny}))
+			} else {
+				args = append(args, JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()})
+			}
+			return jitEmitGoVariadicCallFromDescs(ctx, jitTimeSpecial, args, result)
 		case "define", "set":
 			if len(list) != 3 {
 				panic("jit: malformed " + name)
@@ -2049,8 +2221,35 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			ctx.EmitStoreScmerToStack(value, int32(idx*16))
 			return value
-		case "parser", "optimizer_proc_return":
-			panic("jit: unsupported special form " + name)
+		case "parser":
+			if len(list) < 2 {
+				panic("jit: parser expects syntax")
+			}
+			generator := NewNil()
+			whitespace := NewNil()
+			ignoreResult := false
+			if len(list) > 2 {
+				generator = list[2]
+				ignoreResult = true
+			}
+			if len(list) > 3 {
+				whitespace = list[3]
+			}
+			args := []Scmer{
+				NewSlice([]Scmer{NewSymbol("quote"), list[1]}),
+				NewSlice([]Scmer{NewSymbol("quote"), generator}),
+				NewSlice([]Scmer{NewSymbol("quote"), whitespace}),
+				NewBool(ignoreResult),
+			}
+			args = append(args, jitRuntimeCaptureArgExprs(ctx)...)
+			return jitEmitGoVariadicCallFromExprs(ctx, jitParserSpecial, args, sliceBase, result)
+		case "optimizer_proc_return":
+			if len(list) != 3 {
+				panic("jit: optimizer_proc_return expects procedure and return metadata")
+			}
+			value := jitCompileExpr(ctx, list[1], sliceBase, JITValueDesc{Loc: LocAny})
+			metadata := jitCompileSpecialThunk(ctx, list[2], sliceBase, JITValueDesc{Loc: LocAny})
+			return jitEmitGoVariadicCallFromDescs(ctx, jitOptimizerProcReturnSpecial, []JITValueDesc{value, metadata}, result)
 		case "begin":
 			if len(list) == 1 {
 				imm := NewNil()
@@ -2066,7 +2265,31 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			return jitCompileExpr(ctx, list[len(list)-1], sliceBase, result)
 		case "begin_mut":
-			panic("jit: unsupported special form begin_mut")
+			if len(list) < 3 {
+				panic("jit: begin_mut expects a reserve and body")
+			}
+			reserveExpr := list[1]
+			for reserveExpr.IsSourceInfo() {
+				reserveExpr = reserveExpr.SourceInfo().value
+			}
+			if reserveExpr.GetTag() != tagInt && reserveExpr.GetTag() != tagFloat {
+				panic("jit: begin_mut reserve must be optimized to a number")
+			}
+			reserve := int(ToInt(reserveExpr))
+			if reserve < 0 {
+				reserve = 0
+			}
+			if reserve > ctx.LocalSlotCount {
+				panic("jit: begin_mut reserve exceeds invocation frame")
+			}
+			outerEnv := ctx.Env
+			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc), Outer: outerEnv}
+			defer func() { ctx.Env = outerEnv }()
+			for _, form := range list[2 : len(list)-1] {
+				value := jitCompileExpr(ctx, form, sliceBase, JITValueDesc{Loc: LocAny})
+				ctx.FreeDesc(&value)
+			}
+			return jitCompileExpr(ctx, list[len(list)-1], sliceBase, result)
 		case "!begin":
 			if len(list) == 1 {
 				imm := NewNil()
@@ -2124,7 +2347,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			ctx.FreeStack(ctx.BPOffset - stackStart)
 			return jitRootScmer(ctx, out)
 		case "parallel":
-			panic("jit: unsupported special form parallel")
+			args := make([]JITValueDesc, 0, len(list)-1)
+			for _, child := range list[1:] {
+				args = append(args, jitCompileSpecialThunk(ctx, child, sliceBase, JITValueDesc{Loc: LocAny}))
+			}
+			return jitEmitGoVariadicCallFromDescs(ctx, jitParallelSpecial, args, result)
 		case "match", "match_mut":
 			return jitCompileMatch(ctx, list, sliceBase, result)
 		case "if":
