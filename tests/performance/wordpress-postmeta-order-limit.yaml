@@ -71,6 +71,10 @@ test_cases:
         - "chosen scan_join_order_batched_probe"
         - "scan_join_order"
         - "legacy_join_tree"
+      result_not_contains:
+        - '(0 \"meta_key\")'
+        - '(1 \"post_type\")'
+        - '(1 \"post_status\")'
 
   - name: "WordPress ordered join uses the equivalent postmeta driver"
     sql: |

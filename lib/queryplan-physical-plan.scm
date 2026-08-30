@@ -4894,7 +4894,7 @@ has selected a lowerer. */
 
 /* Enumerate metadata only. No scan, RecSet, keytable or callback AST is built
 until the caller has selected this physical alternative. */
-(define scan_join_order_spec (lambda (all_sources plan default_alias needed_exprs final_condition order_items offset_value limit_value stages facts unordered_reduce)
+(define scan_join_order_spec (lambda (all_sources plan default_alias consumer_exprs final_condition order_items offset_value limit_value stages facts unordered_reduce)
 	(begin
 		(define sources (join_optimizer_sources_for_order all_sources
 			(join_optimizer_tree_aliases plan)))
@@ -4972,8 +4972,11 @@ until the caller has selected this physical alternative. */
 			(max 0 (- scan_invocations 1)) nil))
 		(define output_rows (if (and (number? limit) (>= limit 0))
 			(min (coalesceNil joined_rows limit) (+ offset limit)) joined_rows))
+		/* Local filters, join keys and order expressions are consumed inside
+		scan_join_order. Keep only values read by the downstream mapper live in its
+		tuples; carrying the complete scan recipe defeats late materialization. */
 		(define map_width (count (scan_join_order_refs_for_exprs
-			sources default_alias needed_exprs)))
+			sources default_alias consumer_exprs)))
 		(define window_supported ordered_window)
 		(define reduce_supported (and unordered_reduce
 			(and (equal? offset 0) (and (equal? limit -1) (empty_list? order_items)))))
@@ -5002,7 +5005,7 @@ until the caller has selected this physical alternative. */
 				(list (quote residual) (combine_where_terms residual_terms true))
 				(list (quote order_entries) order_entries)
 				(list (quote map_refs) (scan_join_order_refs_for_exprs
-					sources default_alias needed_exprs))
+					sources default_alias consumer_exprs))
 				(list (quote input_rows) input_rows)
 				(list (quote driver_rows) driver_rows)
 				(list (quote inner_rows) inner_rows)
@@ -5258,7 +5261,7 @@ until the caller has selected this physical alternative. */
 			(wrap_membership_keyset_bindings membership_keysets window_expr)
 			window_expr))))
 
-(define scan_join_order_emit_plan (lambda (spec default_alias needed_exprs value_builder reduce_expr neutral_expr shard_reduce_expr stages batched_probe)
+(define scan_join_order_emit_plan (lambda (spec default_alias value_builder reduce_expr neutral_expr shard_reduce_expr stages batched_probe)
 	(begin
 		(define sources (qassoc_get spec (quote sources) '()))
 		(define local_terms (qassoc_get spec (quote local_terms) '()))
@@ -5312,7 +5315,7 @@ until the caller has selected this physical alternative. */
 
 (define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
-		(define spec (scan_join_order_spec all_sources plan default_alias needed_exprs
+		(define spec (scan_join_order_spec all_sources plan default_alias output_exprs
 			final_condition order_items offset_value limit_value stages facts false))
 		(if (nil? spec)
 			(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
@@ -5420,7 +5423,7 @@ until the caller has selected this physical alternative. */
 							(list "cost" (planner_cost_explain batched_probe_cost)))))))
 				(if (or (equal? chosen "scan_join_order")
 					(equal? chosen "scan_join_order_batched_probe"))
-					(scan_join_order_emit_plan spec default_alias needed_exprs
+					(scan_join_order_emit_plan spec default_alias
 						value_builder reduce_expr neutral_expr nil stages
 						(equal? chosen "scan_join_order_batched_probe"))
 					(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
@@ -5431,10 +5434,10 @@ until the caller has selected this physical alternative. */
 reducers: the first combines shard-tuple results locally and the second merges
 those local states globally. The physical choice deliberately shares the
 ordered operator's Costgen-owned scan, map and expression coefficients. */
-(define join_unordered_reduce_plan (lambda (all_sources plan default_alias needed_exprs
+(define join_unordered_reduce_plan (lambda (all_sources plan default_alias consumer_exprs
 	final_condition stages facts value_builder reduce_expr neutral_expr shard_reduce_expr legacy_plan)
 	(begin
-		(define spec (scan_join_order_spec all_sources plan default_alias needed_exprs
+		(define spec (scan_join_order_spec all_sources plan default_alias consumer_exprs
 			final_condition '() 0 -1 stages facts true))
 		(if (nil? spec)
 			legacy_plan
@@ -5488,7 +5491,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 						(list (list "plan" "scan_join_order")
 							(list "cost" (planner_cost_explain scan_cost)))))))
 				(if (equal? chosen "scan_join_order")
-					(scan_join_order_emit_plan spec default_alias needed_exprs value_builder
+					(scan_join_order_emit_plan spec default_alias value_builder
 						reduce_expr neutral_expr shard_reduce_expr stages false)
 					legacy_plan))))))
 
@@ -7716,7 +7719,7 @@ physical decision and preserve its runtime recompile gate. */
 					(and (equal? (coalesceNil (qb_offset block) 0) 0)
 						(equal? (coalesceNil (qb_limit block) -1) -1)))
 					(join_unordered_reduce_plan
-						scan_sources scan_plan first_alias effective_needed_exprs
+						scan_sources scan_plan first_alias effective_field_exprs
 						effective_condition (query_block_stage_catalog block) (qb_facts block)
 						(lambda (_probe_work_rows _scalar_probe) row_expr)
 						reduce_expr neutral_expr shard_reduce_expr legacy_reduce_plan)
