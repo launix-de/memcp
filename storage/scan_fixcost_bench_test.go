@@ -92,12 +92,11 @@ func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
 	session := scm.NewSession()
-	sessionFn := session.Func()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		scm.SetValues(map[string]any{"session": session}, func() {
-			WithAutocommit(sessionFn, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			WithAutocommit(session, nil, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
 				return tbl.scan(
 					CurrentTx(),
 					[]string{"id"}, trueFn,

@@ -463,7 +463,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			"querySeq":        querySeq,
 			"context":         queryCtx,
 		}, func() {
-			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer)
+			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer,
+				NewAny(&QueryExecutionContext{SessionState: ss, QuerySeq: querySeq}))
 		})
 		return rc
 	}()

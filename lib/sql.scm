@@ -436,6 +436,13 @@ On parse error the result is not cached. */
 					(cadr cached_entry))))
 			formula)))))
 
+/* The frontend already owns the executing session and request identity. Pass
+them to with_autocommit so transaction setup does not rediscover either value
+through goroutine-local context lookups. */
+(define sql_execute_formula (lambda (session execution_context formula resultrow)
+	(with_autocommit session execution_context
+		(lambda () (eval (source "SQL Query" 1 1 formula))))))
+
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),
 then you can query the policy by
@@ -620,6 +627,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					(define resultrow (res "jsonl"))
 					/* Use persistent session if X-Session-Id header is present */
 					(define session_id ((req "header") "X-Session-Id"))
+					(define execution_context (req "__execution_context"))
 					(define session (if session_id
 						(begin
 							(define existing (http_sessions session_id))
@@ -629,7 +637,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 								new_sess
 							))
 						)
-						(context "session")
+						(req "__session")
 					))
 					(session "username" (req "username"))
 					(session "schema" schema)
@@ -646,8 +654,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					the legacy persistent X-Session-Id map can select a different session;
 					avoid a second goroutine-stack lookup for ordinary autocommit queries. */
 					(define execute_formula (lambda ()
-						(with_autocommit session (lambda ()
-							(eval (source "SQL Query" 1 1 formula))))))
+						(sql_execute_formula session execution_context formula resultrow)))
 					(set query_result (if session_id
 						(with_session session execute_formula)
 						(execute_formula)))
@@ -678,7 +685,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(try (lambda () (time (begin
 					((res "header") "Content-Type" "text/plain")
 					(define resultrow (res "jsonl"))
-					(define session (context "session"))
+					(define session (req "__session"))
+					(define execution_context (req "__execution_context"))
 					(session "username" (req "username"))
 					(session "schema" schema)
 					(set resultrow_called false)
@@ -706,7 +714,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						before parse/build so session-sensitive planner rewrites see the right values. */
 						(extract_assoc (req "query") (lambda (k v) (session k v)))
 						(define formula (cached_parse psql_queryplan_cache parse_psql schema query (sql_policy (req "username")) (req "username") session false))
-						(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
+						(sql_execute_formula session execution_context formula resultrow)
 					)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
@@ -801,7 +809,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_) (scan nil (table "system" "user") '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
-(set mysql_handler (lambda (schema sql resultrow_sql session) (begin
+(set mysql_handler (lambda (schema sql resultrow_sql session execution_context) (begin
 	(session "schema" schema)
 	(define resultrow resultrow_sql)
 	(try (lambda () (begin
@@ -818,7 +826,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(define formula (if (equal? (session "syntax") "postgresql")
 					(cached_parse psql_queryplan_cache parse_psql schema sql_parse_input (sql_policy mysql_username) mysql_username session false)
 					(cached_parse sql_queryplan_cache parse_sql schema sql_parse_input (sql_policy mysql_username) mysql_username session true)))
-				(with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula))))
+				(sql_execute_formula session execution_context formula resultrow)
 			) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)

@@ -47,3 +47,28 @@ func TestHTTPSQLBodyUpdatesProcesslistInfo(t *testing.T) {
 		t.Fatalf("expected processlist info %q, got %q", query, observed)
 	}
 }
+
+func TestHTTPRequestCarriesExecutionContextInSingleSessionFrame(t *testing.T) {
+	server := &HttpServer{callback: NewFunc(func(a ...Scmer) Scmer {
+		request := a[0]
+		session := Apply(request, NewString("__session"))
+		executionContext, ok := Apply(request, NewString("__execution_context")).Any().(*QueryExecutionContext)
+		if !ok {
+			t.Fatal("expected typed query execution context")
+		}
+		if executionContext.SessionState != GetCurrentSessionState() {
+			t.Fatal("request and goroutine-local session state differ")
+		}
+		if executionContext.QuerySeq != CurrentQuerySeq() {
+			t.Fatal("request and goroutine-local query sequence differ")
+		}
+		if session != executionContext.SessionState.GetOrCreateScmSession() {
+			t.Fatal("request and process-list Scheme sessions differ")
+		}
+		return NewNil()
+	})}
+	req := httptest.NewRequest("POST", "/sql/database", strings.NewReader("SELECT 1"))
+	res := httptest.NewRecorder()
+
+	server.ServeHTTP(res, req)
+}
