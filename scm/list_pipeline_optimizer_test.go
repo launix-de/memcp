@@ -189,6 +189,25 @@ func TestOptimizeFusesRangeReducerWithoutNeutral(t *testing.T) {
 	}
 }
 
+func TestOptimizeRangeReducerPreservesRetainedCallbackArguments(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (count)
+		(reduce (produceN count) list))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "reduce_range") || strings.Contains(serialized, "produceN") {
+		t.Fatalf("range reducer with retaining callback was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewInt(3))
+	want := NewSlice([]Scmer{
+		NewSlice([]Scmer{NewInt(0), NewInt(1)}),
+		NewInt(2),
+	})
+	if !Equal(got, want) {
+		t.Fatalf("fused retaining range reducer returned %s, want %s", String(got), String(want))
+	}
+}
+
 func BenchmarkOptimizerRangeFindPlanner(b *testing.B) {
 	optimized, env := optimizeListPipeline(b, `(lambda (count target)
 		(reduce (produceN count)

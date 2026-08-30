@@ -28355,8 +28355,6 @@ func init_list() {
 			if count < 0 {
 				count = 0
 			}
-			reducer := PrepareSerialProc(a[1])
-			var reducerArgs [2]Scmer
 			result := NewNil()
 			index := 0
 			if len(a) > 2 {
@@ -28365,6 +28363,16 @@ func init_list() {
 				result = NewInt(0)
 				index = 1
 			}
+			if declaration := DeclarationForValue(a[1]); declaration != nil && declaration.RetainsCallArgs {
+				reducer := OptimizeProcToSerialFunction(a[1])
+				for index < count {
+					result = reducer(result, NewInt(int64(index)))
+					index++
+				}
+				return result
+			}
+			reducer := PrepareSerialProc(a[1])
+			var reducerArgs [2]Scmer
 			for index < count {
 				reducerArgs[0], reducerArgs[1] = result, NewInt(int64(index))
 				result = reducer.Call(reducerArgs[:])
@@ -28396,6 +28404,16 @@ func init_list() {
 			count := int(a[0].Int())
 			if count < 0 {
 				count = 0
+			}
+			if declaration := DeclarationForValue(a[1]); declaration != nil && declaration.RetainsCallArgs {
+				candidate := OptimizeProcToSerialFunction(a[1])
+				for index := 0; index < count; index++ {
+					value := candidate(NewNil(), NewInt(int64(index)))
+					if !value.IsNil() {
+						return value
+					}
+				}
+				return NewNil()
 			}
 			candidate := PrepareSerialProc(a[1])
 			var candidateArgs [2]Scmer
