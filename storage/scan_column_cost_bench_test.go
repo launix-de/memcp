@@ -161,6 +161,48 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 	}
 }
 
+func TestScanSelectivityEstimateLoadsColdPersistentShard(t *testing.T) {
+	Init(scm.Globalenv)
+	tbl, persistence := createDurabilityTestTable(t, "test_selectivity_cold_shard", 100)
+	RebuildTable(tbl, true, false)
+
+	db := newDatabase()
+	db.Name = "test_selectivity_cold_shard"
+	db.persistence = persistence
+	db.srState = COLD
+	db.ensureLoaded()
+	coldTable := db.GetTable("items")
+	if coldTable == nil {
+		t.Fatal("reloaded database has no items table")
+	}
+	coldShard := coldTable.ActiveShards()[0]
+	if coldShard.srState != COLD {
+		t.Fatalf("reloaded shard state = %v, want COLD", coldShard.srState)
+	}
+
+	condition := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("<="), scm.NewSymbol("id"), scm.NewInt(50),
+		}),
+		En: &scm.Globalenv,
+	})
+	estimate := scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_selectivity_estimate")],
+		scm.NewNil(), NewTableScmer(coldTable),
+		scm.NewSlice([]scm.Scmer{scm.NewString("id")}), condition, scm.NewInt(512))
+	fields := mustScmerSlice(estimate, "cold selectivity estimate")
+	values := make(map[string]int64, len(fields))
+	for _, field := range fields {
+		pair := mustScmerSlice(field, "cold selectivity estimate field")
+		if pair[1].IsInt() {
+			values[scm.String(pair[0])] = int64(scm.ToInt(pair[1]))
+		}
+	}
+	if values["rows"] != 50 || values["sampled"] != 100 || values["input"] != 100 {
+		t.Fatalf("cold selectivity estimate = %v, want rows=50 sampled=100 input=100", values)
+	}
+}
+
 func TestCountEstimateSumsUnevenShards(t *testing.T) {
 	oldShardSize := Settings.ShardSize
 	Settings.ShardSize = 3

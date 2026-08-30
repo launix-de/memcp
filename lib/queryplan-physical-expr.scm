@@ -2382,14 +2382,13 @@ retain the scalar's complete value, including SQL NULL. */
 			nil)
 		_ nil)))
 
-(define order_expr_driver_equivalent (lambda (sources driver expr)
-	(reduce (cdr sources) (lambda (found src)
-		(if (not (nil? found))
-			found
-			(reduce (split_and_terms (coalesceNil (source_join_expr src) true))
-				(lambda (equivalent term)
-					(coalesceNil equivalent (join_term_driver_equivalent driver expr term))) nil)))
-		nil)))
+(define order_expr_driver_equivalent (lambda (sources driver expr condition)
+	(reduce (merge_unique (list
+		(split_and_terms (coalesceNil condition true))
+		(merge (map sources (lambda (src)
+			(split_and_terms (coalesceNil (source_join_expr src) true)))))))
+		(lambda (equivalent term)
+			(coalesceNil equivalent (join_term_driver_equivalent driver expr term))) nil)))
 
 (define scan_order_unique_lookup_sort_column (lambda (sources default_alias driver lookup expr stages condition)
 	(begin
@@ -2428,7 +2427,7 @@ retain the scalar's complete value, including SQL NULL. */
 	(if (order_expr_belongs_to_source? driver expr)
 		(scan_order_sort_column_for_alias driver expr)
 		(begin
-			(define equivalent (order_expr_driver_equivalent sources driver expr))
+			(define equivalent (order_expr_driver_equivalent sources driver expr condition))
 			(if (not (nil? equivalent))
 				(scan_order_sort_column_for_alias driver equivalent)
 				(begin
@@ -2447,7 +2446,7 @@ retain the scalar's complete value, including SQL NULL. */
 	(reduce (order_exprs order_items) (lambda (supported expr)
 		(and supported (or
 			(order_expr_belongs_to_source? driver expr)
-			(not (nil? (order_expr_driver_equivalent sources driver expr)))
+			(not (nil? (order_expr_driver_equivalent sources driver expr condition)))
 			(not (nil? (order_expr_unique_lookup_source sources driver default_alias expr stages condition)))))) true)))
 
 (define split_order_items_for_join_driver (lambda (sources default_alias driver order_items stages condition accepted)
@@ -6752,3 +6751,40 @@ coefficient used here. */
 		(* output_rows map_width planner_membership_map_column_row_ns)
 		(* joined_rows (+ 8 (* map_width 8)))
 		0 output_rows 0.65)))
+
+/* Directional ORDER/LIMIT planning compares equal operator families, so fixed
+startup cancels out. The driver can brake after enough local matches while
+every inner input must be prepared completely. Keep this property score out of
+the absolute scan_join_order-versus-legacy calibration. */
+(define planner_ordered_driver_rows_visited (lambda (input_rows filtered_rows target)
+	(if (or (not (number? input_rows)) (not (number? filtered_rows)))
+		input_rows
+		(if (<= filtered_rows 0)
+			input_rows
+			(min input_rows (max target (* target (/ input_rows filtered_rows))))))))
+
+(define planner_scan_join_order_orientation_cost (lambda (driver_rows inner_rows table_count target)
+	(planner_scan_join_order_cost (+ driver_rows inner_rows)
+		target target table_count target 0)))
+
+/* The batched probe variant visits only the ordered driver window and probes
+each later equality input with those query-local keys. Reuse the calibrated
+scan_join_order work units so this alternative introduces no hand-tuned
+threshold outside Costgen's model. */
+(define planner_growing_batch_invocations_from (lambda (rows batch invocations)
+	(if (<= rows 0)
+		invocations
+		(planner_growing_batch_invocations_from
+			(- rows batch) (* batch 2) (+ invocations 1)))))
+
+(define planner_scan_join_order_batched_probe_cost (lambda (driver_rows table_count target map_width)
+	(begin
+		(define batch_invocations (planner_growing_batch_invocations_from
+			driver_rows (max 1 target) 0))
+		(planner_cost_add
+			(planner_scan_join_order_cost driver_rows
+				(* driver_rows (- table_count 1)) target table_count target map_width)
+			(planner_cost (* (max 0 (- batch_invocations 1)) table_count
+				planner_membership_scan_invocation_ns)
+				0 0 0 0 0 0 0 target 0.65)
+			target 0.65))))

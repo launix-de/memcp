@@ -852,7 +852,11 @@ func Init(en scm.Env) {
 				if shard == nil {
 					continue
 				}
-				estimate := shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx)
+				estimate := func() filteredRowEstimate {
+					release := shard.GetRead()
+					defer release()
+					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx)
+				}()
 				if estimate.examined == 0 {
 					continue
 				}
@@ -1336,7 +1340,7 @@ func Init(en scm.Env) {
 			if len(a) > layout.reduce2Idx+sbShift {
 				reduce2 = a[layout.reduce2Idx+sbShift]
 			}
-			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata)
+			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata, nil)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filter-map-reduce pass on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
 			Params: []*scm.TypeDescriptor{

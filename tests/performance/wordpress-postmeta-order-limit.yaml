@@ -1,0 +1,124 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+
+metadata:
+  version: "1.0"
+  description: "WordPress posts and postmeta filtered join with ordered Top-K"
+  isolated: true
+  ci: true
+  restart_after_setup: true
+
+# Reproduces the common WordPress shape which filters postmeta by key, joins
+# matching posts, and returns the newest small page. The cardinalities and
+# distributions match the wordpress2 installation used for the MariaDB A/B.
+setup:
+  - sql: "DROP TABLE IF EXISTS wordpress_perf_postmeta"
+  - sql: "DROP TABLE IF EXISTS wordpress_perf_posts"
+  - sql: "CREATE TABLE wordpress_perf_posts (ID BIGINT PRIMARY KEY, post_title VARCHAR(64), post_status VARCHAR(20), post_type VARCHAR(20)) ENGINE=sloppy"
+  - sql: "CREATE TABLE wordpress_perf_postmeta (meta_id BIGINT PRIMARY KEY, post_id BIGINT, meta_key VARCHAR(255), meta_value VARCHAR(64)) ENGINE=sloppy"
+  - scm: |
+      (insert (table "memcp-tests" "wordpress_perf_posts")
+        '("ID" "post_title" "post_status" "post_type")
+        (map (produceN 8214) (lambda (i)
+          (begin
+            (define id (+ i 1))
+            (list id (concat "Benchmark Post " (string id))
+              (if (equal? (mod id 20) 0) "draft" "publish") "post")))))
+  - scm: |
+      (insert (table "memcp-tests" "wordpress_perf_postmeta")
+        '("meta_id" "post_id" "meta_key" "meta_value")
+        (map (produceN 75000) (lambda (i)
+          (begin
+            (define id (+ i 1))
+            (define key_mod (mod i 5))
+            (list id (+ 1 (mod i 8214))
+              (if (equal? key_mod 0) "_edit_lock"
+                (if (equal? key_mod 1) "_thumbnail_id"
+                  (if (equal? key_mod 2) "_yoast_wpseo_title"
+                    (if (equal? key_mod 3) "custom_color" "view_count"))))
+              (concat "meta-value-" (string id)))))))
+  - scm: "(rebuild)"
+
+test_cases:
+  - name: "WordPress filtered postmeta join ordered by newest post"
+    warmup: 2
+    timing_samples: 5
+    threshold_ms: 6
+    sql: |
+      SELECT p.ID, p.post_title, pm.meta_value
+      FROM wordpress_perf_posts p
+      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
+      WHERE p.post_type = 'post'
+        AND p.post_status = 'publish'
+        AND pm.meta_key = 'custom_color'
+      ORDER BY p.ID DESC
+      LIMIT 20
+    expect: {rows: 20}
+
+  - name: "WordPress filtered postmeta join physical plan"
+    sql: |
+      EXPLAIN PHYSICAL
+      SELECT p.ID, p.post_title, pm.meta_value
+      FROM wordpress_perf_posts p
+      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
+      WHERE p.post_type = 'post'
+        AND p.post_status = 'publish'
+        AND pm.meta_key = 'custom_color'
+      ORDER BY p.ID DESC
+      LIMIT 20
+    expect:
+      rows: 1
+      result_contains:
+        - "chosen scan_join_order_batched_probe"
+        - "scan_join_order"
+        - "legacy_join_tree"
+
+  - name: "WordPress ordered join uses the equivalent postmeta driver"
+    sql: |
+      EXPLAIN REORDER
+      SELECT p.ID, p.post_title, pm.meta_value
+      FROM wordpress_perf_posts p
+      JOIN wordpress_perf_postmeta pm ON pm.post_id = p.ID
+      WHERE p.post_type = 'post'
+        AND p.post_status = 'publish'
+        AND pm.meta_key = 'custom_color'
+      ORDER BY p.ID DESC
+      LIMIT 20
+    expect:
+      rows: 1
+      result_contains:
+        - '(join_driver \"pm\")'
+      result_not_contains:
+        - '(join_driver \"p\")'
+
+  - name: "WordPress handwritten equivalent-driver batched scan_join_order"
+    warmup: 2
+    timing_samples: 5
+    threshold_ms: 8
+    scm: |
+      (begin
+        (define posts (table "memcp-tests" "wordpress_perf_posts"))
+        (define postmeta (table "memcp-tests" "wordpress_perf_postmeta"))
+        (define found
+          (scan_join_order (session "__memcp_tx")
+            (list postmeta posts)
+            (list (list "meta_key") (list "post_type" "post_status"))
+            (list
+              (lambda (meta_key) (equal?? meta_key "custom_color"))
+              (lambda (post_type post_status)
+                (and (equal?? post_type "post") (equal?? post_status "publish"))))
+            (list (list (list 0 "post_id" "ID")))
+            (list) nil
+            (list (list 0 "post_id"))
+            (list (collate "utf8mb4" true))
+            0 0 20
+            (list (list 1 "ID") (list 1 "post_title") (list 0 "meta_value"))
+            (lambda (_id _title _value) 1)
+            + 0 nil false 0 true))
+        (if (equal? found 20) "ok"
+          (error "wrong WordPress scan_join_order row count")))
+    expect:
+      data: ["ok"]
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS wordpress_perf_postmeta"
+  - sql: "DROP TABLE IF EXISTS wordpress_perf_posts"

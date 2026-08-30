@@ -1205,7 +1205,7 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 		currentTx = r.tx
 	}
 	return r.table.scanWithBatchFrom(currentTx, r, conditionCols, condition,
-		callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
+		callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil, nil)
 }
 
 func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {

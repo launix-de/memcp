@@ -116,6 +116,7 @@ func TestRowFeaturesModelsOrderedJoinAlternatives(t *testing.T) {
 	value := func(v float64) *float64 { return &v }
 	base := calibrationRow{
 		Decision: "scan_join_order", JoinInputRows: value(25_000),
+		JoinDriverRows: value(10_000), JoinInnerRows: value(15_000),
 		JoinProbeRows: value(600), JoinMapWidth: value(3),
 		JoinEstimatedRows: value(4_000), JoinOutputRows: value(72),
 		JoinTableCount: value(2), JoinLegacyProbeRows: value(600),
@@ -472,13 +473,31 @@ func TestDecisionAlternativesAcceptsOrderedJoinFamily(t *testing.T) {
 	rows := []observation{
 		{caseName: "join", decision: "scan_join_order", plan: "legacy_join_tree"},
 		{caseName: "join", decision: "scan_join_order", plan: "scan_join_order"},
+		{caseName: "join", decision: "scan_join_order", plan: "scan_join_order_batched_probe"},
 	}
 	groups, err := decisionAlternatives(rows)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups["join"]) != 2 {
+	if len(groups["join"]) != 3 {
 		t.Fatalf("unexpected ordered join alternatives: %+v", groups)
+	}
+}
+
+func TestOrderedJoinBatchedProbeCountsGrowingScanInvocations(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Decision: "scan_join_order", Plan: "scan_join_order_batched_probe",
+		JoinInputRows: value(28192), JoinDriverRows: value(2560), JoinProbeRows: value(20000),
+		JoinEstimatedRows: value(1), JoinOutputRows: value(1), JoinMapWidth: value(4),
+		JoinTableCount: value(2), Limit: value(5), Offset: value(0),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[0] != 20 {
+		t.Fatalf("batched scan invocations = %v, want 20", features[0])
 	}
 }
 

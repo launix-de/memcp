@@ -4788,10 +4788,17 @@ flatten or reorder a bushy plan to make the operator applicable. */
 	(map refs (lambda (ref)
 		(symbol (concat (source_alias (nth sources (car ref))) "." (cadr ref)))))))
 
-(define scan_join_order_order_entry (lambda (sources default_alias item)
+(define scan_join_order_order_entry (lambda (sources default_alias terms item)
 	(match item
 		'(expr _dir) (begin
-			(define ref (scan_join_order_column_ref_using sources default_alias expr))
+			(define driver (car sources))
+			(define direct_ref (scan_join_order_column_ref_using sources default_alias expr))
+			(define equivalent (if (and (not (nil? direct_ref))
+				(equal? (car direct_ref) 0)) nil
+				(reduce terms (lambda (found term)
+					(coalesceNil found (join_term_driver_equivalent driver expr term))) nil)))
+			(define ref (if (nil? equivalent) direct_ref
+				(scan_join_order_column_ref_using sources default_alias equivalent)))
 			(if (nil? ref)
 				nil
 				(list ref (car (order_relations_for_source
@@ -4912,11 +4919,53 @@ until the caller has selected this physical alternative. */
 			(and (not (contains? consumed_join_terms term))
 				(not (contains? all_local_terms term))))))
 		(define order_entries (map order_items (lambda (item)
-			(scan_join_order_order_entry sources default_alias item))))
+			(scan_join_order_order_entry sources default_alias terms item))))
 		(define source_rows (map sources planner_source_row_count))
 		(define known_rows (reduce source_rows (lambda (known rows)
 			(and known (number? rows))) true))
 		(define input_rows (if known_rows (reduce source_rows + 0) nil))
+		/* Driver selectivity is only an ORDER/LIMIT property. In particular, do
+		not inspect session-dependent predicates while costing unordered joined
+		aggregation: those plans are cached before an execution session exists. */
+		(define ordered_window (and (>= limit 0) (not (empty_list? order_items))))
+		(define filtered_rows (if (and ordered_window known_rows)
+			(map (produceN (count sources)) (lambda (index)
+				(begin
+					(define src (nth sources index))
+					(define base_rows (nth source_rows index))
+					(define local_condition
+						(combine_where_terms (nth local_terms index) true))
+					(if (equal? local_condition true)
+						base_rows
+						(begin
+							(define estimate
+								(planner_source_filter_estimate src local_condition 512))
+							(max 1 (planner_estimated_matching_rows estimate
+								base_rows base_rows))))))) nil))
+		/* A local driver predicate is only the first acceptance stage. Every
+		later input may reject the driver row as well, so price ordered braking
+		from the product of the independently estimated inner selectivities.
+		This keeps a selective exact carrier competitive when join matches are
+		rare, while an almost-unfiltered FK lookup remains a cheap batch probe. */
+		(define inner_acceptance (if (and ordered_window
+			(not (empty_list? filtered_rows)))
+			(reduce (produceN (- (count sources) 1)) (lambda (acceptance offset_index)
+				(begin
+					(define index (+ offset_index 1))
+					(define base_rows (nth source_rows index))
+					(define matching_rows (nth filtered_rows index))
+					(* acceptance (if (<= base_rows 0) 0
+						(min 1 (/ matching_rows base_rows)))))) 1)
+			nil))
+		(define accepted_driver_target (if (and (number? inner_acceptance)
+			(> inner_acceptance 0))
+			(/ (+ offset limit) inner_acceptance)
+			(if (number? inner_acceptance) (car source_rows) nil)))
+		(define driver_rows (if (and ordered_window (not (empty_list? filtered_rows)))
+			(planner_ordered_driver_rows_visited (car source_rows) (car filtered_rows)
+				accepted_driver_target) nil))
+		(define inner_rows (if (and ordered_window (not (empty_list? source_rows)))
+			(reduce (cdr source_rows) + 0) nil))
 		(define joined_rows (qassoc_get facts (quote join_estimated_rows) nil))
 		(define scan_invocations (physical_join_tree_scan_invocations plan all_sources 1))
 		(define probe_rows (if (number? scan_invocations)
@@ -4925,7 +4974,7 @@ until the caller has selected this physical alternative. */
 			(min (coalesceNil joined_rows limit) (+ offset limit)) joined_rows))
 		(define map_width (count (scan_join_order_refs_for_exprs
 			sources default_alias needed_exprs)))
-		(define window_supported (and (>= limit 0) (not (empty_list? order_items))))
+		(define window_supported ordered_window)
 		(define reduce_supported (and unordered_reduce
 			(and (equal? offset 0) (and (equal? limit -1) (empty_list? order_items)))))
 		(define supported (and (scan_join_order_tree_compatible? plan)
@@ -4955,6 +5004,8 @@ until the caller has selected this physical alternative. */
 				(list (quote map_refs) (scan_join_order_refs_for_exprs
 					sources default_alias needed_exprs))
 				(list (quote input_rows) input_rows)
+				(list (quote driver_rows) driver_rows)
+				(list (quote inner_rows) inner_rows)
 				(list (quote probe_rows) probe_rows)
 				(list (quote joined_rows) joined_rows)
 				(list (quote output_rows) output_rows)
@@ -4964,7 +5015,10 @@ until the caller has selected this physical alternative. */
 				(list (quote limit) limit)
 				(list (quote cost) (planner_scan_join_order_cost
 					input_rows probe_rows joined_rows (count sources)
-					output_rows map_width)))))))
+					output_rows map_width))
+				(list (quote batched_probe_cost) (if (number? driver_rows)
+					(planner_scan_join_order_batched_probe_cost driver_rows
+						(count sources) (+ offset limit) map_width) nil)))))))
 
 (define join_ordered_streaming_limit_legacy_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
@@ -5204,7 +5258,7 @@ until the caller has selected this physical alternative. */
 			(wrap_membership_keyset_bindings membership_keysets window_expr)
 			window_expr))))
 
-(define scan_join_order_emit_plan (lambda (spec default_alias needed_exprs value_builder reduce_expr neutral_expr shard_reduce_expr stages)
+(define scan_join_order_emit_plan (lambda (spec default_alias needed_exprs value_builder reduce_expr neutral_expr shard_reduce_expr stages batched_probe)
 	(begin
 		(define sources (qassoc_get spec (quote sources) '()))
 		(define local_terms (qassoc_get spec (quote local_terms) '()))
@@ -5254,7 +5308,7 @@ until the caller has selected this physical alternative. */
 			(list (quote lambda)
 				(scan_join_order_ref_params sources map_refs)
 				map_body)
-			reduce_expr neutral_expr shard_reduce_expr false neutral_expr))))
+			reduce_expr neutral_expr shard_reduce_expr false neutral_expr batched_probe))))
 
 (define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
@@ -5269,6 +5323,7 @@ until the caller has selected this physical alternative. */
 				(define input_rows (qassoc_get spec (quote input_rows) 0))
 				(define output_rows (qassoc_get spec (quote output_rows) 0))
 				(define scan_cost (qassoc_get spec (quote cost) nil))
+				(define batched_probe_cost (qassoc_get spec (quote batched_probe_cost) nil))
 				/* join_estimated_cost is the optimizer's scalar DP rank. Physical
 				alternatives compare the calibrated cost-domain record instead. */
 				(define estimated_legacy_cost (qassoc_get facts (quote join_cost) nil))
@@ -5321,11 +5376,17 @@ until the caller has selected this physical alternative. */
 					(coalesceNil joined_rows legacy_probe_rows) 0.65))
 				/* Both alternatives are fully costed in the same generated cost domain.
 				Do not override a close comparison with an operator-specific preference. */
-				(define normal_choice (if (planner_cost_better? scan_cost legacy_cost)
+				(define materialized_choice (if (planner_cost_better? scan_cost legacy_cost)
 					"scan_join_order" "legacy_join_tree"))
+				(define materialized_cost (if (equal? materialized_choice "scan_join_order")
+					scan_cost legacy_cost))
+				(define normal_choice (if (and (not (nil? batched_probe_cost))
+					(planner_cost_better? batched_probe_cost materialized_cost))
+					"scan_join_order_batched_probe" materialized_choice))
 				(define decision_id (concat "scan_join_order:"
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
-				(define alternatives (list "legacy_join_tree" "scan_join_order"))
+				(define alternatives (list "legacy_join_tree" "scan_join_order"
+					"scan_join_order_batched_probe"))
 				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
 				(define forced (planner_physical_override decision_id))
 				(planner_record_physical_decision (list
@@ -5340,6 +5401,8 @@ until the caller has selected this physical alternative. */
 						"calibration_override"))
 					(list "inputs" (list
 						(list "join_input_rows" input_rows)
+						(list "join_driver_rows" (qassoc_get spec (quote driver_rows) nil))
+						(list "join_inner_rows" (qassoc_get spec (quote inner_rows) nil))
 						(list "join_probe_rows" (qassoc_get spec (quote probe_rows) 0))
 						(list "join_estimated_rows" joined_rows)
 						(list "join_output_rows" output_rows)
@@ -5352,10 +5415,14 @@ until the caller has selected this physical alternative. */
 						(list (list "plan" "legacy_join_tree")
 							(list "cost" (planner_cost_explain legacy_cost)))
 						(list (list "plan" "scan_join_order")
-							(list "cost" (planner_cost_explain scan_cost)))))))
-				(if (equal? chosen "scan_join_order")
+							(list "cost" (planner_cost_explain scan_cost)))
+						(list (list "plan" "scan_join_order_batched_probe")
+							(list "cost" (planner_cost_explain batched_probe_cost)))))))
+				(if (or (equal? chosen "scan_join_order")
+					(equal? chosen "scan_join_order_batched_probe"))
 					(scan_join_order_emit_plan spec default_alias needed_exprs
-						value_builder reduce_expr neutral_expr nil stages)
+						value_builder reduce_expr neutral_expr nil stages
+						(equal? chosen "scan_join_order_batched_probe"))
 					(join_ordered_streaming_limit_legacy_plan schema all_sources plan default_alias
 						output_exprs needed_exprs final_condition order_items offset_value limit_value
 						stages facts value_builder reduce_expr neutral_expr)))))))
@@ -5422,7 +5489,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 							(list "cost" (planner_cost_explain scan_cost)))))))
 				(if (equal? chosen "scan_join_order")
 					(scan_join_order_emit_plan spec default_alias needed_exprs value_builder
-						reduce_expr neutral_expr shard_reduce_expr stages)
+						reduce_expr neutral_expr shard_reduce_expr stages false)
 					legacy_plan))))))
 
 (define without_col (lambda (cols col)
@@ -9258,7 +9325,10 @@ ordering run. Storage artifacts begin in build_queryplan. */
 					(physical_membership_operator_family plan)))
 			(if (equal? kind "scan_join_order")
 				(if (physical_expr_has_head? plan (quote scan_join_order))
-					"scan_join_order" "legacy_join_tree")
+					(if (equal? (qassoc_get decision "chosen" nil)
+						"scan_join_order_batched_probe")
+						"scan_join_order_batched_probe" "scan_join_order")
+					"legacy_join_tree")
 				(if (equal? kind "direct_group_join")
 					(if (physical_expr_has_group_relation? plan)
 						"group_carrier" "direct_group_join")
@@ -9425,6 +9495,8 @@ potentially large calibrated SELECT result. */
 							"driver_expression_operations" (physical_calibration_input decision "driver_expression_operations")
 							"driver_expression_depth" (physical_calibration_input decision "driver_expression_depth")
 							"join_input_rows" (physical_calibration_input decision "join_input_rows")
+							"join_driver_rows" (physical_calibration_input decision "join_driver_rows")
+							"join_inner_rows" (physical_calibration_input decision "join_inner_rows")
 							"join_probe_rows" (physical_calibration_input decision "join_probe_rows")
 							"join_estimated_rows" (physical_calibration_input decision "join_estimated_rows")
 							"join_output_rows" (physical_calibration_input decision "join_output_rows")

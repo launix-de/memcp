@@ -83,6 +83,7 @@ func TestScanJoinOrderFiltersJoinsAndBrakesInDriverOrder(t *testing.T) {
 		reduceFn:      reduceFn,
 		neutral:       scm.NewNil(),
 		notFoundValue: scm.NewNil(),
+		batchedProbe:  true,
 	})
 
 	want := [][2]int64{{5, 101}, {3, 100}, {3, 101}}
