@@ -25,10 +25,10 @@ import "strings"
 
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
-	Name                     string
-	Fn                       func(...Scmer) Scmer
-	Type                     *TypeDescriptor
-	RetainsCallArgs          bool // native result or state may retain the variadic argument array
+	Name            string
+	Fn              func(...Scmer) Scmer
+	Type            *TypeDescriptor
+	RetainsCallArgs bool // native result or state may retain the variadic argument array
 	// Optimize owns declaration-specific rewrites. When set, the optimizer calls
 	// it instead of the default argument optimization and post-processing path.
 	Optimize                 func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
@@ -86,9 +86,9 @@ type TypeDescriptor struct {
 	// data. Numbered parameters stay in their existing stack slots and constants
 	// stay immediate until an operation actually needs to materialize them.
 	JITVirtualArgs bool
-	// JITInlineCallbacks is generated from the builtin's Go SSA. It permits the
-	// declaration emitter to inline known lambdas only when callback results do
-	// not currently cross the builtin's own control-flow merges.
+	// JITInlineCallbacks records that jitgen emitted the builtin's dynamic SSA
+	// calls as recursive lambda emitters. It is capability metadata, not a
+	// runtime permission gate.
 	JITInlineCallbacks bool
 }
 

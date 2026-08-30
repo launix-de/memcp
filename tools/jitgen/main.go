@@ -240,7 +240,7 @@ func main() {
 			genErr = nativeValidationFailures[op.name]
 		}
 		usesFallback := genErr != ""
-		inlineCallbacks := hasDynamicSSACall(ssaFn) && !dynamicSSAResultCrossesControlFlow(ssaFn)
+		inlineCallbacks := hasDynamicSSACall(ssaFn)
 		if genErr == "" {
 			fmt.Printf("  %s: %s OK\n", op.path, op.name)
 		} else {
@@ -471,38 +471,6 @@ func dynamicSSACalls(fn *ssa.Function) []*ssa.Call {
 
 func hasDynamicSSACall(fn *ssa.Function) bool {
 	return len(dynamicSSACalls(fn)) != 0
-}
-
-// dynamicSSAResultCrossesControlFlow identifies higher-order builtins whose
-// callback result selects an edge or becomes a phi input. Those cases need a
-// stronger callback/merge contract than straight-line map emitters currently
-// provide.
-func dynamicSSAResultCrossesControlFlow(fn *ssa.Function) bool {
-	for _, call := range dynamicSSACalls(fn) {
-		queue := []ssa.Value{call}
-		seen := map[ssa.Value]bool{call: true}
-		for len(queue) > 0 {
-			value := queue[0]
-			queue = queue[1:]
-			refs := value.Referrers()
-			if refs == nil {
-				continue
-			}
-			for _, ref := range *refs {
-				switch ref.(type) {
-				case *ssa.If, *ssa.Phi:
-					return true
-				}
-				next, ok := ref.(ssa.Value)
-				if !ok || seen[next] {
-					continue
-				}
-				seen[next] = true
-				queue = append(queue, next)
-			}
-		}
-	}
-	return false
 }
 
 func generateFallbackClosure(opName string) string {
@@ -1521,6 +1489,107 @@ func (g *codeGen) phiSlotOffExpr(bbIdx int, phiIdx int) string {
 	return fmt.Sprintf("int32(bbs[%d].PhiBase)+int32(%d)", bbIdx, phiIdx*phiSlotBytes)
 }
 
+// directPhiTarget returns the stack slot and shape for a producer feeding one
+// phi node. Other local consumers are allowed: the producer can write the phi
+// destination immediately and retain its descriptor for those local uses.
+func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool) {
+	refs := value.Referrers()
+	if refs == nil {
+		return "", phiTargetScalar, false
+	}
+	var phi *ssa.Phi
+	for _, ref := range *refs {
+		candidate, ok := ref.(*ssa.Phi)
+		if !ok {
+			continue
+		}
+		if phi != nil && phi != candidate {
+			return "", phiTargetScalar, false
+		}
+		phi = candidate
+	}
+	if phi == nil {
+		return "", phiTargetScalar, false
+	}
+	shape := phiTargetScalar
+	if isPhiTripleType(phi.Type()) {
+		shape = phiTargetTriple
+	} else if isPhiPairType(phi.Type()) {
+		shape = phiTargetPair
+	}
+	for phiIdx, candidate := range g.blockPhis(phi.Block().Index) {
+		if candidate == phi {
+			return g.phiSlotOffExpr(phi.Block().Index, phiIdx), shape, true
+		}
+	}
+	return "", phiTargetScalar, false
+}
+
+type JITTargetShape uint8
+
+const (
+	phiTargetScalar JITTargetShape = iota
+	phiTargetPair
+	phiTargetTriple
+)
+
+func (g *codeGen) phiValueAlreadyStored(value ssa.Value, targetBBIdx, phiIdx int) bool {
+	phis := g.blockPhis(targetBBIdx)
+	if phiIdx < 0 || phiIdx >= len(phis) {
+		return false
+	}
+	target := phis[phiIdx]
+	if value == target {
+		return true
+	}
+	if !jitgenProducerSupportsPhiTarget(value) {
+		return false
+	}
+	off, _, ok := g.directPhiTarget(value)
+	return ok && off == g.phiSlotOffExpr(targetBBIdx, phiIdx)
+}
+
+func jitgenProducerSupportsPhiTarget(value ssa.Value) bool {
+	switch v := value.(type) {
+	case *ssa.MakeSlice:
+		return true
+	case *ssa.Call:
+		if builtin, ok := v.Call.Value.(*ssa.Builtin); ok {
+			return builtin.Name() == "append"
+		}
+		callee := v.Call.StaticCallee()
+		if callee == nil {
+			return true
+		}
+		switch callee.Name() {
+		case "NewBool", "NewInt", "NewFloat", "NewNil":
+			return true
+		default:
+			return false
+		}
+	case *ssa.BinOp:
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *codeGen) emitDirectPhiStore(value ssa.Value) {
+	if _, ok := value.(*ssa.BinOp); !ok {
+		return
+	}
+	target, shape, ok := g.directPhiTarget(value)
+	if !ok || shape != phiTargetScalar {
+		return
+	}
+	gv, ok := g.vals[value.Name()]
+	if !ok || !gv.isDesc || gv.goVar == "" {
+		return
+	}
+	g.emit("ctx.EnsureDesc(&%s)", gv.goVar)
+	g.emit("ctx.EmitStoreToStack(%s, %s)", gv.goVar, target)
+}
+
 func (g *codeGen) emitBBPhiLayout() {
 	for bbIdx := range g.fn.Blocks {
 		base, ok := g.bbPhiBase[bbIdx]
@@ -1596,6 +1665,9 @@ func (g *codeGen) emitBuildPhiStateForEdge(psVar string, targetBBIdx int, succPo
 			continue
 		}
 		edge := phi.Edges[edgeIdx]
+		if g.phiValueAlreadyStored(edge, targetBBIdx, phiIdx) {
+			continue
+		}
 		if c, ok := edge.(*ssa.Const); ok {
 			cv := g.emitConstDescForSSAConst(c)
 			g.emit("%s.PhiValues[%d] = %s", psVar, phiIdx, cv.goVar)
@@ -1975,6 +2047,10 @@ func (g *codeGen) collectEdgePhiMoves(targetBBIdx int, succPos int) []phiEdgeMov
 			panic(fmt.Sprintf("phi edge index out of range for %s: edge=%d len=%d", phi.Name(), edgeIdx, len(phi.Edges)))
 		}
 		edge := phi.Edges[edgeIdx]
+		if g.phiValueAlreadyStored(edge, targetBBIdx, phiIdx) {
+			phiIdx++
+			continue
+		}
 		out = append(out, phiEdgeMove{
 			phiOff:  g.phiSlotOffExpr(targetBBIdx, phiIdx),
 			edge:    edge,
@@ -2096,14 +2172,19 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 			edgeSrc := g.allocDesc()
 			g.emit("%s := %s", edgeSrc, src.goVar)
 			g.emit("if %s.Loc == LocNone { panic(\"jit: phi source has no location\") }", edgeSrc)
-			g.emit("ctx.EnsureDesc(&%s)", edgeSrc)
 			if phiTriple {
-				g.emit("if %s.Loc != LocRegTriple { panic(\"jit: slice phi source is not a triple\") }", edgeSrc)
-				g.emit("ctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", edgeSrc, phiOff)
-				g.emit("ctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", edgeSrc, phiOff)
-				g.emit("ctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", edgeSrc, phiOff)
+				g.emit("ctx.SyncDesc(&%s)", edgeSrc)
+				g.emit("if %s.Loc == LocStackTriple {", edgeSrc)
+				g.emit("\tctx.EmitCopyStackWords(%s, %s, 3)", edgeSrc, phiOff)
+				g.emit("} else {")
+				g.emit("\tif %s.Loc != LocRegTriple { panic(\"jit: slice phi source is not a triple\") }", edgeSrc)
+				g.emit("\tctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", edgeSrc, phiOff)
+				g.emit("\tctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", edgeSrc, phiOff)
+				g.emit("\tctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", edgeSrc, phiOff)
+				g.emit("}")
 				return
 			}
+			g.emit("ctx.EnsureDesc(&%s)", edgeSrc)
 			if phiPair {
 				g.emit("if %s.Loc == LocRegPair || %s.Loc == LocImm {", edgeSrc, edgeSrc)
 				g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", edgeSrc, phiOff)
@@ -2130,7 +2211,7 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 			// over-decrement when the same value appears on mutually exclusive
 			// conditional paths (each path's emitPhiMov runs at codegen time).
 		} else {
-			panic(fmt.Sprintf("phi edge references unknown value: %s", v))
+			panic(fmt.Sprintf("phi edge references unknown value in BB%d: %s", g.curBlock, v))
 		}
 	}
 }
@@ -4163,11 +4244,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 				g.emit("ctx.EnsureDesc(&%s)", slice.goVar)
 				g.emit("if %s.Loc != LocRegTriple { panic(\"jit: append requires a Go slice header\") }", slice.goVar)
+				g.emit("ctx.ProtectReg(%s.Reg)", slice.goVar)
+				g.emit("ctx.ProtectReg(%s.Reg2)", slice.goVar)
+				g.emit("ctx.ProtectReg(%s.Reg3)", slice.goVar)
 				capacityOK := g.allocLabel()
 				g.emit("%s := ctx.ReserveLabel()", capacityOK)
 				g.emit("ctx.EmitCmpInt64(%s.Reg2, %s.Reg3)", slice.goVar, slice.goVar)
 				g.emit("ctx.EmitJcc(CcB, %s)", capacityOK)
-				g.emit("ctx.EmitGoCallVoid(GoFuncAddr(jitPanic), []JITValueDesc{{Loc: LocImm, Type: tagString, Imm: NewString(\"jit: generated append exceeded its fixed capacity\")}})")
+				g.emit("ctx.EmitGoPanic(\"jit: generated append exceeded its fixed capacity\")")
 				g.emit("ctx.MarkLabel(%s)", capacityOK)
 				index := g.allocDesc()
 				g.emit("%s := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2, NoHeapPointer: true}", index, slice.goVar)
@@ -4178,11 +4262,22 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("ctx.EmitStoreScmerAt(&%s, &%s)", address, value)
 				g.emit("ctx.FreeDesc(&%s)", address)
 				g.emit("ctx.EmitAddRegImm32(%s.Reg2, 1)", slice.goVar)
+				g.emit("ctx.UnprotectReg(%s.Reg3)", slice.goVar)
+				g.emit("ctx.UnprotectReg(%s.Reg2)", slice.goVar)
+				g.emit("ctx.UnprotectReg(%s.Reg)", slice.goVar)
 				dv := g.allocDesc()
-				g.emit("%s := %s", dv, slice.goVar)
-				g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
-				g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
-				g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
+				if phiTarget, shape, direct := g.directPhiTarget(v); direct && shape == phiTargetTriple {
+					g.emit("ctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", slice.goVar, phiTarget)
+					g.emit("ctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", slice.goVar, phiTarget)
+					g.emit("ctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", slice.goVar, phiTarget)
+					g.emit("ctx.FreeDesc(&%s)", slice.goVar)
+					g.emit("%s := JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: %s}", dv, phiTarget)
+				} else {
+					g.emit("%s := %s", dv, slice.goVar)
+					g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
+					g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
+					g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
+				}
 				g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 			case "len":
 				arg := v.Call.Args[0]
@@ -4250,14 +4345,25 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("%s[%d] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)+%d}", argsVar, i, callArgs.stackBase, i*16)
 			}
 			g.emit("var %s JITValueDesc", dv)
+			callbackTargetOff := ""
+			phiTarget, phiShape, directPhiTarget := g.directPhiTarget(v)
+			directPhiTarget = directPhiTarget && phiShape == phiTargetPair
+			if directPhiTarget {
+				callbackTargetOff = phiTarget
+			} else {
+				callbackResultOff := g.allocTemp("callbackResultOff")
+				g.emit("%s := ctx.AllocStack(16)", callbackResultOff)
+				callbackTargetOff = "int32(" + callbackResultOff + ")"
+			}
+			callbackTarget := fmt.Sprintf("JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: %s, ID: 0}", callbackTargetOff)
 			g.emit("ctx.FreeDesc(&%s)", callArgs.goVar)
 			g.emit("if %s.Loc == LocLambdaTemplate && %s.Lambda != nil {", callable.goVar, callable.goVar)
+			stableArgs := g.allocTemp("stableCallbackArgs")
+			g.emit("\t%s := ctx.StabilizeCallbackArgs(%s)", stableArgs, argsVar)
 			preservedVar := g.allocTemp("outerRegs")
 			g.emit("\t%s := ctx.PreserveOuterRegs()", preservedVar)
-			g.emit("\t%s = JITEmitProcInlineWithOuter(ctx, &%s.Lambda.Proc, %s.Lambda.Outer, %s, ctx.SliceBase, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})", dv, callable.goVar, callable.goVar, argsVar)
-			g.emit("\tctx.EnsureDesc(&%s)", dv)
+			g.emit("\t%s = JITEmitProcInlineWithOuter(ctx, &%s.Lambda.Proc, %s.Lambda.Outer, %s, ctx.SliceBase, %s)", dv, callable.goVar, callable.goVar, stableArgs, callbackTarget)
 			g.emit("\tctx.RestoreOuterRegs(%s)", preservedVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: %s.Type, Reg: RegRAX, Reg2: RegRBX, ID: 0, NoHeapPointer: %s.NoHeapPointer}", dv, dv, dv)
 			g.emit("} else {")
 			callbackHelper := ""
 			switch callArgs.stackLen {
@@ -4274,6 +4380,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tcallbackCallArgs = append(callbackCallArgs, %s)", callable.goVar)
 			g.emit("\tcallbackCallArgs = append(callbackCallArgs, %s...)", argsVar)
 			g.emit("\t%s = ctx.EmitGoCallScalarInto(GoFuncAddr(%s), callbackCallArgs, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})", dv, callbackHelper)
+			g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", dv, callbackTargetOff)
+			g.emit("\tctx.FreeDesc(&%s)", dv)
+			g.emit("\t%s = %s", dv, callbackTarget)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 			break
@@ -4542,18 +4651,45 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		case "NewBool":
 			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
-			g.vals[name] = genVal{goVar: src.goVar, marker: "_newbool", resultTargetVar: src.resultTargetVar}
+			if target, shape, direct := g.directPhiTarget(v); direct && shape == phiTargetPair {
+				dv := g.allocDesc()
+				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagBool, %s)", src.goVar, target)
+				g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: tagBool, StackOff: %s}", dv, target)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else {
+				g.vals[name] = genVal{goVar: src.goVar, isDesc: src.isDesc, marker: "_newbool", resultTargetVar: src.resultTargetVar}
+			}
 		case "NewInt":
 			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
-			g.vals[name] = genVal{goVar: src.goVar, marker: "_newint", resultTargetVar: src.resultTargetVar}
+			if target, shape, direct := g.directPhiTarget(v); direct && shape == phiTargetPair {
+				dv := g.allocDesc()
+				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagInt, %s)", src.goVar, target)
+				g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: tagInt, StackOff: %s}", dv, target)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else {
+				g.vals[name] = genVal{goVar: src.goVar, isDesc: src.isDesc, marker: "_newint", resultTargetVar: src.resultTargetVar}
+			}
 		case "NewFloat":
 			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
-			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat", resultTargetVar: src.resultTargetVar}
+			if target, shape, direct := g.directPhiTarget(v); direct && shape == phiTargetPair {
+				dv := g.allocDesc()
+				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagFloat, %s)", src.goVar, target)
+				g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: tagFloat, StackOff: %s}", dv, target)
+				g.vals[name] = genVal{goVar: dv, isDesc: true}
+			} else {
+				g.vals[name] = genVal{goVar: src.goVar, isDesc: src.isDesc, marker: "_newfloat", resultTargetVar: src.resultTargetVar}
+			}
 		case "NewNil":
 			dv := g.allocDesc()
-			g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
+			if target, shape, direct := g.directPhiTarget(v); direct && shape == phiTargetPair {
+				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
+				g.emit("ctx.EmitStoreScmerToStack(%s, %s)", dv, target)
+				g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: tagNil, StackOff: %s}", dv, target)
+			} else {
+				g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
+			}
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewString":
 			// NewString(s string) Scmer — arg is a Go string (2 words: ptr+len), result is Scmer (2 words)
@@ -6177,18 +6313,9 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			if err != nil {
 				panic(fmt.Sprintf("malformed stack array length: %q", x.marker))
 			}
-			ptrReg := g.allocReg()
-			lenReg := g.allocReg()
-			capReg := g.allocReg()
 			dv := g.allocDesc()
-			g.emit("%s := ctx.AllocReg()", ptrReg)
-			g.emit("%s := ctx.AllocRegExcept(%s)", lenReg, ptrReg)
-			g.emit("%s := ctx.AllocRegExcept(%s, %s)", capReg, ptrReg, lenReg)
-			g.emit("ctx.EmitLeaRegMem(%s, RegRSP, int32(%s))", ptrReg, x.goVar)
-			g.emit("ctx.EmitMovRegImm64(%s, uint64(%d))", lenReg, arrayLen)
-			g.emit("ctx.EmitMovRegImm64(%s, uint64(%d))", capReg, arrayLen)
-			g.emit("%s := JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s, KnownSliceLen: int32(%d), KnownSliceCap: int32(%d), SliceSizeKnown: true}", dv, ptrReg, lenReg, capReg, arrayLen, arrayLen)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", stackBase: x.goVar, stackLen: int(arrayLen)}
+			g.emit("%s := JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(%d), KnownSliceCap: int32(%d), SliceSizeKnown: true}", dv, arrayLen, arrayLen)
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_stackslice", stackBase: x.goVar, stackLen: int(arrayLen)}
 			break
 		}
 		if x.marker == "_alloc" {
@@ -6383,6 +6510,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
 		g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
 		g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
+		if phiTarget, shape, direct := g.directPhiTarget(v); direct && shape == phiTargetTriple {
+			g.emit("ctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", dv, phiTarget)
+			g.emit("ctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", dv, phiTarget)
+			g.emit("ctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", dv, phiTarget)
+			g.emit("ctx.FreeDesc(&%s)", dv)
+			g.emit("%s = JITValueDesc{Loc: LocStackTriple, Type: tagSlice, StackOff: %s}", dv, phiTarget)
+		}
 		g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 
 	default:

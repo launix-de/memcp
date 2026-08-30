@@ -24,6 +24,9 @@ import "golang.org/x/tools/go/ssa"
 func (g *codeGen) emitInstr(instr ssa.Instruction) {
 	em := perSSAInstrEmitter{g: g}
 	em.Emit(instr)
+	if value, ok := instr.(ssa.Value); ok {
+		g.emitDirectPhiStore(value)
+	}
 }
 
 type perSSAInstrEmitter struct {
