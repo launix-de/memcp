@@ -120,9 +120,6 @@ restart:
 		// apply
 		operands := list[1:]
 		procedure := Eval(list[0], en) // resolve syntax, lambdas, and ordinary functions
-		if specialForm, ok := resolveSpecialFormSymbol(list[0], en); ok {
-			procedure = specialForm
-		}
 		switch procedure.GetTag() {
 		case tagSpecialForm:
 			switch procedure.SpecialFormName() {
