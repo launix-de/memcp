@@ -17,9 +17,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package main
 
 import (
+	"go/constant"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"testing"
+
+	"golang.org/x/tools/go/ssa"
 )
 
 func TestCollectOperatorsUsesRootFunctionTypeDescriptor(t *testing.T) {
@@ -48,6 +52,29 @@ func init() {
 	ops := collectOperators(fset, file, "sample.go")
 	if len(ops) != 1 || ops[0].name != "nested" || !ops[0].jitInsertPos.IsValid() {
 		t.Fatalf("collectOperators() = %#v, want one root declaration insertion", ops)
+	}
+}
+
+func TestSlicePhiUsesThreeWordLayout(t *testing.T) {
+	sliceType := types.NewSlice(types.Typ[types.Int64])
+	if !isPhiTripleType(sliceType) {
+		t.Fatal("Go slice phi was not classified as ptr/len/cap triple")
+	}
+	if isPhiPairType(sliceType) {
+		t.Fatal("Go slice phi was also classified as a two-word value")
+	}
+}
+
+func TestBoundedAppendStartsWithSpareCapacity(t *testing.T) {
+	zero := ssa.NewConst(constant.MakeInt64(0), types.Typ[types.Int])
+	one := ssa.NewConst(constant.MakeInt64(1), types.Typ[types.Int])
+	bounded := &ssa.Phi{Edges: []ssa.Value{&ssa.MakeSlice{Len: zero, Cap: one}}}
+	if !phiStartsWithBoundedEmptySlice(bounded) {
+		t.Fatal("empty slice with separately bounded capacity was rejected")
+	}
+	unbounded := &ssa.Phi{Edges: []ssa.Value{&ssa.MakeSlice{Len: zero, Cap: zero}}}
+	if phiStartsWithBoundedEmptySlice(unbounded) {
+		t.Fatal("zero-capacity slice was accepted as non-growing append target")
 	}
 }
 

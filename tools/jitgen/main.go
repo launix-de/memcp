@@ -213,6 +213,9 @@ func main() {
 		if genErr == "" {
 			if _, err := parser.ParseExpr(newText); err != nil {
 				genErr = "generated invalid Go expression: " + err.Error()
+				if verbose {
+					fmt.Fprintln(os.Stderr, newText)
+				}
 			}
 		}
 		// Declaration emitters are expressions nested one indentation level below
@@ -534,6 +537,7 @@ type genVal struct {
 	hasSliceInput    bool
 	lengthInput      int
 	hasLengthInput   bool
+	pinAcrossBlock   bool // mutable aggregate whose register identity is embedded in another block
 }
 
 // ssaValueRewriter can replace SSA values while traversing instructions.
@@ -559,6 +563,7 @@ type codeGen struct {
 	inlineCallSeq  map[uint64]uint32 // caller scoped-BB id -> inline call ordinal
 	phiRegs        map[string]string // SSA phi name → stack offset string (e.g. "0", "8", "16")
 	phiPair        map[string]bool   // SSA phi name → true if value occupies 2 words (16 bytes)
+	phiTriple      map[string]bool   // SSA phi name → true if value occupies 3 words (24 bytes)
 	phiTypeTag     map[string]string // SSA phi name → static JIT tag constant (or JITTypeUnknown)
 	bbPhiBase      map[int]int       // BB index → phi base stack offset (bytes)
 	bbPhiCount     map[int]int       // BB index → number of phi slots
@@ -1282,6 +1287,15 @@ func (g *codeGen) blockPhis(bbIdx int) []*ssa.Phi {
 }
 
 func (g *codeGen) phiSlotOffExpr(bbIdx int, phiIdx int) string {
+	phis := g.blockPhis(bbIdx)
+	if phiIdx >= 0 && phiIdx < len(phis) {
+		if off, ok := g.phiRegs[phis[phiIdx].Name()]; ok {
+			offset, err := strconv.Atoi(off)
+			if err == nil {
+				return fmt.Sprintf("int32(bbs[%d].PhiBase)+int32(%d)", bbIdx, offset-g.bbPhiBase[bbIdx])
+			}
+		}
+	}
 	return fmt.Sprintf("int32(bbs[%d].PhiBase)+int32(%d)", bbIdx, phiIdx*phiSlotBytes)
 }
 
@@ -1418,6 +1432,24 @@ func isScmerType(t types.Type) bool {
 	return ok && named.Obj() != nil && named.Obj().Name() == "Scmer"
 }
 
+func phiStartsWithBoundedEmptySlice(phi *ssa.Phi) bool {
+	for _, edge := range phi.Edges {
+		makeSlice, ok := edge.(*ssa.MakeSlice)
+		if !ok || makeSlice.Cap == nil {
+			continue
+		}
+		length, ok := makeSlice.Len.(*ssa.Const)
+		if !ok || length.Value == nil || length.Value.Kind() != constant.Int {
+			continue
+		}
+		lengthValue, exact := constant.Int64Val(length.Value)
+		if exact && lengthValue == 0 && makeSlice.Cap != makeSlice.Len {
+			return true
+		}
+	}
+	return false
+}
+
 func jitTagForSSAType(t types.Type) string {
 	if t == nil {
 		return "JITTypeUnknown"
@@ -1503,6 +1535,91 @@ func (g *codeGen) emitUnprotectDescVars(descVars []string) {
 		g.emit("\tctx.UnprotectReg(%s.Reg2)", dv)
 		g.emit("}")
 	}
+}
+
+func (g *codeGen) externalDescVars(block *ssa.BasicBlock) []string {
+	seen := make(map[string]struct{})
+	vars := make([]string, 0)
+	for _, instr := range block.Instrs {
+		for _, operand := range instr.Operands(nil) {
+			if operand == nil || *operand == nil {
+				continue
+			}
+			value := *operand
+			if definition, ok := value.(ssa.Instruction); ok && definition.Block() == block {
+				continue
+			}
+			generated, ok := g.vals[value.Name()]
+			if !ok || !generated.isDesc || generated.goVar == "" || !generated.pinAcrossBlock {
+				continue
+			}
+			if _, exists := seen[generated.goVar]; exists {
+				continue
+			}
+			seen[generated.goVar] = struct{}{}
+			vars = append(vars, generated.goVar)
+		}
+	}
+	sort.Strings(vars)
+	return vars
+}
+
+func (g *codeGen) emitPinDescVars(descVars []string) string {
+	if len(descVars) == 0 {
+		return ""
+	}
+	pinned := g.allocTemp("blockPinnedRegs")
+	seen := g.allocTemp("seenBlockPinnedRegs")
+	g.emit("%s := make([]Reg, 0, %d)", pinned, len(descVars)*3)
+	g.emit("%s := make(map[Reg]bool)", seen)
+	g.emit("_ = %s", seen)
+	for _, variable := range descVars {
+		g.emit("for _, r := range []Reg{%s.Reg, %s.Reg2, %s.Reg3} {", variable, variable, variable)
+		g.emit("\tlive := %s.Loc == LocRegTriple && (r == %s.Reg || r == %s.Reg2 || r == %s.Reg3)", variable, variable, variable, variable)
+		g.emit("\tif live && !%s[r] {", seen)
+		g.emit("\t\tctx.ProtectReg(r)")
+		g.emit("\t\t%s[r] = true", seen)
+		g.emit("\t\t%s = append(%s, r)", pinned, pinned)
+		g.emit("\t}")
+		g.emit("}")
+	}
+	cleanup := g.allocTemp("unpinBlockRegs")
+	g.emit("%s := func() { for _, r := range %s { ctx.UnprotectReg(r) } }", cleanup, pinned)
+	g.emit("defer %s()", cleanup)
+	return pinned
+}
+
+func (g *codeGen) emitProtectLiveDescRegs(exclude string) string {
+	vars := make([]string, 0, len(g.vals))
+	seen := make(map[string]struct{})
+	for name, value := range g.vals {
+		if g.refCounts[name] <= 0 || !value.isDesc || value.goVar == "" || value.goVar == exclude {
+			continue
+		}
+		if _, exists := seen[value.goVar]; exists {
+			continue
+		}
+		seen[value.goVar] = struct{}{}
+		vars = append(vars, value.goVar)
+	}
+	sort.Strings(vars)
+	protected := g.allocTemp("liveRegs")
+	seenRegs := g.allocTemp("seenLiveRegs")
+	g.emit("\t%s := make([]Reg, 0, %d)", protected, len(vars)*3)
+	g.emit("\t%s := make(map[Reg]bool)", seenRegs)
+	for _, variable := range vars {
+		g.emit("\tfor _, r := range []Reg{%s.Reg, %s.Reg2, %s.Reg3} {", variable, variable, variable)
+		g.emit("\t\tlive := (%s.Loc == LocReg && r == %s.Reg) ||", variable, variable)
+		g.emit("\t\t\t(%s.Loc == LocRegPair && (r == %s.Reg || r == %s.Reg2)) ||", variable, variable, variable)
+		g.emit("\t\t\t(%s.Loc == LocRegTriple && (r == %s.Reg || r == %s.Reg2 || r == %s.Reg3))", variable, variable, variable, variable)
+		g.emit("\t\tif live && !%s[r] {", seenRegs)
+		g.emit("\t\t\tctx.ProtectReg(r)")
+		g.emit("\t\t\t%s[r] = true", seenRegs)
+		g.emit("\t\t\t%s = append(%s, r)", protected, protected)
+		g.emit("\t\t}")
+		g.emit("\t}")
+	}
+	return protected
 }
 
 func (g *codeGen) emitIfClosure(v *ssa.If) {
@@ -1740,6 +1857,7 @@ func (g *codeGen) phiMovesRequireSingleChunk(moves []phiEdgeMove) bool {
 // emitPhiMov emits a machine-code store from an SSA value to a phi stack slot.
 // phiOff is the stack offset string (e.g. "0", "8", "16").
 func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
+	phiTriple := isPhiTripleType(phiType)
 	phiPair := isPhiPairType(phiType)
 	phiOffHi := "(" + phiOff + ")+8"
 	if c, ok := v.(*ssa.Const); ok {
@@ -1790,6 +1908,13 @@ func (g *codeGen) emitPhiMov(phiOff string, v ssa.Value, phiType types.Type) {
 			g.emit("%s := %s", edgeSrc, src.goVar)
 			g.emit("if %s.Loc == LocNone { panic(\"jit: phi source has no location\") }", edgeSrc)
 			g.emit("ctx.EnsureDesc(&%s)", edgeSrc)
+			if phiTriple {
+				g.emit("if %s.Loc != LocRegTriple { panic(\"jit: slice phi source is not a triple\") }", edgeSrc)
+				g.emit("ctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", edgeSrc, phiOff)
+				g.emit("ctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", edgeSrc, phiOff)
+				g.emit("ctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", edgeSrc, phiOff)
+				return
+			}
 			if phiPair {
 				g.emit("if %s.Loc == LocRegPair || %s.Loc == LocImm {", edgeSrc, edgeSrc)
 				g.emit("\tctx.EmitStoreScmerToStack(%s, %s)", edgeSrc, phiOff)
@@ -1900,11 +2025,17 @@ func (g *codeGen) allocPhiRegs() {
 		g.bbPhiCount[block.Index] = len(phis)
 		for _, phi := range phis {
 			phiName := phi.Name()
+			triple := isPhiTripleType(phi.Type())
 			pair := isPhiPairType(phi.Type())
 			g.phiRegs[phiName] = fmt.Sprintf("%d", offset)
 			g.phiPair[phiName] = pair
+			g.phiTriple[phiName] = triple
 			g.phiTypeTag[phiName] = jitTagForSSAType(phi.Type())
-			offset += phiSlotBytes
+			if triple {
+				offset += 24
+			} else {
+				offset += phiSlotBytes
+			}
 		}
 	}
 	g.phiStackSize = offset - localStart
@@ -1946,12 +2077,19 @@ func (g *codeGen) initAllPhiDescs() {
 			if g.phiFrameFixup != "" {
 				phiBaseExpr = "int32(" + g.phiFrameFixup + ")+"
 			}
-			if g.phiPair[name] {
+			if g.phiTriple[name] {
+				g.emit("%s := JITValueDesc{Loc: LocStackTriple, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+			} else if g.phiPair[name] {
 				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
 			} else {
 				g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
 			}
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			generated := genVal{goVar: dv, isDesc: true}
+			if g.phiTriple[name] {
+				generated.marker = "_slice"
+				generated.pinAcrossBlock = true
+			}
+			g.vals[name] = generated
 		}
 	}
 }
@@ -1977,6 +2115,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	savedCurBlock := g.curBlock
 	savedPhiRegs := g.phiRegs
 	savedPhiPair := g.phiPair
+	savedPhiTriple := g.phiTriple
 	savedPhiTypeTag := g.phiTypeTag
 	savedBBPhiBase := g.bbPhiBase
 	savedBBPhiCount := g.bbPhiCount
@@ -2021,6 +2160,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.bbScope = g.nextBBScope
 	g.phiRegs = map[string]string{}
 	g.phiPair = map[string]bool{}
+	g.phiTriple = map[string]bool{}
 	g.phiTypeTag = map[string]string{}
 	g.bbPhiBase = map[int]int{}
 	g.bbPhiCount = map[int]int{}
@@ -2213,6 +2353,7 @@ func (g *codeGen) inlineCall(callee *ssa.Function, callArgs []ssa.Value) genVal 
 	g.curBlock = savedCurBlock
 	g.phiRegs = savedPhiRegs
 	g.phiPair = savedPhiPair
+	g.phiTriple = savedPhiTriple
 	g.phiTypeTag = savedPhiTypeTag
 	g.bbPhiBase = savedBBPhiBase
 	g.bbPhiCount = savedBBPhiCount
@@ -2244,7 +2385,11 @@ func (g *codeGen) emitSpecializedPhiStackWrites(bbIdx int, psVar string, indent 
 		g.emit("%sif len(%s.PhiValues) > %d && %s.PhiValues[%d].Loc != LocNone {", indent, psVar, phiIdx, psVar, phiIdx)
 		g.emit("%s\t%s := %s.PhiValues[%d]", indent, tmp, psVar, phiIdx)
 		g.emit("%s\tctx.EnsureDesc(&%s)", indent, tmp)
-		if isPhiPairType(phi.Type()) {
+		if isPhiTripleType(phi.Type()) {
+			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg, RegRSP, %s)", indent, tmp, phiOff)
+			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg2, RegRSP, %s+8)", indent, tmp, phiOff)
+			g.emit("%s\tctx.EmitStoreRegMem(%s.Reg3, RegRSP, %s+16)", indent, tmp, phiOff)
+		} else if isPhiPairType(phi.Type()) {
 			g.emit("%s\tctx.EmitStoreScmerToStack(%s, %s)", indent, tmp, phiOff)
 		} else {
 			g.emit("%s\tctx.EmitStoreToStack(%s, %s)", indent, tmp, phiOff)
@@ -2296,6 +2441,7 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 		g.resetAllPhiDescsToStack()
 		g.applyPhiStateOverlay(bbIdx)
 		g.emit("ctx.ReclaimUntrackedRegs()")
+		g.emitPinDescVars(g.externalDescVars(block))
 
 		for _, instr := range block.Instrs {
 			g.emitInstr(instr)
@@ -2322,6 +2468,7 @@ func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter) *codeGen {
 		inlineCallSeq:   map[uint64]uint32{},
 		phiRegs:         map[string]string{},
 		phiPair:         map[string]bool{},
+		phiTriple:       map[string]bool{},
 		phiTypeTag:      map[string]string{},
 		bbPhiBase:       map[int]int{},
 		bbPhiCount:      map[int]int{},
@@ -2727,7 +2874,9 @@ func (g *codeGen) resetAllPhiDescsToStack() {
 		if g.phiFrameFixup != "" && !g.storageMode {
 			stackOff = "int32(" + g.phiFrameFixup + ")+" + stackOff
 		}
-		if g.phiPair[phiName] {
+		if g.phiTriple[phiName] {
+			g.emit("%s = JITValueDesc{Loc: LocStackTriple, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
+		} else if g.phiPair[phiName] {
 			g.emit("%s = JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
 		} else {
 			g.emit("%s = JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", gv.goVar, phiTag, stackOff)
@@ -2775,12 +2924,18 @@ func (g *codeGen) applyPhiStateOverlay(bbIdx int) {
 			if phiTag == "" {
 				phiTag = "JITTypeUnknown"
 			}
-			if g.phiPair[phi.Name()] {
+			if g.phiTriple[phi.Name()] {
+				g.emit("%s := JITValueDesc{Loc: LocStackTriple, Type: %s, StackOff: %s}", dv, phiTag, stackOff)
+			} else if g.phiPair[phi.Name()] {
 				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %s}", dv, phiTag, stackOff)
 			} else {
 				g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %s}", dv, phiTag, stackOff)
 			}
 			gv = genVal{goVar: dv, isDesc: true}
+			if g.phiTriple[phi.Name()] {
+				gv.marker = "_slice"
+				gv.pinAcrossBlock = true
+			}
 			g.vals[phi.Name()] = gv
 		}
 		g.emit("if !ps.General && len(ps.PhiValues) > %d && ps.PhiValues[%d].Loc != LocNone {", phiIdx, phiIdx)
@@ -3741,6 +3896,41 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// Check for builtins first (len, cap, etc.)
 		if builtin, ok := v.Call.Value.(*ssa.Builtin); ok {
 			switch builtin.Name() {
+			case "append":
+				if len(v.Call.Args) != 2 {
+					panic(fmt.Sprintf("append with unsupported argument count: %s", v))
+				}
+				slice := g.vals[v.Call.Args[0].Name()]
+				elements := g.vals[v.Call.Args[1].Name()]
+				if slice.marker != "_slice" || elements.stackBase == "" || elements.stackLen != 1 {
+					panic(fmt.Sprintf("append requires a descriptor slice and one local Scmer element: %s", v))
+				}
+				if phi, ok := v.Call.Args[0].(*ssa.Phi); !ok || !phiStartsWithBoundedEmptySlice(phi) {
+					panic(fmt.Sprintf("append growth is not statically bounded: %s", v))
+				}
+				g.emit("ctx.EnsureDesc(&%s)", slice.goVar)
+				g.emit("if %s.Loc != LocRegTriple { panic(\"jit: append requires a Go slice header\") }", slice.goVar)
+				capacityOK := g.allocLabel()
+				g.emit("%s := ctx.ReserveLabel()", capacityOK)
+				g.emit("ctx.EmitCmpInt64(%s.Reg2, %s.Reg3)", slice.goVar, slice.goVar)
+				g.emit("ctx.EmitJcc(CcB, %s)", capacityOK)
+				g.emit("ctx.EmitGoCallVoid(GoFuncAddr(jitPanic), []JITValueDesc{{Loc: LocImm, Type: tagString, Imm: NewString(\"jit: generated append exceeded its fixed capacity\")}})")
+				g.emit("ctx.MarkLabel(%s)", capacityOK)
+				index := g.allocDesc()
+				g.emit("%s := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s.Reg2, NoHeapPointer: true}", index, slice.goVar)
+				address := g.allocDesc()
+				g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, int32(16))", address, slice.goVar, index)
+				value := g.allocDesc()
+				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(%s)}", value, elements.stackBase)
+				g.emit("ctx.EmitStoreScmerAt(&%s, &%s)", address, value)
+				g.emit("ctx.FreeDesc(&%s)", address)
+				g.emit("ctx.EmitAddRegImm32(%s.Reg2, 1)", slice.goVar)
+				dv := g.allocDesc()
+				g.emit("%s := %s", dv, slice.goVar)
+				g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
+				g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
+				g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
+				g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 			case "len":
 				arg := v.Call.Args[0]
 				if arg.Name() == g.paramName {
@@ -3809,10 +3999,20 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("ctx.FreeDesc(&%s)", callArgs.goVar)
 			g.emit("if %s.Loc == LocLambdaTemplate && %s.Lambda != nil {", callable.goVar, callable.goVar)
+			resultOff := g.allocTemp("callbackResultOff")
+			g.emit("\t%s := ctx.AllocSpill(16)", resultOff)
+			g.emit("\tctx.setStackPointer(jitStackRootFrameBP, %s, true)", resultOff)
 			preservedVar := g.allocTemp("outerRegs")
 			g.emit("\t%s := ctx.PreserveOuterRegs()", preservedVar)
 			g.emit("\t%s = JITEmitProcInlineWithOuter(ctx, &%s.Lambda.Proc, %s.Lambda.Outer, %s, ctx.SliceBase, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})", dv, callable.goVar, callable.goVar, argsVar)
+			g.emit("\tctx.EnsureDesc(&%s)", dv)
+			g.emit("\tctx.EmitStoreRegMem(%s.Reg, RegRBP, %s)", dv, resultOff)
+			g.emit("\tctx.EmitStoreRegMem(%s.Reg2, RegRBP, %s+8)", dv, resultOff)
 			g.emit("\tctx.RestoreOuterRegs(%s)", preservedVar)
+			g.emit("\t%s = JITValueDesc{Loc: LocStackPair, Type: %s.Type, StackOff: %s, NoHeapPointer: %s.NoHeapPointer}", dv, dv, resultOff, dv)
+			liveRegs := g.emitProtectLiveDescRegs(dv)
+			g.emit("\tctx.EnsureDesc(&%s)", dv)
+			g.emit("\tfor _, r := range %s { ctx.UnprotectReg(r) }", liveRegs)
 			g.emit("} else {")
 			callbackHelper := ""
 			switch callArgs.stackLen {
@@ -5268,7 +5468,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			if g.phiFrameFixup != "" && !g.storageMode {
 				stackOff = "int32(" + g.phiFrameFixup + ")+" + stackOff
 			}
-			if g.phiPair[name] {
+			if g.phiTriple[name] {
+				dv := g.allocDesc()
+				g.emit("%s := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: %s}", dv, stackOff)
+				g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
+			} else if g.phiPair[name] {
 				dv := g.allocDesc()
 				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: %s}", dv, stackOff)
 				g.vals[name] = genVal{goVar: dv, isDesc: true}
@@ -5743,7 +5947,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("ctx.EmitMovRegImm64(%s, 0)", lenReg)
 			g.emit("ctx.EmitMovRegImm64(%s, 0)", capReg)
 			g.emit("%s := JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv, ptrReg, lenReg, capReg)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 			break
 		}
 		sliceType, isGoSlice := v.X.Type().Underlying().(*types.Slice)
@@ -5905,7 +6109,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			dv := g.allocDesc()
 			g.emit("%s := ctx.RequestPreallocatedSlice(%d)", root, length.lengthInput)
 			g.emit("%s := jitKnownSliceHeader(ctx, &%s)", dv, root)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 			break
 		}
 		g.emit("ctx.EnsureDesc(&%s)", length.goVar)
@@ -5915,7 +6119,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("ctx.BindReg(%s.Reg, &%s)", dv, dv)
 		g.emit("ctx.BindReg(%s.Reg2, &%s)", dv, dv)
 		g.emit("ctx.BindReg(%s.Reg3, &%s)", dv, dv)
-		g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice"}
+		g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 
 	default:
 		panic(instrDesc(instr))
@@ -6516,14 +6720,17 @@ func isPhiPairType(t types.Type) bool {
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
 		return u.Kind() == types.String
-	case *types.Slice:
-		return true
 	case *types.Struct:
 		// Scmer-like two-word structs.
 		return elemSizeOf(t) == 16
 	default:
 		return false
 	}
+}
+
+func isPhiTripleType(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Slice)
+	return ok
 }
 
 func intTypeName(signed bool, bits int) string {
