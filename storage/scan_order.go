@@ -1334,7 +1334,9 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		var survivedBuf, mainIdsBuf, acceptMainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
-		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, func(index *StorageIndex, active bool) {
+		boundaryCoveredLimit := acceptProgram == nil &&
+			sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
+		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
 				resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
 			}

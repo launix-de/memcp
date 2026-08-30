@@ -594,6 +594,45 @@ func extractBoundaries(conditionCols []string, condition scm.Scmer) boundaries {
 	return extractBoundariesInto(nil, conditionCols, condition)
 }
 
+// sortedBoundariesCoverCondition proves that every predicate in condition was
+// lowered into an identical sorted boundary. Ordered scans may use this proof
+// to size their index batches from LIMIT without turning residual rejection
+// into a sequence of tiny batches. Additional ORDER-only boundaries are fine.
+func sortedBoundariesCoverCondition(conditionCols []string, condition scm.Scmer, bounds boundaries) bool {
+	ctx, ok := conditionAnalyzeContext(conditionCols, condition)
+	if !ok {
+		return false
+	}
+	required, simple := extractSimpleBoundaries(&ctx, ctx.proc.Body, nil)
+	if !simple || len(required) == 0 {
+		return false
+	}
+	for _, want := range required {
+		if want.matcher == nil || !want.matcher.IsSorted() || want.lowerBatch || want.upperBatch {
+			return false
+		}
+		covered := false
+		for _, have := range bounds {
+			if have.col != want.col || have.matcher == nil ||
+				!matcherKindEqual(have.matcher, want.matcher) ||
+				have.lowerBatch || have.upperBatch ||
+				have.lowerInclusive != want.lowerInclusive ||
+				have.upperInclusive != want.upperInclusive ||
+				have.collation != want.collation ||
+				!boundaryValueEqual(have.lower, want.lower) ||
+				!boundaryValueEqual(have.upper, want.upper) {
+				continue
+			}
+			covered = true
+			break
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
+}
+
 // extractBoundariesGeneral retains the complete recursive analyzer for OR
 // widening, computed columns and any future shape not handled by the simple
 // allocation-free path.
