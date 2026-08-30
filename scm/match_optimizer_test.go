@@ -91,21 +91,21 @@ const recursiveMatchBenchmarkSource = `(define recursive_match_benchmark
 	(lambda (expr)
 		(match expr
 			((symbol leaf) value) value
-			((quote leaf) value) -101
+			((quote leaf) value) (+ value 0)
 			((symbol add) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
-			((quote add) left right) -102
+			((quote add) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
 			((symbol sub) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
-			((quote sub) left right) -103
+			((quote sub) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
 			((symbol and) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
-			((quote and) left right) -104
+			((quote and) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
 			((symbol or) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
-			((quote or) left right) -105
+			((quote or) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
 			((symbol equal) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
-			((quote equal) left right) -106
+			((quote equal) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
 			((symbol concat) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
-			((quote concat) left right) -107
+			((quote concat) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
 			((symbol multiply) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
-			((quote multiply) left right) -108
+			((quote multiply) left right) (+ (recursive_match_benchmark left) (recursive_match_benchmark right))
 			_ 0)))`
 
 func recursiveMatchBenchmarkTree(depth int) Scmer {
@@ -129,13 +129,13 @@ func BenchmarkRecursiveMatchWalker(b *testing.B) {
 	env := newOptimizerTestEnv()
 	EvalAll("recursive match benchmark", recursiveMatchBenchmarkSource, env)
 	fn := OptimizeProcToSerialFunction(env.FindRead(Symbol("recursive_match_benchmark")).Vars[Symbol("recursive_match_benchmark")])
-	tree := recursiveMatchBenchmarkTree(8)
-	want := NewInt(256)
+	tree := recursiveMatchBenchmarkTree(9)
+	want := NewInt(512)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if got := fn(tree); !Equal(got, want) {
-			b.Fatalf("recursive match walker returned %s, want 256", String(got))
+			b.Fatalf("recursive match walker returned %s, want 512", String(got))
 		}
 	}
 }
