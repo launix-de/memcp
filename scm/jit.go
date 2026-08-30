@@ -2371,6 +2371,10 @@ func init_jit() {
 			},
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["jit"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2468,6 +2472,10 @@ func init_jit() {
 			},
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["jit-warn-if-fallback"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

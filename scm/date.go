@@ -347,7 +347,10 @@ func init_date() {
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the current date/time",
 			Return: &TypeDescriptor{Kind: "date"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["now"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -359,7 +362,10 @@ func init_date() {
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a monotonic nanosecond timestamp for benchmarking (not wall-clock)",
 			Return: &TypeDescriptor{Kind: "int"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["nanotime"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -374,7 +380,10 @@ func init_date() {
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the current date (midnight in session timezone)",
 			Return: &TypeDescriptor{Kind: "date"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["current_date"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -400,7 +409,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["parse_date"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -423,7 +435,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["format_date"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -474,7 +489,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["extract_date"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -517,7 +535,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["date_add"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -560,7 +581,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["date_sub"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -584,7 +608,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["date_trunc_day"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -656,7 +683,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["timestampdiff"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -683,7 +713,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["datediff"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -708,7 +741,10 @@ func init_date() {
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["str_to_date"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 }

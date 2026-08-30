@@ -1326,7 +1326,10 @@ func init() {
 				return NewSlice(v), resultType
 			},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["optimize"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1454,7 +1457,10 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["error"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1478,7 +1484,10 @@ func init() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["try"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1495,7 +1504,137 @@ func init() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				d1 := args[0]
+				d1.ID = 0
+				d2 := args[1]
+				d2.ID = 0
+				var d3 JITValueDesc
+				if d2.Type == tagSlice {
+					d3 = jitKnownSliceHeader(ctx, &d2)
+				} else {
+					d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
+				}
+				ctx.BindReg(d3.Reg, &d3)
+				ctx.BindReg(d3.Reg2, &d3)
+				ctx.BindReg(d3.Reg3, &d3)
+				ctx.FreeDesc(&d2)
+				ctx.EnsureDesc(&d1)
+				ctx.EnsureDesc(&d1)
+				if d1.Loc == LocImm {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					if d1.Imm.GetTag() == tagBool {
+						ctx.EmitMakeBool(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagInt {
+						ctx.EmitMakeInt(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagFloat {
+						ctx.EmitMakeFloat(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagNil {
+						ctx.EmitMakeNil(tmpPair)
+					} else {
+						ptrWord, auxWord := d1.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					}
+					d1 = tmpPair
+				} else if d1.Loc == LocReg {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+					switch d1.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d1)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d1)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d1)
+					default:
+						panic("jit: generic call arg scalar type unknown for 2-word value")
+					}
+					ctx.FreeDesc(&d1)
+					d1 = tmpPair
+				}
+				if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
+					panic("jit: generic call arg expects 2-word value (Apply arg0)")
+				}
+				ctx.EnsureDesc(&d3)
+				ctx.EnsureDesc(&d3)
+				if d3.Loc != LocRegTriple && d3.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice (Apply arg1)")
+				}
+				d4 := ctx.EmitGoCallScalar(GoFuncAddr(Apply), []JITValueDesc{d1, d3}, 2)
+				ctx.BindReg(d4.Reg, &d4)
+				ctx.BindReg(d4.Reg2, &d4)
+				ctx.FreeDesc(&d1)
+				if d4.Loc == LocImm {
+					if result.Loc == LocAny {
+						return d4
+					}
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				ctx.EnsureDesc(&d4)
+				if d4.Loc == LocRegPair {
+					ctx.EmitMovPairToResult(&d4, &result)
+					result.Type = d4.Type
+				} else {
+					switch d4.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d4)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d4)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d4)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
+				return result
+				return result
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1512,7 +1651,137 @@ func init() {
 			Return: &TypeDescriptor{Kind: "symbol"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				d1 := args[0]
+				d1.ID = 0
+				d2 := args[1]
+				d2.ID = 0
+				var d3 JITValueDesc
+				if d2.Type == tagSlice {
+					d3 = jitKnownSliceHeader(ctx, &d2)
+				} else {
+					d3 = ctx.EmitGoCallScalar(GoFuncAddr(jitAsSlice), []JITValueDesc{d2}, 3)
+				}
+				ctx.BindReg(d3.Reg, &d3)
+				ctx.BindReg(d3.Reg2, &d3)
+				ctx.BindReg(d3.Reg3, &d3)
+				ctx.FreeDesc(&d2)
+				ctx.EnsureDesc(&d1)
+				ctx.EnsureDesc(&d1)
+				if d1.Loc == LocImm {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					if d1.Imm.GetTag() == tagBool {
+						ctx.EmitMakeBool(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagInt {
+						ctx.EmitMakeInt(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagFloat {
+						ctx.EmitMakeFloat(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagNil {
+						ctx.EmitMakeNil(tmpPair)
+					} else {
+						ptrWord, auxWord := d1.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					}
+					d1 = tmpPair
+				} else if d1.Loc == LocReg {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+					switch d1.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d1)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d1)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d1)
+					default:
+						panic("jit: generic call arg scalar type unknown for 2-word value")
+					}
+					ctx.FreeDesc(&d1)
+					d1 = tmpPair
+				}
+				if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
+					panic("jit: generic call arg expects 2-word value (ApplyAssoc arg0)")
+				}
+				ctx.EnsureDesc(&d3)
+				ctx.EnsureDesc(&d3)
+				if d3.Loc != LocRegTriple && d3.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice (ApplyAssoc arg1)")
+				}
+				d4 := ctx.EmitGoCallScalar(GoFuncAddr(ApplyAssoc), []JITValueDesc{d1, d3}, 2)
+				ctx.BindReg(d4.Reg, &d4)
+				ctx.BindReg(d4.Reg2, &d4)
+				ctx.FreeDesc(&d1)
+				if d4.Loc == LocImm {
+					if result.Loc == LocAny {
+						return d4
+					}
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				ctx.EnsureDesc(&d4)
+				if d4.Loc == LocRegPair {
+					ctx.EmitMovPairToResult(&d4, &result)
+					result.Type = d4.Type
+				} else {
+					switch d4.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d4)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d4)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d4)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
+				return result
+				return result
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1732,7 +2001,10 @@ func init() {
 			Optimize:                 FirstParameterMutable("for_mut"),
 			OptimizeFirstArgTransfer: true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["for"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1762,7 +2034,10 @@ func init() {
 			Const:     true,
 			Forbidden: true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["for_mut"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1966,7 +2241,10 @@ Patterns can be any of:
 			Return: &TypeDescriptor{Kind: "returntype"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["source"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1978,6 +2256,10 @@ Patterns can be any of:
 				{Kind: "string", Label: "prefix", Description: "source path prefix", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "assoc"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["source_coverage_report"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2591,7 +2873,10 @@ Patterns can be any of:
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["serialize"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2611,7 +2896,10 @@ Patterns can be any of:
 			},
 			Return: &TypeDescriptor{Kind: "string"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["pretty_print"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 

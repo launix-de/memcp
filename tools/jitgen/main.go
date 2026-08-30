@@ -26,6 +26,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/constant"
@@ -50,6 +51,7 @@ var onlyOp string
 var doPatch bool
 var doWipe bool
 var verbose bool
+var missingOnly bool
 
 const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */"
 const phiSlotBytes = 16
@@ -78,6 +80,8 @@ func main() {
 			doPatch = true
 		} else if arg == "-wipe" {
 			doWipe = true
+		} else if arg == "-missing-only" {
+			missingOnly = true
 		} else if arg == "-v" || arg == "--verbose" {
 			verbose = true
 		} else {
@@ -85,7 +89,7 @@ func main() {
 		}
 	}
 	if len(files) == 0 {
-		fmt.Fprintf(os.Stderr, "usage: jitgen [-dump=OP] [-patch] [-wipe] <file.go> ...\n")
+		fmt.Fprintf(os.Stderr, "usage: jitgen [-dump=OP] [-patch] [-missing-only] [-wipe] <file.go> ...\n")
 		os.Exit(1)
 	}
 
@@ -96,11 +100,17 @@ func main() {
 
 	// Determine package from file paths
 	pkgDir := "./" + filepath.Dir(files[0])
+	overlay, preservedEmitterOffsets, err := generatedEmitterOverlay(pkgDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to prepare source overlay: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Load package with full type info for SSA
 	cfg := &packages.Config{
 		Mode: packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes |
 			packages.NeedTypesInfo | packages.NeedDeps | packages.NeedImports | packages.NeedName,
+		Overlay: overlay,
 	}
 	pkgs, err := packages.Load(cfg, pkgDir)
 	if err != nil {
@@ -186,6 +196,14 @@ func main() {
 		ops = append(ops, collectOperators(fset, astFile, fname)...)
 		stInfos = append(stInfos, collectStorageMethods(fset, astFile, fname)...)
 	}
+	for i := range ops {
+		if ops[i].jitExpr == nil {
+			continue
+		}
+		path, _ := filepath.Abs(ops[i].path)
+		offset := fset.Position(ops[i].jitExpr.Pos()).Offset
+		ops[i].preservedEnd = preservedEmitterOffsets[path][offset]
+	}
 
 	// Process each operator (pattern 1: Declare)
 	patches := map[string][]patchEntry{}
@@ -218,35 +236,42 @@ func main() {
 				}
 			}
 		}
+		if genErr == "" {
+			genErr = nativeValidationFailures[op.name]
+		}
+		usesFallback := genErr != ""
+		if genErr == "" {
+			fmt.Printf("  %s: %s OK\n", op.path, op.name)
+		} else {
+			fmt.Printf("  %s: %s FALLBACK: %s\n", op.path, op.name, genErr)
+			if verbose {
+				dumpSSA(ssaFn)
+			}
+			newText = generateFallbackClosure(op.name)
+		}
 		// Declaration emitters are expressions nested one indentation level below
 		// their TypeDescriptor field. Keep generated output gofmt-stable both when
 		// inserting a new JITEmit field and when replacing an existing closure.
 		newText = strings.ReplaceAll(newText, "\n", "\n\t")
-		if genErr == "" {
-			genErr = nativeValidationFailures[op.name]
-		}
-		if genErr == "" {
-			fmt.Printf("  %s: %s OK\n", op.path, op.name)
-		} else {
-			fmt.Printf("  %s: %s SKIP: %s\n", op.path, op.name, genErr)
-			if verbose {
-				dumpSSA(ssaFn)
-			}
-			// The diagnostic is already printed above. Keep the generated source
-			// stable: Go AST expression spans exclude trailing comments, so placing
-			// the error there would append another TODO on every generator run.
-			newText = "nil"
-		}
 
 		if doPatch {
+			if missingOnly && !operatorJITEmitMissing(op) {
+				continue
+			}
 			var pos, end token.Position
 			if op.jitExpr != nil {
 				pos = fset.Position(op.jitExpr.Pos())
 				end = fset.Position(op.jitExpr.End())
+				if op.preservedEnd > 0 {
+					end.Offset = op.preservedEnd
+				}
 			} else {
 				pos = fset.Position(op.jitInsertPos)
 				end = pos
 				newText = "\tJITEmit: " + newText + ",\n\t\t"
+				if usesFallback && op.jitVirtualExpr == nil {
+					newText += "JITVirtualArgs: true,\n\t\t"
+				}
 			}
 			patches[op.path] = append(patches[op.path], patchEntry{
 				startOff: pos.Offset,
@@ -254,6 +279,26 @@ func main() {
 				newText:  newText,
 				opName:   op.name,
 			})
+			if usesFallback && op.jitExpr != nil {
+				if op.jitVirtualExpr != nil {
+					virtualPos := fset.Position(op.jitVirtualExpr.Pos())
+					virtualEnd := fset.Position(op.jitVirtualExpr.End())
+					patches[op.path] = append(patches[op.path], patchEntry{
+						startOff: virtualPos.Offset,
+						endOff:   virtualEnd.Offset,
+						newText:  "true",
+						opName:   op.name + ".JITVirtualArgs",
+					})
+				} else if op.typeInsertPos.IsValid() {
+					insertPos := fset.Position(op.typeInsertPos)
+					patches[op.path] = append(patches[op.path], patchEntry{
+						startOff: insertPos.Offset,
+						endOff:   insertPos.Offset,
+						newText:  "\tJITVirtualArgs: true,\n\t\t",
+						opName:   op.name + ".JITVirtualArgs",
+					})
+				}
+			}
 		}
 	}
 
@@ -276,7 +321,7 @@ func main() {
 		if genErr == "" {
 			fmt.Printf("  %s: %s.GetValue OK\n", si.path, si.typeName)
 		} else {
-			fmt.Printf("  %s: %s.GetValue SKIP: %s\n", si.path, si.typeName, genErr)
+			fmt.Printf("  %s: %s.GetValue FALLBACK: %s\n", si.path, si.typeName, genErr)
 			if verbose {
 				dumpSSA(ssaFn)
 			}
@@ -305,16 +350,112 @@ func main() {
 	}
 }
 
+// generatedEmitterOverlay replaces Declaration emitter expressions only for
+// SSA package loading. Their source spans and line breaks stay intact, so patch
+// offsets remain valid and x/tools only analyzes builtin Fn bodies.
+func generatedEmitterOverlay(pkgDir string) (map[string][]byte, map[string]map[int]int, error) {
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	overlay := map[string][]byte{}
+	preserved := map[string]map[int]int{}
+	const stub = "func(*JITContext,[]Scmer,[]JITValueDesc,JITValueDesc)JITValueDesc{panic(0)},"
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		path, err := filepath.Abs(filepath.Join(pkgDir, entry.Name()))
+		if err != nil {
+			return nil, nil, err
+		}
+		source, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, source, 0)
+		if err != nil {
+			return nil, nil, err
+		}
+		patched := append([]byte(nil), source...)
+		changed := false
+		ast.Inspect(file, func(node ast.Node) bool {
+			kv, ok := node.(*ast.KeyValueExpr)
+			if !ok {
+				return true
+			}
+			key, ok := kv.Key.(*ast.Ident)
+			if !ok || key.Name != "JITEmit" {
+				return true
+			}
+			start := fset.Position(kv.Value.Pos()).Offset
+			end := fset.Position(kv.Value.End()).Offset
+			if start < 0 || end > len(source) || start >= end {
+				return true
+			}
+			if _, ok := kv.Value.(*ast.FuncLit); !ok {
+				return true
+			}
+			replaceEnd := end
+			if replaceEnd < len(source) && source[replaceEnd] == ',' {
+				replaceEnd++
+			}
+			span := patched[start:replaceEnd]
+			firstNewline := bytes.IndexByte(span, '\n')
+			if firstNewline >= 0 && firstNewline < len(stub) {
+				return true
+			}
+			for i := range span {
+				if span[i] != '\n' && span[i] != '\r' {
+					span[i] = ' '
+				}
+			}
+			copy(span, stub)
+			if preserved[path] == nil {
+				preserved[path] = map[int]int{}
+			}
+			preserved[path][start] = end
+			changed = true
+			return false
+		})
+		if changed {
+			overlay[path] = patched
+		}
+	}
+	return overlay, preserved, nil
+}
+
+func operatorJITEmitMissing(op operatorInfo) bool {
+	if op.preservedEnd > 0 {
+		return false
+	}
+	if op.jitExpr == nil {
+		return true
+	}
+	ident, ok := op.jitExpr.(*ast.Ident)
+	return ok && ident.Name == "nil"
+}
+
+func generateFallbackClosure(opName string) string {
+	return fmt.Sprintf(`func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+	return jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)
+}`, opName)
+}
+
 // --- AST operator collection (for patching byte offsets) ---
 
 type operatorInfo struct {
-	name         string
-	path         string
-	line         int
-	funcLit      *ast.FuncLit
-	funcName     string
-	jitExpr      ast.Expr
-	jitInsertPos token.Pos
+	name           string
+	path           string
+	line           int
+	funcLit        *ast.FuncLit
+	funcName       string
+	jitExpr        ast.Expr
+	jitVirtualExpr ast.Expr
+	jitInsertPos   token.Pos
+	typeInsertPos  token.Pos
+	preservedEnd   int
 }
 
 func keyedValue(comp *ast.CompositeLit, name string) ast.Expr {
@@ -351,8 +492,9 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			return true
 		}
 
-		var nameExpr, fnExpr, jitExpr ast.Expr
+		var nameExpr, fnExpr, jitExpr, jitVirtualExpr ast.Expr
 		var jitInsertPos token.Pos
+		var typeInsertPos token.Pos
 		if len(comp.Elts) > 0 {
 			if _, keyed := comp.Elts[0].(*ast.KeyValueExpr); keyed {
 				nameExpr = keyedValue(comp, "Name")
@@ -365,6 +507,8 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 							return true
 						}
 						jitExpr = keyedValue(typeComp, "JITEmit")
+						jitVirtualExpr = keyedValue(typeComp, "JITVirtualArgs")
+						typeInsertPos = typeComp.Rbrace
 						if jitExpr == nil {
 							jitInsertPos = typeComp.Rbrace
 						}
@@ -389,13 +533,15 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			return true
 		}
 		ops = append(ops, operatorInfo{
-			name:         strings.Trim(nameLit.Value, "\""),
-			path:         path,
-			line:         fset.Position(nameLit.Pos()).Line,
-			funcLit:      funcLit,
-			funcName:     funcName,
-			jitExpr:      jitExpr,
-			jitInsertPos: jitInsertPos,
+			name:           strings.Trim(nameLit.Value, "\""),
+			path:           path,
+			line:           fset.Position(nameLit.Pos()).Line,
+			funcLit:        funcLit,
+			funcName:       funcName,
+			jitExpr:        jitExpr,
+			jitVirtualExpr: jitVirtualExpr,
+			jitInsertPos:   jitInsertPos,
+			typeInsertPos:  typeInsertPos,
 		})
 		return true
 	})
@@ -526,6 +672,7 @@ type genVal struct {
 	argIdx           int    // >= 0: deferred arg reference from IndexAddr (constant index), not yet loaded
 	argIdxVar        string // non-empty: deferred arg reference with variable index (goVar of index desc)
 	marker           string // "_newbool"/"_newint"/"_newfloat" for deferred constructors
+	resultTargetVar  string // generated bool: scalar payload was emitted directly into result.Reg2
 	deferredIndexSSA string // SSA name of index operand (for deferred IndexAddr on slices)
 	deferredBaseSSA  string // SSA name of base operand for deferred local FieldAddr deref
 	offsetExpr       string // Go expression for byte offset from thisptr (for _fieldaddr/_fieldconst markers)
@@ -592,6 +739,10 @@ type codeGen struct {
 
 	// Reference counting for SSA values (remaining uses)
 	refCounts map[string]int
+
+	// Scalar values consumed by the constructor returned from the same block.
+	// Arithmetic may produce these directly in result.Reg2.
+	directResultPayloads map[string]string
 
 	// SSA name aliases (e.g. Convert no-ops redirect to source)
 	ssaAliases map[string]string
@@ -2459,24 +2610,25 @@ func (g *codeGen) emitRecursiveBBRenderers() {
 // Returns (closureCode, "") on success, or ("", errorDescription) on failure.
 func newCodeGen(fn *ssa.Function, rewrite ssaValueRewriter) *codeGen {
 	return &codeGen{
-		vals:            map[string]genVal{},
-		fn:              fn,
-		bbLabels:        map[uint64]string{},
-		bbPosVars:       map[uint64]string{},
-		bbDone:          map[uint64]bool{},
-		bbQueued:        map[uint64]bool{},
-		inlineCallSeq:   map[uint64]uint32{},
-		phiRegs:         map[string]string{},
-		phiPair:         map[string]bool{},
-		phiTriple:       map[string]bool{},
-		phiTypeTag:      map[string]string{},
-		bbPhiBase:       map[int]int{},
-		bbPhiCount:      map[int]int{},
-		fieldCache:      map[string]genVal{},
-		refCounts:       computeRefCounts(fn),
-		ssaAliases:      map[string]string{},
-		topLevelPkgPath: fn.Pkg.Pkg.Path(),
-		valueRewriter:   rewrite,
+		vals:                 map[string]genVal{},
+		fn:                   fn,
+		bbLabels:             map[uint64]string{},
+		bbPosVars:            map[uint64]string{},
+		bbDone:               map[uint64]bool{},
+		bbQueued:             map[uint64]bool{},
+		inlineCallSeq:        map[uint64]uint32{},
+		phiRegs:              map[string]string{},
+		phiPair:              map[string]bool{},
+		phiTriple:            map[string]bool{},
+		phiTypeTag:           map[string]string{},
+		bbPhiBase:            map[int]int{},
+		bbPhiCount:           map[int]int{},
+		fieldCache:           map[string]genVal{},
+		refCounts:            computeRefCounts(fn),
+		directResultPayloads: computeDirectResultPayloads(fn),
+		ssaAliases:           map[string]string{},
+		topLevelPkgPath:      fn.Pkg.Pkg.Path(),
+		valueRewriter:        rewrite,
 	}
 }
 
@@ -2755,6 +2907,68 @@ func computeRefCounts(fn *ssa.Function) map[string]int {
 		}
 	}
 	return counts
+}
+
+// computeDirectResultPayloads finds scalar SSA values whose NewBool/NewInt/
+// NewFloat wrapper is returned directly. Those payloads can use the
+// caller-selected Scmer aux register as their ALU target.
+func computeDirectResultPayloads(fn *ssa.Function) map[string]string {
+	result := map[string]string{}
+	if fn == nil {
+		return result
+	}
+	for _, instr := range fn.Blocks[0].Instrs {
+		ret, ok := instr.(*ssa.Return)
+		if !ok || len(ret.Results) != 1 {
+			continue
+		}
+		call, ok := ret.Results[0].(*ssa.Call)
+		if !ok || len(call.Call.Args) != 1 {
+			continue
+		}
+		callee := call.Call.StaticCallee()
+		if callee == nil {
+			continue
+		}
+		marker := ""
+		switch callee.Name() {
+		case "NewBool":
+			marker = "_newbool"
+		case "NewInt":
+			marker = "_newint"
+		case "NewFloat":
+			marker = "_newfloat"
+		}
+		if marker != "" {
+			producer, ok := call.Call.Args[0].(ssa.Instruction)
+			if ok && producer.Block() == ret.Block() {
+				result[call.Call.Args[0].Name()] = marker
+			}
+		}
+	}
+	return result
+}
+
+// emitAllocResultAwareReg chooses the caller's requested scalar payload
+// register when it cannot alias a still-live operand. The final EmitMake*
+// remains unconditional; its architecture-specific register move is a no-op
+// for this placement and materializes other destination forms normally.
+func (g *codeGen) emitAllocResultAwareReg(dstVar, targetVar, indent string, direct bool, excludes ...string) {
+	if !direct {
+		g.emit("%s%s := ctx.AllocRegExcept(%s)", indent, dstVar, strings.Join(excludes, ", "))
+		return
+	}
+	condition := "result.Loc == LocRegPair"
+	for _, exclude := range excludes {
+		condition += " && result.Reg2 != " + exclude
+	}
+	g.emit("%svar %s Reg", indent, dstVar)
+	g.emit("%sif %s {", indent, condition)
+	g.emit("%s\t%s = result.Reg2", indent, dstVar)
+	g.emit("%s\t%s = true", indent, targetVar)
+	g.emit("%s} else {", indent)
+	g.emit("%s\t%s = ctx.AllocRegExcept(%s)", indent, dstVar, strings.Join(excludes, ", "))
+	g.emit("%s}", indent)
 }
 
 // useOperand decrements the refcount of an SSA value and emits FreeDesc when it reaches zero.
@@ -3282,10 +3496,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("ctx.EnsureDesc(&%s)", base)
 				g.emit("if %s.Loc == LocImm {", base)
-				g.emit("\tptrWord, auxWord := %s.Imm.RawWords()", base)
 				if fieldName == "ptr" {
+					g.emit("\tptrWord, _ := %s.Imm.RawWords()", base)
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(ptrWord))}", dv)
 				} else {
+					g.emit("\t_, auxWord := %s.Imm.RawWords()", base)
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(auxWord))}", dv)
 				}
 				g.emit("} else {")
@@ -4297,15 +4512,15 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		case "NewBool":
 			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
-			g.vals[name] = genVal{goVar: src.goVar, marker: "_newbool"}
+			g.vals[name] = genVal{goVar: src.goVar, marker: "_newbool", resultTargetVar: src.resultTargetVar}
 		case "NewInt":
 			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
-			g.vals[name] = genVal{goVar: src.goVar, marker: "_newint"}
+			g.vals[name] = genVal{goVar: src.goVar, marker: "_newint", resultTargetVar: src.resultTargetVar}
 		case "NewFloat":
 			src := g.resolveValue(v.Call.Args[0])
 			g.keepAliveForMarker(v.Call.Args[0])
-			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat"}
+			g.vals[name] = genVal{goVar: src.goVar, marker: "_newfloat", resultTargetVar: src.resultTargetVar}
 		case "NewNil":
 			dv := g.allocDesc()
 			g.emit("%s := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}", dv)
@@ -4606,6 +4821,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 		}
 		xVal := g.resolveValue(v.X)
+		directResultMarker := g.directResultPayloads[name]
+		directResult := directResultMarker == "_newint" || directResultMarker == "_newfloat"
+		resultTargetVar := ""
+		if directResult {
+			resultTargetVar = g.allocTemp("resultTarget")
+			g.emit("%s := false", resultTargetVar)
+		}
 		// Check if v.X has more remaining uses (excluding this one).
 		// If so, destructive operations must copy before modifying.
 		xMultiUse := false
@@ -4628,6 +4850,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		if g.isFieldCachedDesc(xVal.goVar) {
 			xMultiUse = true
 		}
+		if directResult {
+			// Keep the input intact until the result placement is selected. The
+			// selected register can then be the caller's result.Reg2.
+			xMultiUse = true
+		}
 		if floatAluOp := floatAluEmitFunc(v.Op); floatAluOp != "" && isFloat64Type(v.Type()) && isFloat64Type(v.X.Type()) && isFloat64Type(v.Y.Type()) {
 			dv := g.allocDesc()
 			goOp := goOpStr(v.Op)
@@ -4642,7 +4869,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float() %s %g)}", dv, xVal.goVar, goOp, cmpVal)
 				g.emit("} else {")
 				if xMultiUse {
-					g.emitAllocRegExcept("scratch", "\t", true, xVal)
+					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, xVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 					g.emit("\tctx.EmitMovRegImm64(RegR11, uint64(%d))", bits)
 					g.emit("\tctx.%s(scratch, RegR11)", floatAluOp)
@@ -4665,14 +4892,14 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float() %s %s.Imm.Float())}", dv, xVal.goVar, goOp, yVal.goVar)
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
-				g.emitAllocRegExcept("scratch", "\t", true, yVal)
+				g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, yVal.goVar+".Reg")
 				g.emit("\t_, xBits := %s.Imm.RawWords()", xVal.goVar)
 				g.emit("\tctx.EmitMovRegImm64(scratch, xBits)")
 				g.emit("\tctx.%s(scratch, %s.Reg)", floatAluOp, yVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}", dv)
 				g.emit("} else if %s.Loc == LocImm {", yVal.goVar)
 				if xMultiUse {
-					g.emitAllocRegExcept("scratch", "\t", true, xVal)
+					g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directResult, xVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 					g.emit("\t_, yBits := %s.Imm.RawWords()", yVal.goVar)
 					g.emit("\tctx.EmitMovRegImm64(RegR11, yBits)")
@@ -4687,7 +4914,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emit("\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
+					g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directResult, xVal.goVar+".Reg", yVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.%s(%s, %s.Reg)", floatAluOp, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: %s}", dv, copyReg)
@@ -4701,7 +4928,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
 			g.emit("}")
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			if directResult {
+				g.emit("if %s && %s.Loc == LocReg { ctx.BindReg(result.Reg2, &result) }", resultTargetVar, dv)
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar}
 			break
 		}
 		xSigned, _, xIsInt := intTypeInfo(v.X.Type())
@@ -4891,6 +5121,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		} else if aluOp := aluEmitFunc(v.Op); aluOp != "" {
 			// Arithmetic BinOp: ADD, SUB, MUL
 			dv := g.allocDesc()
+			directIntResult := directResultMarker == "_newint"
 			if c, ok := v.Y.(*ssa.Const); ok {
 				cmpVal, ok := constInt64Value(c.Value)
 				if !ok {
@@ -4907,7 +5138,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					// x is needed again → result must go into a fresh register
 					if v.Op == token.SUB {
 						// SUB is non-commutative: copy x, then subtract const
-						g.emitAllocRegExcept("scratch", "\t", true, xVal)
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						if fitsInt32(cmpVal) {
 							g.emit("\tctx.EmitSubRegImm32(scratch, int32(%d))", cmpVal)
@@ -4918,7 +5149,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
-						g.emitAllocRegExcept("scratch", "\t", true, xVal)
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						if v.Op == token.MUL {
 							g.emitMulConstOnReg("scratch", cmpVal, "\t")
@@ -4974,7 +5205,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("} else if %s.Loc == LocImm && %s.Imm.Int() == 0 {", yVal.goVar, yVal.goVar)
 					if xMultiUse {
 						copyReg := g.allocReg()
-						g.emitAllocRegExcept(copyReg, "\t", true, xVal)
+						g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
 					} else {
@@ -4988,7 +5219,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				}
 				g.emit("} else if %s.Loc == LocImm {", xVal.goVar)
 				// x is const, y is reg → materialize x into scratch, ALU (result in scratch)
-				g.emitAllocRegExcept("scratch", "\t", true, yVal)
+				g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, yVal.goVar+".Reg")
 				g.emit("\tctx.EmitMovRegImm64(scratch, uint64(%s.Imm.Int()))", xVal.goVar)
 				g.emit("\tctx.%s(scratch, %s.Reg)", aluOp, yVal.goVar)
 				g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
@@ -4997,7 +5228,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if xMultiUse {
 					if v.Op == token.SUB {
 						// SUB is non-commutative: copy x, then subtract y
-						g.emitAllocRegExcept("scratch", "\t", true, xVal)
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 						g.emit("\t\tctx.EmitSubRegImm32(scratch, int32(%s.Imm.Int()))", yVal.goVar)
@@ -5008,7 +5239,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 						g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}", dv)
 					} else {
 						// ADD/MUL: commutative, order doesn't matter
-						g.emitAllocRegExcept("scratch", "\t", true, xVal)
+						g.emitAllocResultAwareReg("scratch", resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg")
 						g.emit("\tctx.EmitMovRegReg(scratch, %s.Reg)", xVal.goVar)
 						g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", yVal.goVar, yVal.goVar)
 						if v.Op == token.ADD {
@@ -5047,7 +5278,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("} else {")
 				if xMultiUse {
 					copyReg := g.allocReg()
-					g.emit("\t%s := ctx.AllocRegExcept(%s.Reg, %s.Reg)", copyReg, xVal.goVar, yVal.goVar)
+					g.emitAllocResultAwareReg(copyReg, resultTargetVar, "\t", directIntResult, xVal.goVar+".Reg", yVal.goVar+".Reg")
 					g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", copyReg, xVal.goVar)
 					g.emit("\tctx.%s(%s, %s.Reg)", aluOp, copyReg, yVal.goVar)
 					g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", dv, copyReg)
@@ -5065,7 +5296,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.TransferReg(%s.Reg)", xVal.goVar)
 			g.emit("\t%s.Loc = LocNone", xVal.goVar)
 			g.emit("}")
-			g.vals[name] = genVal{goVar: dv, isDesc: true}
+			if directIntResult {
+				g.emit("if %s && %s.Loc == LocReg { ctx.BindReg(result.Reg2, &result) }", resultTargetVar, dv)
+			}
+			g.vals[name] = genVal{goVar: dv, isDesc: true, resultTargetVar: resultTargetVar}
 		} else if v.Op == token.QUO {
 			// Integer division: uses SHR for power-of-2, IDIV otherwise
 			dv := g.allocDesc()
@@ -6152,7 +6386,11 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("\tctx.EmitMakeBool(result, %s)", res.goVar)
 		g.emit("} else {")
 		g.emit("\tctx.EmitMakeBool(result, %s)", res.goVar)
-		g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
+		if res.resultTargetVar != "" {
+			g.emit("\tif !%s { ctx.FreeReg(%s.Reg) }", res.resultTargetVar, res.goVar)
+		} else {
+			g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
+		}
 		g.emit("}")
 		g.emit("result.Type = tagBool")
 		g.emit("return result")
@@ -6166,7 +6404,11 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("\tctx.EmitMakeInt(result, %s)", res.goVar)
 		g.emit("} else {")
 		g.emit("\tctx.EmitMakeInt(result, %s)", res.goVar)
-		g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
+		if res.resultTargetVar != "" {
+			g.emit("\tif !%s { ctx.FreeReg(%s.Reg) }", res.resultTargetVar, res.goVar)
+		} else {
+			g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
+		}
 		g.emit("}")
 		g.emit("result.Type = tagInt")
 		g.emit("return result")
@@ -6180,7 +6422,11 @@ func (g *codeGen) emitReturnSingleBlock(v *ssa.Return) {
 		g.emit("\tctx.EmitMakeFloat(result, %s)", res.goVar)
 		g.emit("} else {")
 		g.emit("\tctx.EmitMakeFloat(result, %s)", res.goVar)
-		g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
+		if res.resultTargetVar != "" {
+			g.emit("\tif !%s { ctx.FreeReg(%s.Reg) }", res.resultTargetVar, res.goVar)
+		} else {
+			g.emit("\tctx.FreeReg(%s.Reg)", res.goVar)
+		}
 		g.emit("}")
 		g.emit("result.Type = tagFloat")
 		g.emit("return result")
@@ -6313,19 +6559,13 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	res := g.vals[v.Results[0].Name()]
 	switch res.marker {
 	case "_newbool":
-		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
-		g.emit("ctx.EmitMakeBool(result, %s)", res.goVar)
-		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
+		g.emitScalarReturnIntoResult(res, "Bool", "tagBool")
 		g.emit("result.Type = tagBool")
 	case "_newint":
-		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
-		g.emit("ctx.EmitMakeInt(result, %s)", res.goVar)
-		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
+		g.emitScalarReturnIntoResult(res, "Int", "tagInt")
 		g.emit("result.Type = tagInt")
 	case "_newfloat":
-		g.emit("ctx.EnsureDesc(&%s)", res.goVar)
-		g.emit("ctx.EmitMakeFloat(result, %s)", res.goVar)
-		g.emit("if %s.Loc == LocReg { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar)
+		g.emitScalarReturnIntoResult(res, "Float", "tagFloat")
 		g.emit("result.Type = tagFloat")
 	case "_newnil":
 		g.emit("ctx.EmitMakeNil(result)")
@@ -6369,6 +6609,18 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 		}
 	}
 	g.emit("ctx.EmitJmp(%s)", g.endLabel)
+}
+
+func (g *codeGen) emitScalarReturnIntoResult(res genVal, constructor, tag string) {
+	payload := g.allocDesc()
+	g.emit("if %s.Loc == LocImm {", res.goVar)
+	g.emit("\tctx.EmitMake%s(result, %s)", constructor, res.goVar)
+	g.emit("} else {")
+	g.emit("\tctx.EmitMovToReg(result.Reg2, %s)", res.goVar)
+	g.emit("\t%s := JITValueDesc{Loc: LocReg, Type: %s, Reg: result.Reg2, ID: 0}", payload, tag)
+	g.emit("\tctx.EmitMake%s(result, %s)", constructor, payload)
+	g.emit("\tif %s.Loc == LocReg && %s.Reg != result.Reg2 { ctx.FreeReg(%s.Reg) }", res.goVar, res.goVar, res.goVar)
+	g.emit("}")
 }
 
 // emitInlineReturn handles Return inside an inlined function (multi-block).

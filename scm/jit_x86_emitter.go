@@ -4229,16 +4229,18 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 	return emitResult(out)
 }
 
-// EmitMovToReg moves a JITValueDesc value into a specific GPR register.
-// Handles LocImm (materializes constant) and LocReg (register-to-register move).
+// EmitMovToReg moves a scalar JITValueDesc into a specific GPR register.
+// Register self-copies intentionally emit no instruction.
 func (ctx *JITContext) EmitMovToReg(dst Reg, src JITValueDesc) {
 	switch src.Loc {
 	case LocImm:
 		ctx.EmitMovRegImm64(dst, uint64(src.Imm.Int()))
 	case LocReg:
-		if src.Reg != dst {
-			ctx.emitMovRegReg(dst, src.Reg)
-		}
+		ctx.EmitMovRegReg(dst, src.Reg)
+	case LocStack:
+		ctx.EmitMovRegMem(dst, RegRSP, src.StackOff)
+	default:
+		panic("jit: scalar move requires immediate, register, or stack source")
 	}
 }
 
