@@ -295,10 +295,12 @@ func jitRequiredLocalSlots(expr Scmer, minimum int) int {
 		return minimum
 	}
 	items := expr.Slice()
-	if len(items) > 0 && items[0].IsSymbol() {
-		switch string(items[0].Symbol()) {
-		case "quote", "parser", "lambda":
-			return minimum
+	if len(items) > 0 {
+		if head, ok := scmerSymbol(items[0]); ok {
+			switch string(head) {
+			case "quote", "parser", "lambda":
+				return minimum
+			}
 		}
 	}
 	for _, item := range items {
@@ -1910,53 +1912,55 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 	}
 	if expr.GetTag() == tagSlice {
 		list := expr.Slice()
-		if len(list) > 0 && list[0].IsSymbol() {
-			switch string(list[0].Symbol()) {
-			case "and":
-				// Eval semantics: (and) => true
-				if len(list) <= 1 {
-					ctx.EmitJmp(trueLbl)
+		if len(list) > 0 {
+			if head, ok := scmerSymbol(list[0]); ok {
+				switch string(head) {
+				case "and":
+					// Eval semantics: (and) => true
+					if len(list) <= 1 {
+						ctx.EmitJmp(trueLbl)
+						return
+					}
+					for i := 1; i < len(list)-1; i++ {
+						nextLbl := ctx.ReserveLabel()
+						jitEmitCondJump(ctx, list[i], sliceBase, nextLbl, falseLbl)
+						ctx.MarkLabel(nextLbl)
+					}
+					jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, falseLbl)
+					return
+				case "or":
+					// Eval semantics: (or) => false
+					if len(list) <= 1 {
+						ctx.EmitJmp(falseLbl)
+						return
+					}
+					for i := 1; i < len(list)-1; i++ {
+						nextLbl := ctx.ReserveLabel()
+						jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, nextLbl)
+						ctx.MarkLabel(nextLbl)
+					}
+					jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, falseLbl)
+					return
+				case "if":
+					// Eval semantics: chain of condition/value pairs plus optional else.
+					i := 1
+					for i+1 < len(list) {
+						thenCondLbl := ctx.ReserveLabel()
+						nextCondLbl := ctx.ReserveLabel()
+						jitEmitCondJump(ctx, list[i], sliceBase, thenCondLbl, nextCondLbl)
+						ctx.MarkLabel(thenCondLbl)
+						jitEmitCondJump(ctx, list[i+1], sliceBase, trueLbl, falseLbl)
+						ctx.MarkLabel(nextCondLbl)
+						i += 2
+					}
+					if i < len(list) {
+						jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, falseLbl)
+					} else {
+						// No else branch => nil => false
+						ctx.EmitJmp(falseLbl)
+					}
 					return
 				}
-				for i := 1; i < len(list)-1; i++ {
-					nextLbl := ctx.ReserveLabel()
-					jitEmitCondJump(ctx, list[i], sliceBase, nextLbl, falseLbl)
-					ctx.MarkLabel(nextLbl)
-				}
-				jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, falseLbl)
-				return
-			case "or":
-				// Eval semantics: (or) => false
-				if len(list) <= 1 {
-					ctx.EmitJmp(falseLbl)
-					return
-				}
-				for i := 1; i < len(list)-1; i++ {
-					nextLbl := ctx.ReserveLabel()
-					jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, nextLbl)
-					ctx.MarkLabel(nextLbl)
-				}
-				jitEmitCondJump(ctx, list[len(list)-1], sliceBase, trueLbl, falseLbl)
-				return
-			case "if":
-				// Eval semantics: chain of condition/value pairs plus optional else.
-				i := 1
-				for i+1 < len(list) {
-					thenCondLbl := ctx.ReserveLabel()
-					nextCondLbl := ctx.ReserveLabel()
-					jitEmitCondJump(ctx, list[i], sliceBase, thenCondLbl, nextCondLbl)
-					ctx.MarkLabel(thenCondLbl)
-					jitEmitCondJump(ctx, list[i+1], sliceBase, trueLbl, falseLbl)
-					ctx.MarkLabel(nextCondLbl)
-					i += 2
-				}
-				if i < len(list) {
-					jitEmitCondJump(ctx, list[i], sliceBase, trueLbl, falseLbl)
-				} else {
-					// No else branch => nil => false
-					ctx.EmitJmp(falseLbl)
-				}
-				return
 			}
 		}
 	}
@@ -2113,10 +2117,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
 		}
 		// Resolve operator
-		if !list[0].IsSymbol() {
+		head, headOK := scmerSymbol(list[0])
+		if !headOK {
 			return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 		}
-		name := string(list[0].Symbol())
+		name := string(head)
 		switch name {
 		case "jit-enabled?":
 			if len(list) != 1 {
@@ -2742,18 +2747,20 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				}
 				if argExpr.GetTag() == tagSlice {
 					nested := argExpr.Slice()
-					isQuote := len(nested) > 0 && nested[0].IsSymbol() && nested[0].Symbol() == Symbol("quote")
+					isQuote := len(nested) > 0 && scmerIsSymbol(nested[0], "quote")
 					param := jitDeclarationParam(decl, argIndex)
-					isLambdaTemplate := param != nil && param.Kind == "func" && len(nested) > 0 && nested[0].IsSymbol() && nested[0].SymbolEquals("lambda")
+					isLambdaTemplate := param != nil && param.Kind == "func" && len(nested) > 0 && scmerIsSymbol(nested[0], "lambda")
 					// !list's backing storage is the current JIT frame. Until the
 					// generated-emitter contract can express result aliasing, only
 					// nth may consume it: nth returns one Scmer value, never a view
 					// into the list backing array.
-					isStackListForNth := name == "nth" && len(nested) > 0 && nested[0].IsSymbol() && nested[0].Symbol() == Symbol("!list")
+					isStackListForNth := name == "nth" && len(nested) > 0 && scmerIsSymbol(nested[0], "!list")
 					var nestedType *TypeDescriptor
-					if len(nested) > 0 && nested[0].IsSymbol() {
-						if nestedDecl, exists := declarations[string(nested[0].Symbol())]; exists {
-							nestedType = nestedDecl.Type
+					if len(nested) > 0 {
+						if nestedHead, ok := scmerSymbol(nested[0]); ok {
+							if nestedDecl, exists := declarations[string(nestedHead)]; exists {
+								nestedType = nestedDecl.Type
+							}
 						}
 					}
 					isSpecialForm := nestedType == nil
@@ -2916,7 +2923,7 @@ func jitLambdaTemplate(expr Scmer, outer *JITEnv) (*JITLambdaTemplate, bool) {
 		return nil, false
 	}
 	parts := expr.Slice()
-	if len(parts) < 3 || !parts[0].IsSymbol() || !parts[0].SymbolEquals("lambda") {
+	if len(parts) < 3 || !scmerIsSymbol(parts[0], "lambda") {
 		return nil, false
 	}
 	params := parts[1]

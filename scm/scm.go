@@ -119,17 +119,43 @@ restart:
 		}
 		// apply
 		operands := list[1:]
-		procedure, syntax := specialFormForSymbol(list[0])
-		if !syntax {
-			procedure = Eval(list[0], en) // compute lambdas or look up ordinary functions
+		procedure := Eval(list[0], en) // resolve syntax, lambdas, and ordinary functions
+		if specialForm, ok := resolveSpecialFormSymbol(list[0], en); ok {
+			procedure = specialForm
 		}
 		switch procedure.GetTag() {
 		case tagSpecialForm:
-			switch procedure.SpecialFormKind() {
-			case specialFormEvalKind:
+			switch procedure.SpecialFormName() {
+			case "outer":
+				if en.Outer == nil {
+					return NewNil()
+				}
+				if operands[0].IsSymbol() {
+					symbol := operands[0].Symbol()
+					if outer := en.Outer.FindRead(symbol); outer != nil {
+						if result, exists := outer.Vars[symbol]; exists {
+							return result
+						}
+					}
+					symbolName := string(symbol)
+					if strings.Contains(symbolName, ".") && !strings.Contains(symbolName, "\x00") {
+						suffix := "\x00" + symbolName
+						for outer := en.Outer; outer != nil; outer = outer.Outer {
+							for key, result := range outer.Vars {
+								if strings.HasSuffix(string(key), suffix) {
+									return result
+								}
+							}
+						}
+					}
+				}
+				en = en.Outer
+				expression = operands[0]
+				goto restart
+			case "eval":
 				expression = Eval(operands[0], en)
 				goto restart
-			case specialFormIfKind:
+			case "if":
 				i := 0
 				for i+1 < len(operands) {
 					if Eval(operands[i], en).Bool() {
@@ -143,11 +169,11 @@ restart:
 					goto restart
 				}
 				return NewNil()
-			case specialFormMatchKind, specialFormMatchMutKind:
+			case "match", "match_mut":
 				matchedValue := Eval(operands[0], en)
 				matchEnv := Env{VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
 				i := 1
-				mutable := procedure.SpecialFormKind() == specialFormMatchMutKind
+				mutable := procedure.SpecialFormName() == "match_mut"
 				for i < len(operands)-1 {
 					if match(matchedValue, operands[i], &matchEnv, mutable) {
 						en = &matchEnv
@@ -161,8 +187,19 @@ restart:
 					goto restart
 				}
 				return NewNil()
-			case specialFormBeginMutKind:
-				reserve := int(ToInt(Eval(operands[0], en)))
+			case "begin":
+				beginEnv := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
+				for _, form := range operands[:len(operands)-1] {
+					Eval(form, beginEnv)
+				}
+				en = beginEnv
+				expression = operands[len(operands)-1]
+				goto restart
+			case "begin_mut":
+				reserve := 0
+				if len(operands) > 0 {
+					reserve = int(ToInt(Eval(operands[0], en)))
+				}
 				if reserve < 0 {
 					reserve = 0
 				}
@@ -178,7 +215,7 @@ restart:
 				en = beginEnv
 				expression = operands[len(operands)-1]
 				goto restart
-			case specialFormBangBeginKind:
+			case "!begin":
 				for _, form := range operands[:len(operands)-1] {
 					Eval(form, en)
 				}
@@ -747,13 +784,15 @@ func collectProcedureBindings(expression Scmer, bound map[Symbol]struct{}) {
 		return
 	}
 	items := expression.Slice()
-	if len(items) > 0 && items[0].IsSymbol() {
-		switch items[0].String() {
-		case "lambda", "quote":
-			return
-		case "define", "set":
-			if len(items) > 1 && items[1].IsSymbol() {
-				bound[items[1].Symbol()] = struct{}{}
+	if len(items) > 0 {
+		if head, ok := scmerSymbol(items[0]); ok {
+			switch string(head) {
+			case "lambda", "quote":
+				return
+			case "define", "set":
+				if len(items) > 1 && items[1].IsSymbol() {
+					bound[items[1].Symbol()] = struct{}{}
+				}
 			}
 		}
 	}
@@ -783,12 +822,14 @@ func closeProcedureCaptures(expression Scmer, callFrame *Env, bound map[Symbol]s
 		return expression
 	}
 	items := expression.Slice()
-	if len(items) > 0 && items[0].IsSymbol() {
-		switch items[0].String() {
-		case "outer":
-			return Eval(expression, callFrame)
-		case "lambda", "quote":
-			return expression
+	if len(items) > 0 {
+		if head, ok := scmerSymbol(items[0]); ok {
+			switch string(head) {
+			case "outer":
+				return Eval(expression, callFrame)
+			case "lambda", "quote":
+				return expression
+			}
 		}
 	}
 	closed := make([]Scmer, len(items))
@@ -898,7 +939,7 @@ func init() {
 
 	// system
 	DeclareTitle("SCM Builtins")
-	Declare(&Globalenv, &Declaration{
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "quote",
 
 		Fn: nil,
@@ -909,8 +950,8 @@ func init() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialQuote)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "eval",
 
 		Fn: nil,
@@ -920,7 +961,7 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	})
+	}, nil)
 	Declare(&Globalenv, &Declaration{
 		Name: "size",
 
@@ -1087,7 +1128,7 @@ func init() {
 			JITVirtualArgs: true,
 		},
 	})
-	Declare(&Globalenv, &Declaration{
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "time",
 
 		Fn: nil,
@@ -1098,8 +1139,8 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialTime)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "if",
 
 		Fn: nil,
@@ -1113,8 +1154,8 @@ func init() {
 			Const:    true,
 			Optimize: optimizeIf,
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, nil)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "and",
 
 		Fn: nil,
@@ -1126,8 +1167,8 @@ func init() {
 			Const:    true,
 			Optimize: optimizeAnd,
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialAnd)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "or",
 
 		Fn: nil,
@@ -1139,8 +1180,8 @@ func init() {
 			Const:    true,
 			Optimize: optimizeOr,
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialOr)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "coalesce",
 
 		Fn: nil,
@@ -1152,8 +1193,8 @@ func init() {
 			Const:    true,
 			Optimize: optimizeCoalesce,
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialCoalesce)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "coalesceNil",
 
 		Fn: nil,
@@ -1165,8 +1206,8 @@ func init() {
 			Const:    true,
 			Optimize: optimizeCoalesce,
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialCoalesceNil)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "define",
 
 		Fn: nil,
@@ -1177,8 +1218,8 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialDefine)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "set",
 
 		Fn: nil,
@@ -1189,7 +1230,7 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
-	})
+	}, specialDefine)
 
 	// basic
 	Declare(&Globalenv, &Declaration{
@@ -1908,7 +1949,7 @@ func init() {
 			},
 		},
 	})
-	Declare(&Globalenv, &Declaration{
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "match",
 
 		Fn:// TODO: returntype as soon as repead validate is implemented */
@@ -1933,8 +1974,8 @@ Patterns can be any of:
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, nil)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "lambda",
 
 		Fn:// TODO: func(...)->returntype as soon as function types are implemented
@@ -1950,8 +1991,8 @@ Patterns can be any of:
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value produced by code"},
 			},
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, specialLambda)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "begin",
 
 		Fn:// TODO: returntype as soon as repeat is implemented
@@ -1962,8 +2003,8 @@ Patterns can be any of:
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	})
-	Declare(&Globalenv, &Declaration{
+	}, nil)
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "parallel",
 
 		Fn:// TODO: returntype as soon as repeat is implemented
@@ -1974,7 +2015,7 @@ Patterns can be any of:
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	})
+	}, specialParallel)
 	Declare(&Globalenv, &Declaration{
 		Name: "source",
 
@@ -2793,7 +2834,7 @@ func ComputeSize(v Scmer) uint {
 		}
 		return base
 	case tagSpecialForm:
-		return base + goAllocOverhead + uint(unsafe.Sizeof(specialFormValue{}))
+		return base + goAllocOverhead + uint(unsafe.Sizeof(SpecialForm(nil)))
 	default:
 		if v.GetTag() >= 100 {
 			return base

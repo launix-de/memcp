@@ -44,8 +44,8 @@ func serialExprMayCaptureEnv(expression Scmer) bool {
 	if len(items) == 0 {
 		return false
 	}
-	if items[0].IsSymbol() {
-		switch items[0].String() {
+	if head, ok := scmerSymbol(items[0]); ok {
+		switch string(head) {
 		case "quote":
 			return false
 		case "lambda", "parser", "eval":
@@ -100,11 +100,11 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 	if len(items) == 0 {
 		return func(*Env) Scmer { return expression }
 	}
-	if items[0].IsSymbol() {
+	if head, ok := scmerSymbol(items[0]); ok {
 		// These control forms intentionally mirror Eval's short-circuit and SQL
 		// NULL semantics. Keep both implementations in sync; every other form
 		// falls through to Eval instead of growing a second interpreter here.
-		switch items[0].String() {
+		switch string(head) {
 		case "quote":
 			value := items[1]
 			return func(*Env) Scmer { return value }

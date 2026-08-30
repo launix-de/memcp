@@ -47,7 +47,7 @@ func procBodyUsesNamedParam(body Scmer, named map[Symbol]struct{}) bool {
 		return false
 	}
 	items := body.Slice()
-	if len(items) > 0 && items[0].IsSymbol() && items[0].String() == "quote" {
+	if len(items) > 0 && scmerIsSymbol(items[0], "quote") {
 		return false
 	}
 	for _, item := range items {
@@ -943,6 +943,9 @@ func leafInlineBindingsStable(expr Scmer, source, target *Env) bool {
 		}
 		sourceValue, sourceOK := sourceOwner.Vars[sym]
 		targetValue, targetOK := targetOwner.Vars[sym]
+		if (sourceOK && sourceValue.GetTag() == tagSpecialForm) || (targetOK && targetValue.GetTag() == tagSpecialForm) {
+			return false
+		}
 		return sourceOK && targetOK && sourceValue == targetValue
 	}
 	items := expr.Slice()
@@ -1464,8 +1467,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		}
 		return val, tiZero
 	case tagSlice:
-		result, ti := optimizeList(val.Slice(), env, ome, useResult)
-		return lowerSpecialFormHead(result), ti
+		return optimizeList(val.Slice(), env, ome, useResult)
 	case tagSourceInfo:
 		siPtr := val.SourceInfo()
 		if SettingsTrackSourceCoverage {
@@ -1590,6 +1592,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	if len(v) == 0 {
 		return NewSlice(v), tiZero
 	}
+	if callable, ok := resolveSpecialFormSymbol(v[0], env); ok {
+		resolved := make([]Scmer, len(v))
+		copy(resolved, v)
+		resolved[0] = callable
+		v = resolved
+	}
 	headSym, headOk := scmerSymbol(v[0])
 
 	if headOk && headSym == Symbol("outer") && len(v) == 2 {
@@ -1612,6 +1620,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if isConstant {
 			return inner, tiConstTransfer
 		}
+		// outer is both executable syntax and a lexical marker consumed by later
+		// optimizer passes. Keep that marker symbolic after optimizing its body.
+		v[0] = NewSymbol("outer")
 		v[1] = inner
 		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
 	}
@@ -2150,21 +2161,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	}
 
 	return NewSlice(v), MakeTypeInfo(transferOwnership, false)
-}
-
-func lowerSpecialFormHead(expression Scmer) Scmer {
-	items, ok := scmerSlice(expression)
-	if !ok || len(items) == 0 {
-		return expression
-	}
-	form, ok := specialFormForSymbol(items[0])
-	if !ok {
-		return expression
-	}
-	lowered := make([]Scmer, len(items))
-	copy(lowered, items)
-	lowered[0] = form
-	return NewSlice(lowered)
 }
 
 // OptimizeSub optimizes a sub-expression and returns its result TypeDescriptor.
@@ -3067,7 +3063,7 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 		return expr
 	}
 	items := expr.Slice()
-	if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "!list" {
+	if len(items) >= 3 && scmerIsSymbol(items[0], "!list") {
 		count := int(ToInt(items[2]))
 		if count == len(items)-3 {
 			newItems := make([]Scmer, 1+count)
@@ -3078,7 +3074,7 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 			return NewSlice(newItems)
 		}
 	}
-	if len(items) == 3 && items[0].IsSymbol() && items[0].String() == "!!list" && items[1].IsNthLocalVar() {
+	if len(items) == 3 && scmerIsSymbol(items[0], "!!list") && items[1].IsNthLocalVar() {
 		return NewSlice([]Scmer{NewSymbol("list")})
 	}
 	// recurse into sub-expressions

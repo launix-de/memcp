@@ -598,7 +598,7 @@ func validateCallbackSignature(lambdaSlice []Scmer, expectedSig *TypeDescriptor,
 	if len(lambdaSlice) < 3 {
 		return ""
 	}
-	if !lambdaSlice[0].IsSymbol() || !lambdaSlice[0].SymbolEquals("lambda") {
+	if !scmerIsSymbol(lambdaSlice[0], "lambda") {
 		return ""
 	}
 	paramList, ok := scmerSlice(lambdaSlice[1])
@@ -694,17 +694,7 @@ func Validate(val Scmer, require string) string {
 			return "list"
 		}
 		if len(slice) > 0 {
-			var def *Declaration
-			head := slice[0]
-			if head.IsSymbol() {
-				if def2, ok := declarations[head.String()]; ok {
-					def = def2
-				}
-			} else if head.GetTag() == tagFunc {
-				if def2, ok := declarationsByFunction[FunctionIdentity(head.Func())]; ok {
-					def = def2
-				}
-			}
+			def := DeclarationForValue(slice[0])
 			if def != nil {
 				if len(slice)-1 < def.MinParams() {
 					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
@@ -713,7 +703,7 @@ func Validate(val Scmer, require string) string {
 					panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParams()) + " parameters")
 				}
 			}
-			skipFirst := slice[0].IsSymbol() && (slice[0].SymbolEquals("lambda") || slice[0].SymbolEquals("parser"))
+			skipFirst := scmerIsSymbol(slice[0], "lambda") || scmerIsSymbol(slice[0], "parser")
 			returntype := ""
 			for i := 1; i < len(slice); i++ {
 				if def != nil && def.Name == "match" && i >= 2 && i%2 == 0 {

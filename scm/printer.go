@@ -325,13 +325,13 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := v.Slice()
-		if len(slice) == 2 && slice[0].IsSymbol() && slice[0].String() == "outer" {
+		if len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
 			b.WriteString("(outer ")
 			serializeEx(b, slice[1], en, glob, nil)
 			b.WriteByte(')')
 			return
 		}
-		if len(slice) > 0 && slice[0].IsSymbol() && slice[0].String() == "list" {
+		if len(slice) > 0 && scmerIsSymbol(slice[0], "list") {
 			b.WriteByte('\'')
 			slice = slice[1:]
 		}

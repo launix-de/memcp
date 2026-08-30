@@ -347,14 +347,10 @@ func NewAny(v any) Scmer {
 // SpecialForm executes syntax whose operands must not be evaluated eagerly.
 type SpecialForm func(code []Scmer, en *Env) Scmer
 
-type specialFormValue struct {
-	name string
-	fn   SpecialForm
-}
-
-func NewSpecialForm(name string, kind uint8, fn SpecialForm) Scmer {
-	value := &specialFormValue{name: name, fn: fn}
-	return Scmer{(*byte)(unsafe.Pointer(value)), makeAux(tagSpecialForm, uint64(kind))}
+func NewSpecialForm(fn SpecialForm) Scmer {
+	value := new(SpecialForm)
+	*value = fn
+	return Scmer{(*byte)(unsafe.Pointer(value)), makeAux(tagSpecialForm, 0)}
 }
 
 func NewRegex(re *regexp.Regexp) Scmer {
@@ -940,21 +936,14 @@ func (s Scmer) SpecialForm() SpecialForm {
 	if s.GetTag() != tagSpecialForm {
 		panic("not special form")
 	}
-	return (*specialFormValue)(unsafe.Pointer(s.ptr)).fn
+	return *(*SpecialForm)(unsafe.Pointer(s.ptr))
 }
 
 func (s Scmer) SpecialFormName() string {
 	if s.GetTag() != tagSpecialForm {
 		panic("not special form")
 	}
-	return (*specialFormValue)(unsafe.Pointer(s.ptr)).name
-}
-
-func (s Scmer) SpecialFormKind() uint8 {
-	if s.GetTag() != tagSpecialForm {
-		panic("not special form")
-	}
-	return uint8(auxVal(s.aux))
+	return specialFormName(s)
 }
 
 func (s Scmer) IsProc() bool {
@@ -1175,6 +1164,8 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 				return map[string]any{"symbol": decl.Name}
 			}
 			return map[string]any{"symbol": "?"}
+		case tagSpecialForm:
+			return map[string]any{"symbol": v.SpecialFormName()}
 		case tagFuncEnv:
 			return map[string]any{"symbol": "?"}
 		case tagNthLocalVar:

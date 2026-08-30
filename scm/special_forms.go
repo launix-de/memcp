@@ -19,88 +19,62 @@ package scm
 import (
 	"fmt"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/jtolds/gls"
 )
 
-var specialFormsByName map[Symbol]Scmer
+var specialFormNames = make(map[*byte]string)
 
-const (
-	specialFormCallbackKind uint8 = iota
-	specialFormEvalKind
-	specialFormIfKind
-	specialFormMatchKind
-	specialFormMatchMutKind
-	specialFormBeginMutKind
-	specialFormBangBeginKind
-)
+// DeclareSpecialForm registers syntax as a normal global callable while
+// preserving its unevaluated-operand calling convention. Optimize and JIT
+// hooks live on def.Type just like they do for ordinary declarations.
+func DeclareSpecialForm(env *Env, def *Declaration, fn SpecialForm) {
+	Declare(env, def)
+	value := NewSpecialForm(fn)
+	env.Vars[Symbol(def.Name)] = value
+	specialFormNames[value.ptr] = def.Name
+}
 
 func registerSpecialForms() {
-	specialFormsByName = make(map[Symbol]Scmer)
-	register := func(name string, kind uint8, fn SpecialForm) {
-		value := NewSpecialForm(name, kind, fn)
-		specialFormsByName[Symbol(name)] = value
+	register := func(name string, fn SpecialForm) {
+		value := NewSpecialForm(fn)
+		Globalenv.Vars[Symbol(name)] = value
+		specialFormNames[value.ptr] = name
 	}
-	register("outer", specialFormCallbackKind, specialOuter)
-	register("quote", specialFormCallbackKind, specialQuote)
-	register("eval", specialFormEvalKind, nil)
-	register("time", specialFormCallbackKind, specialTime)
-	register("if", specialFormIfKind, nil)
-	register("and", specialFormCallbackKind, specialAnd)
-	register("or", specialFormCallbackKind, specialOr)
-	register("coalesce", specialFormCallbackKind, specialCoalesce)
-	register("coalesceNil", specialFormCallbackKind, specialCoalesceNil)
-	register("match", specialFormMatchKind, nil)
-	register("match_mut", specialFormMatchMutKind, nil)
-	register("define", specialFormCallbackKind, specialDefine)
-	register("set", specialFormCallbackKind, specialDefine)
-	register("setN", specialFormCallbackKind, specialSetN)
-	register("parser", specialFormCallbackKind, specialParser)
-	register("optimizer_proc_return", specialFormCallbackKind, specialOptimizerProcReturn)
-	register("lambda", specialFormCallbackKind, specialLambda)
-	register("begin", specialFormCallbackKind, specialBegin)
-	register("begin_mut", specialFormBeginMutKind, nil)
-	register("!begin", specialFormBangBeginKind, nil)
-	register("!list", specialFormCallbackKind, specialBangList)
-	register("!!list", specialFormCallbackKind, specialBangBangList)
-	register("parallel", specialFormCallbackKind, specialParallel)
+	register("outer", nil)
+	register("setN", specialSetN)
+	register("parser", specialParser)
+	register("optimizer_proc_return", specialOptimizerProcReturn)
+	register("!list", specialBangList)
+	register("!!list", specialBangBangList)
+	register("match_mut", nil)
+	register("begin_mut", nil)
+	register("!begin", nil)
 }
 
-func specialFormForSymbol(value Scmer) (Scmer, bool) {
-	name, ok := scmerSymbol(value)
-	if !ok {
+func specialFormName(value Scmer) string {
+	if name, ok := specialFormNames[value.ptr]; ok {
+		return name
+	}
+	panic("unregistered special form")
+}
+
+func resolveSpecialFormSymbol(value Scmer, env *Env) (Scmer, bool) {
+	symbol, symbolic := scmerSymbol(value)
+	if !symbolic {
 		return NewNil(), false
 	}
-	form, ok := specialFormsByName[name]
-	return form, ok
-}
-
-func specialOuter(code []Scmer, en *Env) Scmer {
-	if en.Outer == nil {
-		return NewNil()
-	}
-	if code[0].IsSymbol() {
-		sym := code[0].Symbol()
-		if env := en.Outer.FindRead(sym); env != nil {
-			if val, ok := env.Vars[sym]; ok {
-				return val
+	if owner := env.FindRead(symbol); owner != nil {
+		if resolved, exists := owner.Vars[symbol]; exists {
+			if resolved.GetTag() == tagSpecialForm {
+				return resolved, true
 			}
-		}
-		symStr := string(sym)
-		if strings.Contains(symStr, ".") && !strings.Contains(symStr, "\x00") {
-			suffix := "\x00" + symStr
-			for env := en.Outer; env != nil; env = env.Outer {
-				for key, val := range env.Vars {
-					if strings.HasSuffix(string(key), suffix) {
-						return val
-					}
-				}
-			}
+			return NewNil(), false
 		}
 	}
-	return Eval(code[0], en.Outer)
+	resolved, exists := Globalenv.Vars[symbol]
+	return resolved, exists && resolved.GetTag() == tagSpecialForm
 }
 
 func specialQuote(code []Scmer, _ *Env) Scmer { return code[0] }
@@ -257,14 +231,6 @@ func specialLambda(code []Scmer, en *Env) Scmer {
 		NumVars:      numVars,
 		NumberedOnly: procCanUseNumberedOnly(params, code[1], numVars),
 	})
-}
-
-func specialBegin(code []Scmer, en *Env) Scmer {
-	beginEnv := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
-	for _, form := range code[:len(code)-1] {
-		Eval(form, beginEnv)
-	}
-	return Eval(code[len(code)-1], beginEnv)
 }
 
 func specialBangList(code []Scmer, en *Env) Scmer {
