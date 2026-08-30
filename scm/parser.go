@@ -70,9 +70,10 @@ func EvalAll(source, s string, en *Env) (expression Scmer) {
 	return evalAll(source, s, en, false)
 }
 
-// EvalAllJIT evaluates a Scheme module and attaches native implementations to
-// every top-level procedure that the current emitter can compile. Unsupported
-// procedures stay ordinary Procs and retain the interpreter as a safe fallback.
+// EvalAllJIT evaluates a Scheme module through the same parse, validate,
+// optimize, and recursive JIT pipeline as an explicit (jit ...) call.
+// Unsupported procedures stay ordinary Procs and retain the interpreter as an
+// atomic fallback.
 func EvalAllJIT(source, s string, en *Env) (expression Scmer) {
 	return evalAll(source, s, en, true)
 }
@@ -85,20 +86,39 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
 		if compileProcedures && expression.GetTag() == tagProc {
-			compiled := jitCompileForImport(expression)
-			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil && compiled.Proc().Compiled.AutoImportSafe {
+			compiled := jitCompile(expression)
+			sym, definition := topLevelDefinitionSymbol(code)
+			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil &&
+				compiled.Proc().Compiled.AutoImportSafe &&
+				jitAutoImportCoverageWorthwhile(compiled.Proc().Compiled.Coverage) &&
+				definition {
 				expression = compiled
-				if sym, ok := topLevelDefinitionSymbol(code); ok {
+				if definition {
 					target := en.definitionTarget()
 					if target.Vars == nil {
 						target.Vars = make(Vars)
 					}
 					target.Vars[sym] = compiled
+					compiled.Proc().Compiled.DebugName = string(sym)
+				}
+				if JITLog {
+					entry := compiled.Proc().Compiled
+					fmt.Printf("JIT: import %s code=%p bytes=%d hidden-args=%d expressions=%d dynamic-calls=%d inlined-calls=%d\n",
+						sym, entry.CodePtr, entry.CodeLen, len(entry.HiddenArgs),
+						entry.Coverage.Expressions, entry.Coverage.DynamicCalls, entry.Coverage.InlinedCalls)
 				}
 			}
 		}
 	}
 	return
+}
+
+func jitAutoImportCoverageWorthwhile(coverage JITCoverage) bool {
+	// A generic Apply bridge costs more than a handful of straight-line emitter
+	// nodes. Keep probe compilation universal, but activate only native bodies
+	// whose static coverage can amortize every remaining bridge. This decision is
+	// deliberately independent of module paths and definition names.
+	return coverage.DynamicCalls == 0 || coverage.Expressions >= coverage.DynamicCalls*8
 }
 
 func topLevelDefinitionSymbol(code Scmer) (Symbol, bool) {
