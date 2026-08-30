@@ -8381,7 +8381,7 @@ func init_list() {
 					stackArray42 := ctx.AllocStack(int32(32))
 					ctx.EnsureDesc(&d13)
 					ctx.EnsureDesc(&d13)
-					ctx.EmitStoreScmerToStack(d13, int32(stackArray42)+int32(0))
+					ctx.EmitStoreTypedScmerToStack(d13, tagInt, int32(stackArray42)+int32(0))
 					ctx.EnsureDesc(&d40)
 					ctx.EnsureDesc(&d40)
 					ctx.EmitStoreScmerToStack(d40, int32(stackArray42)+int32(16))
@@ -12233,7 +12233,7 @@ func init_list() {
 					stackArray154 := ctx.AllocStack(int32(16))
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
-					ctx.EmitStoreScmerToStack(d2, int32(stackArray154)+int32(0))
+					ctx.EmitStoreTypedScmerToStack(d2, tagInt, int32(stackArray154)+int32(0))
 					d155 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(1), KnownSliceCap: int32(1), SliceSizeKnown: true}
 					callbackArgs157 := make([]JITValueDesc, 1)
 					callbackArgs157[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray154) + 0}
@@ -15259,7 +15259,7 @@ func init_list() {
 					stackArray185 := ctx.AllocStack(int32(16))
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d2)
-					ctx.EmitStoreScmerToStack(d2, int32(stackArray185)+int32(0))
+					ctx.EmitStoreTypedScmerToStack(d2, tagInt, int32(stackArray185)+int32(0))
 					d186 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(1), KnownSliceCap: int32(1), SliceSizeKnown: true}
 					callbackArgs188 := make([]JITValueDesc, 1)
 					callbackArgs188[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray185) + 0}
@@ -16703,7 +16703,7 @@ func init_list() {
 					stackArray263 := ctx.AllocStack(int32(16))
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d3)
-					ctx.EmitStoreScmerToStack(d3, int32(stackArray263)+int32(0))
+					ctx.EmitStoreTypedScmerToStack(d3, tagInt, int32(stackArray263)+int32(0))
 					d264 = JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(1), KnownSliceCap: int32(1), SliceSizeKnown: true}
 					callbackArgs266 := make([]JITValueDesc, 1)
 					callbackArgs266[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray263) + 0}
@@ -55159,7 +55159,7 @@ func init_list() {
 					stackArray33 := ctx.AllocStack(int32(32))
 					ctx.EnsureDesc(&d10)
 					ctx.EnsureDesc(&d10)
-					ctx.EmitStoreScmerToStack(d10, int32(stackArray33)+int32(0))
+					ctx.EmitStoreTypedScmerToStack(d10, tagInt, int32(stackArray33)+int32(0))
 					ctx.EnsureDesc(&d31)
 					ctx.EnsureDesc(&d31)
 					ctx.EmitStoreScmerToStack(d31, int32(stackArray33)+int32(16))

@@ -6142,7 +6142,16 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				panic(fmt.Sprintf("unsupported non-Scmer stack array Store: %s", v))
 			}
 			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
-			g.emit("ctx.EmitStoreScmerToStack(%s, %s)", src.goVar, dst.offsetExpr)
+			switch src.marker {
+			case "_newbool":
+				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagBool, %s)", src.goVar, dst.offsetExpr)
+			case "_newint":
+				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagInt, %s)", src.goVar, dst.offsetExpr)
+			case "_newfloat":
+				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagFloat, %s)", src.goVar, dst.offsetExpr)
+			default:
+				g.emit("ctx.EmitStoreScmerToStack(%s, %s)", src.goVar, dst.offsetExpr)
+			}
 		} else if dst.marker == "_alloc" {
 			// Storing to an allocation: just remember the stored value
 			src := g.vals[v.Val.Name()]
