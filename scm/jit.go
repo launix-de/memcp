@@ -28,7 +28,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
+
+	"github.com/jtolds/gls"
 )
 
 /*
@@ -1402,6 +1405,200 @@ func jitBuildCompiledLambdaClosure(args ...Scmer) Scmer {
 	return jitCompile(jitBuildLambdaClosure(args...))
 }
 
+// jitRuntimeEnvFromCaptures reconstructs the visible lexical environment for
+// special forms whose runtime contract consumes Scheme syntax as data. The
+// first argument is the interpreter environment outside the native Proc; the
+// remaining arguments are frame markers and symbol-or-numbered-key/value pairs.
+var jitRuntimeEnvFrameMarker = &struct{}{}
+
+func jitRuntimeEnvFromCaptures(args []Scmer) *Env {
+	if len(args) == 0 || (len(args)-1)%2 != 0 {
+		panic("jit: malformed runtime environment capture")
+	}
+	outer, ok := args[0].Any().(*Env)
+	if !ok || outer == nil {
+		panic("jit: invalid outer runtime environment")
+	}
+	type capturedFrame struct {
+		vars     Vars
+		numbered map[int]Scmer
+	}
+	frames := make([]capturedFrame, 0, 2)
+	current := capturedFrame{}
+	started := false
+	for i := 1; i < len(args); i += 2 {
+		key, value := args[i], args[i+1]
+		if key.GetTag() == tagAny && key.Any() == jitRuntimeEnvFrameMarker {
+			if started {
+				frames = append(frames, current)
+			}
+			current = capturedFrame{}
+			started = true
+			continue
+		}
+		if key.IsNthLocalVar() {
+			if current.numbered == nil {
+				current.numbered = make(map[int]Scmer)
+			}
+			current.numbered[int(key.NthLocalVar())] = value
+			continue
+		}
+		if current.vars == nil {
+			current.vars = make(Vars)
+		}
+		current.vars[mustSymbol(key)] = value
+	}
+	if started || current.vars != nil || current.numbered != nil {
+		frames = append(frames, current)
+	}
+	if len(frames) == 0 {
+		return &Env{Outer: outer}
+	}
+	for i := len(frames) - 1; i >= 0; i-- {
+		frame := frames[i]
+		maxNumbered := -1
+		for index := range frame.numbered {
+			if index > maxNumbered {
+				maxNumbered = index
+			}
+		}
+		var numbered []Scmer
+		if maxNumbered >= 0 {
+			numbered = make([]Scmer, maxNumbered+1)
+			for index, value := range frame.numbered {
+				numbered[index] = value
+			}
+		}
+		outer = &Env{Vars: frame.vars, VarsNumbered: numbered, Outer: outer}
+	}
+	return outer
+}
+
+func jitEvalSpecial(args ...Scmer) Scmer {
+	if len(args) < 2 {
+		panic("eval expects exactly one expression")
+	}
+	return Eval(args[0], jitRuntimeEnvFromCaptures(args[1:]))
+}
+
+func jitParserSpecial(args ...Scmer) Scmer {
+	if len(args) < 5 {
+		panic("parser expects syntax")
+	}
+	en := jitRuntimeEnvFromCaptures(args[4:])
+	return NewScmParser(NewParser(args[0], args[1], args[2], en, args[3].Bool()))
+}
+
+type jitSpecialThunkValue struct {
+	callable Scmer
+	args     []Scmer
+}
+
+func jitMakeSpecialThunk(args ...Scmer) Scmer {
+	if len(args) == 0 {
+		panic("jit: special-form thunk expects a callable")
+	}
+	return NewAny(&jitSpecialThunkValue{callable: args[0], args: append([]Scmer(nil), args[1:]...)})
+}
+
+func jitCallSpecialThunk(thunk Scmer) Scmer {
+	if thunk.GetTag() == tagAny {
+		if value, ok := thunk.Any().(*jitSpecialThunkValue); ok && value != nil {
+			if value.callable.GetTag() == tagProc {
+				if proc := value.callable.Proc(); proc != nil && proc.Compiled != nil {
+					return proc.Compiled.Call(value.args...)
+				}
+			}
+			return Apply(value.callable, value.args...)
+		}
+	}
+	if thunk.GetTag() == tagProc {
+		if proc := thunk.Proc(); proc != nil && proc.Compiled != nil {
+			return proc.Compiled.Call()
+		}
+	}
+	return Apply(thunk)
+}
+
+func jitOptimizerProcReturnSpecial(args ...Scmer) Scmer {
+	if len(args) != 2 {
+		panic("optimizer_proc_return expects procedure and return metadata")
+	}
+	value, metadataThunk := args[0], args[1]
+	if value.GetTag() != tagProc {
+		return value
+	}
+	metadataValue := jitCallSpecialThunk(metadataThunk)
+	if metadataValue.GetTag() != tagAny {
+		panic("optimizer_proc_return expects internal return metadata")
+	}
+	metadata, ok := metadataValue.Any().(optimizerProcReturnTemplate)
+	if !ok {
+		panic("optimizer_proc_return received invalid return metadata")
+	}
+	proc := *value.Proc()
+	proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return, HasReturn: metadata.HasReturn}
+	return NewProcStruct(proc)
+}
+
+func jitTimeSpecial(args ...Scmer) Scmer {
+	if len(args) != 2 {
+		panic("time expects an expression and optional label")
+	}
+	body, label := args[0], args[1]
+	hasLabel := !label.IsNil()
+	var start time.Time
+	if TracePrint {
+		start = time.Now()
+	}
+	var timedResult Scmer
+	if Trace != nil {
+		traceLabel := "(time)"
+		if hasLabel {
+			traceLabel = String(jitCallSpecialThunk(label))
+		}
+		Trace.Duration(traceLabel, "scm", func() {
+			timedResult = jitCallSpecialThunk(body)
+		})
+	} else {
+		timedResult = jitCallSpecialThunk(body)
+	}
+	if TracePrint {
+		message := "trace " + time.Since(start).String()
+		if hasLabel {
+			message += " " + String(jitCallSpecialThunk(label))
+		}
+		TracePrintFunc(message)
+	}
+	return timedResult
+}
+
+func jitParallelSpecial(thunks ...Scmer) Scmer {
+	if len(thunks) == 0 {
+		return NewNil()
+	}
+	errs := make(chan any, len(thunks))
+	for _, thunk := range thunks {
+		thunk := thunk
+		gls.Go(func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					errs <- recovered
+				} else {
+					errs <- nil
+				}
+			}()
+			jitCallSpecialThunk(thunk)
+		})
+	}
+	for range thunks {
+		if err := <-errs; err != nil {
+			panic(err)
+		}
+	}
+	return NewNil()
+}
+
 // GoFuncAddr returns the entry point address of a Go function value.
 func GoFuncAddr(fn interface{}) uint64 {
 	return uint64(reflect.ValueOf(fn).Pointer())
@@ -1948,6 +2145,18 @@ type jitCodeReservation struct {
 // may run concurrently, but an entry point does not become reachable before
 // every earlier reservation has either published its maps or reported failure.
 func (a *jitArena) complete(reservation *jitCodeReservation, maps []jitStackMap) {
+	a.completeMode(reservation, maps, true)
+}
+
+// completeDeferred records metadata for code which cannot become reachable
+// before its enclosing reservation is published. Nested special-form thunks
+// use this to avoid waiting on the outer compiler which is currently emitting
+// them; the outer completion publishes both reservations in allocation order.
+func (a *jitArena) completeDeferred(reservation *jitCodeReservation, maps []jitStackMap) {
+	a.completeMode(reservation, maps, false)
+}
+
+func (a *jitArena) completeMode(reservation *jitCodeReservation, maps []jitStackMap, wait bool) {
 	if a == nil || reservation == nil {
 		return
 	}
@@ -1961,8 +2170,10 @@ func (a *jitArena) complete(reservation *jitCodeReservation, maps []jitStackMap)
 		a.metaNext++
 	}
 	a.metaCond.Broadcast()
-	for !reservation.published {
-		a.metaCond.Wait()
+	if wait {
+		for !reservation.published {
+			a.metaCond.Wait()
+		}
 	}
 	a.metaMu.Unlock()
 }
@@ -2323,6 +2534,14 @@ func jitCompile(a ...Scmer) Scmer {
 }
 
 func jitCompileMode(recursiveLambdas bool, a ...Scmer) Scmer {
+	return jitCompileModePublish(recursiveLambdas, true, a...)
+}
+
+func jitCompileModeDeferred(recursiveLambdas bool, a ...Scmer) Scmer {
+	return jitCompileModePublish(recursiveLambdas, false, a...)
+}
+
+func jitCompileModePublish(recursiveLambdas bool, waitForPublication bool, a ...Scmer) Scmer {
 	if len(a) != 1 {
 		panic("jit: expects exactly 1 argument")
 	}
@@ -2364,7 +2583,11 @@ func jitCompileMode(recursiveLambdas bool, a ...Scmer) Scmer {
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
 			codeLen, roots, overflow, transferInputArgs, hiddenArgs, autoImportSafe, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
-			arena.complete(reservation, buf.stackMaps)
+			if waitForPublication {
+				arena.complete(reservation, buf.stackMaps)
+			} else {
+				arena.completeDeferred(reservation, buf.stackMaps)
+			}
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
