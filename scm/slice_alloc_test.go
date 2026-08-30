@@ -176,6 +176,80 @@ func TestOptimizeNumbersRepeatedLocalBinding(t *testing.T) {
 	}
 }
 
+func TestOptimizeSingleUseLocalTransfersFreshValue(t *testing.T) {
+	expr := Read("single-use local ownership", `(lambda (value)
+		(begin
+			(define values (list value))
+			(append values 2)))`)
+	optimized := Optimize(expr, &Globalenv, nil)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "append_mut") {
+		t.Fatalf("single-use fresh local did not transfer ownership: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(1)); !Equal(got, NewSlice([]Scmer{NewInt(1), NewInt(2)})) {
+		t.Fatalf("optimized single-use binding returned %s", String(got))
+	}
+}
+
+func TestOptimizeMultiUseLocalKeepsFreshValueBorrowed(t *testing.T) {
+	expr := Read("multi-use local ownership", `(lambda (value)
+		(begin
+			(define values (list value))
+			(list (append values 2) values)))`)
+	optimized := Optimize(expr, &Globalenv, nil)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if !strings.Contains(serialized, "setN") {
+		t.Fatalf("multi-use local binding was not retained: %s", serialized)
+	}
+	if strings.Contains(serialized, "append_mut") {
+		t.Fatalf("multi-use local incorrectly transferred ownership: %s", serialized)
+	}
+	want := NewSlice([]Scmer{
+		NewSlice([]Scmer{NewInt(1), NewInt(2)}),
+		NewSlice([]Scmer{NewInt(1)}),
+	})
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(1)); !Equal(got, want) {
+		t.Fatalf("optimized multi-use binding returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeCapturedSingleUseLocalKeepsFreshValueBorrowed(t *testing.T) {
+	expr := Read("captured single-use local ownership", `(lambda (value)
+		(begin
+			(define values (list value))
+			(define extend (lambda () (append values 2)))
+			(extend)))`)
+	optimized := Optimize(expr, &Globalenv, nil)
+	serialized := serializeSliceAllocTestExpr(t, optimized)
+	if strings.Contains(serialized, "append_mut") {
+		t.Fatalf("captured local incorrectly transferred ownership: %s", serialized)
+	}
+	if got := Apply(Eval(optimized, &Globalenv), NewInt(1)); !Equal(got, NewSlice([]Scmer{NewInt(1), NewInt(2)})) {
+		t.Fatalf("optimized captured binding returned %s", String(got))
+	}
+}
+
+func BenchmarkRunSingleUseLocalOwnership(b *testing.B) {
+	expr := Read("single-use local ownership benchmark", `(lambda (value)
+		(begin
+			(define values (list value value value value value value value value
+				value value value value value value value value))
+			(filter values (lambda (value) (> value 0)))))`)
+	optimized := Optimize(expr, &Globalenv, nil)
+	if serialized := serializeSliceAllocTestExpr(b, optimized); !strings.Contains(serialized, "filter_mut") {
+		b.Fatalf("single-use fresh local did not transfer ownership: %s", serialized)
+	}
+	fn := OptimizeProcToSerialFunction(Eval(optimized, &Globalenv))
+	value := NewInt(1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := fn(value); len(got.Slice()) != 16 {
+			b.Fatalf("optimized filter returned %s", String(got))
+		}
+	}
+}
+
 func TestOptimizeNumbersLocalBindingsDeterministically(t *testing.T) {
 	source := `(lambda (value)
 		(begin
