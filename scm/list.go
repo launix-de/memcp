@@ -711,8 +711,7 @@ func optimizePlannerReduceFold(rv []Scmer, td *TypeDescriptor) (Scmer, *TypeDesc
 		}
 		if containsCall, ok := scmerSlice(candidate); ok && len(containsCall) == 3 &&
 			scmerIsSymbol(containsCall[0], "contains?") &&
-			optimizerLambdaParamReference(containsCall[2], params, 1) &&
-			!exprMayHaveSideEffects(containsCall[1]) {
+			optimizerLambdaParamReference(containsCall[2], params, 1) {
 			if available, hoisted := optimizerHoistStableOneLambdaLevel(containsCall[1]); hoisted {
 				name := "list_contains_any"
 				if wantNeutral {
