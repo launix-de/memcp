@@ -54,7 +54,8 @@ type storageIndexState struct {
 }
 
 type indexIterationOptions struct {
-	orderedLimit int
+	orderedLimit         int
+	boundaryCoveredLimit bool
 }
 
 type computedRevision struct {
@@ -578,8 +579,8 @@ func (t *storageShard) iterateIndexEstimate(tx *TxContext, cols boundaries, lowe
 	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, 0, false, nil, nil, candidateSpan, selected, callback)
 }
 
-func (t *storageShard) iterateIndexOrdered(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, limit int, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
-	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, &indexIterationOptions{orderedLimit: limit}, nil, selected, callback)
+func (t *storageShard) iterateIndexOrdered(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, usageWeight float64, limit int, boundaryCoveredLimit bool, selected func(*StorageIndex, bool), callback func([]uint32) bool) {
+	t.iterateIndexEx(tx, cols, lower, upperLast, maxInsertIndex, buf, usageWeight, false, nil, &indexIterationOptions{orderedLimit: limit, boundaryCoveredLimit: boundaryCoveredLimit}, nil, selected, callback)
 }
 
 func (t *storageShard) iterateIndexForce(tx *TxContext, cols boundaries, lower []scm.Scmer, upperLast scm.Scmer, maxInsertIndex int, buf []uint32, countUsage bool, callback func([]uint32) bool) {
@@ -1659,6 +1660,15 @@ start_scan:
 	s.mu.Unlock()
 	if selected != nil {
 		selected(s, true)
+	}
+	// A fully index-covered filter cannot reject an otherwise visible row. When
+	// this active index also supplies ORDER BY, emit only the requested prefix
+	// per callback so LIMIT can brake inside the index walk. The caller-owned
+	// pooled buffer remains allocated at its normal size; only its visible slice
+	// is shortened, so the hot path adds no allocation.
+	if options != nil && options.boundaryCoveredLimit && options.orderedLimit > 0 &&
+		options.orderedLimit < len(buf) && indexCoversBoundaryOrder(s, true, bounds, len(lower)) {
+		buf = buf[:options.orderedLimit]
 	}
 
 	// record-ID lookup: identity when data is physically sorted (Native), index dereference otherwise

@@ -642,8 +642,15 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					(define resultrow (lambda (row) (begin
 						(set resultrow_called true)
 						(original_resultrow row))))
-					/* Execute inside auto-commit tx (or existing explicit tx) */
-					(set query_result (with_session session (lambda () (with_autocommit session (lambda () (eval (source "SQL Query" 1 1 formula)))))))
+					/* network.go already installed the request-local Scheme session. Only
+					the legacy persistent X-Session-Id map can select a different session;
+					avoid a second goroutine-stack lookup for ordinary autocommit queries. */
+					(define execute_formula (lambda ()
+						(with_autocommit session (lambda ()
+							(eval (source "SQL Query" 1 1 formula))))))
+					(set query_result (if session_id
+						(with_session session execute_formula)
+						(execute_formula)))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))

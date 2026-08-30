@@ -24,6 +24,23 @@ import (
 
 var benchmarkBoundaries boundaries
 
+func TestSortedBoundariesCoverCondition(t *testing.T) {
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewSymbol("value"),
+		scm.NewString("needle"),
+	})
+	condition := buildProc([]string{"value"}, body)
+	bounds := extractBoundaries([]string{"meta_key"}, condition)
+	if !sortedBoundariesCoverCondition([]string{"meta_key"}, condition, bounds) {
+		t.Fatal("simple equality should be covered by its extracted boundary")
+	}
+	bounds[0].upper = scm.NewString("other")
+	if sortedBoundariesCoverCondition([]string{"meta_key"}, condition, bounds) {
+		t.Fatal("different boundary must not cover the condition")
+	}
+}
+
 func BenchmarkExtractBoundariesEqual(b *testing.B) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal?"),
