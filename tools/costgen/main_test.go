@@ -484,6 +484,23 @@ func TestDecisionAlternativesAcceptsOrderedJoinFamily(t *testing.T) {
 	}
 }
 
+func TestOrderedJoinBatchedProbeCountsGrowingScanInvocations(t *testing.T) {
+	value := func(v float64) *float64 { return &v }
+	row := calibrationRow{
+		Decision: "scan_join_order", Plan: "scan_join_order_batched_probe",
+		JoinInputRows: value(28192), JoinDriverRows: value(2560), JoinProbeRows: value(20000),
+		JoinEstimatedRows: value(1), JoinOutputRows: value(1), JoinMapWidth: value(4),
+		JoinTableCount: value(2), Limit: value(5), Offset: value(0),
+	}
+	features, err := rowFeatures(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if features[0] != 20 {
+		t.Fatalf("batched scan invocations = %v, want 20", features[0])
+	}
+}
+
 func TestValidateDecisionOrderingUsesOrderedJoinCostBoundary(t *testing.T) {
 	legacy := func(name string, measured, estimated float64) observation {
 		return observation{

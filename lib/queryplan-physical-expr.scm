@@ -6771,6 +6771,20 @@ the absolute scan_join_order-versus-legacy calibration. */
 each later equality input with those query-local keys. Reuse the calibrated
 scan_join_order work units so this alternative introduces no hand-tuned
 threshold outside Costgen's model. */
+(define planner_growing_batch_invocations_from (lambda (rows batch invocations)
+	(if (<= rows 0)
+		invocations
+		(planner_growing_batch_invocations_from
+			(- rows batch) (* batch 2) (+ invocations 1)))))
+
 (define planner_scan_join_order_batched_probe_cost (lambda (driver_rows table_count target map_width)
-	(planner_scan_join_order_cost driver_rows
-		(* driver_rows (- table_count 1)) target table_count target map_width)))
+	(begin
+		(define batch_invocations (planner_growing_batch_invocations_from
+			driver_rows (max 1 target) 0))
+		(planner_cost_add
+			(planner_scan_join_order_cost driver_rows
+				(* driver_rows (- table_count 1)) target table_count target map_width)
+			(planner_cost (* (max 0 (- batch_invocations 1)) table_count
+				planner_membership_scan_invocation_ns)
+				0 0 0 0 0 0 0 target 0.65)
+			target 0.65))))

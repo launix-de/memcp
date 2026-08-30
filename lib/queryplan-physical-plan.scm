@@ -4942,9 +4942,28 @@ until the caller has selected this physical alternative. */
 								(planner_source_filter_estimate src local_condition 512))
 							(max 1 (planner_estimated_matching_rows estimate
 								base_rows base_rows))))))) nil))
+		/* A local driver predicate is only the first acceptance stage. Every
+		later input may reject the driver row as well, so price ordered braking
+		from the product of the independently estimated inner selectivities.
+		This keeps a selective exact carrier competitive when join matches are
+		rare, while an almost-unfiltered FK lookup remains a cheap batch probe. */
+		(define inner_acceptance (if (and ordered_window
+			(not (empty_list? filtered_rows)))
+			(reduce (produceN (- (count sources) 1)) (lambda (acceptance offset_index)
+				(begin
+					(define index (+ offset_index 1))
+					(define base_rows (nth source_rows index))
+					(define matching_rows (nth filtered_rows index))
+					(* acceptance (if (<= base_rows 0) 0
+						(min 1 (/ matching_rows base_rows)))))) 1)
+			nil))
+		(define accepted_driver_target (if (and (number? inner_acceptance)
+			(> inner_acceptance 0))
+			(/ (+ offset limit) inner_acceptance)
+			(if (number? inner_acceptance) (car source_rows) nil)))
 		(define driver_rows (if (and ordered_window (not (empty_list? filtered_rows)))
 			(planner_ordered_driver_rows_visited (car source_rows) (car filtered_rows)
-				(+ offset limit)) nil))
+				accepted_driver_target) nil))
 		(define inner_rows (if (and ordered_window (not (empty_list? source_rows)))
 			(reduce (cdr source_rows) + 0) nil))
 		(define joined_rows (qassoc_get facts (quote join_estimated_rows) nil))

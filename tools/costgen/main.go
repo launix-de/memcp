@@ -816,6 +816,19 @@ type calibrationVariantResult struct {
 	err     error
 }
 
+func growingBatchInvocations(rows, batch float64) float64 {
+	if batch < 1 {
+		batch = 1
+	}
+	invocations := 0.0
+	for rows > 0 {
+		rows -= batch
+		batch *= 2
+		invocations++
+	}
+	return invocations
+}
+
 func discoverCalibrationDecision(server *memcpServer, query, decisionName string) (*calibrationDiscovery, map[string]*float64, error) {
 	discoveryPayload, err := server.execute("/sql/"+database,
 		"EXPLAIN PHYSICAL CALIBRATE DISCOVER\n"+query, 10*time.Minute)
@@ -1278,9 +1291,11 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			features[23] = *row.JoinInputRows
 			features[24] = *row.JoinProbeRows
 		} else if row.Plan == "scan_join_order_batched_probe" {
-			if row.JoinDriverRows == nil {
+			if row.JoinDriverRows == nil || row.Limit == nil || row.Offset == nil {
 				return nil, fmt.Errorf("ordered batched probe profile has nil driver rows: %+v", row)
 			}
+			features[0] = *row.JoinTableCount * growingBatchInvocations(
+				*row.JoinDriverRows, *row.Limit+*row.Offset)
 			features[1] = *row.JoinDriverRows
 			features[4] = *row.JoinOutputRows
 			features[22] = 1
