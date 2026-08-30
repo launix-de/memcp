@@ -31,6 +31,8 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -307,7 +309,7 @@ restart:
 				// Allocate one metadata identity per evaluated lambda. Proc value
 				// copies deliberately share it; independently evaluated lambdas do
 				// not share future specialization state.
-				proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return}
+				proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return, HasReturn: metadata.HasReturn}
 				return NewProcStruct(proc)
 			case "lambda":
 				params := list[1]
@@ -826,25 +828,123 @@ type Proc struct {
 	// original body remains attached so storage scan callbacks can later be
 	// specialized and recompiled against concrete column/storage types.
 	Compiled *JITEntryPoint
-	// OptimizerMeta belongs to this concrete procedure identity. Proc values are
-	// copied by CloseProcedure and the JIT, so optimizer state must remain behind
-	// a pointer: copies share one identity without copying future locks or
-	// specialization tables. A fresh lambda evaluation allocates a fresh meta.
+	// OptimizerMeta belongs to this concrete procedure identity. Exact Proc
+	// copies, including the JIT's source/compiled pair, share it. Copies which
+	// change Body or En must allocate a new identity so cached specializations
+	// can never retain code or captures from a different Proc.
 	// Keep optimizer-only fields after the runtime/JIT-facing Proc layout.
 	OptimizerMeta *ProcOptimizerMeta
 }
 
-// ProcOptimizerMeta is immutable today. Future specialization variants belong
-// here and must publish immutable snapshots for lock-free reads; only a miss for
-// the same procedure and specialization key may coordinate compilation.
+// ProcOptimizerMeta belongs to one concrete Proc identity. Specialization
+// variants publish immutable snapshots for lock-free reads; only a miss for the
+// same procedure and specialization key coordinates compilation.
 type ProcOptimizerMeta struct {
-	Return TypeInfo
+	Return    TypeInfo
+	HasReturn bool
+
+	// specializations is an immutable, atomically published snapshot. Its
+	// values are complete Proc values (wrapped as Scmer), not aliases in an
+	// Env. Consequently every variant retains its optimized body, captures,
+	// return metadata and independent JIT entry point. Rejected keys prevent a
+	// read-only Transfer fact from repeatedly recompiling an unchanged Proc.
+	specializations  atomic.Pointer[procSpecializationSnapshot]
+	specializationMu sync.Mutex
+	building         map[procSpecializationKey]*procSpecializationBuild
+}
+
+type procSpecializationKey uint64
+
+type procSpecializationSnapshot struct {
+	variants map[procSpecializationKey]Scmer
+	rejected map[procSpecializationKey]struct{}
+}
+
+type procSpecializationBuild struct {
+	done chan struct{}
+}
+
+func (m *ProcOptimizerMeta) specialization(key procSpecializationKey) (Scmer, bool) {
+	if m == nil {
+		return NewNil(), false
+	}
+	snapshot := m.specializations.Load()
+	if snapshot == nil {
+		return NewNil(), false
+	}
+	variant, exists := snapshot.variants[key]
+	return variant, exists
+}
+
+func (m *ProcOptimizerMeta) specializationRejected(key procSpecializationKey) bool {
+	if m == nil {
+		return false
+	}
+	snapshot := m.specializations.Load()
+	if snapshot == nil {
+		return false
+	}
+	_, rejected := snapshot.rejected[key]
+	return rejected
+}
+
+// beginSpecialization elects one compiler for a Proc/key pair. Callers for a
+// different key do not wait; callers for the same key wait on build.done.
+func (m *ProcOptimizerMeta) beginSpecialization(key procSpecializationKey) (*procSpecializationBuild, bool) {
+	m.specializationMu.Lock()
+	defer m.specializationMu.Unlock()
+	if _, exists := m.specialization(key); exists || m.specializationRejected(key) {
+		return nil, false
+	}
+	if build := m.building[key]; build != nil {
+		return build, false
+	}
+	if m.building == nil {
+		m.building = make(map[procSpecializationKey]*procSpecializationBuild)
+	}
+	build := &procSpecializationBuild{done: make(chan struct{})}
+	m.building[key] = build
+	return build, true
+}
+
+func (m *ProcOptimizerMeta) finishSpecialization(key procSpecializationKey, variant Scmer) {
+	m.specializationMu.Lock()
+	build := m.building[key]
+	previous := m.specializations.Load()
+	variantCount := 0
+	rejectedCount := 0
+	if previous != nil {
+		variantCount = len(previous.variants)
+		rejectedCount = len(previous.rejected)
+	}
+	variants := make(map[procSpecializationKey]Scmer, variantCount+1)
+	rejected := make(map[procSpecializationKey]struct{}, rejectedCount+1)
+	if previous != nil {
+		for previousKey, previousVariant := range previous.variants {
+			variants[previousKey] = previousVariant
+		}
+		for previousKey := range previous.rejected {
+			rejected[previousKey] = struct{}{}
+		}
+	}
+	if variant.IsProc() {
+		variants[key] = variant
+	} else {
+		rejected[key] = struct{}{}
+	}
+	m.specializations.Store(&procSpecializationSnapshot{variants: variants, rejected: rejected})
+	delete(m.building, key)
+	if build != nil {
+		close(build.done)
+	}
+	m.specializationMu.Unlock()
 }
 
 // optimizerProcReturnTemplate is embedded in optimizer-generated ASTs. Eval
 // turns the immutable template into a new ProcOptimizerMeta identity.
 type optimizerProcReturnTemplate struct {
-	Return TypeInfo
+	Return    TypeInfo
+	HasReturn bool
 }
 
 // CloseProcedure snapshots explicit captures of a procedure without retaining
@@ -875,6 +975,12 @@ func CloseProcedure(value Scmer) Scmer {
 	proc.Body = closeProcedureCaptures(proc.Body, callFrame, bound)
 	proc.En = &Globalenv
 	proc.Compiled = nil
+	if proc.OptimizerMeta != nil {
+		proc.OptimizerMeta = &ProcOptimizerMeta{
+			Return:    proc.OptimizerMeta.Return,
+			HasReturn: proc.OptimizerMeta.HasReturn,
+		}
+	}
 	return NewProcStruct(proc)
 }
 
@@ -973,7 +1079,7 @@ func (e *Env) optimizerProcHint(s Symbol) (TypeInfo, bool) {
 		return tiZero, false
 	}
 	proc := bound.Proc()
-	if proc.OptimizerMeta == nil {
+	if proc.OptimizerMeta == nil || !proc.OptimizerMeta.HasReturn {
 		return tiZero, false
 	}
 	return proc.OptimizerMeta.Return, true
@@ -1619,9 +1725,10 @@ func init() {
 				{Kind: "func", Label: "condition", Description: "func that receives the current state as parameters and must return true if the loop shall be continued", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "bool"}},
 				{Kind: "func", Label: "step", Description: "step func that returns the next state as a list", Params: []*TypeDescriptor{{Kind: "any", Label: "state", Variadic: true}}, Return: &TypeDescriptor{Kind: "list"}},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: FirstParameterMutable("for_mut"),
+			Return:                   FreshAlloc,
+			Const:                    true,
+			Optimize:                 FirstParameterMutable("for_mut"),
+			OptimizeFirstArgTransfer: true,
 
 			JITEmit: nil,
 		},
@@ -2566,6 +2673,13 @@ func ComputeSize(v Scmer) uint {
 		if p.OptimizerMeta != nil {
 			sz += goAllocOverhead + uint(unsafe.Sizeof(*p.OptimizerMeta))
 			sz += typeDescriptorRetainedSize(p.OptimizerMeta.Return.Extra, make(map[*TypeDescriptor]struct{}))
+			if snapshot := p.OptimizerMeta.specializations.Load(); snapshot != nil {
+				sz += 2 * goAllocOverhead
+				sz += uint(len(snapshot.variants)+len(snapshot.rejected)) * uint(unsafe.Sizeof(procSpecializationKey(0)))
+				for _, variant := range snapshot.variants {
+					sz += ComputeSize(variant)
+				}
+			}
 		}
 		if p.Compiled != nil {
 			sz += goAllocOverhead + align8(uint(p.Compiled.CodeLen))
