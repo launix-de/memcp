@@ -1015,16 +1015,35 @@ func markProcOwnershipSpecializationUse(ome *optimizerMetainfo, expr Scmer) {
 	if ome.specializationUsed == nil || ome.lambdaDepth != ome.specializationDepth {
 		return
 	}
+	mask := procOwnershipParameterMask(expr, 64)
+	if procSpecializationKey(mask)&ome.specializationParamMask != 0 {
+		*ome.specializationUsed = true
+	}
+}
+
+// procOwnershipParameterMask follows expressions which return one of their
+// arguments unchanged. Ownership can cross such a selector only when the
+// selector's merged return type proves every possible result transferable.
+func procOwnershipParameterMask(expr Scmer, paramCount int) uint64 {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
 	}
-	if !expr.IsNthLocalVar() {
-		return
+	if expr.IsNthLocalVar() {
+		idx := uint(expr.NthLocalVar())
+		if idx < uint(paramCount) && idx < 64 {
+			return 1 << idx
+		}
+		return 0
 	}
-	idx := uint(expr.NthLocalVar())
-	if idx < 64 && ome.specializationParamMask&(1<<idx) != 0 {
-		*ome.specializationUsed = true
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) < 2 || (!scmerIsSymbol(items[0], "coalesce") && !scmerIsSymbol(items[0], "coalesceNil")) {
+		return 0
 	}
+	var mask uint64
+	for _, item := range items[1:] {
+		mask |= procOwnershipParameterMask(item, paramCount)
+	}
+	return mask
 }
 
 func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bool) {
@@ -1055,14 +1074,12 @@ func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bo
 			if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.Type != nil {
 				consumesFirst = consumesFirst || declaration.Type.OptimizeFirstArgTransfer
 			}
-			first := items[1]
-			if stripped, strippedOK := scmerStripSourceInfo(first); strippedOK {
-				first = stripped
-			}
-			if consumesFirst && first.IsNthLocalVar() {
-				idx := int(first.NthLocalVar())
-				if idx >= 0 && idx < paramCount {
-					consumed[idx] = true
+			if consumesFirst {
+				mask := procOwnershipParameterMask(items[1], paramCount)
+				for idx := 0; idx < paramCount && idx < 64; idx++ {
+					if mask&(1<<uint(idx)) != 0 {
+						consumed[idx] = true
+					}
 				}
 			}
 		}
@@ -1418,14 +1435,14 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 				if varType != nil {
 					return val, TypeInfoFromTD(varType)
 				}
-				return val, tiTransfer
+				return val, tiZero
 			}
 			if slice, ok := scmerSlice(replacement); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
 				if s2, ok := scmerSymbol(slice[1]); ok && s2 == sym {
 					if varType != nil {
 						return val, TypeInfoFromTD(varType)
 					}
-					return val, tiTransfer
+					return val, tiZero
 				}
 			}
 			result, ti := OptimizeEx(replacement, env, ome, useResult)
@@ -1437,7 +1454,7 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		if varType != nil {
 			return val, TypeInfoFromTD(varType)
 		}
-		return val, tiTransfer
+		return val, tiZero
 	case tagSlice:
 		return optimizeList(val.Slice(), env, ome, useResult)
 	case tagSourceInfo:
@@ -2036,6 +2053,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		result, td := oc.applyDefaultOptimization(v, useResult, "")
 		return result, TypeInfoFromTD(td)
 	}
+	if len(v) == 2 {
+		quoted, quotedList := scmerSlice(v[1])
+		if v[1].IsNil() || (quotedList && len(quoted) == 0) {
+			return NewSlice(v), TypeInfo{kind: KindList, flags: FlagTransfer | FlagConst, length: UnknownLength}
+		}
+	}
 
 	return NewSlice(v), MakeTypeInfo(transferOwnership, false)
 }
@@ -2223,6 +2246,35 @@ func FirstParameterMutable(mutName string) func(v []Scmer, oc *OptimizerContext,
 	}
 }
 
+// optimizeCoalesce preserves ownership only when every branch can transfer its
+// result. This lets an optional owned list flow into an in-place consumer while
+// keeping shared fallback values conservative.
+func optimizeCoalesce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
+	if len(call.argumentTypes) < 2 {
+		return call.code, call.typeInfo
+	}
+	branchType := func(ti TypeInfo) *TypeDescriptor {
+		if td := ti.ToTypeDescriptor(); td != nil {
+			return td
+		}
+		return &TypeDescriptor{Kind: "any", Length: UnknownLength}
+	}
+	merged := branchType(call.argumentTypes[1])
+	if len(call.argumentTypes) == 2 {
+		if items, ok := scmerSlice(call.code); ok && len(items) == 2 {
+			return items[1], merged
+		}
+	}
+	for i := 2; i < len(call.argumentTypes); i++ {
+		merged, _ = mergeOptimizerTypes(merged, branchType(call.argumentTypes[i]))
+	}
+	// The lazy selector remains executable code even when all branches happen
+	// to be constant. Const means the returned AST is already self-evaluating.
+	merged.Const = false
+	return call.code, merged
+}
+
 // applyDefaultOptimization runs the standard optimization pipeline on a function
 // call expression: callback ownership propagation, arg optimization, _mut swap
 // (when mutName is non-empty), !list rewrite, and constant folding.
@@ -2244,7 +2296,6 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	}
 
 	allConstArgs := true
-	var transferOwnership bool
 	var firstArgType TypeInfo
 	argTypes := make([]TypeInfo, len(v))
 	var immediateLambdaParams []*TypeDescriptor
@@ -2298,7 +2349,6 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		if i == 1 {
 			firstArgType = ti
 		}
-		transferOwnership = ti.Transfer()
 		if i > 0 && !ti.Const() {
 			allConstArgs = false
 		}
@@ -2325,9 +2375,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			if stripped, ok := scmerStripSourceInfo(arg1); ok {
 				arg1 = stripped
 			}
-			if td := optimizerExpressionDescriptor(arg1, env, ome); td != nil {
-				firstArgFresh = td.Transfer && !td.Const
-			}
+			firstArgFresh = firstArgType.Transfer() && !firstArgType.Const()
 			// merge_unique accepts either a segment catalog or variadic lists, so
 			// its public return contract cannot expose first-argument ownership.
 			// A direct catalog constructor is nevertheless fresh. Decide this
@@ -2341,7 +2389,6 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		if firstArgFresh && len(v) >= 2 {
 			markProcOwnershipSpecializationUse(ome, v[1])
 			v[0] = NewSymbol(mutName)
-			transferOwnership = true
 			firstArgTransferred = true
 		}
 	}
@@ -2445,7 +2492,9 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 	}
 
-	td := &TypeDescriptor{Transfer: transferOwnership}
+	// Unknown calls return borrowed values. A declaration or optimized Proc
+	// return contract must explicitly transfer ownership to enable mutation.
+	td := &TypeDescriptor{}
 	if immediateLambdaParams != nil {
 		// The call returns the lambda body's value, not its last argument. This
 		// distinction keeps ownership monotonic across reducer fixed-point passes.
@@ -2463,6 +2512,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			td.Element = procReturn.Extra.Element
 		}
 	} else if retTD != nil {
+		td.Transfer = retTD.Transfer
 		td.Kind = retTD.Kind
 		td.Length = retTD.Length
 		td.Params = retTD.Params
@@ -2471,6 +2521,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		td.Keys = retTD.Keys
 		td.Element = retTD.Element
 	} else {
+		td.Transfer = false
 		td.Length = UnknownLength
 	}
 	if callName == "list" {
