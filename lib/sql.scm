@@ -307,14 +307,10 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 		/* Parsing includes logical and physical planning. Never spend optimizer
 		work or install a variant after its requesting context was cancelled. */
 		(context "check")
-		/* Session references must be bound before optimization. Rewriting the
-		optimized tree afterwards invalidates resolved calls and prevents the JIT
-		from seeing the final simplified expression. */
-		(define plan (optimize (sql_queryplan_bind_execution_session raw_plan)))
+		(define plan (optimize raw_plan))
 		(context "check")
 		(list
-			(sql_queryplan_bind_execution_session
-				(sql_queryplan_guard_from_session planning_session))
+			(sql_queryplan_guard_from_session planning_session)
 			plan
 			(sql_queryplan_preparations_from_session planning_session)))))
 
@@ -357,11 +353,12 @@ otherwise side-effect-free guard. */
 					false
 					(begin (prepared_catalog (car preparation) true) true)))))
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
+			(define bound_plan (sql_queryplan_bind_execution_session (cadr variant)))
 			(define dispatch (if (equal? (car variant) true)
-				(cadr variant)
+				bound_plan
 				(list (quote if)
-					(car variant)
-					(cadr variant) tail_expr)))
+					(sql_queryplan_bind_execution_session (car variant))
+					bound_plan tail_expr)))
 			(if (empty_list? new_preparations)
 				dispatch
 				(cons (quote !begin)
