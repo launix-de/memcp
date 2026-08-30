@@ -1048,6 +1048,10 @@ func DeclarationForValue(v Scmer) *Declaration {
 		if d, ok := declarationsByFunction[FunctionIdentity(v.Func())]; ok {
 			return d
 		}
+	case tagSpecialForm:
+		if d, ok := declarations[v.SpecialFormName()]; ok {
+			return d
+		}
 	case tagAny:
 		if s, ok := v.Any().(string); ok {
 			if d, ok := declarations[s]; ok {

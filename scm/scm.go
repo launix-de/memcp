@@ -27,13 +27,11 @@ package scm
 
 import (
 	"fmt"
-	"github.com/jtolds/gls"
 	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 	"unsafe"
 )
 
@@ -43,6 +41,9 @@ func symbolName(v Scmer) (string, bool) {
 	}
 	if v.GetTag() == tagSymbol {
 		return v.String(), true
+	}
+	if v.GetTag() == tagSpecialForm {
+		return v.SpecialFormName(), true
 	}
 	if v.GetTag() == tagAny {
 		if sym, ok := v.Any().(Symbol); ok {
@@ -116,230 +117,52 @@ restart:
 		if len(list) == 0 {
 			return expression
 		}
-		if list[0].GetTag() == tagSymbol {
-			headSym := list[0].Symbol()
-			switch string(headSym) {
-			case "outer":
-				if en.Outer == nil {
-					return NewNil()
-				}
-				if list[1].IsSymbol() {
-					sym := list[1].Symbol()
-					if env := en.Outer.FindRead(sym); env != nil {
-						if val, ok := env.Vars[sym]; ok {
-							return val
-						}
-					}
-					symStr := string(sym)
-					if strings.Contains(symStr, ".") && !strings.Contains(symStr, "\x00") {
-						suffix := "\x00" + symStr
-						for env := en.Outer; env != nil; env = env.Outer {
-							for key, val := range env.Vars {
-								if strings.HasSuffix(string(key), suffix) {
-									return val
-								}
-							}
-						}
-					}
-				}
-				return Eval(list[1], en.Outer)
-			case "quote":
-				return list[1]
-			case "eval":
-				expression = Eval(list[1], en)
+		// apply
+		operands := list[1:]
+		procedure, syntax := specialFormForSymbol(list[0])
+		if !syntax {
+			procedure = Eval(list[0], en) // compute lambdas or look up ordinary functions
+		}
+		switch procedure.GetTag() {
+		case tagSpecialForm:
+			switch procedure.SpecialFormKind() {
+			case specialFormEvalKind:
+				expression = Eval(operands[0], en)
 				goto restart
-			case "time":
-				var start time.Time
-				if TracePrint {
-					start = time.Now()
-				}
-				var timedResult Scmer
-				if Trace != nil {
-					if len(list) > 2 {
-						Trace.Duration(String(Eval(list[2], en)), "scm", func() {
-							timedResult = Eval(list[1], en)
-						})
-					} else {
-						Trace.Duration("(time)", "scm", func() {
-							timedResult = Eval(list[1], en)
-						})
+			case specialFormIfKind:
+				i := 0
+				for i+1 < len(operands) {
+					if Eval(operands[i], en).Bool() {
+						expression = operands[i+1]
+						goto restart
 					}
-				} else {
-					timedResult = Eval(list[1], en)
+					i += 2
 				}
-				if TracePrint {
-					d := time.Since(start).String()
-					var msg string
-					if len(list) > 2 {
-						msg = "trace " + d + " " + String(Eval(list[2], en))
-					} else {
-						msg = "trace " + d
-					}
-					TracePrintFunc(msg)
+				if i < len(operands) {
+					expression = operands[i]
+					goto restart
 				}
-				return timedResult
-			case "if":
+				return NewNil()
+			case specialFormMatchKind, specialFormMatchMutKind:
+				matchedValue := Eval(operands[0], en)
+				matchEnv := Env{VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
 				i := 1
-				for i+1 < len(list) {
-					if Eval(list[i], en).Bool() {
-						expression = list[i+1]
+				mutable := procedure.SpecialFormKind() == specialFormMatchMutKind
+				for i < len(operands)-1 {
+					if match(matchedValue, operands[i], &matchEnv, mutable) {
+						en = &matchEnv
+						expression = operands[i+1]
 						goto restart
 					}
 					i += 2
 				}
-				if i < len(list) {
-					expression = list[i]
+				if i < len(operands) {
+					expression = operands[i]
 					goto restart
 				}
 				return NewNil()
-			case "and":
-				unknown := false
-				for idx, x := range list {
-					if idx > 0 {
-						value := Eval(x, en)
-						if value.IsNil() {
-							unknown = true
-						} else if !value.Bool() {
-							return NewBool(false)
-						}
-					}
-				}
-				if unknown {
-					return NewNil()
-				}
-				return NewBool(true)
-			case "or":
-				unknown := false
-				for idx, x := range list {
-					if idx > 0 {
-						value := Eval(x, en)
-						if value.IsNil() {
-							unknown = true
-						} else if value.Bool() {
-							return NewBool(true)
-						}
-					}
-				}
-				if unknown {
-					return NewNil()
-				}
-				return NewBool(false)
-			case "coalesce":
-				for i := 1; i < len(list); i++ {
-					v := Eval(list[i], en)
-					if i == len(list)-1 || v.Bool() {
-						return v
-					}
-				}
-				return NewNil()
-			case "coalesceNil":
-				for i, x := range list {
-					v := Eval(x, en)
-					if i > 0 && !v.IsNil() {
-						return v
-					}
-				}
-				return NewNil()
-			case "match", "match_mut":
-				val := Eval(list[1], en)
-				i := 2
-				mutable := headSym == Symbol("match_mut")
-				en2 := Env{VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
-				for i < len(list)-1 {
-					if match(val, list[i], &en2, mutable) {
-						en = &en2
-						expression = list[i+1]
-						goto restart
-					}
-					i += 2
-				}
-				if i < len(list) {
-					expression = list[i]
-					goto restart
-				}
-				return NewNil()
-			case "define", "set":
-				val := Eval(list[2], en)
-				target := en
-				for target != nil && target.Nodefine {
-					target = target.Outer
-				}
-				if target == nil {
-					target = &Globalenv
-				}
-				if target.Vars == nil {
-					target.Vars = make(Vars)
-				}
-				target.Vars[mustSymbol(list[1])] = val
-				return val
-			case "setN":
-				val := Eval(list[2], en)
-				idx := mustNthLocalVar(list[1])
-				if int(idx) >= len(en.VarsNumbered) {
-					buf := make([]byte, 8192)
-					n := runtime.Stack(buf, false)
-					panic(fmt.Sprintf("setN(%d) out of range (len=%d)\n%s", int(idx), len(en.VarsNumbered), buf[:n]))
-				}
-				en.VarsNumbered[int(idx)] = val
-				return val
-			case "parser":
-				if len(list) > 3 {
-					return NewScmParser(NewParser(list[1], list[2], list[3], en, true))
-				} else if len(list) > 2 {
-					return NewScmParser(NewParser(list[1], list[2], NewNil(), en, true))
-				}
-				return NewScmParser(NewParser(list[1], NewNil(), NewNil(), en, false))
-			case "optimizer_proc_return":
-				if len(list) != 3 {
-					panic("optimizer_proc_return expects procedure and return metadata")
-				}
-				value := Eval(list[1], en)
-				if value.GetTag() != tagProc {
-					return value
-				}
-				metadataValue := Eval(list[2], en)
-				if metadataValue.GetTag() != tagAny {
-					panic("optimizer_proc_return expects internal return metadata")
-				}
-				metadata, ok := metadataValue.Any().(optimizerProcReturnTemplate)
-				if !ok {
-					panic("optimizer_proc_return received invalid return metadata")
-				}
-				proc := *value.Proc()
-				// Allocate one metadata identity per evaluated lambda. Proc value
-				// copies deliberately share it; independently evaluated lambdas do
-				// not share future specialization state.
-				proc.OptimizerMeta = &ProcOptimizerMeta{Return: metadata.Return, HasReturn: metadata.HasReturn}
-				return NewProcStruct(proc)
-			case "lambda":
-				params := list[1]
-				if params.IsSourceInfo() {
-					params = params.SourceInfo().value
-				}
-				numVars := 0
-				if len(list) > 3 {
-					numVars = int(list[3].Int())
-				}
-				return NewProcStruct(Proc{
-					Params:       params,
-					Body:         list[2],
-					En:           en,
-					NumVars:      numVars,
-					NumberedOnly: procCanUseNumberedOnly(params, list[2], numVars),
-				})
-			case "begin":
-				en2 := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
-				for _, form := range list[1 : len(list)-1] {
-					Eval(form, en2)
-				}
-				expression = list[len(list)-1]
-				en = en2
-				goto restart
-			case "begin_mut":
-				reserve := 0
-				if len(list) > 1 {
-					reserve = int(ToInt(Eval(list[1], en)))
-				}
+			case specialFormBeginMutKind:
+				reserve := int(ToInt(Eval(operands[0], en)))
 				if reserve < 0 {
 					reserve = 0
 				}
@@ -348,97 +171,22 @@ restart:
 					varsNumbered = make([]Scmer, len(en.VarsNumbered)+reserve)
 					copy(varsNumbered, en.VarsNumbered)
 				}
-				en2 := &Env{Vars: make(Vars), VarsNumbered: varsNumbered, Outer: en, Nodefine: false}
-				for _, form := range list[2 : len(list)-1] {
-					Eval(form, en2)
+				beginEnv := &Env{Vars: make(Vars), VarsNumbered: varsNumbered, Outer: en, Nodefine: false}
+				for _, form := range operands[1 : len(operands)-1] {
+					Eval(form, beginEnv)
 				}
-				expression = list[len(list)-1]
-				en = en2
+				en = beginEnv
+				expression = operands[len(operands)-1]
 				goto restart
-			case "!begin":
-				for _, form := range list[1 : len(list)-1] {
+			case specialFormBangBeginKind:
+				for _, form := range operands[:len(operands)-1] {
 					Eval(form, en)
 				}
-				expression = list[len(list)-1]
+				expression = operands[len(operands)-1]
 				goto restart
-			case "!list":
-				// Stack-allocated list: (!list NthLocalVar(start) count expr...)
-				// Evaluates exprs into VarsNumbered[start..start+count] and returns
-				// a slice view. The slice MUST NOT escape the current lambda frame.
-				start := int(list[1].NthLocalVar())
-				count := int(ToInt(list[2]))
-				if start+count > len(en.VarsNumbered) {
-					buf := make([]byte, 8192)
-					n := runtime.Stack(buf, false)
-					panic(fmt.Sprintf("!list start=%d count=%d out of range (len=%d)\n%s", start, count, len(en.VarsNumbered), buf[:n]))
-				}
-				for i := 0; i < count && i+3 < len(list); i++ {
-					en.VarsNumbered[start+i] = Eval(list[i+3], en)
-				}
-				return NewSlice(en.VarsNumbered[start : start+count])
-			case "!!list":
-				// Preallocated stack-backed list buffer.
-				// Internal optimized form: (!!list NthLocalVar(start) cap)
-				// Fallback surface form: (!!list cap) allocates a heap-backed buffer.
-				if len(list) == 3 && list[1].IsNthLocalVar() {
-					start := int(list[1].NthLocalVar())
-					capacity := int(ToInt(list[2]))
-					if capacity < 0 {
-						capacity = 0
-					}
-					if start+capacity > len(en.VarsNumbered) {
-						buf := make([]byte, 8192)
-						n := runtime.Stack(buf, false)
-						panic(fmt.Sprintf("!!list start=%d cap=%d out of range (len=%d)\n%s", start, capacity, len(en.VarsNumbered), buf[:n]))
-					}
-					return NewSlice(en.VarsNumbered[start : start : start+capacity])
-				}
-				if len(list) == 2 {
-					capacity := int(ToInt(Eval(list[1], en)))
-					if capacity < 0 {
-						capacity = 0
-					}
-					return NewSlice(make([]Scmer, 0, capacity))
-				}
-				panic("!!list expects either (!!list cap) or optimized (!!list NthLocalVar(start) cap)")
-			case "parallel":
-				// execute all childs parallely, return nil after finish
-				childExprs := list[1:]
-				if len(childExprs) == 0 {
-					return NewNil()
-				}
-				errs := make(chan any, len(childExprs))
-				for _, expr := range childExprs {
-					expr := expr
-					gls.Go(func(e Scmer) func() {
-						return func() {
-							defer func() {
-								if r := recover(); r != nil {
-									errs <- r
-								} else {
-									errs <- nil
-								}
-							}()
-							Eval(e, en)
-						}
-					}(expr))
-				}
-				for range childExprs {
-					if err := <-errs; err != nil {
-						panic(err)
-					}
-				}
-				return NewNil()
 			default:
-				goto to_apply
+				return procedure.SpecialForm()(operands, en)
 			}
-			// control flow will never be here
-		}
-	to_apply:
-		// apply
-		operands := list[1:]
-		procedure := Eval(list[0], en) // resolve the head (compute lambdas or lookup function from symbol)
-		switch procedure.GetTag() {
 		case tagFunc:
 			// Native funcs
 			fn := procedure.Func()
@@ -558,7 +306,7 @@ restart:
 		default:
 			panic("Unknown function: " + list[0].String())
 		}
-	case tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise:
+	case tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise, tagSpecialForm:
 		// Optimizer-resolved native callables.
 		return expression
 	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagBSON:
@@ -575,7 +323,13 @@ restart:
 		return en.VarsNumbered[idx]
 	case tagSymbol:
 		// Fallback for names not folded to numbered vars/native funcs by the optimizer.
-		return en.FindRead(mustSymbol(expression)).Vars[mustSymbol(expression)]
+		sym := mustSymbol(expression)
+		if scope := en.FindRead(sym); scope != nil {
+			if value, ok := scope.Vars[sym]; ok {
+				return value
+			}
+		}
+		return NewNil()
 	case tagSourceInfo:
 		return evalWithSourceInfo(expression.SourceInfo(), en)
 	default:
@@ -1140,6 +894,7 @@ func init() {
 		nil,
 		false,
 	}
+	registerSpecialForms()
 
 	// system
 	DeclareTitle("SCM Builtins")
@@ -3037,6 +2792,8 @@ func ComputeSize(v Scmer) uint {
 			return base + goAllocOverhead + 32
 		}
 		return base
+	case tagSpecialForm:
+		return base + goAllocOverhead + uint(unsafe.Sizeof(specialFormValue{}))
 	default:
 		if v.GetTag() >= 100 {
 			return base

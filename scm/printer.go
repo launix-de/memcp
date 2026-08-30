@@ -88,6 +88,8 @@ func String(v Scmer) string {
 		return v.String()
 	case tagSymbol:
 		return v.String()
+	case tagSpecialForm:
+		return v.SpecialFormName()
 	case tagSlice:
 		slice := v.Slice()
 		l := make([]string, len(slice))
@@ -163,6 +165,8 @@ func WriteStringValue(w *schemeTextWriter, v Scmer) {
 		w.WriteString("nil")
 	case tagBool, tagString, tagCString, tagBString, tagSymbol:
 		w.WriteString(v.String())
+	case tagSpecialForm:
+		w.WriteString(v.SpecialFormName())
 	case tagBSON:
 		if err := writeBSONJSON(w, bsonRawValue(v)); err != nil {
 			panic(err)
@@ -353,6 +357,12 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		b.WriteString("[promise]")
 	case tagFunc:
 		serializeNativeFunc(b, v.Func(), en)
+	case tagSpecialForm:
+		if declaration := DeclarationForValue(v); declaration != nil {
+			b.WriteString(declaration.Name)
+		} else {
+			b.WriteString(v.SpecialFormName())
+		}
 	case tagProc:
 		// Serialize compiled procedures as (lambda ...) expressions, but
 		// avoid walking the captured environment here to prevent cycles.

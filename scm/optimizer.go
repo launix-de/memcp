@@ -925,6 +925,12 @@ func leafInlineBindingsStable(expr Scmer, source, target *Env) bool {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
 	}
+	// Special forms replace unbound syntax symbols. Preserve the old inliner
+	// boundary so ownership-aware Proc specialization still gets first use of
+	// calls containing lazy selectors such as coalesceNil.
+	if expr.GetTag() == tagSpecialForm {
+		return false
+	}
 	if expr.IsNthLocalVar() || !expr.IsSlice() && !expr.IsSymbol() {
 		return true
 	}
@@ -1458,7 +1464,8 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		}
 		return val, tiZero
 	case tagSlice:
-		return optimizeList(val.Slice(), env, ome, useResult)
+		result, ti := optimizeList(val.Slice(), env, ome, useResult)
+		return lowerSpecialFormHead(result), ti
 	case tagSourceInfo:
 		siPtr := val.SourceInfo()
 		if SettingsTrackSourceCoverage {
@@ -1583,7 +1590,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	if len(v) == 0 {
 		return NewSlice(v), tiZero
 	}
-
 	headSym, headOk := scmerSymbol(v[0])
 
 	if headOk && headSym == Symbol("outer") && len(v) == 2 {
@@ -2144,6 +2150,21 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	}
 
 	return NewSlice(v), MakeTypeInfo(transferOwnership, false)
+}
+
+func lowerSpecialFormHead(expression Scmer) Scmer {
+	items, ok := scmerSlice(expression)
+	if !ok || len(items) == 0 {
+		return expression
+	}
+	form, ok := specialFormForSymbol(items[0])
+	if !ok {
+		return expression
+	}
+	lowered := make([]Scmer, len(items))
+	copy(lowered, items)
+	lowered[0] = form
+	return NewSlice(lowered)
 }
 
 // OptimizeSub optimizes a sub-expression and returns its result TypeDescriptor.
@@ -3039,6 +3060,9 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 //	(!list NthLocalVar(start) count expr...) -> (list expr...)
 //	(!!list NthLocalVar(start) cap) -> (list)
 func DeoptimizeExpr(expr Scmer) Scmer {
+	if expr.GetTag() == tagSpecialForm {
+		return NewSymbol(expr.SpecialFormName())
+	}
 	if !expr.IsSlice() {
 		return expr
 	}
@@ -3062,7 +3086,7 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 	changed := false
 	for i, item := range items {
 		newItems[i] = DeoptimizeExpr(item)
-		if !Equal(newItems[i], item) {
+		if newItems[i] != item {
 			changed = true
 		}
 	}

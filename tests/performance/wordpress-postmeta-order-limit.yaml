@@ -39,9 +39,23 @@ setup:
   - scm: "(rebuild)"
 
 test_cases:
+  - name: "WordPress post point select"
+    warmup: 10
+    timing_samples: 100
+    threshold_ms: 2
+    sql: "SELECT post_title FROM wordpress_perf_posts WHERE ID = 4242"
+    expect: {rows: 1}
+
+  - name: "WordPress post ordered limit"
+    warmup: 10
+    timing_samples: 50
+    threshold_ms: 2
+    sql: "SELECT ID, post_status, post_type FROM wordpress_perf_posts ORDER BY post_title LIMIT 5"
+    expect: {rows: 5}
+
   - name: "WordPress filtered postmeta join ordered by newest post"
-    warmup: 2
-    timing_samples: 5
+    warmup: 10
+    timing_samples: 30
     threshold_ms: 6
     sql: |
       SELECT p.ID, p.post_title, pm.meta_value
