@@ -377,6 +377,14 @@ func jitMakeReservedList(capacity int) Scmer {
 	return NewSlice(make([]Scmer, 0, capacity))
 }
 
+func jitCdrScmer(value Scmer) Scmer {
+	list := asSlice(value, "cdr")
+	if len(list) == 0 {
+		return NewSlice(nil)
+	}
+	return NewSlice(list[1:])
+}
+
 func jitStoreScmerAt(address *Scmer, value Scmer) {
 	*address = value
 }
@@ -743,6 +751,14 @@ func jitMatchSliceTail(ctx *JITContext, slice *JITValueDesc) JITValueDesc {
 	ctx.UnprotectReg(slice.Reg)
 	ctx.EmitMovRegReg(ptrReg, slice.Reg)
 	ctx.EmitAddRegImm32(ptrReg, 16)
+	// NewSlice canonicalizes a zero-capacity slice to a nil data pointer. Keep
+	// the same invariant for the tail of a one-element match: a one-past-the-end
+	// pointer is not a valid GC root even though the resulting length is zero.
+	keepPtr := ctx.ReserveLabel()
+	ctx.EmitCmpRegImm32(slice.Reg3, 1)
+	ctx.EmitJcc(CcNE, keepPtr)
+	ctx.EmitMovRegImm64(ptrReg, 0)
+	ctx.MarkLabel(keepPtr)
 	ctx.EmitMovRegReg(auxReg, slice.Reg2)
 	ctx.EmitSubRegImm32(auxReg, 1)
 	ctx.EmitShlRegImm8(auxReg, sliceCapBits)
@@ -1297,6 +1313,7 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 	pairs := make([]JITValueDesc, len(virtual.Virtual))
 	for i := range virtual.Virtual {
 		src := virtual.Virtual[i]
+		ctx.syncDescSpill(&src)
 		if src.Loc == LocRegPair || src.Loc == LocStackPair || src.Loc == LocInputPair {
 			pairs[i] = src
 			continue
@@ -2095,6 +2112,17 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				out.SliceSizeKnown = true
 			}
 			return out
+		case "cdr":
+			if len(list) != 2 {
+				panic("jit: cdr expects exactly one argument")
+			}
+			stackStart := ctx.BPOffset
+			value := jitCompileRootedCallValue(ctx, list[1], sliceBase)
+			target := jitEnsureResultPair(ctx, result)
+			out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitCdrScmer), []JITValueDesc{value}, target)
+			out.Type = tagSlice
+			ctx.FreeStack(ctx.BPOffset - stackStart)
+			return jitRootScmer(ctx, out)
 		case "parallel":
 			panic("jit: unsupported special form parallel")
 		case "match", "match_mut":
@@ -2556,6 +2584,21 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			allocatedBeforeEmitter := ctx.AllRegs &^ ctx.FreeRegs
 			labelsBefore := ctx.LabelNext
 			out := decl.Type.JITEmit(ctx, list[1:], args, result)
+			// Generated control-flow emitters may spill their result placement while
+			// rendering sibling blocks and then write the final value back into its
+			// registers. Rebind that placement at the declaration boundary so stale
+			// spill metadata cannot replace the freshly produced result.
+			switch out.Loc {
+			case LocReg:
+				ctx.BindReg(out.Reg, &out)
+			case LocRegPair:
+				ctx.BindReg(out.Reg, &out)
+				ctx.BindReg(out.Reg2, &out)
+			case LocRegTriple:
+				ctx.BindReg(out.Reg, &out)
+				ctx.BindReg(out.Reg2, &out)
+				ctx.BindReg(out.Reg3, &out)
+			}
 			outputRegs := uint64(0)
 			switch out.Loc {
 			case LocReg:

@@ -135,7 +135,8 @@ Generated emitters (tools/jitgen):
 // JITEntryPoint holds a JIT-compiled function alongside its original
 // Scheme representation for serialization and fallback.
 type JITEntryPoint struct {
-	Native func(...Scmer) Scmer // compiled native function pointer
+	Native    func(...Scmer) Scmer // compiled native function pointer
+	DebugName string
 	// TransferInputArgs means the native body returns its complete variadic
 	// argument array as an owned list. Call must make that array fresh because
 	// apply may otherwise pass caller-owned list backing directly.
@@ -176,6 +177,9 @@ type JITCoverage struct {
 func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if jep == nil || jep.Native == nil {
 		panic("JIT: nil entry point")
+	}
+	if JITLog && jep.DebugName != "" {
+		fmt.Printf("JIT: call %s argc=%d\n", jep.DebugName, len(args))
 	}
 	// A transferred list must own fresh backing, and appending hidden inputs must
 	// not reuse caller-owned capacity. Stack maps make an extra copy unnecessary
@@ -493,7 +497,6 @@ type jitAllocStateSnapshot struct {
 	ownerValues        map[uint32]JITValueDesc
 	spillOffset        int32
 	descSpills         map[uint32]descSpillMeta
-	nextDescID         uint32
 	stackRoots         map[jitStackRoot]struct{}
 	dynamicSP          int32
 }
@@ -504,7 +507,6 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		protectedRegs:      ctx.ProtectedRegs,
 		protectedRegCounts: ctx.ProtectedRegCounts,
 		spillOffset:        ctx.SpillOffset,
-		nextDescID:         ctx.nextDescID,
 		dynamicSP:          ctx.DynamicSP,
 	}
 	if len(ctx.descOwners) != 0 {
@@ -541,7 +543,9 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	ctx.ProtectedRegs = s.protectedRegs
 	ctx.ProtectedRegCounts = s.protectedRegCounts
 	ctx.SpillOffset = s.spillOffset
-	ctx.nextDescID = s.nextDescID
+	// Descriptor identities are global to one emitted function. Restoring an
+	// older basic-block snapshot must not make later descriptors reuse IDs whose
+	// spill metadata was already emitted on a sibling path.
 	ctx.DynamicSP = s.dynamicSP
 
 	if s.ownerValues == nil {
@@ -941,7 +945,7 @@ func (ctx *JITContext) AllocReg() Reg {
 }
 
 // EnsureDesc restores a descriptor from stack/spill locations to registers.
-func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
+func (ctx *JITContext) syncDescSpill(desc *JITValueDesc) {
 	if desc.Loc == LocReg && desc.ID != 0 && ctx.descSpills != nil {
 		if meta, ok := ctx.descSpills[desc.ID]; ok && meta.loc == LocStack {
 			desc.Loc = LocStack
@@ -969,6 +973,10 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 			desc.Reg3 = 0
 		}
 	}
+}
+
+func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
+	ctx.syncDescSpill(desc)
 	switch desc.Loc {
 	case LocInputPair:
 		r1 := ctx.AllocReg()
@@ -1513,6 +1521,49 @@ func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 // resultsBuf: caller-provided [16]Reg buffer for results (no heap alloc).
 // Returns a slice into resultsBuf holding the result registers.
 // All live JIT registers are saved/restored around the call.
+type jitRegMove struct {
+	dst Reg
+	src Reg
+}
+
+// emitParallelRegMoves preserves every source until its last consumer has
+// moved. R11 is reserved as emitter scratch and breaks register cycles.
+func (ctx *JITContext) emitParallelRegMoves(moves []jitRegMove) {
+	for len(moves) > 0 {
+		emitIdx := -1
+		for i := range moves {
+			dstIsPendingSrc := false
+			for j := range moves {
+				if i != j && moves[j].src == moves[i].dst {
+					dstIsPendingSrc = true
+					break
+				}
+			}
+			if !dstIsPendingSrc {
+				emitIdx = i
+				break
+			}
+		}
+		if emitIdx == -1 {
+			cycleDst := moves[0].dst
+			if cycleDst != RegR11 {
+				ctx.emitMovRegReg(RegR11, cycleDst)
+			}
+			for i := range moves {
+				if moves[i].src == cycleDst {
+					moves[i].src = RegR11
+				}
+			}
+			continue
+		}
+		mv := moves[emitIdx]
+		if mv.dst != mv.src {
+			ctx.emitMovRegReg(mv.dst, mv.src)
+		}
+		moves = append(moves[:emitIdx], moves[emitIdx+1:]...)
+	}
+}
+
 func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg, resultTargets []Reg) []Reg {
 	ctx.NeedsStableArgs = true
 	if numResultWords > len(GoABIIntRegs) {
@@ -1569,11 +1620,7 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			}
 		}
 
-		type regMove struct {
-			dst Reg
-			src Reg
-		}
-		moves := make([]regMove, 0, len(argWords))
+		moves := make([]jitRegMove, 0, len(argWords))
 		regWordCount := len(argWords)
 		if regWordCount > len(GoABIIntRegs) {
 			regWordCount = len(GoABIIntRegs)
@@ -1581,47 +1628,10 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		for i := 0; i < regWordCount; i++ {
 			target := GoABIIntRegs[i]
 			if argWords[i].loc == LocReg && argWords[i].reg != target {
-				moves = append(moves, regMove{dst: target, src: argWords[i].reg})
+				moves = append(moves, jitRegMove{dst: target, src: argWords[i].reg})
 			}
 		}
-		for len(moves) > 0 {
-			emitIdx := -1
-			for i := range moves {
-				dstIsPendingSrc := false
-				for j := range moves {
-					if i == j {
-						continue
-					}
-					if moves[j].src == moves[i].dst {
-						dstIsPendingSrc = true
-						break
-					}
-				}
-				if !dstIsPendingSrc {
-					emitIdx = i
-					break
-				}
-			}
-			if emitIdx == -1 {
-				// Break a cycle via R11, which is reserved as JIT scratch and is
-				// not part of Go ABIInternal's integer argument registers.
-				cycleDst := moves[0].dst
-				if cycleDst != RegR11 {
-					ctx.emitMovRegReg(RegR11, cycleDst)
-				}
-				for i := range moves {
-					if moves[i].src == cycleDst {
-						moves[i].src = RegR11
-					}
-				}
-				continue
-			}
-			mv := moves[emitIdx]
-			if mv.dst != mv.src {
-				ctx.emitMovRegReg(mv.dst, mv.src)
-			}
-			moves = append(moves[:emitIdx], moves[emitIdx+1:]...)
-		}
+		ctx.emitParallelRegMoves(moves)
 
 		for i := 0; i < regWordCount; i++ {
 			target := GoABIIntRegs[i]
@@ -1652,18 +1662,24 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 			ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 		}
+		moves := make([]jitRegMove, 0, numResultWords)
 		for i := 0; i < numResultWords; i++ {
 			var r Reg
 			if i < len(resultTargets) {
 				r = resultTargets[i]
 			} else {
-				r = ctx.AllocReg()
+				// All Go ABI result registers remain live until every result word
+				// has been copied. In particular, a three-word slice returns its
+				// capacity in RCX; selecting RCX for the earlier data pointer would
+				// overwrite that capacity before it is read.
+				r = ctx.AllocRegExcept(GoABIIntRegs[:numResultWords]...)
 			}
 			if r != GoABIIntRegs[i] {
-				ctx.emitMovRegReg(r, GoABIIntRegs[i])
+				moves = append(moves, jitRegMove{dst: r, src: GoABIIntRegs[i]})
 			}
 			resultsBuf[i] = r
 		}
+		ctx.emitParallelRegMoves(moves)
 		return resultsBuf[:numResultWords]
 	}
 
@@ -1865,6 +1881,16 @@ func (ctx *JITContext) EmitGoCallScalarInto(funcAddr uint64, args []JITValueDesc
 
 // EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.
 func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
+	if src.Reg != dst.Reg && src.Reg2 == dst.Reg {
+		// Preserve the pointer word before writing the aux word into its source
+		// register. This includes the full register-swap case.
+		ctx.emitMovRegReg(RegR11, src.Reg)
+		if src.Reg2 != dst.Reg2 {
+			ctx.emitMovRegReg(dst.Reg2, src.Reg2)
+		}
+		ctx.emitMovRegReg(dst.Reg, RegR11)
+		return
+	}
 	if src.Reg != dst.Reg {
 		ctx.emitMovRegReg(dst.Reg, src.Reg)
 	}
@@ -2387,11 +2413,11 @@ func jitCompileMode(recursiveLambdas bool, a ...Scmer) Scmer {
 	}
 }
 
-// jitAutoImportSyntaxSafe is deliberately narrower than explicit (jit ...).
-// Module loading must never turn experimental emitter coverage into a semantic
-// regression. It enables leaf expressions, borrowed accessors, scalar
-// builtins, and rooted calls with at most two arguments; allocation-heavy
-// transforms remain interpreted until their callback/ABI paths are proven.
+// jitAutoImportSyntaxSafe rejects procedures which manufacture callbacks. A
+// compiled top-level procedure may otherwise use every expression the emitter
+// accepted; unsupported expressions already abort compilation atomically.
+// Callback closure compilation remains opt-in until its generated slice paths
+// carry the same complete lifetime contract as the enclosing entry point.
 func jitAutoImportSyntaxSafe(expr Scmer) bool {
 	for expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
@@ -2403,47 +2429,15 @@ func jitAutoImportSyntaxSafe(expr Scmer) bool {
 	if len(items) == 0 {
 		return true
 	}
-	if !items[0].IsSymbol() {
-		if len(items)-1 > 2 || !jitAutoImportSyntaxSafe(items[0]) {
-			return false
-		}
-		for _, item := range items[1:] {
-			if !jitAutoImportSyntaxSafe(item) {
-				return false
-			}
-		}
-		return true
-	}
-	name := items[0].String()
-	switch name {
-	case "quote":
-		return true
-	case "lambda", "optimizer_proc_return", "begin", "begin_mut", "!begin", "set", "define", "setN", "!list", "!!list", "eval", "parallel":
-		return false
-	case "match", "match_mut":
-		return false
-	case "if", "and", "or", "coalesce", "coalesceNil":
-		return false
-	case "outer":
-		for _, item := range items[1:] {
-			if !jitAutoImportSyntaxSafe(item) {
-				return false
-			}
-		}
-		return true
-	}
-	if decl, ok := declarations[name]; ok && decl.Type != nil && decl.Type.JITEmit != nil {
-		if !jitAutoImportReturnSafe(name, decl.Type.Return) {
-			return false
-		}
-	} else {
-		binding, exists := Globalenv.Vars[Symbol(name)]
-		if !exists || binding.GetTag() != tagProc || binding.Proc() == nil || binding.Proc().Compiled == nil ||
-			!binding.Proc().Compiled.AutoImportSafe {
+	if items[0].IsSymbol() {
+		switch items[0].String() {
+		case "quote":
+			return true
+		case "lambda", "optimizer_proc_return":
 			return false
 		}
 	}
-	for _, item := range items[1:] {
+	for _, item := range items {
 		if !jitAutoImportSyntaxSafe(item) {
 			return false
 		}
