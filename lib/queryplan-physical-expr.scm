@@ -6766,3 +6766,11 @@ the absolute scan_join_order-versus-legacy calibration. */
 (define planner_scan_join_order_orientation_cost (lambda (driver_rows inner_rows table_count target)
 	(planner_scan_join_order_cost (+ driver_rows inner_rows)
 		target target table_count target 0)))
+
+/* The batched probe variant visits only the ordered driver window and probes
+each later equality input with those query-local keys. Reuse the calibrated
+scan_join_order work units so this alternative introduces no hand-tuned
+threshold outside Costgen's model. */
+(define planner_scan_join_order_batched_probe_cost (lambda (driver_rows table_count target map_width)
+	(planner_scan_join_order_cost driver_rows
+		(* driver_rows (- table_count 1)) target table_count target map_width)))

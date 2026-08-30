@@ -1277,6 +1277,15 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 			features[22] = 1
 			features[23] = *row.JoinInputRows
 			features[24] = *row.JoinProbeRows
+		} else if row.Plan == "scan_join_order_batched_probe" {
+			if row.JoinDriverRows == nil {
+				return nil, fmt.Errorf("ordered batched probe profile has nil driver rows: %+v", row)
+			}
+			features[1] = *row.JoinDriverRows
+			features[4] = *row.JoinOutputRows
+			features[22] = 1
+			features[23] = *row.JoinDriverRows
+			features[24] = *row.JoinDriverRows * (*row.JoinTableCount - 1)
 		} else if row.Plan == "legacy_join_tree" {
 			if row.JoinLegacyProbeRows == nil {
 				return nil, fmt.Errorf("ordered legacy join profile has nil probe rows: %+v", row)
@@ -2002,7 +2011,7 @@ func decisionAlternatives(rows []observation) (map[string]map[string]observation
 		switch row.plan {
 		case "candidate_keyset", "driver_order_membership_probe", "driver_filter_join_probe", "ordered_batch_accept", "prefiltered_candidate_keyset":
 			groups[row.caseName][row.plan] = row
-		case "legacy_join_tree", "scan_join_order":
+		case "legacy_join_tree", "scan_join_order", "scan_join_order_batched_probe":
 			if row.decision != "scan_join_order" {
 				return nil, fmt.Errorf("plan %q belongs to scan_join_order, got decision %q", row.plan, row.decision)
 			}

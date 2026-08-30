@@ -595,14 +595,14 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCo
 
 // map reduce implementation based on scheme scripts
 func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
-	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil)
+	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil, nil)
 }
 
 func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
-	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, stride, batchdata)
+	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, stride, batchdata, nil)
 }
 
-func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
+func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer, requiredBoundaries boundaries) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := scm.CurrentQuerySeq()
 	hasMutationCallback := false
@@ -633,6 +633,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 		defer releaseScanAnalyzeScratch(scratch)
 		boundaries = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
 	}
+	boundaries = append(boundaries, requiredBoundaries...)
 	reorderByFrequency(boundaries, t)
 	boundaries = appendRecSetBoundary(boundaries, source)
 	var lowerStorage []scm.Scmer

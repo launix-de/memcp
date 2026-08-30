@@ -42,7 +42,7 @@ test_cases:
   - name: "WordPress filtered postmeta join ordered by newest post"
     warmup: 2
     timing_samples: 5
-    threshold_ms: 14
+    threshold_ms: 6
     sql: |
       SELECT p.ID, p.post_title, pm.meta_value
       FROM wordpress_perf_posts p
@@ -68,7 +68,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "chosen scan_join_order"
+        - "chosen scan_join_order_batched_probe"
         - "scan_join_order"
         - "legacy_join_tree"
 
@@ -90,7 +90,7 @@ test_cases:
       result_not_contains:
         - '(join_driver \"p\")'
 
-  - name: "WordPress handwritten equivalent-driver scan_join_order"
+  - name: "WordPress handwritten equivalent-driver batched scan_join_order"
     warmup: 2
     timing_samples: 5
     threshold_ms: 8
@@ -113,7 +113,7 @@ test_cases:
             0 0 20
             (list (list 1 "ID") (list 1 "post_title") (list 0 "meta_value"))
             (lambda (_id _title _value) 1)
-            + 0))
+            + 0 nil false 0 true))
         (if (equal? found 20) "ok"
           (error "wrong WordPress scan_join_order row count")))
     expect:

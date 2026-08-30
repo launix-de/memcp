@@ -16,6 +16,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package storage
 
+import "fmt"
 import "sort"
 import "runtime"
 import "container/heap"
@@ -105,6 +106,7 @@ type scanJoinOrderSpec struct {
 	neutral        scm.Scmer
 	isOuter        bool
 	notFoundValue  scm.Scmer
+	batchedProbe   bool
 }
 
 func scanJoinOrderUsesDriverOrder(spec *scanJoinOrderSpec) bool {
@@ -850,6 +852,218 @@ func scanJoinOrderBatch(currentTx *TxContext, spec *scanJoinOrderSpec, driverRef
 	return filtered
 }
 
+// probeScanJoinOrderInput keeps the ordered side as a compact tuple batch and
+// turns its join keys into mandatory scan_batch index boundaries. Equal driver
+// keys share one physical probe and expand back to every originating tuple, so
+// SQL multiplicity is retained without a query-wide inner record set.
+func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tuples []*scanJoinOrderTuple, inputIndex int) []*scanJoinOrderTuple {
+	if len(tuples) == 0 {
+		return nil
+	}
+	input := &spec.inputs[inputIndex]
+	keyWidth := len(input.sourceKeyCols)
+	stride := keyWidth
+	batchdata := make([]scm.Scmer, 0, len(tuples)*keyWidth)
+	probeKeys := make([][]scm.Scmer, 0, len(tuples))
+	tupleIndexes := make([][]int, 0, len(tuples))
+	for tupleIndex, tuple := range tuples {
+		key := scanJoinOrderTupleKey(spec, tuple, input.sourceKeyCols, nil)
+		if scanJoinOrderKeyHasNull(key) {
+			continue
+		}
+		probeIndex := -1
+		for index, existing := range probeKeys {
+			if compareProjectKey(existing, key) == 0 {
+				probeIndex = index
+				break
+			}
+		}
+		if probeIndex < 0 {
+			probeIndex = len(probeKeys)
+			probeKeys = append(probeKeys, append([]scm.Scmer(nil), key...))
+			tupleIndexes = append(tupleIndexes, nil)
+			batchdata = append(batchdata, key...)
+		}
+		tupleIndexes[probeIndex] = append(tupleIndexes[probeIndex], tupleIndex)
+	}
+	if len(batchdata) == 0 {
+		return nil
+	}
+
+	conditionCols := append([]string(nil), input.filterCols...)
+	conditionCols = append(conditionCols, input.targetKeyCols...)
+	for keyIndex := 0; keyIndex < keyWidth; keyIndex++ {
+		conditionCols = append(conditionCols, fmt.Sprintf("#%d", keyIndex))
+	}
+	filterProgram := scm.PrepareSerialProc(input.filter)
+	filterWidth := len(input.filterCols)
+	condition := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		if !scm.ToBool(filterProgram.Call(values[:filterWidth])) {
+			return scm.NewBool(false)
+		}
+		for keyIndex := 0; keyIndex < keyWidth; keyIndex++ {
+			left := values[filterWidth+keyIndex]
+			right := values[filterWidth+keyWidth+keyIndex]
+			if left.IsNil() || right.IsNil() || !scm.Equal(left, right) {
+				return scm.NewBool(false)
+			}
+		}
+		return scm.NewBool(true)
+	})
+	required := make(boundaries, keyWidth)
+	for keyIndex, column := range input.targetKeyCols {
+		required[keyIndex] = columnboundaries{
+			col: column, matcher: EqualMatcher,
+			lowerBatch: true, lowerBatchSubidx: keyIndex,
+			upperBatch: true, upperBatchSubidx: keyIndex,
+			lowerInclusive: true, upperInclusive: true, mandatory: true,
+		}
+	}
+
+	callbackCols := append([]string(nil), input.readCols...)
+	for keyIndex := 0; keyIndex < keyWidth; keyIndex++ {
+		callbackCols = append(callbackCols, fmt.Sprintf("#%d", keyIndex))
+	}
+	callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.NewSlice(append([]scm.Scmer(nil), values...))
+	})
+	collect := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.NewSlice(append(values[0].Slice(), values[1]))
+	})
+	combine := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
+	})
+	rows := input.table.scanWithBatchFrom(currentTx, nil, conditionCols, condition,
+		callbackCols, callback, collect, scm.NewSlice(nil), combine, false,
+		stride, batchdata, required).Slice()
+	hits := make([][]*scanJoinOrderRecord, len(tuples))
+	for _, rowValue := range rows {
+		row := rowValue.Slice()
+		key := row[len(input.readCols):]
+		matches := true
+		for keyIndex, column := range input.targetKeyCols {
+			value := row[input.readColIndex[column]]
+			if value.IsNil() || key[keyIndex].IsNil() || !scm.Equal(value, key[keyIndex]) {
+				matches = false
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+		probeIndex := -1
+		for index, existing := range probeKeys {
+			if compareProjectKey(existing, key) == 0 {
+				probeIndex = index
+				break
+			}
+		}
+		if probeIndex < 0 {
+			continue
+		}
+		record := &scanJoinOrderRecord{values: row[:len(input.readCols)]}
+		for _, tupleIndex := range tupleIndexes[probeIndex] {
+			hits[tupleIndex] = append(hits[tupleIndex], record)
+		}
+	}
+
+	result := make([]*scanJoinOrderTuple, 0, len(tuples))
+	for tupleIndex, tuple := range tuples {
+		for _, record := range hits[tupleIndex] {
+			records := make([]*scanJoinOrderRecord, len(tuple.records)+1)
+			copy(records, tuple.records)
+			records[len(tuple.records)] = record
+			result = append(result, &scanJoinOrderTuple{records: records, order: tuple.order})
+		}
+	}
+	return result
+}
+
+func scanJoinOrderBatchedProbe(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
+	prepareScanJoinOrderSpec(&spec)
+	if spec.limit == 0 {
+		return spec.notFoundValue
+	}
+	// Probe hits have no stable record handle after the batched scan returns.
+	// Read the narrow final projection with the hit and keep the later mapper
+	// allocation-free for the small LIMIT window.
+	for inputIndex := 1; inputIndex < len(spec.inputs); inputIndex++ {
+		input := &spec.inputs[inputIndex]
+		for _, column := range input.lateMapCols {
+			input.readCols, input.readColIndex = appendScanJoinColumn(input.readCols, input.readColIndex, column)
+		}
+		input.lateMapCols = nil
+		input.lateMapIndex = nil
+	}
+	driverSortCols := make([]scm.Scmer, len(spec.orderCols))
+	for index, ref := range spec.orderCols {
+		driverSortCols[index] = scm.NewString(ref.column)
+	}
+	result := spec.neutral
+	driverOffset := 0
+	accepted := 0
+	emitted := 0
+	hadValue := false
+	target := spec.offset + spec.limit
+	batchSize := target
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	for accepted < target {
+		driverRefs := collectScanJoinOrderRecords(currentTx, &spec.inputs[0], driverSortCols,
+			spec.orderDirs, driverOffset, batchSize, nil, scm.NewNil())
+		if len(driverRefs) == 0 {
+			break
+		}
+		driver := materializeScanJoinRecords(currentTx, &spec.inputs[0], driverRefs)
+		tuples := make([]*scanJoinOrderTuple, len(driver))
+		for index, record := range driver {
+			tuples[index] = &scanJoinOrderTuple{records: []*scanJoinOrderRecord{record}, order: index}
+		}
+		for inputIndex := 1; inputIndex < len(spec.inputs) && len(tuples) > 0; inputIndex++ {
+			tuples = probeScanJoinOrderInput(currentTx, &spec, tuples, inputIndex)
+		}
+		if !spec.joinFilter.IsNil() && len(tuples) > 0 {
+			filterProgram := scm.PrepareSerialProc(spec.joinFilter)
+			filtered := tuples[:0]
+			for _, tuple := range tuples {
+				args := scanJoinOrderTupleValues(&spec, tuple, spec.joinFilterCols, nil)
+				if scm.ToBool(filterProgram.Call(args)) {
+					filtered = append(filtered, tuple)
+				}
+			}
+			tuples = filtered
+		}
+		first := 0
+		if accepted < spec.offset {
+			first = min(len(tuples), spec.offset-accepted)
+		}
+		accepted += len(tuples)
+		last := len(tuples)
+		if last-first > spec.limit-emitted {
+			last = first + spec.limit - emitted
+		}
+		var batchHadValue bool
+		result, batchHadValue = reduceScanJoinOrderTuples(currentTx, &spec, tuples[first:last], result, &emitted)
+		hadValue = hadValue || batchHadValue
+		if emitted >= spec.limit {
+			break
+		}
+		driverOffset += len(driverRefs)
+		if len(driverRefs) < batchSize {
+			break
+		}
+		batchSize *= 2
+	}
+	if !hadValue && spec.isOuter {
+		return scanJoinOrderOuterResult(&spec, result)
+	}
+	if !hadValue {
+		return spec.notFoundValue
+	}
+	return result
+}
+
 func scanJoinOrderMaterialized(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	prepareScanJoinOrderSpec(&spec)
 	if spec.limit == 0 {
@@ -1260,6 +1474,9 @@ func collectTopKScanJoinOrderTuples(spec *scanJoinOrderSpec, runnerResults [][]*
 
 func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	if spec.limit >= 0 && scanJoinOrderUsesDriverOrder(&spec) {
+		if spec.batchedProbe {
+			return scanJoinOrderBatchedProbe(currentTx, spec)
+		}
 		return scanJoinOrderMaterialized(currentTx, spec)
 	}
 	prepareScanJoinOrderSpec(&spec)
@@ -1438,6 +1655,7 @@ func declareScanJoinOrder(en *scm.Env) {
 			if len(a) > 18 {
 				notFoundValue = a[18]
 			}
+			batchedProbe := len(a) > 19 && scm.ToBool(a[19])
 			return scanJoinOrder(scmerToTxContext(a[0]), scanJoinOrderSpec{
 				inputs:             decodeScanJoinOrderInputs(tables, a[2], a[3], a[4]),
 				joinFilterCols:     decodeScanJoinOrderColumns(a[5], "joinFilterColumns"),
@@ -1454,6 +1672,7 @@ func declareScanJoinOrder(en *scm.Env) {
 				neutral:            neutral,
 				isOuter:            isOuter,
 				notFoundValue:      notFoundValue,
+				batchedProbe:       batchedProbe,
 			})
 		},
 		Type: &scm.TypeDescriptor{
@@ -1480,6 +1699,7 @@ func declareScanJoinOrder(en *scm.Env) {
 				{Kind: "func|nil", Label: "reduce2", Description: "optional global second-stage reducer combining runner-local reduce results; permitted only with offset 0 and unlimited limit -1", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "optional whole-scan NULL fallback", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "optional result when no joined row is emitted", Optional: true},
+				{Kind: "bool", Label: "batchedProbe", Description: "probe inner equality indexes from growing ordered-driver batches instead of materializing inner inputs", Optional: true},
 			},
 			Return:   &scm.TypeDescriptor{Kind: "any"},
 			Optimize: optimizeScanJoinOrder,

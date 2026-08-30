@@ -473,12 +473,13 @@ func TestDecisionAlternativesAcceptsOrderedJoinFamily(t *testing.T) {
 	rows := []observation{
 		{caseName: "join", decision: "scan_join_order", plan: "legacy_join_tree"},
 		{caseName: "join", decision: "scan_join_order", plan: "scan_join_order"},
+		{caseName: "join", decision: "scan_join_order", plan: "scan_join_order_batched_probe"},
 	}
 	groups, err := decisionAlternatives(rows)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups["join"]) != 2 {
+	if len(groups["join"]) != 3 {
 		t.Fatalf("unexpected ordered join alternatives: %+v", groups)
 	}
 }
