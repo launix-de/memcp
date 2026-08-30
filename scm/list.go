@@ -776,6 +776,118 @@ func optimizePlannerReduceFold(rv []Scmer, td *TypeDescriptor) (Scmer, *TypeDesc
 	return NewNil(), nil, false
 }
 
+func optimizerEmptyListLiteral(expr Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	items, ok := scmerSlice(expr)
+	if !ok {
+		return false
+	}
+	if elements, list := listConstructorElements(items); list {
+		return len(elements) == 0
+	}
+	if len(items) != 2 || !scmerIsSymbol(items[0], "quote") {
+		return false
+	}
+	quoted, ok := scmerSlice(items[1])
+	return ok && len(quoted) == 0
+}
+
+func optimizerIndexedAssocProjection(expr Scmer, reducerParams []Scmer, pairBody Scmer, pair []Scmer) (Scmer, [2]int, bool) {
+	var noUses [2]int
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	items, ok := scmerSlice(expr)
+	if !ok {
+		if optimizerLambdaParamReference(expr, reducerParams, 0) {
+			return NewNil(), noUses, false
+		}
+		if optimizerLambdaParamReference(expr, reducerParams, 1) {
+			return pairBody, [2]int{1, 1}, true
+		}
+		return expr, noUses, true
+	}
+	if len(items) == 0 || scmerIsSymbol(items[0], "quote") || scmerIsSymbol(items[0], "outer") {
+		return expr, noUses, true
+	}
+	if scmerIsSymbol(items[0], "lambda") {
+		return NewNil(), noUses, false
+	}
+	if len(items) == 2 && scmerIsSymbol(items[0], "car") && optimizerLambdaParamReference(items[1], reducerParams, 1) {
+		return pair[0], [2]int{1, 0}, true
+	}
+	if len(items) == 2 && scmerIsSymbol(items[0], "cadr") && optimizerLambdaParamReference(items[1], reducerParams, 1) {
+		return pair[1], [2]int{0, 1}, true
+	}
+	rewritten := make([]Scmer, len(items))
+	uses := noUses
+	for i, item := range items {
+		var itemUses [2]int
+		var valid bool
+		rewritten[i], itemUses, valid = optimizerIndexedAssocProjection(item, reducerParams, pairBody, pair)
+		if !valid {
+			return NewNil(), noUses, false
+		}
+		uses[0] += itemUses[0]
+		uses[1] += itemUses[1]
+	}
+	return NewSlice(rewritten), uses, true
+}
+
+// optimizeIndexedAssocFold recognizes a three-stage planner idiom: mapIndex
+// creates a pair and reduce derives an empty assoc's keys and values from it.
+// Reused pair projections must be stable references. Keeping the proof inside
+// reduce's hook lets the physical operator write the FastDict directly without
+// another analysis pass.
+func optimizeIndexedAssocFold(mapper, reducer, neutral Scmer) (Scmer, Scmer, bool) {
+	mapperParams, mapperBody, ok := optimizerLambdaParts(mapper)
+	if !ok || len(mapperParams) < 2 {
+		return NewNil(), NewNil(), false
+	}
+	mapperItems, ok := scmerSlice(mapperBody)
+	if !ok {
+		return NewNil(), NewNil(), false
+	}
+	pair, ok := listConstructorElements(mapperItems)
+	if !ok && len(mapperItems) == 2 && scmerIsSymbol(mapperItems[0], "quote") {
+		pair, ok = scmerSlice(mapperItems[1])
+	}
+	if !ok || len(pair) != 2 {
+		return NewNil(), NewNil(), false
+	}
+
+	reducerParams, reducerBody, ok := optimizerLambdaParts(reducer)
+	if !ok || len(reducerParams) < 2 {
+		return NewNil(), NewNil(), false
+	}
+	reducerItems, ok := scmerSlice(reducerBody)
+	if !ok || len(reducerItems) != 4 ||
+		(!scmerIsSymbol(reducerItems[0], "set_assoc") && !scmerIsSymbol(reducerItems[0], "set_assoc_mut")) ||
+		!optimizerLambdaParamReference(reducerItems[1], reducerParams, 0) ||
+		!optimizerEmptyListLiteral(neutral) {
+		return NewNil(), NewNil(), false
+	}
+	key, keyUses, ok := optimizerIndexedAssocProjection(reducerItems[2], reducerParams, mapperBody, pair)
+	if !ok {
+		return NewNil(), NewNil(), false
+	}
+	value, valueUses, ok := optimizerIndexedAssocProjection(reducerItems[3], reducerParams, mapperBody, pair)
+	if !ok {
+		return NewNil(), NewNil(), false
+	}
+	uses := [2]int{keyUses[0] + valueUses[0], keyUses[1] + valueUses[1]}
+	for i := range pair {
+		if uses[i] < 1 || (uses[i] > 1 && !optimizerStableReference(pair[i])) {
+			return NewNil(), NewNil(), false
+		}
+	}
+	keyMapper, keyOK := optimizerLambdaWithBody(mapper, key)
+	valueMapper, valueOK := optimizerLambdaWithBody(mapper, value)
+	return keyMapper, valueMapper, keyOK && valueOK
+}
+
 // optimizeReduce keeps merge as a segmented producer when its flattened value
 // is consumed exactly once by reduce. reduce_segments validates all segments
 // before invoking the callback, matching merge's existing error order.
@@ -788,6 +900,17 @@ func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 	if len(rv) >= 3 {
 		if inner, ok := scmerSlice(rv[1]); ok && len(inner) == 3 {
 			switch {
+			case scmerIsSymbol(inner[0], "mapIndex") || scmerIsSymbol(inner[0], "mapIndex_mut"):
+				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
+					return result, td
+				}
+				if len(rv) == 4 {
+					if key, value, direct := optimizeIndexedAssocFold(inner[2], rv[2], rv[3]); direct {
+						return NewSlice([]Scmer{NewSymbol("index_assoc"), inner[1], key, value}),
+							&TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength}
+					}
+				}
+				return result, td
 			case scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut"):
 				if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) || (len(rv) == 4 && exprMayHaveSideEffects(rv[3])) {
 					return result, td
@@ -29464,6 +29587,7 @@ func init_list() {
 			},
 			JITInlineCallbacks: false,
 		},
+		Optimize: optimizeFindMapNotNull,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "map_filter",
@@ -32025,6 +32149,37 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "index_assoc",
+
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "index_assoc")
+			key := OptimizeProcToSerialFunction(a[1])
+			value := OptimizeProcToSerialFunction(a[2])
+			result := NewFastDictValue(len(input))
+			for index, item := range input {
+				position := NewInt(int64(index))
+				result.Set(key(position, item), value(position, item), nil)
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "builds a FastDict directly from indexed key/value callbacks (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "key", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "value", Params: []*TypeDescriptor{{Kind: "int", Label: "index"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["index_assoc"].Fn, args, result)
+			},
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -56168,7 +56323,6 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
-		Optimize: optimizeFindMapNotNull,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "flat_map_unique",

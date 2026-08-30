@@ -156,6 +156,24 @@ func TestOptimizeFusesFirstNonNilReducerOverRange(t *testing.T) {
 	}
 }
 
+func TestOptimizeFusesDirectFirstNonNilSearchOverRange(t *testing.T) {
+	if declaration := DeclarationForValue(NewSymbol("find_map_notnull")); declaration == nil || declaration.Optimize == nil {
+		t.Fatal("find_map_notnull declaration has no optimizer hook")
+	}
+	optimized, env := optimizeListPipeline(t, `(lambda (count target)
+		(find_map_notnull (produceN count)
+			(lambda (_ index) (if (equal? index target) index nil))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "find_range_notnull") || strings.Contains(serialized, "produceN") {
+		t.Fatalf("direct range search was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	if got := fn(NewInt(8), NewInt(5)); !Equal(got, NewInt(5)) {
+		t.Fatalf("direct fused range search returned %s, want 5", String(got))
+	}
+}
+
 func TestOptimizeFusesGeneralReducerOverRange(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (count)
 		(reduce (produceN count) (lambda (values index) (cons index values)) '()))`)
@@ -362,6 +380,63 @@ func TestOptimizeFusesReduceOverMap(t *testing.T) {
 	want := NewInt(9)
 	if !Equal(got, want) {
 		t.Fatalf("fused reduce/map returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeLeavesGeneralIndexedReduceUnfused(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(reduce (mapIndex values (lambda (index value) (+ index value)))
+			(lambda (total value) (+ total value)) 0))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "mapIndex") || !strings.Contains(serialized, "reduce") || strings.Contains(serialized, "index_assoc") {
+		t.Fatalf("general indexed reduce must stay unspecialized: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	if got := fn(NewSlice([]Scmer{NewInt(10), NewInt(20), NewInt(30)})); !Equal(got, NewInt(63)) {
+		t.Fatalf("general indexed reduce returned %s, want 63", String(got))
+	}
+}
+
+func TestOptimizeBuildsIndexedAssocWithoutMappedPairs(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (aliases)
+		(reduce (mapIndex aliases (lambda (position alias) (list alias position)))
+			(lambda (index entry) (set_assoc index (car entry) (cadr entry))) '()))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "index_assoc") || strings.Contains(serialized, "mapIndex") || strings.Contains(serialized, "reduce") {
+		t.Fatalf("indexed assoc construction was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewString("left"), NewString("right"), NewString("left")}))
+	want := NewSlice([]Scmer{NewString("left"), NewInt(2), NewString("right"), NewInt(1)})
+	if !Equal(got, want) {
+		t.Fatalf("fused indexed assoc returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeBuildsIndexedAssocFromOptionalAliases(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(begin
+		(define alias-index (lambda (aliases)
+			(reduce (mapIndex (coalesceNil aliases '()) (lambda (position alias) (list alias position)))
+				(lambda (index entry) (set_assoc index (toLower (car entry)) entry)) '())))
+		alias-index)`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "index_assoc") || strings.Contains(serialized, "mapIndex") || strings.Contains(serialized, "reduce") {
+		t.Fatalf("optional alias index construction was not specialized: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewString("LEFT"), NewString("Right")}))
+	want := NewSlice([]Scmer{
+		NewString("left"), NewSlice([]Scmer{NewString("LEFT"), NewInt(0)}),
+		NewString("right"), NewSlice([]Scmer{NewString("Right"), NewInt(1)}),
+	})
+	if !Equal(got, want) {
+		t.Fatalf("fused optional alias index returned %s, want %s", String(got), String(want))
+	}
+	if got := fn(NewNil()); !Equal(got, NewSlice(nil)) {
+		t.Fatalf("fused optional empty alias index returned %s, want empty assoc", String(got))
 	}
 }
 
@@ -585,6 +660,27 @@ func BenchmarkPlannerReducerLowerings(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkOptimizerIndexedAliasMap(b *testing.B) {
+	optimized, env := optimizeListPipeline(b, `(lambda (aliases)
+		(reduce (mapIndex aliases (lambda (position alias) (list alias position)))
+			(lambda (index entry) (set_assoc index (car entry) (cadr entry))) '()))`)
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	aliases := make([]Scmer, 128)
+	for i := range aliases {
+		aliases[i] = NewString(fmt.Sprintf("alias-%d", i))
+	}
+	input := NewSlice(aliases)
+	last := NewString("alias-127")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result := fn(input)
+		if got := declarations["get_assoc"].Fn(result, last); got.Int() != 127 {
+			b.Fatalf("indexed alias map returned %s, want 127", String(got))
+		}
 	}
 }
 
