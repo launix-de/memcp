@@ -48,7 +48,7 @@ func serialExprMayCaptureEnv(expression Scmer) bool {
 		switch items[0].String() {
 		case "quote":
 			return false
-		case "lambda", "parser":
+		case "lambda", "parser", "eval":
 			return true
 		}
 	}

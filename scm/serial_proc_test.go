@@ -129,4 +129,8 @@ func TestSerialExprDetectsCapturedBeginScope(t *testing.T) {
 	if !serialExprMayCaptureEnv(source.Proc().Body) {
 		t.Fatalf("capturing begin was classified as reusable: %s", source.Proc().Body.String())
 	}
+	dynamic := preparedTestProc(t, "(lambda (value) (begin (define captured value) (eval '(lambda () captured))))")
+	if !serialExprMayCaptureEnv(dynamic.Proc().Body) {
+		t.Fatalf("eval-created closure was classified as reusable: %s", dynamic.Proc().Body.String())
+	}
 }
