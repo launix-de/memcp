@@ -375,7 +375,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["string?"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -400,7 +403,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["concat"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -414,7 +420,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_concat"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -9336,7 +9345,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["split"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -10214,7 +10226,10 @@ func init_strings() {
 			},
 			Const: true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["collate"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -10534,7 +10549,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["urldecode"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10552,7 +10570,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10575,7 +10596,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_quote"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10619,7 +10643,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode_assoc"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10638,7 +10665,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_decode"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10657,7 +10687,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_decode_scmer"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -10672,7 +10705,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["base64_encode"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10690,7 +10726,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["base64_decode"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
@@ -10723,7 +10762,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_unescape"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10744,7 +10786,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["bin2hex"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10765,7 +10810,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["bin2hex"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10783,7 +10831,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["hex2bin"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -10801,7 +10852,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  false, /* NOT const — each call must return a unique value */
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["uuid"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -10826,7 +10880,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["randomBytes"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -10849,7 +10906,10 @@ func init_strings() {
 			Const:    true,
 			Optimize: optimizeRegexpReplace,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_replace"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -11027,7 +11087,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["stable_structural_hash"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -11042,7 +11105,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sha1"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -11057,7 +11123,10 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sha256"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -11080,7 +11149,10 @@ func init_strings() {
 			Const:    true,
 			Optimize: optimizeRegexpTest,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_test"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 

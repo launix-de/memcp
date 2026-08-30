@@ -64,7 +64,10 @@ func init_vector() {
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["dot"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 }

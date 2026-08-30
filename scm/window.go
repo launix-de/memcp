@@ -112,6 +112,142 @@ func init_window() {
 				{Kind: "any", Label: "value"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				d1 := args[0]
+				d1.ID = 0
+				d2 := args[1]
+				d2.ID = 0
+				stackArray3 := ctx.AllocStack(int32(16))
+				ctx.EnsureDesc(&d2)
+				ctx.EnsureDesc(&d2)
+				ctx.EmitStoreScmerToStack(d2, int32(stackArray3)+int32(0))
+				ctx.FreeDesc(&d2)
+				r0 := ctx.AllocReg()
+				r1 := ctx.AllocRegExcept(r0)
+				r2 := ctx.AllocRegExcept(r0, r1)
+				ctx.EmitLeaRegMem(r0, RegRSP, int32(stackArray3))
+				ctx.EmitMovRegImm64(r1, uint64(1))
+				ctx.EmitMovRegImm64(r2, uint64(1))
+				d4 := JITValueDesc{Loc: LocRegTriple, Reg: r0, Reg2: r1, Reg3: r2, KnownSliceLen: int32(1), KnownSliceCap: int32(1), SliceSizeKnown: true}
+				ctx.BindReg(r0, &d4)
+				ctx.BindReg(r1, &d4)
+				ctx.BindReg(r2, &d4)
+				ctx.EnsureDesc(&d1)
+				ctx.EnsureDesc(&d1)
+				if d1.Loc == LocImm {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					if d1.Imm.GetTag() == tagBool {
+						ctx.EmitMakeBool(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagInt {
+						ctx.EmitMakeInt(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagFloat {
+						ctx.EmitMakeFloat(tmpPair, d1)
+					} else if d1.Imm.GetTag() == tagNil {
+						ctx.EmitMakeNil(tmpPair)
+					} else {
+						ptrWord, auxWord := d1.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					}
+					d1 = tmpPair
+				} else if d1.Loc == LocReg {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+					switch d1.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d1)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d1)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d1)
+					default:
+						panic("jit: generic call arg scalar type unknown for 2-word value")
+					}
+					ctx.FreeDesc(&d1)
+					d1 = tmpPair
+				}
+				if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
+					panic("jit: generic call arg expects 2-word value (Apply arg0)")
+				}
+				ctx.EnsureDesc(&d4)
+				ctx.EnsureDesc(&d4)
+				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice (Apply arg1)")
+				}
+				d5 := ctx.EmitGoCallScalar(GoFuncAddr(Apply), []JITValueDesc{d1, d4}, 2)
+				ctx.BindReg(d5.Reg, &d5)
+				ctx.BindReg(d5.Reg2, &d5)
+				ctx.FreeDesc(&d1)
+				if d5.Loc == LocImm {
+					if result.Loc == LocAny {
+						return d5
+					}
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				ctx.EnsureDesc(&d5)
+				if d5.Loc == LocRegPair {
+					ctx.EmitMovPairToResult(&d5, &result)
+					result.Type = d5.Type
+				} else {
+					switch d5.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d5)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d5)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d5)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
+				return result
+				return result
+			},
 		},
 	})
 
@@ -166,8 +302,11 @@ func init_window() {
 				{Kind: "any", Label: "neutral", Description: "initial accumulator"},
 				{Kind: "func", Label: "producer", Description: "nested streaming plan called with a one-value emit callback", Params: []*TypeDescriptor{{Kind: "func", Label: "emit", Description: "emits one complete value", Params: []*TypeDescriptor{{Kind: "any", Label: "value"}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
-			Return:  &TypeDescriptor{Kind: "any"},
-			JITEmit: nil,
+			Return: &TypeDescriptor{Kind: "any"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["stream_window_reduce"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -179,7 +318,10 @@ func init_window() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", Label: "window", Description: "caller-owned serial window accumulator"}, &TypeDescriptor{Kind: "func", Label: "emit_fn", Description: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", Label: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "list", Label: "vals", Description: "list of stride values to insert"}},
 			Return: &TypeDescriptor{Kind: "list"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["window_mut"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -191,7 +333,10 @@ func init_window() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "list", Label: "window", Description: "ring buffer accumulator"}, &TypeDescriptor{Kind: "func", Label: "emit_fn", Description: "callback receiving all window values oldest-to-newest", Params: []*TypeDescriptor{{Kind: "any", Label: "values", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", Label: "count", Description: "number of nil positions to shift in"}},
 			Return: &TypeDescriptor{Kind: "nil"},
 
-			JITEmit: nil,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["window_flush"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 }

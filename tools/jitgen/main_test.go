@@ -17,14 +17,84 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package main
 
 import (
+	"go/ast"
 	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
+
+func buildTestSSAFunction(t *testing.T, source, name string) *ssa.Function {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkg := types.NewPackage("jitgen.test", "sample")
+	ssaPkg, _, err := ssautil.BuildPackage(&types.Config{Importer: importer.Default()}, fset, pkg, []*ast.File{file}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := ssaPkg.Func(name)
+	if fn == nil {
+		t.Fatalf("SSA function %q not found", name)
+	}
+	return fn
+}
+
+func TestFallbackClosureCallsDeclaredBuiltinDirectly(t *testing.T) {
+	got := generateFallbackClosure("json_encode")
+	if _, err := parser.ParseExpr(got); err != nil {
+		t.Fatalf("fallback is not valid Go: %v\n%s", err, got)
+	}
+	if !strings.Contains(got, `jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode"].Fn, args, result)`) {
+		t.Fatalf("fallback does not call the declaration directly:\n%s", got)
+	}
+}
+
+func TestOperatorJITEmitMissing(t *testing.T) {
+	if !operatorJITEmitMissing(operatorInfo{}) {
+		t.Fatal("absent JITEmit field must be treated as missing")
+	}
+	nilExpr, err := parser.ParseExpr("nil")
+	if err != nil || !operatorJITEmitMissing(operatorInfo{jitExpr: nilExpr}) {
+		t.Fatal("nil JITEmit field must be treated as missing")
+	}
+	funcExpr, err := parser.ParseExpr("func() {}")
+	if err != nil || operatorJITEmitMissing(operatorInfo{jitExpr: funcExpr}) {
+		t.Fatal("existing JITEmit function must be preserved")
+	}
+}
+
+func TestArithmeticUsesRequestedResultPayloadRegister(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+type Scmer struct{}
+func NewInt(int64) Scmer
+func (Scmer) Int() int64
+func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
+`, "add")
+	code, errMsg := generateClosure("add", fn, nil)
+	if errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	for _, want := range []string{
+		"= result.Reg2",
+		"ctx.EmitAddInt64",
+		"ctx.EmitMakeInt(result",
+		"if !resultTarget",
+	} {
+		if !strings.Contains(code, want) {
+			t.Fatalf("generated arithmetic emitter does not contain %q:\n%s", want, code)
+		}
+	}
+}
 
 func TestCollectOperatorsUsesRootFunctionTypeDescriptor(t *testing.T) {
 	const source = `package sample
