@@ -48,6 +48,71 @@ func TestOptimizeLowersAndSerializesSpecialForms(t *testing.T) {
 	}
 }
 
+func TestSpecialFormSharesDeclarationOptimizerAndJITMetadata(t *testing.T) {
+	oldTitles, oldDeclarations, oldFunctions := declaration_titles, declarations, declarationsByFunction
+	declaration_titles = nil
+	declarations = make(map[string]*Declaration)
+	declarationsByFunction = make(map[uintptr]*Declaration)
+	defer func() {
+		declaration_titles, declarations, declarationsByFunction = oldTitles, oldDeclarations, oldFunctions
+	}()
+
+	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
+	hookCalled := false
+	definition := &Declaration{
+		Name: "special-declaration-hook-test",
+		Type: &TypeDescriptor{
+			Kind:   "func",
+			Return: &TypeDescriptor{Kind: "int"},
+			JITEmit: func(_ *JITContext, _ []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return result
+			},
+		},
+		Optimize: func(_ []Scmer, _ *OptimizerContext, _ bool) (Scmer, *TypeDescriptor) {
+			hookCalled = true
+			return NewInt(42), &TypeDescriptor{Kind: "int", Const: true, Transfer: true}
+		},
+	}
+	DeclareSpecialForm(environment, definition, func(_ []Scmer, _ *Env) Scmer { return NewInt(1) }, definition.Type.JITEmit)
+	value := environment.Vars[Symbol(definition.Name)]
+	defer delete(specialFormNames, value.ptr)
+
+	if resolved := DeclarationForValue(value); resolved != definition {
+		t.Fatalf("special form resolved declaration %p, want %p", resolved, definition)
+	}
+	if DeclarationForValue(value).Type.JITEmit == nil {
+		t.Fatal("special form declaration lost its JIT emitter")
+	}
+	optimized := Optimize(NewSlice([]Scmer{NewSymbol(definition.Name)}), environment, nil)
+	if !hookCalled {
+		t.Fatal("special form declaration optimizer hook was not called")
+	}
+	if !optimized.IsInt() || optimized.Int() != 42 {
+		t.Fatalf("special form declaration optimizer returned %s, want 42", String(optimized))
+	}
+}
+
+func TestEveryGlobalSpecialFormHasDeclarationJITHooks(t *testing.T) {
+	for symbol, value := range Globalenv.Vars {
+		if value.GetTag() != tagSpecialForm {
+			continue
+		}
+		definition := DeclarationForValue(value)
+		if definition == nil || !definition.IsSpecialForm {
+			t.Fatalf("global special form %s has no special-form declaration", symbol)
+		}
+		if definition.Type == nil || definition.Type.JITEmit == nil {
+			t.Fatalf("global special form %s has no declaration JIT emitter", symbol)
+		}
+	}
+	for _, name := range []string{"if", "and", "or"} {
+		definition := declarations[name]
+		if definition == nil || definition.Type == nil || definition.Type.JITEmitCond == nil {
+			t.Fatalf("lazy boolean special form %s has no declaration branch emitter", name)
+		}
+	}
+}
+
 func TestEvalUnoptimizedSpecialForm(t *testing.T) {
 	if result := Eval(Read(t.Name(), "(if true 1 0)"), &Globalenv); result.Int() != 1 {
 		t.Fatalf("unoptimized special form returned %s", String(result))

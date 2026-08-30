@@ -745,14 +745,18 @@ type jitNestedPreservation struct {
 // registers before outer code resumes.
 func (ctx *JITContext) PreserveOuterRegs() jitNestedPreservation {
 	p := jitNestedPreservation{alloc: ctx.SnapshotAllocState()}
-	ctx.ReclaimUntrackedRegs()
 	for r := Reg(0); r <= RegR15; r++ {
-		owner := ctx.RegOwners[r]
-		if owner == nil || (ctx.AllRegs&(1<<uint(r))) == 0 || (ctx.FreeRegs&(1<<uint(r))) != 0 {
+		if (ctx.AllRegs&(1<<uint(r))) == 0 || (ctx.FreeRegs&(1<<uint(r))) != 0 {
 			continue
 		}
+		owner := ctx.RegOwners[r]
 		off := ctx.AllocSpill(8)
 		ctx.EmitStoreRegMem(r, RegRBP, off)
+		if owner != nil && !owner.NoHeapPointer &&
+			((owner.Loc == LocRegPair && owner.Reg == r) ||
+				(owner.Loc == LocRegTriple && owner.Reg == r)) {
+			ctx.setStackPointer(jitStackRootFrameBP, off, true)
+		}
 		p.regs = append(p.regs, r)
 		p.offs = append(p.offs, off)
 		ctx.RegOwners[r] = nil
@@ -764,7 +768,6 @@ func (ctx *JITContext) PreserveOuterRegs() jitNestedPreservation {
 }
 
 func (ctx *JITContext) RestoreOuterRegs(p jitNestedPreservation) {
-	ctx.ReclaimUntrackedRegs()
 	for i, r := range p.regs {
 		ctx.EmitMovRegMem(r, RegRBP, p.offs[i])
 	}
@@ -976,6 +979,12 @@ func (ctx *JITContext) syncDescSpill(desc *JITValueDesc) {
 			desc.Reg3 = 0
 		}
 	}
+}
+
+// SyncDesc updates an aliased descriptor after allocator spills without
+// materializing stack-backed values into registers.
+func (ctx *JITContext) SyncDesc(desc *JITValueDesc) {
+	ctx.syncDescSpill(desc)
 }
 
 func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
@@ -1644,6 +1653,10 @@ func JITIntRem(a, b int64) int64 {
 // jitPanic forwards a JIT panic payload into Go panic handling.
 func jitPanic(v Scmer) {
 	panic(v)
+}
+
+func jitPanicString(message string) {
+	panic(message)
 }
 
 // JITPanic forwards panic payloads from cross-package JIT emitters.

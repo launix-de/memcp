@@ -29,7 +29,10 @@ var specialFormNames = make(map[*byte]string)
 // DeclareSpecialForm registers syntax as a normal global callable while
 // preserving its unevaluated-operand calling convention. Optimize and JIT
 // hooks live on def.Type just like they do for ordinary declarations.
-func DeclareSpecialForm(env *Env, def *Declaration, fn SpecialForm) {
+func DeclareSpecialForm(env *Env, def *Declaration, fn SpecialForm, jitEmit JITEmitter) {
+	def.SpecialForm = fn
+	def.IsSpecialForm = true
+	def.Type.JITEmit = jitEmit
 	Declare(env, def)
 	value := NewSpecialForm(fn)
 	env.Vars[Symbol(def.Name)] = value
@@ -37,20 +40,26 @@ func DeclareSpecialForm(env *Env, def *Declaration, fn SpecialForm) {
 }
 
 func registerSpecialForms() {
-	register := func(name string, fn SpecialForm) {
-		value := NewSpecialForm(fn)
-		Globalenv.Vars[Symbol(name)] = value
-		specialFormNames[value.ptr] = name
+	register := func(name string, fn SpecialForm, jitEmit JITEmitter) {
+		DeclareSpecialForm(&Globalenv, &Declaration{
+			Name: name,
+			Type: &TypeDescriptor{
+				Kind:      "func",
+				Forbidden: true,
+				Params:    []*TypeDescriptor{{Kind: "any", Variadic: true}},
+				Return:    &TypeDescriptor{Kind: "any"},
+			},
+		}, fn, jitEmit)
 	}
-	register("outer", nil)
-	register("setN", specialSetN)
-	register("parser", specialParser)
-	register("optimizer_proc_return", specialOptimizerProcReturn)
-	register("!list", specialBangList)
-	register("!!list", specialBangBangList)
-	register("match_mut", nil)
-	register("begin_mut", nil)
-	register("!begin", nil)
+	register("outer", nil, jitEmitSpecialOuter)
+	register("setN", specialSetN, jitEmitSpecialSetN)
+	register("parser", specialParser, jitEmitSpecialParser)
+	register("optimizer_proc_return", specialOptimizerProcReturn, jitEmitSpecialOptimizerProcReturn)
+	register("!list", specialBangList, jitEmitSpecialStackList)
+	register("!!list", specialBangBangList, jitEmitSpecialReservedList)
+	register("match_mut", nil, jitEmitSpecialMatch("match_mut"))
+	register("begin_mut", nil, jitEmitSpecialBegin(true, true))
+	register("!begin", nil, jitEmitSpecialBegin(false, false))
 }
 
 func specialFormName(value Scmer) string {

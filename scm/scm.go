@@ -947,7 +947,7 @@ func init() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 		},
-	}, specialQuote)
+	}, specialQuote, jitEmitSpecialQuote)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "eval",
 
@@ -958,7 +958,7 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	}, nil)
+	}, nil, jitEmitSpecialEval)
 	Declare(&Globalenv, &Declaration{
 		Name: "size",
 
@@ -1136,7 +1136,7 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	}, specialTime)
+	}, specialTime, jitEmitSpecialTime)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "if",
 
@@ -1147,11 +1147,12 @@ func init() {
 				{Kind: "returntype", Label: "true-branch...", Description: "code to evaluate if condition is true"},
 				{Kind: "any", Label: "false-branch", Description: "code to evaluate if condition is false", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "returntype"},
-			Const:  true,
+			Return:      &TypeDescriptor{Kind: "returntype"},
+			Const:       true,
+			JITEmitCond: jitEmitSpecialIfCond,
 		},
 		Optimize: optimizeIf,
-	}, nil)
+	}, nil, jitEmitSpecialIf)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "and",
 
@@ -1160,11 +1161,12 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "bool", Label: "condition", Description: "condition to evaluate", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "bool"},
-			Const:  true,
+			Return:      &TypeDescriptor{Kind: "bool"},
+			Const:       true,
+			JITEmitCond: jitEmitSpecialBoolFoldCond(false),
 		},
 		Optimize: optimizeAnd,
-	}, specialAnd)
+	}, specialAnd, jitEmitSpecialBoolFold(false))
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "or",
 
@@ -1173,11 +1175,12 @@ func init() {
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "condition", Description: "condition to evaluate", Variadic: true},
 			},
-			Return: &TypeDescriptor{Kind: "bool"},
-			Const:  true,
+			Return:      &TypeDescriptor{Kind: "bool"},
+			Const:       true,
+			JITEmitCond: jitEmitSpecialBoolFoldCond(true),
 		},
 		Optimize: optimizeOr,
-	}, specialOr)
+	}, specialOr, jitEmitSpecialBoolFold(true))
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "coalesce",
 
@@ -1190,7 +1193,7 @@ func init() {
 			Const:  true,
 		},
 		Optimize: optimizeCoalesce,
-	}, specialCoalesce)
+	}, specialCoalesce, jitEmitSpecialCoalesce(false))
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "coalesceNil",
 
@@ -1203,7 +1206,7 @@ func init() {
 			Const:  true,
 		},
 		Optimize: optimizeCoalesce,
-	}, specialCoalesceNil)
+	}, specialCoalesceNil, jitEmitSpecialCoalesce(true))
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "define",
 
@@ -1215,7 +1218,7 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
-	}, specialDefine)
+	}, specialDefine, jitEmitSpecialDefine)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "set",
 
@@ -1227,7 +1230,7 @@ func init() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 		},
-	}, specialDefine)
+	}, specialDefine, jitEmitSpecialDefine)
 
 	// basic
 	Declare(&Globalenv, &Declaration{
@@ -1971,7 +1974,7 @@ Patterns can be any of:
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 		},
-	}, nil)
+	}, nil, jitEmitSpecialMatch("match"))
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "lambda",
 
@@ -1988,7 +1991,7 @@ Patterns can be any of:
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value produced by code"},
 			},
 		},
-	}, specialLambda)
+	}, specialLambda, jitEmitSpecialLambda)
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "begin",
 
@@ -2000,7 +2003,7 @@ Patterns can be any of:
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	}, nil)
+	}, nil, jitEmitSpecialBegin(true, false))
 	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "parallel",
 
@@ -2012,7 +2015,7 @@ Patterns can be any of:
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 		},
-	}, specialParallel)
+	}, specialParallel, jitEmitSpecialParallel)
 	Declare(&Globalenv, &Declaration{
 		Name: "source",
 

@@ -441,7 +441,7 @@ func NewParser(syntax, generator, whitespace Scmer, en *Env, ignoreResult bool) 
 
 func init_parser() {
 	DeclareTitle("Parsers")
-	Declare(&Globalenv, &Declaration{
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "parser",
 
 		Fn: nil,
@@ -476,5 +476,5 @@ func init_parser() {
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value produced by the grammar generator"},
 			},
 		},
-	})
+	}, specialParser, jitEmitSpecialParser)
 }

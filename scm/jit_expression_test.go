@@ -175,6 +175,9 @@ func TestJITExpressionTransferredMergeStackList(t *testing.T) {
 }
 
 func TestJITExpressionConsTailOfSingleElementList(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
 	source := `(lambda (sources)
 		(match sources
 			(cons src rest) rest
