@@ -608,6 +608,27 @@ func optimizerLambdaParamReference(expr Scmer, params []Scmer, index int) bool {
 	return ok && scmerIsSymbol(expr, string(param))
 }
 
+// optimizerHoistStableOneLambdaLevel unwraps a stable value captured by the
+// reducer callback when a fused operator consumes it in the parent frame.
+func optimizerHoistStableOneLambdaLevel(expr Scmer) (Scmer, bool) {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if items, ok := scmerSlice(expr); ok {
+		if len(items) == 2 && scmerIsSymbol(items[0], "outer") && optimizerStableReference(expr) {
+			return items[1], true
+		}
+		if len(items) == 2 && scmerIsSymbol(items[0], "quote") {
+			return expr, true
+		}
+		return NewNil(), false
+	}
+	if expr.IsNil() || expr.IsBool() || expr.IsInt() || expr.IsFloat() || expr.IsString() {
+		return expr, true
+	}
+	return NewNil(), false
+}
+
 // optimizerNonNilPredicate recognizes the planner's exact (not (nil? value))
 // filter without analyzing the callback subtree again.
 func optimizerNonNilPredicate(expr Scmer) bool {
@@ -687,6 +708,18 @@ func optimizePlannerReduceFold(rv []Scmer, td *TypeDescriptor) (Scmer, *TypeDesc
 		candidate := bodyItems[2]
 		if len(bodyItems) > 3 {
 			candidate = NewSlice(append([]Scmer{bodyItems[0]}, bodyItems[2:]...))
+		}
+		if containsCall, ok := scmerSlice(candidate); ok && len(containsCall) == 3 &&
+			scmerIsSymbol(containsCall[0], "contains?") &&
+			optimizerLambdaParamReference(containsCall[2], params, 1) &&
+			!exprMayHaveSideEffects(containsCall[1]) {
+			if available, hoisted := optimizerHoistStableOneLambdaLevel(containsCall[1]); hoisted {
+				name := "list_contains_any"
+				if wantNeutral {
+					name = "list_contains_all"
+				}
+				return NewSlice([]Scmer{NewSymbol(name), rv[1], available}), &TypeDescriptor{Kind: "bool"}, true
+			}
 		}
 		callback, ok := optimizerLambdaWithBody(rv[2], candidate)
 		if !ok {
@@ -1081,6 +1114,60 @@ func (builder *orderedUniqueBuilder) result() []Scmer {
 	}
 	clear(pairs[length:])
 	return pairs[:length:length]
+}
+
+func (builder *orderedUniqueBuilder) contains(value Scmer) bool {
+	if builder.dict != nil {
+		if key, domain, ok := orderedUniqueCanonical(value); ok && domain == builder.hashDomain {
+			_, found := builder.dict.Get(key)
+			return found
+		}
+		for index := 1; index < len(builder.dict.Pairs); index += 2 {
+			if Equal(value, builder.dict.Pairs[index]) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, candidate := range builder.linear {
+		if Equal(value, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func listContainsFold(args []Scmer, requireAll bool) Scmer {
+	input := asSlice(args[0], "list membership fold")
+	if len(input) == 0 {
+		return NewBool(requireAll)
+	}
+	available := asSlice(args[1], "list membership fold available")
+	if len(available) < orderedUniqueHashThreshold || len(input)*len(available) < 64 {
+		for _, item := range input {
+			found := false
+			for _, candidate := range available {
+				if Equal(item, candidate) {
+					found = true
+					break
+				}
+			}
+			if found != requireAll {
+				return NewBool(!requireAll)
+			}
+		}
+		return NewBool(requireAll)
+	}
+	index := orderedUniqueBuilder{linear: make([]Scmer, 0, len(available))}
+	for _, candidate := range available {
+		index.add(candidate)
+	}
+	for _, item := range input {
+		if index.contains(item) != requireAll {
+			return NewBool(!requireAll)
+		}
+	}
+	return NewBool(requireAll)
 }
 
 func init_list() {
@@ -10755,6 +10842,36 @@ func init_list() {
 			Forbidden: true,
 
 			JITEmit: nil,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "list_contains_any",
+		Fn: func(a ...Scmer) Scmer {
+			return listContainsFold(a, false)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests whether two lists share a value (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "required", NoEscape: true},
+				{Kind: "list", Label: "available", NoEscape: true},
+			},
+			Return:    &TypeDescriptor{Kind: "bool"},
+			Const:     true,
+			Forbidden: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "list_contains_all",
+		Fn: func(a ...Scmer) Scmer {
+			return listContainsFold(a, true)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "tests whether one list contains every value from another (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "required", NoEscape: true},
+				{Kind: "list", Label: "available", NoEscape: true},
+			},
+			Return:    &TypeDescriptor{Kind: "bool"},
+			Const:     true,
+			Forbidden: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
