@@ -122,8 +122,9 @@ restart:
 		procedure := Eval(list[0], en) // resolve syntax, lambdas, and ordinary functions
 		switch procedure.GetTag() {
 		case tagSpecialForm:
-			switch procedure.SpecialFormName() {
-			case "outer":
+			dispatch := procedure.specialFormDispatch()
+			switch dispatch {
+			case specialFormOuter:
 				if en.Outer == nil {
 					return NewNil()
 				}
@@ -149,10 +150,10 @@ restart:
 				en = en.Outer
 				expression = operands[0]
 				goto restart
-			case "eval":
+			case specialFormEval:
 				expression = Eval(operands[0], en)
 				goto restart
-			case "if":
+			case specialFormIf:
 				i := 0
 				for i+1 < len(operands) {
 					if Eval(operands[i], en).Bool() {
@@ -166,11 +167,11 @@ restart:
 					goto restart
 				}
 				return NewNil()
-			case "match", "match_mut":
+			case specialFormMatch, specialFormMatchMut:
 				matchedValue := Eval(operands[0], en)
 				matchEnv := Env{VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: true}
 				i := 1
-				mutable := procedure.SpecialFormName() == "match_mut"
+				mutable := dispatch == specialFormMatchMut
 				for i < len(operands)-1 {
 					if match(matchedValue, operands[i], &matchEnv, mutable) {
 						en = &matchEnv
@@ -184,7 +185,7 @@ restart:
 					goto restart
 				}
 				return NewNil()
-			case "begin":
+			case specialFormBegin:
 				beginEnv := &Env{Vars: make(Vars), VarsNumbered: en.VarsNumbered, Outer: en, Nodefine: false}
 				for _, form := range operands[:len(operands)-1] {
 					Eval(form, beginEnv)
@@ -192,7 +193,7 @@ restart:
 				en = beginEnv
 				expression = operands[len(operands)-1]
 				goto restart
-			case "begin_mut":
+			case specialFormBeginMut:
 				reserve := 0
 				if len(operands) > 0 {
 					reserve = int(ToInt(Eval(operands[0], en)))
@@ -212,7 +213,7 @@ restart:
 				en = beginEnv
 				expression = operands[len(operands)-1]
 				goto restart
-			case "!begin":
+			case specialFormBangBegin:
 				for _, form := range operands[:len(operands)-1] {
 					Eval(form, en)
 				}

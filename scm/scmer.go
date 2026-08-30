@@ -347,10 +347,10 @@ func NewAny(v any) Scmer {
 // SpecialForm executes syntax whose operands must not be evaluated eagerly.
 type SpecialForm func(code []Scmer, en *Env) Scmer
 
-func NewSpecialForm(fn SpecialForm) Scmer {
+func NewSpecialForm(fn SpecialForm, dispatch specialFormDispatch) Scmer {
 	value := new(SpecialForm)
 	*value = fn
-	return Scmer{(*byte)(unsafe.Pointer(value)), makeAux(tagSpecialForm, 0)}
+	return Scmer{(*byte)(unsafe.Pointer(value)), makeAux(tagSpecialForm, uint64(dispatch))}
 }
 
 func NewRegex(re *regexp.Regexp) Scmer {
@@ -937,6 +937,13 @@ func (s Scmer) SpecialForm() SpecialForm {
 		panic("not special form")
 	}
 	return *(*SpecialForm)(unsafe.Pointer(s.ptr))
+}
+
+func (s Scmer) specialFormDispatch() specialFormDispatch {
+	if s.GetTag() != tagSpecialForm {
+		panic("not special form")
+	}
+	return specialFormDispatch(auxVal(s.aux))
 }
 
 func (s Scmer) SpecialFormName() string {

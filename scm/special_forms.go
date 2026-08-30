@@ -26,6 +26,47 @@ import (
 
 var specialFormNames = make(map[*byte]string)
 
+// specialFormDispatch identifies the few syntax forms whose tail calls must
+// remain inside Eval. All other forms use their declared callback directly.
+// Keeping this discriminator in Scmer.aux avoids consulting the reverse-name
+// map in the interpreter hot path.
+type specialFormDispatch uint8
+
+const (
+	specialFormCall specialFormDispatch = iota
+	specialFormOuter
+	specialFormEval
+	specialFormIf
+	specialFormMatch
+	specialFormMatchMut
+	specialFormBegin
+	specialFormBeginMut
+	specialFormBangBegin
+)
+
+func specialFormDispatchForName(name string) specialFormDispatch {
+	switch name {
+	case "outer":
+		return specialFormOuter
+	case "eval":
+		return specialFormEval
+	case "if":
+		return specialFormIf
+	case "match":
+		return specialFormMatch
+	case "match_mut":
+		return specialFormMatchMut
+	case "begin":
+		return specialFormBegin
+	case "begin_mut":
+		return specialFormBeginMut
+	case "!begin":
+		return specialFormBangBegin
+	default:
+		return specialFormCall
+	}
+}
+
 // DeclareSpecialForm registers syntax as a normal global callable while
 // preserving its unevaluated-operand calling convention. Optimize and JIT
 // hooks live on def.Type just like they do for ordinary declarations.
@@ -34,7 +75,7 @@ func DeclareSpecialForm(env *Env, def *Declaration, fn SpecialForm, jitEmit JITE
 	def.IsSpecialForm = true
 	def.Type.JITEmit = jitEmit
 	Declare(env, def)
-	value := NewSpecialForm(fn)
+	value := NewSpecialForm(fn, specialFormDispatchForName(def.Name))
 	env.Vars[Symbol(def.Name)] = value
 	specialFormNames[value.ptr] = def.Name
 }
