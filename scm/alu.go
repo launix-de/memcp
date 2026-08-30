@@ -856,9 +856,8 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value...", Description: "values to add", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "number"},
-			Const:    true,
-			Optimize: optimizeAssociative,
+			Return: &TypeDescriptor{Kind: "number"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d6 JITValueDesc
@@ -4218,6 +4217,7 @@ func init_alu() {
 				return result
 			},
 		},
+		Optimize: optimizeAssociative,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sql_sum_reduce",
@@ -14362,9 +14362,8 @@ func init_alu() {
 			Params: []*TypeDescriptor{
 				{Kind: "number", Label: "value...", Description: "values", Variadic: true},
 			},
-			Return:   &TypeDescriptor{Kind: "number"},
-			Const:    true,
-			Optimize: optimizeAssociative,
+			Return: &TypeDescriptor{Kind: "number"},
+			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				var d7 JITValueDesc
@@ -21218,6 +21217,7 @@ func init_alu() {
 				return result
 			},
 		},
+		Optimize: optimizeAssociative,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "/",

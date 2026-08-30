@@ -1701,8 +1701,8 @@ func declareScanJoinOrder(en *scm.Env) {
 				{Kind: "any", Label: "notFoundValue", Description: "optional result when no joined row is emitted", Optional: true},
 				{Kind: "bool", Label: "batchedProbe", Description: "probe inner equality indexes from growing ordered-driver batches instead of materializing inner inputs", Optional: true},
 			},
-			Return:   &scm.TypeDescriptor{Kind: "any"},
-			Optimize: optimizeScanJoinOrder,
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
+		Optimize: optimizeScanJoinOrder,
 	})
 }

@@ -1074,7 +1074,7 @@ func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bo
 		if lambdaDepth == 0 && len(items) > 1 {
 			consumesFirst := scmerIsSymbol(items[0], "match") || scmerIsSymbol(items[0], "match_mut")
 			if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.Type != nil {
-				consumesFirst = consumesFirst || declaration.Type.OptimizeFirstArgTransfer
+				consumesFirst = consumesFirst || declaration.OptimizeFirstArgTransfer
 			}
 			if consumesFirst {
 				mask := procOwnershipParameterMask(items[1], paramCount)
@@ -2080,9 +2080,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		return OptimizeParser(NewSlice(v), env, ome, false), tiTransfer
 	case !headOk || headSym != Symbol("quote"):
 		// Look up declaration for hook dispatch
-		if callDecl := DeclarationForValue(v[0]); callDecl != nil && callDecl.Type != nil && callDecl.Type.Optimize != nil {
+		if callDecl := DeclarationForValue(v[0]); callDecl != nil && callDecl.Optimize != nil {
 			oc := &OptimizerContext{Env: env, Ome: ome}
-			result, td := callDecl.Type.Optimize(v, oc, useResult)
+			result, td := callDecl.Optimize(v, oc, useResult)
 			return result, TypeInfoFromTD(td)
 		}
 		// Default optimization path

@@ -757,15 +757,15 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "table"},
-			Optimize: func(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-				// Do NOT fold to a constant pointer — DDL (DROP/CREATE TABLE)
-				// invalidates the pointer and cached query plans would reference
-				// a stale table. Runtime evaluation via GetTable is lock-free.
-				for i := 1; i < len(v); i++ {
-					v[i], _ = oc.OptimizeSub(v[i], true)
-				}
-				return scm.NewSlice(v), nil
-			},
+		},
+		Optimize: func(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+			// Do NOT fold to a constant pointer — DDL (DROP/CREATE TABLE)
+			// invalidates the pointer and cached query plans would reference
+			// a stale table. Runtime evaluation via GetTable is lock-free.
+			for i := 1; i < len(v); i++ {
+				v[i], _ = oc.OptimizeSub(v[i], true)
+			}
+			return scm.NewSlice(v), nil
 		},
 	})
 
@@ -1254,9 +1254,9 @@ func Init(en scm.Env) {
 				reducer("reduce2", "optional final reducer that combines the neutral value with the result produced by reduce"),
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
-			Return:   &scm.TypeDescriptor{Kind: "any"},
-			Optimize: optimizeScan,
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
+		Optimize: optimizeScan,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_batch",
@@ -1373,9 +1373,9 @@ func Init(en scm.Env) {
 				reducer("reduce2", "optional final reducer that combines the neutral value with the result produced by reduce"),
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
-			Return:   &scm.TypeDescriptor{Kind: "any"},
-			Optimize: optimizeScanBatch,
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
+		Optimize: optimizeScanBatch,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_batch_accept",
@@ -1435,9 +1435,9 @@ func Init(en scm.Env) {
 				{Kind: "bool", Label: "isOuter", Description: "optional scan_order-compatible outer behavior: map one NULL row when no accepted row reaches map", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "optional result when no accepted row reaches map and isOuter is false; defaults to neutral", Optional: true},
 			},
-			Return:   &scm.TypeDescriptor{Kind: "any"},
-			Optimize: optimizeScanOrderBatchAccept,
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
+		Optimize: optimizeScanOrderBatchAccept,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order",
@@ -1623,9 +1623,9 @@ func Init(en scm.Env) {
 					return value
 				}(),
 			},
-			Return:   &scm.TypeDescriptor{Kind: "any"},
-			Optimize: optimizeScanOrder,
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
+		Optimize: optimizeScanOrder,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_order_multi",
@@ -1727,9 +1727,9 @@ func Init(en scm.Env) {
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, emit null row when no hits", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
 			},
-			Return:   &scm.TypeDescriptor{Kind: "any"},
-			Optimize: optimizeScanOrderMulti,
+			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
+		Optimize: optimizeScanOrderMulti,
 	})
 	declareScanJoinOrder(&en)
 	scm.Declare(&en, &scm.Declaration{
