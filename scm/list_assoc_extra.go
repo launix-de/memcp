@@ -41,9 +41,10 @@ func init_list_assoc_extra() {
 				{Kind: "list", Label: "dict", Description: "dictionary whose keys have to be mapped", NoEscape: true},
 				{Kind: "func", Label: "map", Description: "computes a replacement key for each dictionary entry", Params: []*TypeDescriptor{{Kind: "string", Label: "key", Description: "existing key"}, {Kind: "any", Label: "value", Description: "entry value"}}, Return: &TypeDescriptor{Kind: "any", Label: "new_key", Description: "replacement key"}},
 			},
-			Return:   FreshAlloc,
-			Const:    true,
-			Optimize: FirstParameterMutable("mapkey_assoc_mut"),
+			Return:                   FreshAlloc,
+			Const:                    true,
+			Optimize:                 FirstParameterMutable("mapkey_assoc_mut"),
+			OptimizeFirstArgTransfer: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{

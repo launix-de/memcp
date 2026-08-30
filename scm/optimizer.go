@@ -347,21 +347,25 @@ type optimizerRewriteState struct {
 const defaultOptimizerRewriteBudget = 64
 
 type optimizerMetainfo struct {
-	variableReplacement   map[Symbol]Scmer
-	variableTypes         map[Symbol]*TypeDescriptor
-	numberedTypes         map[NthLocalVar]*TypeDescriptor
-	setBlacklist          []Symbol
-	nextSlot              *int // pointer to lambda's slot counter; nil outside lambda
-	pendingCallbackParams []*TypeDescriptor
-	pendingCallbackReturn *TypeDescriptor // structured escape information for the next lambda result
-	loopDepth             int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
-	lambdaDepth           int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
-	beginDepth            int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
-	inlineDepth           int
-	inlineStack           map[Symbol]bool
-	rewrite               *optimizerRewriteState
-	captureArgumentTypes  bool
-	argumentTypes         []TypeInfo
+	variableReplacement     map[Symbol]Scmer
+	variableTypes           map[Symbol]*TypeDescriptor
+	numberedTypes           map[NthLocalVar]*TypeDescriptor
+	setBlacklist            []Symbol
+	nextSlot                *int // pointer to lambda's slot counter; nil outside lambda
+	pendingCallbackParams   []*TypeDescriptor
+	pendingCallbackReturn   *TypeDescriptor // structured escape information for the next lambda result
+	loopDepth               int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
+	lambdaDepth             int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
+	beginDepth              int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
+	inlineDepth             int
+	inlineStack             map[Symbol]bool
+	specializationStack     map[procSpecializationStackKey]bool
+	specializationParamMask procSpecializationKey
+	specializationDepth     int
+	specializationUsed      *bool
+	rewrite                 *optimizerRewriteState
+	captureArgumentTypes    bool
+	argumentTypes           []TypeInfo
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -770,6 +774,10 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.specializationStack = ome.specializationStack
+	result.specializationParamMask = ome.specializationParamMask
+	result.specializationDepth = ome.specializationDepth
+	result.specializationUsed = ome.specializationUsed
 	result.rewrite = ome.rewrite
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
@@ -796,6 +804,10 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.beginDepth = ome.beginDepth
 	result.inlineDepth = ome.inlineDepth
 	result.inlineStack = ome.inlineStack
+	result.specializationStack = ome.specializationStack
+	result.specializationParamMask = ome.specializationParamMask
+	result.specializationDepth = ome.specializationDepth
+	result.specializationUsed = ome.specializationUsed
 	result.rewrite = ome.rewrite
 	return
 }
@@ -992,6 +1004,251 @@ func tryInlineLeafProc(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bo
 	ome.inlineDepth--
 	delete(ome.inlineStack, callee)
 	return result, ti, true
+}
+
+type procSpecializationStackKey struct {
+	meta *ProcOptimizerMeta
+	key  procSpecializationKey
+}
+
+func markProcOwnershipSpecializationUse(ome *optimizerMetainfo, expr Scmer) {
+	if ome.specializationUsed == nil || ome.lambdaDepth != ome.specializationDepth {
+		return
+	}
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if !expr.IsNthLocalVar() {
+		return
+	}
+	idx := uint(expr.NthLocalVar())
+	if idx < 64 && ome.specializationParamMask&(1<<idx) != 0 {
+		*ome.specializationUsed = true
+	}
+}
+
+func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bool) {
+	uses := make([]int, paramCount)
+	captured := make([]bool, paramCount)
+	consumed := make([]bool, paramCount)
+	var visit func(Scmer, int, bool)
+	visit = func(current Scmer, lambdaDepth int, throughOuter bool) {
+		if stripped, ok := scmerStripSourceInfo(current); ok {
+			current = stripped
+		}
+		if current.IsNthLocalVar() {
+			idx := int(current.NthLocalVar())
+			if idx >= 0 && idx < paramCount && (lambdaDepth == 0 || throughOuter) {
+				uses[idx]++
+				if lambdaDepth > 0 {
+					captured[idx] = true
+				}
+			}
+			return
+		}
+		items, ok := scmerSlice(current)
+		if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+			return
+		}
+		if lambdaDepth == 0 && len(items) > 1 {
+			consumesFirst := scmerIsSymbol(items[0], "match") || scmerIsSymbol(items[0], "match_mut")
+			if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.Type != nil {
+				consumesFirst = consumesFirst || declaration.Type.OptimizeFirstArgTransfer
+			}
+			first := items[1]
+			if stripped, strippedOK := scmerStripSourceInfo(first); strippedOK {
+				first = stripped
+			}
+			if consumesFirst && first.IsNthLocalVar() {
+				idx := int(first.NthLocalVar())
+				if idx >= 0 && idx < paramCount {
+					consumed[idx] = true
+				}
+			}
+		}
+		if scmerIsSymbol(items[0], "lambda") {
+			if len(items) > 2 {
+				visit(items[2], lambdaDepth+1, false)
+			}
+			return
+		}
+		if scmerIsSymbol(items[0], "outer") {
+			for _, item := range items[1:] {
+				visit(item, lambdaDepth, true)
+			}
+			return
+		}
+		for _, item := range items {
+			visit(item, lambdaDepth, throughOuter)
+		}
+	}
+	visit(expr, 0, false)
+	return uses, captured, consumed
+}
+
+func procOwnershipSpecializationKey(proc *Proc, argTypes []TypeInfo) (procSpecializationKey, bool) {
+	params, ok := scmerSlice(proc.Params)
+	if !ok || len(params) == 0 || len(params) > 64 || proc.NumVars < len(params) {
+		return 0, false
+	}
+	var candidates procSpecializationKey
+	for i := range params {
+		argIndex := i + 1
+		if argIndex >= len(argTypes) {
+			continue
+		}
+		argType := argTypes[argIndex]
+		// Transfer on scalar values only describes a fresh result; there is no
+		// mutable ownership for the callee to consume. Specializing those values
+		// would turn transient scalar type facts into an invalid calling contract.
+		mutableKind := argType.Kind() == KindList || argType.Kind() == KindAssoc
+		if !mutableKind || !argType.Transfer() || argType.Const() {
+			continue
+		}
+		candidates |= 1 << uint(i)
+	}
+	if candidates == 0 {
+		return 0, false
+	}
+	uses, captured, consumed := procParameterOwnershipUses(proc.Body, len(params))
+	var key procSpecializationKey
+	for i := range params {
+		if candidates&(1<<uint(i)) == 0 {
+			continue
+		}
+		// Transfer is linear. A specialized body may consume a parameter only
+		// when that Proc frame has exactly one non-captured use of the value.
+		if uses[i] == 1 && !captured[i] && consumed[i] {
+			key |= 1 << uint(i)
+		}
+	}
+	return key, key != 0
+}
+
+func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, stack map[procSpecializationStackKey]bool) Scmer {
+	paramsValue := proc.Params
+	if stripped, ok := scmerStripSourceInfo(paramsValue); ok {
+		paramsValue = stripped
+	}
+	params := paramsValue.Slice()
+	paramTypes := make([]*TypeDescriptor, len(params))
+	for i := range params {
+		paramTypes[i] = &TypeDescriptor{Kind: "any", Length: UnknownLength}
+		if key&(1<<uint(i)) != 0 {
+			paramTypes[i].Transfer = true
+		}
+	}
+	lambda := []Scmer{
+		NewSymbol("lambda"),
+		CloneOptimizerExpression(proc.Params),
+		DeoptimizeExpr(CloneOptimizerExpression(proc.Body)),
+	}
+	if proc.NumVars > 0 {
+		lambda = append(lambda, NewInt(int64(proc.NumVars)))
+	}
+	meta := newOptimizerMetainfo()
+	used := false
+	meta.pendingCallbackParams = paramTypes
+	meta.specializationStack = stack
+	meta.specializationParamMask = key
+	meta.specializationDepth = meta.lambdaDepth + 1
+	meta.specializationUsed = &used
+	optimized, _ := OptimizeEx(NewSlice(lambda), proc.En, &meta, true)
+	parts, ok := scmerSlice(optimized)
+	if !ok || len(parts) < 3 || !scmerIsSymbol(parts[0], "lambda") {
+		return NewNil()
+	}
+	specialized := *proc
+	specialized.Params = parts[1]
+	specialized.Body = parts[2]
+	if len(parts) > 3 {
+		specialized.NumVars = int(ToInt(parts[3]))
+	}
+	specialized.NumberedOnly = procCanUseNumberedOnly(specialized.Params, specialized.Body, specialized.NumVars)
+	// A fresh argument alone is not sufficient reason to replace a named call
+	// with an anonymous Proc literal. Publish a variant only when an ownership-
+	// aware rewrite actually consumes one of the specialized parameters.
+	if !used {
+		return NewNil()
+	}
+	// Machine code belongs to the exact optimized body. Never inherit the
+	// generic Proc's entry point when publishing a specialized body.
+	specialized.Compiled = nil
+	specialized.OptimizerMeta = &ProcOptimizerMeta{
+		Return:    proc.OptimizerMeta.Return,
+		HasReturn: proc.OptimizerMeta.HasReturn,
+	}
+	variant := NewProcStruct(specialized)
+	if proc.Compiled != nil {
+		variant = jitCompileMode(proc.Compiled.RecursiveLambdas, variant)
+	}
+	return variant
+}
+
+func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimizerMetainfo) (Scmer, bool) {
+	if len(v) < 2 {
+		return NewNil(), false
+	}
+	hasTransferCandidate := false
+	for _, argType := range argTypes[1:] {
+		mutableKind := argType.Kind() == KindList || argType.Kind() == KindAssoc
+		if mutableKind && argType.Transfer() && !argType.Const() {
+			hasTransferCandidate = true
+			break
+		}
+	}
+	if !hasTransferCandidate {
+		return NewNil(), false
+	}
+	callee, ok := scmerSymbol(v[0])
+	if !ok {
+		return NewNil(), false
+	}
+	owner := env.FindRead(callee)
+	if owner == nil {
+		return NewNil(), false
+	}
+	value, exists := owner.Vars[callee]
+	if !exists || !value.IsProc() {
+		return NewNil(), false
+	}
+	proc := value.Proc()
+	if proc == nil || proc.En == nil || proc.OptimizerMeta == nil {
+		return NewNil(), false
+	}
+	key, ok := procOwnershipSpecializationKey(proc, argTypes)
+	if !ok {
+		return NewNil(), false
+	}
+	stackKey := procSpecializationStackKey{meta: proc.OptimizerMeta, key: key}
+	if ome.specializationStack != nil && ome.specializationStack[stackKey] {
+		return NewNil(), false
+	}
+	if variant, exists := proc.OptimizerMeta.specialization(key); exists {
+		return variant, true
+	}
+	if proc.OptimizerMeta.specializationRejected(key) {
+		return NewNil(), false
+	}
+	build, compile := proc.OptimizerMeta.beginSpecialization(key)
+	if !compile {
+		if build != nil {
+			<-build.done
+		}
+		variant, exists := proc.OptimizerMeta.specialization(key)
+		return variant, exists
+	}
+	if ome.specializationStack == nil {
+		ome.specializationStack = make(map[procSpecializationStackKey]bool)
+	}
+	ome.specializationStack[stackKey] = true
+	variant := NewNil()
+	defer func() {
+		delete(ome.specializationStack, stackKey)
+		proc.OptimizerMeta.finishSpecialization(key, variant)
+	}()
+	variant = buildProcOwnershipSpecialization(proc, key, ome.specializationStack)
+	return variant, variant.IsProc()
 }
 
 func scmerIsSymbol(v Scmer, name string) bool {
@@ -1738,12 +1995,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if stripped, ok := scmerStripSourceInfo(rhs); ok {
 				rhs = stripped
 			}
-			if items, ok := scmerSlice(rhs); ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda") && returnType.Kind() != KindAny {
+			if items, ok := scmerSlice(rhs); ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda") {
+				hasReturn := returnType.Kind() != KindAny
 				procReturn := immutableTypeInfo(returnType.WithoutConst())
 				v[2] = NewSlice([]Scmer{
 					NewSymbol("optimizer_proc_return"),
 					v[2],
-					NewAny(optimizerProcReturnTemplate{Return: procReturn}),
+					NewAny(optimizerProcReturnTemplate{Return: procReturn, HasReturn: hasReturn}),
 				})
 			}
 		}
@@ -1752,6 +2010,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		v[1] = value
 		transferOwnership = valueTransfer
 		if headSym == Symbol("match") && valueTransfer {
+			markProcOwnershipSpecializationUse(ome, v[1])
 			v[0] = NewSymbol("match_mut")
 		}
 		for i := 3; i < len(v); i += 2 {
@@ -2051,6 +2310,9 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		if inlined, ti, ok := tryInlineLeafProc(v, env, ome, useResult); ok {
 			return inlined, ti.ToTypeDescriptor()
 		}
+		if specialized, ok := trySpecializeProcCall(v, argTypes, env, ome); ok {
+			v[0] = specialized
+		}
 	}
 
 	// _mut swap: when mutName is set and first arg is exclusively owned,
@@ -2077,6 +2339,7 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			}
 		}
 		if firstArgFresh && len(v) >= 2 {
+			markProcOwnershipSpecializationUse(ome, v[1])
 			v[0] = NewSymbol(mutName)
 			transferOwnership = true
 			firstArgTransferred = true
@@ -2171,7 +2434,10 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 	}
 	if retTD == nil {
-		if sym, ok := scmerSymbol(v[0]); ok {
+		if v[0].IsProc() && v[0].Proc().OptimizerMeta != nil && v[0].Proc().OptimizerMeta.HasReturn {
+			procReturn = v[0].Proc().OptimizerMeta.Return
+			hasProcReturn = true
+		} else if sym, ok := scmerSymbol(v[0]); ok {
 			if ti, exists := env.optimizerProcHint(sym); exists {
 				procReturn = ti
 				hasProcReturn = true

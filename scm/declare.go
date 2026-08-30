@@ -78,7 +78,8 @@ type TypeDescriptor struct {
 	Element        *TypeDescriptor            // for Kind="list": element type
 	// Custom optimizer hook for function types. When set, the optimizer calls this
 	// INSTEAD of the default arg optimization + post-processing.
-	Optimize func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
+	Optimize                 func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
+	OptimizeFirstArgTransfer bool // the hook can consume ownership of its first argument
 	// Optional JIT emitter for native code generation.
 	JITEmit func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
 	// JITVirtualArgs lets an emitter consume the caller's argument array as SSA

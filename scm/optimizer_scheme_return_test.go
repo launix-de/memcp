@@ -147,8 +147,11 @@ func TestSchemeHelperReturnMetadataSurvivesReoptimizationAndProcCopies(t *testin
 
 	bound := env.Vars[Symbol("copied_pair")]
 	closed := CloseProcedure(bound)
-	if bound.Proc().OptimizerMeta == nil || closed.Proc().OptimizerMeta != bound.Proc().OptimizerMeta {
-		t.Fatal("procedure copy did not preserve optimizer metadata identity")
+	if bound.Proc().OptimizerMeta == nil || closed.Proc().OptimizerMeta == bound.Proc().OptimizerMeta {
+		t.Fatal("closed procedure reused specialization metadata for a changed body/environment")
+	}
+	if closed.Proc().OptimizerMeta.Return.Length() != bound.Proc().OptimizerMeta.Return.Length() {
+		t.Fatal("closed procedure did not preserve immutable return metadata")
 	}
 }
 
@@ -158,7 +161,7 @@ func TestProcComputeSizeIncludesOptimizerMetadata(t *testing.T) {
 	typed.OptimizerMeta = &ProcOptimizerMeta{Return: TypeInfoFromTD(&TypeDescriptor{
 		Kind: "list",
 		Keys: map[string]*TypeDescriptor{"0": {Kind: "int"}},
-	})}
+	}), HasReturn: true}
 	if ComputeSize(NewProcStruct(typed)) <= ComputeSize(plain) {
 		t.Fatal("procedure size does not include optimizer metadata")
 	}
@@ -199,6 +202,131 @@ func TestSchemeHelperSharedReturnStaysImmutable(t *testing.T) {
 	Eval(optimized, env)
 	if got := env.FindRead("shared_pair").Vars["shared_pair"]; len(got.Slice()) != 2 {
 		t.Fatalf("shared helper result was mutated: %s", String(got))
+	}
+}
+
+func TestProcOwnershipSpecializationPublishesFullProc(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("proc specialization test", `(define specialize_append_unique (lambda (values)
+		(append_unique values 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)))`, env)
+	base := env.Vars[Symbol("specialize_append_unique")].Proc()
+	genericEntry := &JITEntryPoint{}
+	base.Compiled = genericEntry
+
+	optimized := optimizeTestSource(t, env, `(lambda (value)
+		(specialize_append_unique (list value)))`)
+	parts := optimized.Slice()
+	call := parts[2].Slice()
+	if !call[0].IsProc() {
+		t.Fatalf("specialized call head is not a Proc: %s", serializedTestExpr(t, env, optimized))
+	}
+	variant := call[0].Proc()
+	if variant == base || variant.OptimizerMeta == base.OptimizerMeta {
+		t.Fatal("specialized Proc did not receive an independent full Proc identity")
+	}
+	if variant.Compiled == genericEntry {
+		t.Fatal("specialized Proc inherited machine code for the generic body")
+	}
+	if serialized := serializedTestExpr(t, env, variant.Body); !strings.Contains(serialized, "append_unique_mut") {
+		t.Fatalf("specialized Proc body did not consume its transferred parameter: %s", serialized)
+	}
+	cached, exists := base.OptimizerMeta.specialization(1)
+	if !exists || cached != call[0] {
+		t.Fatal("base Proc did not retain the published Proc specialization")
+	}
+	got := Apply(Eval(optimized, env), NewInt(0))
+	if got.Slice()[0].Int() != 0 || len(got.Slice()) != 26 {
+		t.Fatalf("specialized Proc returned %s", String(got))
+	}
+}
+
+func TestProcOwnershipSpecializationRequiresLinearParameterUse(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("proc specialization test", `(define specialize_shared_twice (lambda (values)
+		(list
+			(append_unique values 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)
+			values)))`, env)
+
+	optimized := optimizeTestSource(t, env, `(lambda (value)
+		(specialize_shared_twice (list value)))`)
+	call := optimized.Slice()[2].Slice()
+	if call[0].IsProc() {
+		t.Fatalf("non-linear parameter received an ownership specialization: %s", serializedTestExpr(t, env, optimized))
+	}
+	got := Apply(Eval(optimized, env), NewInt(0)).Slice()
+	if len(got) != 2 || len(got[0].Slice()) != 26 || !Equal(got[1], NewSlice([]Scmer{NewInt(0)})) {
+		t.Fatalf("generic helper semantics changed: %s", String(NewSlice(got)))
+	}
+}
+
+func TestProcOwnershipSpecializationSkipsUnusedTransferFact(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("proc specialization test", `(define specialize_read_only (lambda (values)
+		(list 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 (car values))))`, env)
+	base := env.Vars[Symbol("specialize_read_only")].Proc()
+
+	optimized := optimizeTestSource(t, env, `(lambda (value)
+		(specialize_read_only (list value)))`)
+	call := optimized.Slice()[2].Slice()
+	if call[0].IsProc() {
+		t.Fatalf("read-only transfer fact replaced the named call: %s", serializedTestExpr(t, env, optimized))
+	}
+	snapshot := base.OptimizerMeta.specializations.Load()
+	if snapshot != nil {
+		t.Fatal("read-only transfer fact reached the specialization cache")
+	}
+	optimized = optimizeTestSource(t, env, `(lambda (value)
+		(specialize_read_only (list value)))`)
+	if base.OptimizerMeta.specializations.Load() != snapshot {
+		t.Fatal("read-only transfer fact triggered specialization work")
+	}
+	got := Apply(Eval(optimized, env), NewInt(0)).Slice()
+	if len(got) != 26 || got[25].Int() != 0 {
+		t.Fatalf("read-only helper returned %s", String(NewSlice(got)))
+	}
+}
+
+func TestConcurrentProcOwnershipSpecializationPublishesOneProc(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("proc specialization test", `(define specialize_concurrently (lambda (values)
+		(append_unique values 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25)))`, env)
+	base := env.Vars[Symbol("specialize_concurrently")].Proc()
+	call := []Scmer{NewSymbol("specialize_concurrently"), NewSymbol("fresh")}
+	argTypes := []TypeInfo{tiZero, tiTransfer.WithKind(KindList)}
+
+	const workers = 16
+	variants := make(chan Scmer, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			meta := newOptimizerMetainfo()
+			variant, ok := trySpecializeProcCall(call, argTypes, env, &meta)
+			if !ok {
+				variants <- NewNil()
+				return
+			}
+			variants <- variant
+		}()
+	}
+	wg.Wait()
+	close(variants)
+
+	var published Scmer
+	for variant := range variants {
+		if !variant.IsProc() {
+			t.Fatal("concurrent specialization did not return a Proc")
+		}
+		if published.IsNil() {
+			published = variant
+		} else if variant != published {
+			t.Fatal("concurrent specialization published multiple Proc identities")
+		}
+	}
+	snapshot := base.OptimizerMeta.specializations.Load()
+	if snapshot == nil || len(snapshot.variants) != 1 || snapshot.variants[1] != published {
+		t.Fatal("concurrent specialization cache does not contain exactly the published Proc")
 	}
 }
 
