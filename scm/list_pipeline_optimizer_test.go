@@ -308,6 +308,109 @@ func TestOptimizeFusesReduceOverMapThenFilter(t *testing.T) {
 	}
 }
 
+func TestOptimizeFusesPipelineThroughSingleUseDefines(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(begin
+			(define mapped (map values (lambda (value) (* value 2))))
+			(define filtered (filter mapped (lambda (value) (> value 2))))
+			(reduce filtered (lambda (total value) (+ total value)) 0)))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "reduce_map_filter") {
+		t.Fatalf("single-use define pipeline was not fused: %s", serialized)
+	}
+	if strings.Contains(serialized, "setN") {
+		t.Fatalf("fused single-use pipeline retained local slots: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewInt(10)
+	if !Equal(got, want) {
+		t.Fatalf("fused single-use define pipeline returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeKeepsCapturedSingleUseDefine(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(begin
+			(define mapped (map values (lambda (value) (* value 2))))
+			(define consume (lambda () (reduce mapped (lambda (total value) (+ total value)) 0)))
+			(consume)))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if strings.Contains(serialized, "reduce_map") {
+		t.Fatalf("captured single-use define was fused across its lambda boundary: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewInt(12)
+	if !Equal(got, want) {
+		t.Fatalf("captured single-use define returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeKeepsSingleUseDefineWithEval(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(begin
+			(define mapped (map values (lambda (value) (* value 2))))
+			(eval (quote mapped))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "define mapped") {
+		t.Fatalf("eval-visible define was removed: %s", serialized)
+	}
+}
+
+func TestOptimizeKeepsSingleUseDefineAcrossSequenceBoundary(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (values)
+		(begin
+			(define mapped (map values (lambda (value) (* value 2))))
+			(context "check")
+			(reduce mapped (lambda (total value) (+ total value)) 0)))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "setN") || strings.Contains(serialized, "reduce_map") {
+		t.Fatalf("single-use define crossed a sequence boundary: %s", serialized)
+	}
+}
+
+func TestOptimizeKeepsSingleUseProducerWhoseCallbackCapturesFrame(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (factor values)
+		(begin
+			(define mapped (map values (lambda (value) (* value factor))))
+			(reduce mapped (lambda (total value) (+ total value)) 0)))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "setN") || strings.Contains(serialized, "reduce_map") {
+		t.Fatalf("producer callback escaped its numbered frame: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewInt(3), NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewInt(18)
+	if !Equal(got, want) {
+		t.Fatalf("capturing producer returned %s, want %s", String(got), String(want))
+	}
+}
+
+func BenchmarkSingleUseDefinedPipeline(b *testing.B) {
+	values := make([]Scmer, 128)
+	for i := range values {
+		values[i] = NewInt(int64(i + 1))
+	}
+	input := NewSlice(values)
+	optimized, env := optimizeListPipeline(b, `(lambda (values)
+		(begin
+			(define mapped (map values (lambda (value) (* value 2))))
+			(define filtered (filter mapped (lambda (value) (> value 64))))
+			(reduce filtered (lambda (total value) (+ total value)) 0)))`)
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := fn(input); got.Int() != 15456 {
+			b.Fatalf("single-use pipeline returned %s", String(got))
+		}
+	}
+}
+
 func TestOptimizeFusesMergeUniqueOverMapOfLists(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (values)
 		(merge_unique (map values (lambda (value) (list (+ value 1))))))`)

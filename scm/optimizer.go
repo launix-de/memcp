@@ -1551,12 +1551,31 @@ func canEliminateFromBegin(val Scmer) bool {
 }
 
 type localBindingFacts struct {
-	defineIdx int
-	firstUse  int
-	count     int
-	useCount  int
-	used      bool
-	captured  bool
+	defineIdx        int
+	firstUse         int
+	count            int
+	useCount         int
+	used             bool
+	captured         bool
+	rhsCapturesFrame bool
+}
+
+func singleUsePipelineProducer(expr Scmer) bool {
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 {
+		return false
+	}
+	head, ok := scmerSymbol(items[0])
+	if !ok {
+		return false
+	}
+	switch head {
+	case "map", "map_mut", "filter", "filter_mut", "filter_map", "map_filter",
+		"map_map", "filter_filter", "map_filter_notnull", "flat_map", "flat_map_unique":
+		return true
+	default:
+		return false
+	}
 }
 
 func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
@@ -1646,6 +1665,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 		var visitNode func(x Scmer, depth int, captured bool, blacklist []Symbol)
+		var currentDefinition Symbol
+		var hasCurrentDefinition bool
 		visitNode = func(x Scmer, depth int, captured bool, blacklist []Symbol) {
 			if stripped, ok := scmerStripSourceInfo(x); ok {
 				x = stripped
@@ -1714,6 +1735,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					}
 				}
 				if !isBlacklisted {
+					if captured && hasCurrentDefinition {
+						_, localBinding := bindings[sym]
+						_, replaced := ome.variableReplacement[sym]
+						if localBinding || replaced {
+							facts := bindings[currentDefinition]
+							facts.rhsCapturesFrame = true
+							bindings[currentDefinition] = facts
+						}
+					}
 					if facts, tracked := bindings[sym]; tracked {
 						facts.useCount++
 						if captured {
@@ -1735,6 +1765,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		for i := bodyStart; i < len(v); i++ {
 			currentTopIdx = i
+			hasCurrentDefinition = false
+			expr := v[i]
+			if stripped, ok := scmerStripSourceInfo(expr); ok {
+				expr = stripped
+			}
+			if items, ok := scmerSlice(expr); ok && len(items) == 3 &&
+				(scmerIsSymbol(items[0], "define") || scmerIsSymbol(items[0], "set")) {
+				currentDefinition, hasCurrentDefinition = scmerSymbol(items[1])
+			}
 			visitNode(v[i], 0, false, nil)
 		}
 		ome2 := ome.CopySharedScope()
@@ -1767,8 +1806,15 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if stripped, ok := scmerStripSourceInfo(content); ok {
 				normalized = stripped
 			}
-			// Bring back old criterion: inline if used < 2 OR RHS is not a list
-			shouldReplace := usedVariables[sym] < 2 || !normalized.IsSlice()
+			facts := bindings[sym]
+			singleUse := facts.count == 1 && facts.used && facts.firstUse == facts.defineIdx+1 &&
+				facts.useCount == 1 && !facts.captured && !facts.rhsCapturesFrame &&
+				singleUsePipelineProducer(normalized)
+			// Scalar literals and direct values keep the old cheap substitution.
+			// List-pipeline producers need the exact single-use proof: the legacy
+			// depth counter deliberately assigned 100 to every symbol below a call,
+			// which hid producer/consumer pipelines written through local defines.
+			shouldReplace := singleUse || !normalized.IsSlice()
 			// Convention: symbols starting with "tbl:" are pre-resolved table
 			// pointers that must not be inlined back into inner loops.
 			if strings.HasPrefix(string(sym), "tbl:") {
