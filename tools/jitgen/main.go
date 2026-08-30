@@ -240,6 +240,7 @@ func main() {
 			genErr = nativeValidationFailures[op.name]
 		}
 		usesFallback := genErr != ""
+		inlineCallbacks := hasDynamicSSACall(ssaFn) && !dynamicSSAResultCrossesControlFlow(ssaFn)
 		if genErr == "" {
 			fmt.Printf("  %s: %s OK\n", op.path, op.name)
 		} else {
@@ -297,6 +298,20 @@ func main() {
 						newText:  "\tJITVirtualArgs: true,\n\t\t",
 						opName:   op.name + ".JITVirtualArgs",
 					})
+				}
+			}
+			if hasDynamicSSACall(ssaFn) {
+				value := "false"
+				if inlineCallbacks && !usesFallback {
+					value = "true"
+				}
+				if op.jitInlineCallbacksExpr != nil {
+					pos := fset.Position(op.jitInlineCallbacksExpr.Pos())
+					end := fset.Position(op.jitInlineCallbacksExpr.End())
+					patches[op.path] = append(patches[op.path], patchEntry{startOff: pos.Offset, endOff: end.Offset, newText: value, opName: op.name + ".JITInlineCallbacks"})
+				} else if op.typeInsertPos.IsValid() {
+					insertPos := fset.Position(op.typeInsertPos)
+					patches[op.path] = append(patches[op.path], patchEntry{startOff: insertPos.Offset, endOff: insertPos.Offset, newText: "\tJITInlineCallbacks: " + value + ",\n\t\t", opName: op.name + ".JITInlineCallbacks"})
 				}
 			}
 		}
@@ -437,6 +452,59 @@ func operatorJITEmitMissing(op operatorInfo) bool {
 	return ok && ident.Name == "nil"
 }
 
+func dynamicSSACalls(fn *ssa.Function) []*ssa.Call {
+	var calls []*ssa.Call
+	for _, block := range fn.Blocks {
+		for _, instr := range block.Instrs {
+			call, ok := instr.(*ssa.Call)
+			if !ok || call.Call.StaticCallee() != nil {
+				continue
+			}
+			if _, builtin := call.Call.Value.(*ssa.Builtin); builtin {
+				continue
+			}
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+func hasDynamicSSACall(fn *ssa.Function) bool {
+	return len(dynamicSSACalls(fn)) != 0
+}
+
+// dynamicSSAResultCrossesControlFlow identifies higher-order builtins whose
+// callback result selects an edge or becomes a phi input. Those cases need a
+// stronger callback/merge contract than straight-line map emitters currently
+// provide.
+func dynamicSSAResultCrossesControlFlow(fn *ssa.Function) bool {
+	for _, call := range dynamicSSACalls(fn) {
+		queue := []ssa.Value{call}
+		seen := map[ssa.Value]bool{call: true}
+		for len(queue) > 0 {
+			value := queue[0]
+			queue = queue[1:]
+			refs := value.Referrers()
+			if refs == nil {
+				continue
+			}
+			for _, ref := range *refs {
+				switch ref.(type) {
+				case *ssa.If, *ssa.Phi:
+					return true
+				}
+				next, ok := ref.(ssa.Value)
+				if !ok || seen[next] {
+					continue
+				}
+				seen[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return false
+}
+
 func generateFallbackClosure(opName string) string {
 	return fmt.Sprintf(`func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	return jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)
@@ -446,16 +514,17 @@ func generateFallbackClosure(opName string) string {
 // --- AST operator collection (for patching byte offsets) ---
 
 type operatorInfo struct {
-	name           string
-	path           string
-	line           int
-	funcLit        *ast.FuncLit
-	funcName       string
-	jitExpr        ast.Expr
-	jitVirtualExpr ast.Expr
-	jitInsertPos   token.Pos
-	typeInsertPos  token.Pos
-	preservedEnd   int
+	name                   string
+	path                   string
+	line                   int
+	funcLit                *ast.FuncLit
+	funcName               string
+	jitExpr                ast.Expr
+	jitVirtualExpr         ast.Expr
+	jitInlineCallbacksExpr ast.Expr
+	jitInsertPos           token.Pos
+	typeInsertPos          token.Pos
+	preservedEnd           int
 }
 
 func keyedValue(comp *ast.CompositeLit, name string) ast.Expr {
@@ -492,7 +561,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			return true
 		}
 
-		var nameExpr, fnExpr, jitExpr, jitVirtualExpr ast.Expr
+		var nameExpr, fnExpr, jitExpr, jitVirtualExpr, jitInlineCallbacksExpr ast.Expr
 		var jitInsertPos token.Pos
 		var typeInsertPos token.Pos
 		if len(comp.Elts) > 0 {
@@ -508,6 +577,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 						}
 						jitExpr = keyedValue(typeComp, "JITEmit")
 						jitVirtualExpr = keyedValue(typeComp, "JITVirtualArgs")
+						jitInlineCallbacksExpr = keyedValue(typeComp, "JITInlineCallbacks")
 						typeInsertPos = typeComp.Rbrace
 						if jitExpr == nil {
 							jitInsertPos = typeComp.Rbrace
@@ -533,15 +603,16 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			return true
 		}
 		ops = append(ops, operatorInfo{
-			name:           strings.Trim(nameLit.Value, "\""),
-			path:           path,
-			line:           fset.Position(nameLit.Pos()).Line,
-			funcLit:        funcLit,
-			funcName:       funcName,
-			jitExpr:        jitExpr,
-			jitVirtualExpr: jitVirtualExpr,
-			jitInsertPos:   jitInsertPos,
-			typeInsertPos:  typeInsertPos,
+			name:                   strings.Trim(nameLit.Value, "\""),
+			path:                   path,
+			line:                   fset.Position(nameLit.Pos()).Line,
+			funcLit:                funcLit,
+			funcName:               funcName,
+			jitExpr:                jitExpr,
+			jitVirtualExpr:         jitVirtualExpr,
+			jitInlineCallbacksExpr: jitInlineCallbacksExpr,
+			jitInsertPos:           jitInsertPos,
+			typeInsertPos:          typeInsertPos,
 		})
 		return true
 	})
@@ -1738,39 +1809,6 @@ func (g *codeGen) emitPinDescVars(descVars []string) string {
 	g.emit("%s := func() { for _, r := range %s { ctx.UnprotectReg(r) } }", cleanup, pinned)
 	g.emit("defer %s()", cleanup)
 	return pinned
-}
-
-func (g *codeGen) emitProtectLiveDescRegs(exclude string) string {
-	vars := make([]string, 0, len(g.vals))
-	seen := make(map[string]struct{})
-	for name, value := range g.vals {
-		if g.refCounts[name] <= 0 || !value.isDesc || value.goVar == "" || value.goVar == exclude {
-			continue
-		}
-		if _, exists := seen[value.goVar]; exists {
-			continue
-		}
-		seen[value.goVar] = struct{}{}
-		vars = append(vars, value.goVar)
-	}
-	sort.Strings(vars)
-	protected := g.allocTemp("liveRegs")
-	seenRegs := g.allocTemp("seenLiveRegs")
-	g.emit("\t%s := make([]Reg, 0, %d)", protected, len(vars)*3)
-	g.emit("\t%s := make(map[Reg]bool)", seenRegs)
-	for _, variable := range vars {
-		g.emit("\tfor _, r := range []Reg{%s.Reg, %s.Reg2, %s.Reg3} {", variable, variable, variable)
-		g.emit("\t\tlive := (%s.Loc == LocReg && r == %s.Reg) ||", variable, variable)
-		g.emit("\t\t\t(%s.Loc == LocRegPair && (r == %s.Reg || r == %s.Reg2)) ||", variable, variable, variable)
-		g.emit("\t\t\t(%s.Loc == LocRegTriple && (r == %s.Reg || r == %s.Reg2 || r == %s.Reg3))", variable, variable, variable, variable)
-		g.emit("\t\tif live && !%s[r] {", seenRegs)
-		g.emit("\t\t\tctx.ProtectReg(r)")
-		g.emit("\t\t\t%s[r] = true", seenRegs)
-		g.emit("\t\t\t%s = append(%s, r)", protected, protected)
-		g.emit("\t\t}")
-		g.emit("\t}")
-	}
-	return protected
 }
 
 func (g *codeGen) emitIfClosure(v *ssa.If) {
@@ -4214,20 +4252,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("var %s JITValueDesc", dv)
 			g.emit("ctx.FreeDesc(&%s)", callArgs.goVar)
 			g.emit("if %s.Loc == LocLambdaTemplate && %s.Lambda != nil {", callable.goVar, callable.goVar)
-			resultOff := g.allocTemp("callbackResultOff")
-			g.emit("\t%s := ctx.AllocSpill(16)", resultOff)
-			g.emit("\tctx.setStackPointer(jitStackRootFrameBP, %s, true)", resultOff)
 			preservedVar := g.allocTemp("outerRegs")
 			g.emit("\t%s := ctx.PreserveOuterRegs()", preservedVar)
 			g.emit("\t%s = JITEmitProcInlineWithOuter(ctx, &%s.Lambda.Proc, %s.Lambda.Outer, %s, ctx.SliceBase, JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX, ID: 0})", dv, callable.goVar, callable.goVar, argsVar)
 			g.emit("\tctx.EnsureDesc(&%s)", dv)
-			g.emit("\tctx.EmitStoreRegMem(%s.Reg, RegRBP, %s)", dv, resultOff)
-			g.emit("\tctx.EmitStoreRegMem(%s.Reg2, RegRBP, %s+8)", dv, resultOff)
 			g.emit("\tctx.RestoreOuterRegs(%s)", preservedVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocStackPair, Type: %s.Type, StackOff: %s, NoHeapPointer: %s.NoHeapPointer}", dv, dv, resultOff, dv)
-			liveRegs := g.emitProtectLiveDescRegs(dv)
-			g.emit("\tctx.EnsureDesc(&%s)", dv)
-			g.emit("\tfor _, r := range %s { ctx.UnprotectReg(r) }", liveRegs)
+			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: %s.Type, Reg: RegRAX, Reg2: RegRBX, ID: 0, NoHeapPointer: %s.NoHeapPointer}", dv, dv, dv)
 			g.emit("} else {")
 			callbackHelper := ""
 			switch callArgs.stackLen {

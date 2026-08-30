@@ -86,6 +86,10 @@ type TypeDescriptor struct {
 	// data. Numbered parameters stay in their existing stack slots and constants
 	// stay immediate until an operation actually needs to materialize them.
 	JITVirtualArgs bool
+	// JITInlineCallbacks is generated from the builtin's Go SSA. It permits the
+	// declaration emitter to inline known lambdas only when callback results do
+	// not currently cross the builtin's own control-flow merges.
+	JITInlineCallbacks bool
 }
 
 // OptimizerContext is an exported wrapper so packages like storage can use

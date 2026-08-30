@@ -2692,16 +2692,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		if !ok {
 			return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 		}
-		// Higher-order declaration emitters still have an incomplete phi contract:
-		// reduce, for example, can currently lose its neutral value while inlining
-		// a callback. Keep the surrounding expression native, but invoke these
-		// declarations through their correct runtime implementation until callback
-		// lowering becomes its own JIT milestone.
-		if jitDeclarationHasCallback(decl) {
-			return jitCompileDynamicHigherOrderCall(ctx, list[0], list[1:], sliceBase, result)
-		}
 		if name == "strlike" {
 			panic("jit: strlike emitter is not supported")
+		}
+		if jitDeclarationHasCallback(decl) && !decl.Type.JITInlineCallbacks {
+			return jitCompileDynamicHigherOrderCall(ctx, list[0], list[1:], sliceBase, result)
 		}
 		// Pointer-bearing return values need a complete stack map/liveness
 		// contract for Go callbacks. Keep them interpreted until that contract is
