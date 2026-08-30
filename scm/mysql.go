@@ -439,7 +439,6 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			item := a[0].Slice()
 			resultlock.Lock()
 			defer resultlock.Unlock()
-			updateFlags(session, sessionFunc) // set transaction status
 
 			newitem := appendMySQLResultRow(&result, colmap, item)
 			if len(result.Rows) == cap(result.Rows) {
@@ -479,7 +478,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		result.InsertID = uint64(lastInsertId.Int())
 	}
 	result.RowsAffected = uint64(rowcount.Int())
-	// update status greeting
+	// Transaction and schema status can change once per statement, not once per
+	// emitted result row. Publish the final state before flushing the result.
 	updateFlags(session, sessionFunc)
 	// flush the rest
 	if result.State == sqltypes.RStateFields {
