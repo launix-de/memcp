@@ -302,6 +302,40 @@ type JITLambdaTemplate struct {
 // (RAX, R8, X0, etc.) are defined in architecture-specific files.
 type Reg uint8
 
+// JITCondition describes the result of the most recently emitted comparison.
+// It is deliberately independent of any architecture's condition-code
+// encoding; machine emitters translate it when they write a branch or a
+// boolean result.
+type JITCondition uint8
+
+const (
+	CondEqual JITCondition = iota
+	CondNotEqual
+	CondSignedLess
+	CondSignedGreaterOrEqual
+	CondSignedLessOrEqual
+	CondSignedGreater
+	CondUnsignedBelow
+	CondUnsignedAboveOrEqual
+	CondUnsignedBelowOrEqual
+	CondUnsignedAbove
+)
+
+// Short condition names keep generated emitters source-compatible. New
+// lowering code should use the descriptive, architecture-neutral names above.
+const (
+	CcE  = CondEqual
+	CcNE = CondNotEqual
+	CcL  = CondSignedLess
+	CcGE = CondSignedGreaterOrEqual
+	CcLE = CondSignedLessOrEqual
+	CcG  = CondSignedGreater
+	CcB  = CondUnsignedBelow
+	CcAE = CondUnsignedAboveOrEqual
+	CcBE = CondUnsignedBelowOrEqual
+	CcA  = CondUnsignedAbove
+)
+
 // JITTypeUnknown means the Scmer type is not known at compile time.
 // All other type values are tag constants (tagInt, tagFloat, tagBool, etc.)
 // so GetTag can be constant-folded when Type != JITTypeUnknown.
@@ -421,6 +455,14 @@ type JITContext struct {
 	FreeRegs  uint64
 	AllRegs   uint64 // original set of all allocatable registers (for spilling)
 	SliceBase Reg    // register holding the args slice pointer (for variable-index access)
+	// Architecture register roles let common lowering describe placement without
+	// depending on one instruction set's register names.
+	StackReg     Reg
+	FrameReg     Reg
+	ScratchReg   Reg
+	ResultPtrReg Reg
+	ResultAuxReg Reg
+	LastIntReg   Reg
 	// OriginalArgsOff stores the incoming variadic slice data pointer in the
 	// invocation-local frame.
 	// Optimized local frames may repurpose SliceBase, while hidden GC roots still
@@ -445,6 +487,10 @@ type JITContext struct {
 	AutoImportSafe    bool
 	RecursiveLambdas  bool
 	NeedsStableArgs   bool
+	SelfSymbols       map[Symbol]struct{}
+	SelfLoopLabel     uint8
+	HasSelfLoop       bool
+	SelfParamCount    int
 	RegOwners         [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DynamicSP is the temporary distance below the static frame bottom. It
 	// covers pushed live registers, variadic arrays, and the Go call area.
