@@ -89,7 +89,8 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 			compiled := jitCompile(expression)
 			sym, definition := topLevelDefinitionSymbol(code)
 			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil &&
-				(compiled.Proc().Compiled.AutoImportSafe || definition && jitQueryCompilerEntrypoint(sym)) {
+				definition && (jitQueryCompilerEntrypoint(sym) ||
+				jitQueryCompilerSource(source) && compiled.Proc().Compiled.AutoImportSafe) {
 				expression = compiled
 				if definition {
 					target := en.definitionTarget()
@@ -108,6 +109,13 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 		}
 	}
 	return
+}
+
+func jitQueryCompilerSource(source string) bool {
+	if slash := strings.LastIndexByte(source, '/'); slash >= 0 {
+		source = source[slash+1:]
+	}
+	return strings.HasPrefix(source, "queryplan") && strings.HasSuffix(source, ".scm")
 }
 
 func jitQueryCompilerEntrypoint(sym Symbol) bool {

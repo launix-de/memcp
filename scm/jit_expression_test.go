@@ -127,3 +127,16 @@ func TestJITExpressionReduceLambdaArgumentOrder(t *testing.T) {
 		t.Fatalf("unexpected reduce result: got %s, want %s", String(got), String(want))
 	}
 }
+
+func TestJITExpressionHigherOrderClosureCapture(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (values blocked) (begin
+		(define blocked_set (reduce blocked (lambda (acc item) (set_assoc acc item true)) '()))
+		(filter values (lambda (item) (not (has_assoc? blocked_set item))))))`)
+	got := Apply(compiled,
+		NewSlice([]Scmer{NewString("a"), NewString("b"), NewString("c")}),
+		NewSlice([]Scmer{NewString("b")}))
+	want := NewSlice([]Scmer{NewString("a"), NewString("c")})
+	if !Equal(got, want) {
+		t.Fatalf("unexpected captured higher-order result: got %s, want %s", String(got), String(want))
+	}
+}

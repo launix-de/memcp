@@ -1855,7 +1855,12 @@ func (ctx *JITContext) EmitGoCallScalarInto(funcAddr uint64, args []JITValueDesc
 	words := ctx.flattenArgs(args, &wordsBuf)
 	targets := [...]Reg{result.Reg, result.Reg2}
 	results := ctx.EmitGoCall(funcAddr, words, 2, &resultsBuf, targets[:])
-	return JITValueDesc{Loc: LocRegPair, Type: result.Type, Reg: results[0], Reg2: results[1]}
+	result.Loc = LocRegPair
+	result.Reg = results[0]
+	result.Reg2 = results[1]
+	ctx.BindReg(result.Reg, &result)
+	ctx.BindReg(result.Reg2, &result)
+	return result
 }
 
 // EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.
@@ -2432,7 +2437,11 @@ func jitAutoImportSyntaxSafe(expr Scmer) bool {
 			return false
 		}
 	} else {
-		return false
+		binding, exists := Globalenv.Vars[Symbol(name)]
+		if !exists || binding.GetTag() != tagProc || binding.Proc() == nil || binding.Proc().Compiled == nil ||
+			!binding.Proc().Compiled.AutoImportSafe {
+			return false
+		}
 	}
 	for _, item := range items[1:] {
 		if !jitAutoImportSyntaxSafe(item) {
