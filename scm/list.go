@@ -675,6 +675,30 @@ func optimizerZeroLiteral(expr Scmer) bool {
 	return (expr.IsInt() && expr.Int() == 0) || (expr.IsFloat() && expr.Float() == 0)
 }
 
+// optimizedUnmappedRange extracts the bound of an already optimized
+// (produceN n) call. Mapped produceN calls need a separate consumer contract
+// because their mapper must still run before the downstream callback.
+func optimizedUnmappedRange(expr Scmer) (Scmer, bool) {
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) != 2 || !scmerIsSymbol(items[0], "produceN") {
+		return NewNil(), false
+	}
+	return items[1], true
+}
+
+func optimizeFindMapNotNull(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	result, td := oc.ApplyDefaultOptimization(v, useResult)
+	items, ok := scmerSlice(result)
+	if !ok || len(items) != 3 || !scmerIsSymbol(items[0], "find_map_notnull") {
+		return result, td
+	}
+	count, ok := optimizedUnmappedRange(items[1])
+	if !ok {
+		return result, td
+	}
+	return NewSlice([]Scmer{NewSymbol("find_range_notnull"), count, items[2]}), td
+}
+
 // optimizePlannerReduceFold lowers common planner folds to physical loops. It
 // only inspects the already optimized reducer's root shape, keeping the whole
 // optimization pass linear in the expression size.
@@ -830,7 +854,20 @@ func optimizeReduce(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		return NewSlice(fused), td
 	}
 	if fused, fusedType, ok := optimizePlannerReduceFold(rv, td); ok {
+		items, isCall := scmerSlice(fused)
+		if isCall && len(items) == 3 && scmerIsSymbol(items[0], "find_map_notnull") {
+			if count, isRange := optimizedUnmappedRange(items[1]); isRange {
+				return NewSlice([]Scmer{NewSymbol("find_range_notnull"), count, items[2]}), fusedType
+			}
+		}
 		return fused, fusedType
+	}
+	if count, isRange := optimizedUnmappedRange(rv[1]); isRange {
+		fused := []Scmer{NewSymbol("reduce_range"), count, rv[2]}
+		if len(rv) == 4 {
+			fused = append(fused, rv[3])
+		}
+		return NewSlice(fused), td
 	}
 	return result, td
 }
@@ -28305,6 +28342,84 @@ func init_list() {
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["reduce_all"].Fn, args, result)
+			},
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "reduce_range",
+
+		Fn: func(a ...Scmer) Scmer {
+			count := int(a[0].Int())
+			if count < 0 {
+				count = 0
+			}
+			reducer := PrepareSerialProc(a[1])
+			var reducerArgs [2]Scmer
+			result := NewNil()
+			index := 0
+			if len(a) > 2 {
+				result = a[2]
+			} else if count > 0 {
+				result = NewInt(0)
+				index = 1
+			}
+			for index < count {
+				reducerArgs[0], reducerArgs[1] = result, NewInt(int64(index))
+				result = reducer.Call(reducerArgs[:])
+				index++
+			}
+			return result
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "reduces an integer range without materializing it (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "number", Label: "count"},
+				{Kind: "func", Label: "reduce", Params: []*TypeDescriptor{{Kind: "any", Transfer: true, Label: "acc"}, {Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral", Optional: true},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["reduce_range"].Fn, args, result)
+			},
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "find_range_notnull",
+
+		Fn: func(a ...Scmer) Scmer {
+			count := int(a[0].Int())
+			if count < 0 {
+				count = 0
+			}
+			candidate := PrepareSerialProc(a[1])
+			var candidateArgs [2]Scmer
+			candidateArgs[0] = NewNil()
+			for index := 0; index < count; index++ {
+				candidateArgs[1] = NewInt(int64(index))
+				value := candidate.Call(candidateArgs[:])
+				if !value.IsNil() {
+					return value
+				}
+			}
+			return NewNil()
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "maps an integer range until the first non-nil result without materializing it (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "number", Label: "count"},
+				{Kind: "func", Label: "candidate", Params: []*TypeDescriptor{{Kind: "any", Label: "state"}, {Kind: "int", Label: "index"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "any"},
+			Const:     true,
+			Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["find_range_notnull"].Fn, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -56035,6 +56150,7 @@ func init_list() {
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
 		},
+		Optimize: optimizeFindMapNotNull,
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "flat_map_unique",

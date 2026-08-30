@@ -136,6 +136,77 @@ func TestOptimizeLowersFirstNonNilReducer(t *testing.T) {
 	}
 }
 
+func TestOptimizeFusesFirstNonNilReducerOverRange(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (count target)
+		(reduce (produceN count)
+			(lambda (found index)
+				(if (not (nil? found)) found (if (equal? index target) index nil)))
+			nil))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "find_range_notnull") || strings.Contains(serialized, "produceN") {
+		t.Fatalf("range search was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	if got := fn(NewInt(8), NewInt(5)); !Equal(got, NewInt(5)) {
+		t.Fatalf("fused range search returned %s, want 5", String(got))
+	}
+	if got := fn(NewInt(8), NewInt(9)); !got.IsNil() {
+		t.Fatalf("fused range search returned %s, want nil", String(got))
+	}
+}
+
+func TestOptimizeFusesGeneralReducerOverRange(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (count)
+		(reduce (produceN count) (lambda (values index) (cons index values)) '()))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "reduce_range") || strings.Contains(serialized, "produceN") {
+		t.Fatalf("range reducer was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	got := fn(NewInt(4))
+	want := NewSlice([]Scmer{NewInt(3), NewInt(2), NewInt(1), NewInt(0)})
+	if !Equal(got, want) {
+		t.Fatalf("fused range reducer returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestOptimizeFusesRangeReducerWithoutNeutral(t *testing.T) {
+	optimized, env := optimizeListPipeline(t, `(lambda (count)
+		(reduce (produceN count) (lambda (total index) (+ total index))))`)
+	serialized := serializedTestExpr(t, env, optimized)
+	if !strings.Contains(serialized, "reduce_range") || strings.Contains(serialized, "produceN") {
+		t.Fatalf("range reducer without neutral was not fused: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	if got := fn(NewInt(4)); !Equal(got, NewInt(6)) {
+		t.Fatalf("fused range reducer returned %s, want 6", String(got))
+	}
+	if got := fn(NewInt(0)); !got.IsNil() {
+		t.Fatalf("empty fused range reducer returned %s, want nil", String(got))
+	}
+}
+
+func BenchmarkOptimizerRangeFindPlanner(b *testing.B) {
+	optimized, env := optimizeListPipeline(b, `(lambda (count target)
+		(reduce (produceN count)
+			(lambda (found index)
+				(if (not (nil? found)) found (if (equal? index target) index nil)))
+			nil))`)
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	count := NewInt(64)
+	target := NewInt(63)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := fn(count, target); !Equal(got, target) {
+			b.Fatalf("range search returned %s, want %s", String(got), String(target))
+		}
+	}
+}
+
 func TestOptimizeLowersMappedSumReducer(t *testing.T) {
 	optimized, env := optimizeListPipeline(t, `(lambda (values)
 		(reduce values (lambda (total value) (+ total (* value 2))) 0))`)
