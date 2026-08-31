@@ -42,6 +42,8 @@ type Session struct {
 	statements    map[uint32]*Statement // Save the metadata of the session related to the prepare operation.
 	done          chan struct{}
 	doneOnce      sync.Once
+	queryCancel   func()
+	queryCancelID uint64
 }
 
 func newSession(log *xlog.Log, ID uint32, serverVersion string, conn net.Conn) *Session {
@@ -233,11 +235,46 @@ func (s *Session) Close() {
 	s.mu.Lock()
 	conn := s.conn
 	s.conn = nil
+	queryCancel := s.queryCancel
+	s.queryCancel = nil
 	s.mu.Unlock()
+	if queryCancel != nil {
+		queryCancel()
+	}
 	if conn != nil {
 		conn.Close()
 	}
 	s.doneOnce.Do(func() { close(s.done) })
+}
+
+// SetQueryCancel installs the cancellation callback for the statement currently
+// running on this connection. MySQL executes statements serially per session,
+// so disconnect handling can invoke it directly without a watcher goroutine per
+// statement.
+func (s *Session) SetQueryCancel(cancel func()) uint64 {
+	s.mu.Lock()
+	if s.conn == nil {
+		s.mu.Unlock()
+		cancel()
+		return 0
+	}
+	s.queryCancelID++
+	id := s.queryCancelID
+	s.queryCancel = cancel
+	s.mu.Unlock()
+	return id
+}
+
+// ClearQueryCancel removes a callback only if it still belongs to this query.
+func (s *Session) ClearQueryCancel(id uint64) {
+	if id == 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.queryCancelID == id {
+		s.queryCancel = nil
+	}
+	s.mu.Unlock()
 }
 
 // Done is closed once the client connection is gone.
