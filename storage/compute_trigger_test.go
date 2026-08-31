@@ -66,6 +66,25 @@ func lambdaAst(params []string, body scm.Scmer) scm.Scmer {
 	})
 }
 
+func TestStorageAnalyzersRecognizeLoweredSpecialFormHeads(t *testing.T) {
+	constantOne := scm.NewSlice([]scm.Scmer{
+		scm.Globalenv.Vars[scm.Symbol("lambda")],
+		scm.NewSlice(nil),
+		scm.NewInt(1),
+	})
+	if constantOne.Slice()[0].IsSymbol() {
+		t.Fatal("optimizer did not lower lambda head for the regression fixture")
+	}
+	if !isConstantOneAggregate(constantOne) {
+		t.Fatal("constant COUNT mapper was hidden by its lowered lambda head")
+	}
+
+	outer := scm.Globalenv.Vars[scm.Symbol("outer")]
+	if !scanSymbolIs(outer, "outer") {
+		t.Fatal("scan analyzer did not recognize the lowered outer form")
+	}
+}
+
 func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),

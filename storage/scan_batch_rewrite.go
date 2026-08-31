@@ -330,6 +330,9 @@ func scmerHeadString(head scm.Scmer) string {
 	if head.IsSymbol() {
 		return head.String()
 	}
+	if declaration := scm.DeclarationForValue(head); declaration != nil {
+		return declaration.Name
+	}
 	if sym, ok := head.Any().(scm.Symbol); ok {
 		return string(sym)
 	}
@@ -460,12 +463,7 @@ func replaceSymbolsInAST(expr scm.Scmer, mapping map[string]string) scm.Scmer {
 	}
 	// Don't recurse into nested lambda param lists (only body)
 	head := sl[0]
-	headStr := ""
-	if head.IsSymbol() {
-		headStr = head.String()
-	} else if sym, ok := head.Any().(scm.Symbol); ok {
-		headStr = string(sym)
-	}
+	headStr := scmerHeadString(head)
 	if headStr == "lambda" && len(sl) >= 3 {
 		// Only replace in body (sl[2]), not in params (sl[1])
 		newBody := replaceSymbolsInAST(sl[2], mapping)

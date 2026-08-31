@@ -23,10 +23,15 @@ import "path/filepath"
 import "sort"
 import "strings"
 
+type JITEmitter func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
+type JITCondEmitter func(ctx *JITContext, args []Scmer, trueLabel, falseLabel uint8)
+
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
 	Name            string
 	Fn              func(...Scmer) Scmer
+	SpecialForm     SpecialForm
+	IsSpecialForm   bool
 	Type            *TypeDescriptor
 	RetainsCallArgs bool // native result or state may retain the variadic argument array
 	// Optimize owns declaration-specific rewrites. When set, the optimizer calls
@@ -81,7 +86,9 @@ type TypeDescriptor struct {
 	Keys           map[string]*TypeDescriptor // for Kind="assoc": per-key type info
 	Element        *TypeDescriptor            // for Kind="list": element type
 	// Optional JIT emitter for native code generation.
-	JITEmit func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
+	JITEmit JITEmitter
+	// Optional branch emitter for lazy boolean syntax such as if/and/or.
+	JITEmitCond JITCondEmitter
 	// JITVirtualArgs lets an emitter consume the caller's argument array as SSA
 	// data. Numbered parameters stay in their existing stack slots and constants
 	// stay immediate until an operation actually needs to materialize them.
@@ -598,7 +605,7 @@ func validateCallbackSignature(lambdaSlice []Scmer, expectedSig *TypeDescriptor,
 	if len(lambdaSlice) < 3 {
 		return ""
 	}
-	if !lambdaSlice[0].IsSymbol() || !lambdaSlice[0].SymbolEquals("lambda") {
+	if !scmerIsSymbol(lambdaSlice[0], "lambda") {
 		return ""
 	}
 	paramList, ok := scmerSlice(lambdaSlice[1])
@@ -694,17 +701,7 @@ func Validate(val Scmer, require string) string {
 			return "list"
 		}
 		if len(slice) > 0 {
-			var def *Declaration
-			head := slice[0]
-			if head.IsSymbol() {
-				if def2, ok := declarations[head.String()]; ok {
-					def = def2
-				}
-			} else if head.GetTag() == tagFunc {
-				if def2, ok := declarationsByFunction[FunctionIdentity(head.Func())]; ok {
-					def = def2
-				}
-			}
+			def := DeclarationForValue(slice[0])
 			if def != nil {
 				if len(slice)-1 < def.MinParams() {
 					panic(source_info.String() + ": function " + def.Name + " expects at least " + fmt.Sprintf("%d", def.MinParams()) + " parameters")
@@ -713,7 +710,7 @@ func Validate(val Scmer, require string) string {
 					panic(source_info.String() + ": function " + def.Name + " expects at most " + fmt.Sprintf("%d", def.MaxParams()) + " parameters")
 				}
 			}
-			skipFirst := slice[0].IsSymbol() && (slice[0].SymbolEquals("lambda") || slice[0].SymbolEquals("parser"))
+			skipFirst := scmerIsSymbol(slice[0], "lambda") || scmerIsSymbol(slice[0], "parser")
 			returntype := ""
 			for i := 1; i < len(slice); i++ {
 				if def != nil && def.Name == "match" && i >= 2 && i%2 == 0 {
@@ -1046,6 +1043,10 @@ func DeclarationForValue(v Scmer) *Declaration {
 		}
 	case tagFunc:
 		if d, ok := declarationsByFunction[FunctionIdentity(v.Func())]; ok {
+			return d
+		}
+	case tagSpecialForm:
+		if d, ok := declarations[v.SpecialFormName()]; ok {
 			return d
 		}
 	case tagAny:
