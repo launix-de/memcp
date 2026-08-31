@@ -1932,7 +1932,7 @@ func (g *codeGen) emitIfClosure(v *ssa.If) {
 	g.emit("%s := ctx.ReserveLabel()", thenEdgeLbl)
 	g.emit("%s := ctx.ReserveLabel()", elseEdgeLbl)
 	g.emit("ctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-	g.emit("ctx.EmitJcc(CcNE, %s)", thenEdgeLbl)
+	g.emit("ctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
 	g.emit("ctx.EmitJmp(%s)", elseEdgeLbl)
 	g.emit("ctx.MarkLabel(%s)", thenEdgeLbl)
 	g.emitEdgePhiMoves(thenBB, 0)
@@ -2953,8 +2953,8 @@ func addScmPrefix(code string) string {
 		"EnsureDesc":                   true,
 		"ConcatStrings":                true,
 		"OptimizeProcToSerialFunction": true,
-		"CcE":                          true, "CcNE": true, "CcL": true, "CcG": true, "CcLE": true, "CcGE": true,
-		"CcB": true, "CcAE": true, "CcBE": true, "CcA": true,
+		"CondEqual":                    true, "CondNotEqual": true, "CondSignedLess": true, "CondSignedGreater": true, "CondSignedLessOrEqual": true, "CondSignedGreaterOrEqual": true,
+		"CondUnsignedBelow": true, "CondUnsignedAboveOrEqual": true, "CondUnsignedBelowOrEqual": true, "CondUnsignedAbove": true,
 		"RegRAX": true, "RegRBX": true, "RegRCX": true, "RegRDX": true,
 		"RegRSI": true, "RegRDI": true, "RegRSP": true, "RegRBP": true,
 		"RegR8": true, "RegR9": true, "RegR10": true, "RegR11": true,
@@ -3590,13 +3590,13 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t\tctx.EmitMovRegReg(negReg, %s.Reg2)", src.goVar)
 			g.emit("\t\tctx.EmitAndRegImm32(negReg, 1)")
 			g.emit("\t\tctx.EmitCmpRegImm32(negReg, 0)")
-			g.emit("\t\tctx.EmitSetcc(negReg, CcE)")
+			g.emit("\t\tctx.EmitSetcc(negReg, CondEqual)")
 			g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: negReg}", dv)
 			g.emit("\t} else if %s.Loc == LocReg {", src.goVar)
 			g.emit("\t\tctx.EmitMovRegReg(negReg, %s.Reg)", src.goVar)
 			g.emit("\t\tctx.EmitAndRegImm32(negReg, 1)")
 			g.emit("\t\tctx.EmitCmpRegImm32(negReg, 0)")
-			g.emit("\t\tctx.EmitSetcc(negReg, CcE)")
+			g.emit("\t\tctx.EmitSetcc(negReg, CondEqual)")
 			g.emit("\t\t%s = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: negReg}", dv)
 			g.emit("\t} else {")
 			g.emit("\t\tpanic(\"UnOp ! unsupported source location\")")
@@ -4157,11 +4157,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("\t%s := ctx.ReserveLabel()", doneLbl)
 				g.emit("\t%s := ctx.ReserveLabel()", oobLbl)
 				g.emit("\tctx.EmitCmpRegImm32(%s.Reg, int32(len(args)))", idxDescVar)
-				g.emit("\tctx.EmitJcc(CcAE, %s)", oobLbl)
+				g.emit("\tctx.EmitJump(CondUnsignedAboveOrEqual, %s)", oobLbl)
 				g.emit("\tfor i := 0; i < len(args); i++ {")
 				g.emit("\t\tnextLbl := ctx.ReserveLabel()")
 				g.emit("\t\tctx.EmitCmpRegImm32(%s.Reg, int32(i))", idxDescVar)
-				g.emit("\t\tctx.EmitJcc(CcNE, nextLbl)")
+				g.emit("\t\tctx.EmitJump(CondNotEqual, nextLbl)")
 				g.emit("\t\tai := args[i]")
 				g.emit("\t\tai.ID = 0")
 				g.emit("\t\tswitch ai.Loc {")
@@ -4250,7 +4250,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				capacityOK := g.allocLabel()
 				g.emit("%s := ctx.ReserveLabel()", capacityOK)
 				g.emit("ctx.EmitCmpInt64(%s.Reg2, %s.Reg3)", slice.goVar, slice.goVar)
-				g.emit("ctx.EmitJcc(CcB, %s)", capacityOK)
+				g.emit("ctx.EmitJump(CondUnsignedBelow, %s)", capacityOK)
 				g.emit("ctx.EmitGoPanic(\"jit: generated append exceeded its fixed capacity\")")
 				g.emit("ctx.MarkLabel(%s)", capacityOK)
 				index := g.allocDesc()
@@ -5956,7 +5956,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		g.emit("} else {")
 		// Runtime: CMP + JNE to then-edge helper, otherwise else-edge helper.
 		g.emit("\tctx.EmitCmpRegImm32(%s.Reg, 0)", condVar)
-		g.emit("\tctx.EmitJcc(CcNE, %s)", thenEdgeLbl)
+		g.emit("\tctx.EmitJump(CondNotEqual, %s)", thenEdgeLbl)
 		g.emit("\tctx.EmitJmp(%s)", elseEdgeLbl)
 		// Dynamic condition: both helper edges are reachable.
 		g.emit("\tctx.MarkLabel(%s)", thenEdgeLbl)
@@ -6991,17 +6991,17 @@ func constFloat64Value(v constant.Value) (val float64, ok bool) {
 func opToCC(op token.Token) string {
 	switch op {
 	case token.EQL:
-		return "CcE"
+		return "CondEqual"
 	case token.NEQ:
-		return "CcNE"
+		return "CondNotEqual"
 	case token.LSS:
-		return "CcL"
+		return "CondSignedLess"
 	case token.GTR:
-		return "CcG"
+		return "CondSignedGreater"
 	case token.LEQ:
-		return "CcLE"
+		return "CondSignedLessOrEqual"
 	case token.GEQ:
-		return "CcGE"
+		return "CondSignedGreaterOrEqual"
 	default:
 		return ""
 	}
@@ -7010,17 +7010,17 @@ func opToCC(op token.Token) string {
 func opToCCUnsigned(op token.Token) string {
 	switch op {
 	case token.EQL:
-		return "CcE"
+		return "CondEqual"
 	case token.NEQ:
-		return "CcNE"
+		return "CondNotEqual"
 	case token.LSS:
-		return "CcB"
+		return "CondUnsignedBelow"
 	case token.GTR:
-		return "CcA"
+		return "CondUnsignedAbove"
 	case token.LEQ:
-		return "CcBE"
+		return "CondUnsignedBelowOrEqual"
 	case token.GEQ:
-		return "CcAE"
+		return "CondUnsignedAboveOrEqual"
 	default:
 		return ""
 	}
