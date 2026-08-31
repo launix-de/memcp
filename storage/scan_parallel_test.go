@@ -462,9 +462,8 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 
 func TestShowStatsLockedDoesNotReenterWithQueuedWriter(t *testing.T) {
 	shard := &storageShard{
-		main_count:  1,
-		columns:     map[string]ColumnStorage{"value": &StorageConst{value: scm.NewInt(7), count: 1}},
-		writeOwners: make(map[uint64]uint32),
+		main_count: 1,
+		columns:    map[string]ColumnStorage{"value": &StorageConst{value: scm.NewInt(7), count: 1}},
 	}
 	readerReady := make(chan struct{})
 	readStats := make(chan shardStatsSnapshot, 1)
@@ -513,10 +512,9 @@ func TestShowStatsLockedDoesNotReenterWithQueuedWriter(t *testing.T) {
 
 func TestTableStatisticsReadsPublishedSnapshotWithoutShardLock(t *testing.T) {
 	shard := &storageShard{
-		main_count:  1,
-		columns:     map[string]ColumnStorage{"value": &StorageConst{value: scm.NewInt(7), count: 1}},
-		writeOwners: make(map[uint64]uint32),
-		srState:     WRITE,
+		main_count: 1,
+		columns:    map[string]ColumnStorage{"value": &StorageConst{value: scm.NewInt(7), count: 1}},
+		srState:    WRITE,
 	}
 	tbl := &table{schema: &database{Name: "table-statistics-test"}, Shards: []*storageShard{shard}}
 	shard.t = tbl
@@ -571,7 +569,6 @@ func benchmarkStatisticsTable() *table {
 			t:            tbl,
 			main_count:   1000,
 			columns:      make(map[string]ColumnStorage, 4),
-			writeOwners:  make(map[uint64]uint32),
 			srState:      WRITE,
 			deltaColumns: make(map[string]int),
 		}

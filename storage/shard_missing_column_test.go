@@ -36,7 +36,6 @@ func TestGetColumnStorageOrPanicExAddsSchemaColumnWhenLocked(t *testing.T) {
 		t:            tbl,
 		columns:      map[string]ColumnStorage{"username": new(StorageSparse)},
 		deltaColumns: make(map[string]int),
-		writeOwners:  make(map[uint64]uint32),
 	}
 
 	shard.mu.Lock()
