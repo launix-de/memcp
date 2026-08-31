@@ -764,7 +764,7 @@ func (ome *optimizerMetainfo) applyPendingCallbackParams(params Scmer, child *op
 			td = callbackParameterType(ome.pendingCallbackParams[i])
 		}
 		if td == nil {
-			continue
+			td = unknownOptimizerParameterType
 		}
 		child.variableTypes[sym] = td
 		if replacement, ok := child.variableReplacement[sym]; ok && replacement.IsNthLocalVar() {
@@ -1245,7 +1245,7 @@ func specializationHashText(seed uint64, value string) uint64 {
 	return result
 }
 
-func specializationOwnershipHash(td *TypeDescriptor) (uint64, uint64) {
+func specializationShapeHash(td *TypeDescriptor) (uint64, uint64) {
 	if td == nil {
 		return 0x243f6a8885a308d3, 0x13198a2e03707344
 	}
@@ -1255,9 +1255,29 @@ func specializationOwnershipHash(td *TypeDescriptor) (uint64, uint64) {
 		lo = combineStructuralHash(lo, 1)
 		hi = combineStructuralHash(hi, 0x9e3779b97f4a7c15)
 	}
+	if td.CallsOnce {
+		lo = combineStructuralHash(lo, 2)
+		hi = combineStructuralHash(hi, 0xbf58476d1ce4e5b9)
+	}
+	if td.NoEscape {
+		lo = combineStructuralHash(lo, 3)
+		hi = combineStructuralHash(hi, 0x94d049bb133111eb)
+	}
+	if td.Const {
+		lo = combineStructuralHash(lo, 4)
+		hi = combineStructuralHash(hi, 0xd6e8feb86659fd93)
+	}
 	lo = combineStructuralHash(lo, uint64(td.Length))
 	hi = combineStructuralHash(hi, uint64(td.Length)^0xa4093822299f31d0)
-	elementLo, elementHi := specializationOwnershipHash(td.Element)
+	for i, param := range td.Params {
+		paramLo, paramHi := specializationShapeHash(param)
+		lo = combineStructuralHash(lo, combineStructuralHash(uint64(i), paramLo))
+		hi = combineStructuralHash(hi, combineStructuralHash(uint64(i), paramHi))
+	}
+	returnLo, returnHi := specializationShapeHash(td.Return)
+	lo = combineStructuralHash(lo, returnLo)
+	hi = combineStructuralHash(hi, returnHi)
+	elementLo, elementHi := specializationShapeHash(td.Element)
 	lo = combineStructuralHash(lo, elementLo)
 	hi = combineStructuralHash(hi, elementHi)
 	// TypeDescriptor.Keys is a map. Fold separately hashed entries using two
@@ -1265,7 +1285,7 @@ func specializationOwnershipHash(td *TypeDescriptor) (uint64, uint64) {
 	// without sorting or allocating a temporary key slice.
 	var keysXor, keysSum, keysXorHi, keysSumHi uint64
 	for key, child := range td.Keys {
-		childLo, childHi := specializationOwnershipHash(child)
+		childLo, childHi := specializationShapeHash(child)
 		keyLo := combineStructuralHash(specializationHashText(1469598103934665603, key), childLo)
 		keyHi := combineStructuralHash(specializationHashText(1099511628211, key), childHi)
 		keysXor ^= keyLo
@@ -1279,17 +1299,17 @@ func specializationOwnershipHash(td *TypeDescriptor) (uint64, uint64) {
 }
 
 func procSpecializationKeyFromParams(mask uint64, paramTypes []*TypeDescriptor) procSpecializationKey {
-	ownershipLo := uint64(0x6a09e667f3bcc909)
-	ownershipHi := uint64(0xbb67ae8584caa73b)
+	shapeLo := uint64(0x6a09e667f3bcc909)
+	shapeHi := uint64(0xbb67ae8584caa73b)
 	for i, paramType := range paramTypes {
 		if mask&(1<<uint(i)) == 0 {
 			continue
 		}
-		paramLo, paramHi := specializationOwnershipHash(paramType)
-		ownershipLo = combineStructuralHash(ownershipLo, combineStructuralHash(uint64(i), paramLo))
-		ownershipHi = combineStructuralHash(ownershipHi, combineStructuralHash(uint64(i), paramHi))
+		paramLo, paramHi := specializationShapeHash(paramType)
+		shapeLo = combineStructuralHash(shapeLo, combineStructuralHash(uint64(i), paramLo))
+		shapeHi = combineStructuralHash(shapeHi, combineStructuralHash(uint64(i), paramHi))
 	}
-	return procSpecializationKey{paramMask: mask, ownershipLo: ownershipLo, ownershipHi: ownershipHi}
+	return procSpecializationKey{paramMask: mask, shapeLo: shapeLo, shapeHi: shapeHi}
 }
 
 func procSpecializationHasNestedOwnership(paramTypes []*TypeDescriptor) bool {
@@ -1301,18 +1321,22 @@ func procSpecializationHasNestedOwnership(paramTypes []*TypeDescriptor) bool {
 	return false
 }
 
-func procOwnershipSpecializationKey(proc *Proc, argTypes []TypeInfo) (procSpecializationKey, []*TypeDescriptor, bool) {
+func procSpecializationKeyForArguments(proc *Proc, argTypes []TypeInfo) (procSpecializationKey, []*TypeDescriptor, bool) {
 	params, ok := scmerSlice(proc.Params)
 	if !ok || len(params) == 0 || len(params) > 64 || proc.NumVars < len(params) {
 		return procSpecializationKey{}, nil, false
 	}
-	var candidates uint64
+	var ownershipCandidates uint64
+	var callableCandidates uint64
 	for i := range params {
 		argIndex := i + 1
 		if argIndex >= len(argTypes) {
 			continue
 		}
 		argType := argTypes[argIndex]
+		if argType.Kind() == KindFunc && argType.Extra != nil {
+			callableCandidates |= 1 << uint(i)
+		}
 		// Transfer on scalar values only describes a fresh result; there is no
 		// mutable ownership for the callee to consume. Specializing those values
 		// would turn transient scalar type facts into an invalid calling contract.
@@ -1320,21 +1344,23 @@ func procOwnershipSpecializationKey(proc *Proc, argTypes []TypeInfo) (procSpecia
 		if !mutableKind || !argType.Transfer() || argType.Const() {
 			continue
 		}
-		candidates |= 1 << uint(i)
+		ownershipCandidates |= 1 << uint(i)
 	}
-	if candidates == 0 {
+	if ownershipCandidates|callableCandidates == 0 {
 		return procSpecializationKey{}, nil, false
 	}
-	uses, captured, consumed := procParameterOwnershipUses(proc.Body, len(params))
-	var mask uint64
-	for i := range params {
-		if candidates&(1<<uint(i)) == 0 {
-			continue
-		}
-		// Transfer is linear. A specialized body may consume a parameter only
-		// when that Proc frame has exactly one non-captured use of the value.
-		if uses[i] == 1 && !captured[i] && consumed[i] {
-			mask |= 1 << uint(i)
+	mask := callableCandidates
+	if ownershipCandidates != 0 {
+		uses, captured, consumed := procParameterOwnershipUses(proc.Body, len(params))
+		for i := range params {
+			if ownershipCandidates&(1<<uint(i)) == 0 {
+				continue
+			}
+			// Transfer is linear. A specialized body may consume a parameter only
+			// when that Proc frame has exactly one non-captured use of the value.
+			if uses[i] == 1 && !captured[i] && consumed[i] {
+				mask |= 1 << uint(i)
+			}
 		}
 	}
 	if mask == 0 {
@@ -1346,12 +1372,19 @@ func procOwnershipSpecializationKey(proc *Proc, argTypes []TypeInfo) (procSpecia
 		if mask&(1<<uint(i)) == 0 {
 			continue
 		}
-		paramTypes[i] = specializationOwnershipDescriptor(argTypes[i+1].ToTypeDescriptor())
+		if callableCandidates&(1<<uint(i)) != 0 {
+			paramTypes[i] = cloneTypeDescriptor(argTypes[i+1].ToTypeDescriptor(), make(map[*TypeDescriptor]*TypeDescriptor))
+			paramTypes[i].Transfer = false
+			paramTypes[i].Const = false
+			paramTypes[i].NoEscape = false
+		} else {
+			paramTypes[i] = specializationOwnershipDescriptor(argTypes[i+1].ToTypeDescriptor())
+		}
 	}
 	return procSpecializationKeyFromParams(mask, paramTypes), paramTypes, true
 }
 
-func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, paramTypes []*TypeDescriptor, stack map[procSpecializationStackKey]bool) (Scmer, bool, bool) {
+func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes []*TypeDescriptor, stack map[procSpecializationStackKey]bool) (Scmer, bool, bool) {
 	paramsValue := proc.Params
 	if stripped, ok := scmerStripSourceInfo(paramsValue); ok {
 		paramsValue = stripped
@@ -1363,7 +1396,7 @@ func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, par
 	lambda := []Scmer{
 		NewSymbol("lambda"),
 		CloneOptimizerExpression(proc.Params),
-		DeoptimizeExpr(CloneOptimizerExpression(proc.Body)),
+		deoptimizeProcSpecializationExpr(CloneOptimizerExpression(proc.Body), len(params)),
 	}
 	if proc.NumVars > 0 {
 		lambda = append(lambda, NewInt(int64(proc.NumVars)))
@@ -1416,15 +1449,15 @@ func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimi
 	if len(v) < 2 {
 		return NewNil(), false
 	}
-	hasTransferCandidate := false
+	hasTypeCandidate := false
 	for _, argType := range argTypes[1:] {
 		mutableKind := argType.Kind() == KindList || argType.Kind() == KindAssoc
-		if mutableKind && argType.Transfer() && !argType.Const() {
-			hasTransferCandidate = true
+		if (mutableKind && argType.Transfer() && !argType.Const()) || (argType.Kind() == KindFunc && argType.Extra != nil) {
+			hasTypeCandidate = true
 			break
 		}
 	}
-	if !hasTransferCandidate {
+	if !hasTypeCandidate {
 		return NewNil(), false
 	}
 	callee, ok := scmerSymbol(v[0])
@@ -1443,14 +1476,14 @@ func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimi
 	if proc == nil || proc.En == nil || proc.OptimizerMeta == nil {
 		return NewNil(), false
 	}
-	key, paramTypes, ok := procOwnershipSpecializationKey(proc, argTypes)
+	key, paramTypes, ok := procSpecializationKeyForArguments(proc, argTypes)
 	if !ok {
 		return NewNil(), false
 	}
-	return getProcOwnershipSpecialization(proc, key, paramTypes, ome)
+	return getProcSpecialization(proc, key, paramTypes, ome)
 }
 
-func getProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, paramTypes []*TypeDescriptor, ome *optimizerMetainfo) (Scmer, bool) {
+func getProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes []*TypeDescriptor, ome *optimizerMetainfo) (Scmer, bool) {
 	stackKey := procSpecializationStackKey{meta: proc.OptimizerMeta, key: key}
 	if ome.specializationStack != nil && ome.specializationStack[stackKey] {
 		return NewNil(), false
@@ -1479,7 +1512,7 @@ func getProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, param
 		proc.OptimizerMeta.finishSpecialization(key, variant)
 	}()
 	var nestedUsed, rootMutationUsed bool
-	variant, nestedUsed, rootMutationUsed = buildProcOwnershipSpecialization(proc, key, paramTypes, ome.specializationStack)
+	variant, nestedUsed, rootMutationUsed = buildProcSpecialization(proc, key, paramTypes, ome.specializationStack)
 	if procSpecializationHasNestedOwnership(paramTypes) && !nestedUsed && !rootMutationUsed {
 		variant = NewNil()
 	}
@@ -1645,6 +1678,11 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		return val, TypeInfo{kind: KindString, flags: FlagTransfer | FlagConst, length: UnknownLength}
 	case tagBSON:
 		return val, TypeInfo{kind: KindAny, flags: FlagTransfer | FlagConst, length: UnknownLength}
+	case tagFunc:
+		if td := val.CallableType(); td != nil {
+			return val, TypeInfoFromTD(td)
+		}
+		return val, tiZero
 	case tagSymbol:
 		sym := mustSymbol(val)
 		varType := ome.variableTypes[sym]
@@ -1671,6 +1709,13 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		}
 		if varType != nil {
 			return val, TypeInfoFromTD(varType)
+		}
+		if binding := env.FindRead(sym); binding != nil {
+			if bound, exists := binding.Vars[sym]; exists {
+				if td := bound.CallableType(); td != nil {
+					return val, TypeInfoFromTD(td)
+				}
+			}
 		}
 		return val, tiZero
 	case tagSlice:
@@ -1726,9 +1771,10 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 
 // Common TypeInfo values (stack-allocated, no heap)
 var (
-	tiConstTransfer = TypeInfo{flags: FlagTransfer | FlagConst, length: UnknownLength}
-	tiTransfer      = TypeInfo{flags: FlagTransfer, length: UnknownLength}
-	tiZero          = TypeInfo{length: UnknownLength}
+	tiConstTransfer               = TypeInfo{flags: FlagTransfer | FlagConst, length: UnknownLength}
+	tiTransfer                    = TypeInfo{flags: FlagTransfer, length: UnknownLength}
+	tiZero                        = TypeInfo{length: UnknownLength}
+	unknownOptimizerParameterType = &TypeDescriptor{Kind: "any", Length: UnknownLength}
 )
 
 // optimizeExCompat is a temporary bridge: calls OptimizeEx and unpacks TypeInfo
@@ -1775,6 +1821,17 @@ type localBindingFacts struct {
 	captured        bool
 	repeatedCapture bool
 	leafLambda      bool
+	sinkRegion      *conditionalSinkRegion
+	sinkRegionSeen  bool
+	sinkConflict    bool
+}
+
+// conditionalSinkRegion represents the first exclusive branch below a begin
+// body. Nested conditionals retain the same region, keeping common-region
+// tracking O(1) per use instead of repeatedly comparing ancestor paths.
+type conditionalSinkRegion struct {
+	target     *Scmer
+	hasBinding bool
 }
 
 func optimizerCallType(call []Scmer, env *Env, ome *optimizerMetainfo) *TypeDescriptor {
@@ -1975,8 +2032,8 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		var leafScan *bool
 		var leafScanRoot bool
-		var visitNode func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, blacklist []Symbol)
-		visitNode = func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, blacklist []Symbol) {
+		var visitNode func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, region *conditionalSinkRegion, blacklist []Symbol)
+		visitNode = func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, region *conditionalSinkRegion, blacklist []Symbol) {
 			if stripped, ok := scmerStripSourceInfo(x); ok {
 				x = stripped
 			}
@@ -1991,12 +2048,18 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						leafScanRoot = false
 					} else if subHeadOk {
 						switch subHead {
-						case Symbol("begin"), Symbol("begin_mut"), Symbol("!begin"), Symbol("define"), Symbol("set"), Symbol("lambda"), Symbol("eval"), Symbol("import"):
+						case Symbol("begin"), Symbol("begin_mut"), Symbol("!begin"), Symbol("define"), Symbol("set"), Symbol("setN"), Symbol("lambda"), Symbol("eval"), Symbol("import"):
 							*leafScan = false
 						}
 					}
 				}
+				if region != nil && subHeadOk && subHead == Symbol("setN") {
+					region.hasBinding = true
+				}
 				if subHeadOk && (subHead == Symbol("define") || subHead == Symbol("set")) {
+					if region != nil {
+						region.hasBinding = true
+					}
 					var definedSym Symbol
 					var scansDefinition bool
 					if depth == 0 {
@@ -2007,7 +2070,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					if scansDefinition {
 						leafScan, leafScanRoot = &leaf, true
 					}
-					visitNode(sub[2], depth, captured, captureOnce, false, blacklist)
+					visitNode(sub[2], depth, captured, captureOnce, false, region, blacklist)
 					if scansDefinition {
 						facts := bindings[definedSym]
 						facts.leafLambda = leaf
@@ -2026,7 +2089,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						params = stripped
 					}
 					if sym, ok := scmerSymbol(params); ok {
-						visitNode(sub[2], depth+1, true, captureOnce, false, append(append([]Symbol{}, blacklist...), sym))
+						visitNode(sub[2], depth+1, true, captureOnce, false, region, append(append([]Symbol{}, blacklist...), sym))
 					} else if list, ok := scmerSlice(params); ok {
 						blacklist2 := append([]Symbol{}, blacklist...)
 						for _, entry := range list {
@@ -2034,7 +2097,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 								blacklist2 = append(blacklist2, s)
 							}
 						}
-						visitNode(sub[2], depth+1, true, captureOnce, false, blacklist2)
+						visitNode(sub[2], depth+1, true, captureOnce, false, region, blacklist2)
 					}
 				} else if subHeadOk && (subHead == Symbol("begin") || subHead == Symbol("begin_mut")) {
 					start := 1
@@ -2042,25 +2105,46 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						start = 2
 					}
 					for i := start; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, captured, captureOnce, false, blacklist)
+						visitNode(sub[i], depth+1, captured, captureOnce, false, region, blacklist)
 					}
 				} else if subHeadOk && subHead == Symbol("!begin") {
 					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth, captured, captureOnce, false, blacklist)
+						visitNode(sub[i], depth, captured, captureOnce, false, region, blacklist)
 					}
 				} else if subHeadOk && subHead == Symbol("eval") {
+					if region != nil {
+						region.hasBinding = true
+					}
 					usedVariables[Symbol("eval")] = 1
 					for i := 2; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, captured, captureOnce, false, blacklist)
+						visitNode(sub[i], depth+1, captured, captureOnce, false, region, blacklist)
+					}
+				} else if subHeadOk && subHead == Symbol("if") {
+					i := 1
+					for i+1 < len(sub) {
+						visitNode(sub[i], depth+1, captured, captureOnce, false, region, blacklist)
+						branchRegion := region
+						if branchRegion == nil {
+							branchRegion = &conditionalSinkRegion{target: &sub[i+1]}
+						}
+						visitNode(sub[i+1], depth+1, captured, captureOnce, false, branchRegion, blacklist)
+						i += 2
+					}
+					if i < len(sub) {
+						branchRegion := region
+						if branchRegion == nil {
+							branchRegion = &conditionalSinkRegion{target: &sub[i]}
+						}
+						visitNode(sub[i], depth+1, captured, captureOnce, false, branchRegion, blacklist)
 					}
 				} else {
 					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
-					visitNode(sub[0], depth+1, captured, captureOnce, false, blacklist)
+					visitNode(sub[0], depth+1, captured, captureOnce, false, region, blacklist)
 					callType := optimizerCallType(sub, env, ome)
 					for i := 1; i < len(sub); i++ {
 						param := optimizerCallParam(callType, i-1)
 						argLambdaOnce := optimizerIsLambda(sub[i]) && param != nil && param.Kind == "func" && param.CallsOnce
-						visitNode(sub[i], depth+1, captured, captureOnce, argLambdaOnce, blacklist)
+						visitNode(sub[i], depth+1, captured, captureOnce, argLambdaOnce, region, blacklist)
 					}
 				}
 				return
@@ -2076,6 +2160,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				if !isBlacklisted {
 					if facts, tracked := bindings[sym]; tracked {
 						facts.useCount++
+						if !facts.sinkRegionSeen {
+							facts.sinkRegion = region
+							facts.sinkRegionSeen = true
+						} else if facts.sinkRegion != region {
+							facts.sinkConflict = true
+							facts.sinkRegion = nil
+						}
 						if captured {
 							facts.captured = true
 							if !captureOnce {
@@ -2098,7 +2189,35 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		for i := bodyStart; i < len(v); i++ {
 			currentTopIdx = i
-			visitNode(v[i], 0, false, true, false, nil)
+			visitNode(v[i], 0, false, true, false, nil, nil)
+		}
+		// A multi-use closure may still have one exclusive execution region: for
+		// example, both uses can live in the same arm of an outer if. Move its
+		// binding to that arm before normal begin optimization. Reverse definition
+		// order preserves the original ordering when several bindings share a target.
+		if earliestDynamicSyntax < 0 {
+			for i := len(bindingOrder) - 1; i >= 0; i-- {
+				sym := bindingOrder[i]
+				facts := bindings[sym]
+				content, exists := variableContent[sym]
+				if !exists || facts.count != 1 || facts.useCount < 2 || !facts.used ||
+					facts.firstUse <= facts.defineIdx || facts.sinkConflict || facts.sinkRegion == nil ||
+					facts.sinkRegion.target == nil || facts.sinkRegion.hasBinding || facts.repeatedCapture ||
+					!optimizerIsLambda(content) {
+					continue
+				}
+				target := facts.sinkRegion.target
+				original := *target
+				*target = NewSlice([]Scmer{
+					NewSymbol("begin"),
+					NewSlice([]Scmer{NewSymbol("define"), NewSymbol(string(sym)), content}),
+					original,
+				})
+				v[facts.defineIdx] = NewNil()
+				delete(variableContent, sym)
+				delete(bindings, sym)
+				delete(usedVariables, sym)
+			}
 		}
 		ome2 := ome.CopySharedScope()
 		ome2.beginDepth++
@@ -2135,6 +2254,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if facts, tracked := bindings[sym]; tracked && facts.count == 1 && facts.useCount == 1 &&
 				facts.captured && !facts.repeatedCapture && facts.leafLambda {
 				shouldReplace = true
+				if ome.specializationUsed != nil {
+					*ome.specializationUsed = true
+				}
 			}
 			// Convention: symbols starting with "tbl:" are pre-resolved table
 			// pointers that must not be inlined back into inner loops.
@@ -3670,6 +3792,55 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 	}
 	if !changed {
 		return expr
+	}
+	return NewSlice(newItems)
+}
+
+func specializationSlotSymbol(slot NthLocalVar) Scmer {
+	return NewSymbol("__optimizer_slot_" + strconv.Itoa(int(slot)))
+}
+
+// deoptimizeProcSpecializationExpr restores optimizer-created local slots to
+// stable internal names while rebuilding a Proc specialization. Parameters
+// retain their numbered representation; begin-local setN bindings must become
+// visible to the existing usage walk so type-driven rewrites can fire again.
+// This replaces the ordinary DeoptimizeExpr traversal rather than adding a
+// second analysis pass over the body.
+func deoptimizeProcSpecializationExpr(expr Scmer, paramCount int) Scmer {
+	if expr.IsNthLocalVar() {
+		slot := expr.NthLocalVar()
+		if int(slot) >= paramCount {
+			return specializationSlotSymbol(slot)
+		}
+		return expr
+	}
+	if expr.GetTag() == tagSpecialForm {
+		return NewSymbol(expr.SpecialFormName())
+	}
+	if !expr.IsSlice() {
+		return expr
+	}
+	items := expr.Slice()
+	if len(items) >= 3 && scmerIsSymbol(items[0], "!list") {
+		count := int(ToInt(items[2]))
+		if count == len(items)-3 {
+			newItems := make([]Scmer, 1+count)
+			newItems[0] = NewSymbol("list")
+			for i := 0; i < count; i++ {
+				newItems[1+i] = deoptimizeProcSpecializationExpr(items[3+i], paramCount)
+			}
+			return NewSlice(newItems)
+		}
+	}
+	if len(items) == 3 && scmerIsSymbol(items[0], "!!list") && items[1].IsNthLocalVar() {
+		return NewSlice([]Scmer{NewSymbol("list")})
+	}
+	newItems := make([]Scmer, len(items))
+	for i, item := range items {
+		newItems[i] = deoptimizeProcSpecializationExpr(item, paramCount)
+	}
+	if len(newItems) == 3 && scmerIsSymbol(newItems[0], "setN") && items[1].IsNthLocalVar() && int(items[1].NthLocalVar()) >= paramCount {
+		newItems[0] = NewSymbol("define")
 	}
 	return NewSlice(newItems)
 }

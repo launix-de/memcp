@@ -104,6 +104,44 @@ func TestOptimizeSinksThroughTypedNativeCallable(t *testing.T) {
 	}
 }
 
+func TestOptimizeSpecializesProcForTypedCallableParameter(t *testing.T) {
+	env := newOptimizerTestEnv()
+	cacheType := &TypeDescriptor{Kind: "func", Params: []*TypeDescriptor{
+		{Kind: "any"},
+		{Kind: "func", CallsOnce: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+	}, Return: &TypeDescriptor{Kind: "any"}}
+	env.Vars[Symbol("typed_cache")] = NewTypedFunc(func(args ...Scmer) Scmer {
+		return Apply(args[1])
+	}, RegisterCallableType(cacheType))
+
+	definition := Optimize(Read(t.Name(), `(define typed_cache_consumer (lambda (cache captured)
+		(begin
+			(define helper (lambda () (+ captured 1)))
+			(cache "key" (lambda () (helper))))))`), env, nil)
+	Eval(definition, env)
+	consumer := env.Vars[Symbol("typed_cache_consumer")]
+	if !consumer.IsProc() || consumer.Proc().OptimizerMeta == nil {
+		t.Fatalf("test consumer has no optimizer metadata: %s", serializedTestExpr(t, env, consumer))
+	}
+	meta := newOptimizerMetainfo()
+	_, callableInfo := OptimizeEx(NewSymbol("typed_cache"), env, &meta, true)
+	if callableInfo.Kind() != KindFunc || callableInfo.Extra == nil || callableInfo.Extra.Params[1] == nil || !callableInfo.Extra.Params[1].CallsOnce {
+		t.Fatalf("OptimizeEx lost typed callable metadata: %#v", callableInfo)
+	}
+	optimized := Optimize(Read(t.Name(), `(typed_cache_consumer typed_cache 8)`), env, nil)
+	call, ok := scmerSlice(optimized)
+	if !ok || len(call) == 0 || !call[0].IsProc() {
+		t.Fatalf("typed callable did not create a Proc specialization: %s", serializedTestExpr(t, env, optimized))
+	}
+	serialized := serializedTestExpr(t, env, call[0])
+	if strings.Contains(serialized, "setN") || strings.Contains(serialized, "define helper") {
+		t.Fatalf("callable parameter lost CallsOnce in Proc specialization: %s", serialized)
+	}
+	if got := Eval(optimized, env); !Equal(got, NewInt(9)) {
+		t.Fatalf("specialized callable parameter returned %s, want 9", String(got))
+	}
+}
+
 func TestOptimizeKeepsClosureAheadOfTwoExecutedUses(t *testing.T) {
 	env := newOptimizerTestEnv()
 	optimized := Optimize(Read(t.Name(), `(lambda (captured)
@@ -113,6 +151,46 @@ func TestOptimizeKeepsClosureAheadOfTwoExecutedUses(t *testing.T) {
 	serialized := serializedTestExpr(t, env, optimized)
 	if !strings.Contains(serialized, "setN") {
 		t.Fatalf("closure used twice on one path was duplicated: %s", serialized)
+	}
+}
+
+func TestOptimizeSinksMultiUseClosureIntoExclusiveBranch(t *testing.T) {
+	env := newOptimizerTestEnv()
+	optimized := Optimize(Read(t.Name(), `(lambda (enabled positive captured)
+		(begin
+			(define helper (lambda () (begin
+				(define result (+ captured 1))
+				result)))
+			(if enabled
+				(if positive (helper) (helper))
+				0)))`), env, nil)
+	serialized := serializedTestExpr(t, env, optimized)
+	if ifAt, helperAt := strings.Index(serialized, "(if "), strings.Index(serialized, "setN"); ifAt < 0 || helperAt < 0 || helperAt < ifAt {
+		t.Fatalf("multi-use closure stayed ahead of its exclusive branch: %s", serialized)
+	}
+
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	if got := fn(NewBool(false), NewBool(true), NewInt(8)); !Equal(got, NewInt(0)) {
+		t.Fatalf("cold branch returned %s, want 0", String(got))
+	}
+	if got := fn(NewBool(true), NewBool(false), NewInt(8)); !Equal(got, NewInt(9)) {
+		t.Fatalf("sunk branch returned %s, want 9", String(got))
+	}
+}
+
+func TestOptimizeKeepsMultiUseClosureAheadOfBindingBranch(t *testing.T) {
+	env := newOptimizerTestEnv()
+	optimized := Optimize(Read(t.Name(), `(lambda (enabled positive captured)
+		(begin
+			(define helper (lambda () (+ captured 1)))
+			(if enabled
+				(begin
+					(define branch_value captured)
+					(if positive (helper) (helper)))
+				0)))`), env, nil)
+	serialized := serializedTestExpr(t, env, optimized)
+	if ifAt, helperAt := strings.Index(serialized, "(if "), strings.Index(serialized, "setN"); helperAt < 0 || ifAt < 0 || helperAt > ifAt {
+		t.Fatalf("closure crossed a binding branch: %s", serialized)
 	}
 }
 
@@ -129,6 +207,25 @@ func BenchmarkOptimizedOnceCallbackClosureSinking(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if got := fn(args...); !Equal(got, NewInt(9)) {
+			b.Fatal(got)
+		}
+	}
+}
+
+func BenchmarkOptimizedExclusiveBranchClosureSinking(b *testing.B) {
+	env := newOptimizerTestEnv()
+	optimized := Optimize(Read(b.Name(), `(lambda (captured guarded direct)
+		(begin
+			(define helper (lambda () (begin
+				(define incremented (+ captured 1))
+				incremented)))
+			(if guarded 7 (if direct (helper) (helper)))))`), env, nil)
+	fn := OptimizeProcToSerialFunction(Eval(optimized, env))
+	args := []Scmer{NewInt(8), NewBool(true), NewBool(false)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := fn(args...); !Equal(got, NewInt(7)) {
 			b.Fatal(got)
 		}
 	}

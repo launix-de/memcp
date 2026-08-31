@@ -650,14 +650,13 @@ const (
 	procSequenceAndTerms
 )
 
-// procSpecializationKey distinguishes both the transferred parameters and the
-// ownership shape below them. A Proc can therefore retain independent full
-// variants for e.g. a fresh list with borrowed elements and a fresh list whose
-// elements are transferable as well.
+// procSpecializationKey distinguishes specialized parameters and the optimizer
+// shape below them. A Proc can therefore retain independent full variants for
+// ownership trees as well as higher-order callable contracts.
 type procSpecializationKey struct {
-	paramMask   uint64
-	ownershipLo uint64
-	ownershipHi uint64
+	paramMask uint64
+	shapeLo   uint64
+	shapeHi   uint64
 }
 
 type procSpecializationSnapshot struct {
