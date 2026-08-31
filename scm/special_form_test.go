@@ -179,6 +179,23 @@ func TestOptimizerCollapsesOuterScopeDepth(t *testing.T) {
 	}
 }
 
+func TestOptimizerCollapsesExplicitAndCapturedOuterDepth(t *testing.T) {
+	metadata := newOptimizerMetainfo()
+	expression, _ := OptimizeEx(
+		Read(t.Name(), "(lambda (captured) (lambda (middle) (lambda (inner) (outer 1 captured))))"),
+		&Globalenv,
+		&metadata,
+		true,
+	)
+	serialized := SerializeToString(expression, &Globalenv)
+	if !strings.Contains(serialized, "(outer 2 (var 0))") {
+		t.Fatalf("explicit and captured scope transitions were not collapsed: %s", serialized)
+	}
+	if strings.Contains(serialized, "(outer 1 (outer") {
+		t.Fatalf("optimizer retained nested explicit outer forms: %s", serialized)
+	}
+}
+
 func TestOptimizerDoesNotLowerConstructedSyntaxData(t *testing.T) {
 	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
 	expression := Optimize(Read(t.Name(), "(list (quote if) true 1 0)"), environment, nil)

@@ -135,6 +135,15 @@ func TestSerialExprDetectsCapturedBeginScope(t *testing.T) {
 	}
 }
 
+func TestPrepareSerialProcTraversesExplicitOuterScope(t *testing.T) {
+	factory := preparedTestProc(t, "(lambda (captured) (lambda (value) (+ value captured)))")
+	callback := Apply(factory, NewInt(7))
+	prepared := PrepareSerialProc(callback)
+	if got := prepared.Call([]Scmer{NewInt(5)}).Int(); got != 12 {
+		t.Fatalf("prepared outer-scope result = %d, want 12; body=%s", got, callback.Proc().Body.String())
+	}
+}
+
 func TestEqualProceduresUsesIdentity(t *testing.T) {
 	first := Eval(Read("procedure equality test", "(lambda (x) x)"), &Globalenv)
 	second := Eval(Read("procedure equality test", "(lambda (x) (+ x 1))"), &Globalenv)

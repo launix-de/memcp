@@ -1983,6 +1983,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		if isConstant {
 			return inner, tiConstTransfer
 		}
+		if nested, ok := scmerSlice(inner); ok && len(nested) == 3 && scmerIsSymbol(nested[0], "outer") {
+			if nestedDepth, validNestedDepth := outerDepthLiteral(nested[1]); validNestedDepth && nestedDepth <= int64(^uint64(0)>>1)-depthValue {
+				return NewSlice([]Scmer{v[0], NewInt(depthValue + nestedDepth), nested[2]}), MakeTypeInfo(transferOwnership, false)
+			}
+		}
 		v[2] = inner
 		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
 	}
