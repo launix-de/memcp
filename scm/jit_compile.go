@@ -110,6 +110,19 @@ func jitAllocTrackedPair(ctx *JITContext, valueType uint8) JITValueDesc {
 	return desc
 }
 
+func jitDescRegs(desc JITValueDesc) []Reg {
+	switch desc.Loc {
+	case LocReg:
+		return []Reg{desc.Reg}
+	case LocRegPair:
+		return []Reg{desc.Reg, desc.Reg2}
+	case LocRegTriple:
+		return []Reg{desc.Reg, desc.Reg2, desc.Reg3}
+	default:
+		return nil
+	}
+}
+
 func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) JITValueDesc {
 	if target.Loc != LocRegPair {
 		panic("jit: jitPlaceIntoPair requires LocRegPair target")
@@ -684,26 +697,28 @@ func jitCondToBoolBorrowed(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
 
 	// Known primitive truthiness without consuming the original value.
 	if cond.Type == tagBool || cond.Type == tagInt || cond.Type == tagFloat {
-		tmp := *cond
-		ctx.EnsureDesc(&tmp)
-		tmpLoc := tmp.Loc
-		tmpReg := tmp.Reg
-		tmpReg2 := tmp.Reg2
+		ctx.EnsureDesc(cond)
 		var valReg Reg
-		switch tmp.Loc {
+		var sourceRegs []Reg
+		switch cond.Loc {
 		case LocReg:
-			valReg = tmp.Reg
+			valReg = cond.Reg
+			sourceRegs = append(sourceRegs, cond.Reg)
 		case LocRegPair:
-			valReg = tmp.Reg2
+			valReg = cond.Reg2
+			sourceRegs = append(sourceRegs, cond.Reg, cond.Reg2)
 		default:
 			panic("jit: borrowed bool test needs register value")
+		}
+		for _, reg := range sourceRegs {
+			ctx.ProtectReg(reg)
 		}
 		dst := ctx.AllocReg()
 		if dst != valReg {
 			ctx.EmitMovRegReg(dst, valReg)
 		}
 		if cond.Type == tagFloat {
-			mask := ctx.AllocReg()
+			mask := ctx.AllocRegExcept(dst)
 			ctx.EmitMovRegImm64(mask, 0x7fffffffffffffff)
 			ctx.EmitAndInt64(dst, mask)
 			ctx.FreeReg(mask)
@@ -713,29 +728,26 @@ func jitCondToBoolBorrowed(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
 		}
 		ctx.EmitCmpRegImm32(dst, 0)
 		ctx.EmitSetcc(dst, CondNotEqual)
-		switch tmpLoc {
-		case LocReg:
-			if dst != tmpReg {
-				ctx.FreeReg(tmpReg)
-			}
-		case LocRegPair:
-			if dst == tmpReg {
-				ctx.FreeReg(tmpReg2)
-			} else if dst == tmpReg2 {
-				ctx.FreeReg(tmpReg)
-			} else {
-				ctx.FreeReg(tmpReg)
-				ctx.FreeReg(tmpReg2)
-			}
-		default:
-			ctx.FreeDesc(&tmp)
+		for _, reg := range sourceRegs {
+			ctx.UnprotectReg(reg)
 		}
-		return JITValueDesc{Loc: LocReg, Type: tagBool, Reg: dst}
+		result := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: dst}
+		ctx.BindReg(dst, &result)
+		return result
 	}
 
+	ctx.EnsureDesc(cond)
+	sourceRegs := jitDescRegs(*cond)
+	for _, reg := range sourceRegs {
+		ctx.ProtectReg(reg)
+	}
 	out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Bool), []JITValueDesc{*cond}, 1)
+	for _, reg := range sourceRegs {
+		ctx.UnprotectReg(reg)
+	}
 	ctx.EmitAndRegImm32(out.Reg, 1)
 	out.Type = tagBool
+	ctx.BindReg(out.Reg, &out)
 	return out
 }
 
@@ -747,21 +759,31 @@ func jitIsNilBorrowed(ctx *JITContext, v *JITValueDesc) JITValueDesc {
 	if v.Type != JITTypeUnknown {
 		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(v.Type == tagNil)}
 	}
-	tmp := *v
-	ctx.EnsureDesc(&tmp)
-	if tmp.Loc != LocRegPair {
-		ctx.FreeDesc(&tmp)
+	ctx.EnsureDesc(v)
+	sourceRegs := jitDescRegs(*v)
+	for _, reg := range sourceRegs {
+		ctx.ProtectReg(reg)
+	}
+	if v.Loc != LocRegPair {
 		out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.IsNil), []JITValueDesc{*v}, 1)
+		for _, reg := range sourceRegs {
+			ctx.UnprotectReg(reg)
+		}
 		ctx.EmitAndRegImm32(out.Reg, 1)
 		out.Type = tagBool
+		ctx.BindReg(out.Reg, &out)
 		return out
 	}
 	tagReg := ctx.AllocReg()
-	ctx.EmitGetTagRegs(tagReg, tmp.Reg, tmp.Reg2)
+	ctx.EmitGetTagRegs(tagReg, v.Reg, v.Reg2)
 	ctx.EmitCmpRegImm8(tagReg, tagNil)
 	ctx.EmitSetcc(tagReg, CondEqual)
-	ctx.FreeDesc(&tmp)
-	return JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
+	for _, reg := range sourceRegs {
+		ctx.UnprotectReg(reg)
+	}
+	result := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: tagReg}
+	ctx.BindReg(tagReg, &result)
+	return result
 }
 
 func jitBuildIfTail(tail []Scmer) Scmer {
