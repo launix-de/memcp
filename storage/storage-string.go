@@ -1177,6 +1177,6 @@ func (s *StorageString) DistinctCount() uint {
 // JITEmit currently preserves the complete string decoding path through GetValue.
 func (s *StorageString) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: RunDefers: rundefers */
+	/* TODO: unsupported call: sync/atomic.AddUint64(t0, 1:uint64) */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageString).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
