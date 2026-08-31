@@ -1771,6 +1771,12 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	targetHasRegs := target.Loc == LocRegPair
 	if targetHasRegs {
 		target.Type = JITTypeUnknown
+	} else {
+		targetReg := ctx.AllocRegExcept(arg.Reg, arg.Reg2)
+		target = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: targetReg, Reg2: ctx.AllocRegExcept(arg.Reg, arg.Reg2, targetReg)}
+		ctx.BindReg(target.Reg, &target)
+		ctx.BindReg(target.Reg2, &target)
+		targetHasRegs = true
 	}
 
 	ctx.ReclaimUntrackedRegs()
@@ -1870,16 +1876,8 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	ctx.recordSafepoint(transientRoots)
 	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 
-	if !targetHasRegs {
-		target = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-		targetHasRegs = true
-	}
-	if target.Reg != RegRAX {
-		ctx.EmitMovRegReg(target.Reg, RegRAX)
-	}
-	if target.Reg2 != RegRBX {
-		ctx.EmitMovRegReg(target.Reg2, RegRBX)
-	}
+	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
+	ctx.EmitMovPairToResult(&callResult, &target)
 	for i, r := range liveRegs {
 		ctx.EmitMovRegMem(r, RegRSP, int32(i*8))
 	}
@@ -2095,7 +2093,7 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 		ctx.EmitMovRegImm64(RegR11, desc.Imm.aux)
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
 	default:
-		panic("jit: EmitStoreScmerToStack: unsupported location")
+		panic(fmt.Sprintf("jit: EmitStoreScmerToStack: unsupported location %d (type %d)", desc.Loc, desc.Type))
 	}
 }
 

@@ -35,6 +35,10 @@ type perSSAInstrEmitter struct {
 
 func (e perSSAInstrEmitter) Emit(instr ssa.Instruction) {
 	switch v := instr.(type) {
+	case *ssa.Extract:
+		e.EmitExtract(v)
+	case *ssa.Lookup:
+		e.EmitLookup(v)
 	case *ssa.IndexAddr:
 		e.EmitIndexAddr(v)
 	case *ssa.FieldAddr:
@@ -55,6 +59,8 @@ func (e perSSAInstrEmitter) Emit(instr ssa.Instruction) {
 		e.EmitJump(v)
 	case *ssa.Convert:
 		e.EmitConvert(v)
+	case *ssa.ChangeType:
+		e.EmitChangeType(v)
 	case *ssa.Alloc:
 		e.EmitAlloc(v)
 	case *ssa.Store:
@@ -74,6 +80,8 @@ func (e perSSAInstrEmitter) Emit(instr ssa.Instruction) {
 	}
 }
 
+func (e perSSAInstrEmitter) EmitExtract(v *ssa.Extract)             { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitLookup(v *ssa.Lookup)               { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitIndexAddr(v *ssa.IndexAddr)         { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitFieldAddr(v *ssa.FieldAddr)         { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitUnOp(v *ssa.UnOp)                   { e.g.emitInstrLegacy(v) }
@@ -84,6 +92,7 @@ func (e perSSAInstrEmitter) EmitPhi(v *ssa.Phi)                     { e.g.emitIn
 func (e perSSAInstrEmitter) EmitIf(v *ssa.If)                       { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitJump(v *ssa.Jump)                   { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitConvert(v *ssa.Convert)             { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitChangeType(v *ssa.ChangeType)       { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitAlloc(v *ssa.Alloc)                 { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitStore(v *ssa.Store)                 { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitMakeClosure(v *ssa.MakeClosure)     { e.g.emitInstrLegacy(v) }

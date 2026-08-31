@@ -480,17 +480,18 @@ type JITContext struct {
 	LocalSlotCount int
 	// TransferInputArgs is set when emission proves that the native result is
 	// exactly the complete variadic input array re-tagged as an owned list.
-	TransferInputArgs bool
-	HiddenArgs        []JITHiddenArg
-	RuntimeEnv        Scmer
-	AutoImportSafe    bool
-	RecursiveLambdas  bool
-	NeedsStableArgs   bool
-	SelfSymbols       map[Symbol]struct{}
-	SelfLoopLabel     uint8
-	HasSelfLoop       bool
-	SelfParamCount    int
-	RegOwners         [16]*JITValueDesc // register → owner descriptor (nil = untracked)
+	TransferInputArgs     bool
+	HiddenArgs            []JITHiddenArg
+	RuntimeEnv            Scmer
+	AutoImportSafe        bool
+	RecursiveLambdas      bool
+	ActiveBuiltinEmitters map[*Declaration]uint16
+	NeedsStableArgs       bool
+	SelfSymbols           map[Symbol]struct{}
+	SelfLoopLabel         uint8
+	HasSelfLoop           bool
+	SelfParamCount        int
+	RegOwners             [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DynamicSP is the temporary distance below the static frame bottom. It
 	// covers pushed live registers, variadic arrays, and the Go call area.
 	DynamicSP int32
@@ -1681,6 +1682,8 @@ func JITSqrtBits(v uint64) uint64 {
 	return math.Float64bits(math.Sqrt(math.Float64frombits(v)))
 }
 
+func JITStringEqual(a, b string) bool { return a == b }
+
 func JITAbsBits(v uint64) uint64 {
 	return math.Float64bits(math.Abs(math.Float64frombits(v)))
 }
@@ -1724,9 +1727,13 @@ type goCallArgWord struct {
 func (ctx *JITContext) collectLiveRegsForCall(buf *[16]Reg) []Reg {
 	// Only allocator-owned registers can contain live SSA values. Reserved ABI,
 	// scratch and frame registers are handled explicitly by the call emitter.
-	allocatedMask := ctx.AllRegs &^ ctx.FreeRegs
+	// Protected registers are explicitly live across the current nested emitter
+	// even when a borrowed descriptor has no allocator owner (or its owner was
+	// moved to a spill slot). Calls must preserve that contract as well as normal
+	// allocator ownership.
+	allocatedMask := (ctx.AllRegs &^ ctx.FreeRegs) | (ctx.ProtectedRegs & ctx.AllRegs)
 	for r := Reg(0); r <= RegR15; r++ {
-		if ctx.RegOwners[r] != nil && (ctx.FreeRegs&(1<<uint(r))) != 0 {
+		if ctx.RegOwners[r] != nil && (ctx.FreeRegs&(1<<uint(r))) != 0 && (ctx.ProtectedRegs&(1<<uint(r))) == 0 {
 			panic("jit: internal reg state mismatch (owner set but register marked free)")
 		}
 	}
@@ -1820,6 +1827,15 @@ func (ctx *JITContext) emitParallelRegMoves(moves []jitRegMove) {
 }
 
 func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg, resultTargets []Reg) []Reg {
+	return ctx.emitGoCall(funcAddr, argWords, numResultWords, resultsBuf, resultTargets, nil)
+}
+
+func (ctx *JITContext) EmitGoCallToStack(funcAddr uint64, argWords []goCallArgWord, resultStackOffs []int32) {
+	var resultsBuf [16]Reg
+	ctx.emitGoCall(funcAddr, argWords, len(resultStackOffs), &resultsBuf, nil, resultStackOffs)
+}
+
+func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, numResultWords int, resultsBuf *[16]Reg, resultTargets []Reg, resultStackOffs []int32) []Reg {
 	ctx.NeedsStableArgs = true
 	if numResultWords > len(GoABIIntRegs) {
 		panic("jit: too many result words for Go ABI")
@@ -1917,6 +1933,12 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 			ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
 		}
+		if resultStackOffs != nil {
+			for i, off := range resultStackOffs {
+				ctx.EmitStoreRegMem(GoABIIntRegs[i], ctx.StackReg, off)
+			}
+			return nil
+		}
 		moves := make([]jitRegMove, 0, numResultWords)
 		for i := 0; i < numResultWords; i++ {
 			var r Reg
@@ -2000,6 +2022,17 @@ func (ctx *JITContext) EmitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 	}
 	for i := len(liveRegs) - 1; i >= 0; i-- {
 		ctx.EmitPopReg(liveRegs[i])
+	}
+	if resultStackOffs != nil {
+		for i, off := range resultStackOffs {
+			ctx.EmitMovRegMem(RegR11, RegRSP, int32(i*8))
+			ctx.EmitStoreRegMem(RegR11, ctx.StackReg, off+int32(resultBytes))
+		}
+		ctx.EmitReleaseStackBytes(int32(resultBytes))
+		if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
+			ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
+		}
+		return nil
 	}
 
 	// Pop results from reserved slots into freshly allocated registers
