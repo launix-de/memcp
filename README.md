@@ -1,3 +1,5 @@
+<!-- Copyright (C) 2023 - 2026 Carl-Philip Haensch; GPL-3.0-or-later -->
+
 # MemCP — Persistent Main Memory Database with MySQL Compatibility
 
 MemCP is a MySQL-compatible database that keeps your data fully in main memory for maximum speed. **Your data is safe** — it's persisted to disk automatically and survives restarts — but because there's no disk I/O on the query path, reads and aggregations run 10–100× faster than MySQL.
@@ -85,8 +87,14 @@ MemCP (main memory):          0.1-1ms  // 50x faster!
 ### **⚡ Docker**
 ```bash
 docker pull carli2/memcp
-docker run -it -p 4321:4321 -p 3307:3307 carli2/memcp
+printf '%s\n' 'replace-with-a-long-random-password' > memcp-root-password.txt
+chmod 600 memcp-root-password.txt
+docker compose up -d
 ```
+
+The container intentionally refuses to initialize a fresh data volume without
+an explicit password. See [Container deployment](#container-deployment) for the
+complete Compose configuration.
 
 ### **🧠 Persistent and Safe**
 - **Data is written to disk** — restarts and crashes don't lose your data
@@ -202,39 +210,143 @@ does not compile or activate the experimental runtime integration.
 | `--mysql-port=PORT` | `3307` | MySQL protocol listen port |
 | `--mysql-socket=PATH` | `/tmp/memcp.sock` | MySQL Unix socket path |
 | `--root-password=PASSWORD` | `admin` | Initial root password (first run only) |
+| `--root-password-file=PATH` | — | Read the initial root password from a file |
 | `--disable-api` | — | Disable HTTP API server |
 | `--disable-mysql` | — | Disable MySQL protocol server |
 | `--no-repl` | — | Disable interactive REPL (required for daemon/background use) |
+| `--initialize` | — | Initialize a fresh data directory and exit cleanly |
 | `-data DIR` | `./data` | Data directory |
 
 ### Authentication
 
 > **Security note:** Never expose MemCP directly to the internet with default credentials. Always set a strong `--root-password` before any network-accessible deployment.
 
-- Default credentials: `root` / `admin`.
-- Set the initial root password via CLI: `--root-password=supersecret` at the first run (on a fresh -data folder), or via Docker env `ROOT_PASSWORD`.
-- Docker Compose example:
+- Source builds default to `root` / `admin` unless `--root-password` is supplied
+  for the first start of a fresh data directory.
+- DEB and RPM installations generate a random initial password. Read it once
+  with `sudo cat /etc/memcp/initial-root-password`, change it, and then delete
+  that file.
+- Containers require either the `memcp_root_password` secret shown below or an
+  explicit `ROOT_PASSWORD` for a fresh volume. The secret is preferred because
+  environment variables are visible through container metadata.
+- Change the credentials with:
+```bash
+curl -X POST http://localhost:4321/sql/system \
+  -d "ALTER USER root IDENTIFIED BY 'new-long-random-password'" \
+  -u root:"$OLD_PASSWORD"
+```
+
+## Installation packages
+
+Tagged releases publish a static Linux binary, an amd64 DEB, an x86_64 RPM and
+source RPM, checksums, and a multi-architecture container image for amd64 and
+arm64. The version in the tag must exactly match the first word in
+`CHANGELOG.md` (for example `v0.2` for version `0.2`).
+
+### Debian and Ubuntu
+
+```bash
+sudo apt install ./memcp_VERSION_amd64.deb
+sudo cat /etc/memcp/initial-root-password
+systemctl status memcp
+```
+
+The password file is readable only by root. After logging in and changing the
+password, remove the one-time copy:
+
+```bash
+sudo rm /etc/memcp/initial-root-password
+```
+
+Configuration lives in `/etc/memcp/memcp.conf`, persistent data in
+`/var/lib/memcp`, and the local MySQL socket in `/run/memcp/memcp.sock`.
+Package upgrades stop MemCP gracefully before replacing the binary and restart
+it afterwards. Removing or purging the package deliberately preserves database
+data, the service account, and any still-existing initial password file.
+
+The packaged systemd sandbox only permits writes below `/var/lib/memcp` and
+`/run/memcp`. If `-data` is moved elsewhere, add that absolute directory with a
+systemd drop-in (`ReadWritePaths=`); paths below `/home` additionally require an
+appropriate `ProtectHome=` override.
+
+### RPM distributions
+
+```bash
+sudo dnf install ./memcp_VERSION_x86_64.rpm
+sudo cat /etc/memcp/initial-root-password
+systemctl status memcp
+```
+
+RPM installations use the same paths and data-retention rules as DEB packages.
+
+### Container deployment
+
+Create `memcp-root-password.txt` outside the repository and keep it out of Git:
+
 ```yaml
 services:
   memcp:
-    image: carli2/memcp:latest
-    environment:
-      - ROOT_PASSWORD=supersecret
-      - PARAMS=--api-port=4321
+    image: carli2/memcp:VERSION
     ports:
-      - "4321:4321"  # HTTP API
-      - "3307:3307"  # MySQL protocol
+      - "4321:4321"
+      - "3307:3307"
+    volumes:
+      - memcp_data:/data
+    secrets:
+      - memcp_root_password
+
+secrets:
+  memcp_root_password:
+    file: ./memcp-root-password.txt
+
+volumes:
+  memcp_data: {}
+```
+
+The image runs as the fixed unprivileged user/group `10001:10001`. Existing
+host directories mounted at `/data` must therefore be writable by UID 10001.
+The initial password is read only when `/data` is fresh; subsequent starts use
+the credentials stored in the database.
+
+For compatibility, `ROOT_PASSWORD` is also accepted on the first start:
+
+```yaml
+services:
+  memcp:
+    image: carli2/memcp:VERSION
+    environment:
+      ROOT_PASSWORD: replace-with-a-long-random-password
+    ports:
+      - "4321:4321"
+      - "3307:3307"
     volumes:
       - memcp_data:/data
 volumes:
   memcp_data: {}
 ```
-- Change the credentials with:
+
+### Building packages locally
+
+```bash
+make memcp.deb
+make memcp.rpm
+python3 tools/test_packaging.py --artifacts
 ```
-curl -X POST http://localhost:4321/sql/system \
-  -d "ALTER USER root IDENTIFIED BY 'supersecret'" \
-  -u root:admin
-```
+
+Artifacts are written to `dist/`. Container builds are not part of these local
+targets. `make docker-release` is an explicit multi-architecture push and
+requires an authenticated Docker Buildx installation.
+
+### Publishing a release
+
+Repository maintainers configure `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` as
+GitHub Actions secrets. After the release changelog PR is merged, create and
+push an annotated tag whose name exactly matches `v` plus the changelog version.
+The release workflow verifies that the commit belongs to `master`, rebuilds and
+checks all artifacts, publishes the versioned and `latest` container tags,
+creates SHA256 checksums and build-provenance attestations, and only then creates
+the GitHub release. It must not be replaced by manually uploading locally built
+files.
 
 ## Importing Existing Data 📥
 
