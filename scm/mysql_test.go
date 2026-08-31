@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
-	"github.com/launix-de/go-mysqlstack/sqlparser/depends/sqltypes"
 )
 
 func TestMySQLClientErrorMessageDropsInternalStackAndFitsCommandBuffer(t *testing.T) {
@@ -44,25 +43,86 @@ func TestMySQLClientErrorMessageBoundsSingleLineErrors(t *testing.T) {
 }
 
 func TestAppendMySQLResultRowDuplicateAliasUsesLastValueType(t *testing.T) {
-	result := sqltypes.Result{}
+	var fields []*querypb.Field
 	colmap := map[string]int{}
 
-	row := appendMySQLResultRow(&result, colmap, []Scmer{
+	row, unknown := prepareMySQLResultRow(&fields, colmap, []Scmer{
 		NewString("x"), NewInt(1),
 		NewString("x"), NewString("EUR"),
-	})
+	}, nil, false, true)
 
-	if len(result.Fields) != 1 {
-		t.Fatalf("expected 1 field, got %d", len(result.Fields))
+	if unknown {
+		t.Fatal("first row unexpectedly reported an unknown column")
 	}
-	if result.Fields[0].Type != querypb.Type_VARCHAR {
-		t.Fatalf("expected varchar metadata, got %v", result.Fields[0].Type)
+	if len(fields) != 1 {
+		t.Fatalf("expected 1 field, got %d", len(fields))
 	}
-	if result.Fields[0].Charset != 45 {
-		t.Fatalf("expected utf8mb4 charset, got %d", result.Fields[0].Charset)
+	if fields[0].Type != querypb.Type_VARCHAR {
+		t.Fatalf("expected varchar metadata, got %v", fields[0].Type)
 	}
-	if got := row[0].ToString(); got != "EUR" {
+	if fields[0].Charset != 45 {
+		t.Fatalf("expected utf8mb4 charset, got %d", fields[0].Charset)
+	}
+	if got := row[0].String(); got != "EUR" {
 		t.Fatalf("expected last duplicate value, got %q", got)
+	}
+}
+
+func TestPrepareMySQLResultRowPadsMissingAndRejectsNewPublishedColumns(t *testing.T) {
+	fields := []*querypb.Field{{Name: "a", Type: querypb.Type_INT64}, {Name: "b", Type: querypb.Type_VARCHAR}}
+	colmap := map[string]int{"a": 0, "b": 1}
+	row := []Scmer{NewInt(1), NewString("old")}
+
+	row, unknown := prepareMySQLResultRow(&fields, colmap, []Scmer{
+		NewString("b"), NewString("new"),
+		NewString("c"), NewString("ignored"),
+	}, row, true, false)
+
+	if !unknown {
+		t.Fatal("new column after publishing fields was not reported")
+	}
+	if !row[0].IsNil() {
+		t.Fatalf("missing column was not padded with NULL: %v", row[0])
+	}
+	if got := row[1].String(); got != "new" {
+		t.Fatalf("known column got %q, want new", got)
+	}
+}
+
+func TestPrepareMySQLResultRowRefinesInitiallyNullMetadata(t *testing.T) {
+	var fields []*querypb.Field
+	colmap := map[string]int{}
+
+	row, _ := prepareMySQLResultRow(&fields, colmap, []Scmer{
+		NewString("value"), NewNil(),
+	}, nil, false, true)
+	if fields[0].Type != querypb.Type_NULL_TYPE {
+		t.Fatalf("initial NULL has type %v, want NULL_TYPE", fields[0].Type)
+	}
+
+	row, _ = prepareMySQLResultRow(&fields, colmap, []Scmer{
+		NewString("value"), NewInt(42),
+	}, row, true, true)
+	if fields[0].Type != querypb.Type_INT64 {
+		t.Fatalf("later integer has type %v, want INT64", fields[0].Type)
+	}
+}
+
+func BenchmarkPrepareMySQLResultRow10PublishedColumns(b *testing.B) {
+	fields := make([]*querypb.Field, 10)
+	colmap := make(map[string]int, 10)
+	item := make([]Scmer, 0, 20)
+	row := make([]Scmer, 10)
+	for i := 0; i < 10; i++ {
+		name := string(rune('a' + i))
+		fields[i] = &querypb.Field{Name: name, Type: querypb.Type_INT64}
+		colmap[name] = i
+		item = append(item, NewString(name), NewInt(int64(i)))
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		row, _ = prepareMySQLResultRow(&fields, colmap, item, row, true, false)
 	}
 }
 
