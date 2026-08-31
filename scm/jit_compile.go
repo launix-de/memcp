@@ -18,6 +18,7 @@ package scm
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"unsafe"
 )
@@ -267,6 +268,53 @@ func jitMakeScmerSlice(length, capacity int) []Scmer {
 	return make([]Scmer, length, capacity)
 }
 
+func jitMakeByteSlice(length, capacity int) []byte {
+	return make([]byte, length, capacity)
+}
+
+func jitStringToBytes(value string) []byte {
+	return []byte(value)
+}
+
+func jitBytesToString(value []byte) string {
+	return string(value)
+}
+
+func jitCopyScmerSlice(dst, src []Scmer) int {
+	return copy(dst, src)
+}
+
+func jitCopyByteSlice(dst, src []byte) int {
+	return copy(dst, src)
+}
+
+func jitAssertString(value any) (string, bool) {
+	result, ok := value.(string)
+	return result, ok
+}
+
+func jitAssertReader(value any) (io.Reader, bool) {
+	result, ok := value.(io.Reader)
+	return result, ok
+}
+
+func jitAssertScmerFunction(value any) (func(...Scmer) Scmer, bool) {
+	result, ok := value.(func(...Scmer) Scmer)
+	return result, ok
+}
+
+func jitAssertScmer(value any) Scmer {
+	return value.(Scmer)
+}
+
+func jitReaderToAny(value io.Reader) any {
+	return value
+}
+
+func jitInvokeMergeCallback(callback func(Scmer, Scmer) Scmer, oldValue, newValue Scmer) Scmer {
+	return callback(oldValue, newValue)
+}
+
 func jitMakeReservedList(capacity int) Scmer {
 	if capacity < 0 {
 		capacity = 0
@@ -355,12 +403,24 @@ func jitInvokeCallback3(callback, arg0, arg1, arg2 Scmer) Scmer {
 	return callback.Func()(arg0, arg1, arg2)
 }
 
+func jitInvokeCallback4(callback, arg0, arg1, arg2, arg3 Scmer) Scmer {
+	return callback.Func()(arg0, arg1, arg2, arg3)
+}
+
+func jitInvokeCallbackSlice(callback Scmer, args []Scmer) Scmer {
+	return callback.Func()(args...)
+}
+
+func jitInvokeGoFunctionSlice(callback func(...Scmer) Scmer, args []Scmer) Scmer {
+	return callback(args...)
+}
+
 // EmitSliceElementAddress lowers the address part shared by SSA slice loads and
 // stores.
 func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, elementSize int32) JITValueDesc {
 	slicePtr := Reg(0)
 	loadedPtr := false
-	if slice.Loc == LocStackTriple {
+	if slice.Loc == LocStackTriple || slice.Loc == LocStackPair {
 		slicePtr = ctx.AllocReg()
 		base := ctx.StackReg
 		if slice.StackOff < 0 {
@@ -370,8 +430,8 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 		loadedPtr = true
 	} else {
 		ctx.EnsureDesc(slice)
-		if slice.Loc != LocRegTriple {
-			panic("jit: slice element address requires a Go slice header")
+		if slice.Loc != LocRegTriple && slice.Loc != LocRegPair {
+			panic("jit: slice element address requires a Go slice or string header")
 		}
 		slicePtr = slice.Reg
 		ctx.ProtectReg(slicePtr)
@@ -432,6 +492,27 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 	result := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: address}
 	ctx.BindReg(address, &result)
 	return result
+}
+
+// EnsureGoStringHeader materializes a Go string's data pointer and length as
+// the same two-word descriptor used by ABI calls and indexed loads.
+func (ctx *JITContext) EnsureGoStringHeader(value *JITValueDesc) {
+	if value.Loc == LocImm {
+		ctx.TrackImm(value.Imm)
+		data := ctx.AllocReg()
+		length := ctx.AllocRegExcept(data)
+		ptrWord, _ := value.Imm.RawWords()
+		ctx.EmitMovRegImm64(data, uint64(ptrWord))
+		ctx.EmitMovRegImm64(length, uint64(len(value.Imm.String())))
+		*value = JITValueDesc{Loc: LocRegPair, Reg: data, Reg2: length, Rooted: true}
+		ctx.BindReg(data, value)
+		ctx.BindReg(length, value)
+		return
+	}
+	ctx.EnsureDesc(value)
+	if value.Loc != LocRegPair && value.Loc != LocStackPair {
+		panic("jit: Go string header requires a two-word descriptor")
+	}
 }
 
 // EmitSliceCapAfterLow computes cap(slice)-low without forcing a stack-backed

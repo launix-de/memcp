@@ -39,6 +39,8 @@ func (e perSSAInstrEmitter) Emit(instr ssa.Instruction) {
 		e.EmitExtract(v)
 	case *ssa.Lookup:
 		e.EmitLookup(v)
+	case *ssa.Index:
+		e.EmitIndex(v)
 	case *ssa.IndexAddr:
 		e.EmitIndexAddr(v)
 	case *ssa.FieldAddr:
@@ -69,6 +71,14 @@ func (e perSSAInstrEmitter) Emit(instr ssa.Instruction) {
 		e.EmitMakeClosure(v)
 	case *ssa.MakeInterface:
 		e.EmitMakeInterface(v)
+	case *ssa.TypeAssert:
+		e.EmitTypeAssert(v)
+	case *ssa.ChangeInterface:
+		e.EmitChangeInterface(v)
+	case *ssa.MakeMap:
+		e.EmitMakeMap(v)
+	case *ssa.MapUpdate:
+		e.EmitMapUpdate(v)
 	case *ssa.Panic:
 		e.EmitPanic(v)
 	case *ssa.Slice:
@@ -82,6 +92,7 @@ func (e perSSAInstrEmitter) Emit(instr ssa.Instruction) {
 
 func (e perSSAInstrEmitter) EmitExtract(v *ssa.Extract)             { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitLookup(v *ssa.Lookup)               { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitIndex(v *ssa.Index)                 { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitIndexAddr(v *ssa.IndexAddr)         { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitFieldAddr(v *ssa.FieldAddr)         { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitUnOp(v *ssa.UnOp)                   { e.g.emitInstrLegacy(v) }
@@ -97,6 +108,12 @@ func (e perSSAInstrEmitter) EmitAlloc(v *ssa.Alloc)                 { e.g.emitIn
 func (e perSSAInstrEmitter) EmitStore(v *ssa.Store)                 { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitMakeClosure(v *ssa.MakeClosure)     { e.g.emitInstrLegacy(v) }
 func (e perSSAInstrEmitter) EmitMakeInterface(v *ssa.MakeInterface) { e.g.emitInstrLegacy(v) }
-func (e perSSAInstrEmitter) EmitPanic(v *ssa.Panic)                 { e.g.emitInstrLegacy(v) }
-func (e perSSAInstrEmitter) EmitSlice(v *ssa.Slice)                 { e.g.emitInstrLegacy(v) }
-func (e perSSAInstrEmitter) EmitMakeSlice(v *ssa.MakeSlice)         { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitTypeAssert(v *ssa.TypeAssert)       { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitChangeInterface(v *ssa.ChangeInterface) {
+	e.g.emitInstrLegacy(v)
+}
+func (e perSSAInstrEmitter) EmitMakeMap(v *ssa.MakeMap)     { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitMapUpdate(v *ssa.MapUpdate) { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitPanic(v *ssa.Panic)         { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitSlice(v *ssa.Slice)         { e.g.emitInstrLegacy(v) }
+func (e perSSAInstrEmitter) EmitMakeSlice(v *ssa.MakeSlice) { e.g.emitInstrLegacy(v) }
