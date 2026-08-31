@@ -1578,31 +1578,35 @@ func optimizerProcSequenceForDefinition(name Symbol, expression Scmer) procSeque
 		return procSequenceNone
 	}
 	body, ok := scmerSlice(lambda[2])
-	if !ok || len(body) < 8 || (!scmerIsSymbol(body[0], "match") && !scmerIsSymbol(body[0], "match_mut")) {
+	if !ok || len(body) < 8 || len(body)%2 != 0 || (!scmerIsSymbol(body[0], "match") && !scmerIsSymbol(body[0], "match_mut")) {
 		return procSequenceNone
 	}
 	input, ok := scmerSlice(body[1])
 	if !ok || len(input) != 3 || !scmerIsSymbol(input[0], "coalesceNil") {
 		return procSequenceNone
 	}
-	binaryPattern, ok := scmerSlice(body[2])
-	if !ok || len(binaryPattern) != 3 {
-		return procSequenceNone
+	hasBinary, hasVariadic := false, false
+	for i := 2; i+1 < len(body); i += 2 {
+		pattern, patternOK := scmerSlice(body[i])
+		result, resultOK := scmerSlice(body[i+1])
+		if !patternOK || !resultOK {
+			continue
+		}
+		if len(pattern) == 3 {
+			head, headOK := scmerSlice(pattern[0])
+			if headOK && len(head) == 2 &&
+				(scmerIsSymbol(head[0], "symbol") || scmerIsSymbol(head[0], "quote")) &&
+				scmerIsSymbol(head[1], "and") && len(result) >= 2 && scmerIsSymbol(result[0], "merge") {
+				hasBinary = true
+				continue
+			}
+		}
+		if len(pattern) == 3 && scmerIsSymbol(pattern[0], "cons") &&
+			len(result) >= 3 && scmerIsSymbol(result[0], "if") {
+			hasVariadic = true
+		}
 	}
-	binaryHead, ok := scmerSlice(binaryPattern[0])
-	if !ok || len(binaryHead) != 2 || !scmerIsSymbol(binaryHead[0], "symbol") || !scmerIsSymbol(binaryHead[1], "and") {
-		return procSequenceNone
-	}
-	binaryResult, ok := scmerSlice(body[3])
-	if !ok || len(binaryResult) < 2 || !scmerIsSymbol(binaryResult[0], "merge") {
-		return procSequenceNone
-	}
-	variadicPattern, ok := scmerSlice(body[4])
-	if !ok || len(variadicPattern) != 3 || !scmerIsSymbol(variadicPattern[0], "cons") {
-		return procSequenceNone
-	}
-	variadicResult, ok := scmerSlice(body[5])
-	if !ok || len(variadicResult) < 3 || !scmerIsSymbol(variadicResult[0], "if") {
+	if !hasBinary || !hasVariadic {
 		return procSequenceNone
 	}
 	return procSequenceAndTerms
