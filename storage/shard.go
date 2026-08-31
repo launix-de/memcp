@@ -54,12 +54,9 @@ type storageShard struct {
 	// later rollback or ACID commit can still change successor visibility.
 	// Guarded by mu.
 	rollbackProtected NonLockingReadMap.NonBlockingBitMap
-	// writeOwner mirrors ownership of mu's exclusive lock. A nested read only
-	// performs an atomic load; it must never lock or CAS merely to discover that
-	// its transaction already owns the shard. Only the mutation-side enter/exit
-	// path writes this cache line while it physically owns mu.
-	writeOwner atomic.Pointer[TxContext]
-	logfile    PersistenceLogfile // only in safe mode
+	writeOwners       map[uint64]uint32  // goroutine-local write ownership marker
+	writeOwnMu        sync.Mutex         // guards writeOwners
+	logfile           PersistenceLogfile // only in safe mode
 	// mu protects shard-local topology/runtime state:
 	//   - columns / deltaColumns / inserts / deletions
 	//   - Indexes

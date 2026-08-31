@@ -152,11 +152,6 @@ func NewTxContext(mode TxMode) *TxContext {
 // Rollback leave the object parked in its Scheme session so the next statement
 // can reuse it without retaining any state from the completed transaction.
 func (tx *TxContext) reset(mode TxMode) {
-	// Normal commit/rollback releases every physical shard lock first. Clear a
-	// stale ownership publication defensively before this allocation is reused.
-	for shard := range tx.writeHeld {
-		shard.writeOwner.CompareAndSwap(tx, nil)
-	}
 	tx.ID = atomic.AddUint64(&txIDCounter, 1)
 	tx.Mode = mode
 	tx.State = TxActive
@@ -341,15 +336,7 @@ func (tx *TxContext) EnterShardWrite(shard *storageShard) {
 	if tx.writeHeld == nil {
 		tx.writeHeld = make(map[*storageShard]uint32)
 	}
-	depth := tx.writeHeld[shard]
-	tx.writeHeld[shard] = depth + 1
-	if depth == 0 {
-		if owner := shard.writeOwner.Load(); owner != nil && owner != tx {
-			tx.mu.Unlock()
-			panic("shard write ownership published by a different transaction")
-		}
-		shard.writeOwner.Store(tx)
-	}
+	tx.writeHeld[shard]++
 	tx.mu.Unlock()
 }
 
@@ -358,20 +345,18 @@ func (tx *TxContext) ExitShardWrite(shard *storageShard) {
 	tx.mu.Lock()
 	if d := tx.writeHeld[shard]; d <= 1 {
 		delete(tx.writeHeld, shard)
-		if !shard.writeOwner.CompareAndSwap(tx, nil) {
-			tx.mu.Unlock()
-			panic("shard write ownership lost before release")
-		}
 	} else {
 		tx.writeHeld[shard] = d - 1
 	}
 	tx.mu.Unlock()
 }
 
-// HasShardWrite is a read-only hot-path query. It intentionally performs one
-// atomic load and no lock, CAS, counter update or other shared-memory write.
+// HasShardWrite returns true when this tx context currently holds a write lock
+// on the shard. Used to avoid re-entering shard read locks from nested scans.
 func (tx *TxContext) HasShardWrite(shard *storageShard) bool {
-	return tx != nil && shard.writeOwner.Load() == tx
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return tx.writeHeld[shard] > 0
 }
 
 // ---------------------------------------------------------------------------
