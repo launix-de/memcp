@@ -221,12 +221,12 @@ partner. */
 	(match expr
 		((symbol quote) _value) expr
 		((quote quote) _value) expr
-		((symbol outer) _value) expr
-		((quote outer) _value) expr
+		((symbol outer) _depth _value) expr
+		((quote outer) _depth _value) expr
 		(cons head tail) (cons head (map tail (lambda (item)
 			(mark_scalar_first_probe_outer_symbols sources item))))
 		_ (if (scalar_first_probe_outer_symbol? sources expr)
-			(list (quote outer) expr)
+			(list (quote outer) 1 expr)
 			expr))))
 
 (define scalar_first_probe_key_terms (lambda (sources default_alias src keys lookup_keys)
@@ -4621,7 +4621,7 @@ self-joins of the same base table still describe two distinct row roles. */
 				(if (not (nil? found)) found (if (equal? expr (nth candidate 0)) candidate nil)))
 			nil))
 		(if (not (nil? pair))
-			(list (quote outer) (symbol (nth pair 1)))
+			(list (quote outer) 1 (symbol (nth pair 1)))
 			(match expr
 				(cons head tail) (cons head (map tail (lambda (item)
 					(replace_group_session_expr stage keys key_names item))))
@@ -5039,7 +5039,7 @@ ever-larger subtrees. */
 				true
 				(list (quote equal?)
 					(lower_column_expr_for_alias src (nth keys i))
-					(list (quote outer) (symbol (nth key_names i))))))))))
+					(list (quote outer) 1 (symbol (nth key_names i))))))))))
 
 (define build_group_constant_key_insert_plan (lambda (schema grouptbl)
 	(list (quote insert)

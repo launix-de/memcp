@@ -1377,8 +1377,8 @@ func jitRuntimeCaptureArgExprs(ctx *JITContext) []Scmer {
 		for _, symbol := range symbols {
 			key := NewSymbol(string(symbol))
 			value := Scmer(key)
-			for level := 0; level < depth; level++ {
-				value = NewSlice([]Scmer{NewSymbol("outer"), value})
+			if depth > 0 {
+				value = NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), value})
 			}
 			args = append(args, NewSlice([]Scmer{NewSymbol("quote"), key}), value)
 		}

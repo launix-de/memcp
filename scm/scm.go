@@ -53,6 +53,20 @@ func symbolName(v Scmer) (string, bool) {
 	return "", false
 }
 
+func outerDepthLiteral(value Scmer) (int64, bool) {
+	for value.IsSourceInfo() {
+		value = value.SourceInfo().value
+	}
+	if value.GetTag() != tagInt && value.GetTag() != tagFloat {
+		return 0, false
+	}
+	depth := value.Int()
+	if depth < 0 || (value.GetTag() == tagFloat && value.Float() != float64(depth)) {
+		return 0, false
+	}
+	return depth, true
+}
+
 func mustSymbol(v Scmer) Symbol {
 	if name, ok := symbolName(v); ok {
 		return Symbol(name)
@@ -125,12 +139,25 @@ restart:
 			dispatch := procedure.specialFormDispatch()
 			switch dispatch {
 			case specialFormOuter:
-				if en.Outer == nil {
+				depth, validDepth := int64(0), false
+				if len(operands) == 2 {
+					depth, validDepth = outerDepthLiteral(operands[0])
+				}
+				if !validDepth {
+					panic(fmt.Sprintf("outer expects a non-negative scope depth and an expression: %s", SerializeToString(expression, en)))
+				}
+				for ; depth > 0; depth-- {
+					if en == nil {
+						return NewNil()
+					}
+					en = en.Outer
+				}
+				if en == nil {
 					return NewNil()
 				}
-				if operands[0].IsSymbol() {
-					symbol := operands[0].Symbol()
-					if outer := en.Outer.FindRead(symbol); outer != nil {
+				if operands[1].IsSymbol() {
+					symbol := operands[1].Symbol()
+					if outer := en.FindRead(symbol); outer != nil {
 						if result, exists := outer.Vars[symbol]; exists {
 							return result
 						}
@@ -138,7 +165,7 @@ restart:
 					symbolName := string(symbol)
 					if strings.Contains(symbolName, ".") && !strings.Contains(symbolName, "\x00") {
 						suffix := "\x00" + symbolName
-						for outer := en.Outer; outer != nil; outer = outer.Outer {
+						for outer := en; outer != nil; outer = outer.Outer {
 							for key, result := range outer.Vars {
 								if strings.HasSuffix(string(key), suffix) {
 									return result
@@ -147,8 +174,7 @@ restart:
 						}
 					}
 				}
-				en = en.Outer
-				expression = operands[0]
+				expression = operands[1]
 				goto restart
 			case specialFormEval:
 				expression = Eval(operands[0], en)
@@ -754,7 +780,7 @@ type optimizerProcReturnTemplate struct {
 
 // CloseProcedure snapshots explicit captures of a procedure without retaining
 // its request-local environment. The optimizer represents a capture from the
-// procedure's creation frame as (outer expr). Resolve only those forms in the
+// procedure's creation frame as (outer depth expr). Resolve only those forms in the
 // current procedure body; nested lambdas keep their own outer references,
 // which bind to frames created when the closed procedure runs.
 func CloseProcedure(value Scmer) Scmer {

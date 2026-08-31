@@ -18,6 +18,7 @@ package scm
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -147,7 +148,7 @@ func TestSpecialFormDispatchFollowsSymbolResolution(t *testing.T) {
 
 func TestOptimizerLowersLambdaAndCompilerForms(t *testing.T) {
 	metadata := newOptimizerMetainfo()
-	expression, _ := OptimizeEx(Read(t.Name(), "(lambda (value) (outer value))"), &Globalenv, &metadata, true)
+	expression, _ := OptimizeEx(Read(t.Name(), "(lambda (value) (outer 1 value))"), &Globalenv, &metadata, true)
 	items := expression.Slice()
 	if items[0].GetTag() != tagSpecialForm || items[0].SpecialFormName() != "lambda" {
 		t.Fatalf("lambda declaration was not lowered: %s", SerializeToString(expression, &Globalenv))
@@ -155,6 +156,26 @@ func TestOptimizerLowersLambdaAndCompilerForms(t *testing.T) {
 	body := items[2].Slice()
 	if body[0].GetTag() != tagSpecialForm || body[0].SpecialFormName() != "outer" {
 		t.Fatalf("compiler-internal outer form remained shadowable: %s", SerializeToString(expression, &Globalenv))
+	}
+}
+
+func TestOptimizerCollapsesOuterScopeDepth(t *testing.T) {
+	metadata := newOptimizerMetainfo()
+	expression, _ := OptimizeEx(
+		Read(t.Name(), "(lambda (captured) (lambda (middle) (lambda (inner) (+ captured middle inner))))"),
+		&Globalenv,
+		&metadata,
+		true,
+	)
+	serialized := SerializeToString(expression, &Globalenv)
+	if !strings.Contains(serialized, "(outer 2 (var 0))") {
+		t.Fatalf("two scope transitions were not collapsed: %s", serialized)
+	}
+	if !strings.Contains(serialized, "(outer 1 (var 0))") {
+		t.Fatalf("one scope transition was not retained: %s", serialized)
+	}
+	if strings.Contains(serialized, "(outer 1 (outer") {
+		t.Fatalf("optimizer rebuilt nested outer forms: %s", serialized)
 	}
 }
 

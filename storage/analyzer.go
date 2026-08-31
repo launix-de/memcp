@@ -207,18 +207,11 @@ func (c *indexAnalyzeContext) resolveBatchSubidx(v scm.Scmer) (int, bool) {
 }
 
 func (c *indexAnalyzeContext) resolveOuterReference(v scm.Scmer) (scm.Scmer, bool) {
-	depth := 0
-	for {
-		parts, ok := scmerSlice(v)
-		if !ok || len(parts) != 2 || !scanSymbolIs(parts[0], "outer") {
-			break
-		}
-		depth++
-		v = parts[1]
-	}
-	if depth == 0 {
+	depth, inner, ok := scanOuterReference(v)
+	if !ok || depth == 0 {
 		return scm.NewNil(), false
 	}
+	v = inner
 
 	env := c.proc.En
 	for level := 1; level < depth && env != nil; level++ {

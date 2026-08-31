@@ -44,7 +44,7 @@ test_cases:
           '("source_id")
           (lambda (source_id)
             (scan nil (table "memcp-tests" "lookup_invalidation_source")
-              '("id") (lambda (id) (equal? id (outer source_id)))
+              '("id") (lambda (id) (equal? id (outer 1 source_id)))
               '("val") (lambda (val) val)
               (lambda (old value) value) 0 nil false)))
         (scan nil (table "memcp-tests" "lookup_invalidation_driver")

@@ -1365,8 +1365,8 @@ func jitCollectLambdaOuterVarIndices(expr Scmer, seen map[NthLocalVar]struct{}, 
 		case "quote":
 			return
 		case "outer":
-			if len(list) == 2 {
-				arg := list[1]
+			if len(list) == 3 {
+				arg := list[2]
 				if arg.IsSourceInfo() {
 					arg = arg.SourceInfo().value
 				}

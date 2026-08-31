@@ -279,11 +279,20 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 		}
 		return scm.NewNil(), false
 	}
-	// (outer sym): look up sym in env
+	// (outer depth sym): look up sym in the selected environment
 	if expr.IsSlice() {
-		items := expr.Slice()
-		if len(items) == 2 && items[0].SymbolEquals("outer") {
-			sym := scm.Symbol(items[1].String())
+		if depth, value, valid := scanOuterReference(expr); valid && depth > 0 {
+			value = value.WithoutSourceInfo()
+			if !value.IsSymbol() {
+				return scm.NewNil(), false
+			}
+			for level := 1; level < depth && env != nil; level++ {
+				env = env.Outer
+			}
+			if env == nil {
+				return scm.NewNil(), false
+			}
+			sym := scm.Symbol(value.String())
 			e := env.FindRead(sym)
 			if e != nil {
 				if val, exists := e.Vars[sym]; exists {

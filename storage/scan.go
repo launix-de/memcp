@@ -212,8 +212,8 @@ func scanExprSafeToHoist(expr scm.Scmer, belowOuter bool) bool {
 	if scanSymbolIs(items[0], "quote") {
 		return true
 	}
-	if scanSymbolIs(items[0], "outer") {
-		return len(items) == 2 && scanExprSafeToHoist(items[1], true)
+	if depth, inner, ok := scanOuterReference(expr); ok {
+		return depth > 0 && scanExprSafeToHoist(inner, true)
 	}
 	name, named := scanSymbolName(items[0])
 	if !named {
@@ -237,8 +237,11 @@ func scanLiftOutOfLambda(expr scm.Scmer) scm.Scmer {
 	if !ok || len(items) == 0 || scanSymbolIs(items[0], "quote") {
 		return expr
 	}
-	if scanSymbolIs(items[0], "outer") && len(items) == 2 {
-		return items[1]
+	if depth, inner, ok := scanOuterReference(expr); ok && depth > 0 {
+		if depth == 1 {
+			return inner
+		}
+		return scm.NewSlice([]scm.Scmer{items[0], scm.NewInt(int64(depth - 1)), inner})
 	}
 	lifted := make([]scm.Scmer, len(items))
 	for i, item := range items {
@@ -358,6 +361,30 @@ func scanExprIsLambdaParam(v scm.Scmer, name string, idx int) bool {
 func scanSymbolIs(v scm.Scmer, name string) bool {
 	s, ok := scanSymbolName(v)
 	return ok && s == name
+}
+
+func scanOuterReference(v scm.Scmer) (int, scm.Scmer, bool) {
+	items, ok := scmerSlice(v)
+	if !ok || len(items) != 3 || !scanSymbolIs(items[0], "outer") {
+		return 0, scm.NewNil(), false
+	}
+	depthValue := items[1].WithoutSourceInfo()
+	var depth int64
+	switch {
+	case depthValue.IsInt():
+		depth = depthValue.Int()
+	case depthValue.IsFloat():
+		depth = depthValue.Int()
+		if depthValue.Float() != float64(depth) {
+			return 0, scm.NewNil(), false
+		}
+	default:
+		return 0, scm.NewNil(), false
+	}
+	if depth < 0 || int64(int(depth)) != depth {
+		return 0, scm.NewNil(), false
+	}
+	return int(depth), items[2], true
 }
 
 func scanSymbolName(v scm.Scmer) (string, bool) {

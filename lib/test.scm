@@ -1395,7 +1395,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (coalesceNil nil "" 0) "") true "coalesceNil returns first non-nil")
 	/* outer evaluates expression in outer environment */
 	(define ox_eval 10)
-	(assert (equal? (begin (define ox_eval 20) (eval (list 'outer 'ox_eval))) 10) true "outer reads outer var")
+	(assert (equal? (begin (define ox_eval 20) (eval (list 'outer 1 'ox_eval))) 10) true "outer reads outer var")
 	/* begin creates new scope; final value is last expression */
 	(assert (equal? (begin (define p 1) (define q (+ p 1)) q) 2) true "begin uses new scope and returns last")
 	/* !begin executes in parent env */
@@ -1479,7 +1479,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (optimize '('concat "a" 2)) "a2" "optimize folds string concat")
 	(assert (optimize '('and true '(equal? 2 2))) true "optimize folds and/equal")
 	(assert (optimize '('begin '('define 'x 4) '(+ 'x 1))) 5 "optimize inlines define use-once")
-	(assert (optimize '('and '('and '('and '(> 'LINEITEM.L_QUANTITY 10)) true) '('equal? 1 '('outer 1)))) '(> 'LINEITEM.L_QUANTITY 10) "SQL filter optimization")
+	(assert (optimize '('and '('and '('and '(> 'LINEITEM.L_QUANTITY 10)) true) '('equal? 1 '('outer 1 1)))) '(> 'LINEITEM.L_QUANTITY 10) "SQL filter optimization")
 
 	/* Flatten nested + and * (associative operators) */
 	(assert (optimize '('+ 1 '('+ 2 3))) 6 "optimize flattens nested + constants")
@@ -2916,8 +2916,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* serialize: symbol with special chars (unquote branch) */
 	(assert (equal? (serialize (_i (symbol "hello world"))) "(unquote \"hello world\")") true "serialize symbol with space triggers unquote")
 	(assert (equal? (serialize (_i (symbol "a\"b"))) "(unquote \"a\\\"b\")") true "serialize symbol with quote triggers unquote")
-	/* serialize: (outer ...) pattern */
-	(assert (equal? (serialize (list (symbol "outer") (symbol "x"))) "(outer x)") true "serialize outer expression")
+	/* serialize: (outer depth expression) pattern */
+	(assert (equal? (serialize (list (symbol "outer") 1 (symbol "x"))) "(outer 1 x)") true "serialize outer expression")
 	/* serialize: list starting with 'list symbol (quote shorthand '(...) ) */
 	(assert (strlike (serialize (list (symbol "list") 1 2 3)) "%1 2 3%") true "serialize list-prefixed list")
 	/* serialize: collate function (serializeNativeFunc collate branch) */

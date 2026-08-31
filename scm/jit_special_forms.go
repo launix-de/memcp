@@ -24,13 +24,25 @@ func jitSpecialFormList(name string, args []Scmer) []Scmer {
 }
 
 func jitEmitSpecialOuter(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
-	if len(args) != 1 || ctx.Env == nil || ctx.Env.Outer == nil {
+	depth, validDepth := int64(0), false
+	if len(args) == 2 {
+		depth, validDepth = outerDepthLiteral(args[0])
+	}
+	if !validDepth {
 		panic("jit: invalid outer reference")
 	}
 	current := ctx.Env
-	ctx.Env = current.Outer
+	for ; depth > 0; depth-- {
+		if ctx.Env == nil {
+			panic("jit: outer reference exceeds environment depth")
+		}
+		ctx.Env = ctx.Env.Outer
+	}
+	if ctx.Env == nil {
+		panic("jit: outer reference exceeds environment depth")
+	}
 	defer func() { ctx.Env = current }()
-	return jitCompileExpr(ctx, args[0], ctx.SliceBase, result)
+	return jitCompileExpr(ctx, args[1], ctx.SliceBase, result)
 }
 
 func jitEmitSpecialQuote(ctx *JITContext, args []Scmer, _ []JITValueDesc, _ JITValueDesc) JITValueDesc {

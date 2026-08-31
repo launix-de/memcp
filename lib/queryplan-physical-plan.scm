@@ -3190,7 +3190,7 @@ columns cannot change group cardinality because the primary key is unique. */
 
 (define mark_outer_join_symbols (lambda (sources current_alias expr)
 	(if (join_outer_symbol? sources current_alias expr)
-		(list (quote outer) expr)
+		(list (quote outer) 1 expr)
 		(match expr
 			((symbol quote) _value) expr
 			((symbol lambda) _params _body) expr
@@ -3464,7 +3464,7 @@ lookup for each ordered driver candidate. */
 					(list (quote lambda) (map filtercols symbol)
 						(list (quote and)
 							(list (quote equal??) (symbol key_name)
-								(list (quote outer) probe_var))
+								(list (quote outer) 1 probe_var))
 							(stage_recset_value_filter_term stage value_col)))))))))
 
 (define membership_keyset_parts (lambda (membership)
@@ -7289,7 +7289,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(prejoin_column_name sources alias key_col))))
 		(define filter_params (map key_cols (lambda (key_col) (symbol (concat alias "." key_col)))))
 		(define filter_terms (map (produceN (count key_cols)) (lambda (i)
-			(list (quote equal?) (nth filter_params i) (list (quote outer) (symbol (nth input_cols i)))))))
+			(list (quote equal?) (nth filter_params i) (list (quote outer) 1 (symbol (nth input_cols i)))))))
 		(define value_symbol (symbol (concat alias "." col)))
 		(define reduce_expr (list (quote lambda) (list (quote _old) (quote new)) (quote new)))
 		(define computor (list (quote lambda)

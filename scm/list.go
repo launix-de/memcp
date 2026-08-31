@@ -617,8 +617,15 @@ func optimizerHoistStableOneLambdaLevel(expr Scmer) (Scmer, bool) {
 		expr = stripped
 	}
 	if items, ok := scmerSlice(expr); ok {
-		if len(items) == 2 && scmerIsSymbol(items[0], "outer") && optimizerStableReference(expr) {
-			return items[1], true
+		depth, validDepth := int64(0), false
+		if len(items) == 3 && scmerIsSymbol(items[0], "outer") {
+			depth, validDepth = outerDepthLiteral(items[1])
+		}
+		if validDepth && depth > 0 && optimizerStableReference(expr) {
+			if depth == 1 {
+				return items[2], true
+			}
+			return NewSlice([]Scmer{items[0], NewInt(depth - 1), items[2]}), true
 		}
 		if len(items) == 2 && scmerIsSymbol(items[0], "quote") {
 			return expr, true

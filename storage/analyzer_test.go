@@ -166,13 +166,8 @@ func TestBoundaryEqualResolvesNestedOuterNumberedVar(t *testing.T) {
 		scm.NewNthLocalVar(0),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("outer"),
-			scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("outer"),
-				scm.NewSlice([]scm.Scmer{
-					scm.NewSymbol("outer"),
-					scm.NewNthLocalVar(0),
-				}),
-			}),
+			scm.NewInt(3),
+			scm.NewNthLocalVar(0),
 		}),
 	})
 	cond := scm.NewProcStruct(scm.Proc{
@@ -199,10 +194,8 @@ func TestBoundaryEqualMissingOuterFrameIsNotExtracted(t *testing.T) {
 		scm.NewNthLocalVar(0),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("outer"),
-			scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("outer"),
-				scm.NewNthLocalVar(0),
-			}),
+			scm.NewInt(2),
+			scm.NewNthLocalVar(0),
 		}),
 	})
 	cond := scm.NewProcStruct(scm.Proc{

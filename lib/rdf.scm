@@ -98,7 +98,7 @@ this is how rdf works:
 			)
 			/* default */
 			(!begin
-				((outer old_handler) req res))
+				((outer 1 old_handler) req res))
 		)
 	))
 ))

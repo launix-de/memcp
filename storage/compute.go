@@ -1031,7 +1031,7 @@ func extractStringListFromAST(expr scm.Scmer) []string {
 }
 
 // extractEqualityJoins inspects a filter lambda for patterns like
-// (equal? filterParam (outer inputCol)) and returns matched srcCol/inputCol pairs.
+// (equal? filterParam (outer 1 inputCol)) and returns matched srcCol/inputCol pairs.
 // filterParam is matched by position against condCols.
 func extractEqualityJoins(filterExpr scm.Scmer, condCols []string, computorParams []scm.Scmer) (srcCols, inputCols []string) {
 	var params []scm.Scmer
@@ -1101,7 +1101,7 @@ func collectEqualities(body scm.Scmer) [][2]scm.Scmer {
 	return nil
 }
 
-// matchJoinEquality checks if a is a filter param reference and b is (outer inputCol).
+// matchJoinEquality checks if a is a filter param reference and b is (outer 1 inputCol).
 // a may be a symbol or NthLocalVar (compiled proc).
 // b's inner expression may be a symbol, (get_column tblvar _ col _), or another
 // NthLocalVar (the optimizer may hoist the outer ref into a closure capture).
@@ -1125,9 +1125,8 @@ func matchJoinEquality(a, b scm.Scmer, paramIdx map[string]int, paramCount int, 
 		return -1, ""
 	}
 	if b.IsSlice() {
-		bItems := b.Slice()
-		if len(bItems) == 2 && callHeadIs(bItems[0], "outer") {
-			inner := stripSourceInfo(bItems[1])
+		if depth, value, ok := scanOuterReference(b); ok && depth == 1 {
+			inner := stripSourceInfo(value)
 			if inner.IsSymbol() {
 				return idx, inner.String()
 			}

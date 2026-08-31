@@ -1350,7 +1350,7 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 	// Used for deserializing Proc bodies so that inner (lambda ...) forms are kept as
 	// raw S-expression slices. This preserves the env chain: when the outer Proc fires,
 	// inner lambdas are compiled by the evaluator with the correct enclosing env, so
-	// symbol lookup (e.g. OLD/NEW) and (outer NthLocalVar(N)) resolve correctly.
+	// symbol lookup (e.g. OLD/NEW) and (outer depth NthLocalVar(N)) resolve correctly.
 	var fromBody func(any) Scmer
 	fromBody = func(x any) Scmer {
 		switch t := x.(type) {
