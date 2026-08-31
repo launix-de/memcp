@@ -8210,6 +8210,19 @@ every title. */
 		(cons title (cons _expr rest)) (cons title (projection_titles rest))
 		_ '())))
 
+/* The SQL compiler is the sole owner of result shape. Protocol frontends use
+these titles instead of inspecting or reparsing the original SQL text. Expand
+stars through the same catalog-aware path used by physical lowering. */
+(define queryplan_result_titles (lambda (query)
+	(match query
+		((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
+		(projection_titles (expand_query_block_fields sources fields))
+		((symbol union-block) _mode branches _order _limit _offset _facts)
+		(match branches
+			(cons first_branch _rest) (queryplan_result_titles first_branch)
+			_ '())
+		_ '())))
+
 (define projection_exprs (lambda (fields)
 	(match (coalesceNil fields '())
 		(cons _title (cons expr rest)) (cons expr (projection_exprs rest))

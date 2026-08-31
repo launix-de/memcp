@@ -132,21 +132,22 @@ func TestMySQLServerVersionHasClientCompatiblePrefix(t *testing.T) {
 	}
 }
 
-func TestIsSelectQueryHandlesCommentsAndCase(t *testing.T) {
-	for _, query := range []string{
-		"SELECT 1",
-		" select 1",
-		"/* client */ SELECT 1",
-		"-- client\nSELECT 1",
-		"# client\nSeLeCt 1",
-	} {
-		if !isSelectQuery(query) {
-			t.Fatalf("expected SELECT query: %q", query)
+func TestPrepareMySQLResultFieldsPreservesCompilerOrderAndDuplicates(t *testing.T) {
+	fields, colmap, row := prepareMySQLResultFields([]Scmer{
+		NewString("id"), NewString("value"), NewString("value"),
+	})
+	if len(fields) != 3 || len(row) != 3 {
+		t.Fatalf("prepared %d fields and %d row slots, want 3 each", len(fields), len(row))
+	}
+	if fields[0].Name != "id" || fields[1].Name != "value" || fields[2].Name != "value" {
+		t.Fatalf("compiler field order was not preserved: %+v", fields)
+	}
+	for _, field := range fields {
+		if field.Type != querypb.Type_NULL_TYPE {
+			t.Fatalf("unobserved field %q has type %v, want NULL_TYPE", field.Name, field.Type)
 		}
 	}
-	for _, query := range []string{"UPDATE t SET a=1", "/* unfinished", "SELECTED"} {
-		if isSelectQuery(query) {
-			t.Fatalf("unexpected SELECT query: %q", query)
-		}
+	if colmap["id"] != 0 || colmap["value"] != 2 {
+		t.Fatalf("unexpected fallback column map: %+v", colmap)
 	}
 }
