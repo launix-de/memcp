@@ -103,9 +103,8 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 			writeSymbolOrColumn(s)
 		case node.IsSlice():
 			slice := node.Slice()
-			if len(slice) > 0 && slice[0].IsSymbol() {
-				head, _ := slice[0].AppendString(nil) // zero-alloc
-				if head == "outer" {
+			if len(slice) > 0 {
+				if slice[0].SymbolEquals("outer") {
 					io.WriteString(w, "?")
 					return
 				}
@@ -113,7 +112,7 @@ func encodeScmer(v scm.Scmer, w io.Writer, columns []string, columnSymbols []scm
 				// (!list NthLocalVar(start) count expr...) encodes (list expr...) but the
 				// storage slot (items[1]) varies per call site, so two identical lists would
 				// get different canonical names. Strip items[1] and items[2] and use "list".
-				if head == "!list" && len(slice) >= 3 {
+				if slice[0].SymbolEquals("!list") && len(slice) >= 3 {
 					count := int(scm.ToInt(slice[2]))
 					if count == len(slice)-3 {
 						io.WriteString(w, "(list")

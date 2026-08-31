@@ -364,11 +364,14 @@ func scanSymbolName(v scm.Scmer) (string, bool) {
 	if v.GetTag() == scm.TagSymbol {
 		return v.String(), true
 	}
+	if declaration := scm.DeclarationForValue(v); declaration != nil && declaration.IsSpecialForm {
+		return declaration.Name, true
+	}
 	if !v.IsSlice() {
 		return "", false
 	}
 	items := v.Slice()
-	if len(items) == 2 && items[0].GetTag() == scm.TagSymbol && items[0].String() == "quote" && items[1].GetTag() == scm.TagSymbol {
+	if len(items) == 2 && items[0].SymbolEquals("quote") && items[1].GetTag() == scm.TagSymbol {
 		return items[1].String(), true
 	}
 	return "", false

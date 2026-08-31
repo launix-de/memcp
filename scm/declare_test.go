@@ -174,6 +174,28 @@ func TestHelpUsesRecursiveTypeDescriptors(t *testing.T) {
 	}
 }
 
+func TestSpecialFormsParticipateInHelpAndDocumentation(t *testing.T) {
+	value, exists := Globalenv.Vars[Symbol("and")]
+	if !exists || value.GetTag() != tagSpecialForm {
+		t.Fatal("and is not registered as a global special form")
+	}
+	if help := Help(NewString("and")); !strings.Contains(help, declarations["and"].Type.Description) {
+		t.Fatalf("special form is missing from help: %s", help)
+	}
+
+	folder := t.TempDir()
+	if err := WriteDocumentation(folder); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(folder, "scm-builtins.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "## and\n") {
+		t.Fatal("special form is missing from generated documentation")
+	}
+}
+
 func TestDeclarationOwnsOptimizerHook(t *testing.T) {
 	oldTitles, oldDeclarations, oldFunctions := declaration_titles, declarations, declarationsByFunction
 	defer func() {

@@ -1115,7 +1115,7 @@ func analyzeOrcAdditive(reduceFn scm.Scmer) OrcAdditiveInfo {
 		}
 	} else if reduceFn.IsSlice() {
 		items := reduceFn.Slice()
-		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
 			body = items[2]
 			if items[1].IsSlice() {
 				params := items[1].Slice()
@@ -1133,7 +1133,7 @@ func analyzeOrcAdditive(reduceFn scm.Scmer) OrcAdditiveInfo {
 	var returnVal scm.Scmer
 	if body.IsSlice() {
 		items := body.Slice()
-		if len(items) >= 2 && items[0].IsSymbol() && items[0].String() == "begin" {
+		if len(items) >= 2 && items[0].SymbolEquals("begin") {
 			returnVal = items[len(items)-1]
 		} else {
 			returnVal = body
@@ -1213,7 +1213,7 @@ func analyzeOrcSuffix(reduceFn scm.Scmer) int {
 		body = reduceFn.Proc().Body
 	} else if reduceFn.IsSlice() {
 		items := reduceFn.Slice()
-		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
 			body = items[2]
 		}
 	}
@@ -1228,7 +1228,7 @@ func analyzeOrcSuffix(reduceFn scm.Scmer) int {
 
 	if body.IsSlice() {
 		items := body.Slice()
-		if len(items) >= 2 && items[0].IsSymbol() && items[0].String() == "begin" {
+		if len(items) >= 2 && items[0].SymbolEquals("begin") {
 			returnVal = items[len(items)-1]
 			// Search for setter call: ((car mapped) val) or ((nth mapped 0) val)
 			for _, item := range items[1 : len(items)-1] {
@@ -1275,7 +1275,7 @@ func findSetterArg(expr scm.Scmer) scm.Scmer {
 		}
 	}
 	// Recurse into begin blocks
-	if items[0].IsSymbol() && items[0].String() == "begin" {
+	if items[0].SymbolEquals("begin") {
 		for _, item := range items[1:] {
 			if sa := findSetterArg(item); !sa.IsNil() {
 				return sa
