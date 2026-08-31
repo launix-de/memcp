@@ -190,6 +190,10 @@ func init_timezone() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "dt", Description: "optional datetime value to convert", Optional: true}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["unix_timestamp"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -202,6 +206,117 @@ func init_timezone() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the operating system's local timezone name",
 			Return: &TypeDescriptor{Kind: "string"},
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["system_time_zone"].Fn, args, result)
+				}
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				d1 := args[0]
+				d1.ID = 0
+				d3 := d1
+				ctx.EnsureDesc(&d3)
+				if d3.Loc == LocImm {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					tag := d3.Imm.GetTag()
+					switch tag {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d3)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d3)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d3)
+					case tagNil:
+						ctx.EmitMakeNil(tmpPair)
+					default:
+						ptrWord, auxWord := d3.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					}
+					d3 = tmpPair
+				} else if d3.Loc == LocReg {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d3.Reg), Reg2: ctx.AllocRegExcept(d3.Reg)}
+					switch d3.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d3)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d3)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d3)
+					default:
+						panic("jit: Scmer.String requires Scmer pair receiver")
+					}
+					ctx.FreeDesc(&d3)
+					d3 = tmpPair
+				} else if d3.Loc == LocMem {
+					tmpScalar := JITValueDesc{Loc: LocReg, Type: d3.Type, Reg: ctx.AllocReg()}
+					scratch := ctx.AllocRegExcept(tmpScalar.Reg)
+					ctx.EmitMovRegImm64(scratch, uint64(d3.MemPtr))
+					ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
+					ctx.FreeReg(scratch)
+					ctx.BindReg(tmpScalar.Reg, &tmpScalar)
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(tmpScalar.Reg), Reg2: ctx.AllocRegExcept(tmpScalar.Reg)}
+					switch tmpScalar.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, tmpScalar)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, tmpScalar)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, tmpScalar)
+					default:
+						panic("jit: Scmer.String requires Scmer pair receiver")
+					}
+					ctx.FreeDesc(&tmpScalar)
+					d3 = tmpPair
+				}
+				if d3.Loc != LocRegPair && d3.Loc != LocStackPair {
+					panic("jit: Scmer.String receiver not materialized as pair")
+				}
+				d2 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d3}, 2)
+				ctx.FreeDesc(&d1)
+				d4 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d2}, 2)
+				if result.Loc == LocAny {
+					return d4
+				}
+				ctx.EmitMovPairToResult(&d4, &result)
+				result.Type = tagString
+				return result
+				return result
+			},
 		},
 	})
 
@@ -244,6 +359,10 @@ func init_timezone() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "dt", Description: "datetime value"}, &TypeDescriptor{Kind: "string", Label: "from_tz", Description: "source timezone"}, &TypeDescriptor{Kind: "string", Label: "to_tz", Description: "target timezone"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["convert_tz"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -268,6 +387,10 @@ func init_timezone() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "unix_ts", Description: "unix timestamp (seconds since epoch)"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "optional MySQL format string", Optional: true}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["from_unixtime"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -280,6 +403,10 @@ func init_timezone() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the current UTC datetime",
 			Return: &TypeDescriptor{Kind: "date"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["utc_timestamp"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -294,6 +421,10 @@ func init_timezone() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the current UTC date (midnight)",
 			Return: &TypeDescriptor{Kind: "date"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["utc_date"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -309,6 +440,10 @@ func init_timezone() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the current UTC time (as a datetime at epoch date)",
 			Return: &TypeDescriptor{Kind: "date"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["utc_time"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -321,6 +456,10 @@ func init_timezone() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the current datetime (re-evaluated per call, unlike now())",
 			Return: &TypeDescriptor{Kind: "date"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sysdate"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -363,6 +502,10 @@ func init_timezone() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "dt", Description: "datetime value"}, &TypeDescriptor{Kind: "string", Label: "zone", Description: "target timezone"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["at_time_zone"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 
@@ -408,6 +551,10 @@ func init_timezone() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "string", Label: "unit", Description: "SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, YEAR"}, &TypeDescriptor{Kind: "any", Label: "dt1", Description: "first datetime"}, &TypeDescriptor{Kind: "any", Label: "dt2", Description: "second datetime"}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["timestampdiff"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 }
