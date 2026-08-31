@@ -176,6 +176,18 @@ func BenchmarkOptimizerGroupedAppend(b *testing.B) {
 	}
 }
 
+func BenchmarkOptimizerGroupedAppendPlannerScale(b *testing.B) {
+	fn := benchmarkPlannerFusionProc(b, `(lambda (pairs) (reduce pairs (lambda (dict pair)
+		(set_assoc dict (car pair)
+			(append (get_assoc dict (car pair) '()) (cadr pair)))) '()))`)
+	input := benchmarkGroupedInput(55, 10)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		groupAssocBenchmarkSink = fn(input)
+	}
+}
+
 func BenchmarkOptimizerGroupedCount(b *testing.B) {
 	fn := benchmarkPlannerFusionProc(b, `(lambda (pairs) (reduce pairs (lambda (dict pair)
 		(set_assoc dict (car pair) (+ (get_assoc dict (car pair) 0) 1))) '()))`)
