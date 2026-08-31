@@ -7,6 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.3
+	github.com/aws/smithy-go v1.24.2
 	github.com/carli2/hybridsort v0.0.0-20260319220658-610599b2851c
 	github.com/ceph/go-ceph v0.37.0
 	github.com/chzyer/readline v1.5.1
@@ -18,9 +19,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jtolds/gls v4.20.0+incompatible
-	github.com/launix-de/NonLockingReadMap v1.0.9
-	github.com/launix-de/go-mysqlstack v0.0.0-20260220192146-2b1e1efd98c4
-	github.com/launix-de/go-packrat/v2 v2.1.21
+	github.com/launix-de/NonLockingReadMap v1.0.11
+	github.com/launix-de/go-mysqlstack v0.1.0
+	github.com/launix-de/go-packrat/v2 v2.1.22
 	github.com/lib/pq v1.11.2
 	github.com/pierrec/lz4/v4 v4.1.26
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
@@ -47,7 +48,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.9 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.6 // indirect
-	github.com/aws/smithy-go v1.24.2 // indirect
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	golang.org/x/exp v0.0.0-20241009180824-f66d83c29e7c // indirect
@@ -55,12 +55,6 @@ require (
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 )
-
-replace github.com/launix-de/NonLockingReadMap => ./third_party/NonLockingReadMap
-
-replace github.com/launix-de/go-mysqlstack => ./third_party/go-mysqlstack
-
-replace github.com/launix-de/go-packrat/v2 => ./third_party/go-packrat
 
 replace golang.org/x/text => github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a
 
