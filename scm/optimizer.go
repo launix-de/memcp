@@ -347,26 +347,30 @@ type optimizerRewriteState struct {
 const defaultOptimizerRewriteBudget = 64
 
 type optimizerMetainfo struct {
-	variableReplacement     map[Symbol]Scmer
-	variableTypes           map[Symbol]*TypeDescriptor
-	numberedTypes           map[NthLocalVar]*TypeDescriptor
-	ownedLocalBindings      map[Symbol]bool
-	setBlacklist            []Symbol
-	nextSlot                *int // pointer to lambda's slot counter; nil outside lambda
-	pendingCallbackParams   []*TypeDescriptor
-	pendingCallbackReturn   *TypeDescriptor // structured escape information for the next lambda result
-	loopDepth               int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
-	lambdaDepth             int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
-	beginDepth              int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
-	inlineDepth             int
-	inlineStack             map[Symbol]bool
-	specializationStack     map[procSpecializationStackKey]bool
-	specializationParamMask uint64
-	specializationDepth     int
-	specializationUsed      *bool
-	rewrite                 *optimizerRewriteState
-	captureArgumentTypes    bool
-	argumentTypes           []TypeInfo
+	variableReplacement       map[Symbol]Scmer
+	variableTypes             map[Symbol]*TypeDescriptor
+	numberedTypes             map[NthLocalVar]*TypeDescriptor
+	ownedLocalBindings        map[Symbol]bool
+	setBlacklist              []Symbol
+	nextSlot                  *int // pointer to lambda's slot counter; nil outside lambda
+	pendingCallbackParams     []*TypeDescriptor
+	pendingCallbackReturn     *TypeDescriptor // structured escape information for the next lambda result
+	loopDepth                 int             // >0 inside scan/reduce callbacks; prevents hoisted defines from being inlined back into loops
+	lambdaDepth               int             // >0 while optimizing a lambda body; keeps local definitions out of Env hints
+	beginDepth                int             // >0 in lexical begin scopes; their definitions do not reach the caller Env
+	inlineDepth               int
+	inlineStack               map[Symbol]bool
+	specializationStack       map[procSpecializationStackKey]bool
+	specializationParamMask   uint64
+	specializationDepth       int
+	specializationUsed        *bool
+	specializationNestedUsed  *bool
+	specializationRootMutUsed *bool
+	specializationOwnedVars   map[Symbol]bool
+	specializationOwnedSlots  map[NthLocalVar]bool
+	rewrite                   *optimizerRewriteState
+	captureArgumentTypes      bool
+	argumentTypes             []TypeInfo
 }
 
 func newOptimizerMetainfo() (result optimizerMetainfo) {
@@ -789,6 +793,8 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 	result.specializationParamMask = ome.specializationParamMask
 	result.specializationDepth = ome.specializationDepth
 	result.specializationUsed = ome.specializationUsed
+	result.specializationNestedUsed = ome.specializationNestedUsed
+	result.specializationRootMutUsed = ome.specializationRootMutUsed
 	result.rewrite = ome.rewrite
 	// nextSlot is NOT propagated across lambda boundaries (each lambda has its own)
 	return
@@ -820,6 +826,10 @@ func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
 	result.specializationParamMask = ome.specializationParamMask
 	result.specializationDepth = ome.specializationDepth
 	result.specializationUsed = ome.specializationUsed
+	result.specializationNestedUsed = ome.specializationNestedUsed
+	result.specializationRootMutUsed = ome.specializationRootMutUsed
+	result.specializationOwnedVars = ome.specializationOwnedVars
+	result.specializationOwnedSlots = ome.specializationOwnedSlots
 	result.rewrite = ome.rewrite
 	return
 }
@@ -1042,6 +1052,55 @@ func markProcOwnershipSpecializationUse(ome *optimizerMetainfo, expr Scmer) {
 	}
 }
 
+func markNestedProcOwnershipSpecializationUse(ome *optimizerMetainfo, expr Scmer) {
+	if ome.specializationNestedUsed == nil || ome.lambdaDepth != ome.specializationDepth {
+		return
+	}
+	if nestedProcOwnershipExpression(ome, expr) {
+		*ome.specializationNestedUsed = true
+	}
+}
+
+func nestedProcOwnershipExpression(ome *optimizerMetainfo, expr Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsNthLocalVar() && ome.specializationOwnedSlots[expr.NthLocalVar()] {
+		return true
+	}
+	if sym, ok := scmerSymbol(expr); ok && ome.specializationOwnedVars[sym] {
+		return true
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) < 2 {
+		return false
+	}
+	if scmerIsSymbol(items[0], "car") || scmerIsSymbol(items[0], "cadr") || scmerIsSymbol(items[0], "nth") || scmerIsSymbol(items[0], "get_assoc") {
+		if procOwnershipParameterMask(items[1], 64)&ome.specializationParamMask != 0 {
+			return true
+		}
+		return nestedProcOwnershipExpression(ome, items[1])
+	}
+	if scmerIsSymbol(items[0], "coalesce") || scmerIsSymbol(items[0], "coalesceNil") {
+		for _, item := range items[1:] {
+			if nestedProcOwnershipExpression(ome, item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func markRootProcOwnershipMutationUse(ome *optimizerMetainfo, expr Scmer) {
+	if ome.specializationRootMutUsed == nil || ome.lambdaDepth != ome.specializationDepth {
+		return
+	}
+	mask := procOwnershipParameterMask(expr, 64)
+	if mask&ome.specializationParamMask != 0 {
+		*ome.specializationRootMutUsed = true
+	}
+}
+
 // procOwnershipParameterMask follows expressions which return one of their
 // arguments unchanged. Ownership can cross such a selector only when the
 // selector's merged return type proves every possible result transferable.
@@ -1219,6 +1278,29 @@ func specializationOwnershipHash(td *TypeDescriptor) (uint64, uint64) {
 	return lo, hi
 }
 
+func procSpecializationKeyFromParams(mask uint64, paramTypes []*TypeDescriptor) procSpecializationKey {
+	ownershipLo := uint64(0x6a09e667f3bcc909)
+	ownershipHi := uint64(0xbb67ae8584caa73b)
+	for i, paramType := range paramTypes {
+		if mask&(1<<uint(i)) == 0 {
+			continue
+		}
+		paramLo, paramHi := specializationOwnershipHash(paramType)
+		ownershipLo = combineStructuralHash(ownershipLo, combineStructuralHash(uint64(i), paramLo))
+		ownershipHi = combineStructuralHash(ownershipHi, combineStructuralHash(uint64(i), paramHi))
+	}
+	return procSpecializationKey{paramMask: mask, ownershipLo: ownershipLo, ownershipHi: ownershipHi}
+}
+
+func procSpecializationHasNestedOwnership(paramTypes []*TypeDescriptor) bool {
+	for _, paramType := range paramTypes {
+		if paramType != nil && (descriptorContainsOwnership(paramType.Element) || len(paramType.Keys) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
 func procOwnershipSpecializationKey(proc *Proc, argTypes []TypeInfo) (procSpecializationKey, []*TypeDescriptor, bool) {
 	params, ok := scmerSlice(proc.Params)
 	if !ok || len(params) == 0 || len(params) > 64 || proc.NumVars < len(params) {
@@ -1259,29 +1341,24 @@ func procOwnershipSpecializationKey(proc *Proc, argTypes []TypeInfo) (procSpecia
 		return procSpecializationKey{}, nil, false
 	}
 	paramTypes := make([]*TypeDescriptor, len(params))
-	ownershipLo := uint64(0x6a09e667f3bcc909)
-	ownershipHi := uint64(0xbb67ae8584caa73b)
 	for i := range params {
 		paramTypes[i] = &TypeDescriptor{Kind: "any", Length: UnknownLength}
 		if mask&(1<<uint(i)) == 0 {
 			continue
 		}
 		paramTypes[i] = specializationOwnershipDescriptor(argTypes[i+1].ToTypeDescriptor())
-		paramLo, paramHi := specializationOwnershipHash(paramTypes[i])
-		ownershipLo = combineStructuralHash(ownershipLo, combineStructuralHash(uint64(i), paramLo))
-		ownershipHi = combineStructuralHash(ownershipHi, combineStructuralHash(uint64(i), paramHi))
 	}
-	return procSpecializationKey{paramMask: mask, ownershipLo: ownershipLo, ownershipHi: ownershipHi}, paramTypes, true
+	return procSpecializationKeyFromParams(mask, paramTypes), paramTypes, true
 }
 
-func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, paramTypes []*TypeDescriptor, stack map[procSpecializationStackKey]bool) Scmer {
+func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, paramTypes []*TypeDescriptor, stack map[procSpecializationStackKey]bool) (Scmer, bool, bool) {
 	paramsValue := proc.Params
 	if stripped, ok := scmerStripSourceInfo(paramsValue); ok {
 		paramsValue = stripped
 	}
 	params := paramsValue.Slice()
 	if len(paramTypes) != len(params) {
-		return NewNil()
+		return NewNil(), false, false
 	}
 	lambda := []Scmer{
 		NewSymbol("lambda"),
@@ -1293,15 +1370,19 @@ func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, par
 	}
 	meta := newOptimizerMetainfo()
 	used := false
+	nestedUsed := false
+	rootMutationUsed := false
 	meta.pendingCallbackParams = paramTypes
 	meta.specializationStack = stack
 	meta.specializationParamMask = key.paramMask
 	meta.specializationDepth = meta.lambdaDepth + 1
 	meta.specializationUsed = &used
+	meta.specializationNestedUsed = &nestedUsed
+	meta.specializationRootMutUsed = &rootMutationUsed
 	optimized, _ := OptimizeEx(NewSlice(lambda), proc.En, &meta, true)
 	parts, ok := scmerSlice(optimized)
 	if !ok || len(parts) < 3 || !scmerIsSymbol(parts[0], "lambda") {
-		return NewNil()
+		return NewNil(), nestedUsed, rootMutationUsed
 	}
 	specialized := *proc
 	specialized.Params = parts[1]
@@ -1314,7 +1395,7 @@ func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, par
 	// with an anonymous Proc literal. Publish a variant only when an ownership-
 	// aware rewrite actually consumes one of the specialized parameters.
 	if !used {
-		return NewNil()
+		return NewNil(), nestedUsed, rootMutationUsed
 	}
 	// Machine code belongs to the exact optimized body. Never inherit the
 	// generic Proc's entry point when publishing a specialized body.
@@ -1328,7 +1409,7 @@ func buildProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, par
 	if proc.Compiled != nil {
 		variant = jitCompileMode(proc.Compiled.RecursiveLambdas, variant)
 	}
-	return variant
+	return variant, nestedUsed, rootMutationUsed
 }
 
 func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimizerMetainfo) (Scmer, bool) {
@@ -1366,6 +1447,10 @@ func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimi
 	if !ok {
 		return NewNil(), false
 	}
+	return getProcOwnershipSpecialization(proc, key, paramTypes, ome)
+}
+
+func getProcOwnershipSpecialization(proc *Proc, key procSpecializationKey, paramTypes []*TypeDescriptor, ome *optimizerMetainfo) (Scmer, bool) {
 	stackKey := procSpecializationStackKey{meta: proc.OptimizerMeta, key: key}
 	if ome.specializationStack != nil && ome.specializationStack[stackKey] {
 		return NewNil(), false
@@ -1393,7 +1478,11 @@ func trySpecializeProcCall(v []Scmer, argTypes []TypeInfo, env *Env, ome *optimi
 		delete(ome.specializationStack, stackKey)
 		proc.OptimizerMeta.finishSpecialization(key, variant)
 	}()
-	variant = buildProcOwnershipSpecialization(proc, key, paramTypes, ome.specializationStack)
+	var nestedUsed, rootMutationUsed bool
+	variant, nestedUsed, rootMutationUsed = buildProcOwnershipSpecialization(proc, key, paramTypes, ome.specializationStack)
+	if procSpecializationHasNestedOwnership(paramTypes) && !nestedUsed && !rootMutationUsed {
+		variant = NewNil()
+	}
 	return variant, variant.IsProc()
 }
 
@@ -2589,6 +2678,8 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 		}
 		if firstArgFresh && len(v) >= 2 {
 			markProcOwnershipSpecializationUse(ome, v[1])
+			markRootProcOwnershipMutationUse(ome, v[1])
+			markNestedProcOwnershipSpecializationUse(ome, v[1])
 			v[0] = NewSymbol(mutName)
 			firstArgTransferred = true
 		}
@@ -3144,12 +3235,47 @@ func optimizeMatchPattern(pattern Scmer, env *Env, ome *optimizerMetainfo) (Scme
 	return pattern, matchPatternScalarInfo(pattern)
 }
 
-func bindMatchPatternType(pattern Scmer, td *TypeDescriptor, ome *optimizerMetainfo) {
+func cloneDescriptorMap(source map[Symbol]*TypeDescriptor) map[Symbol]*TypeDescriptor {
+	result := make(map[Symbol]*TypeDescriptor, len(source))
+	for symbol, td := range source {
+		result[symbol] = td
+	}
+	return result
+}
+
+func cloneNumberedDescriptorMap(source map[NthLocalVar]*TypeDescriptor) map[NthLocalVar]*TypeDescriptor {
+	result := make(map[NthLocalVar]*TypeDescriptor, len(source))
+	for slot, td := range source {
+		result[slot] = td
+	}
+	return result
+}
+
+func cloneSymbolBoolMap(source map[Symbol]bool) map[Symbol]bool {
+	result := make(map[Symbol]bool, len(source))
+	for symbol, value := range source {
+		result[symbol] = value
+	}
+	return result
+}
+
+func cloneNumberedBoolMap(source map[NthLocalVar]bool) map[NthLocalVar]bool {
+	result := make(map[NthLocalVar]bool, len(source))
+	for slot, value := range source {
+		result[slot] = value
+	}
+	return result
+}
+
+func bindMatchPatternType(pattern Scmer, td *TypeDescriptor, ome *optimizerMetainfo, derived bool) {
 	if stripped, ok := scmerStripSourceInfo(pattern); ok {
 		pattern = stripped
 	}
 	if pattern.IsNthLocalVar() {
 		ome.numberedTypes[pattern.NthLocalVar()] = td
+		if derived && td != nil && td.Transfer {
+			ome.specializationOwnedSlots[pattern.NthLocalVar()] = true
+		}
 		return
 	}
 	if sym, ok := scmerSymbol(pattern); ok {
@@ -3158,8 +3284,14 @@ func bindMatchPatternType(pattern Scmer, td *TypeDescriptor, ome *optimizerMetai
 			return
 		}
 		ome.variableTypes[sym] = td
+		if derived && td != nil && td.Transfer {
+			ome.specializationOwnedVars[sym] = true
+		}
 		if replacement, exists := ome.variableReplacement[sym]; exists && replacement.IsNthLocalVar() {
 			ome.numberedTypes[replacement.NthLocalVar()] = td
+			if derived && td != nil && td.Transfer {
+				ome.specializationOwnedSlots[replacement.NthLocalVar()] = true
+			}
 		}
 		return
 	}
@@ -3170,25 +3302,25 @@ func bindMatchPatternType(pattern Scmer, td *TypeDescriptor, ome *optimizerMetai
 	head, headOK := scmerSymbol(items[0])
 	if !headOK {
 		for i, child := range items {
-			bindMatchPatternType(child, descriptorProjection(td, strconv.Itoa(i)), ome)
+			bindMatchPatternType(child, descriptorProjection(td, strconv.Itoa(i)), ome, true)
 		}
 		return
 	}
 	switch head {
 	case Symbol("cons"):
 		if len(items) == 3 {
-			bindMatchPatternType(items[1], descriptorProjection(td, "0"), ome)
-			bindMatchPatternType(items[2], matchTailDescriptor(td), ome)
+			bindMatchPatternType(items[1], descriptorProjection(td, "0"), ome, true)
+			bindMatchPatternType(items[2], matchTailDescriptor(td), ome, true)
 		}
 	case Symbol("list"):
 		for i, child := range items[1:] {
-			bindMatchPatternType(child, descriptorProjection(td, strconv.Itoa(i)), ome)
+			bindMatchPatternType(child, descriptorProjection(td, strconv.Itoa(i)), ome, true)
 		}
 	case Symbol("list?"):
 		if len(items) == 2 {
 			refined := copyTypeDescriptor(td)
 			refined.Kind = "list"
-			bindMatchPatternType(items[1], refined, ome)
+			bindMatchPatternType(items[1], refined, ome, derived)
 		}
 	case Symbol("eval"), Symbol("quote"), Symbol("symbol"), Symbol("string?"), Symbol("number?"), Symbol("regex"), Symbol("ignorecase"), Symbol("merge"):
 		return
@@ -3252,7 +3384,11 @@ func optimizeMatch(v []Scmer, headSym Symbol, env *Env, ome *optimizerMetainfo, 
 		branchOme := ome.CopySharedScope()
 		pattern, info := optimizeMatchPattern(v[i-1], env, &branchOme)
 		if valueDescriptor != nil {
-			bindMatchPatternType(pattern, valueDescriptor, &branchOme)
+			branchOme.variableTypes = cloneDescriptorMap(ome.variableTypes)
+			branchOme.numberedTypes = cloneNumberedDescriptorMap(ome.numberedTypes)
+			branchOme.specializationOwnedVars = cloneSymbolBoolMap(ome.specializationOwnedVars)
+			branchOme.specializationOwnedSlots = cloneNumberedBoolMap(ome.specializationOwnedSlots)
+			bindMatchPatternType(pattern, valueDescriptor, &branchOme, false)
 		}
 		duplicate := false
 		if info.comparable && seen != nil {

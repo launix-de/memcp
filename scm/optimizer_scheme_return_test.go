@@ -341,6 +341,29 @@ func TestProcOwnershipSpecializationUsesElementOwnershipForEveryChild(t *testing
 	}
 }
 
+func TestProcOwnershipSpecializationRejectsUnusedNestedShape(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("unused nested ownership specialization test", `(define specialize_nested_read_only (lambda (wrapper)
+		(match wrapper
+			(cons child _tail) (car child)
+			_ nil)))`, env)
+
+	borrowed := optimizeTestSource(t, env, `(lambda (child)
+		(specialize_nested_read_only (list child)))`)
+	transferred := optimizeTestSource(t, env, `(lambda (value)
+		(specialize_nested_read_only (list (list value))))`)
+	borrowedVariant := borrowed.Slice()[2].Slice()[0]
+	transferredVariant := transferred.Slice()[2].Slice()[0]
+	if !borrowedVariant.IsProc() || transferredVariant.IsProc() {
+		t.Fatal("unused nested ownership built a redundant structural Proc body")
+	}
+	base := env.Vars[Symbol("specialize_nested_read_only")].Proc()
+	snapshot := base.OptimizerMeta.specializations.Load()
+	if snapshot == nil || len(snapshot.variants) != 1 || len(snapshot.rejected) != 1 {
+		t.Fatalf("unused nested ownership was not rejected: %#v", snapshot)
+	}
+}
+
 func TestProcOwnershipSpecializationRejectsSharedCoalesceFallback(t *testing.T) {
 	env := newOptimizerTestEnv()
 	EvalAll("proc specialization test", `(define shared_filter_fallback (list 7 8 9))`, env)
