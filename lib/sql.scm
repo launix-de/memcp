@@ -191,7 +191,6 @@ functional planner return value. */
 		(planning_session "__memcp_queryplan_guarded_session_keys" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_observed_session_keys" (newsession))
 		(planning_session "__memcp_queryplan_preparations" (newsession))
-		(planning_session "__memcp_queryplan_statistics" (newsession))
 		planning_session)))
 
 (define sql_queryplan_preparations_from_session (lambda (planning_session)

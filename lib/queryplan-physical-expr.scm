@@ -3693,7 +3693,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						alternative: it preserves ORDER while increasing its candidate window
 						until LIMIT is satisfied. Candidate materialization and unbounded
 						driver filtering would both commit to unknown full-relation work. */
-						(if (and allow_ordered_batch driver_probe_supported)
+						(if allow_ordered_batch
 							"ordered_batch_accept"
 							(if (and driver_probe_supported
 								(or owns_requirement branch_not_implied))

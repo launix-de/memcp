@@ -4898,8 +4898,12 @@ until the caller has selected this physical alternative. */
 	(begin
 		(define sources (join_optimizer_sources_for_order all_sources
 			(join_optimizer_tree_aliases plan)))
-		(define offset (coalesceNil (planner_literal_value offset_value) 0))
-		(define limit (coalesceNil (planner_literal_value limit_value) -1))
+		(define offset (coalesceNil
+			(qassoc_get facts (quote join_order_planning_offset) nil)
+			(coalesceNil (planner_literal_value offset_value) 0)))
+		(define limit (coalesceNil
+			(qassoc_get facts (quote join_order_planning_limit) nil)
+			(coalesceNil (planner_literal_value limit_value) -1)))
 		(define terms (scan_join_order_terms sources plan final_condition))
 		(define joins (map (produceN (- (count sources) 1)) (lambda (raw_index)
 			(begin
@@ -5390,8 +5394,11 @@ until the caller has selected this physical alternative. */
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
 				(define alternatives (list "legacy_join_tree" "scan_join_order"
 					"scan_join_order_batched_probe"))
-				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-				(define forced (planner_physical_override decision_id))
+				(define physical_planning_session
+					(qassoc_get facts (quote physical_planning_session) nil))
+				(define chosen (planner_physical_choice decision_id normal_choice alternatives
+					physical_planning_session))
+				(define forced (planner_physical_override decision_id physical_planning_session))
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
 					(list "decision" "scan_join_order")
@@ -5420,7 +5427,8 @@ until the caller has selected this physical alternative. */
 						(list (list "plan" "scan_join_order")
 							(list "cost" (planner_cost_explain scan_cost)))
 						(list (list "plan" "scan_join_order_batched_probe")
-							(list "cost" (planner_cost_explain batched_probe_cost)))))))
+							(list "cost" (planner_cost_explain batched_probe_cost))))))
+					physical_planning_session)
 				(if (or (equal? chosen "scan_join_order")
 					(equal? chosen "scan_join_order_batched_probe"))
 					(scan_join_order_emit_plan spec default_alias
@@ -8650,18 +8658,25 @@ every title. */
 without emitting runtime operators. Keeping this boundary explicit makes
 analysis and emission independently measurable while preserving the normal
 build_queryplan contract. */
-(define prepare_physical_queryplan (lambda (ir)
+(define prepare_physical_queryplan (lambda (ir planning_session)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
 		(define planned_root (apply_join_optimizer_plan_node (ir_root ir)))
-		(define stages (if (query_block? planned_root)
-			(stage_catalog_with_nested (query_block_stage_catalog planned_root))
+		/* This native handle exists only between physical preparation and emission.
+		It never enters the logical IR or the emitted/cached runtime plan. */
+		(define contextual_root (if (and (query_block? planned_root)
+			(not (nil? planning_session)))
+			(query_block_with_reorder_facts planned_root
+				(list (list (quote physical_planning_session) planning_session)))
+			planned_root))
+		(define stages (if (query_block? contextual_root)
+			(stage_catalog_with_nested (query_block_stage_catalog contextual_root))
 			'()))
 		(make_ir
 			(ir_kind ir)
-			(if (query_block? planned_root)
-				(query_block_with_full_stage_catalog_using planned_root stages)
-				planned_root)
+			(if (query_block? contextual_root)
+				(query_block_with_full_stage_catalog_using contextual_root stages)
+				contextual_root)
 			(map (ir_stages ir) apply_join_optimizer_plan_stage)
 			(ir_context_of ir)
 			(ir_return ir)))))
@@ -9062,7 +9077,7 @@ capture those values directly instead of rediscovering request state. */
 			(with_physical_query_context memoized_plan)))))
 
 (define build_queryplan (lambda (ir)
-	(emit_physical_queryplan (prepare_physical_queryplan ir))))
+	(emit_physical_queryplan (prepare_physical_queryplan ir nil))))
 
 /* Keep phase ownership explicit. normalize_query_ast inside untangle_query
 removes parser-specific spelling before dependent joins are identified; this
@@ -9075,17 +9090,17 @@ ordering run. Storage artifacts begin in build_queryplan. */
 (define decorrelate_logical_query (lambda (ast)
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
 
-(define optimize_logical_query (lambda (ir planning_session)
-	(join_reorder (aggregate_pushdown_logical ir) planning_session)))
+(define optimize_logical_query (lambda (ir planning_session tx)
+	(join_reorder (aggregate_pushdown_logical ir) planning_session tx)))
 
 (define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
 		(tx_check tx)
 		(define ir (decorrelate_logical_query ast))
 		(tx_check tx)
-		(define reordered (optimize_logical_query ir planning_session))
+		(define reordered (optimize_logical_query ir planning_session tx))
 		(tx_check tx)
-		(define prepared (prepare_physical_queryplan reordered))
+		(define prepared (prepare_physical_queryplan reordered planning_session))
 		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
 		(tx_check tx)
@@ -9096,9 +9111,9 @@ ordering run. Storage artifacts begin in build_queryplan. */
 		(tx_check tx)
 		(define normalized (require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir)))
 		(tx_check tx)
-		(define reordered (optimize_logical_query normalized planning_session))
+		(define reordered (optimize_logical_query normalized planning_session tx))
 		(tx_check tx)
-		(define prepared (prepare_physical_queryplan reordered))
+		(define prepared (prepare_physical_queryplan reordered planning_session))
 		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
 		(tx_check tx)
@@ -9166,7 +9181,8 @@ ordering run. Storage artifacts begin in build_queryplan. */
 (define explain_queryplan_reorder (lambda (query planning_session)
 	(begin
 		(planning_session "__memcp_explain_reorder_selectivities" true)
-		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
 		(planning_session "__memcp_explain_reorder_selectivities" nil)
 		(list (quote resultrow)
 			(list (quote list)
@@ -9360,7 +9376,7 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 		(accumulator "count" 0)
 		(planning_session "__memcp_explain_physical" accumulator)
 		(planning_session "__memcp_physical_overrides" overrides)
-		(define prepared (prepare_physical_queryplan reordered))
+		(define prepared (prepare_physical_queryplan reordered planning_session))
 		(define plan (emit_physical_queryplan prepared))
 		(define operator_family (physical_membership_operator_family plan))
 		(define optimized_plan (optimize plan))
@@ -9546,7 +9562,8 @@ potentially large calibrated SELECT result. */
 
 (define explain_queryplan_physical_calibrate_discover (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
 		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define decisions (filter (nth compilation 1) (lambda (decision)
 			(physical_decision_calibratable? decision))))
@@ -9566,7 +9583,8 @@ potentially large calibrated SELECT result. */
 
 (define explain_queryplan_physical_calibrate_variant (lambda (query decision_id variant planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
 		(define compilation (compile_physical_explain_variant reordered
 			(list (list decision_id variant)) planning_session))
 		(define decision (physical_decision_by_id (nth compilation 1) decision_id))
@@ -9590,7 +9608,8 @@ potentially large calibrated SELECT result. */
 
 (define explain_queryplan_physical_calibrate (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
 		(define default_compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define uncalibratable (filter (nth default_compilation 1) (lambda (decision)
 			(and (equal? (qassoc_get decision "decision" nil) "membership_carrier")
@@ -9614,7 +9633,8 @@ potentially large calibrated SELECT result. */
 
 (define explain_queryplan_physical (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
 		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define optimized_plan (nth compilation 0))
 		(define decisions (nth compilation 1))
@@ -9657,9 +9677,9 @@ potentially large calibrated SELECT result. */
 		(define started_ns (nanotime))
 		(define ir (decorrelate_logical_query query))
 		(define untangled_ns (nanotime))
-		(define reordered (optimize_logical_query ir planning_session))
+		(define reordered (optimize_logical_query ir planning_session nil))
 		(define reordered_ns (nanotime))
-		(define prepared (prepare_physical_queryplan reordered))
+		(define prepared (prepare_physical_queryplan reordered planning_session))
 		(define prepared_ns (nanotime))
 		(define plan (emit_physical_queryplan prepared))
 		(define emitted_ns (nanotime))

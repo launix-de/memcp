@@ -1427,7 +1427,7 @@ substring replace (which is the historical behaviour). */
 ))
 
 (define psql_import_plan (lambda (schema dump_schema command policy tx) (begin
-	(define raw_plan (parse_psql schema command policy tx))
+	(define raw_plan (parse_psql schema command policy nil tx))
 	(define created_schema (psql_import_createdatabase_name raw_plan))
 	(if created_schema
 		(list (coalesce dump_schema created_schema) '((quote createdatabase) schema true))
@@ -1435,7 +1435,7 @@ substring replace (which is the historical behaviour). */
 			(list dump_schema true)
 			(list dump_schema
 				(if dump_schema
-					(parse_psql schema (psql_retarget_command command dump_schema schema) policy tx)
+					(parse_psql schema (psql_retarget_command command dump_schema schema) policy nil tx)
 					raw_plan))))
 )))
 
