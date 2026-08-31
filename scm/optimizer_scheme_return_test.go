@@ -230,8 +230,15 @@ func TestProcOwnershipSpecializationPublishesFullProc(t *testing.T) {
 	if serialized := serializedTestExpr(t, env, variant.Body); !strings.Contains(serialized, "append_unique_mut") {
 		t.Fatalf("specialized Proc body did not consume its transferred parameter: %s", serialized)
 	}
-	cached, exists := base.OptimizerMeta.specialization(1)
-	if !exists || cached != call[0] {
+	snapshot := base.OptimizerMeta.specializations.Load()
+	if snapshot == nil || len(snapshot.variants) != 1 {
+		t.Fatal("base Proc did not retain exactly one Proc specialization")
+	}
+	var cached Scmer
+	for _, variant := range snapshot.variants {
+		cached = variant
+	}
+	if cached != call[0] {
 		t.Fatal("base Proc did not retain the published Proc specialization")
 	}
 	got := Apply(Eval(optimized, env), NewInt(0))
@@ -258,6 +265,79 @@ func TestProcOwnershipSpecializationFollowsCoalesceNilIntoFilter(t *testing.T) {
 	got := Apply(Eval(optimized, env), NewInt(1), NewInt(50), NewInt(99))
 	if !Equal(got, NewSlice([]Scmer{NewInt(1), NewInt(99)})) {
 		t.Fatalf("specialized optional filter returned %s", String(got))
+	}
+}
+
+func TestProcOwnershipSpecializationRetainsNestedOwnershipVariants(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("nested proc specialization test", `(define specialize_nested_child (lambda (wrapper)
+		(match wrapper
+			(cons child _tail) (append child 2 3 4 5 6 7 8 9 10)
+			_ '())))`, env)
+	base := env.Vars[Symbol("specialize_nested_child")].Proc()
+
+	borrowed := optimizeTestSource(t, env, `(lambda (child)
+		(specialize_nested_child (list child)))`)
+	borrowedCall := borrowed.Slice()[2].Slice()
+	if !borrowedCall[0].IsProc() {
+		t.Fatalf("fresh wrapper did not specialize: %s", serializedTestExpr(t, env, borrowed))
+	}
+	if body := serializedTestExpr(t, env, borrowedCall[0].Proc().Body); strings.Contains(body, "append_mut") {
+		t.Fatalf("borrowed child was made mutable: %s", body)
+	}
+
+	transferred := optimizeTestSource(t, env, `(lambda (value)
+		(specialize_nested_child (list (list value))))`)
+	transferredCall := transferred.Slice()[2].Slice()
+	if !transferredCall[0].IsProc() {
+		t.Fatalf("nested fresh child did not specialize: %s", serializedTestExpr(t, env, transferred))
+	}
+	if body := serializedTestExpr(t, env, transferredCall[0].Proc().Body); !strings.Contains(body, "append_mut") {
+		t.Fatalf("nested ownership did not reach the match binding: %s", body)
+	}
+	if transferredCall[0] == borrowedCall[0] {
+		t.Fatal("different nested ownership shapes selected the same Proc")
+	}
+	snapshot := base.OptimizerMeta.specializations.Load()
+	if snapshot == nil || len(snapshot.variants) != 2 {
+		t.Fatalf("expected two retained ownership variants, got %#v", snapshot)
+	}
+
+	child := NewSlice([]Scmer{NewInt(1)})
+	got := Apply(Eval(borrowed, env), child)
+	if len(child.Slice()) != 1 || len(got.Slice()) != 10 {
+		t.Fatalf("borrowed variant changed its input: child=%s result=%s", String(child), String(got))
+	}
+	got = Apply(Eval(transferred, env), NewInt(1))
+	if len(got.Slice()) != 10 {
+		t.Fatalf("transferred variant returned %s", String(got))
+	}
+}
+
+func TestProcOwnershipSpecializationUsesElementOwnershipForEveryChild(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("element ownership specialization test", `(define specialize_element_child (lambda (wrapper)
+		(match wrapper
+			(cons child _tail) (append child 2 3 4 5 6 7 8 9 10)
+			_ '())))`, env)
+	base := env.Vars[Symbol("specialize_element_child")].Proc()
+	call := []Scmer{NewSymbol("specialize_element_child"), NewSymbol("fresh")}
+	allChildrenOwned := &TypeDescriptor{
+		Kind:     "list",
+		Transfer: true,
+		Length:   UnknownLength,
+		Element:  &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength},
+	}
+	meta := newOptimizerMetainfo()
+	variant, ok := trySpecializeProcCall(call, []TypeInfo{tiZero, TypeInfoFromTD(allChildrenOwned)}, env, &meta)
+	if !ok || !variant.IsProc() {
+		t.Fatal("element ownership did not produce a Proc specialization")
+	}
+	if body := serializedTestExpr(t, env, variant.Proc().Body); !strings.Contains(body, "append_mut") {
+		t.Fatalf("Element.Transfer did not reach a projected child: %s", body)
+	}
+	if base.OptimizerMeta.specializations.Load() == nil {
+		t.Fatal("element ownership specialization was not retained")
 	}
 }
 
@@ -375,8 +455,13 @@ func TestConcurrentProcOwnershipSpecializationPublishesOneProc(t *testing.T) {
 		}
 	}
 	snapshot := base.OptimizerMeta.specializations.Load()
-	if snapshot == nil || len(snapshot.variants) != 1 || snapshot.variants[1] != published {
+	if snapshot == nil || len(snapshot.variants) != 1 {
 		t.Fatal("concurrent specialization cache does not contain exactly the published Proc")
+	}
+	for _, variant := range snapshot.variants {
+		if variant != published {
+			t.Fatal("concurrent specialization cache contains a different Proc")
+		}
 	}
 }
 

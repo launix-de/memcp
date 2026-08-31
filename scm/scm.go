@@ -650,7 +650,15 @@ const (
 	procSequenceAndTerms
 )
 
-type procSpecializationKey uint64
+// procSpecializationKey distinguishes both the transferred parameters and the
+// ownership shape below them. A Proc can therefore retain independent full
+// variants for e.g. a fresh list with borrowed elements and a fresh list whose
+// elements are transferable as well.
+type procSpecializationKey struct {
+	paramMask   uint64
+	ownershipLo uint64
+	ownershipHi uint64
+}
 
 type procSpecializationSnapshot struct {
 	variants map[procSpecializationKey]Scmer
@@ -2772,7 +2780,8 @@ func ComputeSize(v Scmer) uint {
 			sz += typeDescriptorRetainedSize(p.OptimizerMeta.Return.Extra, make(map[*TypeDescriptor]struct{}))
 			if snapshot := p.OptimizerMeta.specializations.Load(); snapshot != nil {
 				sz += 2 * goAllocOverhead
-				sz += uint(len(snapshot.variants)+len(snapshot.rejected)) * uint(unsafe.Sizeof(procSpecializationKey(0)))
+				keyCount := len(snapshot.variants) + len(snapshot.rejected)
+				sz += uint(keyCount) * uint(unsafe.Sizeof(procSpecializationKey{}))
 				for _, variant := range snapshot.variants {
 					sz += ComputeSize(variant)
 				}
