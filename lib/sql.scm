@@ -524,7 +524,7 @@ user table merely to discard a newly constructed policy closure. */
 					(cadr cached_entry))))
 			formula)))))
 
-(define sql_execute_formula (lambda (session tx formula resultrow)
+(define sql_execute_formula (lambda (session tx formula resultrow resultfields)
 	(eval (source "SQL Query" 1 1 formula))))
 
 /* helper: build a policy function for table-level access checks
@@ -724,7 +724,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(lambda (tx) (begin
 							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
-							(sql_execute_formula session tx formula resultrow)))))
+							(sql_execute_formula session tx formula resultrow (lambda (_fields) true))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -784,7 +784,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 							(extract_assoc (req "query") (lambda (k v) (session k v)))
 							(define formula (cached_parse psql_queryplan_cache (list parse_psql) schema query
 								(list (quote sql-policy-for) (req "username")) (req "username") session false tx))
-							(sql_execute_formula session tx formula resultrow))))))
+							(sql_execute_formula session tx formula resultrow (lambda (_fields) true)))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -878,7 +878,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_) (scan nil (table "system" "user") '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
-(set mysql_handler (lambda (schema sql resultrow_sql session session_state query_seq) (begin
+(set mysql_handler (lambda (schema sql resultrow_sql resultfields_sql session session_state query_seq) (begin
 	(session "schema" schema)
 	(define resultrow resultrow_sql)
 	(try (lambda () (begin
@@ -898,7 +898,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 							(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
 						(cached_parse sql_queryplan_cache (list parse_sql) schema sql_parse_input
 							(list (quote sql-policy-for) mysql_username) mysql_username session true tx)))
-					(sql_execute_formula session tx formula resultrow)
+					(sql_execute_formula session tx formula resultrow resultfields_sql)
 			))) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)
