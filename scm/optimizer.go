@@ -2074,22 +2074,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 		}
 	case headOk && (headSym == Symbol("match") || headSym == Symbol("match_mut")):
-		value, valueTransfer, _ := optimizeExCompat(v[1], env, ome, true)
-		v[1] = value
-		transferOwnership = valueTransfer
-		if headSym == Symbol("match") && valueTransfer {
-			markProcOwnershipSpecializationUse(ome, v[1])
-			v[0] = NewSymbol("match_mut")
-		}
-		for i := 3; i < len(v); i += 2 {
-			ome2 := ome.CopySharedScope()
-			v[i-1] = OptimizeMatchPattern(v[1], v[i-1], env, ome, &ome2)
-			v[i], transferOwnership, _ = optimizeExCompat(v[i], env, &ome2, useResult)
-		}
-		if len(v)%2 == 1 {
-			v[len(v)-1], transferOwnership, _ = optimizeExCompat(v[len(v)-1], env, ome, useResult)
-		}
-		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
+		return optimizeMatch(v, headSym, env, ome, useResult)
 	case headOk && headSym == Symbol("parser"):
 		return OptimizeParser(NewSlice(v), env, ome, false), tiTransfer
 	case !headOk || headSym != Symbol("quote"):
@@ -2899,27 +2884,66 @@ func optimizeAssociative(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer
 	return result, td
 }
 
-func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMetainfo, ome2 *optimizerMetainfo) Scmer {
+type matchPatternInfo struct {
+	hash       uint64
+	comparable bool
+}
+
+func matchPatternScalarInfo(pattern Scmer) matchPatternInfo {
+	if stripped, ok := scmerStripSourceInfo(pattern); ok {
+		pattern = stripped
+	}
+	switch pattern.GetTag() {
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagSymbol, tagNthLocalVar:
+		return matchPatternInfo{hash: combineStructuralHash(uint64(pattern.GetTag()), HashKey(pattern)), comparable: true}
+	default:
+		return matchPatternInfo{}
+	}
+}
+
+// optimizeMatchPattern returns the canonical pattern and its structural hash in
+// the same recursive walk. Callers can therefore recognize unreachable duplicate
+// branches without repeatedly analyzing their pattern trees.
+func optimizeMatchPattern(pattern Scmer, env *Env, ome *optimizerMetainfo) (Scmer, matchPatternInfo) {
 	if stripped, ok := scmerStripSourceInfo(pattern); ok {
 		pattern = stripped
 	}
 
 	if sym, ok := scmerSymbol(pattern); ok {
-		delete(ome2.variableReplacement, sym)
-		return pattern
+		delete(ome.variableReplacement, sym)
+		return pattern, matchPatternScalarInfo(pattern)
 	}
 
 	if slice, ok := scmerSlice(pattern); ok {
 		if len(slice) == 0 {
-			return NewSlice(slice)
+			return NewSlice(slice), matchPatternInfo{hash: combineStructuralHash(0xbb67ae8584caa73b, 0), comparable: true}
+		}
+		if stripped, ok := scmerStripSourceInfo(slice[0]); ok {
+			slice[0] = stripped
 		}
 		headSym, headOk := scmerSymbol(slice[0])
 		if headOk && headSym == Symbol("eval") && len(slice) > 1 {
-			slice[1], _ = OptimizeEx(slice[1], env, ome2, true)
-			return NewSlice(slice)
+			slice[1], _ = OptimizeEx(slice[1], env, ome, true)
+			return NewSlice(slice), matchPatternInfo{}
 		}
 		if headOk && headSym == Symbol("var") && len(slice) == 2 {
-			return NewNthLocalVar(NthLocalVar(ToInt(slice[1])))
+			pattern = NewNthLocalVar(NthLocalVar(ToInt(slice[1])))
+			return pattern, matchPatternScalarInfo(pattern)
+		}
+		if headOk && (headSym == Symbol("symbol") || headSym == Symbol("quote")) && len(slice) == 2 {
+			if _, literal := scmerSymbol(slice[1]); literal {
+				// match implements both spellings as the same symbol-literal pattern.
+				slice[0] = NewSymbol("symbol")
+				if stripped, ok := scmerStripSourceInfo(slice[1]); ok {
+					slice[1] = stripped
+				}
+				pattern = NewSlice(slice)
+				literalInfo := matchPatternScalarInfo(slice[1])
+				hash := combineStructuralHash(0xbb67ae8584caa73b, 2)
+				hash = combineStructuralHash(hash, matchPatternScalarInfo(slice[0]).hash)
+				hash = combineStructuralHash(hash, literalInfo.hash)
+				return pattern, matchPatternInfo{hash: hash, comparable: literalInfo.comparable}
+			}
 		}
 		if headOk && headSym == Symbol("regex") && len(slice) > 1 {
 			// Precompile constant regex patterns at optimization time
@@ -2932,17 +2956,70 @@ func OptimizeMatchPattern(value Scmer, pattern Scmer, env *Env, ome *optimizerMe
 				slice[1] = NewRegex(re)
 			}
 			for i := 2; i < len(slice); i++ {
-				slice[i] = OptimizeMatchPattern(NewNil(), slice[i], env, ome, ome2)
+				slice[i], _ = optimizeMatchPattern(slice[i], env, ome)
 			}
-			return NewSlice(slice)
+			return NewSlice(slice), matchPatternInfo{}
 		}
+		hash := combineStructuralHash(0xbb67ae8584caa73b, uint64(len(slice)))
+		headInfo := matchPatternScalarInfo(slice[0])
+		if !headOk {
+			slice[0], headInfo = optimizeMatchPattern(slice[0], env, ome)
+		}
+		comparable := headInfo.comparable
+		hash = combineStructuralHash(hash, headInfo.hash)
 		for i := 1; i < len(slice); i++ {
-			slice[i] = OptimizeMatchPattern(NewNil(), slice[i], env, ome, ome2)
+			var info matchPatternInfo
+			slice[i], info = optimizeMatchPattern(slice[i], env, ome)
+			hash = combineStructuralHash(hash, info.hash)
+			comparable = comparable && info.comparable
 		}
-		return NewSlice(slice)
+		return NewSlice(slice), matchPatternInfo{hash: hash, comparable: comparable}
 	}
 
-	return pattern
+	return pattern, matchPatternScalarInfo(pattern)
+}
+
+func optimizeMatch(v []Scmer, headSym Symbol, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
+	value, transferOwnership, _ := optimizeExCompat(v[1], env, ome, true)
+	head := v[0]
+	if headSym == Symbol("match") && transferOwnership {
+		markProcOwnershipSpecializationUse(ome, value)
+		head = NewSymbol("match_mut")
+	}
+	out := make([]Scmer, 0, len(v))
+	out = append(out, head, value)
+	var seen map[uint64][]Scmer
+	if (len(v)-2)/2 > 1 {
+		seen = make(map[uint64][]Scmer, (len(v)-2)/2)
+	}
+	for i := 3; i < len(v); i += 2 {
+		branchOme := ome.CopySharedScope()
+		pattern, info := optimizeMatchPattern(v[i-1], env, &branchOme)
+		duplicate := false
+		if info.comparable && seen != nil {
+			for _, previous := range seen[info.hash] {
+				if astStructuralEqual(previous, pattern) {
+					duplicate = true
+					break
+				}
+			}
+		}
+		if duplicate {
+			continue
+		}
+		if info.comparable && seen != nil {
+			seen[info.hash] = append(seen[info.hash], pattern)
+		}
+		result, resultTransfer, _ := optimizeExCompat(v[i], env, &branchOme, useResult)
+		transferOwnership = resultTransfer
+		out = append(out, pattern, result)
+	}
+	if len(v)%2 == 1 {
+		fallback, fallbackTransfer, _ := optimizeExCompat(v[len(v)-1], env, ome, useResult)
+		transferOwnership = fallbackTransfer
+		out = append(out, fallback)
+	}
+	return NewSlice(out), MakeTypeInfo(transferOwnership, false)
 }
 
 func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bool) Scmer {
