@@ -1,3 +1,18 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 name: Test
 
 on:
@@ -10,6 +25,19 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: recovery-test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+
     steps:
       - uses: actions/checkout@v4
 
@@ -18,8 +46,20 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install Python dependencies
-        run: pip install requests PyYAML
+      - name: Install test dependencies
+        run: |
+          pip install requests PyYAML
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client
 
       - name: Run tests
         run: bash git-pre-commit
+
+      - name: Verify dump and restore compatibility
+        env:
+          MEMCP_RECOVERY_MARIADB_PASSWORD: recovery-test
+        run: >-
+          python3 tools/test_mysqldump_recovery.py
+          --mariadb-host=127.0.0.1
+          --mariadb-port=3306
+          --mysqldump=mariadb-dump

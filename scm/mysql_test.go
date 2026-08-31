@@ -150,3 +150,47 @@ func TestIsSelectQueryHandlesCommentsAndCase(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMySQLTableProjection(t *testing.T) {
+	tests := []struct {
+		query         string
+		defaultSchema string
+		schema        string
+		table         string
+		columns       []string
+	}{
+		{"SELECT * FROM empty_table", "app", "app", "empty_table", nil},
+		{"SELECT /*!40001 SQL_NO_CACHE */ `user`, `channel`, `dv`, `id`, `date` FROM `fop_notification`", "app", "app", "fop_notification", []string{"user", "channel", "dv", "id", "date"}},
+		{" select `t`.`id`, `t`.`name` from `other`.`odd``table`; ", "app", "other", "odd`table", []string{"id", "name"}},
+	}
+	for _, test := range tests {
+		schema, table, columns, ok := parseMySQLTableProjection(test.query, test.defaultSchema)
+		if !ok || schema != test.schema || table != test.table || strings.Join(columns, ",") != strings.Join(test.columns, ",") {
+			t.Fatalf("parseMySQLTableProjection(%q) = %q, %q, %v, %v; want %q, %q, %v, true",
+				test.query, schema, table, columns, ok, test.schema, test.table, test.columns)
+		}
+	}
+	for _, query := range []string{
+		"SELECT * FROM empty_table WHERE id = 1",
+		"SELECT id + 1 FROM empty_table",
+		"UPDATE empty_table SET id = 1",
+	} {
+		if _, _, _, ok := parseMySQLTableProjection(query, "app"); ok {
+			t.Fatalf("unexpected table-projection match for %q", query)
+		}
+	}
+}
+
+func TestMySQLFieldFromShowColumn(t *testing.T) {
+	field, ok := mysqlFieldFromShowColumn([]Scmer{
+		NewString("Field"), NewString("payload"),
+		NewString("Type"), NewString("LONGBLOB"),
+		NewString("RawType"), NewString("LONGBLOB"),
+	})
+	if !ok {
+		t.Fatal("valid SHOW column was rejected")
+	}
+	if field.Name != "payload" || field.Type != querypb.Type_BLOB || field.Charset != 63 {
+		t.Fatalf("unexpected MySQL field metadata: %+v", field)
+	}
+}

@@ -383,6 +383,211 @@ func isSelectQuery(query string) bool {
 		return false
 	}
 }
+
+func consumeMySQLKeyword(input string, keyword string) (string, bool) {
+	input = strings.TrimSpace(input)
+	if len(input) < len(keyword) || !strings.EqualFold(input[:len(keyword)], keyword) {
+		return input, false
+	}
+	if len(input) > len(keyword) {
+		switch input[len(keyword)] {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return input, false
+		}
+	}
+	return input[len(keyword):], true
+}
+
+func parseMySQLIdentifier(input string) (identifier string, rest string, ok bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", input, false
+	}
+	if input[0] == '`' {
+		var value strings.Builder
+		for i := 1; i < len(input); i++ {
+			if input[i] != '`' {
+				value.WriteByte(input[i])
+				continue
+			}
+			if i+1 < len(input) && input[i+1] == '`' {
+				value.WriteByte('`')
+				i++
+				continue
+			}
+			return value.String(), input[i+1:], true
+		}
+		return "", input, false
+	}
+	end := 0
+	for end < len(input) {
+		ch := input[end]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') || ch == '_' || ch == '$' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		return "", input, false
+	}
+	return input[:end], input[end:], true
+}
+
+func parseMySQLTableProjection(query string, defaultSchema string) (schema string, table string, columns []string, ok bool) {
+	rest, ok := consumeMySQLKeyword(query, "SELECT")
+	if !ok {
+		return "", "", nil, false
+	}
+	rest = strings.TrimSpace(rest)
+	for strings.HasPrefix(rest, "/*") {
+		end := strings.Index(rest[2:], "*/")
+		if end < 0 {
+			return "", "", nil, false
+		}
+		rest = strings.TrimSpace(rest[end+4:])
+	}
+	if rest != "" && rest[0] == '*' {
+		rest = rest[1:]
+	} else {
+		for {
+			column, tail, parsed := parseMySQLIdentifier(rest)
+			if !parsed {
+				return "", "", nil, false
+			}
+			tail = strings.TrimSpace(tail)
+			if strings.HasPrefix(tail, ".") {
+				column, tail, parsed = parseMySQLIdentifier(tail[1:])
+				if !parsed {
+					return "", "", nil, false
+				}
+				tail = strings.TrimSpace(tail)
+			}
+			columns = append(columns, column)
+			if !strings.HasPrefix(tail, ",") {
+				rest = tail
+				break
+			}
+			rest = tail[1:]
+		}
+	}
+	rest, ok = consumeMySQLKeyword(rest, "FROM")
+	if !ok {
+		return "", "", nil, false
+	}
+	first, rest, ok := parseMySQLIdentifier(rest)
+	if !ok {
+		return "", "", nil, false
+	}
+	rest = strings.TrimSpace(rest)
+	if strings.HasPrefix(rest, ".") {
+		second, tail, parsed := parseMySQLIdentifier(rest[1:])
+		if !parsed {
+			return "", "", nil, false
+		}
+		schema, table, rest = first, second, tail
+	} else {
+		schema, table = defaultSchema, first
+	}
+	rest = strings.TrimSpace(rest)
+	if strings.HasSuffix(rest, ";") {
+		rest = strings.TrimSpace(rest[:len(rest)-1])
+	}
+	return schema, table, columns, rest == "" && schema != "" && table != ""
+}
+
+func mysqlShowColumnValue(row []Scmer, key string) (Scmer, bool) {
+	for i := 0; i+1 < len(row); i += 2 {
+		if row[i].String() == key {
+			return row[i+1], true
+		}
+	}
+	return NewNil(), false
+}
+
+func mysqlFieldFromShowColumn(row []Scmer) (*querypb.Field, bool) {
+	name, ok := mysqlShowColumnValue(row, "Field")
+	if !ok || name.String() == "" {
+		return nil, false
+	}
+	rawType, ok := mysqlShowColumnValue(row, "RawType")
+	if !ok {
+		rawType, _ = mysqlShowColumnValue(row, "Type")
+	}
+	typeName := strings.ToUpper(rawType.String())
+	if end := strings.IndexAny(typeName, "( "); end >= 0 {
+		typeName = typeName[:end]
+	}
+	field := &querypb.Field{Name: name.String()}
+	switch typeName {
+	case "BOOL", "BOOLEAN":
+		field.Type = querypb.Type_INT32
+	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT":
+		field.Type = querypb.Type_INT64
+	case "FLOAT":
+		field.Type = querypb.Type_FLOAT32
+	case "DOUBLE", "REAL":
+		field.Type = querypb.Type_FLOAT64
+	case "DECIMAL", "NUMERIC":
+		field.Type = querypb.Type_DECIMAL
+	case "BINARY", "VARBINARY":
+		field.Type = querypb.Type_VARBINARY
+		field.Charset = 63
+	case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB":
+		field.Type = querypb.Type_BLOB
+		field.Charset = 63
+	case "DATE":
+		field.Type = querypb.Type_DATE
+	case "DATETIME", "TIMESTAMP":
+		field.Type = querypb.Type_DATETIME
+	case "TIME":
+		field.Type = querypb.Type_TIME
+	default:
+		field.Type = querypb.Type_VARCHAR
+		field.Charset = 45
+	}
+	return field, true
+}
+
+func mysqlFieldsForEmptyTableSelect(query string, defaultSchema string) (fields []*querypb.Field) {
+	schema, table, projectedColumns, ok := parseMySQLTableProjection(query, defaultSchema)
+	if !ok {
+		return nil
+	}
+	declaration, ok := Globalenv.Vars[Symbol("show")]
+	if !ok {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			fields = nil
+		}
+	}()
+	byName := make(map[string]*querypb.Field)
+	for _, column := range Apply(declaration, NewString(schema), NewString(table)).Slice() {
+		field, valid := mysqlFieldFromShowColumn(column.Slice())
+		if !valid {
+			return nil
+		}
+		byName[field.Name] = field
+		if len(projectedColumns) == 0 {
+			fields = append(fields, field)
+		}
+	}
+	if len(projectedColumns) != 0 {
+		for _, name := range projectedColumns {
+			field, exists := byName[name]
+			if !exists {
+				return nil
+			}
+			fields = append(fields, field)
+		}
+	}
+	return fields
+}
+
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, output *driver.ResultWriter) (myerr error) {
 	atomic.AddInt64(&TotalHTTPRequests, 1)
 	var ss *SessionState
@@ -578,8 +783,11 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		updateFlags(session, sessionFunc)
 	}
 	if !fieldsPublished && selectQuery {
-		fields = []*querypb.Field{
-			{Name: "_empty", Type: querypb.Type_NULL_TYPE},
+		fields = mysqlFieldsForEmptyTableSelect(query, session.Schema())
+		if len(fields) == 0 {
+			fields = []*querypb.Field{
+				{Name: "_empty", Type: querypb.Type_NULL_TYPE},
+			}
 		}
 		if err := output.SetFields(fields); err != nil {
 			return err

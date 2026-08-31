@@ -125,6 +125,9 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	(parser '((atom "'" false) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape (replace x "''" "'")))
 	(parser '((atom "\"" false) (define x (regex "(\\\\.|\"\"|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape (replace x "\"\"" "\"")))
 )))
+(define sql_hex_literal (parser
+	(define x (regex "0[xX](?:[0-9A-Fa-f]{2})*"))
+	'('hex2bin (substr x 2))))
 
 /* SQL modulo expression: NULL-safe, division-by-zero-safe, truncates quotient toward zero */
 (define sql_mod_expr (lambda (a b)
@@ -166,6 +169,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (atom "NULL" true) (sql_null_literal))
 	(parser (atom "TRUE" true) true)
 	(parser (atom "FALSE" true) false)
+	sql_hex_literal
 	sql_number
 	sql_string
 )))
@@ -927,6 +931,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define n (placeholder_counter "n"))
 			(placeholder_counter "n" (+ n 1))
 			(list (quote session) (concat "v" (string (+ n 1))))))
+		sql_hex_literal
 		sql_number
 		sql_string
 		sql_column

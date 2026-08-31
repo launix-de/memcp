@@ -2714,13 +2714,16 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 	var Auto_increment uint64
 	var hasAI bool
 	var aiColIdx int = -1
+	var aiInputIdx int = -1
 	for _, c := range t.t.Columns {
 		if c.AutoIncrement {
 			hasAI = true
-			t.t.mu.Lock() // auto increment with global table lock outside the loop for a batch
-			Auto_increment = t.t.Auto_increment
-			t.t.Auto_increment = t.t.Auto_increment + uint64(len(values)) // batch reservation of new IDs
-			t.t.mu.Unlock()
+			for i, name := range columns {
+				if name == c.Name {
+					aiInputIdx = i
+					break
+				}
+			}
 		}
 		if c.AutoIncrement || c.hasDefault() {
 			// column with default or auto increment -> also add to deltacolumns
@@ -2736,8 +2739,28 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 			}
 		}
 	}
+	generatedIDs := 0
+	var maxExplicitID uint64
+	if hasAI {
+		for _, row := range values {
+			if aiInputIdx < 0 || aiInputIdx >= len(row) || row[aiInputIdx].IsNil() {
+				generatedIDs++
+				continue
+			}
+			if explicitID := scm.ToInt(row[aiInputIdx]); explicitID > 0 && uint64(explicitID) > maxExplicitID {
+				maxExplicitID = uint64(explicitID)
+			}
+		}
+		t.t.mu.Lock() // reserve generated IDs once for the complete batch
+		Auto_increment = t.t.Auto_increment
+		if maxExplicitID > Auto_increment {
+			Auto_increment = maxExplicitID
+		}
+		t.t.Auto_increment = Auto_increment + uint64(generatedIDs)
+		t.t.mu.Unlock()
+	}
 	// if requested, notify the first assigned id once per statement
-	if hasAI && onFirstInsertId != nil {
+	if generatedIDs > 0 && onFirstInsertId != nil {
 		onFirstInsertId(int64(Auto_increment) + 1)
 		// do not call again for this shard; table-level wrapper ensures only first shard triggers
 		onFirstInsertId = nil
@@ -2749,10 +2772,13 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		newrow := make([]scm.Scmer, len(t.deltaColumns))
 		for _, c := range t.t.Columns {
 			if c.AutoIncrement {
-				// fill auto_increment col (lock-free because the lock is outside the loop)
+				// Fill only missing/NULL values; explicit values were accounted for
+				// before reserving the batch's generated range.
 				cidx := t.deltaColumns[c.Name]
-				Auto_increment++ // local increase
-				newrow[cidx] = scm.NewInt(int64(Auto_increment))
+				if aiInputIdx < 0 || aiInputIdx >= len(row) || row[aiInputIdx].IsNil() {
+					Auto_increment++ // local increase within the reserved range
+					newrow[cidx] = scm.NewInt(int64(Auto_increment))
+				}
 			} else if c.hasDefault() {
 				// fill col with default
 				cidx := t.deltaColumns[c.Name]
@@ -2789,28 +2815,6 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		}
 	}
 	t.plannerDeltaRows.Store(uint64(len(t.inserts)))
-	// If any row had an explicit AI value exceeding the reserved range, bump the counter.
-	// Auto_increment (local) holds the base before reservation; auto-assigned IDs are
-	// in [Auto_increment+1 .. Auto_increment+len(values)]. Any stored value beyond that
-	// range was explicitly provided by the caller and must advance the counter.
-	if hasAI && aiColIdx >= 0 {
-		reservedTop := Auto_increment + uint64(len(values))
-		var maxExplicit uint64
-		for _, row := range t.inserts[len(t.inserts)-len(values):] {
-			if aiColIdx < len(row) && !row[aiColIdx].IsNil() {
-				if v := uint64(scm.ToInt(row[aiColIdx])); v > reservedTop && v > maxExplicit {
-					maxExplicit = v
-				}
-			}
-		}
-		if maxExplicit > 0 {
-			t.t.mu.Lock()
-			if maxExplicit > t.t.Auto_increment {
-				t.t.Auto_increment = maxExplicit
-			}
-			t.t.mu.Unlock()
-		}
-	}
 	// Charge only the new allocation to each disjoint CacheManager owner. A
 	// rebuild later replaces these deltas with each owner's absolute measured
 	// size; insert must not traverse an ever-growing shard or index here.
