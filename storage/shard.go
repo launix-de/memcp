@@ -531,11 +531,15 @@ func (u *storageShard) needsRuntimeAttach(colName string, columnstorage ColumnSt
 	if columnstorage == nil {
 		return false
 	}
-	if _, ok := columnstorage.(*OverlayBlob); ok {
-		return true
+	if blob, ok := columnstorage.(*OverlayBlob); ok {
+		return blob.schema != u.t.schema
 	}
-	if _, ok := columnstorage.(*StorageComputeProxy); ok {
-		return true
+	if proxy, ok := columnstorage.(*StorageComputeProxy); ok {
+		if proxy.shard != u || proxy.colName != colName {
+			return true
+		}
+		col := u.schemaColumn(colName)
+		return col != nil && len(col.OrcSortCols) > 0 && !proxy.isOrdered
 	}
 	col := u.schemaColumn(colName)
 	return col != nil && isRuntimeComputedColumn(col)
