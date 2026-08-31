@@ -1445,6 +1445,9 @@ func init_list() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		if !jitEnabled {
+			return jitEmitGoVariadicCallFromDescs(ctx, declarations["count"].Fn, args, result)
+		}
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -5571,6 +5574,9 @@ func init_list() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		if !jitEnabled {
+			return jitEmitGoVariadicCallFromDescs(ctx, declarations["has?"].Fn, args, result)
+		}
 				var d2 JITValueDesc
 				_ = d2
 				var d3 JITValueDesc
@@ -19502,6 +19508,9 @@ func init_list() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		if !jitEnabled {
+			return jitEmitGoVariadicCallFromDescs(ctx, declarations["contains?"].Fn, args, result)
+		}
 				var d2 JITValueDesc
 				_ = d2
 				var d3 JITValueDesc
@@ -20357,6 +20366,9 @@ func init_list() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		if !jitEnabled {
+			return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_in"].Fn, args, result)
+		}
 				var d3 JITValueDesc
 				_ = d3
 				var d4 JITValueDesc
@@ -22978,6 +22990,9 @@ func init_list() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+		if !jitEnabled {
+			return jitEmitGoVariadicCallFromDescs(ctx, declarations["get_assoc_pairlist"].Fn, args, result)
+		}
 				var d2 JITValueDesc
 				_ = d2
 				var d3 JITValueDesc

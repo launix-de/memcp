@@ -2858,8 +2858,14 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 		bbsDeclPrefix: "",
 	})
 
-	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
-		g.wDecl.String(), injectBindRegCalls(g.w.String()))
+	// Keep generated native emitters out of vanilla binaries. jitEnabled is a
+	// build-tag-selected constant, so the Go compiler eliminates either this
+	// fallback or the (potentially very large) native emitter body completely.
+	// This prevents adding JIT coverage from perturbing non-JIT instruction
+	// layout and performance while retaining one generated source of truth.
+	guard := fmt.Sprintf("\tif !jitEnabled {\n\t\treturn jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)\n\t}\n", opName)
+	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s%s\t\t}",
+		guard, g.wDecl.String(), injectBindRegCalls(g.w.String()))
 	return result, ""
 }
 
