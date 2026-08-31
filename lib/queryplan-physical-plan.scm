@@ -8958,16 +8958,14 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 					(or found (physical_plan_uses_query_scope? item))) false))
 			_ false))))
 
-/* `session` is optimized to its helper closure while planner code is loaded,
-whereas dynamically-built fragments can retain the symbol. Normalize both
-representations without depending on their printed form. */
+/* Match syntax structurally. Comparing a call head with the value of the
+session binding can classify an unrelated lambda as a session call. */
 (define physical_session_call_parts (lambda (expr)
 	(match expr
 		((symbol quote) _value) nil
 		((quote quote) _value) nil
-		(cons head tail) (if (or (equal? head session) (equal? head (quote session)))
-			(list tail)
-			nil)
+		(cons (symbol session) tail) (list tail)
+		(cons (quote session) tail) (list tail)
 		_ nil)))
 
 /* Physical operators share one transaction for the complete query. Keep

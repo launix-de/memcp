@@ -640,6 +640,29 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "Session binding preserves unrelated lambda call heads"
+    scm: |
+      (begin
+        (define nullable_length
+          (list
+            (list (quote lambda) (list (quote x))
+              (list (quote if)
+                (list (quote nil?) (quote x))
+                nil
+                (list (quote strlen) (quote x))))
+            "payload"))
+        (and
+          (equal? (sql_queryplan_bind_execution_session nullable_length) nullable_length)
+          (equal? (sql_queryplan_bind_tx_calls nullable_length) nullable_length)
+          (equal?
+            (sql_queryplan_bind_execution_session (list session_globalvar "time_zone"))
+            (list (quote session_globalvar_explicit) (quote session) "time_zone"))
+          (equal?
+            (sql_queryplan_bind_tx_calls (list connection_id))
+            (list (quote tx_connection_id) (quote tx)))))
+    expect:
+      data: [true]
+
   - name: "Exact cached formula keeps optimizer-resolved session calls"
     scm: |
       (begin

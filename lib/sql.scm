@@ -15,6 +15,11 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+/* Query-plan builders emit session as code before a request-local session is
+in scope. Keep the global binding as an inert self-representing symbol; SQL
+execution shadows it with the concrete session captured by the frontend. */
+(define session (quote session))
+
 (import "sql-parser.scm")
 (import "psql-parser.scm")
 (import "sql-builtins.scm")
@@ -202,21 +207,29 @@ functional planner return value. */
 (define sql_queryplan_bind_execution_session (lambda (expr)
 	(match expr
 		((symbol quote) _value) expr
-		(cons head tail) (if (or (equal? head session) (equal? head (quote session)))
-			(cons (quote session)
-				(map tail sql_queryplan_bind_execution_session))
-			(if (and (or (equal? head context) (equal? head (quote context)))
-				(and (equal? (count tail) 1) (equal? (car tail) "session")))
-				(quote session)
-				(if (or (equal? head session_globalvar) (equal? head (quote session_globalvar)))
-					(cons (quote session_globalvar_explicit)
-						(cons (quote session)
-							(map tail sql_queryplan_bind_execution_session)))
-					(if (or (equal? head connection_id) (equal? head (quote connection_id)))
-						(list (quote tx_connection_id) (quote tx))
-						(cons
-							(sql_queryplan_bind_execution_session head)
-							(map tail sql_queryplan_bind_execution_session))))))
+		((symbol context) "session") (quote session)
+		((quote context) "session") (quote session)
+		(cons (symbol session) tail) (cons (quote session)
+			(map tail sql_queryplan_bind_execution_session))
+		(cons (quote session) tail) (cons (quote session)
+			(map tail sql_queryplan_bind_execution_session))
+		(cons (symbol session_globalvar) tail) (cons (quote session_globalvar_explicit)
+			(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
+		(cons (quote session_globalvar) tail) (cons (quote session_globalvar_explicit)
+			(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
+		(cons (symbol connection_id) _tail) (list (quote tx_connection_id) (quote tx))
+		(cons (quote connection_id) _tail) (list (quote tx_connection_id) (quote tx))
+		(cons head tail) (if (equal? head session_globalvar)
+			(cons (quote session_globalvar_explicit)
+				(cons (quote session) (map tail sql_queryplan_bind_execution_session)))
+			(if (equal? head connection_id)
+				(list (quote tx_connection_id) (quote tx))
+				(if (and (equal? head context)
+					(and (equal? (count tail) 1) (equal? (car tail) "session")))
+					(quote session)
+					(cons
+						(sql_queryplan_bind_execution_session head)
+						(map tail sql_queryplan_bind_execution_session)))))
 		_ expr)))
 
 /* Exact DML plans do not enter the guarded SELECT variant pipeline. Bind only
@@ -225,7 +238,9 @@ must remain in the guarded-plan path. */
 (define sql_queryplan_bind_tx_calls (lambda (expr)
 	(match expr
 		((symbol quote) _value) expr
-		(cons head tail) (if (or (equal? head connection_id) (equal? head (quote connection_id)))
+		(cons (symbol connection_id) _tail) (list (quote tx_connection_id) (quote tx))
+		(cons (quote connection_id) _tail) (list (quote tx_connection_id) (quote tx))
+		(cons head tail) (if (equal? head connection_id)
 			(list (quote tx_connection_id) (quote tx))
 			(cons (sql_queryplan_bind_tx_calls head)
 				(map tail sql_queryplan_bind_tx_calls)))

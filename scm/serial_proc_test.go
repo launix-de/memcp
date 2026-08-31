@@ -134,3 +134,14 @@ func TestSerialExprDetectsCapturedBeginScope(t *testing.T) {
 		t.Fatalf("eval-created closure was classified as reusable: %s", dynamic.Proc().Body.String())
 	}
 }
+
+func TestEqualProceduresUsesIdentity(t *testing.T) {
+	first := Eval(Read("procedure equality test", "(lambda (x) x)"), &Globalenv)
+	second := Eval(Read("procedure equality test", "(lambda (x) (+ x 1))"), &Globalenv)
+	if !Equal(first, first) {
+		t.Fatal("a procedure must equal itself")
+	}
+	if Equal(first, second) {
+		t.Fatal("distinct procedures must not compare equal through their printed representation")
+	}
+}
