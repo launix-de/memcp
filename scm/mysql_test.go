@@ -71,3 +71,22 @@ func TestMySQLServerVersionHasClientCompatiblePrefix(t *testing.T) {
 		t.Fatalf("unexpected MySQL protocol version %q", got)
 	}
 }
+
+func TestIsSelectQueryHandlesCommentsAndCase(t *testing.T) {
+	for _, query := range []string{
+		"SELECT 1",
+		" select 1",
+		"/* client */ SELECT 1",
+		"-- client\nSELECT 1",
+		"# client\nSeLeCt 1",
+	} {
+		if !isSelectQuery(query) {
+			t.Fatalf("expected SELECT query: %q", query)
+		}
+	}
+	for _, query := range []string{"UPDATE t SET a=1", "/* unfinished", "SELECTED"} {
+		if isSelectQuery(query) {
+			t.Fatalf("unexpected SELECT query: %q", query)
+		}
+	}
+}

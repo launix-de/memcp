@@ -35,10 +35,6 @@ type mysqlCloser interface {
 	Close()
 }
 
-type mysqlSessionDone interface {
-	Done() <-chan struct{}
-}
-
 var mysqlListenersMu sync.Mutex
 var mysqlListeners []mysqlCloser
 
@@ -210,6 +206,7 @@ func (m *MySQLWrapper) ComInitDB(session *driver.Session, database string) error
 	refreshMySQLSessionProcesslistMeta(session)
 	return nil
 }
+
 func MySQLToScmer(v sqltypes.Value) Scmer {
 	if v.IsNull() {
 		return NewNil()
@@ -258,6 +255,12 @@ func (s ErrorWrapper) Error() string {
 }
 
 const mysqlClientErrorMessageLimit = 2048
+const mysqlResultBatchRows = 1024
+
+var mysqlResultRowsPool = sync.Pool{New: func() any {
+	rows := make([][]sqltypes.Value, 0, mysqlResultBatchRows)
+	return &rows
+}}
 
 // mysqlClientErrorMessage keeps protocol errors below mysqlnd's fixed command
 // buffer. Internal panics include their full stack for the server log, but the
@@ -336,7 +339,18 @@ func isSelectQuery(query string) bool {
 		}
 		break
 	}
-	return strings.HasPrefix(strings.ToLower(trimmed), "select")
+	if len(trimmed) < len("select") || !strings.EqualFold(trimmed[:len("select")], "select") {
+		return false
+	}
+	if len(trimmed) == len("select") {
+		return true
+	}
+	switch trimmed[len("select")] {
+	case ' ', '\t', '\r', '\n', '(', '/':
+		return true
+	default:
+		return false
+	}
 }
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
 	atomic.AddInt64(&TotalHTTPRequests, 1)
@@ -344,28 +358,19 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	var querySeq uint64
 	queryCtx, queryCancel := context.WithCancel(context.Background())
 	defer queryCancel()
-	queryDone := make(chan struct{})
-	defer close(queryDone)
 	if v, ok := mysqlStates.Load(session.ID()); ok {
 		ss = v.(*SessionState)
 		refreshMySQLSessionProcesslistMeta(session)
 		ss.Touch()
-		querySeq = ss.BeginQuery("Query", query)
-		ss.SetCancel(querySeq, queryCancel)
-		ss.SetQueryContext(querySeq, queryCtx)
+		querySeq = ss.BeginQuery("Query", query, queryCtx, queryCancel)
 	}
-	if doneSession, ok := any(session).(mysqlSessionDone); ok {
-		go func() {
-			select {
-			case <-doneSession.Done():
-				queryCancel()
-				if ss != nil {
-					ss.KillQuery(querySeq)
-				}
-			case <-queryDone:
-			}
-		}()
-	}
+	cancelID := session.SetQueryCancel(func() {
+		queryCancel()
+		if ss != nil {
+			ss.KillQuery(querySeq)
+		}
+	})
+	defer session.ClearQueryCancel(cancelID)
 	defer func() {
 		if ss != nil {
 			ss.EndQuery(querySeq, "Sleep", "")
@@ -397,12 +402,20 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		})
 		return nil
 	}
+	selectQuery := isSelectQuery(query)
 	colmap := make(map[string]int)
 	// TODO: sqltypes.RStateNone for INSERTs
 	var result sqltypes.Result
 	var resultlock sync.Mutex
 	result.State = sqltypes.RStateFields
-	result.Rows = make([][]sqltypes.Value, 0, 1024)
+	rowBuffer := mysqlResultRowsPool.Get().(*[][]sqltypes.Value)
+	result.Rows = (*rowBuffer)[:0]
+	maxBufferedRows := 0
+	defer func() {
+		clear(result.Rows[:maxBufferedRows])
+		*rowBuffer = result.Rows[:0]
+		mysqlResultRowsPool.Put(rowBuffer)
+	}()
 	// load scm session object
 	scmSessionAny, _ := mysqlsessions.Load(session.ID())
 	// result from scheme
@@ -441,7 +454,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			defer resultlock.Unlock()
 
 			newitem := appendMySQLResultRow(&result, colmap, item)
-			if len(result.Rows) == cap(result.Rows) {
+			if len(result.Rows) == mysqlResultBatchRows {
 				// flush
 				callback(&result)
 				if result.State == sqltypes.RStateFields {
@@ -451,6 +464,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				result.Rows = result.Rows[0:0] // slice off rest of buffer to restart
 			}
 			result.Rows = append(result.Rows, newitem)
+			if len(result.Rows) > maxBufferedRows {
+				maxBufferedRows = len(result.Rows)
+			}
 			return NewBool(true)
 		})
 		// Execute query within GLS context so storage layer can access
@@ -480,10 +496,14 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	result.RowsAffected = uint64(rowcount.Int())
 	// Transaction and schema status can change once per statement, not once per
 	// emitted result row. Publish the final state before flushing the result.
-	updateFlags(session, sessionFunc)
+	// A SELECT cannot change transaction or default-schema protocol flags.
+	// Avoid three synchronized Scheme-session lookups on this hot path.
+	if !selectQuery {
+		updateFlags(session, sessionFunc)
+	}
 	// flush the rest
 	if result.State == sqltypes.RStateFields {
-		if len(result.Fields) == 0 && isSelectQuery(query) {
+		if len(result.Fields) == 0 && selectQuery {
 			result.Fields = []*querypb.Field{
 				{Name: "_empty", Type: querypb.Type_NULL_TYPE},
 			}
