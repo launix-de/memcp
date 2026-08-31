@@ -1025,10 +1025,8 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 (define join_order_dphyp_connected (lambda (nodes aliases predicates connected required_drivers)
 	(begin
 		(define sorted_connected (join_order_sort_sets connected))
-		(define connected_by_first (reduce connected (lambda (dict subset)
-			(begin
-				(define first (car subset))
-				(set_assoc dict first (append (get_assoc dict first '()) subset)))) '()))
+		(define connected_by_first (group_assoc connected car
+			(lambda (subsets subset) (append subsets subset)) '()))
 		(join_order_dphyp_fill nodes aliases predicates connected_by_first sorted_connected '() 0 required_drivers))))
 
 (define join_order_dphyp_budgeted (lambda (nodes aliases predicates budget required_drivers)

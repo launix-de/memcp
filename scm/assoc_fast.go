@@ -649,6 +649,19 @@ func (d *FastDict) Get(key Scmer) (Scmer, bool) {
 	return NewNil(), false
 }
 
+func (d *FastDict) insertHashed(key, value Scmer, h uint64) {
+	pos := len(d.Pairs)
+	d.Pairs = append(d.Pairs, key, value)
+	if _, exists := d.index[h]; exists {
+		if d.collisions == nil {
+			d.collisions = make(map[uint64][]int)
+		}
+		d.collisions[h] = append(d.collisions[h], pos)
+	} else {
+		d.index[h] = pos
+	}
+}
+
 // Set sets or merges a value for key. If merge is nil, it overwrites.
 func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 	if d.index == nil {
@@ -663,16 +676,53 @@ func (d *FastDict) Set(key, value Scmer, merge func(oldV, newV Scmer) Scmer) {
 		}
 		return
 	}
-	pos := len(d.Pairs)
-	d.Pairs = append(d.Pairs, key, value)
-	if _, exists := d.index[h]; exists {
-		if d.collisions == nil {
-			d.collisions = make(map[uint64][]int)
-		}
-		d.collisions[h] = append(d.collisions[h], pos)
-	} else {
-		d.index[h] = pos
+	d.insertHashed(key, value, h)
+}
+
+// ReduceValue updates one bucket from its current value and an input item. A
+// missing bucket starts at neutral. The reducer must treat both arguments as
+// borrowed; only its returned value becomes owned by the dictionary.
+func (d *FastDict) ReduceValue(key, item, neutral Scmer, reduce func(...Scmer) Scmer) {
+	if d.index == nil {
+		d.index = make(map[uint64]int)
 	}
+	h := HashKey(key)
+	if pos, ok := d.findPos(key, h); ok {
+		d.Pairs[pos+1] = reduce(d.Pairs[pos+1], item)
+		return
+	}
+	value := reduce(neutral, item)
+	d.insertHashed(key, value, h)
+}
+
+// AppendValue groups one value below key. The dictionary and every list stored
+// by this method are exclusively owned by the caller, so growing an existing
+// bucket in place is safe. Keeping the lookup and bucket update together avoids
+// the get-transform-set double hash used by functional Scheme reducers.
+func (d *FastDict) AppendValue(key, value Scmer) {
+	if d.index == nil {
+		d.index = make(map[uint64]int)
+	}
+	h := HashKey(key)
+	if pos, ok := d.findPos(key, h); ok {
+		bucket := asSlice(d.Pairs[pos+1], "FastDict.AppendValue")
+		d.Pairs[pos+1] = NewSlice(append(bucket, value))
+		return
+	}
+	d.insertHashed(key, NewSlice([]Scmer{value}), h)
+}
+
+// IncrementCount increments an integer histogram bucket with one hash lookup.
+func (d *FastDict) IncrementCount(key Scmer) {
+	if d.index == nil {
+		d.index = make(map[uint64]int)
+	}
+	h := HashKey(key)
+	if pos, ok := d.findPos(key, h); ok {
+		d.Pairs[pos+1] = NewInt(d.Pairs[pos+1].Int() + 1)
+		return
+	}
+	d.insertHashed(key, NewInt(1), h)
 }
 
 // Copy returns a deep copy of the FastDict (pairs and index).

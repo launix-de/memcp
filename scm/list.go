@@ -678,6 +678,13 @@ func optimizerZeroLiteral(expr Scmer) bool {
 	return (expr.IsInt() && expr.Int() == 0) || (expr.IsFloat() && expr.Float() == 0)
 }
 
+func optimizerOneLiteral(expr Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	return (expr.IsInt() && expr.Int() == 1) || (expr.IsFloat() && expr.Float() == 1)
+}
+
 // optimizedUnmappedRange extracts the bound of an already optimized
 // (produceN n) call. Mapped produceN calls need a separate consumer contract
 // because their mapper must still run before the downstream callback.
@@ -708,6 +715,9 @@ func optimizeFindMapNotNull(v []Scmer, oc *OptimizerContext, useResult bool) (Sc
 func optimizePlannerReduceFold(rv []Scmer, td *TypeDescriptor) (Scmer, *TypeDescriptor, bool) {
 	if len(rv) != 4 {
 		return NewNil(), nil, false
+	}
+	if folded, foldedType, ok := optimizeAssocReducerFold(rv[1], rv[2], rv[3]); ok {
+		return folded, foldedType, true
 	}
 	params, body, ok := optimizerLambdaParts(rv[2])
 	if !ok || len(params) < 2 {
@@ -795,6 +805,211 @@ func optimizerEmptyListLiteral(expr Scmer) bool {
 	}
 	quoted, ok := scmerSlice(items[1])
 	return ok && len(quoted) == 0
+}
+
+// optimizerExpressionReferencesParam checks an already optimized expression
+// without invoking type analysis again. Nested lambdas are rejected because a
+// captured reducer parameter would need frame-aware rewriting.
+func optimizerExpressionReferencesParam(expr Scmer, params []Scmer, index int) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if optimizerLambdaParamReference(expr, params, index) {
+		return true
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+		return false
+	}
+	if scmerIsSymbol(items[0], "lambda") {
+		return true
+	}
+	for _, item := range items {
+		if optimizerExpressionReferencesParam(item, params, index) {
+			return true
+		}
+	}
+	return false
+}
+
+func optimizerAppendReduction(body Scmer, params []Scmer) (Scmer, bool) {
+	items, ok := scmerSlice(body)
+	if !ok || len(items) != 3 ||
+		(!scmerIsSymbol(items[0], "append") && !scmerIsSymbol(items[0], "append_mut")) ||
+		!optimizerLambdaParamReference(items[1], params, 0) ||
+		optimizerExpressionReferencesParam(items[2], params, 0) {
+		return NewNil(), false
+	}
+	return items[2], true
+}
+
+func optimizerCountReduction(body Scmer, params []Scmer) bool {
+	items, ok := scmerSlice(body)
+	if !ok || len(items) != 3 || !scmerIsSymbol(items[0], "+") {
+		return false
+	}
+	return (optimizerLambdaParamReference(items[1], params, 0) && optimizerOneLiteral(items[2])) ||
+		(optimizerLambdaParamReference(items[2], params, 0) && optimizerOneLiteral(items[1]))
+}
+
+func optimizerAssocLookup(expr Scmer, params []Scmer) (Scmer, Scmer, bool) {
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) != 4 || !scmerIsSymbol(items[0], "get_assoc") ||
+		!optimizerLambdaParamReference(items[1], params, 0) ||
+		optimizerExpressionReferencesParam(items[2], params, 0) {
+		return NewNil(), NewNil(), false
+	}
+	return items[2], items[3], true
+}
+
+func optimizerSubstituteReducerLocals(expr Scmer, locals map[int]Scmer) (Scmer, bool) {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	if expr.IsNthLocalVar() {
+		if replacement, ok := locals[int(expr.NthLocalVar())]; ok {
+			return replacement, true
+		}
+		return expr, true
+	}
+	items, ok := scmerSlice(expr)
+	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") || scmerIsSymbol(items[0], "outer") {
+		return expr, true
+	}
+	if scmerIsSymbol(items[0], "lambda") {
+		return NewNil(), false
+	}
+	rewritten := make([]Scmer, len(items))
+	for i, item := range items {
+		var valid bool
+		rewritten[i], valid = optimizerSubstituteReducerLocals(item, locals)
+		if !valid {
+			return NewNil(), false
+		}
+	}
+	return NewSlice(rewritten), true
+}
+
+// optimizerInlineReducerLocals removes a begin containing only stable local
+// definitions. This lets the semantic matcher see the terminal assoc update
+// without re-optimizing or re-analyzing the callback subtree.
+func optimizerInlineReducerLocals(body Scmer, params []Scmer) (Scmer, bool) {
+	items, ok := scmerSlice(body)
+	if !ok || len(items) < 2 || !scmerIsSymbol(items[0], "begin") {
+		return body, true
+	}
+	locals := make(map[int]Scmer, len(items)-2)
+	for _, prefix := range items[1 : len(items)-1] {
+		definition, ok := scmerSlice(prefix)
+		if !ok || len(definition) != 3 || !scmerIsSymbol(definition[0], "setN") ||
+			!definition[1].IsNthLocalVar() || int(definition[1].NthLocalVar()) < len(params) {
+			return NewNil(), false
+		}
+		value, valid := optimizerSubstituteReducerLocals(definition[2], locals)
+		if !valid || optimizerExpressionReferencesParam(value, params, 0) || exprMayHaveSideEffects(value) {
+			return NewNil(), false
+		}
+		locals[int(definition[1].NthLocalVar())] = value
+	}
+	return optimizerSubstituteReducerLocals(items[len(items)-1], locals)
+}
+
+// optimizeAssocReducerFold recognizes the functional meaning of the common
+// imperative get-transform-set reducer. It performs one bounded root-shape
+// walk over the already optimized callback and never invokes analysis again.
+func optimizeAssocReducerFold(input, reducer, neutral Scmer) (Scmer, *TypeDescriptor, bool) {
+	if !optimizerEmptyListLiteral(neutral) {
+		return NewNil(), nil, false
+	}
+	params, body, ok := optimizerLambdaParts(reducer)
+	if !ok || len(params) != 2 {
+		return NewNil(), nil, false
+	}
+	body, ok = optimizerInlineReducerLocals(body, params)
+	if !ok {
+		return NewNil(), nil, false
+	}
+	setCall, ok := scmerSlice(body)
+	if !ok || len(setCall) != 4 ||
+		(!scmerIsSymbol(setCall[0], "set_assoc") && !scmerIsSymbol(setCall[0], "set_assoc_mut")) ||
+		!optimizerLambdaParamReference(setCall[1], params, 0) ||
+		optimizerExpressionReferencesParam(setCall[2], params, 0) || exprMayHaveSideEffects(setCall[2]) {
+		return NewNil(), nil, false
+	}
+
+	update, ok := scmerSlice(setCall[3])
+	if !ok || len(update) != 3 {
+		return NewNil(), nil, false
+	}
+	if scmerIsSymbol(update[0], "append") || scmerIsSymbol(update[0], "append_mut") {
+		lookupKey, fallback, lookup := optimizerAssocLookup(update[1], params)
+		if !lookup || !structuralEqual(setCall[2], lookupKey) || !optimizerEmptyListLiteral(fallback) ||
+			optimizerExpressionReferencesParam(update[2], params, 0) {
+			return NewNil(), nil, false
+		}
+		keyFn, keyOK := optimizerLambdaWithBody(reducer, setCall[2])
+		valueFn, valueOK := optimizerLambdaWithBody(reducer, update[2])
+		if !keyOK || !valueOK {
+			return NewNil(), nil, false
+		}
+		return NewSlice([]Scmer{NewSymbol("group_assoc_append_reduce"), input, keyFn, valueFn}),
+			&TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}}, true
+	}
+	if scmerIsSymbol(update[0], "+") {
+		var lookupExpr Scmer
+		switch {
+		case optimizerOneLiteral(update[2]):
+			lookupExpr = update[1]
+		case optimizerOneLiteral(update[1]):
+			lookupExpr = update[2]
+		default:
+			return NewNil(), nil, false
+		}
+		lookupKey, fallback, lookup := optimizerAssocLookup(lookupExpr, params)
+		if !lookup || !structuralEqual(setCall[2], lookupKey) || !optimizerZeroLiteral(fallback) {
+			return NewNil(), nil, false
+		}
+		keyFn, ok := optimizerLambdaWithBody(reducer, setCall[2])
+		if !ok {
+			return NewNil(), nil, false
+		}
+		return NewSlice([]Scmer{NewSymbol("group_assoc_count_reduce"), input, keyFn}),
+			&TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}}, true
+	}
+	return NewNil(), nil, false
+}
+
+// optimizeGroupAssoc preserves group_assoc as the functional API while
+// lowering reducers with stronger semantics to single-lookup physical loops.
+// It inspects only the root of the already optimized reducer.
+func optimizeGroupAssoc(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "")
+	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
+	if len(v) == 5 {
+		td = setOptimizedCallElement(td, callbackResultType(v[3], optimizedArgumentType(argumentTypes, 3)))
+	}
+	rv, ok := scmerSlice(result)
+	if !ok || len(rv) != 5 || !scmerIsSymbol(rv[0], "group_assoc") {
+		return result, td
+	}
+	params, body, ok := optimizerLambdaParts(rv[3])
+	if !ok || len(params) != 2 {
+		return result, td
+	}
+	if optimizerEmptyListLiteral(rv[4]) {
+		if value, appendReduction := optimizerAppendReduction(body, params); appendReduction {
+			valueFn, ok := optimizerLambdaWithBody(rv[3], value)
+			if ok {
+				return NewSlice([]Scmer{NewSymbol("group_assoc_append"), rv[1], rv[2], valueFn}),
+					&TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}}
+			}
+		}
+	}
+	if optimizerZeroLiteral(rv[4]) && optimizerCountReduction(body, params) {
+		return NewSlice([]Scmer{NewSymbol("group_assoc_count"), rv[1], rv[2]}),
+			&TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}}
+	}
+	return result, td
 }
 
 func optimizerIndexedAssocProjection(expr Scmer, reducerParams []Scmer, pairBody Scmer, pair []Scmer) (Scmer, [2]int, bool) {
