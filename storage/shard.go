@@ -633,12 +633,9 @@ func (u *storageShard) getColumnStorageRLocked(colName string) ColumnStorage {
 	return cs
 }
 
-// getColumnStorageOrPanic returns a stable column storage. Explicit transaction
-// ownership replaces the former goroutine-local lock marker.
+// getColumnStorageOrPanic returns a stable column storage. Callers must state
+// whether they already hold u.mu; lock ownership is never inferred implicitly.
 func (u *storageShard) getColumnStorageOrPanic(colName string, alreadyLocked bool, currentTx *TxContext) ColumnStorage {
-	if !alreadyLocked && currentTx != nil && currentTx.HasShardWrite(u) {
-		alreadyLocked = true
-	}
 	if alreadyLocked {
 		cs, present := u.columns[colName]
 		if !present {

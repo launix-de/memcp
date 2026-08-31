@@ -54,7 +54,7 @@ func TestGetColumnStorageOrPanicExAddsSchemaColumnWhenLocked(t *testing.T) {
 	}
 }
 
-func TestGetColumnStorageOrPanicExUsesTransactionWriteOwnership(t *testing.T) {
+func TestGetColumnStorageOrPanicUsesExplicitWriteOwnership(t *testing.T) {
 	shard := &storageShard{
 		t: &table{
 			schema: &database{Name: "system"},
@@ -75,7 +75,7 @@ func TestGetColumnStorageOrPanicExUsesTransactionWriteOwnership(t *testing.T) {
 			tx.ExitShardWrite(shard)
 			shard.mu.Unlock()
 		}()
-		done <- shard.getColumnStorageOrPanic("username", false, tx)
+		done <- shard.getColumnStorageOrPanic("username", true, tx)
 	}()
 
 	select {
@@ -84,6 +84,6 @@ func TestGetColumnStorageOrPanicExUsesTransactionWriteOwnership(t *testing.T) {
 			t.Fatal("expected column storage")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("column lookup re-entered the shard read lock despite transaction write ownership")
+		t.Fatal("column lookup re-entered the shard read lock despite explicit write ownership")
 	}
 }
