@@ -51,6 +51,17 @@ type cacheMapFlight struct {
 	waiters    int
 }
 
+var cacheMapCallableType = &scm.TypeDescriptor{Kind: "func", Label: "cachemap", Description: "thread-safe cache accessor",
+	Params: []*scm.TypeDescriptor{
+		{Kind: "any", Label: "key_or_operation", Description: "cache key, or get_or_compute", Optional: true},
+		{Kind: "any", Label: "value_or_key", Description: "value to store, or key for get_or_compute", Optional: true},
+		{Kind: "func", CallsOnce: true, Label: "producer", Description: "zero-argument value producer used by get_or_compute", Optional: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any", Label: "value"}},
+	},
+	Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "cached value, previous value, or key list depending on the operation"},
+}
+
+var cacheMapCallableTypeID = scm.RegisterCallableType(cacheMapCallableType)
+
 // NewCacheMap creates a new cachemap and returns a Scheme function.
 // (cachemap key value) — set entry
 // (cachemap key) — get entry (or nil)
@@ -61,7 +72,7 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 		entries: make(map[string]*cacheMapEntry),
 		flights: make(map[string]*cacheMapFlight),
 	}
-	return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+	return scm.NewTypedFunc(func(a ...scm.Scmer) scm.Scmer {
 		switch len(a) {
 		case 0:
 			// list all keys
@@ -97,7 +108,7 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 		default:
 			panic("cachemap: expected 0, 1, 2, or 3 arguments")
 		}
-	})
+	}, cacheMapCallableTypeID)
 }
 
 func newCacheMapEntry(cm *cacheMap, key string, value scm.Scmer) *cacheMapEntry {

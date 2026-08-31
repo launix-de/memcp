@@ -650,14 +650,13 @@ const (
 	procSequenceAndTerms
 )
 
-// procSpecializationKey distinguishes both the transferred parameters and the
-// ownership shape below them. A Proc can therefore retain independent full
-// variants for e.g. a fresh list with borrowed elements and a fresh list whose
-// elements are transferable as well.
+// procSpecializationKey distinguishes specialized parameters and the optimizer
+// shape below them. A Proc can therefore retain independent full variants for
+// ownership trees as well as higher-order callable contracts.
 type procSpecializationKey struct {
-	paramMask   uint64
-	ownershipLo uint64
-	ownershipHi uint64
+	paramMask uint64
+	shapeLo   uint64
+	shapeHi   uint64
 }
 
 type procSpecializationSnapshot struct {
@@ -1293,8 +1292,8 @@ func init() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "tries to execute a function and returns its result. In case of a failure, the error is fed to the second function and its result value will be used",
 			Params: []*TypeDescriptor{
-				{Kind: "func", Label: "func", Description: "function with no parameters that will be called", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Label: "errorhandler", Description: "function that takes the error as parameter", Params: []*TypeDescriptor{{Kind: "any", Label: "error"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", CallsOnce: true, Label: "func", Description: "function with no parameters that will be called", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", CallsOnce: true, Label: "errorhandler", Description: "function that takes the error as parameter", Params: []*TypeDescriptor{{Kind: "any", Label: "error"}}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,

@@ -3754,14 +3754,7 @@ func Init(en scm.Env) {
 
 		Fn: NewCacheMap,
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Creates a new cachemap. Returns a threadsafe key-value function with LRU eviction under memory pressure: (cachemap key value) sets, (cachemap key) gets, (cachemap) lists keys, (cachemap \"get_or_compute\" key producer) computes one value for concurrent misses of the same key.",
-			Return: &scm.TypeDescriptor{Kind: "func", Label: "cachemap", Description: "thread-safe cache accessor",
-				Params: []*scm.TypeDescriptor{
-					{Kind: "any", Label: "key_or_operation", Description: "cache key, or get_or_compute", Optional: true},
-					{Kind: "any", Label: "value_or_key", Description: "value to store, or key for get_or_compute", Optional: true},
-					{Kind: "func", Label: "producer", Description: "zero-argument value producer used by get_or_compute", Optional: true, Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any", Label: "value"}},
-				},
-				Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "cached value, previous value, or key list depending on the operation"},
-			},
+			Return: cacheMapCallableType,
 		},
 	})
 	initTransaction(en)
