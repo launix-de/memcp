@@ -121,6 +121,28 @@ func (s *SessionState) BeginQuery(cmd, info string) uint64 {
 	return seq
 }
 
+// SetCancel stores the cancel function for one specific active query generation.
+func (s *SessionState) SetCancel(seq uint64, fn context.CancelFunc) {
+	s.cancelMu.Lock()
+	if s.cancelFns == nil {
+		s.cancelFns = make(map[uint64]context.CancelFunc)
+	}
+	s.cancelFns[seq] = fn
+	s.cancelMu.Unlock()
+}
+
+// SetQueryContext records the query-generation-specific cancellation signal.
+// Persistent HTTP sessions may execute overlapping generations, so table-lock
+// waiters must never infer this context from the session's latest query.
+func (s *SessionState) SetQueryContext(seq uint64, ctx context.Context) {
+	s.cancelMu.Lock()
+	if s.queryCtxs == nil {
+		s.queryCtxs = make(map[uint64]context.Context)
+	}
+	s.queryCtxs[seq] = ctx
+	s.cancelMu.Unlock()
+}
+
 // SetQueryInfo updates the processlist text for an active query generation.
 // HTTP requests use this after lazily reading a SQL request body. A stale
 // request must not overwrite the text of a newer request sharing the session.
@@ -180,28 +202,6 @@ func (s *SessionState) processListState() string {
 // SetDB updates the current database name.
 func (s *SessionState) SetDB(db string) {
 	s.DB.Store(&db)
-}
-
-// SetCancel stores the cancel function for one specific active query generation.
-func (s *SessionState) SetCancel(seq uint64, fn context.CancelFunc) {
-	s.cancelMu.Lock()
-	if s.cancelFns == nil {
-		s.cancelFns = make(map[uint64]context.CancelFunc)
-	}
-	s.cancelFns[seq] = fn
-	s.cancelMu.Unlock()
-}
-
-// SetQueryContext records the query-generation-specific cancellation signal.
-// Persistent HTTP sessions may execute overlapping generations, so table-lock
-// waiters must never infer this context from the session's latest query.
-func (s *SessionState) SetQueryContext(seq uint64, ctx context.Context) {
-	s.cancelMu.Lock()
-	if s.queryCtxs == nil {
-		s.queryCtxs = make(map[uint64]context.Context)
-	}
-	s.queryCtxs[seq] = ctx
-	s.cancelMu.Unlock()
 }
 
 // QueryContext returns the cancellation context owned by one query generation.
