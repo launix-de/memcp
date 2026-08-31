@@ -75,8 +75,178 @@ func declareSQLLiteralParameterizer() {
 			Params: []*TypeDescriptor{{Kind: "string", Label: "query"}},
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["parameterize_sql_select_literals"].Fn, args, result)
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["parameterize_sql_select_literals"].Fn, args, result)
+				}
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d0 := args[0]
+				d0.ID = 0
+				d2 := d0
+				ctx.EnsureDesc(&d2)
+				if d2.Loc == LocImm {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					tag := d2.Imm.GetTag()
+					switch tag {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d2)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d2)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d2)
+					case tagNil:
+						ctx.EmitMakeNil(tmpPair)
+					default:
+						ptrWord, auxWord := d2.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					}
+					d2 = tmpPair
+				} else if d2.Loc == LocReg {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d2.Reg), Reg2: ctx.AllocRegExcept(d2.Reg)}
+					switch d2.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d2)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d2)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d2)
+					default:
+						panic("jit: Scmer.String requires Scmer pair receiver")
+					}
+					ctx.FreeDesc(&d2)
+					d2 = tmpPair
+				} else if d2.Loc == LocMem {
+					tmpScalar := JITValueDesc{Loc: LocReg, Type: d2.Type, Reg: ctx.AllocReg()}
+					scratch := ctx.AllocRegExcept(tmpScalar.Reg)
+					ctx.EmitMovRegImm64(scratch, uint64(d2.MemPtr))
+					ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
+					ctx.FreeReg(scratch)
+					ctx.BindReg(tmpScalar.Reg, &tmpScalar)
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(tmpScalar.Reg), Reg2: ctx.AllocRegExcept(tmpScalar.Reg)}
+					switch tmpScalar.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, tmpScalar)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, tmpScalar)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, tmpScalar)
+					default:
+						panic("jit: Scmer.String requires Scmer pair receiver")
+					}
+					ctx.FreeDesc(&tmpScalar)
+					d2 = tmpPair
+				}
+				if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
+					panic("jit: Scmer.String receiver not materialized as pair")
+				}
+				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
+				ctx.FreeDesc(&d0)
+				ctx.EnsureDesc(&d1)
+				ctx.EnsureDesc(&d1)
+				ctx.EnsureDesc(&d1)
+				if d1.Loc == LocImm {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.TrackImm(d1.Imm)
+					ptrWord, _ := d1.Imm.RawWords()
+					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d1.Imm.String())))
+					d1 = tmpPair
+				} else if d1.Loc == LocReg {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+					switch d1.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d1)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d1)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d1)
+					default:
+						panic("jit: generic call arg scalar type unknown for 2-word value")
+					}
+					ctx.FreeDesc(&d1)
+					d1 = tmpPair
+				}
+				if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
+					panic("jit: generic call arg expects 2-word value (parameterizeSQLSelectLiterals arg0)")
+				}
+				ctx.SyncDesc(&d1)
+				callResults3 := JITEmitGoCallResults(ctx, GoFuncAddr(parameterizeSQLSelectLiterals), []JITValueDesc{d1}, []uint8{2, 3, 2}, []uint8{1, 1, 1})
+				d4 := callResults3[0]
+				_ = d4
+				d5 := callResults3[1]
+				_ = d5
+				d6 := callResults3[2]
+				_ = d6
+				stackArray7 := ctx.AllocStack(int32(48))
+				_ = stackArray7
+				ctx.EnsureDesc(&d4)
+				ctx.EnsureDesc(&d4)
+				ctx.EnsureDesc(&d4)
+				ctx.EmitStoreScmerToStack(d4, int32(stackArray7)+int32(0))
+				d8 := ctx.EmitNewSliceFromGoSlice(&d5)
+				ctx.EnsureDesc(&d8)
+				ctx.EnsureDesc(&d8)
+				ctx.EmitStoreScmerToStack(d8, int32(stackArray7)+int32(16))
+				ctx.FreeDesc(&d8)
+				ctx.EnsureDesc(&d6)
+				ctx.EnsureDesc(&d6)
+				ctx.EnsureDesc(&d6)
+				ctx.EmitStoreScmerToStack(d6, int32(stackArray7)+int32(32))
+				d9 := JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(3), KnownSliceCap: int32(3), SliceSizeKnown: true}
+				_ = d9
+				r0 := ctx.AllocReg()
+				r1 := ctx.AllocRegExcept(r0)
+				r2 := ctx.AllocRegExcept(r0, r1)
+				d10 := JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: r0, Reg2: r1, Reg3: r2}
+				ctx.BindReg(r0, &d10)
+				ctx.BindReg(r1, &d10)
+				ctx.BindReg(r2, &d10)
+				ctx.BindReg(r0, &d10)
+				ctx.BindReg(r1, &d10)
+				ctx.BindReg(r2, &d10)
+				ctx.EmitLeaRegMem(d10.Reg, ctx.StackReg, int32(stackArray7))
+				ctx.EmitMovRegImm64(d10.Reg2, uint64(3))
+				ctx.EmitMovRegImm64(d10.Reg3, uint64(3))
+				callResults11 := JITEmitGoCallResults(ctx, GoFuncAddr(JITNewSliceCopy), []JITValueDesc{d10}, []uint8{2}, []uint8{1})
+				d12 := callResults11[0]
+				if d12.Loc == LocImm {
+					if result.Loc == LocAny {
+						return d12
+					}
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				ctx.EnsureDesc(&d12)
+				if d12.Loc == LocRegPair {
+					ctx.EmitMovPairToResult(&d12, &result)
+					result.Type = d12.Type
+				} else {
+					switch d12.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d12)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d12)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d12)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
+				return result
+				return result
 			},
 			JITVirtualArgs: true,
 		},
