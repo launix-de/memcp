@@ -74,6 +74,12 @@ github.com/gopherjs/gopherjs v1.17.2 h1:fQnZVsXk8uxXIStYb0N4bGk7jeyTalG/wsZjQ25d
 github.com/gopherjs/gopherjs v1.17.2/go.mod h1:pRRIvn/QzFLrKfvEz3qUuEhtE/zLCWfreZ6J5gM2i+k=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
+github.com/launix-de/NonLockingReadMap v1.0.11 h1:7meLjLc9wqwgjNHN/0FEM0pAOeAurz/evsnLuH/zwvQ=
+github.com/launix-de/NonLockingReadMap v1.0.11/go.mod h1:p6x2cZTkO1c/Qj1Ix8YD+9h3qcjsyDtKyIs08tVr43c=
+github.com/launix-de/go-mysqlstack v0.1.0 h1:p+pHgrZSmNBqW1yDcYWCJDVKNd3cTU0MchQkaCtY1nU=
+github.com/launix-de/go-mysqlstack v0.1.0/go.mod h1:VdLcZx5196xfE/j4IceJPF462Xf50LvSk5vzuJRdSVs=
+github.com/launix-de/go-packrat/v2 v2.1.22 h1:N5GrtcMOftB1c/MGgWcYe9k5TnIzoGnWD9bIZSmL1q4=
+github.com/launix-de/go-packrat/v2 v2.1.22/go.mod h1:Xb1/gZg0UMb2CPgmCfBdwvpMZYhKLjZ5BdqoWa/oQjw=
 github.com/lib/pq v1.11.2 h1:x6gxUeu39V0BHZiugWe8LXZYZ+Utk7hSJGThs8sdzfs=
 github.com/lib/pq v1.11.2/go.mod h1:/p+8NSbOcwzAEI7wiMXFlgydTwcgTr3OSKMsD2BitpA=
 github.com/pierrec/lz4/v4 v4.1.26 h1:GrpZw1gZttORinvzBdXPUXATeqlJjqUG/D87TKMnhjY=

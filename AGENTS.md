@@ -10,6 +10,18 @@
 - `docs/`: generated API/reference docs.
 - if you work on files, update/add the copyright notice's current year
 
+## External Dependency Policy
+
+**WARNING: NEVER COPY, VENDOR, OR PATCH AN EXTERNAL LIBRARY INSIDE THE MEMCP
+REPOSITORY.** In particular, do not add `third_party/`, `vendor/`, or another
+tracked source-code copy to bypass the Go module system. Fixes belong in the
+library's upstream repository, must be reviewed and tested there, and must be
+published with a proper semantic version tag. MemCP may then update its normal
+`go.mod` requirement to that released version. Do not commit local-path
+`replace` directives. An untracked `.third_party/` directory may be used only
+as disposable local workspace while preparing an upstream patch; none of its
+contents may enter a MemCP commit or build.
+
 ## Query Planner Invariants
 - Before changing SQL parsing, `lib/queryplan.scm`, `lib/queryplan-*.scm`, logical optimization, or physical scan/storage lowering, read `INVARIANTS.md`.
 - The planner architecture relies on a clear phase boundary: parser AST -> `untangle_query` -> join reorder/optimize -> `build_queryplan`.

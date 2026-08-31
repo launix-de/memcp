@@ -353,6 +353,17 @@ func NewSession(a ...Scmer) Scmer {
 	})
 }
 
+var sessionCallableType = &TypeDescriptor{Kind: "func", Label: "session", Description: "session accessor accepting exactly zero, one, two, four, or five arguments", HasSideEffects: true,
+	Params: []*TypeDescriptor{
+		{Kind: "any", Label: "key_or_operation", Description: "key, or get_or_compute_scoped", Optional: true},
+		{Kind: "any", Label: "value_or_scope", Description: "value to store, or scope for get_or_compute_scoped", Optional: true},
+		{Kind: "any", Label: "scoped_key", Description: "cache key used by get_or_compute_scoped", Optional: true},
+		{Kind: "func", CallsOnce: true, Label: "scoped_producer", Description: "producer used only by the four-argument get_or_compute_scoped form", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "value", Description: "computed value cached for the scope and key"}},
+		{Kind: "any", Label: "scoped_finalizer", Description: "optional finalizer for scoped cache entries", Optional: true},
+	},
+	Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value list, stored value, retrieved value, or shared computed value"},
+}
+
 // Context creates a Scheme session and passes it explicitly to fn.
 func Context(a ...Scmer) Scmer {
 	if len(a) == 0 || a[0].IsNil() {
@@ -421,15 +432,7 @@ func init_sync() {
 
 		Fn: NewSession,
 		Type: &TypeDescriptor{Kind: "func", Description: "Creates a thread-safe key-value session. Call it without arguments to list values, with a key to read, with a key and value to store, or with get_or_compute_scoped, a scope, a key, and a producer to share one concurrent computation.",
-			Return: &TypeDescriptor{Kind: "func", Label: "session", Description: "session accessor accepting exactly zero, one, two, or four arguments", HasSideEffects: true,
-				Params: []*TypeDescriptor{
-					{Kind: "any", Label: "key_or_operation", Description: "key, or get_or_compute_scoped", Optional: true},
-					{Kind: "any", Label: "value_or_scope", Description: "value to store, or scope for get_or_compute_scoped", Optional: true},
-					{Kind: "any", Label: "scoped_key", Description: "cache key used by get_or_compute_scoped", Optional: true},
-					{Kind: "func", Label: "scoped_producer", Description: "producer used only by the four-argument get_or_compute_scoped form", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "value", Description: "computed value cached for the scope and key"}},
-				},
-				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value list, stored value, retrieved value, or shared computed value"},
-			},
+			Return: sessionCallableType,
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["newsession"].Fn, args, result)
 			},
@@ -445,7 +448,7 @@ func init_sync() {
 		Type: &TypeDescriptor{Kind: "func", Description: "Executes a function with the given session installed in the execution context, so storage operations can access the session's transaction state.",
 			Params: []*TypeDescriptor{
 				{Kind: "func", Label: "session", Description: "the session to install", Params: []*TypeDescriptor{{Kind: "any", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Label: "fn", Description: "the function to execute", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", CallsOnce: true, Label: "fn", Description: "the function to execute", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any"}},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 
@@ -671,7 +674,7 @@ func init_sync() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "Creates a function wrapper that you can call multiple times but only gets executed once. The result value is cached and returned on a second call. You can add parameters to that resulting function that will be passed to the first run of the wrapped function.",
 			Params: []*TypeDescriptor{
-				{Kind: "func", Label: "f", Description: "function that produces the result value", Params: []*TypeDescriptor{{Kind: "any", Label: "argument", Variadic: true}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
+				{Kind: "func", CallsOnce: true, Label: "f", Description: "function that produces the result value", Params: []*TypeDescriptor{{Kind: "any", Label: "argument", Variadic: true}}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 			},
 			Return: &TypeDescriptor{Kind: "func", Label: "once_wrapper", Description: "calls the wrapped function once and returns its cached result thereafter",
 				Params: []*TypeDescriptor{
@@ -727,7 +730,7 @@ func init_sync() {
 			Return: &TypeDescriptor{Kind: "func", Label: "locked", Description: "executes one parameterless function while holding the mutex", HasSideEffects: true,
 				Params: []*TypeDescriptor{
 					{Kind: "any", Label: "fn_or_tx", Description: "function, or explicit transaction context followed by function", Optional: true},
-					{Kind: "func", Label: "fn", Description: "parameterless function to execute under the lock", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
+					{Kind: "func", CallsOnce: true, Label: "fn", Description: "parameterless function to execute under the lock", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 				},
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result returned by the protected function"},
 			},

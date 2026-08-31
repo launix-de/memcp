@@ -73,6 +73,7 @@ type TypeDescriptor struct {
 	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
 	NoEscape       bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
 	Transfer       bool                       // callee receives ownership, can mutate
+	CallsOnce      bool                       // for func params: callback is invoked at most once per call; default false = unknown or repeated
 	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold
 	Length         int                        // exact positive list/assoc length; -1 = unknown
 	Optional       bool                       // for func params: parameter is optional
@@ -132,17 +133,19 @@ const (
 
 // Flag bits for TypeInfo
 const (
-	FlagTransfer uint8 = 1 << iota // callee receives ownership
-	FlagConst                      // compile-time constant
-	FlagEscape                     // value may outlive scope
+	FlagTransfer  uint8 = 1 << iota // callee receives ownership
+	FlagConst                       // compile-time constant
+	FlagEscape                      // value may outlive scope
+	FlagCallsOnce                   // function value is invoked at most once per callee call
 )
 
 const UnknownLength = -1
 
-func (ti TypeInfo) Transfer() bool { return ti.flags&FlagTransfer != 0 }
-func (ti TypeInfo) Const() bool    { return ti.flags&FlagConst != 0 }
-func (ti TypeInfo) Escape() bool   { return ti.flags&FlagEscape != 0 }
-func (ti TypeInfo) Kind() uint8    { return ti.kind }
+func (ti TypeInfo) Transfer() bool  { return ti.flags&FlagTransfer != 0 }
+func (ti TypeInfo) Const() bool     { return ti.flags&FlagConst != 0 }
+func (ti TypeInfo) Escape() bool    { return ti.flags&FlagEscape != 0 }
+func (ti TypeInfo) CallsOnce() bool { return ti.flags&FlagCallsOnce != 0 }
+func (ti TypeInfo) Kind() uint8     { return ti.kind }
 func (ti TypeInfo) Length() int {
 	if ti.length <= 0 {
 		return UnknownLength
@@ -192,6 +195,9 @@ func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
 	if td.Const {
 		ti.flags |= FlagConst
 	}
+	if td.CallsOnce {
+		ti.flags |= FlagCallsOnce
+	}
 	switch td.Kind {
 	case "string":
 		ti.kind = KindString
@@ -215,7 +221,7 @@ func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
 	if td.Length > 0 {
 		ti.length = td.Length
 	}
-	if td.Length > 0 || len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
+	if td.Length > 0 || td.CallsOnce || len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
 		ti.Extra = td
 	}
 	return ti
@@ -226,12 +232,13 @@ func (ti TypeInfo) ToTypeDescriptor() *TypeDescriptor {
 	if ti.kind == KindAny && ti.flags == 0 && ti.Extra == nil && ti.Length() == UnknownLength {
 		return nil
 	}
-	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape(), Length: ti.Length()}
+	td := &TypeDescriptor{Transfer: ti.Transfer(), Const: ti.Const(), NoEscape: !ti.Escape(), CallsOnce: ti.CallsOnce(), Length: ti.Length()}
 	if ti.Extra != nil {
 		*td = *ti.Extra
 		td.Transfer = ti.Transfer()
 		td.Const = ti.Const()
 		td.NoEscape = !ti.Escape()
+		td.CallsOnce = ti.CallsOnce()
 		td.Length = ti.Length()
 	}
 	if td.Kind == "" {
