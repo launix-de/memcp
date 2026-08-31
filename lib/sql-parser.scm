@@ -125,6 +125,14 @@ Extracts only the username portion; the @host part is accepted but ignored. */
 	(parser '((atom "'" false) (define x (regex "(\\\\.|''|[^\\'])*" false false)) (atom "'" false false)) (sql_unescape (replace x "''" "'")))
 	(parser '((atom "\"" false) (define x (regex "(\\\\.|\"\"|[^\\\"])*" false false)) (atom "\"" false false)) (sql_unescape (replace x "\"\"" "\"")))
 )))
+(define sql_hex_literal (parser
+	(define x (regex "0[xX](?:[0-9A-Fa-f]{2})*"))
+	'('hex2bin (substr x 2))))
+
+/* Direct users of parse_sql may evaluate a compiled formula without a network
+frontend. The protocol execution path shadows this no-op with its metadata
+consumer, just as it already shadows resultrow. */
+(define resultfields (lambda (_fields) true))
 
 /* SQL modulo expression: NULL-safe, division-by-zero-safe, truncates quotient toward zero */
 (define sql_mod_expr (lambda (a b)
@@ -166,6 +174,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (atom "NULL" true) (sql_null_literal))
 	(parser (atom "TRUE" true) true)
 	(parser (atom "FALSE" true) false)
+	sql_hex_literal
 	sql_number
 	sql_string
 )))
@@ -927,6 +936,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define n (placeholder_counter "n"))
 			(placeholder_counter "n" (+ n 1))
 			(list (quote session) (concat "v" (string (+ n 1))))))
+		sql_hex_literal
 		sql_number
 		sql_string
 		sql_column
@@ -1032,8 +1042,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		_ false
 	)))
 	(define sql_build_select_plan (lambda (query) (begin
-		(define actual_plan (build_queryplan_term (sql_expand_views query policy)))
-		(if (sql_select_calc_found_rows? query)
+		(define expanded_query (sql_expand_views query policy))
+		(define actual_plan (build_queryplan_term expanded_query))
+		(define execution_plan (if (sql_select_calc_found_rows? query)
 			(begin
 				(define count_plan (build_queryplan_term (sql_expand_views (sql_select_clear_stage query) policy)))
 				(list (quote !begin)
@@ -1044,7 +1055,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 							(list (quote session) "found_rows"
 								(list (quote +) (list (quote session) "found_rows") 1))))
 					actual_plan))
-			actual_plan)
+			actual_plan))
+		(list (quote !begin)
+			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query)))
+			execution_plan)
 	)))
 	(define sql_union_all_parts (lambda (query)
 		(match query

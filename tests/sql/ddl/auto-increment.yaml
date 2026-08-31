@@ -21,6 +21,7 @@ setup:
   - sql: "DROP TABLE IF EXISTS ai_partitioned"
   - sql: "DROP TABLE IF EXISTS ai_seeded"
   - sql: "DROP TABLE IF EXISTS ai_seeded_copy"
+  - sql: "DROP TABLE IF EXISTS ai_dump_restore"
   - sql: "CREATE TABLE ai_basic (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_explicit (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)"
   - sql: "CREATE TABLE ai_mixed (id INT AUTO_INCREMENT PRIMARY KEY, val INT)"
@@ -39,6 +40,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS ai_partitioned"
   - sql: "DROP TABLE IF EXISTS ai_seeded"
   - sql: "DROP TABLE IF EXISTS ai_seeded_copy"
+  - sql: "DROP TABLE IF EXISTS ai_dump_restore"
 
 test_cases:
 
@@ -319,6 +321,22 @@ test_cases:
         (settings "PartitionMaxDimensions" 0))
 
   # --- Explicit next-value state must survive SHOW CREATE and restart. ---
+
+  - name: "Create table with mysqldump AUTO_INCREMENT state"
+    sql: "CREATE TABLE ai_dump_restore (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT) ENGINE=InnoDB AUTO_INCREMENT=3"
+
+  - name: "Restore explicit rows without consuming generated IDs"
+    sql: "INSERT INTO ai_dump_restore (id, name) VALUES (1, 'one'), (2, 'two')"
+
+  - name: "Generate the next ID after restoring explicit rows"
+    sql: "INSERT INTO ai_dump_restore (name) VALUES ('three')"
+
+  - name: "Restored AUTO_INCREMENT state generates ID three"
+    sql: "SELECT id FROM ai_dump_restore WHERE name = 'three'"
+    expect:
+      rows: 1
+      data:
+        - {id: 3}
 
   - name: "Explicit AUTO_INCREMENT next value is accepted"
     sql: "CREATE TABLE ai_seeded (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT) ENGINE=InnoDB AUTO_INCREMENT=42"

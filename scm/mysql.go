@@ -341,48 +341,17 @@ func mysqlFieldsResolved(fields []*querypb.Field) bool {
 	return true
 }
 
-func isSelectQuery(query string) bool {
-	trimmed := strings.TrimSpace(query)
-	for {
-		if strings.HasPrefix(trimmed, "/*") {
-			end := strings.Index(trimmed, "*/")
-			if end == -1 {
-				return false
-			}
-			trimmed = strings.TrimSpace(trimmed[end+2:])
-			continue
-		}
-		if strings.HasPrefix(trimmed, "--") {
-			end := strings.Index(trimmed, "\n")
-			if end == -1 {
-				return false
-			}
-			trimmed = strings.TrimSpace(trimmed[end+1:])
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			end := strings.Index(trimmed, "\n")
-			if end == -1 {
-				return false
-			}
-			trimmed = strings.TrimSpace(trimmed[end+1:])
-			continue
-		}
-		break
+func prepareMySQLResultFields(titles []Scmer) ([]*querypb.Field, map[string]int, []Scmer) {
+	fields := make([]*querypb.Field, len(titles))
+	colmap := make(map[string]int, len(titles))
+	for i, title := range titles {
+		name := title.String()
+		fields[i] = &querypb.Field{Name: name, Type: querypb.Type_NULL_TYPE}
+		colmap[name] = i
 	}
-	if len(trimmed) < len("select") || !strings.EqualFold(trimmed[:len("select")], "select") {
-		return false
-	}
-	if len(trimmed) == len("select") {
-		return true
-	}
-	switch trimmed[len("select")] {
-	case ' ', '\t', '\r', '\n', '(', '/':
-		return true
-	default:
-		return false
-	}
+	return fields, colmap, make([]Scmer, len(fields))
 }
+
 func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, output *driver.ResultWriter) (myerr error) {
 	atomic.AddInt64(&TotalHTTPRequests, 1)
 	var ss *SessionState
@@ -433,12 +402,12 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			},
 		})
 	}
-	selectQuery := isSelectQuery(query)
 	colmap := make(map[string]int)
 	var fields []*querypb.Field
 	var rowValues []Scmer
 	schemaInitialized := false
 	fieldsPublished := false
+	resultSet := false
 	var bufferedRows []Scmer
 	bufferedRowCount := 0
 	var rowStatus driver.RowStatus
@@ -538,6 +507,17 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			}
 			return NewBool(true)
 		})
+		fieldsFn := NewFunc(func(a ...Scmer) Scmer {
+			resultlock.Lock()
+			defer resultlock.Unlock()
+			if schemaInitialized || fieldsPublished || len(a) != 1 {
+				panic("result fields must be declared exactly once before result rows")
+			}
+			fields, colmap, rowValues = prepareMySQLResultFields(a[0].Slice())
+			schemaInitialized = true
+			resultSet = true
+			return NewBool(true)
+		})
 		// Execute query within GLS context so storage layer can access
 		// the session (and its TxContext) via GetCurrentTx().
 		var rc Scmer
@@ -547,7 +527,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			"querySeq":        querySeq,
 			"context":         queryCtx,
 		}, func() {
-			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, scmSessionScmer,
+			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, fieldsFn, scmSessionScmer,
 				NewAny(&QueryExecutionContext{SessionState: ss, QuerySeq: querySeq}))
 		})
 		return rc
@@ -572,18 +552,10 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	rowsAffected := uint64(rowcount.Int())
 	// Transaction and schema status can change once per statement, not once per
 	// emitted result row. Publish the final state before flushing the result.
-	// A SELECT cannot change transaction or default-schema protocol flags.
+	// A result-producing SELECT cannot change transaction or default-schema protocol flags.
 	// Avoid three synchronized Scheme-session lookups on this hot path.
-	if !selectQuery {
+	if !resultSet {
 		updateFlags(session, sessionFunc)
-	}
-	if !fieldsPublished && selectQuery {
-		fields = []*querypb.Field{
-			{Name: "_empty", Type: querypb.Type_NULL_TYPE},
-		}
-		if err := output.SetFields(fields); err != nil {
-			return err
-		}
 	}
 	return output.Finish(rowsAffected, lastInsertID, 0)
 }
