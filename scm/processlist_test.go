@@ -62,7 +62,8 @@ func TestEvictHTTPSessionReleasesLocksAndKillsQuery(t *testing.T) {
 	var unlocked int
 	var cancelled bool
 	ss.AddLock(func() { unlocked++ })
-	ss.BeginQuery("Query", "SELECT 1", context.Background(), func() { cancelled = true })
+	seq := ss.BeginQuery("Query", "SELECT 1")
+	ss.SetCancel(seq, func() { cancelled = true })
 
 	if !EvictHTTPSession(key) {
 		t.Fatalf("expected eviction to succeed")
@@ -82,8 +83,8 @@ func TestKillQueryMarksOnlyCurrentGeneration(t *testing.T) {
 	ss := RegisterSession("u", "h", "db")
 	defer UnregisterSession(ss.ID)
 
-	seq1 := ss.BeginQuery("Query", "SELECT 1", nil, nil)
-	seq2 := ss.BeginQuery("Query", "SELECT 2", nil, nil)
+	seq1 := ss.BeginQuery("Query", "SELECT 1")
+	seq2 := ss.BeginQuery("Query", "SELECT 2")
 	if !ss.KillQuery(seq1) {
 		t.Fatalf("expected first query generation to be killable")
 	}
@@ -105,7 +106,7 @@ func TestKillSessionLogsKilledQuery(t *testing.T) {
 	ss := RegisterSession("u", "h", "db")
 	defer UnregisterSession(ss.ID)
 
-	seq := ss.BeginQuery("Query", "SELECT 42", context.Background(), func() {})
+	seq := ss.BeginQuery("Query", "SELECT 42")
 	defer ss.EndQuery(seq, "Sleep", "")
 
 	var msgs []string
@@ -117,6 +118,7 @@ func TestKillSessionLogsKilledQuery(t *testing.T) {
 		TracePrintFunc = oldTracePrint
 	}()
 
+	ss.SetCancel(seq, func() {})
 	if !KillSession(ss.ID) {
 		t.Fatalf("expected session kill to succeed")
 	}
@@ -132,8 +134,8 @@ func TestSetQueryInfoRejectsStaleGeneration(t *testing.T) {
 	ss := RegisterSession("u", "h", "db")
 	defer UnregisterSession(ss.ID)
 
-	stale := ss.BeginQuery("Query", "POST /sql/db", nil, nil)
-	current := ss.BeginQuery("Query", "SELECT 2", nil, nil)
+	stale := ss.BeginQuery("Query", "POST /sql/db")
+	current := ss.BeginQuery("Query", "SELECT 2")
 	defer ss.EndQuery(stale, "Sleep", "")
 	defer ss.EndQuery(current, "Sleep", "")
 

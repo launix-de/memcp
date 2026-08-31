@@ -362,7 +362,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 		ss = v.(*SessionState)
 		refreshMySQLSessionProcesslistMeta(session)
 		ss.Touch()
-		querySeq = ss.BeginQuery("Query", query, queryCtx, queryCancel)
+		querySeq = ss.BeginQuery("Query", query)
+		ss.SetCancel(querySeq, queryCancel)
+		ss.SetQueryContext(querySeq, queryCtx)
 	}
 	cancelID := session.SetQueryCancel(func() {
 		queryCancel()

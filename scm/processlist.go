@@ -103,7 +103,7 @@ func (s *SessionState) SetCommand(cmd, info string) {
 // BeginQuery marks a new request/query generation as active on this session.
 // This prevents late disconnects from earlier HTTP requests from killing a
 // subsequent request reusing the same SessionState.
-func (s *SessionState) BeginQuery(cmd, info string, ctx context.Context, cancel context.CancelFunc) uint64 {
+func (s *SessionState) BeginQuery(cmd, info string) uint64 {
 	seq := s.nextQuerySeq.Add(1)
 	s.activeQuery.Store(seq)
 	s.activeCount.Add(1)
@@ -112,18 +112,6 @@ func (s *SessionState) BeginQuery(cmd, info string, ctx context.Context, cancel 
 		s.active = make(map[uint64]bool)
 	}
 	s.active[seq] = true
-	if cancel != nil {
-		if s.cancelFns == nil {
-			s.cancelFns = make(map[uint64]context.CancelFunc)
-		}
-		s.cancelFns[seq] = cancel
-	}
-	if ctx != nil {
-		if s.queryCtxs == nil {
-			s.queryCtxs = make(map[uint64]context.Context)
-		}
-		s.queryCtxs[seq] = ctx
-	}
 	if s.killed != nil {
 		delete(s.killed, seq)
 	}
@@ -131,6 +119,28 @@ func (s *SessionState) BeginQuery(cmd, info string, ctx context.Context, cancel 
 	s.SetState("")
 	s.SetCommand(cmd, info)
 	return seq
+}
+
+// SetCancel stores the cancel function for one specific active query generation.
+func (s *SessionState) SetCancel(seq uint64, fn context.CancelFunc) {
+	s.cancelMu.Lock()
+	if s.cancelFns == nil {
+		s.cancelFns = make(map[uint64]context.CancelFunc)
+	}
+	s.cancelFns[seq] = fn
+	s.cancelMu.Unlock()
+}
+
+// SetQueryContext records the query-generation-specific cancellation signal.
+// Persistent HTTP sessions may execute overlapping generations, so table-lock
+// waiters must never infer this context from the session's latest query.
+func (s *SessionState) SetQueryContext(seq uint64, ctx context.Context) {
+	s.cancelMu.Lock()
+	if s.queryCtxs == nil {
+		s.queryCtxs = make(map[uint64]context.Context)
+	}
+	s.queryCtxs[seq] = ctx
+	s.cancelMu.Unlock()
 }
 
 // SetQueryInfo updates the processlist text for an active query generation.

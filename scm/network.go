@@ -309,8 +309,10 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		defer ss.ReleaseAllLocks() // non-persistent: release locks when request ends
 	}
 	ss.Touch()
+	querySeq = ss.BeginQuery("Query", req.Method+" "+req.URL.Path)
 	ctx, cancel := context.WithCancel(req.Context())
-	querySeq = ss.BeginQuery("Query", req.Method+" "+req.URL.Path, ctx, cancel)
+	ss.SetCancel(querySeq, cancel)
+	ss.SetQueryContext(querySeq, ctx)
 	defer cancel()
 	defer ss.EndQuery(querySeq, "Sleep", "")
 	scmSession := ss.GetOrCreateScmSession()
