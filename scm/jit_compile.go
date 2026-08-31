@@ -391,6 +391,14 @@ func jitApplyCallableSlice(callable, envValue Scmer, args []Scmer) Scmer {
 	return ApplyEx(callable, args, envValue.Any().(*Env))
 }
 
+// jitCallSelfCode preserves a Go unwind frame around a non-tail recursive JIT
+// call. Tail recursion stays inside the generated entry point as a direct jump.
+func jitCallSelfCode(code uintptr, args []Scmer) Scmer {
+	fnData := unsafe.Pointer(&struct{ *byte }{(*byte)(unsafe.Pointer(code))})
+	native := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fnData))
+	return callJIT(native, args...)
+}
+
 func jitInvokeCallback1(callback, arg0 Scmer) Scmer {
 	return callback.Func()(arg0)
 }
@@ -1091,7 +1099,29 @@ func jitMaterializeVirtualGoSlice(ctx *JITContext, elements []JITValueDesc) JITV
 }
 
 func jitCondToBool(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
-	return ctx.EmitBoolDesc(cond, JITValueDesc{Loc: LocAny})
+	ctx.EnsureDesc(cond)
+	regs := jitDescRegs(*cond)
+	for _, reg := range regs {
+		ctx.ProtectReg(reg)
+	}
+	boolean := ctx.EmitBoolDesc(cond, JITValueDesc{Loc: LocAny})
+	for _, reg := range regs {
+		ctx.UnprotectReg(reg)
+	}
+	return boolean
+}
+
+// jitCompileCondition gives an arbitrarily large child CFG a stable producer
+// target before lowering Scheme truthiness. This is shared by every special
+// form so nested map/reduce emitters see the same register-bank contract.
+func jitCompileCondition(ctx *JITContext, expr Scmer, sliceBase Reg) JITValueDesc {
+	target := jitAllocTrackedPair(ctx, JITTypeUnknown)
+	ctx.ProtectReg(target.Reg)
+	ctx.ProtectReg(target.Reg2)
+	condition := jitCompileExpr(ctx, expr, sliceBase, target)
+	ctx.UnprotectReg(target.Reg2)
+	ctx.UnprotectReg(target.Reg)
+	return jitCondToBool(ctx, &condition)
 }
 
 // jitCompileStackList lowers the optimizer-internal
@@ -1605,19 +1635,19 @@ func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result
 	}
 
 	argsPtr := ctx.AllocReg()
+	argsLen := ctx.AllocRegExcept(argsPtr)
+	argsCap := ctx.AllocRegExcept(argsPtr, argsLen)
+	argsSlice := JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: argsPtr, Reg2: argsLen, Reg3: argsCap}
+	ctx.BindReg(argsPtr, &argsSlice)
+	ctx.BindReg(argsLen, &argsSlice)
+	ctx.BindReg(argsCap, &argsSlice)
 	ctx.EmitLeaRegMem(argsPtr, ctx.StackReg, argsOff)
-	words := []goCallArgWord{
-		{loc: LocReg, reg: argsPtr},
-		{loc: LocImm, imm: uint64(ctx.SelfParamCount)},
-		{loc: LocImm, imm: uint64(ctx.SelfParamCount)},
-	}
+	ctx.EmitMovRegImm64(argsLen, uint64(ctx.SelfParamCount))
+	ctx.EmitMovRegImm64(argsCap, uint64(ctx.SelfParamCount))
+	code := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(ctx.Start)))}
 	target := jitEnsureResultPair(ctx, result)
-	var resultsBuf [16]Reg
-	targets := [...]Reg{target.Reg, target.Reg2}
-	results := ctx.EmitGoCall(uint64(uintptr(ctx.Start)), words, 2, &resultsBuf, targets[:])
-	ctx.FreeReg(argsPtr)
-	target.Reg = results[0]
-	target.Reg2 = results[1]
+	target = ctx.EmitGoCallScalarInto(GoFuncAddr(jitCallSelfCode), []JITValueDesc{code, argsSlice}, target)
+	ctx.FreeDesc(&argsSlice)
 	target.Type = JITTypeUnknown
 	ctx.BindReg(target.Reg, &target)
 	ctx.BindReg(target.Reg2, &target)
@@ -1675,8 +1705,11 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 		}
 	}
 
-	cond := jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
-	b := jitCondToBool(ctx, &cond)
+	// Conditions are consumed immediately, but generated multi-block emitters
+	// still need a stable pair destination while rendering their internal CFG.
+	// Reserving it here prevents a returned spill descriptor from becoming
+	// relative to a later nested emitter's stack frame.
+	b := jitCompileCondition(ctx, expr, sliceBase)
 	if b.Loc == LocImm {
 		if b.Imm.Bool() {
 			ctx.EmitJmp(trueLbl)
@@ -1689,6 +1722,7 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 	ctx.EmitJump(CondNotEqual, trueLbl)
 	ctx.EmitJmp(falseLbl)
 	ctx.FreeDesc(&b)
+	ctx.ReclaimUntrackedRegs()
 }
 
 // jitCompileExpr recursively compiles a Scheme expression to machine code.
@@ -1711,13 +1745,23 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	}
 	switch expr.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector,
-		tagFunc, tagFuncEnv, tagProc, tagJIT, tagParser, tagFastDict, tagAny,
+		tagFunc, tagFuncEnv, tagJIT, tagParser, tagFastDict, tagAny,
 		tagClosure, tagPromise:
 		// Keep Eval's self-evaluating literal contract. Pointer-bearing constants
 		// are retained through the entry point's ConstRoots for the lifetime of
 		// the generated code.
 		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
+	case tagProc:
+		if ctx.RecursiveLambdas && expr.Proc() != nil && expr.Proc().Compiled == nil {
+			compiled := jitCompileModeDeferred(true, expr)
+			if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+				panic("jit: embedded procedure could not be compiled")
+			}
+			expr = compiled
+		}
+		ctx.TrackImm(expr)
+		return JITValueDesc{Loc: LocImm, Type: tagProc, Imm: expr}
 	case tagSymbol:
 		sym := expr.Symbol()
 		if string(sym) == "nil" {
@@ -1731,6 +1775,17 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					ctx.TrackImm(desc.Imm)
 				}
 				return desc
+			}
+		}
+		// A compiled closure keeps its interpreter environment in RuntimeEnv.
+		// Preserve lexical shadowing before considering a same-named global for
+		// static specialization; the global may only be used when it is the
+		// binding the interpreter would resolve as well.
+		if runtimeEnv, ok := ctx.RuntimeEnv.Any().(*Env); ok && runtimeEnv != nil {
+			if binding := runtimeEnv.FindRead(sym); binding != nil && binding != &Globalenv {
+				if _, exists := binding.Vars[sym]; exists {
+					return jitCompileRuntimeSymbol(ctx, expr, result)
+				}
 			}
 		}
 		if v, ok := Globalenv.Vars[sym]; ok {
@@ -1974,6 +2029,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			allocatedBeforeEmitter := ctx.AllRegs &^ ctx.FreeRegs
 			labelsBefore := ctx.LabelNext
 			out := decl.Type.JITEmit(ctx, list[1:], args, result)
+			ctx.SyncDesc(&out)
 			// Generated control-flow emitters may spill their result placement while
 			// rendering sibling blocks and then write the final value back into its
 			// registers. Rebind that placement at the declaration boundary so stale

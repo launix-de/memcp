@@ -254,12 +254,17 @@ func jitEmitSpecialIf(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JI
 		return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
 	}
 	target := jitEnsureResultPair(ctx, result)
+	ctx.ProtectReg(target.Reg)
+	ctx.ProtectReg(target.Reg2)
+	defer func() {
+		ctx.UnprotectReg(target.Reg2)
+		ctx.UnprotectReg(target.Reg)
+	}()
 	var endLabel uint8
 	hasDynamic := false
 	i := 0
 	for i+1 < len(args) {
-		condition := jitCompileExpr(ctx, args[i], ctx.SliceBase, JITValueDesc{Loc: LocAny})
-		boolean := jitCondToBool(ctx, &condition)
+		boolean := jitCompileCondition(ctx, args[i], ctx.SliceBase)
 		if boolean.Loc == LocImm {
 			if boolean.Imm.Bool() {
 				value := jitCompileExpr(ctx, args[i+1], ctx.SliceBase, target)
@@ -352,13 +357,11 @@ func jitEmitSpecialBoolFold(takeWhen bool) func(*JITContext, []Scmer, []JITValue
 			ctx.TrackImm(imm)
 			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
 		}
-		target := jitEnsureResultPair(ctx, result)
 		var takeLabel, endLabel uint8
 		hasDynamic := false
 		compileTimeTake := false
 		for _, expression := range args {
-			condition := jitCompileExpr(ctx, expression, ctx.SliceBase, JITValueDesc{Loc: LocAny})
-			boolean := jitCondToBool(ctx, &condition)
+			boolean := jitCompileCondition(ctx, expression, ctx.SliceBase)
 			if boolean.Loc == LocImm {
 				if boolean.Imm.Bool() == takeWhen {
 					compileTimeTake = true
@@ -378,7 +381,14 @@ func jitEmitSpecialBoolFold(takeWhen bool) func(*JITContext, []Scmer, []JITValue
 				ctx.EmitJcc(CcE, takeLabel)
 			}
 			ctx.FreeDesc(&boolean)
+			// A completed condition has no values live into the next short-circuit
+			// operand. Drop path-local CFG temporaries before recursively emitting it.
+			ctx.ReclaimUntrackedRegs()
 		}
+		// Allocate the fold's output only after all child CFGs have been emitted.
+		// The result has no live value before this point, and reserving two
+		// registers for it needlessly raises pressure in nested map/reduce code.
+		target := jitEnsureResultPair(ctx, result)
 		if compileTimeTake {
 			if hasDynamic {
 				ctx.MarkLabel(takeLabel)
@@ -492,7 +502,20 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), params}))
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), body}))
 	argExprs = append(argExprs, NewInt(int64(numVars)))
-	for _, symbol := range jitLambdaFreeSymbols(params, body) {
+	freeSymbols := jitLambdaFreeSymbols(params, body)
+	if jitExpressionConsumesRuntimeEnv(body) {
+		seen := make(map[Symbol]struct{}, len(freeSymbols))
+		for _, symbol := range freeSymbols {
+			seen[symbol] = struct{}{}
+		}
+		for _, symbol := range jitVisibleSymbols(ctx) {
+			if _, exists := seen[symbol]; !exists {
+				freeSymbols = append(freeSymbols, symbol)
+				seen[symbol] = struct{}{}
+			}
+		}
+	}
+	for _, symbol := range freeSymbols {
 		if ctx.Env != nil {
 			if _, ok := ctx.Env.Lookup(symbol); ok {
 				argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(symbol))}))
@@ -504,7 +527,20 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 			continue
 		}
 	}
-	for _, index := range jitLambdaOuterVarIndices(body) {
+	outerIndices := jitLambdaOuterVarIndices(body)
+	if jitExpressionConsumesRuntimeEnv(body) {
+		seen := make(map[NthLocalVar]struct{}, len(outerIndices))
+		for _, index := range outerIndices {
+			seen[index] = struct{}{}
+		}
+		for index := 0; index < ctx.LocalSlotCount; index++ {
+			local := NthLocalVar(index)
+			if _, exists := seen[local]; !exists {
+				outerIndices = append(outerIndices, local)
+			}
+		}
+	}
+	for _, index := range outerIndices {
 		key := NewNthLocalVar(index)
 		argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), key}))
 		argExprs = append(argExprs, key)
