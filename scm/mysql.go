@@ -226,28 +226,6 @@ func MySQLToScmer(v sqltypes.Value) Scmer {
 	return NewString(v.ToString())
 }
 
-func ScmerToMySQL(v Scmer) sqltypes.Value {
-	switch v.GetTag() {
-	case tagNil:
-		return sqltypes.MakeTrusted(querypb.Type_NULL_TYPE, nil)
-	case tagFloat:
-		return sqltypes.NewFloat64(v.Float())
-	case tagInt:
-		return sqltypes.NewInt64(v.Int())
-	case tagBool:
-		if v.Bool() {
-			return sqltypes.NewInt32(1)
-		}
-		return sqltypes.NewInt32(0)
-	case tagDate:
-		return sqltypes.NewVarChar(v.String())
-	case tagString:
-		return sqltypes.NewVarChar(v.String())
-	default:
-		return sqltypes.NewVarChar(v.String())
-	}
-}
-
 type ErrorWrapper string
 
 func (s ErrorWrapper) Error() string {
@@ -255,12 +233,6 @@ func (s ErrorWrapper) Error() string {
 }
 
 const mysqlClientErrorMessageLimit = 2048
-const mysqlResultBatchRows = 1024
-
-var mysqlResultRowsPool = sync.Pool{New: func() any {
-	rows := make([][]sqltypes.Value, 0, mysqlResultBatchRows)
-	return &rows
-}}
 
 // mysqlClientErrorMessage keeps protocol errors below mysqlnd's fixed command
 // buffer. Internal panics include their full stack for the server log, but the
@@ -275,39 +247,98 @@ func mysqlClientErrorMessage(message string) string {
 	return message[:mysqlClientErrorMessageLimit]
 }
 
-func updateMySQLFieldMetadata(field *querypb.Field, val sqltypes.Value) {
-	field.Type = val.Type()
-	switch val.Type() {
-	case querypb.Type_TEXT, querypb.Type_VARCHAR, querypb.Type_CHAR, querypb.Type_BLOB:
-		field.Charset = 45 // utf8mb4_general_ci
+func updateMySQLFieldMetadata(field *querypb.Field, val Scmer) {
+	field.Charset = 0
+	switch val.GetTag() {
+	case tagFloat:
+		field.Type = querypb.Type_FLOAT64
+	case tagInt:
+		field.Type = querypb.Type_INT64
+	case tagBool:
+		field.Type = querypb.Type_INT32
+	case tagNil:
+		field.Type = querypb.Type_NULL_TYPE
 	default:
-		field.Charset = 0
+		field.Type = querypb.Type_VARCHAR
+		field.Charset = 45 // utf8mb4_general_ci
 	}
 }
 
-func appendMySQLResultRow(result *sqltypes.Result, colmap map[string]int, item []Scmer) []sqltypes.Value {
-	newitem := make([]sqltypes.Value, len(result.Fields))
+func prepareMySQLResultRow(fields *[]*querypb.Field, colmap map[string]int, item []Scmer, row []Scmer, schemaInitialized bool, refineNullTypes bool) ([]Scmer, bool) {
+	if schemaInitialized {
+		if len(item) == len(*fields)*2 {
+			ordered := true
+			for i, field := range *fields {
+				if item[i*2].String() != field.Name {
+					ordered = false
+					break
+				}
+			}
+			if ordered {
+				for i := range *fields {
+					val := item[i*2+1]
+					row[i] = val
+					if refineNullTypes && (*fields)[i].Type == querypb.Type_NULL_TYPE && !val.IsNil() {
+						updateMySQLFieldMetadata((*fields)[i], val)
+					}
+				}
+				return row, false
+			}
+		}
+		for i := range row {
+			row[i] = NewNil()
+		}
+	} else {
+		row = row[:0]
+	}
+	unknownColumn := false
 	for i := 0; i < len(item)-1; i += 2 {
-		val := ScmerToMySQL(item[i+1])
-
+		val := item[i+1]
 		colname := item[i].String()
 		colid, ok := colmap[colname]
 		if ok {
-			duplicateAliasInRow := colid < len(newitem) && !newitem[colid].IsNull()
-			newitem[colid] = val
-			if duplicateAliasInRow || result.Fields[colid].Type == querypb.Type_NULL_TYPE {
-				updateMySQLFieldMetadata(result.Fields[colid], val)
+			row[colid] = val
+			if !schemaInitialized || (refineNullTypes && (*fields)[colid].Type == querypb.Type_NULL_TYPE && !val.IsNil()) {
+				updateMySQLFieldMetadata((*fields)[colid], val)
 			}
+		} else if schemaInitialized {
+			unknownColumn = true
 		} else {
-			colmap[colname] = len(result.Fields)
+			colmap[colname] = len(*fields)
 			newcol := new(querypb.Field)
 			newcol.Name = colname
 			updateMySQLFieldMetadata(newcol, val)
-			result.Fields = append(result.Fields, newcol)
-			newitem = append(newitem, val)
+			*fields = append(*fields, newcol)
+			row = append(row, val)
 		}
 	}
-	return newitem
+	return row, unknownColumn
+}
+
+func appendScmerToMySQLRow(row *driver.RowWriter, val Scmer) {
+	switch val.GetTag() {
+	case tagNil:
+		row.Null()
+	case tagFloat:
+		row.Float64(val.Float())
+	case tagInt:
+		row.Int64(val.Int())
+	case tagBool:
+		row.Bool(val.Bool())
+	default:
+		row.String(val.String())
+	}
+}
+
+const mysqlFieldDiscoveryRows = 1024
+
+func mysqlFieldsResolved(fields []*querypb.Field) bool {
+	for _, field := range fields {
+		if field.Type == querypb.Type_NULL_TYPE {
+			return false
+		}
+	}
+	return true
 }
 
 func isSelectQuery(query string) bool {
@@ -352,7 +383,7 @@ func isSelectQuery(query string) bool {
 		return false
 	}
 }
-func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, callback func(*sqltypes.Result) error) (myerr error) {
+func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVariables map[string]*querypb.BindVariable, output *driver.ResultWriter) (myerr error) {
 	atomic.AddInt64(&TotalHTTPRequests, 1)
 	var ss *SessionState
 	var querySeq uint64
@@ -383,7 +414,7 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	// Return 40MB so large result sets work without tripping client-side
 	// packet buffer limits on wide login/dashboard views.
 	if query == "select @@max_allowed_packet" || query == "SELECT @@max_allowed_packet" {
-		callback(&sqltypes.Result{
+		return output.WriteResult(&sqltypes.Result{
 			Fields: []*querypb.Field{
 				{Name: "@@max_allowed_packet", Type: querypb.Type_INT64},
 			},
@@ -391,10 +422,9 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				{sqltypes.MakeTrusted(querypb.Type_INT64, []byte("41943040"))},
 			},
 		})
-		return nil
 	}
 	if query == "select @@version_comment limit 1" {
-		callback(&sqltypes.Result{
+		return output.WriteResult(&sqltypes.Result{
 			Fields: []*querypb.Field{
 				{Name: "@@version_comment", Type: querypb.Type_TEXT, Charset: 45},
 			},
@@ -402,22 +432,47 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 				{sqltypes.MakeTrusted(querypb.Type_TEXT, []byte(runtime.GOOS))},
 			},
 		})
-		return nil
 	}
 	selectQuery := isSelectQuery(query)
 	colmap := make(map[string]int)
-	// TODO: sqltypes.RStateNone for INSERTs
-	var result sqltypes.Result
+	var fields []*querypb.Field
+	var rowValues []Scmer
+	schemaInitialized := false
+	fieldsPublished := false
+	var bufferedRows []Scmer
+	bufferedRowCount := 0
+	var rowStatus driver.RowStatus
 	var resultlock sync.Mutex
-	result.State = sqltypes.RStateFields
-	rowBuffer := mysqlResultRowsPool.Get().(*[][]sqltypes.Value)
-	result.Rows = (*rowBuffer)[:0]
-	maxBufferedRows := 0
-	defer func() {
-		clear(result.Rows[:maxBufferedRows])
-		*rowBuffer = result.Rows[:0]
-		mysqlResultRowsPool.Put(rowBuffer)
-	}()
+	emitPreparedRow := func(values []Scmer) {
+		row, err := output.BeginRow()
+		if err != nil {
+			panic(err)
+		}
+		defer row.Abort()
+		for _, val := range values {
+			appendScmerToMySQLRow(row, val)
+		}
+		status, err := row.End()
+		rowStatus |= status
+		if err != nil {
+			panic(err)
+		}
+	}
+	publishAndFlushRows := func() {
+		if fieldsPublished {
+			return
+		}
+		if err := output.SetFields(fields); err != nil {
+			panic(err)
+		}
+		fieldsPublished = true
+		width := len(fields)
+		for offset := 0; offset < len(bufferedRows); offset += width {
+			emitPreparedRow(bufferedRows[offset : offset+width])
+		}
+		bufferedRows = nil
+		bufferedRowCount = 0
+	}
 	// load scm session object
 	scmSessionAny, _ := mysqlsessions.Load(session.ID())
 	// result from scheme
@@ -455,19 +510,31 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			resultlock.Lock()
 			defer resultlock.Unlock()
 
-			newitem := appendMySQLResultRow(&result, colmap, item)
-			if len(result.Rows) == mysqlResultBatchRows {
-				// flush
-				callback(&result)
-				if result.State == sqltypes.RStateFields {
-					result.State = sqltypes.RStateRows
-					callback(&result)
-				}
-				result.Rows = result.Rows[0:0] // slice off rest of buffer to restart
+			var unknownColumn bool
+			rowValues, unknownColumn = prepareMySQLResultRow(&fields, colmap, item, rowValues, schemaInitialized, !fieldsPublished)
+			if unknownColumn {
+				rowStatus |= driver.RowTruncated
 			}
-			result.Rows = append(result.Rows, newitem)
-			if len(result.Rows) > maxBufferedRows {
-				maxBufferedRows = len(result.Rows)
+			schemaInitialized = true
+			if !fieldsPublished && !mysqlFieldsResolved(fields) && bufferedRowCount+1 < mysqlFieldDiscoveryRows {
+				bufferedRows = append(bufferedRows, rowValues...)
+				bufferedRowCount++
+				return NewBool(true)
+			}
+			if !fieldsPublished {
+				if bufferedRowCount == 0 {
+					if err := output.SetFields(fields); err != nil {
+						panic(err)
+					}
+					fieldsPublished = true
+					emitPreparedRow(rowValues)
+				} else {
+					bufferedRows = append(bufferedRows, rowValues...)
+					bufferedRowCount++
+					publishAndFlushRows()
+				}
+			} else {
+				emitPreparedRow(rowValues)
 			}
 			return NewBool(true)
 		})
@@ -488,14 +555,21 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	if myerr != nil {
 		return myerr
 	}
+	if schemaInitialized && !fieldsPublished {
+		publishAndFlushRows()
+	}
+	if rowStatus != driver.RowComplete {
+		m.log.Warning("mysql result rows required recovery flags=%d", rowStatus)
+	}
 	// Retrieve last_insert_id from the session (set by INSERT with AUTO_INCREMENT).
 	// TODO: replace with a dedicated callback parameter to m.querycallback so the
 	// Scheme side has full control over returned insert IDs without hardcoded fields.
 	lastInsertId := sessionFunc(NewString("last_insert_id"))
+	lastInsertID := uint64(0)
 	if !lastInsertId.IsNil() {
-		result.InsertID = uint64(lastInsertId.Int())
+		lastInsertID = uint64(lastInsertId.Int())
 	}
-	result.RowsAffected = uint64(rowcount.Int())
+	rowsAffected := uint64(rowcount.Int())
 	// Transaction and schema status can change once per statement, not once per
 	// emitted result row. Publish the final state before flushing the result.
 	// A SELECT cannot change transaction or default-schema protocol flags.
@@ -503,22 +577,15 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 	if !selectQuery {
 		updateFlags(session, sessionFunc)
 	}
-	// flush the rest
-	if result.State == sqltypes.RStateFields {
-		if len(result.Fields) == 0 && selectQuery {
-			result.Fields = []*querypb.Field{
-				{Name: "_empty", Type: querypb.Type_NULL_TYPE},
-			}
+	if !fieldsPublished && selectQuery {
+		fields = []*querypb.Field{
+			{Name: "_empty", Type: querypb.Type_NULL_TYPE},
 		}
-		result.State = sqltypes.RStateNone // full send
-		callback(&result)
-	} else {
-		// rest + finish
-		callback(&result)
-		result.State = sqltypes.RStateFinished
-		callback(&result)
+		if err := output.SetFields(fields); err != nil {
+			return err
+		}
 	}
-	return myerr
+	return output.Finish(rowsAffected, lastInsertID, 0)
 }
 
 func updateFlags(s *driver.Session, sessionFunc func(...Scmer) Scmer) {

@@ -20,7 +20,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jtolds/gls v4.20.0+incompatible
 	github.com/launix-de/NonLockingReadMap v1.0.11
-	github.com/launix-de/go-mysqlstack v0.1.0
+	github.com/launix-de/go-mysqlstack v0.2.0
 	github.com/launix-de/go-packrat/v2 v2.1.22
 	github.com/lib/pq v1.11.2
 	github.com/pierrec/lz4/v4 v4.1.26
