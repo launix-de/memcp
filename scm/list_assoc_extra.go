@@ -16,7 +16,127 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+func groupAssocCapacity(inputLength int) int {
+	const initialGroups = 32
+	if inputLength < initialGroups {
+		return inputLength
+	}
+	return initialGroups
+}
+
 func init_list_assoc_extra() {
+	Declare(&Globalenv, &Declaration{
+		Name: "group_assoc",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "group_assoc")
+			key := OptimizeProcToSerialFunction(a[1])
+			reduce := OptimizeProcToSerialFunction(a[2])
+			result := NewFastDictValue(groupAssocCapacity(len(input)))
+			for _, item := range input {
+				result.ReduceValue(key(item), item, a[3], reduce)
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "groups list elements by key and reduces every group from a neutral value",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "key", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "reducer", Params: []*TypeDescriptor{{Kind: "any", Label: "current"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "neutral"},
+			},
+			Return: &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength},
+			Const:  true,
+		},
+		Optimize: optimizeGroupAssoc,
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "group_assoc_append",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "group_assoc_append")
+			key := OptimizeProcToSerialFunction(a[1])
+			value := OptimizeProcToSerialFunction(a[2])
+			result := NewFastDictValue(groupAssocCapacity(len(input)))
+			for _, item := range input {
+				result.AppendValue(key(item), value(NewNil(), item))
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only append reduction into grouped lists",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "key", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "value", Params: []*TypeDescriptor{{Kind: "any", Label: "unused_current"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}},
+			Const:     true,
+			Forbidden: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "group_assoc_append_reduce",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "group_assoc_append_reduce")
+			key := OptimizeProcToSerialFunction(a[1])
+			value := OptimizeProcToSerialFunction(a[2])
+			result := NewFastDictValue(groupAssocCapacity(len(input)))
+			for _, item := range input {
+				result.AppendValue(key(NewNil(), item), value(NewNil(), item))
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only append reduction from a normalized two-parameter reducer",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "key", Params: []*TypeDescriptor{{Kind: "any", Label: "unused_current"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "value", Params: []*TypeDescriptor{{Kind: "any", Label: "unused_current"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}},
+			Const:     true,
+			Forbidden: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "group_assoc_count",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "group_assoc_count")
+			key := OptimizeProcToSerialFunction(a[1])
+			result := NewFastDictValue(groupAssocCapacity(len(input)))
+			for _, item := range input {
+				result.IncrementCount(key(item))
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only integer counting reduction by key",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "key", Params: []*TypeDescriptor{{Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}},
+			Const:     true,
+			Forbidden: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "group_assoc_count_reduce",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "group_assoc_count_reduce")
+			key := OptimizeProcToSerialFunction(a[1])
+			result := NewFastDictValue(groupAssocCapacity(len(input)))
+			for _, item := range input {
+				result.IncrementCount(key(NewNil(), item))
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only counting from a normalized two-parameter reducer",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "key", Params: []*TypeDescriptor{{Kind: "any", Label: "unused_current"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}},
+			Const:     true,
+			Forbidden: true,
+		},
+	})
 	Declare(&Globalenv, &Declaration{
 		Name: "mapkey_assoc",
 
