@@ -62,6 +62,18 @@ setup:
   - sql: "INSERT INTO sqlcompat_actions VALUES (1, 0, 'pending', 20, '2026-08-26 10:00:00', NULL), (2, 0, 'pending', 10, '2026-08-26 09:00:00', NULL), (3, 0, 'complete', 1, '2026-08-25 09:00:00', NULL)"
 
 test_cases:
+  - name: "Derived-table wildcard publishes MySQL result fields"
+    mysql:
+      statements:
+        - sql: "SELECT t.* FROM (SELECT ID AS item_id, post_name AS label FROM wpcompat_posts WHERE ID <= 2) AS t ORDER BY t.item_id"
+          expect:
+            rows: 2
+            data:
+              - item_id: 1
+                label: "first"
+              - item_id: 2
+                label: "second"
+
   - name: "SET NAMES with COLLATE and leading whitespace work over MySQL"
     mysql:
       statements:
