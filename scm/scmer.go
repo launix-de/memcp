@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -288,6 +289,54 @@ func NewFunc(fn func(...Scmer) Scmer) Scmer {
 	ptr := new(func(...Scmer) Scmer)
 	*ptr = fn
 	return Scmer{(*byte)(unsafe.Pointer(ptr)), makeAux(tagFunc, 0)}
+}
+
+type CallableTypeID uint64
+
+var callableTypeMu sync.RWMutex
+var callableTypes []*TypeDescriptor
+
+// RegisterCallableType creates a compact handle for a shared callable type.
+// Constructors should register once and reuse the returned handle.
+func RegisterCallableType(td *TypeDescriptor) CallableTypeID {
+	if td == nil {
+		return 0
+	}
+	callableTypeMu.Lock()
+	callableTypes = append(callableTypes, td)
+	id := CallableTypeID(len(callableTypes))
+	callableTypeMu.Unlock()
+	return id
+}
+
+// NewTypedFunc attaches the callable's full type to a native closure value.
+// The compact Scmer stores only a small registry id; descriptors are shared by
+// all instances returned from the same constructor.
+func NewTypedFunc(fn func(...Scmer) Scmer, id CallableTypeID) Scmer {
+	result := NewFunc(fn)
+	if id != 0 {
+		result.aux = makeAux(tagFunc, uint64(id))
+	}
+	return result
+}
+
+// CallableType returns type metadata attached to a native closure value.
+func (s Scmer) CallableType() *TypeDescriptor {
+	if s.GetTag() != tagFunc {
+		return nil
+	}
+	id := auxVal(s.aux)
+	if id == 0 {
+		return nil
+	}
+	callableTypeMu.RLock()
+	if id > uint64(len(callableTypes)) {
+		callableTypeMu.RUnlock()
+		return nil
+	}
+	td := callableTypes[id-1]
+	callableTypeMu.RUnlock()
+	return td
 }
 
 // NewClosure creates a zero-allocation-per-row closure Scmer.

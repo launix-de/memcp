@@ -73,6 +73,7 @@ type TypeDescriptor struct {
 	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
 	NoEscape       bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
 	Transfer       bool                       // callee receives ownership, can mutate
+	CallsOnce      bool                       // for func params: callback is invoked at most once per call; default false = unknown or repeated
 	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold
 	Length         int                        // exact positive list/assoc length; -1 = unknown
 	Optional       bool                       // for func params: parameter is optional
@@ -215,7 +216,7 @@ func TypeInfoFromTD(td *TypeDescriptor) TypeInfo {
 	if td.Length > 0 {
 		ti.length = td.Length
 	}
-	if td.Length > 0 || len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
+	if td.Length > 0 || td.CallsOnce || len(td.Params) > 0 || td.Return != nil || len(td.Keys) > 0 || td.Element != nil {
 		ti.Extra = td
 	}
 	return ti

@@ -1767,12 +1767,70 @@ func canEliminateFromBegin(val Scmer) bool {
 }
 
 type localBindingFacts struct {
-	defineIdx int
-	firstUse  int
-	count     int
-	useCount  int
-	used      bool
-	captured  bool
+	defineIdx       int
+	firstUse        int
+	count           int
+	useCount        int
+	used            bool
+	captured        bool
+	repeatedCapture bool
+	leafLambda      bool
+}
+
+func optimizerCallType(call []Scmer, env *Env, ome *optimizerMetainfo) *TypeDescriptor {
+	if len(call) == 0 {
+		return nil
+	}
+	if decl := DeclarationForValue(call[0]); decl != nil {
+		return decl.Type
+	}
+	if sym, ok := scmerSymbol(call[0]); ok {
+		if td := ome.variableTypes[sym]; td != nil {
+			return td
+		}
+		if binding := env.FindRead(sym); binding != nil {
+			if value, exists := binding.Vars[sym]; exists {
+				if td := value.CallableType(); td != nil {
+					return td
+				}
+			}
+		}
+		return nil
+	}
+	if call[0].IsNthLocalVar() {
+		return ome.numberedTypes[call[0].NthLocalVar()]
+	}
+	// Resolve an immediately-created native operator from its declared return
+	// type without recursively analysing the call-head subtree. The begin usage
+	// walk must remain linear even for deeply nested generated expressions.
+	callHead := call[0]
+	if stripped, ok := scmerStripSourceInfo(callHead); ok {
+		callHead = stripped
+	}
+	if constructor, ok := scmerSlice(callHead); ok && len(constructor) > 0 {
+		if decl := DeclarationForValue(constructor[0]); decl != nil && decl.Type != nil && decl.Type.Return != nil && decl.Type.Return.Kind == "func" {
+			return decl.Type.Return
+		}
+	}
+	return nil
+}
+
+func optimizerCallParam(callType *TypeDescriptor, argIndex int) *TypeDescriptor {
+	if callType == nil || len(callType.Params) == 0 || argIndex < 0 {
+		return nil
+	}
+	if argIndex >= len(callType.Params) {
+		argIndex = len(callType.Params) - 1
+	}
+	return callType.Params[argIndex]
+}
+
+func optimizerIsLambda(expr Scmer) bool {
+	if stripped, ok := scmerStripSourceInfo(expr); ok {
+		expr = stripped
+	}
+	items, ok := scmerSlice(expr)
+	return ok && len(items) >= 3 && scmerIsSymbol(items[0], "lambda")
 }
 
 func optimizerProcSequenceForDefinition(name Symbol, expression Scmer) procSequenceKind {
@@ -1915,8 +1973,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
-		var visitNode func(x Scmer, depth int, captured bool, blacklist []Symbol)
-		visitNode = func(x Scmer, depth int, captured bool, blacklist []Symbol) {
+		var leafScan *bool
+		var leafScanRoot bool
+		var visitNode func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, blacklist []Symbol)
+		visitNode = func(x Scmer, depth int, captured bool, captureOnce bool, lambdaOnce bool, blacklist []Symbol) {
 			if stripped, ok := scmerStripSourceInfo(x); ok {
 				x = stripped
 			}
@@ -1926,20 +1986,47 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					subHeadExpr = stripped
 				}
 				subHead, subHeadOk := scmerSymbol(subHeadExpr)
+				if leafScan != nil {
+					if leafScanRoot {
+						leafScanRoot = false
+					} else if subHeadOk {
+						switch subHead {
+						case Symbol("begin"), Symbol("begin_mut"), Symbol("!begin"), Symbol("define"), Symbol("set"), Symbol("lambda"), Symbol("eval"), Symbol("import"):
+							*leafScan = false
+						}
+					}
+				}
 				if subHeadOk && (subHead == Symbol("define") || subHead == Symbol("set")) {
-					visitNode(sub[2], depth, captured, blacklist)
+					var definedSym Symbol
+					var scansDefinition bool
+					if depth == 0 {
+						definedSym, scansDefinition = scmerSymbol(sub[1])
+					}
+					previousLeafScan, previousLeafRoot := leafScan, leafScanRoot
+					leaf := optimizerIsLambda(sub[2])
+					if scansDefinition {
+						leafScan, leafScanRoot = &leaf, true
+					}
+					visitNode(sub[2], depth, captured, captureOnce, false, blacklist)
+					if scansDefinition {
+						facts := bindings[definedSym]
+						facts.leafLambda = leaf
+						bindings[definedSym] = facts
+						leafScan, leafScanRoot = previousLeafScan, previousLeafRoot
+					}
 					if depth == 0 {
 						if sym, ok := scmerSymbol(sub[1]); ok {
 							variableContent[sym] = sub[2]
 						}
 					}
 				} else if subHeadOk && subHead == Symbol("lambda") {
+					captureOnce = captureOnce && lambdaOnce
 					params := sub[1]
 					if stripped, ok := scmerStripSourceInfo(params); ok {
 						params = stripped
 					}
 					if sym, ok := scmerSymbol(params); ok {
-						visitNode(sub[2], depth+1, true, append(append([]Symbol{}, blacklist...), sym))
+						visitNode(sub[2], depth+1, true, captureOnce, false, append(append([]Symbol{}, blacklist...), sym))
 					} else if list, ok := scmerSlice(params); ok {
 						blacklist2 := append([]Symbol{}, blacklist...)
 						for _, entry := range list {
@@ -1947,7 +2034,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 								blacklist2 = append(blacklist2, s)
 							}
 						}
-						visitNode(sub[2], depth+1, true, blacklist2)
+						visitNode(sub[2], depth+1, true, captureOnce, false, blacklist2)
 					}
 				} else if subHeadOk && (subHead == Symbol("begin") || subHead == Symbol("begin_mut")) {
 					start := 1
@@ -1955,22 +2042,25 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						start = 2
 					}
 					for i := start; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, captured, blacklist)
+						visitNode(sub[i], depth+1, captured, captureOnce, false, blacklist)
 					}
 				} else if subHeadOk && subHead == Symbol("!begin") {
 					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth, captured, blacklist)
+						visitNode(sub[i], depth, captured, captureOnce, false, blacklist)
 					}
 				} else if subHeadOk && subHead == Symbol("eval") {
 					usedVariables[Symbol("eval")] = 1
 					for i := 2; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, captured, blacklist)
+						visitNode(sub[i], depth+1, captured, captureOnce, false, blacklist)
 					}
 				} else {
 					// Also visit the head — it may be a variable used in call position (e.g., (accsess "key"))
-					visitNode(sub[0], depth+1, captured, blacklist)
+					visitNode(sub[0], depth+1, captured, captureOnce, false, blacklist)
+					callType := optimizerCallType(sub, env, ome)
 					for i := 1; i < len(sub); i++ {
-						visitNode(sub[i], depth+1, captured, blacklist)
+						param := optimizerCallParam(callType, i-1)
+						argLambdaOnce := optimizerIsLambda(sub[i]) && param != nil && param.Kind == "func" && param.CallsOnce
+						visitNode(sub[i], depth+1, captured, captureOnce, argLambdaOnce, blacklist)
 					}
 				}
 				return
@@ -1988,6 +2078,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						facts.useCount++
 						if captured {
 							facts.captured = true
+							if !captureOnce {
+								facts.repeatedCapture = true
+							}
 						}
 						if !facts.used {
 							facts.firstUse = currentTopIdx
@@ -2005,7 +2098,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		for i := bodyStart; i < len(v); i++ {
 			currentTopIdx = i
-			visitNode(v[i], 0, false, nil)
+			visitNode(v[i], 0, false, true, false, nil)
 		}
 		ome2 := ome.CopySharedScope()
 		ome2.beginDepth++
@@ -2039,6 +2132,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			}
 			// Bring back old criterion: inline if used < 2 OR RHS is not a list
 			shouldReplace := usedVariables[sym] < 2 || !normalized.IsSlice()
+			if facts, tracked := bindings[sym]; tracked && facts.count == 1 && facts.useCount == 1 &&
+				facts.captured && !facts.repeatedCapture && facts.leafLambda {
+				shouldReplace = true
+			}
 			// Convention: symbols starting with "tbl:" are pre-resolved table
 			// pointers that must not be inlined back into inner loops.
 			if strings.HasPrefix(string(sym), "tbl:") {
@@ -2606,6 +2703,12 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 	// Resolve native and symbolic call heads through the same declaration. Code
 	// generated by Scheme commonly contains either representation.
 	callDecl := DeclarationForValue(v[0])
+	var callType *TypeDescriptor
+	if callDecl != nil {
+		callType = callDecl.Type
+	} else {
+		callType = optimizerCallType(v, env, ome)
+	}
 	callName := string(head)
 	if callDecl != nil {
 		callName = callDecl.Name
@@ -2619,15 +2722,15 @@ func (oc *OptimizerContext) applyDefaultOptimization(v []Scmer, useResult bool, 
 			ome.pendingCallbackParams = nil
 		}
 		ome.pendingCallbackReturn = nil
-		if i > 0 && callDecl != nil {
+		if i > 0 && callType != nil {
 			paramIdx := i - 1
-			if callDecl.Type == nil || len(callDecl.Type.Params) == 0 {
+			if len(callType.Params) == 0 {
 				// no type info
-			} else if paramIdx >= len(callDecl.Type.Params) {
-				paramIdx = len(callDecl.Type.Params) - 1
+			} else if paramIdx >= len(callType.Params) {
+				paramIdx = len(callType.Params) - 1
 			}
-			if paramIdx >= 0 && callDecl.Type != nil && paramIdx < len(callDecl.Type.Params) {
-				if ti := callDecl.Type.Params[paramIdx]; ti != nil && ti.Kind == "func" && len(ti.Params) > 0 {
+			if paramIdx >= 0 && paramIdx < len(callType.Params) {
+				if ti := callType.Params[paramIdx]; ti != nil && ti.Kind == "func" {
 					ome.pendingCallbackParams = ti.Params
 					ome.pendingCallbackReturn = ti.Return
 				}
