@@ -631,6 +631,7 @@ type Proc struct {
 type ProcOptimizerMeta struct {
 	Return    TypeInfo
 	HasReturn bool
+	Sequence  procSequenceKind
 
 	// specializations is an immutable, atomically published snapshot. Its
 	// values are complete Proc values (wrapped as Scmer), not aliases in an
@@ -641,6 +642,13 @@ type ProcOptimizerMeta struct {
 	specializationMu sync.Mutex
 	building         map[procSpecializationKey]*procSpecializationBuild
 }
+
+type procSequenceKind uint8
+
+const (
+	procSequenceNone procSequenceKind = iota
+	procSequenceAndTerms
+)
 
 type procSpecializationKey uint64
 
@@ -734,6 +742,7 @@ func (m *ProcOptimizerMeta) finishSpecialization(key procSpecializationKey, vari
 type optimizerProcReturnTemplate struct {
 	Return    TypeInfo
 	HasReturn bool
+	Sequence  procSequenceKind
 }
 
 // CloseProcedure snapshots explicit captures of a procedure without retaining
@@ -768,6 +777,7 @@ func CloseProcedure(value Scmer) Scmer {
 		proc.OptimizerMeta = &ProcOptimizerMeta{
 			Return:    proc.OptimizerMeta.Return,
 			HasReturn: proc.OptimizerMeta.HasReturn,
+			Sequence:  proc.OptimizerMeta.Sequence,
 		}
 	}
 	return NewProcStruct(proc)

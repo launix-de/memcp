@@ -479,6 +479,9 @@ func optimizeAssocFixedLengthInput(mutName string) func(v []Scmer, oc *Optimizer
 func optimizeExtractAssoc(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 	call := oc.applyDefaultOptimizationWithTypes(v, useResult, "extract_assoc_mut")
 	result, td, argumentTypes := call.code, call.typeInfo, call.argumentTypes
+	if len(v) >= 3 {
+		td = setOptimizedCallElement(td, callbackResultType(v[2], optimizedArgumentType(argumentTypes, 2)))
+	}
 	if rv, ok := scmerSlice(result); ok && len(rv) >= 2 {
 		return result, setOptimizedCallLength(td, exactOptimizedAssocArgumentLength(rv[1], optimizedArgumentType(argumentTypes, 1)))
 	}
@@ -1064,11 +1067,16 @@ func optimizeFilter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 		return result, td
 	}
 	inner, ok := scmerSlice(rv[1])
-	if !ok || len(inner) != 3 {
+	if !ok || len(inner) < 2 {
 		return result, td
 	}
 	switch {
-	case scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut"):
+	case len(inner) == 2 && optimizerProcSequence(inner[0], oc.Env) == procSequenceAndTerms:
+		if exprMayHaveSideEffects(rv[2]) {
+			return result, td
+		}
+		return NewSlice([]Scmer{NewSymbol("filter_and_terms"), inner[1], rv[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
+	case len(inner) == 3 && (scmerIsSymbol(inner[0], "map") || scmerIsSymbol(inner[0], "map_mut")):
 		if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
 			return result, td
 		}
@@ -1076,13 +1084,34 @@ func optimizeFilter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Ty
 			return NewSlice([]Scmer{NewSymbol("map_filter_notnull"), inner[1], inner[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
 		}
 		return NewSlice([]Scmer{NewSymbol("filter_map"), inner[1], inner[2], rv[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
-	case scmerIsSymbol(inner[0], "filter") || scmerIsSymbol(inner[0], "filter_mut"):
+	case len(inner) == 3 && (scmerIsSymbol(inner[0], "filter") || scmerIsSymbol(inner[0], "filter_mut")):
 		if exprMayHaveSideEffects(inner[2]) || exprMayHaveSideEffects(rv[2]) {
 			return result, td
 		}
 		return NewSlice([]Scmer{NewSymbol("filter_filter"), inner[1], inner[2], rv[2]}), descriptorWithLength(FreshAlloc, UnknownLength)
 	}
 	return result, td
+}
+
+func optimizerProcSequence(callee Scmer, env *Env) procSequenceKind {
+	if stripped, ok := scmerStripSourceInfo(callee); ok {
+		callee = stripped
+	}
+	if sym, ok := scmerSymbol(callee); ok {
+		binding := env.FindRead(sym)
+		if binding == nil {
+			return procSequenceNone
+		}
+		var exists bool
+		callee, exists = binding.Vars[sym]
+		if !exists {
+			return procSequenceNone
+		}
+	}
+	if !callee.IsProc() || callee.Proc().OptimizerMeta == nil {
+		return procSequenceNone
+	}
+	return callee.Proc().OptimizerMeta.Sequence
 }
 
 // optimizeProduceN rewrites (produceN ...) to (produceN_mut ... nil) when the
@@ -54163,6 +54192,120 @@ func init_list() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "flat_map_range",
+
+		Fn: func(a ...Scmer) Scmer {
+			count := int(ToInt(a[0]))
+			if count < 0 {
+				count = 0
+			}
+			mapper := PrepareSerialProc(a[1])
+			width := int(ToInt(a[2]))
+			result := make([]Scmer, 0, count*width)
+			var mapperArgs [1]Scmer
+			for i := 0; i < count; i++ {
+				mapperArgs[0] = NewInt(int64(i))
+				result = append(result, asSlice(mapper.Call(mapperArgs[:]), "flat_map_range result")...)
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "fused range generation, fixed-width map, and flatten (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "number", Label: "count"},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "int"}}, Return: &TypeDescriptor{Kind: "list"}},
+				{Kind: "int", Label: "width"},
+			},
+			Return: FreshAlloc, Const: true, Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["flat_map_range"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "filter_and_terms",
+
+		Fn: func(a ...Scmer) Scmer {
+			predicate := PrepareSerialProc(a[1])
+			result := make([]Scmer, 0)
+			var predicateArgs [1]Scmer
+			var visit func(Scmer)
+			visit = func(term Scmer) {
+				if term.IsNil() {
+					term = NewBool(true)
+				}
+				if items, ok := scmerAsSlice(term); ok && len(items) > 0 && scmerIsSymbol(items[0], "and") {
+					for _, child := range items[1:] {
+						visit(child)
+					}
+					return
+				}
+				predicateArgs[0] = term
+				if ToBool(predicate.Call(predicateArgs[:])) {
+					result = append(result, term)
+				}
+			}
+			visit(a[0])
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "fused AND-tree flatten and filter (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "tree", NoEscape: true},
+				{Kind: "func", Label: "predicate", Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "bool"}},
+			},
+			Return: FreshAlloc, Const: true, Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["filter_and_terms"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "flat_map_assoc",
+
+		Fn: func(a ...Scmer) Scmer {
+			slice, fd := asAssoc(a[0], "flat_map_assoc")
+			mapper := PrepareSerialProc(a[1])
+			width := int(ToInt(a[2]))
+			count := len(slice) / 2
+			if fd != nil {
+				count = len(fd.Pairs) / 2
+			}
+			result := make([]Scmer, 0, count*width)
+			var mapperArgs [2]Scmer
+			appendEntry := func(key, value Scmer) {
+				mapperArgs[0], mapperArgs[1] = key, value
+				result = append(result, asSlice(mapper.Call(mapperArgs[:]), "flat_map_assoc result")...)
+			}
+			if fd == nil {
+				for i := 0; i < len(slice); i += 2 {
+					appendEntry(slice[i], slice[i+1])
+				}
+			} else {
+				fd.Iterate(func(key, value Scmer) bool {
+					appendEntry(key, value)
+					return true
+				})
+			}
+			return NewSlice(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "fused assoc iteration, fixed-width map, and flatten (optimizer-only)",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "dict", NoEscape: true},
+				{Kind: "func", Label: "map", Params: []*TypeDescriptor{{Kind: "any"}, {Kind: "any"}}, Return: &TypeDescriptor{Kind: "list"}},
+				{Kind: "int", Label: "width"},
+			},
+			Return: FreshAlloc, Const: true, Forbidden: true,
+
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["flat_map_assoc"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "flat_map_unique",
 
 		Fn: func(a ...Scmer) Scmer {
@@ -57909,6 +58052,20 @@ func optimizeMerge(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *Typ
 						resultLength = inputLength * itemLength
 					}
 					fused := NewSlice([]Scmer{NewSymbol("flat_map"), producer[1], producer[2], NewInt(int64(itemLength))})
+					return fused, descriptorWithLength(FreshAlloc, resultLength)
+				case scmerIsSymbol(producer[0], "produceN"):
+					resultLength := UnknownLength
+					if inputLength := exactOptimizedListArgumentLength(rv[1], producerType); inputLength >= 0 {
+						resultLength = inputLength * itemLength
+					}
+					fused := NewSlice([]Scmer{NewSymbol("flat_map_range"), producer[1], producer[2], NewInt(int64(itemLength))})
+					return fused, descriptorWithLength(FreshAlloc, resultLength)
+				case scmerIsSymbol(producer[0], "extract_assoc"), scmerIsSymbol(producer[0], "extract_assoc_mut"):
+					resultLength := UnknownLength
+					if inputLength := exactOptimizedListArgumentLength(rv[1], producerType); inputLength >= 0 {
+						resultLength = inputLength * itemLength
+					}
+					fused := NewSlice([]Scmer{NewSymbol("flat_map_assoc"), producer[1], producer[2], NewInt(int64(itemLength))})
 					return fused, descriptorWithLength(FreshAlloc, resultLength)
 				}
 			}
