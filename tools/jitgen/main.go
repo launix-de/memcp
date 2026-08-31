@@ -57,18 +57,6 @@ const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen
 const phiSlotBytes = 16
 const phiStoreChunkSize = 3
 
-// These emitters currently pass static SSA lowering but fail native execution
-// because their loop/return CFG is not yet rendered correctly. Keeping this
-// list explicit prevents a generator run from turning a known-bad emitter back
-// on while retaining the precise failure as part of the jitgen TODO census.
-var nativeValidationFailures = map[string]string{
-	"count":              "native CFG validation: wrong merged return value",
-	"has?":               "native CFG validation: loop match path returns false",
-	"contains?":          "native CFG validation: loop match path returns false",
-	"sql_in":             "native CFG validation: loop match path returns false",
-	"get_assoc_pairlist": "native CFG validation: nested loop return pending",
-}
-
 func main() {
 	var files []string
 	for _, arg := range os.Args[1:] {
@@ -235,9 +223,6 @@ func main() {
 					fmt.Fprintln(os.Stderr, newText)
 				}
 			}
-		}
-		if genErr == "" {
-			genErr = nativeValidationFailures[op.name]
 		}
 		usesFallback := genErr != ""
 		inlineCallbacks := hasDynamicSSACall(ssaFn)
@@ -1306,6 +1291,14 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 			return false
 		}
 	}
+	// Materializing a later argument may spill an earlier one. Refresh every
+	// descriptor only after all arguments have been prepared so flattenArgs
+	// observes the final register/stack placement for the complete call.
+	for _, arg := range resolved {
+		if arg.isDesc && arg.goVar != "" {
+			g.emit("ctx.SyncDesc(&%s)", arg.goVar)
+		}
+	}
 	argList := strings.Join(argVars, ", ")
 	if results.Len() == 0 {
 		g.emit("ctx.EmitGoCallVoid(GoFuncAddr(%s), []JITValueDesc{%s})", funcExpr, argList)
@@ -1319,6 +1312,13 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	retType := results.At(0).Type()
 	dv := g.allocDesc()
 	g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
+	if basic, ok := retType.Underlying().(*types.Basic); ok && basic.Kind() == types.Bool {
+		// Go's internal ABI only defines the low byte of a bool result. Clear
+		// unspecified upper bits before generated CFG conditions consume it as
+		// a full register value.
+		g.emit("ctx.EmitAndRegImm32(%s.Reg, 1)", dv)
+		g.emit("%s.Type = tagBool", dv)
+	}
 	// Bind and protect GoCall result registers. The nil-ownership from
 	// EmitGoCallScalar prevents spilling, but BindReg makes it trackable.
 	// We protect until freeDeadOperands releases this value.
@@ -2858,8 +2858,14 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter) 
 		bbsDeclPrefix: "",
 	})
 
-	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s\t\t}",
-		g.wDecl.String(), injectBindRegCalls(g.w.String()))
+	// Keep generated native emitters out of vanilla binaries. jitEnabled is a
+	// build-tag-selected constant, so the Go compiler eliminates either this
+	// fallback or the (potentially very large) native emitter body completely.
+	// This prevents adding JIT coverage from perturbing non-JIT instruction
+	// layout and performance while retaining one generated source of truth.
+	guard := fmt.Sprintf("\tif !jitEnabled {\n\t\treturn jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)\n\t}\n", opName)
+	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s%s\t\t}",
+		guard, g.wDecl.String(), injectBindRegCalls(g.w.String()))
 	return result, ""
 }
 
@@ -4709,6 +4715,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\t%s := ctx.AllocReg()", auxReg)
 			g.emit("\tctx.EmitMovRegImm64(%s, makeAux(tagFastDict, 0))", auxReg)
 			g.emit("\t%s = JITValueDesc{Loc: LocRegPair, Type: tagFastDict, Reg: %s.Reg, Reg2: %s}", dv, src.goVar, auxReg)
+			g.emit("\tctx.TransferReg(%s.Reg)", src.goVar)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", src.goVar, dv)
+			g.emit("\tctx.BindReg(%s, &%s)", auxReg, dv)
+			g.emit("\t%s.Loc = LocNone", src.goVar)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "NewFastDictValue":
@@ -4754,11 +4764,17 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
 			g.emit("var %s JITValueDesc", dv)
+			g.emit("ctx.EnsureDesc(&%s)", arg.goVar)
 			g.emit("if %s.Loc == LocImm {", arg.goVar)
 			g.emit("\tpanic(\"FastDict: LocImm not expected at JIT compile time\")")
+			g.emit("} else if %s.Loc != LocRegPair {", arg.goVar)
+			g.emit("\tpanic(\"FastDict: expected Scmer register pair\")")
 			g.emit("} else {")
 			g.emit("\tctx.FreeReg(%s.Reg2)", arg.goVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocReg, Reg: %s.Reg}", dv, arg.goVar)
+			g.emit("\tctx.TransferReg(%s.Reg)", arg.goVar)
+			g.emit("\tctx.BindReg(%s.Reg, &%s)", arg.goVar, dv)
+			g.emit("\t%s.Loc = LocNone", arg.goVar)
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true}
 		case "Set":
@@ -6456,23 +6472,41 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		// LocImm Scmer cannot represent Go string header (ptr+len) correctly.
 		finalPtr := g.allocReg()
 		finalLen := g.allocReg()
-		g.emit("%s := ctx.AllocReg()", finalPtr)
-		g.emit("%s := ctx.AllocReg()", finalLen)
+		g.emit("var %s Reg", finalPtr)
+		g.emit("var %s Reg", finalLen)
+		g.emit("ctx.SyncDesc(&%s)", ptrDesc)
+		g.emit("ctx.EnsureDesc(&%s)", ptrDesc)
 		g.emit("if %s.Loc == LocImm {", ptrDesc)
+		g.emit("\t%s = ctx.AllocReg()", finalPtr)
 		g.emit("\tctx.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", finalPtr, ptrDesc)
 		g.emit("} else {")
-		g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", finalPtr, ptrDesc)
-		g.emit("\tctx.FreeReg(%s.Reg)", ptrDesc)
+		g.emit("\t%s = %s.Reg", finalPtr, ptrDesc)
 		g.emit("}")
+		g.emit("ctx.ProtectReg(%s)", finalPtr)
+		g.emit("ctx.SyncDesc(&%s)", lenDesc)
+		g.emit("ctx.EnsureDesc(&%s)", lenDesc)
 		g.emit("if %s.Loc == LocImm {", lenDesc)
+		g.emit("\t%s = ctx.AllocReg()", finalLen)
 		g.emit("\tctx.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", finalLen, lenDesc)
 		g.emit("} else {")
-		g.emit("\tctx.EmitMovRegReg(%s, %s.Reg)", finalLen, lenDesc)
-		g.emit("\tctx.FreeReg(%s.Reg)", lenDesc)
+		g.emit("\t%s = %s.Reg", finalLen, lenDesc)
 		g.emit("}")
+		g.emit("ctx.ProtectReg(%s)", finalLen)
 		if isGoSlice {
 			finalCap := g.allocReg()
-			g.emit("%s := ctx.AllocRegExcept(%s, %s)", finalCap, finalPtr, finalLen)
+			g.emit("ctx.SyncDesc(&%s)", x.goVar)
+			g.emit("ctx.EnsureDesc(&%s)", x.goVar)
+			if low.isDesc {
+				g.emit("ctx.ProtectReg(%s.Reg)", x.goVar)
+				g.emit("ctx.ProtectReg(%s.Reg2)", x.goVar)
+				g.emit("ctx.ProtectReg(%s.Reg3)", x.goVar)
+				g.emit("ctx.SyncDesc(&%s)", low.goVar)
+				g.emit("ctx.EnsureDesc(&%s)", low.goVar)
+				g.emit("ctx.UnprotectReg(%s.Reg3)", x.goVar)
+				g.emit("ctx.UnprotectReg(%s.Reg2)", x.goVar)
+				g.emit("ctx.UnprotectReg(%s.Reg)", x.goVar)
+			}
+			g.emit("%s := ctx.AllocRegExcept(%s, %s, %s.Reg3, %s.Reg)", finalCap, finalPtr, finalLen, x.goVar, low.goVar)
 			g.emit("ctx.EmitMovRegReg(%s, %s.Reg3)", finalCap, x.goVar)
 			g.emit("if %s.Loc == LocImm {", low.goVar)
 			g.emit("\tif %s.Imm.Int() >= -2147483648 && %s.Imm.Int() <= 2147483647 {", low.goVar, low.goVar)
@@ -6484,9 +6518,18 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("} else {")
 			g.emit("\tctx.EmitSubInt64(%s, %s.Reg)", finalCap, low.goVar)
 			g.emit("}")
+			g.emit("ctx.UnprotectReg(%s)", finalLen)
+			g.emit("ctx.UnprotectReg(%s)", finalPtr)
 			g.emit("%s = JITValueDesc{Loc: LocRegTriple, Reg: %s, Reg2: %s, Reg3: %s}", dv2, finalPtr, finalLen, finalCap)
+			g.emit("ctx.BindReg(%s, &%s)", finalPtr, dv2)
+			g.emit("ctx.BindReg(%s, &%s)", finalLen, dv2)
+			g.emit("ctx.BindReg(%s, &%s)", finalCap, dv2)
 		} else {
+			g.emit("ctx.UnprotectReg(%s)", finalLen)
+			g.emit("ctx.UnprotectReg(%s)", finalPtr)
 			g.emit("%s = JITValueDesc{Loc: LocRegPair, Reg: %s, Reg2: %s}", dv2, finalPtr, finalLen)
+			g.emit("ctx.BindReg(%s, &%s)", finalPtr, dv2)
+			g.emit("ctx.BindReg(%s, &%s)", finalLen, dv2)
 		}
 		_ = dv
 		marker := "_gostring"
