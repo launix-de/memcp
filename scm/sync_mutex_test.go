@@ -24,9 +24,21 @@ import (
 	"time"
 )
 
-func TestContextCheckWithoutRequestContextIsLive(t *testing.T) {
-	if !Context(NewString("check")).Bool() {
-		t.Fatal("context check without a request context should be live")
+type mutexTestTransaction struct {
+	ss  *SessionState
+	seq uint64
+}
+
+func (tx *mutexTestTransaction) QuerySessionState() (*SessionState, uint64) {
+	return tx.ss, tx.seq
+}
+
+func TestContextPassesExplicitSession(t *testing.T) {
+	result := Context(NewFunc(func(a ...Scmer) Scmer {
+		return Apply(a[0], NewString("key"), NewInt(7))
+	}))
+	if result.Int() != 7 {
+		t.Fatalf("expected explicit context session result 7, got %v", result)
 	}
 }
 
@@ -35,14 +47,14 @@ func TestMutexWaitStopsWhenContextIsCancelled(t *testing.T) {
 	holderEntered := make(chan struct{})
 	releaseHolder := make(chan struct{})
 	holderDone := make(chan struct{})
-	go NewContext(context.Background(), func() {
+	go func() {
 		defer close(holderDone)
 		Apply(lock, NewFunc(func(_ ...Scmer) Scmer {
 			close(holderEntered)
 			<-releaseHolder
 			return NewBool(true)
 		}))
-	})
+	}()
 	select {
 	case <-holderEntered:
 	case <-time.After(time.Second):
@@ -50,15 +62,19 @@ func TestMutexWaitStopsWhenContextIsCancelled(t *testing.T) {
 	}
 
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	ss := &SessionState{}
+	seq := ss.BeginQuery("Query", "mutex wait")
+	ss.SetQueryContext(seq, waiterCtx)
+	defer ss.EndQuery(seq, "Sleep", "")
 	var waiterRan atomic.Bool
 	waiterDone := make(chan any, 1)
-	go NewContext(waiterCtx, func() {
+	go func() {
 		defer func() { waiterDone <- recover() }()
-		Apply(lock, NewFunc(func(_ ...Scmer) Scmer {
+		Apply(lock, NewAny(&mutexTestTransaction{ss: ss, seq: seq}), NewFunc(func(_ ...Scmer) Scmer {
 			waiterRan.Store(true)
 			return NewBool(true)
 		}))
-	})
+	}()
 	cancelWaiter()
 	select {
 	case recovered := <-waiterDone:

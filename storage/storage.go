@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "context"
 import "fmt"
 import "io"
 import "math/rand"
@@ -435,7 +436,7 @@ func lockTablePublicationShards(shards []*storageShard, write bool, snapshotFoll
 // registered with the session so that ReleaseAllLocks() can free it later.
 // A run of FIFO-adjacent READ requests shares the lock. The first reader, or an
 // exclusive writer, drains in-flight shard readers before publishing the lock.
-func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss *scm.SessionState) func() {
+func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss *scm.SessionState, querySeq uint64) func() {
 	if ss == nil {
 		panic("LOCK TABLES requires a query session")
 	}
@@ -448,6 +449,15 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 		panic("LOCK TABLES: unknown table: " + schema + "." + name)
 	}
 	cond := t.getTableLockCond()
+	ctx := tableLockQueryContext(ss, querySeq)
+	if ctx != nil {
+		stopWake := context.AfterFunc(ctx, func() {
+			t.tableLockMu.Lock()
+			cond.Broadcast()
+			t.tableLockMu.Unlock()
+		})
+		defer stopWake()
+	}
 	ss.BeginLockWait()
 	defer ss.EndLockWait()
 	t.tableLockMu.Lock()
@@ -465,6 +475,10 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 	myTicket := t.tableLockNext
 	t.tableLockNext++
 	for myTicket != t.tableLockServe || t.tableLockState.Load() < 0 || (write && t.tableLockState.Load() != 0) {
+		if ctx != nil && ctx.Err() != nil {
+			t.tableLockMu.Unlock()
+			panic("query killed")
+		}
 		cond.Wait()
 	}
 	if !write && t.tableLockState.Load() > 0 {
@@ -544,39 +558,47 @@ func acquireTableLock(schema, name string, write bool, snapshotFollows bool, ss 
 	}
 }
 
-func lockTable(schema, name string, write bool, ss *scm.SessionState) {
-	unlock := acquireTableLock(schema, name, write, false, ss)
+func lockTable(schema, name string, write bool, ss *scm.SessionState, querySeq uint64) {
+	unlock := acquireTableLock(schema, name, write, false, ss, querySeq)
 	if ss != nil {
 		ss.AddLock(unlock)
 	}
 }
 
-const computeInvalidationWaveKey = "memcpComputeInvalidationWave"
-
-func withComputeInvalidationWave(t *table, colName string, invalidate func() bool) {
-	if value, ok := scm.GetGLSValue(computeInvalidationWaveKey); ok {
-		visited := value.(map[string]bool)
-		key := t.schema.Name + "\x00" + t.Name + "\x00" + colName
-		if visited[key] {
+func withComputeInvalidationWave(t *table, colName string, tx *TxContext, invalidate func() bool) {
+	key := t.schema.Name + "\x00" + t.Name + "\x00" + colName
+	if tx != nil {
+		tx.mu.Lock()
+		if tx.invalidationDepth == 0 {
+			tx.invalidationVisited = make(map[string]bool)
+		}
+		if tx.invalidationVisited[key] {
+			tx.mu.Unlock()
 			return
 		}
-		visited[key] = true
-		if invalidate() {
-			t.ExecuteTriggers(AfterInvalidate, nil, nil)
-		}
-		return
+		tx.invalidationVisited[key] = true
+		tx.invalidationDepth++
+		tx.mu.Unlock()
+		defer func() {
+			tx.mu.Lock()
+			tx.invalidationDepth--
+			if tx.invalidationDepth == 0 {
+				tx.invalidationVisited = nil
+			}
+			tx.mu.Unlock()
+		}()
 	}
-	scm.SetValues(map[string]any{computeInvalidationWaveKey: make(map[string]bool)}, func() {
-		withComputeInvalidationWave(t, colName, invalidate)
-	})
+	if invalidate() {
+		t.ExecuteTriggers(AfterInvalidate, nil, nil, tx)
+	}
 }
 
 // invalidateComputedColumn propagates invalidation through computed-cache
-// dependency edges. A GLS-local visited set makes one synchronous invalidation
+// dependency edges. A transaction-local visited set makes one synchronous invalidation
 // wave idempotent and prevents malformed cyclic computed definitions from
 // recursing forever without introducing a global lock or cross-query state.
-func invalidateComputedColumn(t *table, colName string) {
-	withComputeInvalidationWave(t, colName, func() bool {
+func invalidateComputedColumn(t *table, colName string, tx *TxContext) {
+	withComputeInvalidationWave(t, colName, tx, func() bool {
 		invalidated := false
 		for _, s := range t.maintenanceShards() {
 			s.mu.RLock()
@@ -596,12 +618,12 @@ func invalidateComputedColumn(t *table, colName string) {
 // nested cache remains correct even when its own lookup relation cannot be
 // narrowed safely. The common invalidation-wave guard prevents dependency
 // cycles exactly as for invalidateComputedColumn.
-func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct{}) {
+func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct{}, currentTx *TxContext) {
 	if proxy == nil || proxy.shard == nil || len(recids) == 0 {
 		return
 	}
-	withComputeInvalidationWave(proxy.shard.t, proxy.colName, func() bool {
-		proxy.InvalidateRows(recids)
+	withComputeInvalidationWave(proxy.shard.t, proxy.colName, currentTx, func() bool {
+		proxy.InvalidateRowsTx(currentTx, recids)
 		return true
 	})
 }
@@ -1801,6 +1823,10 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			ifnotexists := len(a) > 4 && scm.ToBool(a[4])
+			currentTx := scm.NewNil()
+			if len(a) > 5 {
+				currentTx = a[5]
+			}
 			db := GetDatabase(scm.String(a[0]))
 			if db == nil {
 				panic("database " + scm.String(a[0]) + " does not exist")
@@ -1823,7 +1849,7 @@ func Init(en scm.Env) {
 					if existing.OnInit != nil || existing.onInitComplete {
 						// This also reruns persisted oninit for data-empty MEMORY/CACHE
 						// tables after restart. The local barrier affects no other table.
-						existing.awaitCreationInitialization()
+						existing.awaitCreationInitialization(currentTx)
 						atomic.StoreUint64(&existing.lastAccessed, uint64(time.Now().UnixNano()))
 						return scm.NewBool(false)
 					}
@@ -1948,7 +1974,7 @@ func Init(en scm.Env) {
 				}
 				// The competing creator may have published the table after our
 				// optimistic probe. Its table-local barrier includes oninit.
-				existing.awaitCreationInitialization()
+				existing.awaitCreationInitialization(currentTx)
 				if !ifnotexists {
 					panic("Table " + tblName + " already exists")
 				}
@@ -1994,10 +2020,10 @@ func Init(en scm.Env) {
 					newTable.creationMu.Unlock()
 				}()
 				if !oninit.IsNil() {
-					scm.Apply(oninit)
+					scm.Apply(oninit, currentTx)
 				}
 				newTable.onInitComplete = true
-				executeRegisteredCreateTableTriggers(newTable)
+				executeRegisteredCreateTableTriggers(newTable, nil)
 			}()
 			if newTable.creationPanic != nil {
 				panic(newTable.creationPanic)
@@ -2011,6 +2037,7 @@ func Init(en scm.Env) {
 				{Kind: "list", Label: "cols", Description: "column and constraint definitions", Element: &scm.TypeDescriptor{Kind: "list", Label: "definition", Description: "one of (\"column\" name type dimensions typeparams), (\"unique\" name columns), or (\"foreign\" name local_columns referenced_table referenced_columns update_mode delete_mode). Column lists contain strings; foreign-key modes are restrict, cascade, or set null. A column definition's dimensions contains integers and its typeparams uses the same fields documented by createcolumn options"}},
 				tableOptions,
 				{Kind: "bool", Label: "ifnotexists", Description: "when true, return false instead of failing if the table exists; if another caller is still creating it, wait for that caller's after-create-table initialization before returning false", Optional: true},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context for oninit", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool", Description: "true when this call created and initialized the table, false when ifnotexists reused an initialized table"},
 		},
@@ -2106,7 +2133,11 @@ func Init(en scm.Env) {
 						filter = typeparams[i+1]
 					}
 				}
-				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter)
+				var currentTx *TxContext
+				if len(a) > 7 {
+					currentTx = scmerToTxContext(a[7])
+				}
+				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter, currentTx)
 				return scm.NewBool(true)
 			}
 
@@ -2129,6 +2160,7 @@ func Init(en scm.Env) {
 					value.Optional = true
 					return value
 				}(),
+				{Kind: "any", Label: "tx", Description: "explicit transaction used while materializing computed values", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2138,6 +2170,10 @@ func Init(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
+			var currentTx *TxContext
+			if len(a) > 4 {
+				currentTx = scmerToTxContext(a[4])
+			}
 
 			if !scm.ToBool(a[2]) {
 				return scm.NewBool(true)
@@ -2152,8 +2188,8 @@ func Init(en scm.Env) {
 			// metadata was published. Boot-time catalog creation is single-threaded
 			// and therefore does not require a user-level lock.
 			unlockTable := func() {}
-			if ss := scm.GetCurrentSessionState(); ss != nil {
-				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss)
+			if ss := SessionStateFromTx(currentTx); ss != nil {
+				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
 			}
 			defer unlockTable()
 
@@ -2167,7 +2203,7 @@ func Init(en scm.Env) {
 						return true, false
 					}
 				}
-				return false, t.hasDuplicateUniqueValues(cols)
+				return false, t.hasDuplicateUniqueValues(cols, currentTx)
 			}()
 			if alreadyExists {
 				return scm.NewBool(false)
@@ -2200,6 +2236,7 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "keyname", Description: "name of the new key"},
 				{Kind: "bool", Label: "unique", Description: "whether the key is unique"},
 				{Kind: "list", Label: "columns", Description: "list of columns to include"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2209,11 +2246,15 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			name := scm.String(a[1])
+			var currentTx *TxContext
+			if len(a) > 2 {
+				currentTx = scmerToTxContext(a[2])
+			}
 			requireTableMaintenance(t.schema.Name, t.Name, maintenanceAlter)
 
 			unlockTable := func() {}
-			if ss := scm.GetCurrentSessionState(); ss != nil {
-				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss)
+			if ss := SessionStateFromTx(currentTx); ss != nil {
+				unlockTable = acquireTableLock(t.schema.Name, t.Name, true, false, ss, querySeqFromTx(currentTx))
 			}
 			defer unlockTable()
 			t.schema.schemalock.Lock()
@@ -2234,6 +2275,7 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "keyname", Description: "name of the unique key"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2574,13 +2616,18 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			t := TableFromScmer(a[0])
 			colName := scm.String(a[1])
-			invalidateComputedColumn(t, colName)
+			var currentTx *TxContext
+			if len(a) > 2 {
+				currentTx = scmerToTxContext(a[2])
+			}
+			invalidateComputedColumn(t, colName, currentTx)
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "marks all values of a computed column as stale",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "column", Description: "name of the computed column"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2821,7 +2868,7 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
-					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUse, ktTable.releaseCacheUse)
+					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
@@ -2830,7 +2877,7 @@ func Init(en scm.Env) {
 					IsSystem: true,
 					Priority: 90, // run before invalidatecolumn (100) so keys are current when values recompute
 					Func:     buildFKProc(td.body),
-					Acquire:  ktTable.acquireCacheUse,
+					Acquire:  ktTable.acquireCacheUseForTrigger,
 					Release:  ktTable.releaseCacheUse,
 				})
 			}
@@ -2853,7 +2900,7 @@ func Init(en scm.Env) {
 					}
 				}
 				if exists {
-					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUse, ktTable.releaseCacheUse)
+					baseTable.SetTriggerTarget(triggerName, ktTable.acquireCacheUseForTrigger, ktTable.releaseCacheUse)
 					continue
 				}
 				baseTable.AddTrigger(TriggerDescription{
@@ -2862,7 +2909,7 @@ func Init(en scm.Env) {
 					IsSystem: true,
 					Priority: 90,
 					Func:     buildFKProc(dropBody),
-					Acquire:  ktTable.acquireCacheUse,
+					Acquire:  ktTable.acquireCacheUseForTrigger,
 					Release:  ktTable.releaseCacheUse,
 				})
 			}
@@ -2906,7 +2953,7 @@ func Init(en scm.Env) {
 					}
 				}()
 				for _, source := range sourceTables {
-					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, ss))
+					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, ss, querySeqFromTx(currentTx)))
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
@@ -2956,7 +3003,9 @@ func Init(en scm.Env) {
 		Name: "locktables",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			ss := scm.GetCurrentSessionState()
+			tx := scmerToTxContext(a[1])
+			ss := SessionStateFromTx(tx)
+			querySeq := querySeqFromTx(tx)
 			if ss != nil {
 				ss.ReleaseAllLocks() // LOCK TABLES implicitly releases prior locks
 			}
@@ -2965,13 +3014,14 @@ func Init(en scm.Env) {
 				schema := scm.String(triple[0])
 				tbl := scm.String(triple[1])
 				write := triple[2].Bool()
-				lockTable(schema, tbl, write, ss)
+				lockTable(schema, tbl, write, ss, querySeq)
 			}
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "acquires WRITE or READ user-level locks on a list of tables (LOCK TABLES); implicitly releases any previously held locks", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "list", Label: "locks", Description: "flat list of schema, table, write? triples"},
+				{Kind: "any", Label: "tx", Description: "explicit request context"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -2980,12 +3030,14 @@ func Init(en scm.Env) {
 		Name: "unlocktables",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			if ss := scm.GetCurrentSessionState(); ss != nil {
+			ss := SessionStateFromTx(scmerToTxContext(a[0]))
+			if ss != nil {
 				ss.ReleaseAllLocks()
 			}
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "releases all user-level table locks held by this session", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx", Description: "explicit request context"}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -3061,7 +3113,11 @@ func Init(en scm.Env) {
 			for i, row := range rowVals {
 				rows[i] = mustScmerSlice(row, "insert row")
 			}
-			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst)
+			var currentTx *TxContext
+			if len(a) > 7 {
+				currentTx = scmerToTxContext(a[7])
+			}
+			inserted := t.Insert(cols, rows, onCollisionCols, onCollision, mergeNull, onFirst, currentTx)
 			return scm.NewInt(int64(inserted))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "inserts a new dataset into table and returns the number of successful items", HasSideEffects: true,
@@ -3073,6 +3129,7 @@ func Init(en scm.Env) {
 				{Kind: "func", Label: "onCollision", Description: "function called for each collision. Its positional parameters are the values requested by onCollisionCols, in the same order. If omitted, collisions raise an error.", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "any", Label: "column values", Description: "one value for each onCollisionCols entry", Variadic: true}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result"}},
 				{Kind: "bool", Label: "mergeNull", Description: "if true, it will handle NULL values as equal according to SQL 2003's definition of DISTINCT (https://en.wikipedia.org/wiki/Null_(SQL)#When_two_nulls_are_equal:_grouping,_sorting,_and_some_set_operations)", Optional: true},
 				{Kind: "func", Label: "onInsertid", Description: "called once with the first auto_increment id assigned for this INSERT", Optional: true, Params: []*scm.TypeDescriptor{{Kind: "number", Label: "id", Description: "first assigned auto_increment id"}}, Return: &scm.TypeDescriptor{Kind: "any", Label: "result", Description: "ignored callback result"}},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "number"},
 		},
@@ -4000,7 +4057,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_check_ref",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := CurrentTx()
+			currentTx := scmerToTxContext(a[5])
 			schema := scm.String(a[0])
 			parentTable := scm.String(a[1])
 			parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
@@ -4032,6 +4089,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "parent_cols", Description: "parent column names"},
 				{Kind: "list", Label: "values", Description: "FK values to check"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4042,7 +4100,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_delete",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := CurrentTx()
+			currentTx := scmerToTxContext(a[6])
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -4078,6 +4136,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "parent_vals", Description: "old parent PK values"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
 				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4088,7 +4147,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_update",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := CurrentTx()
+			currentTx := scmerToTxContext(a[7])
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -4138,6 +4197,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "new_vals", Description: "new parent PK values"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
 				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4180,6 +4240,10 @@ func fkQuotedList(cols []string) scm.Scmer {
 	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(elems)})
 }
 
+func fkTxExpr() scm.Scmer {
+	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("__memcp_tx")})
+}
+
 // installFKTriggers creates system triggers on child (t1) and parent (t2) tables
 // to enforce the foreign key constraint. All trigger functions are serializable Procs
 // that call declared builtins (__fk_check_ref, __fk_on_parent_delete, __fk_on_parent_update).
@@ -4199,7 +4263,7 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 				scm.NewSymbol("__fk_check_ref"),
 				scm.NewString(dbName), scm.NewString(fk.Tbl2),
 				fkQuotedList(fk.Cols2), fkValListExpr("NEW", fk.Cols1),
-				scm.NewString(fk.Id),
+				scm.NewString(fk.Id), fkTxExpr(),
 			}),
 			scm.NewSymbol("NEW"),
 		})),
@@ -4217,7 +4281,7 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 				scm.NewSymbol("__fk_check_ref"),
 				scm.NewString(dbName), scm.NewString(fk.Tbl2),
 				fkQuotedList(fk.Cols2), fkValListExpr("NEW", fk.Cols1),
-				scm.NewString(fk.Id),
+				scm.NewString(fk.Id), fkTxExpr(),
 			}),
 			scm.NewSymbol("NEW"),
 		})),
@@ -4240,7 +4304,7 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 			scm.NewSymbol("__fk_on_parent_delete"),
 			scm.NewString(dbName), scm.NewString(fk.Tbl1),
 			fkQuotedList(fk.Cols1), fkValListExpr("OLD", fk.Cols2),
-			scm.NewString(fk.Id), scm.NewString(modeStr),
+			scm.NewString(fk.Id), scm.NewString(modeStr), fkTxExpr(),
 		})),
 	})
 
@@ -4270,7 +4334,7 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 				scm.NewString(dbName), scm.NewString(fk.Tbl1),
 				fkQuotedList(fk.Cols1),
 				fkValListExpr("OLD", fk.Cols2), fkValListExpr("NEW", fk.Cols2),
-				scm.NewString(fk.Id), scm.NewString(updateModeStr),
+				scm.NewString(fk.Id), scm.NewString(updateModeStr), fkTxExpr(),
 			}),
 			scm.NewSymbol("NEW"),
 		})),

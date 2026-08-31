@@ -24,11 +24,10 @@ package storage
 //
 // Three variants let you isolate individual overhead layers:
 //
-//	_NoSession   – plain scan, no GLS context (goroutine overhead only)
-//	_WithGLS     – scan inside gls.SetValues (GLS marks on stack, shallow context)
-//	_WithAutocommit – full HTTP handler path: GLS + autocommit transaction
+//	_NoSession      – plain scan without transaction context
+//	_WithExplicitTx – scan with an explicitly passed transaction
+//	_WithAutocommit – autocommit transaction creation plus scan
 import (
-	"context"
 	"strconv"
 	"testing"
 
@@ -43,7 +42,7 @@ func benchScanTable(b *testing.B, name string) *table {
 	return tbl
 }
 
-// BenchmarkScanFixedCosts_NoSession: scan without any GLS session.
+// BenchmarkScanFixedCosts_NoSession: scan without an explicit session.
 // Establishes the pure goroutine + channel overhead baseline.
 func BenchmarkScanFixedCosts_NoSession(b *testing.B) {
 	tbl := benchScanTable(b, "nosession")
@@ -62,30 +61,22 @@ func BenchmarkScanFixedCosts_NoSession(b *testing.B) {
 	}
 }
 
-// BenchmarkScanFixedCosts_WithGLS: scan inside gls.SetValues.
-// Measures GLS overhead added on top of the goroutine baseline.
-func BenchmarkScanFixedCosts_WithGLS(b *testing.B) {
-	tbl := benchScanTable(b, "withgls")
+// BenchmarkScanFixedCosts_WithExplicitTx measures explicit transaction passing.
+func BenchmarkScanFixedCosts_WithExplicitTx(b *testing.B) {
+	tbl := benchScanTable(b, "explicit_tx")
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
-	session := scm.NewSession()
+	tx := NewTxContext(TxCursorStability)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scm.SetValues(map[string]any{"session": session}, func() {
-			tbl.scan(
-				nil,
-				[]string{"id"}, trueFn,
-				[]string{"id"}, trueFn,
-				nilFn, neutral, nilFn, false,
-			)
-		})
+		tbl.scan(tx, []string{"id"}, trueFn, []string{"id"}, trueFn, nilFn, neutral, nilFn, false)
 	}
 }
 
 // BenchmarkScanFixedCosts_WithAutocommit: full HTTP handler path.
-// GLS context (SetValues) + autocommit transaction wrapping + scan.
+// Autocommit transaction creation plus an explicitly transaction-bound scan.
 func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 	tbl := benchScanTable(b, "autocommit")
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
@@ -95,28 +86,24 @@ func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scm.SetValues(map[string]any{"session": session}, func() {
-			WithAutocommit(session, nil, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-				return tbl.scan(
-					CurrentTx(),
-					[]string{"id"}, trueFn,
-					[]string{"id"}, trueFn,
-					nilFn, neutral, nilFn, false,
-				)
-			}))
-		})
+		WithAutocommit(session, nil, 0, "benchmark scan", scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+			return tbl.scan(
+				scmerToTxContext(a[0]),
+				[]string{"id"}, trueFn,
+				[]string{"id"}, trueFn,
+				nilFn, neutral, nilFn, false,
+			)
+		}))
 	}
 }
 
 // BenchmarkScanFixedCosts_DeepStack: scan called from a deep-ish call stack.
-// Simulates GLS stack-scan cost when marks are far below current frame
-// (as happens when scan is called from deep Scheme evaluation).
+// Measures whether deep Go call stacks affect scan setup cost.
 func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 	tbl := benchScanTable(b, "deepstack")
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
-	session := scm.NewSession()
 
 	// helper that recurses to a given depth then calls fn
 	var recurse func(depth int, fn func())
@@ -130,16 +117,14 @@ func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scm.SetValues(map[string]any{"session": session}, func() {
-			// simulate ~80 extra frames of Scheme evaluation above the scan call
-			recurse(80, func() {
-				tbl.scan(
-					nil,
-					[]string{"id"}, trueFn,
-					[]string{"id"}, trueFn,
-					nilFn, neutral, nilFn, false,
-				)
-			})
+		// simulate ~80 extra frames of Scheme evaluation above the scan call
+		recurse(80, func() {
+			tbl.scan(
+				nil,
+				[]string{"id"}, trueFn,
+				[]string{"id"}, trueFn,
+				nilFn, neutral, nilFn, false,
+			)
 		})
 	}
 }
@@ -265,25 +250,21 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 	}
 }
 
-// BenchmarkGLSGetValue measures raw cost of a single GLS GetValue call.
-// Establishes per-call overhead for CurrentTx() GLS lookups inside shard goroutines.
-func BenchmarkGLSGetValue(b *testing.B) {
-	session := scm.NewSession()
+// BenchmarkExplicitTxAccess measures the replacement for implicit context lookup.
+func BenchmarkExplicitTxAccess(b *testing.B) {
+	tx := NewTxContext(TxCursorStability)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scm.SetValues(map[string]any{"session": session}, func() {
-			for j := 0; j < 10; j++ {
-				scm.GetCurrentTx() // simulates per-shard CurrentTx() cost
-			}
-		})
+		for j := 0; j < 10; j++ {
+			_ = tx.SessionState
+		}
 	}
 }
 
-// BenchmarkNewContext measures the overhead of scm.NewContext (used by HTTP handler).
-func BenchmarkNewContext(b *testing.B) {
+// BenchmarkNewExecutionContext measures request-context construction.
+func BenchmarkNewExecutionContext(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		scm.NewContext(context.TODO(), func() {})
 	}
 }
 
@@ -313,23 +294,20 @@ func BenchmarkScanUpdate(b *testing.B) {
 	tbl.Insert([]string{"id", "val"}, rows, nil, scm.NewNil(), false, nil)
 
 	// Attach the computor to the column after data is loaded
-	tbl.ComputeColumn("cached_val", []string{"val"}, computor, nil, scm.NewNil())
+	tbl.ComputeColumn("cached_val", []string{"val"}, computor, nil, scm.NewNil(), nil)
 
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
-	session := scm.NewSession()
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		scm.SetValues(map[string]any{"session": session}, func() {
-			tbl.scan(
-				nil,
-				[]string{"id"}, trueFn,
-				[]string{"id", "$increment:cached_val"}, trueFn,
-				nilFn, neutral, nilFn, false,
-			)
-		})
+		tbl.scan(
+			nil,
+			[]string{"id"}, trueFn,
+			[]string{"id", "$increment:cached_val"}, trueFn,
+			nilFn, neutral, nilFn, false,
+		)
 	}
 }

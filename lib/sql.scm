@@ -160,14 +160,15 @@ __memcp_tx from the executing session, never retain the transaction which
 happened to compile a shared variant. The condition accumulator belongs to
 exactly one compile and substitutes for threading guard state through every
 functional planner return value. */
-(define sql_queryplan_compile_session (lambda (source_session)
+(define sql_queryplan_compile_session (lambda (source_session tx)
 	(begin
 		(define planning_session (newsession))
 		(define compile_bindings (newsession))
 		(define observation_scope (source_session
 			"get_or_compute_scoped"
-			(context "query")
+			(tx_query tx)
 			"__memcp_queryplan_observations"
+			tx
 			(lambda () (newsession))))
 		(reduce (source_session) (lambda (_ key)
 			(if (match key (regex "^v[0-9]+$" _) true false)
@@ -199,24 +200,36 @@ functional planner return value. */
 		(map (produceN (coalesceNil (preparations "count") 0))
 			(lambda (idx) (preparations (concat "preparation:" idx)))))))
 
-/* cached_parse formulas are also a public low-level interface and may be
-evaluated without sql_execute_formula. Normal SQL execution shadows this proxy
-with its concrete session; direct users retain the previous GLS lookup. */
-(define __memcp_execution_session (lambda args
-	(apply (context "session") args)))
-
 (define sql_queryplan_bind_execution_session (lambda (expr)
 	(match expr
 		((symbol quote) _value) expr
-		((symbol context) "session") (quote __memcp_execution_session)
-		((quote context) "session") (quote __memcp_execution_session)
-		(cons (symbol session) args) (cons (quote __memcp_execution_session)
-			(map args sql_queryplan_bind_execution_session))
-		(cons (quote session) args) (cons (quote __memcp_execution_session)
-			(map args sql_queryplan_bind_execution_session))
-		(cons head tail) (cons
-			(sql_queryplan_bind_execution_session head)
-			(map tail sql_queryplan_bind_execution_session))
+		(cons head tail) (if (or (equal? head session) (equal? head (quote session)))
+			(cons (quote session)
+				(map tail sql_queryplan_bind_execution_session))
+			(if (and (or (equal? head context) (equal? head (quote context)))
+				(and (equal? (count tail) 1) (equal? (car tail) "session")))
+				(quote session)
+				(if (or (equal? head session_globalvar) (equal? head (quote session_globalvar)))
+					(cons (quote session_globalvar_explicit)
+						(cons (quote session)
+							(map tail sql_queryplan_bind_execution_session)))
+					(if (or (equal? head connection_id) (equal? head (quote connection_id)))
+						(list (quote tx_connection_id) (quote tx))
+						(cons
+							(sql_queryplan_bind_execution_session head)
+							(map tail sql_queryplan_bind_execution_session))))))
+		_ expr)))
+
+/* Exact DML plans do not enter the guarded SELECT variant pipeline. Bind only
+request-context primitives here; session binding has broader AST semantics and
+must remain in the guarded-plan path. */
+(define sql_queryplan_bind_tx_calls (lambda (expr)
+	(match expr
+		((symbol quote) _value) expr
+		(cons head tail) (if (or (equal? head connection_id) (equal? head (quote connection_id)))
+			(list (quote tx_connection_id) (quote tx))
+			(cons (sql_queryplan_bind_tx_calls head)
+				(map tail sql_queryplan_bind_tx_calls)))
 		_ expr)))
 
 (define sql_queryplan_uncovered_binding_conditions (lambda (planning_session)
@@ -246,12 +259,12 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 			(regex "^__memcp_queryplan_observation_(?:value|metric)_" _) true
 			_ false)
 			(planner_queryplan_observation_current_read_expr key)
-			(list (list (quote context) "session") key))
+			(list (quote session) key))
 		((quote session) key) (if (match key
 			(regex "^__memcp_queryplan_observation_(?:value|metric)_" _) true
 			_ false)
 			(planner_queryplan_observation_current_read_expr key)
-			(list (list (quote context) "session") key))
+			(list (quote session) key))
 		(cons head tail) (cons
 			(sql_queryplan_runtime_guard_expr head)
 			(map tail sql_queryplan_runtime_guard_expr))
@@ -297,18 +310,23 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 				(list (quote lambda) (map bindings car) raw_guard)
 				(map bindings cadr)))))))
 
-(define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session)
+(define sql_invoke_parse_fn (lambda (parse_fn schema parse_query policy planning_session tx)
+	(if (list? parse_fn)
+		((car parse_fn) schema parse_query policy planning_session tx)
+		(parse_fn schema parse_query policy))))
+
+(define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
 	(begin
-		(context "check")
-		(define planning_session (sql_queryplan_compile_session source_session))
+		(tx_check tx)
+		(define planning_session (sql_queryplan_compile_session source_session tx))
 		(define compile_policy (sql_compile_table_policy policy))
 		(define raw_plan (with_session planning_session (lambda ()
-			(parse_fn schema parse_query compile_policy))))
+			(sql_invoke_parse_fn parse_fn schema parse_query compile_policy planning_session tx))))
 		/* Parsing includes logical and physical planning. Never spend optimizer
 		work or install a variant after its requesting context was cancelled. */
-		(context "check")
+		(tx_check tx)
 		(define plan (optimize raw_plan))
-		(context "check")
+		(tx_check tx)
 		(list
 			(sql_queryplan_guard_from_session planning_session)
 			plan
@@ -326,7 +344,7 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 					(list (quote number?) (list observation_session metric_key))
 					true
 					(list (quote !begin)
-						(list (quote context) "check")
+						(list (quote tx_check) (quote tx))
 						(list
 							(list (quote lambda) (list prepared_value)
 								(list (quote !begin)
@@ -337,7 +355,7 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 											prepared_value))
 									true))
 							(sql_queryplan_runtime_guard_expr producer))
-						(list (quote context) "check")
+						(list (quote tx_check) (quote tx))
 						true)))
 			(planner_queryplan_observation_session_expr))))))
 
@@ -369,7 +387,10 @@ otherwise side-effect-free guard. */
 (define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
 	(list (quote eval)
 		(list (quote sql_queryplan_variant_miss)
-			queryplan_cache cache_key entry parse_fn schema parse_query policy))))
+			queryplan_cache cache_key entry
+			(if (list? parse_fn) (list (quote quote) parse_fn) parse_fn)
+			schema parse_query policy
+			(quote session) (quote tx) (quote resultrow)))))
 
 (define sql_queryplan_formula (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
 	(begin
@@ -385,15 +406,15 @@ otherwise side-effect-free guard. */
 		(entry "formula" (sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants))
 		(entry "formula"))))
 
-(define sql_queryplan_new_entry (lambda (queryplan_cache cache_key parse_fn schema parse_query policy source_session)
+(define sql_queryplan_new_entry (lambda (queryplan_cache cache_key parse_fn schema parse_query policy source_session tx)
 	(begin
 		(define entry (newsession))
 		(entry "compile_lock" (mutex))
 		(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
-			(list (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session))))
+			(list (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session tx))))
 		(list entry formula))))
 
-(define sql_queryplan_matching_variant (lambda (variants)
+(define sql_queryplan_matching_variant (lambda (variants session tx resultrow)
 	(match variants
 		(cons variant rest) (begin
 			/* This request may hold an older formula while another request prepends a
@@ -401,22 +422,25 @@ otherwise side-effect-free guard. */
 			rechecking its guard; preparation expressions are request-idempotent. */
 			(map (nth variant 2) (lambda (preparation)
 				(eval (sql_queryplan_preparation_expr preparation))))
-			(if (eval (car variant)) variant (sql_queryplan_matching_variant rest)))
+			(if (eval (car variant))
+				variant
+				(sql_queryplan_matching_variant rest session tx resultrow)))
 		_ nil)))
 
 /* Called only by the final else branch of a cached plan. Recheck after taking
 the entry lock because another request may already have installed a matching
 variant. New variants are prepended so the most recent statistics regime wins
 the common guard-dispatch path. */
-(define sql_queryplan_variant_miss (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
-	((entry "compile_lock") (lambda ()
+(define sql_queryplan_variant_miss (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy session tx resultrow)
+	((entry "compile_lock") tx (lambda ()
 		(begin
 			(define current_variants (entry "variants"))
-			(define matching (sql_queryplan_matching_variant current_variants))
+			(define matching (sql_queryplan_matching_variant current_variants
+				session tx resultrow))
 			(if (not (nil? matching))
 				(cadr matching)
 				(begin
-					(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy (context "session")))
+					(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx))
 					(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
 						(cons variant current_variants)))
 					(queryplan_cache cache_key (list entry formula))
@@ -424,7 +448,7 @@ the common guard-dispatch path. */
 
 /* cached_parse: wraps SELECT planning with a lazy polymorphic Scheme plan
 cache. DDL, DML and transaction-control formulas retain the original exact
-cache path because their AST may intentionally operate on (context "session").
+cache path because their AST may intentionally operate on session state.
 cache_key = username:schema:view-generation:hash(query-shape), retaining policy
 isolation while sharing safe SELECT plans across literal variants. Each entry
 is a variadic if chain of guarded specialized plans plus one compile miss arm.
@@ -438,7 +462,7 @@ user table merely to discard a newly constructed policy closure. */
 		(sql_policy (cadr policy_spec))
 		policy_spec)))
 
-(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals)
+(define cached_parse (lambda (queryplan_cache parse_fn schema query policy username session parameterize_literals tx)
 	(begin
 		(define explain_query (match (toUpper query)
 			(regex "^\\s*EXPLAIN\\b" _) true
@@ -467,31 +491,27 @@ user table merely to discard a newly constructed policy closure. */
 				nil)
 			/* Compile diagnostics measure true misses and must not turn their own
 			previous result into a cache hit. The inspected query is never run. */
-			(define exact_compile (lambda ()
+			(define exact_compile (lambda (compile_tx)
 				(begin
 					(define resolved_policy (sql_policy_spec_resolve policy))
 					(define compile_policy (sql_compile_table_policy resolved_policy))
-					(optimize (with_session session (lambda ()
-						(parse_fn schema parse_query compile_policy)))))))
+					(optimize (sql_queryplan_bind_tx_calls
+						(sql_queryplan_bind_execution_session
+							(with_session session (lambda ()
+								(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
 			(define formula (if (or compile_diagnostic (not guarded_select))
 				(if compile_diagnostic
-					(exact_compile)
-					(queryplan_cache "get_or_compute" cache_key exact_compile))
+					(exact_compile tx)
+					(queryplan_cache "get_or_compute" cache_key tx exact_compile))
 				(begin
-					(define cached_entry (queryplan_cache "get_or_compute" cache_key
-						(lambda () (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
-							(sql_policy_spec_resolve policy) session))))
+					(define cached_entry (queryplan_cache "get_or_compute" cache_key tx
+						(lambda (compile_tx) (sql_queryplan_new_entry queryplan_cache cache_key parse_fn schema parse_query
+							(sql_policy_spec_resolve policy) session compile_tx))))
 					(cadr cached_entry))))
 			formula)))))
 
-/* The frontend already owns the executing session and request identity. Pass
-them to with_autocommit so transaction setup does not rediscover either value
-through goroutine-local context lookups. */
-(define sql_execute_formula (lambda (session execution_context formula resultrow)
-	(begin
-		(define __memcp_execution_session session)
-		(with_autocommit session execution_context
-			(lambda () (eval (source "SQL Query" 1 1 formula)))))))
+(define sql_execute_formula (lambda (session tx formula resultrow)
+	(eval (source "SQL Query" 1 1 formula))))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),
@@ -658,11 +678,9 @@ the latter is expanded before logical planning and never materialized. */
 
 /* session_globalvar: reads from session first, falls back to globalvars.
 Used for @@var resolution so per-session SET affects @@var reads. */
-(define session_globalvar (lambda (key) (coalesceNil ((context "session") key) (globalvars key))))
+(define session_globalvar (lambda (key) (globalvars key)))
+(define session_globalvar_explicit (lambda (session key) (coalesceNil (session key) (globalvars key))))
 
-
-/* persistent HTTP sessions for transaction support */
-(set http_sessions (newsession))
 
 /* http hook for handling SQL */
 (define http_handler (begin
@@ -675,40 +693,24 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(try (lambda () (time (begin
 					((res "header") "Content-Type" "text/event-stream; charset=utf-8")
 					(define resultrow (res "jsonl"))
-					/* Use persistent session if X-Session-Id header is present */
-					(define session_id ((req "header") "X-Session-Id"))
-					(define execution_context (req "__execution_context"))
-					(define session (if session_id
-						(begin
-							(define existing (http_sessions session_id))
-							(if existing existing (begin
-								(define new_sess (newsession))
-								(http_sessions session_id new_sess)
-								new_sess
-							))
-						)
-						(req "__session")
-					))
+					(define session (req "__session"))
+					(define session_state (req "__session_state"))
+					(define query_seq (req "__query_seq"))
 					(session "username" (req "username"))
 					(session "schema" schema)
 					/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
 					before parse/build so session-sensitive planner rewrites see the right values. */
 					(extract_assoc (req "query") (lambda (k v) (session k v)))
-					(define formula (cached_parse sql_queryplan_cache parse_sql schema query
-						(list (quote sql-policy-for) (req "username")) (req "username") session true))
 					(set resultrow_called false)
 					(set original_resultrow resultrow)
 					(define resultrow (lambda (row) (begin
 						(set resultrow_called true)
 						(original_resultrow row))))
-					/* network.go already installed the request-local Scheme session. Only
-					the legacy persistent X-Session-Id map can select a different session;
-					avoid a second goroutine-stack lookup for ordinary autocommit queries. */
-					(define execute_formula (lambda ()
-						(sql_execute_formula session execution_context formula resultrow)))
-					(set query_result (if session_id
-						(with_session session execute_formula)
-						(execute_formula)))
+					(set query_result (with_autocommit session session_state query_seq query
+						(lambda (tx) (begin
+							(define formula (cached_parse sql_queryplan_cache (list parse_sql) schema query
+								(list (quote sql-policy-for) (req "username")) (req "username") session true tx))
+							(sql_execute_formula session tx formula resultrow)))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -737,7 +739,8 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 					((res "header") "Content-Type" "text/plain")
 					(define resultrow (res "jsonl"))
 					(define session (req "__session"))
-					(define execution_context (req "__execution_context"))
+					(define session_state (req "__session_state"))
+					(define query_seq (req "__query_seq"))
 					(session "username" (req "username"))
 					(session "schema" schema)
 					(set resultrow_called false)
@@ -760,14 +763,14 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 						(regex "FROM\\s+pg_indexes" _) true
 						(regex "FROM\\s+pg_constraint" _) true
 						false))
-					(define query_result (if handled nil (begin
-						/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
-						before parse/build so session-sensitive planner rewrites see the right values. */
-						(extract_assoc (req "query") (lambda (k v) (session k v)))
-						(define formula (cached_parse psql_queryplan_cache parse_psql schema query
-							(list (quote sql-policy-for) (req "username")) (req "username") session false))
-						(sql_execute_formula session execution_context formula resultrow)
-					)))
+					(define query_result (with_autocommit session session_state query_seq query
+						(lambda (tx) (if handled nil (begin
+							/* Bind URL query params (v1=, v2=, ...) as prepared-statement args into the session
+							before parse/build so session-sensitive planner rewrites see the right values. */
+							(extract_assoc (req "query") (lambda (k v) (session k v)))
+							(define formula (cached_parse psql_queryplan_cache (list parse_psql) schema query
+								(list (quote sql-policy-for) (req "username")) (req "username") session false tx))
+							(sql_execute_formula session tx formula resultrow))))))
 					/* If no resultrow was called and we got a number, return it as affected_rows */
 					(if (and (not resultrow_called) (number? query_result)) (begin
 						(original_resultrow '("affected_rows" query_result))
@@ -795,7 +798,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 			(begin
 				(try (lambda () (begin
 					((res "header") "Content-Type" "application/json")
-					(define session (context "session"))
+					(define session (req "__session"))
 					(session "username" (req "username"))
 					(session "schema" "")
 					(set result (eval (scheme code)))
@@ -861,7 +864,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_) (scan nil (table "system" "user") '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
-(set mysql_handler (lambda (schema sql resultrow_sql session execution_context) (begin
+(set mysql_handler (lambda (schema sql resultrow_sql session session_state query_seq) (begin
 	(session "schema" schema)
 	(define resultrow resultrow_sql)
 	(try (lambda () (begin
@@ -869,19 +872,20 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 			/* scheme syntax mode */
 			(set print (lambda args (resultrow '("result" (concat args)))))
 			(resultrow '("result" (eval (scheme sql))))
-		) (time (begin
-				/* SQL syntax mode */
-				(define sql_parse_input (strtrim sql))
-				/* tolerate an optional trailing ';' - must be at end of string */
-				(set sql_parse_input (match sql_parse_input (regex "^((?s:.*));\\s*$" _ body) body sql_parse_input))
-				(define mysql_username (coalesce (session "username") "root"))
-				(define formula (if (equal? (session "syntax") "postgresql")
-					(cached_parse psql_queryplan_cache parse_psql schema sql_parse_input
-						(list (quote sql-policy-for) mysql_username) mysql_username session false)
-					(cached_parse sql_queryplan_cache parse_sql schema sql_parse_input
-						(list (quote sql-policy-for) mysql_username) mysql_username session true)))
-				(sql_execute_formula session execution_context formula resultrow)
-			) sql))
+		) (time (with_autocommit session session_state query_seq sql
+				(lambda (tx) (begin
+					/* SQL syntax mode */
+					(define sql_parse_input (strtrim sql))
+					/* tolerate an optional trailing ';' - must be at end of string */
+					(set sql_parse_input (match sql_parse_input (regex "^((?s:.*));\\s*$" _ body) body sql_parse_input))
+					(define mysql_username (coalesce (session "username") "root"))
+					(define formula (if (equal? (session "syntax") "postgresql")
+						(cached_parse psql_queryplan_cache (list parse_psql) schema sql_parse_input
+							(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
+						(cached_parse sql_queryplan_cache (list parse_sql) schema sql_parse_input
+							(list (quote sql-policy-for) mysql_username) mysql_username session true tx)))
+					(sql_execute_formula session tx formula resultrow)
+			))) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)
 			(error e) /* re-throw so MySQL protocol sends proper error packet */

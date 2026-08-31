@@ -18,7 +18,6 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -88,16 +87,12 @@ func TestKillQueryMarksOnlyCurrentGeneration(t *testing.T) {
 	if !ss.KillQuery(seq1) {
 		t.Fatalf("expected first query generation to be killable")
 	}
-	SetValues(map[string]any{"querySeq": seq1, "context": context.Background()}, func() {
-		if !ss.IsKilled() {
-			t.Fatalf("expected seq1 to be marked killed")
-		}
-	})
-	SetValues(map[string]any{"querySeq": seq2, "context": context.Background()}, func() {
-		if ss.IsKilled() {
-			t.Fatalf("expected seq2 to remain alive")
-		}
-	})
+	if !ss.IsKilledSeq(seq1) {
+		t.Fatalf("expected seq1 to be marked killed")
+	}
+	if ss.IsKilledSeq(seq2) {
+		t.Fatalf("expected seq2 to remain alive")
+	}
 	ss.EndQuery(seq1, "Sleep", "")
 	ss.EndQuery(seq2, "Sleep", "")
 }

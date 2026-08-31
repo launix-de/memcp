@@ -319,8 +319,10 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	req_scm = append(req_scm,
 		NewString("__session"),
 		scmSession,
-		NewString("__execution_context"),
-		NewAny(&QueryExecutionContext{SessionState: ss, QuerySeq: querySeq}),
+		NewString("__session_state"),
+		NewAny(ss),
+		NewString("__query_seq"),
+		NewInt(int64(querySeq)),
 	)
 	// Watch for HTTP client disconnect and propagate to session kill
 	reqDone := make(chan struct{})
@@ -351,13 +353,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}()
 		Apply(s.callback, NewSlice(req_scm), NewSlice(res_scm))
 	}
-	// Persistent HTTP sessions reuse the same Scheme session so that
-	// @variables set in one request are visible in subsequent requests. Install
-	// process-list state in the same GLS frame for both session lifetimes.
-	NewContextWithSession(ctx, scmSession, map[string]any{
-		"sessionStatePtr": ss,
-		"querySeq":        querySeq,
-	}, contextFn)
+	contextFn()
 }
 
 func scmerToGo(v Scmer) any {

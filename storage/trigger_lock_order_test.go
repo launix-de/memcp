@@ -30,7 +30,7 @@ func TestPersistedKeytableTriggerWaitsForRuntimeTarget(t *testing.T) {
 		Name:     ".kt_cleanup:.grp:query:test|items|AFTER DELETE",
 		Timing:   AfterDelete,
 		IsSystem: true,
-		Acquire:  func() bool { return true },
+		Acquire:  func(*TxContext) bool { return true },
 	}
 	encoded, err := json.Marshal(original)
 	if err != nil {
@@ -41,15 +41,15 @@ func TestPersistedKeytableTriggerWaitsForRuntimeTarget(t *testing.T) {
 	if err := json.Unmarshal(encoded, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.acquireTarget() {
+	if restored.acquireTarget(nil) {
 		t.Fatal("persisted keytable trigger ran before its ephemeral target was rebound")
 	}
 
 	tbl := &table{Triggers: []TriggerDescription{restored}}
-	if !tbl.SetTriggerTarget(original.Name, func() bool { return true }, func() {}) {
+	if !tbl.SetTriggerTarget(original.Name, func(*TxContext) bool { return true }, func() {}) {
 		t.Fatal("restored keytable trigger was not reusable")
 	}
-	if !tbl.Triggers[0].acquireTarget() {
+	if !tbl.Triggers[0].acquireTarget(nil) {
 		t.Fatal("rebound keytable trigger did not acquire its runtime target")
 	}
 }
@@ -60,7 +60,7 @@ func TestLegacyPersistedCacheTriggerWaitsForRuntimeTarget(t *testing.T) {
 	if err := json.Unmarshal(encoded, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if restored.acquireTarget() {
+	if restored.acquireTarget(nil) {
 		t.Fatal("legacy cache trigger ran before its ephemeral target was rebound")
 	}
 }

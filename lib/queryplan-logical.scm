@@ -97,21 +97,22 @@ PostgreSQL parsers should both lower to the same combined operators.
 			(cons k _) (and (not (equal? k key)) (not (equal? k removed_key)))
 			true))))))
 
+(define planner_effective_session (lambda (planning_session)
+	planning_session))
+
 /* Cost-model decisions register the condition which keeps their chosen branch
 valid in a compile-local newsession. cached_parse installs the accumulator;
 direct planner users deliberately remain unaffected. The structural catalogs
 deduplicate immutable ASTs without serializing the growing expressions. */
-(define planner_record_guard_condition (lambda (condition)
+(define planner_record_guard_condition (lambda (condition planning_session)
 	(begin
-		(define condition_accumulator (try
-			(lambda () ((context "session") "__memcp_queryplan_guard_conditions"))
-			(lambda (_e) nil)))
+		(define planning_session (planner_effective_session planning_session))
+		(define condition_accumulator (if (nil? planning_session) nil
+			(planning_session "__memcp_queryplan_guard_conditions")))
 		(if (nil? condition_accumulator)
 			condition
 			(begin
-				(define condition_catalog (try
-					(lambda () ((context "session") "__memcp_queryplan_guard_condition_catalog"))
-					(lambda (_e) nil)))
+				(define condition_catalog (planning_session "__memcp_queryplan_guard_condition_catalog"))
 				(if (nil? condition_catalog)
 					(condition_accumulator (string condition) condition)
 					(if (condition_catalog condition)
@@ -121,19 +122,17 @@ deduplicate immutable ASTs without serializing the growing expressions. */
 							(condition_catalog condition true)
 							(condition_accumulator (concat "condition:" count) condition)
 							(condition_accumulator "count" (+ count 1)))))
-				(define covered_bindings (try
-					(lambda () ((context "session") "__memcp_queryplan_guarded_session_keys"))
-					(lambda (_e) nil)))
+				(define covered_bindings (planning_session "__memcp_queryplan_guarded_session_keys"))
 				(if (nil? covered_bindings)
 					nil
 					(reduce (query_expr_session_reads condition) (lambda (_ expr)
 						(covered_bindings (if (nil? condition_catalog) (string expr) expr) true)) nil))
 				condition)))))
 
-(define planner_guarded_choice (lambda (chosen condition)
+(define planner_guarded_choice (lambda (chosen condition planning_session)
 	(begin
 		(planner_record_guard_condition
-			(if chosen condition (list (quote not) condition)))
+			(if chosen condition (list (quote not) condition)) planning_session)
 		chosen)))
 
 /* EXPLAIN PHYSICAL installs this compile-local event sink. Physical lowering
@@ -141,14 +140,14 @@ records only decisions it actually makes; ordinary compilation has no sink and
 therefore keeps the same plan and cache behavior. Numeric cost records retain
 their calibrated nanosecond/memory components so rejected alternatives can be
 compared without reverse-engineering the generated Scheme plan. */
-(define planner_physical_explain_accumulator (lambda ()
-	(try
-		(lambda () ((context "session") "__memcp_explain_physical"))
-		(lambda (_e) nil))))
-
-(define planner_record_physical_decision (lambda (decision)
+(define planner_physical_explain_accumulator (lambda (planning_session)
 	(begin
-		(define accumulator (planner_physical_explain_accumulator))
+		(define planning_session (planner_effective_session planning_session))
+		(if (nil? planning_session) nil (planning_session "__memcp_explain_physical")))))
+
+(define planner_record_physical_decision (lambda (decision planning_session)
+	(begin
+		(define accumulator (planner_physical_explain_accumulator planning_session))
 		(if (nil? accumulator)
 			decision
 			(begin
@@ -171,16 +170,15 @@ compared without reverse-engineering the generated Scheme plan. */
 forced physical alternative. Overrides are compile-local and keyed by the
 stable logical stage identity, so nested decisions cannot accidentally consume
 an override intended for a sibling edge. */
-(define planner_physical_override (lambda (decision_id)
+(define planner_physical_override (lambda (decision_id planning_session)
 	(begin
-		(define overrides (try
-			(lambda () ((context "session") "__memcp_physical_overrides"))
-			(lambda (_e) nil)))
+		(define planning_session (planner_effective_session planning_session))
+		(define overrides (if (nil? planning_session) nil (planning_session "__memcp_physical_overrides")))
 		(if (nil? overrides) nil (qassoc_get overrides decision_id nil)))))
 
-(define planner_physical_choice (lambda (decision_id normal_choice alternatives)
+(define planner_physical_choice (lambda (decision_id normal_choice alternatives planning_session)
 	(begin
-		(define forced (planner_physical_override decision_id))
+		(define forced (planner_physical_override decision_id planning_session))
 		(if (nil? forced)
 			normal_choice
 			(if (contains? alternatives forced)
@@ -205,17 +203,14 @@ an override intended for a sibling edge. */
 /* Runtime statistic expressions recur throughout dynamic-programming costs.
 Bind each unique expression once in the final guard instead of rereading the
 catalog for every comparison. The binding catalog is compile-local as well. */
-(define planner_guard_runtime_binding (lambda (expr)
+(define planner_guard_runtime_binding (lambda (expr planning_session)
 	(begin
-		(define bindings (try
-			(lambda () ((context "session") "__memcp_queryplan_guard_bindings"))
-			(lambda (_e) nil)))
+		(define planning_session (planner_effective_session planning_session))
+		(define bindings (if (nil? planning_session) nil (planning_session "__memcp_queryplan_guard_bindings")))
 		(if (nil? bindings)
 			expr
 			(begin
-				(define binding_catalog (try
-					(lambda () ((context "session") "__memcp_queryplan_guard_binding_catalog"))
-					(lambda (_e) nil)))
+				(define binding_catalog (planning_session "__memcp_queryplan_guard_binding_catalog"))
 				(define key (if (nil? binding_catalog) (string expr) expr))
 				(define existing (if (nil? binding_catalog) (bindings key) (binding_catalog key)))
 				(if (nil? existing)
@@ -250,10 +245,11 @@ connection state. The outer session owns their concurrent flight, while the
 query generation is the scope that releases them after execution. */
 (define planner_queryplan_observation_session_expr (lambda ()
 	(list
-		(quote __memcp_execution_session)
+		(quote session)
 		"get_or_compute_scoped"
-		(list (quote context) "query")
+		(list (quote tx_query) (quote tx))
 		"__memcp_queryplan_observations"
+		(quote tx)
 		(list (quote lambda) '() (list (quote newsession))))))
 
 (define planner_queryplan_observation_read_expr (lambda (key)
@@ -263,17 +259,17 @@ query generation is the scope that releases them after execution. */
 			"get_or_compute_scoped"
 			(physical_query_scope_symbol)
 			"__memcp_queryplan_observations"
+			(quote tx)
 			(list (quote lambda) '() (list (quote newsession))))
 		key)))
 
 (define planner_queryplan_observation_current_read_expr (lambda (key)
 	(list (planner_queryplan_observation_session_expr) key)))
 
-(define planner_register_queryplan_observation (lambda (decision_id producer metric_expr)
+(define planner_register_queryplan_observation (lambda (decision_id producer metric_expr planning_session)
 	(begin
-		(define preparations (try
-			(lambda () ((context "session") "__memcp_queryplan_preparations"))
-			(lambda (_e) nil)))
+		(define planning_session (planner_effective_session planning_session))
+		(define preparations (if (nil? planning_session) nil (planning_session "__memcp_queryplan_preparations")))
 		(if (nil? preparations)
 			nil
 			(begin
@@ -290,22 +286,23 @@ query generation is the scope that releases them after execution. */
 					(planner_queryplan_observation_value_key decision_id)
 					(planner_queryplan_observation_metric_key decision_id)))))))
 
-(define planner_queryplan_observation_registered? (lambda (decision_id)
+(define planner_queryplan_observation_registered? (lambda (decision_id planning_session)
 	(begin
-		(define preparations (try
-			(lambda () ((context "session") "__memcp_queryplan_preparations"))
-			(lambda (_e) nil)))
+		(define planning_session (planner_effective_session planning_session))
+		(define preparations (if (nil? planning_session) nil (planning_session "__memcp_queryplan_preparations")))
 		(and (not (nil? preparations))
 			(preparations (concat "observation:" decision_id))))))
 
-(define planner_queryplan_observed_metric (lambda (decision_id)
-	(try
-		(lambda () (begin
-			(define compile_observations ((context "session") "__memcp_queryplan_observation_scope"))
-			(if (nil? compile_observations)
-				nil
-				(compile_observations (planner_queryplan_observation_metric_key decision_id)))))
-		(lambda (_e) nil))))
+(define planner_queryplan_observed_metric (lambda (decision_id planning_session)
+	(begin
+		(define planning_session (planner_effective_session planning_session))
+		(if (nil? planning_session)
+			nil
+			(begin
+				(define compile_observations (planning_session "__memcp_queryplan_observation_scope"))
+				(if (nil? compile_observations)
+					nil
+					(compile_observations (planner_queryplan_observation_metric_key decision_id))))))))
 
 (define empty_list? (lambda (xs)
 	(or (nil? xs) (equal? xs '()))))

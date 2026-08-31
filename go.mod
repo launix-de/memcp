@@ -17,7 +17,6 @@ require (
 	github.com/google/btree v1.1.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/jtolds/gls v4.20.0+incompatible
 	github.com/launix-de/NonLockingReadMap v1.0.9
 	github.com/launix-de/go-mysqlstack v0.0.0-20260220192146-2b1e1efd98c4
 	github.com/launix-de/go-packrat/v2 v2.1.21
@@ -63,5 +62,3 @@ replace github.com/launix-de/go-mysqlstack => ./third_party/go-mysqlstack
 replace github.com/launix-de/go-packrat/v2 => ./third_party/go-packrat
 
 replace golang.org/x/text => github.com/carli2/text v0.34.1-0.20260305004517-20c7a406302a
-
-replace github.com/jtolds/gls => ./third_party/gls

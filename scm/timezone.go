@@ -122,17 +122,8 @@ func parseFixedOffset(s string) (*time.Location, error) {
 	return time.FixedZone(name, offset), nil
 }
 
-// GetCurrentSessionLocation returns the *time.Location for the current session's time_zone.
-// Reads "time_zone" from the GLS session. Falls back to UTC if not set or invalid.
-func GetCurrentSessionLocation() *time.Location {
-	if mgr == nil {
-		return time.UTC
-	}
-	val, ok := mgr.GetValue("session")
-	if !ok {
-		return time.UTC
-	}
-	sessionScmer := val.(Scmer)
+// GetSessionLocation resolves time_zone from an explicitly passed Scheme session.
+func GetSessionLocation(sessionScmer Scmer) *time.Location {
 	tz := Apply(sessionScmer, NewString("time_zone"))
 	if tz.IsNil() {
 		return time.UTC
@@ -256,16 +247,19 @@ func init_timezone() {
 				return NewNil()
 			}
 			unix := a[0].Int()
-			if len(a) == 2 && !a[1].IsNil() {
+			loc, err := ResolveLocation(a[2].String())
+			if err != nil {
+				loc = time.UTC
+			}
+			if !a[1].IsNil() {
 				// with format string: return string
-				loc := GetCurrentSessionLocation()
 				t := time.Unix(unix, 0).In(loc)
 				return NewString(formatDateMySQL(t, a[1].String()))
 			}
 			return NewDate(unix)
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "converts a unix timestamp to a datetime in the session timezone",
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "unix_ts", Description: "unix timestamp (seconds since epoch)"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "optional MySQL format string", Optional: true}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "unix_ts", Description: "unix timestamp (seconds since epoch)"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "optional MySQL format string"}, &TypeDescriptor{Kind: "string", Label: "timezone", Description: "explicit session timezone"}},
 			Return: &TypeDescriptor{Kind: "date"},
 			Const:  true,
 		},

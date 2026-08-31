@@ -31,7 +31,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/jtolds/gls"
 )
 
 /*
@@ -1635,7 +1634,7 @@ func jitParallelSpecial(thunks ...Scmer) Scmer {
 	errs := make(chan any, len(thunks))
 	for _, thunk := range thunks {
 		thunk := thunk
-		gls.Go(func() {
+		go func() {
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					errs <- recovered
@@ -1644,7 +1643,7 @@ func jitParallelSpecial(thunks ...Scmer) Scmer {
 				}
 			}()
 			jitCallSpecialThunk(thunk)
-		})
+		}()
 	}
 	for range thunks {
 		if err := <-errs; err != nil {

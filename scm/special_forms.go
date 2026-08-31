@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"runtime"
 	"time"
-
-	"github.com/jtolds/gls"
 )
 
 var specialFormNames = make(map[*byte]string)
@@ -328,7 +326,7 @@ func specialParallel(code []Scmer, en *Env) Scmer {
 	errs := make(chan any, len(code))
 	for _, expression := range code {
 		expression := expression
-		gls.Go(func(value Scmer) func() {
+		go func(value Scmer) func() {
 			return func() {
 				defer func() {
 					if recovered := recover(); recovered != nil {
@@ -339,7 +337,7 @@ func specialParallel(code []Scmer, en *Env) Scmer {
 				}()
 				Eval(value, en)
 			}
-		}(expression))
+		}(expression)()
 	}
 	for range code {
 		if err := <-errs; err != nil {

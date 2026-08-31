@@ -19,7 +19,6 @@ package scm
 
 import (
 	"container/heap"
-	"context"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -256,8 +255,8 @@ func init_scheduler() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", Label: "callback", Description: "function to execute once the timeout expires", Params: []*TypeDescriptor{{Kind: "any", Label: "args", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", Label: "milliseconds", Description: "milliseconds until execution"}, &TypeDescriptor{Kind: "any", Label: "args...", Description: "optional arguments forwarded to the callback", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "int"},
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["setTimeout"].Fn, args, result)
-			},
+		return jitEmitGoVariadicCallFromDescs(ctx, declarations["setTimeout"].Fn, args, result)
+	},
 			JITVirtualArgs: true,
 		},
 	})
@@ -269,8 +268,8 @@ func init_scheduler() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "id", Description: "identifier returned by setTimeout"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["clearTimeout"].Fn, args, result)
-			},
+		return jitEmitGoVariadicCallFromDescs(ctx, declarations["clearTimeout"].Fn, args, result)
+	},
 			JITVirtualArgs: true,
 		},
 	})
@@ -290,9 +289,7 @@ func setTimeout(a ...Scmer) Scmer {
 	duration := time.Duration(millis * float64(time.Millisecond))
 	callbackArgs := append([]Scmer(nil), a[2:]...)
 	id, ok := DefaultScheduler.ScheduleAfter(duration, func() {
-		NewContext(context.TODO(), func() {
-			Apply(callback, callbackArgs...)
-		})
+		Apply(callback, callbackArgs...)
 	})
 	if !ok {
 		return NewBool(false)

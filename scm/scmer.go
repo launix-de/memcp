@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -796,7 +797,7 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		}
 		return "false", dst
 	case tagDate:
-		return DateToDisplay(s, GetCurrentSessionLocation()), dst
+		return DateToDisplay(s, time.UTC), dst
 	case tagNil:
 		return "nil", dst
 	case tagFunc:
@@ -1133,7 +1134,7 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagDate:
-			return DateToDisplay(v, GetCurrentSessionLocation())
+			return DateToDisplay(v, time.UTC)
 		case tagString:
 			s := v.String()
 			if !utf8.ValidString(s) {
@@ -1237,7 +1238,7 @@ func (s *Scmer) Write(w io.Writer) {
 		b := strconv.AppendFloat(buf[:0], f, 'g', -1, 64)
 		w.Write(b)
 	case tagDate:
-		io.WriteString(w, DateToDisplay(*s, GetCurrentSessionLocation()))
+		io.WriteString(w, DateToDisplay(*s, time.UTC))
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagBSON:

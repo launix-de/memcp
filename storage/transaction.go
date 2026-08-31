@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "context"
 import "fmt"
 import "github.com/carli2/hybridsort"
 import "runtime"
@@ -116,8 +117,11 @@ type TxContext struct {
 	SnapshotEpoch uint64 // ACID: snapshot boundary
 	Depth         uint32 // nesting depth for savepoints / triggers
 	Session       scm.Scmer
-	SessionState  *scm.SessionState // cached to avoid GLS stack-walking
-	querySeq      atomic.Uint64     // autocommit statement generation for cancellation checks
+	SessionState  *scm.SessionState // owning connection; retained while the transaction object is parked
+	querySeq      atomic.Uint64     // current statement generation; zero while parked
+	queryInfo     atomic.Pointer[string]
+	queryActive   atomic.Bool
+	queryMu       sync.Mutex // serializes statements which reuse this transaction object
 	// fanoutLimit/fanoutInUse bound only additional multi-shard workers. A
 	// single relevant shard never reads or writes this cache line.
 	fanoutLimit atomic.Int32
@@ -127,26 +131,44 @@ type TxContext struct {
 	shards map[*storageShard]*storageShardTransaction
 
 	// Deferred sync: shards with pending log writes that need fsync at commit.
-	touchedShards      sync.Map // map[*storageShard]bool
-	autoCommit         bool
-	writeHeld          map[*storageShard]uint32 // reentrant write-lock depth per shard
-	repartitionDeletes []repartitionDeleteAction
+	touchedShards       sync.Map // map[*storageShard]bool
+	autoCommit          bool
+	writeHeld           map[*storageShard]uint32 // reentrant write-lock depth per shard
+	repartitionDeletes  []repartitionDeleteAction
+	invalidationDepth   uint32
+	invalidationVisited map[string]bool
 
 	mu sync.Mutex
 }
 
 // NewTxContext creates a new active transaction context with the given mode.
 func NewTxContext(mode TxMode) *TxContext {
-	tx := &TxContext{
-		ID:    atomic.AddUint64(&txIDCounter, 1),
-		State: TxActive,
-		Mode:  mode,
-	}
-	tx.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
+	tx := &TxContext{}
+	tx.reset(mode)
+	return tx
+}
+
+// reset starts another transaction in the same allocation. Commit and
+// Rollback leave the object parked in its Scheme session so the next statement
+// can reuse it without retaining any state from the completed transaction.
+func (tx *TxContext) reset(mode TxMode) {
+	tx.ID = atomic.AddUint64(&txIDCounter, 1)
+	tx.Mode = mode
+	tx.State = TxActive
+	tx.SnapshotEpoch = 0
 	if mode == TxACID {
 		tx.SnapshotEpoch = atomic.LoadUint64(&GlobalCommitEpoch)
 	}
-	return tx
+	tx.Depth = 0
+	tx.fanoutLimit.Store(int32(runtime.GOMAXPROCS(0)))
+	tx.fanoutInUse.Store(0)
+	tx.shards = nil
+	tx.touchedShards = sync.Map{}
+	tx.autoCommit = false
+	tx.writeHeld = nil
+	tx.repartitionDeletes = nil
+	tx.invalidationDepth = 0
+	tx.invalidationVisited = nil
 }
 
 // claimFanoutWorkers reserves at most half of the transaction's remaining
@@ -186,6 +208,37 @@ func (tx *TxContext) SessionValue(key string) scm.Scmer {
 	return scm.Apply(tx.Session, scm.NewString(key))
 }
 
+// QuerySessionState exposes cancellation state only while this transaction is
+// executing a statement. A parked explicit transaction is intentionally not a
+// process and therefore has no current query generation.
+func (tx *TxContext) QuerySessionState() (*scm.SessionState, uint64) {
+	if tx == nil || !tx.queryActive.Load() {
+		return nil, 0
+	}
+	return tx.SessionState, tx.querySeq.Load()
+}
+
+func (tx *TxContext) beginQuery(ss *scm.SessionState, seq uint64, info string) {
+	tx.SessionState = ss
+	tx.querySeq.Store(seq)
+	infoPtr := &info
+	tx.queryInfo.Store(infoPtr)
+	tx.queryActive.Store(true)
+	if ss != nil {
+		ss.SetQueryInfoPointer(seq, infoPtr)
+	}
+}
+
+func (tx *TxContext) endQuery(seq uint64) {
+	if tx.querySeq.CompareAndSwap(seq, 0) {
+		tx.queryActive.Store(false)
+		tx.queryInfo.Store(nil)
+		if tx.SessionState != nil {
+			tx.SessionState.FinishQueryExecution(seq)
+		}
+	}
+}
+
 func txSessionScmer(tx *TxContext) scm.Scmer {
 	if tx == nil || tx.Session.IsNil() {
 		return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewNil() })
@@ -193,18 +246,21 @@ func txSessionScmer(tx *TxContext) scm.Scmer {
 	return tx.Session
 }
 
-func bindSessionEnv(env *scm.Env, session scm.Scmer) *scm.Env {
-	outer := &scm.Globalenv
-	var numbered []scm.Scmer
-	if env != nil {
-		outer = env
-		numbered = env.VarsNumbered
+func bindExecutionEnv(env *scm.Env, session, tx scm.Scmer) *scm.Env {
+	if env == nil {
+		env = &scm.Globalenv
 	}
+	vars := make(scm.Vars, len(env.Vars)+2)
+	for name, value := range env.Vars {
+		vars[name] = value
+	}
+	vars[scm.Symbol("session")] = session
+	vars[scm.Symbol("tx")] = tx
 	return &scm.Env{
-		Vars:         scm.Vars{scm.Symbol("session"): session},
-		VarsNumbered: numbered,
-		Outer:        outer,
-		Nodefine:     false,
+		Vars:         vars,
+		VarsNumbered: env.VarsNumbered,
+		Outer:        env.Outer,
+		Nodefine:     env.Nodefine,
 	}
 }
 
@@ -721,40 +777,23 @@ func (tx *TxContext) rollbackACID() {
 	tx.touchedShards = sync.Map{}
 }
 
-// ---------------------------------------------------------------------------
-// GLS / session helpers
-// ---------------------------------------------------------------------------
-
-// CurrentTx returns the active TxContext from goroutine-local storage, or nil.
-func CurrentTx() *TxContext {
-	txAny := scm.GetCurrentTx()
-	if txAny == nil {
+// SessionStateFromTx returns the SessionState from the given tx, falling back
+// to nil when no explicit transaction belongs to the operation.
+func SessionStateFromTx(tx *TxContext) *scm.SessionState {
+	if tx == nil {
 		return nil
 	}
-	tx, _ := txAny.(*TxContext)
-	return tx
-}
-
-// SessionStateFromTx returns the SessionState from the given tx, falling back
-// to GLS lookup only when tx is nil. This avoids the expensive gls stack walk
-// (24% CPU in profiling) on the hot scan path.
-func SessionStateFromTx(tx *TxContext) *scm.SessionState {
-	if tx != nil && tx.SessionState != nil {
-		return tx.SessionState
-	}
-	return scm.GetCurrentSessionState()
+	return tx.SessionState
 }
 
 // querySeqFromTx returns the statement generation cached by an autocommit
-// transaction. Explicit transactions can serve multiple concurrent statements,
-// so their generation must remain statement-local in GLS.
+// transaction. Explicit transactions can serve multiple concurrent statements;
+// each statement updates the generation on its explicit transaction context.
 func querySeqFromTx(tx *TxContext) uint64 {
-	if tx != nil && tx.autoCommit {
-		if seq := tx.querySeq.Load(); seq != 0 {
-			return seq
-		}
+	if tx == nil {
+		return 0
 	}
-	return scm.CurrentQuerySeq()
+	return tx.querySeq.Load()
 }
 
 // WithAutocommit executes fn inside an implicit TxCursorStability transaction
@@ -766,28 +805,37 @@ func querySeqFromTx(tx *TxContext) uint64 {
 // is re-raised so the caller's error handler still fires. This guarantees that
 // every SQL statement executed via the HTTP or MySQL frontend runs inside a
 // transaction, enabling a single fsync per statement instead of one per write.
-func WithAutocommit(session scm.Scmer, executionContext *scm.QueryExecutionContext, fn scm.Scmer) scm.Scmer {
+func transactionForSession(session scm.Scmer) *TxContext {
 	sessionFn := session.Func()
-	var querySeq uint64
-	var sessionState *scm.SessionState
-	if executionContext != nil {
-		querySeq = executionContext.QuerySeq
-		sessionState = executionContext.SessionState
-	} else {
-		querySeq = scm.CurrentQuerySeq()
-		sessionState = scm.GetCurrentSessionState()
+	if value := sessionFn(scm.NewString("__memcp_tx")); !value.IsNil() {
+		if tx, ok := value.Any().(*TxContext); ok {
+			return tx
+		}
 	}
+	tx := &TxContext{Session: session, State: TxCommitted}
+	sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
+	return tx
+}
+
+// WithAutocommit runs a SQL statement with the session's reusable TxContext.
+// Query identity and cancellation belong to the transaction only while fn is
+// running; an explicit transaction remains parked after the statement ends.
+func WithAutocommit(session scm.Scmer, ss *scm.SessionState, querySeq uint64, query string, fn scm.Scmer) scm.Scmer {
+	sessionFn := session.Func()
+	tx := transactionForSession(session)
+	tx.queryMu.Lock()
+	defer tx.queryMu.Unlock()
+	tx.beginQuery(ss, querySeq, query)
+	defer tx.endQuery(querySeq)
+	txValue := scm.NewAny(tx)
+
 	if !sessionFn(scm.NewString("transaction")).IsNil() {
-		return scm.Apply(fn)
+		return scm.Apply(fn, txValue)
 	}
 
-	tx := NewTxContext(TxCursorStability)
+	tx.reset(TxCursorStability)
 	tx.autoCommit = true
 	tx.Session = session
-	tx.SessionState = sessionState
-	tx.querySeq.Store(querySeq)
-	txValue := scm.NewAny(tx)
-	sessionFn(scm.NewString("__memcp_tx"), txValue)
 
 	var result scm.Scmer
 	var panicVal any
@@ -801,14 +849,13 @@ func WithAutocommit(session scm.Scmer, executionContext *scm.QueryExecutionConte
 				scm.PrintError(r)
 			}
 		}()
-		result = scm.Apply(fn)
+		result = scm.Apply(fn, txValue)
 	}()
 
 	if panicVal != nil {
 		if tx.State == TxActive {
 			tx.Rollback()
 		}
-		sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 		panic(panicVal)
 	}
 
@@ -817,36 +864,80 @@ func WithAutocommit(session scm.Scmer, executionContext *scm.QueryExecutionConte
 	}
 
 	if err := tx.Commit(); err != nil {
-		sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 		panic("autocommit failed: " + err.Error())
 	}
-	sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 	return result
 }
 
 func initTransaction(en scm.Env) {
 	scm.DeclareTitle("Transactions")
+	scm.Declare(&en, &scm.Declaration{
+		Name: "tx_query",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(int64(querySeqFromTx(scmerToTxContext(a[0]))))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the current query generation of an active transaction",
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "int"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "tx_check",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			tx := scmerToTxContext(a[0])
+			if tx == nil {
+				return scm.NewBool(true)
+			}
+			ss, seq := tx.QuerySessionState()
+			if ss == nil || seq == 0 {
+				return scm.NewBool(true)
+			}
+			if ss.IsKilledSeq(seq) {
+				panic(context.Canceled)
+			}
+			if ctx := ss.QueryContext(seq); ctx != nil && ctx.Err() != nil {
+				panic(ctx.Err())
+			}
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "aborts when the transaction's current query was cancelled",
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "tx_connection_id",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			ss := SessionStateFromTx(scmerToTxContext(a[0]))
+			if ss == nil {
+				return scm.NewInt(0)
+			}
+			return scm.NewInt(int64(ss.ID))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the connection ID owning a transaction",
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "int"}},
+	})
 
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_begin",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
-			existingTx := sessionFn(scm.NewString("__memcp_tx"))
-			if !existingTx.IsNil() {
-				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
-					tx.Commit()
+			tx := transactionForSession(a[0])
+			if len(a) > 1 && !a[1].IsNil() {
+				if current, ok := a[1].Any().(*TxContext); ok {
+					tx = current
 				}
 			}
-			tx := NewTxContext(TxCursorStability)
+			if tx.State == TxActive {
+				if err := tx.Commit(); err != nil {
+					panic("BEGIN failed to finish current statement: " + err.Error())
+				}
+			}
+			tx.reset(TxCursorStability)
 			tx.Session = a[0]
-			tx.SessionState = scm.GetCurrentSessionState()
 			sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Begins a new cursor-stability transaction. Takes the session function as argument. Stores the transaction context in the session.", HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}, {Kind: "any", Label: "tx", Optional: true}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -856,20 +947,25 @@ func initTransaction(en scm.Env) {
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			sessionFn := a[0].Func()
-			existingTx := sessionFn(scm.NewString("__memcp_tx"))
-			if !existingTx.IsNil() {
-				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
-					tx.Commit()
+			tx := transactionForSession(a[0])
+			if len(a) > 1 && !a[1].IsNil() {
+				if current, ok := a[1].Any().(*TxContext); ok {
+					tx = current
 				}
 			}
-			tx := NewTxContext(TxACID)
+			if tx.State == TxActive {
+				if err := tx.Commit(); err != nil {
+					panic("BEGIN failed to finish current statement: " + err.Error())
+				}
+			}
+			tx.reset(TxACID)
 			tx.Session = a[0]
 			sessionFn(scm.NewString("__memcp_tx"), scm.NewAny(tx))
 			sessionFn(scm.NewString("transaction"), scm.NewInt(1))
 			return scm.NewBool(true)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Begins a new ACID transaction with snapshot isolation and OCC commit. Takes the session function as argument.", HasSideEffects: true,
-			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}},
+			Params: []*scm.TypeDescriptor{{Kind: "func", Label: "session", Description: "the session function to store tx state in", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}}, {Kind: "any", Label: "tx", Optional: true}},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
 	})
@@ -883,13 +979,11 @@ func initTransaction(en scm.Env) {
 			if !existingTx.IsNil() {
 				if tx, ok := existingTx.Any().(*TxContext); ok && tx.State == TxActive {
 					if err := tx.Commit(); err != nil {
-						sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 						sessionFn(scm.NewString("transaction"), scm.NewNil())
 						panic("COMMIT failed: " + err.Error())
 					}
 				}
 			}
-			sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
@@ -910,7 +1004,6 @@ func initTransaction(en scm.Env) {
 					tx.Rollback()
 				}
 			}
-			sessionFn(scm.NewString("__memcp_tx"), scm.NewNil())
 			sessionFn(scm.NewString("transaction"), scm.NewNil())
 			return scm.NewBool(true)
 		},
@@ -924,11 +1017,11 @@ func initTransaction(en scm.Env) {
 		Name: "with_autocommit",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			var executionContext *scm.QueryExecutionContext
+			var ss *scm.SessionState
 			if !a[1].IsNil() {
-				executionContext, _ = a[1].Any().(*scm.QueryExecutionContext)
+				ss, _ = a[1].Any().(*scm.SessionState)
 			}
-			return WithAutocommit(a[0], executionContext, a[2])
+			return WithAutocommit(a[0], ss, uint64(a[2].Int()), a[3].String(), a[4])
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "Executes fn inside an implicit TxCursorStability transaction if no explicit " +
 			"transaction is active in session. Commits on success, rolls back on error, " +
@@ -937,8 +1030,10 @@ func initTransaction(en scm.Env) {
 			"fn is executed without any wrapping.", HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "func", Label: "session", Description: "the session function holding tx state", Params: []*scm.TypeDescriptor{{Kind: "string", Label: "key", Optional: true}, {Kind: "any", Label: "value", Optional: true}}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "any", Label: "execution_context", Description: "optional request-local execution context; nil retains the legacy goroutine-local fallback"},
-				{Kind: "func", Label: "fn", Description: "zero-argument function to execute", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "any", Label: "session_state", Description: "owning process-list session"},
+				{Kind: "int", Label: "query_seq", Description: "current query generation"},
+				{Kind: "string", Label: "query", Description: "current SQL text"},
+				{Kind: "func", Label: "fn", Description: "function called with the active transaction", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},

@@ -59,15 +59,6 @@ type SessionState struct {
 
 }
 
-// QueryExecutionContext carries request-local state across the Scheme SQL
-// boundary without rediscovering it through goroutine-local stack inspection.
-// The transaction itself remains owned by storage and is attached by
-// with_autocommit after the executing Scheme session has been selected.
-type QueryExecutionContext struct {
-	SessionState *SessionState
-	QuerySeq     uint64
-}
-
 // GetOrCreateScmSession returns the persistent Scheme session for this SessionState,
 // creating it on first call. Used by HTTP sessions to persist @variables across requests.
 func (s *SessionState) GetOrCreateScmSession() Scmer {
@@ -147,6 +138,12 @@ func (s *SessionState) SetQueryContext(seq uint64, ctx context.Context) {
 // HTTP requests use this after lazily reading a SQL request body. A stale
 // request must not overwrite the text of a newer request sharing the session.
 func (s *SessionState) SetQueryInfo(seq uint64, info string) bool {
+	return s.SetQueryInfoPointer(seq, &info)
+}
+
+// SetQueryInfoPointer publishes the transaction-owned SQL string without
+// creating another copy for SHOW FULL PROCESSLIST.
+func (s *SessionState) SetQueryInfoPointer(seq uint64, info *string) bool {
 	if seq == 0 || s.activeQuery.Load() != seq {
 		return false
 	}
@@ -155,8 +152,19 @@ func (s *SessionState) SetQueryInfo(seq uint64, info string) bool {
 	if !s.active[seq] || s.activeQuery.Load() != seq {
 		return false
 	}
-	s.Info.Store(&info)
+	s.Info.Store(info)
 	return true
+}
+
+// FinishQueryExecution drops cancellation and process text as soon as SQL
+// execution has unwound. EndQuery later performs connection-level accounting.
+func (s *SessionState) FinishQueryExecution(seq uint64) {
+	s.ClearCancel(seq)
+	if s.activeQuery.CompareAndSwap(seq, 0) {
+		empty := ""
+		s.Info.Store(&empty)
+		s.SetState("")
+	}
 }
 
 // EndQuery clears the active generation if it still matches seq and restores
@@ -230,33 +238,6 @@ func (s *SessionState) ClearCancel(seq uint64) {
 		delete(s.killed, seq)
 	}
 	s.cancelMu.Unlock()
-}
-
-// IsKilled returns true if this session has been killed.
-//
-// Storage execution contract: callers may check cancellation while scheduling
-// shard jobs, but never after entering a shard. Shard execution is atomic and
-// must not contain cancellation checks in index, batch, or row loops.
-func (s *SessionState) IsKilled() bool {
-	return s.IsKilledSeq(CurrentQuerySeq())
-}
-
-// CurrentQuerySeq returns the query generation installed in the current
-// execution context. Storage workers should capture this once in the parent
-// goroutine and use IsKilledSeq instead of reading GLS concurrently.
-func CurrentQuerySeq() uint64 {
-	if mgr == nil {
-		return 0
-	}
-	v, ok := mgr.GetValue("querySeq")
-	if !ok {
-		return 0
-	}
-	seq, ok := v.(uint64)
-	if !ok || seq == 0 {
-		return 0
-	}
-	return seq
 }
 
 // IsKilledSeq returns true if the given query generation has been killed.
@@ -404,18 +385,17 @@ func (s *SessionState) LastUsedNano() int64 {
 	return s.startedAt.Load()
 }
 
-// GetCurrentSessionState returns the *SessionState for the current goroutine's
-// GLS context, or nil if none is set.
-func GetCurrentSessionState() *SessionState {
-	if mgr == nil {
-		return nil
+func querySessionState(value Scmer) (*SessionState, uint64) {
+	if value.IsNil() {
+		return nil, 0
 	}
-	v, ok := mgr.GetValue("sessionStatePtr")
+	state, ok := value.Any().(interface {
+		QuerySessionState() (*SessionState, uint64)
+	})
 	if !ok {
-		return nil
+		return nil, 0
 	}
-	ss, _ := v.(*SessionState)
-	return ss
+	return state.QuerySessionState()
 }
 
 func init_processlist() {
@@ -455,12 +435,17 @@ func init_processlist() {
 		Name: "connection_id",
 
 		Fn: func(a ...Scmer) Scmer {
-			if ss := GetCurrentSessionState(); ss != nil {
+			if len(a) > 0 {
+				ss, _ := querySessionState(a[0])
+				if ss == nil {
+					return NewInt(0)
+				}
 				return NewInt(int64(ss.ID))
 			}
 			return NewInt(0)
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
+			Params: []*TypeDescriptor{{Kind: "any", Label: "tx", Optional: true}},
 			Return: &TypeDescriptor{Kind: "int"},
 		},
 	})

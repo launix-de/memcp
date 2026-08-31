@@ -61,31 +61,49 @@ type computeProxyReader struct {
 	values  []scm.Scmer
 }
 
+type orderedComputeProxyReader struct {
+	proxy *StorageComputeProxy
+	tx    *TxContext
+}
+
+func (r *orderedComputeProxyReader) GetValue(idx uint32) scm.Scmer {
+	return r.proxy.getValueTx(r.tx, idx)
+}
+
+func (r *orderedComputeProxyReader) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	for i := uint32(0); i < count; i++ {
+		target[int(i)*stride] = r.proxy.getValueTx(r.tx, recid+i)
+	}
+}
+
+func (r *orderedComputeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	for i, recid := range recids {
+		target[i*stride] = r.proxy.getValueTx(r.tx, recid)
+	}
+}
+
 func applyWithTx(tx *TxContext, fn scm.Scmer, args ...scm.Scmer) scm.Scmer {
 	if fn.IsProc() {
 		proc := *fn.Proc()
 		runtimeSession := txSessionScmer(tx)
-		proc.En = bindSessionEnv(proc.En, runtimeSession)
 		// Physical computed-column lambdas can outlive the query which created
-		// them. Never let their captured physical context pin a stale snapshot or
-		// request-local carrier: reads and lazy repairs use the current consumer.
-		// The fresh binding environment is procedure-local, so concurrent readers
-		// do not mutate the shared closure.
+		// them. Rebind their explicit execution parameters to the current consumer
+		// without inserting an environment level: optimized nested closures address
+		// captured numbered variables by their exact lexical depth.
 		physicalTx := scm.NewNil()
 		if tx != nil {
 			physicalTx = scm.NewAny(tx)
 		}
-		proc.En.Vars[scm.Symbol("__physical_query_session")] = runtimeSession
-		proc.En.Vars[scm.Symbol("__physical_query_scope")] = scm.NewInt(int64(scm.CurrentQuerySeq()))
-		proc.En.Vars[scm.Symbol("__physical_query_tx")] = physicalTx
+		proc.En = bindExecutionEnv(proc.En, runtimeSession, physicalTx)
 		fn = scm.NewProcStruct(proc)
 	}
-	if tx == nil || tx.Session.IsNil() {
-		return scm.Apply(fn, args...)
-	}
-	return scm.WithSession(tx.Session, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		return scm.Apply(fn, args...)
-	}))
+	return scm.Apply(fn, args...)
 }
 
 // StorageComputeProxy is a complete logical column with lazy physical values.
@@ -422,7 +440,7 @@ func (r *computeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, 
 
 func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
 	if p.isOrdered {
-		return p
+		return &orderedComputeProxyReader{proxy: p, tx: tx}
 	}
 	// Bind input readers before the physical scan acquires the shard read lock.
 	// A cache miss may compute a value, but it must stay within the already
@@ -731,34 +749,18 @@ func (p *StorageComputeProxy) ComputeSize() uint {
 // ordered dependency range instead. Neither kind may treat an unprepared row as
 // absent or expose a transient invalid-cache sentinel as its logical value.
 func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
+	return p.getValueTx(nil, idx)
+}
+
+func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
 		if !p.validMask.Get(uint(idx)) {
-			// During an active recompute (scan_order reading ORC values):
-			// Only the goroutine(s) participating in this table's recompute may
-			// observe the transient nil-for-invalid-row sentinel that the reducer
-			// uses to detect "needs compute". Other concurrent readers must block
-			// on orcMu and re-read after the recompute publishes the values.
-			if atomic.LoadInt32(&p.shard.t.orcRecomputing) > 0 && isCurrentORCRecompute(p.shard.t) {
-				if p.validMask.Get(uint(idx)) {
-					// Valid row: return cached value for convergence check
-					p.mu.RLock()
-					if val, ok := p.delta[idx]; ok {
-						p.mu.RUnlock()
-						return val
-					}
-					p.mu.RUnlock()
-					if p.main != nil {
-						return p.main.GetValue(idx)
-					}
-				}
-				return scm.NewNil() // invalid row, observed from inside the recompute
-			}
 			// Invalid row → on-demand incremental recompute (or wait for the
 			// ongoing one to complete).
 			p.shard.t.orcMu.Lock()
 			if !p.validMask.Get(uint(idx)) {
-				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx)
+				p.shard.t.incrementalRecomputeORC(p.colName, p.shard, idx, tx)
 			}
 			p.shard.t.orcMu.Unlock()
 		}
@@ -799,9 +801,9 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	for i, col := range p.inputCols {
 		// Delta rows must be read via the shard-level ColumnReader; direct
 		// ColumnStorage access only understands main-row indexes.
-		colvalues[i] = p.shard.ColumnReaderTx(CurrentTx(), col)(idx)
+		colvalues[i] = p.shard.ColumnReaderTx(tx, col)(idx)
 	}
-	val := applyWithTx(CurrentTx(), p.computor, colvalues...)
+	val := applyWithTx(tx, p.computor, colvalues...)
 
 	p.mu.Lock()
 	p.delta[idx] = val
@@ -809,6 +811,24 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	p.validMask.Set(uint(idx), true)
 
 	return val
+}
+
+// storedORCValue returns the currently published ORC value without triggering
+// repair. Recompute scans request it through the explicit $orc_stored pseudo
+// column; ordinary readers continue to wait for or initiate repair in getValueTx.
+func (p *StorageComputeProxy) storedORCValue(idx uint32) scm.Scmer {
+	if !p.validMask.Get(uint(idx)) {
+		return scm.NewNil()
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if val, ok := p.delta[idx]; ok {
+		return val
+	}
+	if idx < p.count && p.main != nil {
+		return p.main.GetValue(idx)
+	}
+	return scm.NewNil()
 }
 
 // getValueRLocked evaluates an ordinary computed column while the caller owns
@@ -959,21 +979,20 @@ func (p *StorageComputeProxy) GetValueMulti(recids []uint32, target []scm.Scmer,
 }
 
 func (p *StorageComputeProxy) GetCachedReader() ColumnReader {
-	return p.GetCachedReaderTx(CurrentTx())
+	return p.GetCachedReaderTx(nil)
 }
 
 // Compress materializes all values into a compressed main storage.
-func (p *StorageComputeProxy) Compress() {
+func (p *StorageComputeProxy) Compress(tx *TxContext) {
 	compressStart := time.Now()
 	compressedNow := false
-	tx := CurrentTx()
 	if variant := p.currentVariant(tx, true); variant != nil {
 		p.compressVariant(variant, tx)
 		return
 	}
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
+		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, tx), tx)
 	}
 	func() {
 		p.mu.Lock()
@@ -1041,19 +1060,18 @@ func (p *StorageComputeProxy) Compress() {
 // read-time predicate: unmatched rows remain valid lazy values and GetValue
 // materializes each one pointwise on first read. Ordered reduction columns have
 // dependency-aware preparation and repair paths instead.
-func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.Scmer) {
-	tx := CurrentTx()
+func (p *StorageComputeProxy) CompressFiltered(tx *TxContext, filterCols []string, filter scm.Scmer) {
 	if variant := p.currentVariant(tx, true); variant != nil {
 		p.compressFilteredVariant(variant, tx, filterCols, filter)
 		return
 	}
 	filterReaders := make([]ColumnReader, len(filterCols))
 	for i, col := range filterCols {
-		filterReaders[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
+		filterReaders[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, tx), tx)
 	}
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col), tx)
+		readers[i] = newCachedColumnReaderTx(p.shard.getColumnStorageOrPanic(col, false, tx), tx)
 	}
 
 	func() {
@@ -1080,6 +1098,11 @@ func (p *StorageComputeProxy) CompressFiltered(filterCols []string, filter scm.S
 
 // Invalidate marks a single row as needing recomputation.
 func (p *StorageComputeProxy) Invalidate(idx uint32) {
+	p.InvalidateTx(nil, idx)
+}
+
+// InvalidateTx marks a single row stale and uses tx for any immediate repair.
+func (p *StorageComputeProxy) InvalidateTx(tx *TxContext, idx uint32) {
 	p.revision.Add(1)
 	if p.hasSessionVariants() {
 		p.forEachVariant(func(v *storageComputeVariant) {
@@ -1094,9 +1117,9 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 					}
 					colvalues := make([]scm.Scmer, len(p.inputCols))
 					for i, col := range p.inputCols {
-						colvalues[i] = p.shard.ColumnReaderTx(CurrentTx(), col)(idx)
+						colvalues[i] = p.shard.ColumnReaderTx(tx, col)(idx)
 					}
-					val := applyWithTx(CurrentTx(), p.computor, colvalues...)
+					val := applyWithTx(tx, p.computor, colvalues...)
 					scmer.SetValue(idx, val)
 					return
 				}
@@ -1120,9 +1143,9 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 			// recompute single value and write directly
 			colvalues := make([]scm.Scmer, len(p.inputCols))
 			for i, col := range p.inputCols {
-				colvalues[i] = p.shard.getColumnStorageOrPanic(col).GetValue(idx)
+				colvalues[i] = p.shard.getColumnStorageOrPanic(col, false, tx).GetValue(idx)
 			}
-			val := applyWithTx(CurrentTx(), p.computor, colvalues...)
+			val := applyWithTx(tx, p.computor, colvalues...)
 			scmer.SetValue(idx, val)
 			return // stay compressed, no bitmap change needed
 		}
@@ -1133,9 +1156,9 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 		if idx < p.count {
 			colvalues := make([]scm.Scmer, len(p.inputCols))
 			for i, col := range p.inputCols {
-				colvalues[i] = p.shard.getColumnStorageOrPanic(col).GetValue(idx)
+				colvalues[i] = p.shard.getColumnStorageOrPanic(col, false, tx).GetValue(idx)
 			}
-			p.delta[idx] = applyWithTx(CurrentTx(), p.computor, colvalues...)
+			p.delta[idx] = applyWithTx(tx, p.computor, colvalues...)
 			return
 		}
 	}
@@ -1151,13 +1174,18 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 // a schema-specific heuristic; the same physical operator adapts to cheap and
 // expensive lookup bodies and to changing table cardinalities.
 func (p *StorageComputeProxy) InvalidateRows(recids map[uint32]struct{}) {
+	p.InvalidateRowsTx(nil, recids)
+}
+
+// InvalidateRowsTx invalidates a measured row subset with explicit tx-bound repairs.
+func (p *StorageComputeProxy) InvalidateRowsTx(tx *TxContext, recids map[uint32]struct{}) {
 	if len(recids) == 0 {
 		return
 	}
 	const sampleRows = 32
 	if len(recids) <= sampleRows || p.hasSessionVariants() {
 		for recid := range recids {
-			p.Invalidate(recid)
+			p.InvalidateTx(tx, recid)
 		}
 		return
 	}
@@ -1165,7 +1193,7 @@ func (p *StorageComputeProxy) InvalidateRows(recids map[uint32]struct{}) {
 	fullRecomputeNs := p.lastRecomputeNs.Load()
 	if fullRecomputeNs <= 0 {
 		for recid := range recids {
-			p.Invalidate(recid)
+			p.InvalidateTx(tx, recid)
 		}
 		return
 	}
@@ -1176,7 +1204,7 @@ func (p *StorageComputeProxy) InvalidateRows(recids map[uint32]struct{}) {
 	}
 	started := time.Now()
 	for _, recid := range ids[:sampleRows] {
-		p.Invalidate(recid)
+		p.InvalidateTx(tx, recid)
 	}
 	sampleNs := time.Since(started).Nanoseconds()
 	estimatedNs := float64(sampleNs) * float64(len(ids)) / float64(sampleRows)
@@ -1185,7 +1213,7 @@ func (p *StorageComputeProxy) InvalidateRows(recids map[uint32]struct{}) {
 		return
 	}
 	for _, recid := range ids[sampleRows:] {
-		p.Invalidate(recid)
+		p.InvalidateTx(tx, recid)
 	}
 }
 
@@ -1194,13 +1222,18 @@ func (p *StorageComputeProxy) InvalidateRows(recids map[uint32]struct{}) {
 // state instead of silently dropping the update. This keeps FK-reuse and other
 // incremental aggregate caches correct across empty<->non-empty transitions.
 func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
+	p.IncrementalUpdateTx(nil, idx, delta)
+}
+
+// IncrementalUpdateTx updates one cached value using an explicit tx for lazy repair.
+func (p *StorageComputeProxy) IncrementalUpdateTx(tx *TxContext, idx uint32, delta scm.Scmer) {
 	p.revision.Add(1)
 	if p.hasSessionVariants() {
 		p.forEachVariant(func(v *storageComputeVariant) {
 			v.mu.Lock()
 			if !v.compressed && !v.validMask.Get(uint(idx)) {
 				v.mu.Unlock()
-				p.GetValue(idx)
+				p.getValueTx(tx, idx)
 				return
 			}
 			var oldVal scm.Scmer
@@ -1238,7 +1271,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 		// Recompute the affected row from the already-mutated source state so the
 		// cache converges immediately even when this row had never been
 		// materialized before.
-		p.GetValue(idx)
+		p.getValueTx(tx, idx)
 		return
 	}
 	var oldVal scm.Scmer
@@ -1251,7 +1284,7 @@ func (p *StorageComputeProxy) IncrementalUpdate(idx uint32, delta scm.Scmer) {
 		// The row was appended after main storage was compressed. Its source
 		// state already contains this trigger update, so materialize that state
 		// once instead of applying delta a second time.
-		p.GetValue(idx)
+		p.getValueTx(tx, idx)
 		return
 	}
 	// Add oldVal + delta using Go arithmetic (avoids Scheme runtime overhead)
@@ -1616,6 +1649,6 @@ func (s *StorageComputeProxy) DistinctCount() uint {
 // JITEmit preserves lazy compute semantics by calling the ordinary reader.
 func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: ChangeType: changetype *Pointer[T] <- *Pointer[[]uint64] (x) */
+	/* TODO: inline callee has no return register: (*sync.RWMutex).RLock */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }

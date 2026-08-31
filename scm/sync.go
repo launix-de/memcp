@@ -23,7 +23,6 @@ import "unsafe"
 import "context"
 import "runtime"
 import "sync/atomic"
-import "github.com/jtolds/gls"
 
 // cachedMemStats provides a cached version of runtime.ReadMemStats. Cache
 // ownership accounting must not be added to this snapshot: those allocations
@@ -206,16 +205,19 @@ func sessionHasScopedFlight(sess *session, scope Scmer) bool {
 	return false
 }
 
-func sessionEnsureScopedCleanup(sess *session, scope Scmer) {
+func executionContextFrom(value Scmer) context.Context {
+	ss, seq := querySessionState(value)
+	if ss == nil || seq == 0 {
+		return context.Background()
+	}
+	return ss.QueryContext(seq)
+}
+
+func sessionEnsureScopedCleanup(sess *session, scope Scmer, ctx context.Context) {
 	if sess.ScopedCleanup[scope] {
 		return
 	}
-	value, ok := GetGLSValue("context")
-	if !ok {
-		return
-	}
-	ctx, ok := value.(context.Context)
-	if !ok || ctx.Done() == nil {
+	if ctx == nil || ctx.Done() == nil {
 		return
 	}
 	sess.ScopedCleanup[scope] = true
@@ -235,7 +237,7 @@ func sessionEnsureScopedCleanup(sess *session, scope Scmer) {
 	})
 }
 
-func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, producer Scmer) Scmer {
+func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, tx Scmer, producer Scmer) Scmer {
 	computeKey := sessionScopedKey{scope: scope, key: key}
 	sess.Mu.Lock()
 	if value, ok := sess.ScopedValues[computeKey]; ok {
@@ -248,15 +250,10 @@ func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, producer 
 		sess.ScopedCleanup = make(map[Scmer]bool)
 		sess.ScopedCanceled = make(map[Scmer]bool)
 	}
-	sessionEnsureScopedCleanup(sess, scope)
+	ctx := executionContextFrom(tx)
+	sessionEnsureScopedCleanup(sess, scope, ctx)
 	if flight := sess.ScopedFlights[computeKey]; flight != nil {
 		sess.Mu.Unlock()
-		ctx := context.Background()
-		if value, ok := GetGLSValue("context"); ok {
-			if current, ok := value.(context.Context); ok {
-				ctx = current
-			}
-		}
 		select {
 		case <-flight.done:
 			if flight.failed {
@@ -320,7 +317,12 @@ func NewSession(a ...Scmer) Scmer {
 			if a[0].String() != "get_or_compute_scoped" {
 				panic("session: unknown 4-argument operation")
 			}
-			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3])
+			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[1], a[3])
+		case 5:
+			if a[0].String() != "get_or_compute_scoped" {
+				panic("session: unknown 5-argument operation")
+			}
+			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3], a[4])
 		case 1:
 			sess.Mu.RLock()
 			defer sess.Mu.RUnlock()
@@ -346,146 +348,48 @@ func NewSession(a ...Scmer) Scmer {
 			}
 			return NewSlice(keys)
 		default:
-			panic("wrong number of parameters provided to session: 0, 1, 2, or 4 required")
+			panic("wrong number of parameters provided to session: 0, 1, 2, 4, or 5 required")
 		}
 	})
 }
 
-var mgr *gls.ContextManager
-
-func Context(a ...Scmer) (result Scmer) {
-	if mgr == nil {
-		// prone to race conditions, to the first call should be called in the initialization
-		mgr = gls.NewContextManager()
+// Context creates a Scheme session and passes it explicitly to fn.
+func Context(a ...Scmer) Scmer {
+	if len(a) == 0 || a[0].IsNil() {
+		panic("context requires a callback")
 	}
-	if a[0].IsString() {
-		switch a[0].String() {
-		case "session":
-			val, ok := mgr.GetValue("session")
-			if !ok {
-				panic("no session set")
-			}
-			return val.(Scmer)
-		case "query":
-			return NewInt(int64(CurrentQuerySeq()))
-		case "check":
-			ctxVal, ok := mgr.GetValue("context")
-			if !ok {
-				// Startup compilation and Scheme self-tests have no request to
-				// cancel. Treat that environment as live while preserving prompt
-				// cancellation whenever a request context exists.
-				return NewBool(true)
-			}
-			e := ctxVal.(context.Context).Err()
-			if e != nil {
-				panic(e)
-			}
-			return NewBool(true)
-		}
-	}
-	if !a[0].IsNil() {
-		NewContext(context.TODO(), func() {
-			result = Apply(a[0], a[1:]...)
-		})
-		return result
-	}
-	panic("unimplemented")
+	args := make([]Scmer, len(a))
+	args[0] = NewSession()
+	copy(args[1:], a[1:])
+	return Apply(a[0], args...)
 }
 
-func NewContext(ctx context.Context, fn func()) {
-	if mgr == nil {
-		// prone to race conditions, to the first call should be called in the initialization
-		mgr = gls.NewContextManager()
-	}
-	mgr.SetValues(gls.Values{
-		"session": NewSession(),
-		"context": ctx,
-		// TODO: logger for print and time, process ID etc. etc.
-	}, fn)
-}
-
-// NewContextWithSession installs a pre-existing Scheme session and any
-// request-local values in one GLS frame. Keeping one frame avoids repeating
-// goroutine stack tagging for every HTTP request.
-func NewContextWithSession(ctx context.Context, session Scmer, values map[string]any, fn func()) {
-	if mgr == nil {
-		mgr = gls.NewContextManager()
-	}
-	glsValues := gls.Values{
-		"session": session,
-		"context": ctx,
-	}
-	for key, value := range values {
-		glsValues[key] = value
-	}
-	mgr.SetValues(glsValues, fn)
-}
-
-func GetContext() context.Context {
-	if mgr == nil {
-		// prone to race conditions, to the first call should be called in the initialization
-		mgr = gls.NewContextManager()
-	}
-	r, ok := mgr.GetValue("context")
-	if !ok {
-		panic("no context set")
-	}
-	return r.(context.Context)
-}
-
-// GetCurrentTx returns the current transaction context by looking up the
-// session from GLS and reading the "__memcp_tx" key. Returns nil if no
-// transaction is active or no session is available.
-func GetCurrentTx() any {
-	if mgr == nil {
-		return nil
-	}
-	val, ok := mgr.GetValue("session")
-	if !ok {
-		return nil
-	}
-	sessionScmer := val.(Scmer)
-	txScmer := Apply(sessionScmer, NewString("__memcp_tx"))
-	if txScmer.IsNil() {
-		return nil
-	}
-	return txScmer.Any()
-}
-
-// SetValues wraps mgr.SetValues for use by other packages (e.g. MySQL
-// frontend) that need to install session/context into GLS.
-func SetValues(vals map[string]any, fn func()) {
-	if mgr == nil {
-		mgr = gls.NewContextManager()
-	}
-	glsVals := make(gls.Values, len(vals))
-	for k, v := range vals {
-		glsVals[k] = v
-	}
-	mgr.SetValues(glsVals, fn)
-}
-
-// GetGLSValue returns the GLS value for a given key, or nil if no GLS context
-// is installed. Used by packages outside scm to read goroutine-local markers
-// that propagate across gls.Go-spawned worker goroutines.
-func GetGLSValue(key string) (any, bool) {
-	if mgr == nil {
-		return nil, false
-	}
-	return mgr.GetValue(key)
-}
-
-// WithSession executes fn with the given session installed in GLS,
-// so that GetCurrentTx() and other GLS-based lookups use this session.
+// WithSession evaluates fn in a copy of its lexical closure with session bound.
+// Copying the existing frame, instead of inserting another one, preserves the
+// exact depth of optimizer-resolved outer references and keeps concurrent calls
+// isolated from each other.
 func WithSession(session Scmer, fn Scmer) Scmer {
-	var result Scmer
-	if mgr == nil {
-		mgr = gls.NewContextManager()
+	if !fn.IsProc() {
+		return Apply(fn)
 	}
-	mgr.SetValues(gls.Values{"session": session}, func() {
-		result = Apply(fn)
-	})
-	return result
+	proc := *fn.Proc()
+	outer := proc.En
+	if outer == nil {
+		outer = &Globalenv
+	}
+	vars := make(Vars, len(outer.Vars)+1)
+	for name, value := range outer.Vars {
+		vars[name] = value
+	}
+	vars[Symbol("session")] = session
+	proc.En = &Env{
+		Vars:         vars,
+		VarsNumbered: outer.VarsNumbered,
+		Outer:        outer.Outer,
+		Nodefine:     outer.Nodefine,
+	}
+	proc.Compiled = nil
+	return Apply(NewProcStruct(proc))
 }
 
 func init_sync() {
@@ -545,9 +449,12 @@ func init_sync() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["with_session"].Fn, args, result)
+				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-				argPinned0 := make([]Reg, 0, len(args)*2)
+				argPinned0 := make([]Reg, 0, len(args)*3)
 				seenArgRegs := make(map[Reg]bool)
 				for _, ai := range args {
 					if ai.Loc == LocReg {
@@ -567,8 +474,21 @@ func init_sync() {
 							seenArgRegs[ai.Reg2] = true
 							argPinned0 = append(argPinned0, ai.Reg2)
 						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
 					}
 				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
 				d1 := args[0]
 				d1.ID = 0
 				d2 := args[1]
@@ -645,6 +565,8 @@ func init_sync() {
 				if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
 					panic("jit: generic call arg expects 2-word value (WithSession arg1)")
 				}
+				ctx.SyncDesc(&d1)
+				ctx.SyncDesc(&d2)
 				d3 := ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d1, d2}, 2)
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
@@ -683,9 +605,6 @@ func init_sync() {
 					}
 				}
 				return result
-				for _, r := range argPinned0 {
-					ctx.UnprotectReg(r)
-				}
 				return result
 			},
 		},
@@ -709,24 +628,32 @@ func init_sync() {
 		Name: "sleep",
 
 		Fn: func(a ...Scmer) Scmer {
-			ctx := GetContext()
+			queryState := NewNil()
+			duration := a[0]
+			if len(a) > 1 {
+				queryState = a[0]
+				duration = a[1]
+			}
+			ctx := executionContextFrom(queryState)
 			select {
 			case <-ctx.Done():
 				panic(ctx.Err())
-			case <-time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
+			case <-time.After(time.Duration(ToFloat(duration) * float64(time.Second))):
 				return NewBool(true)
 			}
 		},
-		Type: &TypeDescriptor{Kind: "func", Description: "sleeps the amount of seconds",
+		Type: &TypeDescriptor{Kind: "func", Description: "sleeps the amount of seconds and observes cancellation through tx",
 			Params: []*TypeDescriptor{
-				{Kind: "number", Label: "duration", Description: "number of seconds to sleep"},
+				{Kind: "any", Label: "duration_or_tx", Description: "duration, or explicit transaction context followed by duration", Optional: true},
+				{Kind: "number", Label: "duration", Description: "number of seconds to sleep when a transaction context is supplied", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sleep"].Fn, args, result)
 			},
-			JITVirtualArgs: true,
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -766,12 +693,13 @@ func init_sync() {
 			token := make(chan struct{}, 1)
 			token <- struct{}{}
 			return NewFunc(func(a ...Scmer) Scmer {
-				ctx := context.Background()
-				if value, ok := GetGLSValue("context"); ok {
-					if current, ok := value.(context.Context); ok {
-						ctx = current
-					}
+				queryState := NewNil()
+				fn := a[0]
+				if len(a) > 1 {
+					queryState = a[0]
+					fn = a[1]
 				}
+				ctx := executionContextFrom(queryState)
 				select {
 				case <-token:
 					if err := ctx.Err(); err != nil {
@@ -791,14 +719,15 @@ func init_sync() {
 				}()
 
 				// execute serially
-				return Apply(a[0])
+				return Apply(fn)
 			})
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "Creates a context-aware mutex. The return value serializes calls to parameterless functions and stops waiting when the current request is cancelled.",
 			Params: []*TypeDescriptor{},
 			Return: &TypeDescriptor{Kind: "func", Label: "locked", Description: "executes one parameterless function while holding the mutex", HasSideEffects: true,
 				Params: []*TypeDescriptor{
-					{Kind: "func", Label: "fn", Description: "parameterless function to execute under the lock", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
+					{Kind: "any", Label: "fn_or_tx", Description: "function, or explicit transaction context followed by function", Optional: true},
+					{Kind: "func", Label: "fn", Description: "parameterless function to execute under the lock", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 				},
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result returned by the protected function"},
 			},
@@ -819,9 +748,12 @@ func init_sync() {
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["numcpu"].Fn, args, result)
+				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-				argPinned0 := make([]Reg, 0, len(args)*2)
+				argPinned0 := make([]Reg, 0, len(args)*3)
 				seenArgRegs := make(map[Reg]bool)
 				for _, ai := range args {
 					if ai.Loc == LocReg {
@@ -841,8 +773,21 @@ func init_sync() {
 							seenArgRegs[ai.Reg2] = true
 							argPinned0 = append(argPinned0, ai.Reg2)
 						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
 					}
 				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.EnsureDesc(&d1)
@@ -861,9 +806,6 @@ func init_sync() {
 				}
 				result.Type = tagInt
 				return result
-				for _, r := range argPinned0 {
-					ctx.UnprotectReg(r)
-				}
 				return result
 			},
 		},

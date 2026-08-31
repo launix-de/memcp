@@ -396,22 +396,22 @@ test_cases:
         (define cache (newcachemap))
         (define sess (newsession))
         (define compiles (newsession))
-        (define parser (lambda (_schema _query _policy) (begin
-          (define value (planner_literal_value (list (quote session) "v1")))
+        (define parser (lambda (_schema _query _policy planning_session _tx) (begin
+          (define value (planner_literal_value (list (quote session) "v1") planning_session))
           (define broad (planner_broad_like_expr?
-            (list (quote session) "v1")))
+            (list (quote session) "v1") planning_session))
           (compiles (string (count (compiles))) value)
           (list (quote quote) (if broad "broad" "selective")))))
         (sess "v1" "%C%")
-        (define first_formula (cached_parse cache parser "memcp-tests"
+        (define first_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
         (define first_result (with_session sess (lambda () (eval first_formula))))
         (sess "v1" "%Needle389%")
-        (define second_formula (cached_parse cache parser "memcp-tests"
+        (define second_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
         (define second_result (with_session sess (lambda () (eval second_formula))))
         (sess "v1" "%AnotherSelectiveValue%")
-        (define third_formula (cached_parse cache parser "memcp-tests"
+        (define third_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
         (define third_result (with_session sess (lambda () (eval third_formula))))
         (define entry (car (cache (car (cache)))))
@@ -438,22 +438,22 @@ test_cases:
         (define sess (newsession))
         (define compiles (newsession))
         (compiles "count" 0)
-        (define parser (lambda (_schema _query _policy) (begin
-          (define value (planner_literal_value (list (quote session) "v1")))
+        (define parser (lambda (_schema _query _policy planning_session _tx) (begin
+          (define value (planner_literal_value (list (quote session) "v1") planning_session))
           (planner_record_guard_condition
-            (list (quote equal?) (list (quote session) "v1") value))
+            (list (quote equal?) (list (quote session) "v1") value) planning_session)
           (compiles "count" (+ (compiles "count") 1))
           (list (quote quote) value))))
         (define query "SELECT id FROM ps_test WHERE EXISTS (SELECT id FROM ps_test) LIMIT ?")
         (define results (map (produceN 12) (lambda (value) (begin
           (sess "v1" value)
           (with_session sess (lambda ()
-            (eval (cached_parse cache parser "memcp-tests" query nil "root" sess true))))))))
+            (eval (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true))))))))
         (define entry (car (cache (car (cache)))))
         (define bounded_count (count (entry "variants")))
         (sess "v1" 0)
         (define revisited (with_session sess (lambda ()
-          (eval (cached_parse cache parser "memcp-tests" query nil "root" sess true)))))
+          (eval (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true)))))
         (if (and
           (equal? results (produceN 12))
           (equal? revisited 0)
@@ -538,7 +538,7 @@ test_cases:
         (planning "__memcp_queryplan_guarded_session_keys" (newsession))
         (planning "__memcp_queryplan_observed_session_keys" (newsession))
         (define pattern (list (quote concat) "%" (list (quote session) "v1") "%"))
-        (define compile_broad (with_session planning (lambda () (planner_broad_like_expr? pattern))))
+        (define compile_broad (planner_broad_like_expr? pattern planning))
         (define guard (sql_queryplan_guard_from_session planning))
         (if (and compile_broad (with_session planning (lambda () (eval guard))))
           "ok"
@@ -552,16 +552,16 @@ test_cases:
         (define cache (newcachemap))
         (define sess (newsession))
         (define compiles (newsession))
-        (define parser (lambda (_schema _query _policy) (begin
-          (define value (planner_literal_value (list (quote session) "v1")))
+        (define parser (lambda (_schema _query _policy planning_session _tx) (begin
+          (define value (planner_literal_value (list (quote session) "v1") planning_session))
           (compiles (string value) true)
           (list (quote quote) value))))
         (sess "v1" "first")
-        (define first_formula (cached_parse cache parser "memcp-tests"
+        (define first_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
         (define first_result (with_session sess (lambda () (eval first_formula))))
         (sess "v1" "second")
-        (define second_formula (cached_parse cache parser "memcp-tests"
+        (define second_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
         (define second_result (with_session sess (lambda () (eval second_formula))))
         (define entry (car (cache (car (cache)))))
@@ -589,10 +589,10 @@ test_cases:
           (join_order_adaptive
             '()
             (list
-              (list "left" (planning "left") (list (list (quote context) "session") "left"))
-              (list "right" (planning "right") (list (list (quote context) "session") "right")))
+              (list "left" (planning "left") (list (quote session) "left"))
+              (list "right" (planning "right") (list (quote session) "right")))
             (list (list '("left" "right") 0.01 nil nil true nil 0.01))
-            '()))))
+            '() planning))))
         (define guard (sql_queryplan_guard_from_session planning))
         (define initially_valid (with_session planning (lambda () (eval guard))))
         (planning "left" 10)
@@ -609,7 +609,7 @@ test_cases:
   - name: "Cached-plan guard omits unused planner bindings"
     scm: |
       (begin
-        (define planning (sql_queryplan_compile_session (context "session")))
+        (define planning (sql_queryplan_compile_session (newsession) nil))
         (define guard (with_session planning (lambda ()
           (begin
             (planner_guard_runtime_binding (list (quote +) 1 2))
@@ -634,8 +634,8 @@ test_cases:
             (list (quote quote) quoted_session_call))))
         (equal? bound
           (list (quote begin)
-            (quote __memcp_execution_session)
-            (list (quote __memcp_execution_session) "v1")
+            (quote session)
+            (list (quote session) "v1")
             (list (quote quote) quoted_session_call))))
     expect:
       data: [true]
@@ -643,10 +643,10 @@ test_cases:
   - name: "Exact cached formula keeps optimizer-resolved session calls"
     scm: |
       (begin
-        (define execution_session (context "session"))
+        (define execution_session (newsession))
         (execution_session "v1" 7)
         (define formula
-          (cached_parse (newcachemap) parse_sql "memcp-tests" "SELECT ?"
+          (cached_parse (newcachemap) (list parse_sql) "memcp-tests" "SELECT ?"
             (lambda (_schema _table _write) true)
             "root" execution_session false))
         (equal? (pretty_print formula 120)
@@ -663,14 +663,14 @@ test_cases:
         (sess "schema" "memcp-tests")
         (define resultrow (lambda (_row) nil))
         (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
-        (define first_formula (cached_parse cache parse_sql "memcp-tests" query nil "root" sess true))
+        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
         (with_session sess (lambda () (eval first_formula)))
         (define entry (car (cache (car (cache)))))
         (define variants_after_first (count (entry "variants")))
         (insert (table "memcp-tests" "ps_guard_right") '("id")
           (map (produceN 500) (lambda (i) (list (+ i 2)))))
         (rebuild (table "memcp-tests" "ps_guard_right") true false)
-        (define second_formula (cached_parse cache parse_sql "memcp-tests" query nil "root" sess true))
+        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
         (with_session sess (lambda () (eval second_formula)))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
           "ok"
@@ -696,9 +696,9 @@ test_cases:
         for a shallow EXISTS like this one -- see planner_presence_carrier_cost's
         row_ns coefficient). */
         (define domain_rows 20)
-        (define parser (lambda (_schema _query _policy) (begin
+        (define parser (lambda (_schema _query _policy planning_session _tx) (begin
           (define limit_expr (list (quote session) "v1"))
-          (define limit_value (planner_literal_value limit_expr))
+          (define limit_value (planner_literal_value limit_expr planning_session))
           (define direct (planner_cost_better?
             (planner_direct_presence_probe_cost limit_value)
             (planner_recset_carrier_cost domain_rows limit_value)))
@@ -707,16 +707,16 @@ test_cases:
               (list (quote planner_cost_better?)
                 (list (quote planner_direct_presence_probe_cost) limit_expr)
                 (list (quote planner_recset_carrier_cost) domain_rows limit_expr))
-              direct))
+              direct) planning_session)
           (compiles (string (count (compiles))) direct)
           (list (quote quote) (if direct "probe" "carrier")))))
         (sess "v1" 5)
-        (define first_formula (cached_parse cache parser "memcp-tests"
+        (define first_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
           nil "root" sess true))
         (define first_result (with_session sess (lambda () (eval first_formula))))
         (sess "v1" 10000)
-        (define second_formula (cached_parse cache parser "memcp-tests"
+        (define second_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
           nil "root" sess true))
         (define second_result (with_session sess (lambda () (eval second_formula))))

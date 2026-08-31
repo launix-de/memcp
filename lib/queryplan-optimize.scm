@@ -1025,8 +1025,10 @@ plan = (tree aliases cardinality cost size atomic driver-cardinality left right 
 (define join_order_dphyp_connected (lambda (nodes aliases predicates connected required_drivers)
 	(begin
 		(define sorted_connected (join_order_sort_sets connected))
-		(define connected_by_first (group_assoc connected car
-			(lambda (subsets subset) (append subsets subset)) '()))
+		(define connected_by_first (reduce connected (lambda (dict subset)
+			(begin
+				(define first (car subset))
+				(set_assoc dict first (append (get_assoc dict first '()) subset)))) '()))
 		(join_order_dphyp_fill nodes aliases predicates connected_by_first sorted_connected '() 0 required_drivers))))
 
 (define join_order_dphyp_budgeted (lambda (nodes aliases predicates budget required_drivers)
@@ -1707,7 +1709,7 @@ particular star shape. */
 		(quote dphyp)
 		(if hypergraph (quote goo-dphyp) (quote decomposed-dphyp)))))
 
-(define planner_record_table_statistics_guards (lambda (sources)
+(define planner_record_table_statistics_guards (lambda (sources planning_session)
 	(reduce (filter sources source_is_base_table?) (lambda (_ src)
 		(begin
 			(define token (table_planner_statistics_token
@@ -1716,7 +1718,7 @@ particular star shape. */
 				(list (quote equal?)
 					(list (quote table_planner_statistics_token)
 						(list (quote table) (source_schema src) (source_relation src)))
-					token)))) nil)))
+					token) planning_session))) nil)))
 
 (define planner_table_statistics_aliases (lambda (sources)
 	(map (filter sources source_is_base_table?) source_alias)))
@@ -1733,9 +1735,9 @@ O(1) dependency token per base table. */
 		((quote strlike) _value _pattern _collation) true
 		_ false)))
 
-(define join_order_record_cost_dependencies (lambda (sources nodes predicates)
+(define join_order_record_cost_dependencies (lambda (sources nodes predicates planning_session)
 	(begin
-		(planner_record_table_statistics_guards sources)
+		(planner_record_table_statistics_guards sources planning_session)
 		(define table_aliases (planner_table_statistics_aliases sources))
 		/* Derived and synthetic nodes have no table snapshot whose token can cover
 		their runtime cardinality. Preserve the exact guard for those nodes. */
@@ -1745,12 +1747,12 @@ O(1) dependency token per base table. */
 				(planner_record_guard_condition
 					(list (quote equal?)
 						(if (> (count node) 2) (nth node 2) (cadr node))
-						(cadr node))))) nil)
+						(cadr node)) planning_session))) nil)
 		(reduce predicates (lambda (_ predicate)
 			(begin
 				(define expr (join_order_pred_expr predicate))
 				(if (planner_selectivity_value_dependent? expr)
-					(planner_record_session_value_guards expr) nil))) nil))))
+					(planner_record_session_value_guards expr planning_session) nil))) nil))))
 
 /* Every subset containing one vertex and any selection of its regular-edge
 neighbors is connected. A degree d therefore proves at least 2^d connected
@@ -1862,7 +1864,7 @@ running DP over a wide projection-only graph. */
 					(if (join_order_plan_satisfies_driver_property? plan required_drivers) plan nil))
 				nil)))))
 
-(define join_order_adaptive (lambda (sources nodes raw_predicates required_drivers)
+(define join_order_adaptive (lambda (sources nodes raw_predicates required_drivers planning_session)
 	(begin
 		(define aliases (map nodes car))
 		/* Non-inner join constraints are hypergraph constraints even when their ON
@@ -1892,7 +1894,7 @@ running DP over a wide projection-only graph. */
 		fixed physical driver. Guard every cost input once. Pairwise DP inequalities
 		are deterministic consequences of these inputs and retaining all of them
 		would duplicate complete intermediate plan trees. */
-		(join_order_record_cost_dependencies sources nodes predicates)
+		(join_order_record_cost_dependencies sources nodes predicates planning_session)
 		(define result (if (not (nil? functional_relation_plan))
 			(list functional_relation_plan (- (count aliases) 1))
 			(if exact
@@ -2287,7 +2289,7 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(gs_facts stage))
 		stage)))
 
-(define join_optimizer_plan_segment (lambda (stages relation_units all_sources segment default_alias graph required_drivers)
+(define join_optimizer_plan_segment (lambda (stages relation_units all_sources segment default_alias graph required_drivers planning_session)
 	(begin
 		(define aliases (map segment source_alias))
 		(define alias_index (join_hypergraph_alias_index aliases))
@@ -2311,7 +2313,8 @@ source catalog. join_plan remains the single owner of physical join order. */
 			(join_optimizer_metadata_nodes stages relation_units
 				segment default_alias alias_index graph fixed_functional_pair)
 			predicates
-			required_drivers))
+			required_drivers
+			planning_session))
 		(qassoc_set planned (quote tree)
 			(join_order_tree_with_predicates
 				(qassoc_get planned (quote tree) nil)
@@ -2417,7 +2420,7 @@ the lowerer can cost it. */
 		true
 		(planner_cost_better? (cadr candidate) (cadr current)))))
 
-(define join_optimizer_plan_ordered_drivers (lambda (stage_catalog relation_units sources default_alias graph ordered_drivers target)
+(define join_optimizer_plan_ordered_drivers (lambda (stage_catalog relation_units sources default_alias graph ordered_drivers target planning_session)
 	(begin
 		(define base_row_catalog (map sources (lambda (src)
 			(list (source_alias src)
@@ -2430,7 +2433,7 @@ the lowerer can cost it. */
 		(reduce ordered_drivers (lambda (state driver)
 			(begin
 				(define planned (join_optimizer_plan_segment stage_catalog relation_units
-					sources sources default_alias graph (list driver)))
+					sources sources default_alias graph (list driver) planning_session))
 				(define work (join_optimizer_ordered_driver_work
 					sources base_row_catalog filtered_row_catalog planned target))
 				(define candidate (list planned (car work)
@@ -2442,7 +2445,7 @@ the lowerer can cost it. */
 						(nth work 1) (nth work 2) (nth work 3)))))))
 			(list nil '())))))
 
-(define join_optimizer_reorder_sources (lambda (stage_catalog block graph)
+(define join_optimizer_reorder_sources (lambda (stage_catalog block graph planning_session)
 	(begin
 		(define sources (qb_sources block))
 		(define segment sources)
@@ -2531,9 +2534,9 @@ the lowerer can cost it. */
 			(begin
 				(define relation_units
 					(qassoc_get (qb_facts block) (quote join_relation_units) '()))
-				(define literal_limit (planner_literal_value (qb_limit block)))
+				(define literal_limit (planner_literal_value (qb_limit block) planning_session))
 				(define literal_offset (coalesceNil
-					(planner_literal_value (qb_offset block)) 0))
+					(planner_literal_value (qb_offset block) planning_session) 0))
 				(define enumerate_ordered_drivers (and
 					(number? literal_limit)
 					(and (>= literal_limit 0)
@@ -2546,12 +2549,13 @@ the lowerer can cost it. */
 												(join_optimizer_inner_source? stage_catalog src)))) true))))))))
 				(define ordered_driver_plans (if enumerate_ordered_drivers
 					(join_optimizer_plan_ordered_drivers stage_catalog relation_units
-						sources default_alias graph ordered_drivers (+ literal_offset literal_limit)) nil))
+						sources default_alias graph ordered_drivers (+ literal_offset literal_limit)
+						planning_session) nil))
 				(define ordered_choice (if (nil? ordered_driver_plans) nil
 					(car ordered_driver_plans)))
 				(define planned (if (nil? ordered_choice)
 					(join_optimizer_plan_segment stage_catalog relation_units
-						sources segment default_alias graph required_order_property)
+						sources segment default_alias graph required_order_property planning_session)
 					(car ordered_choice)))
 				(join_optimizer_reorder_result
 					(qassoc_get planned (quote tree) nil)
@@ -2583,7 +2587,7 @@ the lowerer can cost it. */
 		(list (quote join_graph_hyperedges) (count (qassoc_get graph (quote hyperedges) '())))
 		(list (quote join_graph_barriers) (count (qassoc_get graph (quote barriers) '()))))))
 
-(define hybrid_reorder_query_block_using (lambda (stage_catalog block)
+(define hybrid_reorder_query_block_using (lambda (stage_catalog block planning_session)
 	(if (or (empty_list? (qb_sources block)) (single_source? (qb_sources block)))
 		(make_query_block
 			(qb_schema block)
@@ -2596,14 +2600,14 @@ the lowerer can cost it. */
 			(qb_limit block)
 			(qb_offset block)
 			(qb_hidden block)
-			(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage)))
+			(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session)))
 			(qb_facts block))
 		(begin
 			(define provenance_graph (extract_join_hypergraph block))
 			(define normalized (join_optimizer_normalize_inner_joins stage_catalog block))
 			(define graph (join_hypergraph_with_provenance
 				(extract_join_hypergraph normalized) provenance_graph))
-			(define reordered (join_optimizer_reorder_sources stage_catalog normalized graph))
+			(define reordered (join_optimizer_reorder_sources stage_catalog normalized graph planning_session))
 			(query_block_with_reorder_facts
 				(make_query_block
 					(qb_schema normalized)
@@ -2616,57 +2620,59 @@ the lowerer can cost it. */
 					(qb_limit normalized)
 					(qb_offset normalized)
 					(qb_hidden normalized)
-					(map (qb_stages normalized) (lambda (stage) (join_reorder_stage_using stage_catalog stage)))
+					(map (qb_stages normalized) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session)))
 					(qb_facts normalized))
 				(merge (list
-					(query_block_reorder_telemetry normalized)
+					(query_block_reorder_telemetry normalized planning_session)
 					(join_optimizer_telemetry graph reordered))))))))
 
-(define hybrid_reorder_query_block (lambda (block)
-	(hybrid_reorder_query_block_using (qb_stages block) block)))
-(define planner_literal_value (lambda (expr)
-	(match expr
-		((symbol session) key) (try
-			(lambda () (begin
-				(define compile_bindings ((context "session") "__memcp_queryplan_compile_bindings"))
-				(define observed ((context "session") "__memcp_queryplan_observed_session_keys"))
-				(if (and (not (nil? compile_bindings)) (not (nil? observed)))
-					(observed key true)
-					nil)
-				(define direct ((context "session") key))
-				(if (not (nil? direct))
-					direct
-					(if (nil? compile_bindings) nil (compile_bindings key)))))
-			(lambda (_e) nil))
-		((quote session) key) (planner_literal_value (list (quote session) key))
-		_ expr)))
+(define hybrid_reorder_query_block (lambda (block planning_session)
+	(hybrid_reorder_query_block_using (qb_stages block) block planning_session)))
+(define planner_literal_value (lambda (expr planning_session)
+	(begin
+		(define planning_session (planner_effective_session planning_session))
+		(match expr
+			((symbol session) key) (try
+				(lambda () (begin
+					(define compile_bindings (if (nil? planning_session) nil (planning_session "__memcp_queryplan_compile_bindings")))
+					(define observed (if (nil? planning_session) nil (planning_session "__memcp_queryplan_observed_session_keys")))
+					(if (and (not (nil? compile_bindings)) (not (nil? observed)))
+						(observed key true)
+						nil)
+					(define direct (if (nil? planning_session) nil (planning_session key)))
+					(if (not (nil? direct))
+						direct
+						(if (nil? compile_bindings) nil (compile_bindings key)))))
+				(lambda (_e) nil))
+			((quote session) key) (planner_literal_value (list (quote session) key) planning_session)
+			_ expr))))
 
 /* Physical selectivity decisions over session-dependent predicates must be
 guarded by the values observed while compiling the cached plan. */
-(define planner_record_session_value_guards (lambda (node)
+(define planner_record_session_value_guards (lambda (node planning_session)
 	(reduce (query_expr_session_reads node) (lambda (_ expr)
 		(begin
-			(define value (planner_literal_value expr))
+			(define value (planner_literal_value expr planning_session))
 			(planner_record_guard_condition
 				(list (quote equal?) expr
-					(if (list? value) (list (quote quote) value) value))))) nil)))
+					(if (list? value) (list (quote quote) value) value)) planning_session))) nil)))
 
-(define planner_concat_expr_value (lambda (items)
+(define planner_concat_expr_value (lambda (items planning_session)
 	(match items
 		(cons item rest) (begin
-			(define value (planner_string_expr_value item))
-			(define tail (planner_concat_expr_value rest))
+			(define value (planner_string_expr_value item planning_session))
+			(define tail (planner_concat_expr_value rest planning_session))
 			(if (and (string? value) (string? tail)) (concat value tail) nil))
 		_ "")))
 
-(define planner_string_expr_value (lambda (expr)
+(define planner_string_expr_value (lambda (expr planning_session)
 	(begin
-		(define value (planner_literal_value expr))
+		(define value (planner_literal_value expr planning_session))
 		(if (string? value)
 			value
 			(match expr
 				(cons head args) (if (or (equal? head (symbol "concat")) (equal? head (quote concat)))
-					(planner_concat_expr_value args) nil)
+					(planner_concat_expr_value args planning_session) nil)
 				_ nil)))))
 
 (define like_pattern_core (lambda (pattern)
@@ -2717,24 +2723,24 @@ floor avoids pretending that an unseen word is impossible. */
 			(define core (like_pattern_core pattern))
 			(<= (strlen core) 2)))))
 
-(define planner_broad_like_expr? (lambda (pattern)
+(define planner_broad_like_expr? (lambda (pattern planning_session)
 	(begin
-		(define broad (broad_like_pattern? (planner_string_expr_value pattern)))
+		(define broad (broad_like_pattern? (planner_string_expr_value pattern planning_session)))
 		(if (expr_contains_session_dependency? pattern)
 			(planner_guarded_choice broad
-				(list (quote broad_like_pattern?) pattern))
+				(list (quote broad_like_pattern?) pattern) planning_session)
 			broad))))
 
-(define expr_contains_broad_text_match? (lambda (expr)
+(define expr_contains_broad_text_match? (lambda (expr planning_session)
 	(match expr
 		((symbol strlike) _value pattern _collation)
-		(planner_broad_like_expr? pattern)
+		(planner_broad_like_expr? pattern planning_session)
 		((quote strlike) _value pattern _collation)
-		(expr_contains_broad_text_match? (list (quote strlike) _value pattern _collation))
+		(expr_contains_broad_text_match? (list (quote strlike) _value pattern _collation) planning_session)
 		(cons head tail)
 		(reduce tail (lambda (found item)
-			(or found (expr_contains_broad_text_match? item)))
-			(expr_contains_broad_text_match? head))
+			(or found (expr_contains_broad_text_match? item planning_session)))
+			(expr_contains_broad_text_match? head planning_session))
 		_ false)))
 
 (define expr_contains_text_match? (lambda (expr)
@@ -2743,18 +2749,18 @@ floor avoids pretending that an unseen word is impossible. */
 		((quote strlike) _value _pattern _collation) true
 		_ false)))
 
-(define stage_input_contains_broad_membership_filter? (lambda (input)
+(define stage_input_contains_broad_membership_filter? (lambda (input planning_session)
 	(if (union_block? input)
 		(reduce (union_branches input) (lambda (found branch)
-			(or found (stage_input_contains_broad_membership_filter? branch)))
+			(or found (stage_input_contains_broad_membership_filter? branch planning_session)))
 			false)
 		(if (query_block? input)
-			(expr_contains_broad_text_match? (qb_where input))
+			(expr_contains_broad_text_match? (qb_where input) planning_session)
 			false))))
 
-(define candidate_stage_broad? (lambda (stage)
+(define candidate_stage_broad? (lambda (stage planning_session)
 	(or (equal? (qassoc_get (gs_facts stage) (quote selectivity_class) nil) (quote broad))
-		(stage_input_contains_broad_membership_filter? (gs_input stage)))))
+		(stage_input_contains_broad_membership_filter? (gs_input stage) planning_session))))
 
 (define source_order_limit_driver? (lambda (src order_items limit_value)
 	(and (query_limit_active? nil limit_value)
@@ -3103,15 +3109,14 @@ their tighter direct bound; this product is only an additional candidate. */
 								(if (equal? (qassoc_get estimate (quote source) nil) (quote range_unknown))
 									0.3333333333333333 0.1))))))))))
 
-(define explain_reorder_selectivities? (lambda ()
-	(try
-		(lambda () (coalesceNil ((context "session") "__memcp_explain_reorder_selectivities") false))
-		(lambda (_e) false))))
+(define explain_reorder_selectivities? (lambda (planning_session)
+	(if (nil? planning_session) false
+		(coalesceNil (planning_session "__memcp_explain_reorder_selectivities") false))))
 
-(define query_block_reorder_telemetry (lambda (block)
+(define query_block_reorder_telemetry (lambda (block planning_session)
 	(merge (list
 		(list (list (quote source_estimates) (map (qb_sources block) source_reorder_estimate)))
-		(if (explain_reorder_selectivities?)
+		(if (explain_reorder_selectivities? planning_session)
 			(list (list (quote selectivity_estimates) (query_block_selectivity_estimates block)))
 			'())
 		(list (list (quote left_join_requirements) (filter
@@ -3483,7 +3488,7 @@ carrier crossover. */
 									(expr_refs_alias? default_alias (source_alias src)
 										(qb_where block)))))))))))))))
 
-(define candidate_reorder_telemetry (lambda (stage sources block)
+(define candidate_reorder_telemetry (lambda (stage sources block planning_session)
 	(begin
 		(define driver (reduce (coalesceNil sources '()) (lambda (found src)
 			(if (not (nil? found)) found
@@ -3521,7 +3526,7 @@ carrier crossover. */
 			(>= (* estimate_rows 4) candidate_rows)))
 		(define driver_alternative (membership_expr_has_driver_alternative? (qb_where block)))
 		(define class (if (or estimate_ratio_broad
-			(if driver_alternative (candidate_stage_broad? stage) false)) (quote broad) (quote selective)))
+			(if driver_alternative (candidate_stage_broad? stage planning_session) false)) (quote broad) (quote selective)))
 		(define ordered_driver (if (nil? driver) false
 			(or (source_order_limit_driver? driver (qb_order block) (qb_limit block))
 				(source_row_number_limit_driver? (qb_stages block) driver))))
@@ -3586,8 +3591,9 @@ carrier crossover. */
 			(list (quote membership_driver_expression_operations) (qassoc_get driver_work (quote expression_operations) 0))
 			(list (quote membership_driver_expression_depth) (qassoc_get driver_work (quote expression_depth) 0))
 			(list (quote membership_driver_alternative) driver_alternative)
-			(list (quote membership_order_limit) (qb_limit block))
-			(list (quote membership_order_offset) (coalesceNil (qb_offset block) 0))
+			(list (quote membership_order_limit) (planner_literal_value (qb_limit block) planning_session))
+			(list (quote membership_order_offset)
+				(coalesceNil (planner_literal_value (qb_offset block) planning_session) 0))
 			(list (quote membership_order_limit_driver) ordered_driver)
 			(list (quote membership_consumer) consumer)))))
 
@@ -4133,7 +4139,10 @@ ordered batch is executable and what its actual driver workload is. */
 			(and (single_source? base_sources)
 				(and (query_limit_active? (qb_offset block) (qb_limit block))
 					(and (order_items_belong_to_source? (car base_sources) (qb_order block))
-						(expr_contains_broad_text_match? condition))))))))
+						(or (not (membership_driver_subscan_supported? stage))
+							(or (equal? (qassoc_get (gs_facts stage) (quote membership_selectivity_class) nil) (quote broad))
+								(or (equal? (qassoc_get (gs_facts stage) (quote selectivity_class) nil) (quote broad))
+									(expr_contains_broad_text_match? condition nil)))))))))))
 
 (define ordered_batch_stage_supported? (lambda (stage)
 	(begin
@@ -4850,7 +4859,7 @@ the logical lookup still carries an alias which no longer exists. */
 								src nil))
 						nil)))) nil))))
 
-(define query_block_with_exists_membership_requirement (lambda (stage_catalog block)
+(define query_block_with_exists_membership_requirement (lambda (stage_catalog block planning_session)
 	(begin
 		(define sources (qb_sources block))
 		(define default_alias (if (empty_list? sources) nil (source_alias (car sources))))
@@ -4869,7 +4878,7 @@ the logical lookup still carries an alias which no longer exists. */
 				(define driver_sources
 					(without_source_alias rewritten_sources (source_alias exists_src)))
 				(define candidate_telemetry
-					(candidate_reorder_telemetry stage driver_sources block))
+					(candidate_reorder_telemetry stage driver_sources block planning_session))
 				(define costed_stage (group_stage_with_facts stage
 					(merge (list candidate_telemetry (gs_facts stage)))))
 				(define probe (first_driver_lookup_key costed_stage driver_sources))
@@ -4892,18 +4901,18 @@ the logical lookup still carries an alias which no longer exists. */
 						(candidate_stage_without_source
 							(qb_stages block) (gs_id stage))
 						(merge (list
-							(query_block_reorder_telemetry block)
+							(query_block_reorder_telemetry block planning_session)
 							candidate_telemetry
 							(list (list (quote membership_requirement) (list
 								(list (quote access) (quote membership))
 								(list (quote reuse) 1))))
-							(qb_facts block))))))))))
+							(qb_facts block)))) planning_session))))))
 
-(define reorder_query_block_with_candidate_strategy_using (lambda (stage_catalog block)
+(define reorder_query_block_with_candidate_strategy_using (lambda (stage_catalog block planning_session)
 	(begin
 		(define sources (qb_sources block))
 		(if (and (empty_list? sources) (empty_list? (qb_stages block)))
-			(hybrid_reorder_query_block_using stage_catalog block)
+			(hybrid_reorder_query_block_using stage_catalog block planning_session)
 			(if (equal? (qassoc_get (qb_facts block) (quote dml) false) true)
 				(make_query_block
 					(qb_schema block)
@@ -4916,22 +4925,22 @@ the logical lookup still carries an alias which no longer exists. */
 					(qb_limit block)
 					(qb_offset block)
 					(qb_hidden block)
-					(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage)))
+					(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session)))
 					(qb_facts block))
 				(begin
 					(define candidate (first_candidate_source (qb_stages block) sources))
 					(if (nil? candidate)
 						(begin
 							(define exists_block
-								(query_block_with_exists_membership_requirement stage_catalog block))
+								(query_block_with_exists_membership_requirement stage_catalog block planning_session))
 							(if (nil? exists_block)
-								(hybrid_reorder_query_block_using stage_catalog block)
+								(hybrid_reorder_query_block_using stage_catalog block planning_session)
 								exists_block))
 						(begin
 							(define stage (stage_by_id stage_catalog (stage_output_relation_id (source_relation candidate))))
-							(define candidate_telemetry (candidate_reorder_telemetry stage sources block))
+							(define candidate_telemetry (candidate_reorder_telemetry stage sources block planning_session))
 							(define facts (merge (list
-								(query_block_reorder_telemetry block)
+								(query_block_reorder_telemetry block planning_session)
 								(list (list (quote membership_requirement)
 									(qassoc_set candidate_telemetry (quote reuse) 1))))))
 							(query_block_with_reorder_facts
@@ -4951,29 +4960,29 @@ the logical lookup still carries an alias which no longer exists. */
 											(if (equal? (gs_id current_stage) (gs_id stage))
 												(group_stage_with_facts current_stage
 													(merge (list candidate_telemetry (gs_facts current_stage))))
-												current_stage))))
+												current_stage) planning_session)))
 									(qb_facts block))
 								facts)))))))))
 
-(define join_reorder_node_using (lambda (stage_catalog node)
+(define join_reorder_node_using (lambda (stage_catalog node planning_session)
 	(if (query_block? node)
-		(reorder_query_block_with_candidate_strategy_using stage_catalog node)
+		(reorder_query_block_with_candidate_strategy_using stage_catalog node planning_session)
 		(if (union_block? node)
 			(make_union_block
 				(union_mode node)
-				(map (union_branches node) (lambda (branch) (join_reorder_node_using stage_catalog branch)))
+				(map (union_branches node) (lambda (branch) (join_reorder_node_using stage_catalog branch planning_session)))
 				(union_order node)
 				(union_limit node)
 				(union_offset node)
 				(union_facts node))
 			node))))
 
-(define join_reorder_stage_using (lambda (stage_catalog stage)
+(define join_reorder_stage_using (lambda (stage_catalog stage planning_session)
 	(if (group_stage? stage)
 		(group_stage_with_reorder_facts
 			(make_group_stage
 				(gs_id stage)
-				(join_reorder_node_using stage_catalog (gs_input stage))
+				(join_reorder_node_using stage_catalog (gs_input stage) planning_session)
 				(gs_domain stage)
 				(gs_keys stage)
 				(gs_aggregates stage)
@@ -6325,7 +6334,7 @@ accept exactly the same aggregate descriptors. */
 				(merge (map (union_branches node) join_reorder_node_stage_catalog)))
 			'()))))
 
-(define join_reorder (lambda (ir)
+(define join_reorder (lambda (ir planning_session)
 	(begin
 		/* A flattened decorrelation catalog grows with every independent scalar or
 		UNION branch. Repeated linear stage_by_id scans made reordering those
@@ -6337,7 +6346,7 @@ accept exactly the same aggregate descriptors. */
 			stages
 			(make_indexed_lowering_catalog stages nil)))
 		(define reordered_root
-			(join_reorder_node_using stage_catalog (ir_root ir)))
+			(join_reorder_node_using stage_catalog (ir_root ir) planning_session))
 		(make_ir
 			(ir_kind ir)
 			reordered_root

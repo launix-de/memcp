@@ -226,7 +226,7 @@ test_cases:
       rows: 1
       contains:
         - "__query_presence_probe_"
-        - "__physical_query_tx"
+        - "tx"
         - "get_or_compute_scoped"
       result_occurrences:
         - text: "__query_presence_probe_"

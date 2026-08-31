@@ -641,7 +641,7 @@ consumer stage. */
 ))
 (define rdf_relation_targets (lambda (schema subj pred) (begin
 	(define out (newsession))
-	(scan (session "__memcp_tx") (table schema "rdf") '("s" "p") (lambda (s p) (and (equal? s subj) (equal? p pred))) '("o") (lambda (o) (out o true)))
+	(scan nil (table schema "rdf") '("s" "p") (lambda (s p) (and (equal? s subj) (equal? p pred))) '("o") (lambda (o) (out o true)))
 	(out)
 )))
 (define rdf_path_targets (lambda (schema start pred include_self) (begin
@@ -671,7 +671,7 @@ consumer stage. */
 ))
 (define rdf_delete_triples (lambda (schema triples) (begin
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan (session "__memcp_tx") (table schema "rdf") '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
+		(scan nil (table schema "rdf") '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
 	)))
 	nil
 )))
@@ -831,11 +831,11 @@ consumer stage. */
 									(set map_fn (list (quote lambda) (extract_assoc vars (lambda (k v) (symbol v))) (build_scan tail (if order_head order_rest order) inner_ctx resultfunc2)))
 									(match order_head
 										'(col dir)
-										(list (quote scan_order) (list (quote session) "__memcp_tx") (list (quote table) schema "rdf")
+										(list (quote scan_order) nil (list (quote table) schema "rdf")
 											filter_cols filter_fn
 											(list (quote list) col) (list (quote list) (match dir "DESC" > <)) 0 0 -1
 											map_cols map_fn (quote cons) nil)
-										(list (quote scan) (list (quote session) "__memcp_tx") (list (quote table) schema "rdf") filter_cols filter_fn map_cols map_fn)
+										(list (quote scan) nil (list (quote table) schema "rdf") filter_cols filter_fn map_cols map_fn)
 									)
 							)))
 					))
@@ -1009,7 +1009,7 @@ consumer stage. */
 (define delete_ttl (lambda (schema s) (begin
 	(set triples (parse_ttl_triples schema s))
 	(map triples (lambda (triple) (match triple '(subj pred obj)
-		(scan (session "__memcp_tx") (table schema "rdf") '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
+		(scan nil (table schema "rdf") '("s" "p" "o") (lambda (s p o) (and (equal? s subj) (equal? p pred) (equal? o obj))) '("$update") (lambda ($update) ($update)))
 	)))
 )))
 

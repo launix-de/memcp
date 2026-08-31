@@ -1173,6 +1173,7 @@ both names therefore bind to the same parameter. */
 					(list (quote concat)
 						(concat (scalar_query_probe_recipe_key stage requested_col) ":")
 						(list (quote serialize) (cons (quote list) params)))
+					(quote tx)
 					(list (quote lambda) '() probe_expr))
 				probe_expr))
 			(list
@@ -1463,13 +1464,13 @@ membership set. */
 	(concat "__recset_probe_" (fnv_hash (gs_id stage)))))
 
 (define physical_query_session_symbol (lambda ()
-	(quote __physical_query_session)))
+	(quote session)))
 
 (define physical_query_scope_symbol (lambda ()
-	(quote __physical_query_scope)))
+	(quote tx)))
 
 (define physical_query_tx_symbol (lambda ()
-	(quote __physical_query_tx)))
+	(quote tx)))
 
 (define physical_query_symbol_named? (lambda (expr expected_name)
 	(and (symbol? expr)
@@ -1481,6 +1482,7 @@ membership set. */
 		"get_or_compute_scoped"
 		(physical_query_scope_symbol)
 		(stage_prepare_key stage)
+		(quote tx)
 		(list (quote lambda) '()
 			(list (quote !begin)
 				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
@@ -1605,6 +1607,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 				"get_or_compute_scoped"
 				(physical_query_scope_symbol)
 				(concat "__direct_boolean_recset_" (fnv_hash (gs_id stage)))
+				(quote tx)
 				(list (quote lambda) '() producer))
 			producer))))
 
@@ -1689,6 +1692,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 							"get_or_compute_scoped"
 							(physical_query_scope_symbol)
 							lookup_key
+							(quote tx)
 							(list (quote lambda) '()
 								(list (quote recset_key_index)
 									(list (quote session) "__memcp_tx")
@@ -1779,6 +1783,7 @@ would still have to project that value over the segment. */
 		"get_or_compute_scoped"
 		(physical_query_scope_symbol)
 		(query_invariant_scalar_first_probe_key stage requested_col)
+		(quote tx)
 		(list (quote lambda) '() expr))))
 
 (define lower_table_scalar_first_probe_expr (lambda (sources default_alias src stage value_expr keys lookup_keys order_exprs dirs offset_value partition_limit tx_expr)
@@ -1914,6 +1919,7 @@ would still have to project that value over the segment. */
 				(list (quote concat)
 					(concat (query_invariant_scalar_first_probe_key stage requested_col) ":bound:")
 					(list (quote serialize) (cons (quote list) lowered_lookup_keys)))
+				(quote tx)
 				(list (quote lambda) '() lowered))
 			lowered))
 		(if (scalar_first_probe_query_invariant? stage requested_col)
@@ -3415,10 +3421,11 @@ still rechecks current data and autoindex statistics. */
 			(stable_structural_hash (list
 				(source_schema src) (source_relation src) cols condition max_rows) true)))
 		(list
-			(list (quote context) "session")
+			(quote session)
 			"get_or_compute_scoped"
-			(list (quote context) "query")
+			(list (quote tx_query) (quote tx))
 			key
+			(quote tx)
 			(list (quote lambda) '() estimate_expr)))))
 
 /* Recreate only the source-local statistic read used for carrier costing. The
@@ -3686,7 +3693,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						alternative: it preserves ORDER while increasing its candidate window
 						until LIMIT is satisfied. Candidate materialization and unbounded
 						driver filtering would both commit to unknown full-relation work. */
-						(if allow_ordered_batch
+						(if (and allow_ordered_batch driver_probe_supported)
 							"ordered_batch_accept"
 							(if (and driver_probe_supported
 								(or owns_requirement branch_not_implied))
@@ -4225,7 +4232,8 @@ working on the original values. */
 	(map_assoc (coalesceNil fields '()) (lambda (_title expr)
 		(begin
 			(define sql_type (temporal_expr_type sources expr))
-			(if (nil? sql_type) expr (list (quote sql_temporal_output) expr sql_type)))))))
+			(if (nil? sql_type) expr (list (quote sql_temporal_output) expr sql_type
+				(list (quote session) "time_zone"))))))))
 
 (define sanitize_temporal_outputs (lambda (query)
 	(begin
@@ -5215,13 +5223,13 @@ ever-larger subtrees. */
 						"get_or_compute_scoped"
 						(physical_query_scope_symbol)
 						(concat "__group_count_recset_" (stable_structural_hash membership_expr true))
+						(quote tx)
 						(list (quote lambda) '() membership_expr)))
 				(list (quote scan)
-					/* Computed group columns outlive the physical request which creates
-					them. Resolve the transaction from ComputeColumn's rebound runtime
-					session instead of letting rewrite_physical_transaction_reads capture
-					a request-local __physical_query_tx slot in this stored closure. */
-					(list (list (quote context) "session") "__memcp_tx")
+					/* Computed group columns outlive the request which creates them.
+					applyWithTx rebinds this captured physical slot to the transaction of
+					each later materialization or repair before invoking the closure. */
+					(physical_query_tx_symbol)
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -5247,7 +5255,8 @@ ever-larger subtrees. */
 				(cons (quote list) key_names)
 				(list (quote lambda)
 					(map key_names (lambda (col) (symbol col)))
-					aggregate_value_expr))))))
+					aggregate_value_expr)
+				(physical_query_tx_symbol))))))
 
 (define direct_group_aggregate_read_expr (lambda (ag)
 	(begin

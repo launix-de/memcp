@@ -119,16 +119,6 @@ func mergeSessionKeys(parts ...[]string) []string {
 	return out
 }
 
-func txBoundSessionScmer() scm.Scmer {
-	return scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		return scm.Apply(txSessionScmer(CurrentTx()), a...)
-	})
-}
-
-func bindTxSessionEnv(env *scm.Env) *scm.Env {
-	return bindSessionEnv(env, txBoundSessionScmer())
-}
-
 // containsNthLocalVar reports whether expr contains at least one optimizer-local
 // variable reference (var i). This is used to decide whether Proc.NumVars must
 // be set for serial execution.
@@ -369,14 +359,10 @@ func buildComputedFn(formulaExpr scm.Scmer, origParams scm.Scmer, env *scm.Env, 
 		origParams,
 		formulaExpr,
 	})
-	evalEnv := env
-	if len(extractSessionKeys(formulaExpr)) > 0 {
-		evalEnv = bindTxSessionEnv(env)
-	}
 	var result scm.Scmer
 	func() {
 		defer func() { recover() }()
-		result = scm.Eval(lambdaForm, evalEnv)
+		result = scm.Eval(lambdaForm, env)
 	}()
 	if result.IsNil() {
 		return nil, scm.NewNil()

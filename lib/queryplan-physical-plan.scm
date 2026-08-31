@@ -1529,14 +1529,14 @@ outer joins. */
 			(quoted_runtime_list '("engine" "cache"))
 			(list (quote list)
 				"engine" "cache"
-				"oninit" (list (quote lambda) '() initial_fill_expr))))
+				"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
 		(define group_cache_created (symbol "__group_cache_created"))
 		(define keytable_init (list
 			(list (quote lambda) (list group_cache_created)
 				(list (quote !begin)
 					(list (quote touch_keytable) (list (quote table) schema grouptbl))
 					group_cache_created))
-			(list (quote createtable) schema grouptbl create_cols create_options true)))
+			(list (quote createtable) schema grouptbl create_cols create_options true (quote tx))))
 		(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
 			(scalar_first_probe_recset_row_keys stage
 				(scalar_first_probe_carrier_source prepared_src)) '()))
@@ -3015,7 +3015,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 
 (define stage_prepare_call_expr (lambda (stage)
 	(list (quote apply)
-		(list (list (quote context) "session") (stage_prepare_key stage))
+		(list (physical_query_session_symbol) (stage_prepare_key stage))
 		(quoted_runtime_list '()))))
 
 (define lazy_stage_prepare_binding (lambda (dependency_graph stage stage_catalog)
@@ -3024,7 +3024,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 		(define direct_dependencies
 			(coalesceNil (get_assoc dependency_graph (logical_stage_key stage)) '()))
 		(list
-			(list (quote context) "session")
+			(physical_query_session_symbol)
 			(stage_prepare_key stage)
 			(list (quote once)
 				(list (quote lambda)
@@ -3044,7 +3044,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 
 (define prepared_stage_binding (lambda (stage)
 	(list
-		(list (quote context) "session")
+		(physical_query_session_symbol)
 		(stage_prepare_key stage)
 		(list (quote once) (list (quote lambda) '() true)))))
 
@@ -6229,10 +6229,9 @@ only the structural work counts are specific to this operator. */
 (define direct_group_join_canonical_name (lambda (stage)
 	(concat (group_stage_cache_schema stage) "\n" (group_stage_cache_relation stage))))
 
-(define direct_group_join_calibration_active? (lambda ()
-	(not (nil? (try
-		(lambda () ((context "session") "__memcp_physical_overrides"))
-		(lambda (_error) nil))))))
+(define direct_group_join_calibration_active? (lambda (planning_session)
+	(and (not (nil? planning_session))
+		(not (nil? (planning_session "__memcp_physical_overrides"))))))
 
 (define direct_group_join_raw_scan_expr (lambda (all_sources default_alias stage)
 	(begin
@@ -6389,12 +6388,12 @@ the costgen threshold. */
 			false)
 		(claim "build"))))
 
-(define group_cache_candidate_delete (lambda (canonical_name)
+(define group_cache_candidate_delete (lambda (current_tx canonical_name)
 	(begin
 		(define candidates (table "system_statistic" "group_cache_candidates"))
 		(if (nil? candidates)
 			0
-			(scan (session "__memcp_tx") candidates
+			(scan current_tx candidates
 				'("canonical_name")
 				(lambda (candidate_name) (equal? candidate_name canonical_name))
 				'("$update")
@@ -6433,7 +6432,9 @@ the costgen threshold. */
 
 (define direct_group_join_eval_prepare_recipe_expr (lambda (stage)
 	(list (quote eval)
-		(list (quote optimize) (direct_group_join_prepare_recipe_symbol stage)))))
+		(list (quote optimize)
+			(list (quote rewrite_physical_transaction_reads)
+				(direct_group_join_prepare_recipe_symbol stage))))))
 
 (define direct_group_join_async_build_expr (lambda (stage canonical_name)
 	(begin
@@ -6442,26 +6443,24 @@ the costgen threshold. */
 				(list (quote try)
 					(list (quote lambda) '()
 						(list
-							(list (quote lambda) (list (quote __group_cache_build_session))
-								(list (quote with_session) (quote __group_cache_build_session)
-									(list (quote lambda) '()
-										(list (quote with_autocommit) (quote __group_cache_build_session) nil
-											(list (quote lambda) '()
-												(list (quote !begin)
-													(direct_group_join_eval_prepare_recipe_expr stage)
-													(list (quote group_cache_candidate_delete)
-														canonical_name))))))
-								(list (quote newsession))))
-						(list (quote lambda) (list (quote __group_cache_build_error))
-							(list (quote !begin)
-								(list (quote try)
-									(list (quote lambda) '()
-										(list (quote droptable)
-											(group_stage_cache_schema stage)
-											(group_stage_cache_relation stage) true))
-									(list (quote lambda) (list (quote __group_cache_cleanup_error)) nil))
-								(list (quote error) (quote __group_cache_build_error)))))))
-			0))))
+							(list (quote lambda) (list (quote session))
+								(list (quote with_autocommit) (quote session) nil 0 "group cache build"
+									(list (quote lambda) (list (quote tx))
+										(list (quote !begin)
+											(direct_group_join_eval_prepare_recipe_expr stage)
+											(list (quote group_cache_candidate_delete)
+												(quote tx) canonical_name)))))
+							(list (quote newsession))))
+					(list (quote lambda) (list (quote __group_cache_build_error))
+						(list (quote !begin)
+							(list (quote try)
+								(list (quote lambda) '()
+									(list (quote droptable)
+										(group_stage_cache_schema stage)
+										(group_stage_cache_relation stage) true))
+								(list (quote lambda) (list (quote __group_cache_cleanup_error)) nil))
+							(list (quote error) (quote __group_cache_build_error)))))))
+		0))))
 
 (define direct_group_join_usage_flush_expr (lambda (stage)
 	(begin
@@ -6483,7 +6482,7 @@ the costgen threshold. */
 					(direct_group_join_async_build_expr stage canonical_name)
 					nil)
 				nil)
-			(list (quote group_cache_candidate_delete) canonical_name)))))
+			(list (quote group_cache_candidate_delete) (physical_query_tx_symbol) canonical_name)))))
 
 (define direct_group_join_usage_flush_exprs (lambda (stages)
 	(if (direct_group_join_calibration_active?)
@@ -8857,7 +8856,7 @@ recipe in one zero-argument helper. */
 
 (define shared_prepare_owner_binding (lambda (dependency_graph catalog stage)
 	(list
-		(list (quote context) "session")
+		(physical_query_session_symbol)
 		(shared_prepare_owner_key stage)
 		(list (quote once)
 			(list (quote lambda) '()
@@ -8869,12 +8868,12 @@ recipe in one zero-argument helper. */
 
 (define shared_prepare_alias_binding (lambda (stage)
 	(list
-		(list (quote context) "session")
+		(physical_query_session_symbol)
 		(stage_prepare_key stage)
 		(list (quote once)
 			(list (quote lambda) '()
 				(list (quote apply)
-					(list (list (quote context) "session") (shared_prepare_owner_key stage))
+					(list (physical_query_session_symbol) (shared_prepare_owner_key stage))
 					(quoted_runtime_list '())))))))
 
 (define closed_group_prepare_consolidation_required? (lambda (ir)
@@ -8980,7 +8979,7 @@ Replacing them with lexical symbols here would hide that dependency fact. */
 
 (define query_invariant_presence_memo_parts (lambda (expr)
 	(match expr
-		'(session_symbol "get_or_compute_scoped" scope_symbol key producer)
+		'(session_symbol "get_or_compute_scoped" scope_symbol key _tx producer)
 		(if (and (equal? session_symbol (physical_query_session_symbol))
 			(and (equal? scope_symbol (physical_query_scope_symbol))
 				(and (string? key) (strlike key "__query_presence_probe_%"))))
@@ -9033,23 +9032,10 @@ row callback. */
 						expr)))
 				(list (rewrite_query_invariant_presence_memos plan)))))))))
 
-/* Resolve request-local state once at the physical-plan boundary. RecSet
-lookups execute inside deeply nested row callbacks; resolving `(context
-"session")` there would repeat the goroutine-local lookup for every row even
-though both handles are constant for the complete query generation. */
+/* The SQL execution lambda already binds session and tx. Generated operators
+capture those values directly instead of rediscovering request state. */
 (define with_physical_query_context (lambda (plan)
-	(begin
-		(define rewritten (rewrite_physical_transaction_reads plan))
-		(if (not (physical_plan_uses_query_scope? rewritten))
-			rewritten
-			(cons (quote begin) (merge (list
-				(list (list (quote define) (physical_query_session_symbol)
-					(list (quote context) "session")))
-				(list (list (quote define) (physical_query_scope_symbol)
-					(list (quote context) "query")))
-				(list (list (quote define) (physical_query_tx_symbol)
-					(list (physical_query_session_symbol) "__memcp_tx")))
-				(list rewritten))))))))
+	(rewrite_physical_transaction_reads plan)))
 
 (define emit_physical_queryplan (lambda (ir)
 	(begin
@@ -9089,42 +9075,42 @@ ordering run. Storage artifacts begin in build_queryplan. */
 (define decorrelate_logical_query (lambda (ast)
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
 
-(define optimize_logical_query (lambda (ir)
-	(join_reorder (aggregate_pushdown_logical ir))))
+(define optimize_logical_query (lambda (ir planning_session)
+	(join_reorder (aggregate_pushdown_logical ir) planning_session)))
 
-(define neumann_compile_pipeline (lambda (ast)
+(define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
-		(context "check")
+		(tx_check tx)
 		(define ir (decorrelate_logical_query ast))
-		(context "check")
-		(define reordered (optimize_logical_query ir))
-		(context "check")
+		(tx_check tx)
+		(define reordered (optimize_logical_query ir planning_session))
+		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered))
-		(context "check")
+		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
-		(context "check")
+		(tx_check tx)
 		plan)))
 
-(define neumann_compile_ir_pipeline (lambda (ir)
+(define neumann_compile_ir_pipeline (lambda (ir planning_session tx)
 	(begin
-		(context "check")
+		(tx_check tx)
 		(define normalized (require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir)))
-		(context "check")
-		(define reordered (optimize_logical_query normalized))
-		(context "check")
+		(tx_check tx)
+		(define reordered (optimize_logical_query normalized planning_session))
+		(tx_check tx)
 		(define prepared (prepare_physical_queryplan reordered))
-		(context "check")
+		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
-		(context "check")
+		(tx_check tx)
 		plan)))
 
 /* ------------------------------------------------------------------------- */
 /* Parser-facing adapters                                                     */
 
-(define build_queryplan_term (lambda (query)
-	(neumann_compile_pipeline query)))
+(define build_queryplan_term (lambda (query planning_session tx)
+	(neumann_compile_pipeline query planning_session tx)))
 
-(define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset)
+(define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset planning_session tx)
 	(begin
 		(define query (make_query_block
 			schema
@@ -9138,9 +9124,10 @@ ordering run. Storage artifacts begin in build_queryplan. */
 			'() '()
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
-			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))))))
+			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))
+			planning_session tx))))
 
-(define build_multi_delete_plan (lambda (schema target_specs all_defs condition)
+(define build_multi_delete_plan (lambda (schema target_specs all_defs condition planning_session tx)
 	(begin
 		(define query (make_query_block
 			schema
@@ -9151,12 +9138,13 @@ ordering run. Storage artifacts begin in build_queryplan. */
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
 			(ir_with_return (decorrelate_logical_query query)
-				(list (quote dml-many) target_specs))))))
+				(list (quote dml-many) target_specs))
+			planning_session tx))))
 
-(define sql_truncate (lambda (schema tbl)
+(define sql_truncate (lambda (schema tbl planning_session tx)
 	(build_dml_plan schema tbl nil
 		(list (list tbl schema tbl false nil))
-		nil true nil nil nil)))
+		nil true nil nil nil planning_session tx)))
 
 (define explain_union_ir_metadata (lambda (ir)
 	(begin
@@ -9175,11 +9163,10 @@ ordering run. Storage artifacts begin in build_queryplan. */
 					(pretty_print ir (settings "ExplainWidth"))
 					(explain_union_ir_metadata ir)))))))
 
-(define explain_queryplan_reorder (lambda (query)
+(define explain_queryplan_reorder (lambda (query planning_session)
 	(begin
-		(define planning_session (context "session"))
 		(planning_session "__memcp_explain_reorder_selectivities" true)
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
+		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
 		(planning_session "__memcp_explain_reorder_selectivities" nil)
 		(list (quote resultrow)
 			(list (quote list)
@@ -9367,9 +9354,8 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 				(merge (list decisions (physical_recset_project_join_decisions item)))) own))
 		_ '())))
 
-(define compile_physical_explain_variant (lambda (reordered overrides)
+(define compile_physical_explain_variant (lambda (reordered overrides planning_session)
 	(begin
-		(define planning_session (context "session"))
 		(define accumulator (newsession))
 		(accumulator "count" 0)
 		(planning_session "__memcp_explain_physical" accumulator)
@@ -9516,14 +9502,14 @@ potentially large calibrated SELECT result. */
 							"result_equal" (quote __calibration_equal)))))
 			(quote resultrow)))))
 
-(define physical_calibration_variants_for_decision (lambda (reordered decision suite_var)
+(define physical_calibration_variants_for_decision (lambda (reordered decision suite_var planning_session)
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" nil))
 		(map (qassoc_get decision "alternatives" '()) (lambda (alternative)
 			(begin
 				(define variant (qassoc_get alternative "plan" nil))
 				(define compilation (compile_physical_explain_variant reordered
-					(list (list decision_id variant))))
+					(list (list decision_id variant)) planning_session))
 				(define variant_decision (physical_decision_by_id (nth compilation 1) decision_id))
 				(define variant_alternative (physical_decision_alternative variant_decision variant))
 				(define variant_cost (qassoc_get variant_alternative "cost" '()))
@@ -9558,10 +9544,10 @@ potentially large calibrated SELECT result. */
 							(number? (qassoc_get inputs "driver_rows" nil))))))))))
 
 
-(define explain_queryplan_physical_calibrate_discover (lambda (query)
+(define explain_queryplan_physical_calibrate_discover (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
-		(define compilation (compile_physical_explain_variant reordered nil))
+		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define decisions (filter (nth compilation 1) (lambda (decision)
 			(physical_decision_calibratable? decision))))
 		(if (empty_list? decisions)
@@ -9578,11 +9564,11 @@ potentially large calibrated SELECT result. */
 						(map (qassoc_get decision "alternatives" '()) (lambda (alternative)
 							(qassoc_get (qassoc_get alternative "cost" '()) "total_ns" nil)))))))))))))
 
-(define explain_queryplan_physical_calibrate_variant (lambda (query decision_id variant)
+(define explain_queryplan_physical_calibrate_variant (lambda (query decision_id variant planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
+		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
 		(define compilation (compile_physical_explain_variant reordered
-			(list (list decision_id variant))))
+			(list (list decision_id variant)) planning_session))
 		(define decision (physical_decision_by_id (nth compilation 1) decision_id))
 		(define alternative (if (nil? decision) nil
 			(physical_decision_alternative decision variant)))
@@ -9602,10 +9588,10 @@ potentially large calibrated SELECT result. */
 							(nth compilation 0) decision)
 						suite_var)))))))
 
-(define explain_queryplan_physical_calibrate (lambda (query)
+(define explain_queryplan_physical_calibrate (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
-		(define default_compilation (compile_physical_explain_variant reordered nil))
+		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define default_compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define uncalibratable (filter (nth default_compilation 1) (lambda (decision)
 			(and (equal? (qassoc_get decision "decision" nil) "membership_carrier")
 				(not (physical_decision_calibratable? decision))))))
@@ -9621,15 +9607,15 @@ potentially large calibrated SELECT result. */
 				(begin
 					(define suite_var (quote __physical_calibration_suite))
 					(define variants (merge (map decisions (lambda (decision)
-						(physical_calibration_variants_for_decision reordered decision suite_var)))))
+						(physical_calibration_variants_for_decision reordered decision suite_var planning_session)))))
 					(cons (quote !begin) (cons
 						(list (quote define) suite_var (list (quote newsession)))
 						variants))))))))
 
-(define explain_queryplan_physical (lambda (query)
+(define explain_queryplan_physical (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
-		(define compilation (compile_physical_explain_variant reordered nil))
+		(define reordered (optimize_logical_query (decorrelate_logical_query query) planning_session))
+		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define optimized_plan (nth compilation 0))
 		(define decisions (nth compilation 1))
 		(list (quote resultrow)
@@ -9639,7 +9625,7 @@ potentially large calibrated SELECT result. */
 				"code"
 				(pretty_print optimized_plan (settings "ExplainWidth")))))))
 
-(define explain_queryplan_compile (lambda (query parse_started_ns sql_bytes)
+(define explain_queryplan_compile (lambda (query parse_started_ns sql_bytes planning_session)
 	(begin
 		(define logical_count (lambda (node target)
 			(begin
@@ -9671,7 +9657,7 @@ potentially large calibrated SELECT result. */
 		(define started_ns (nanotime))
 		(define ir (decorrelate_logical_query query))
 		(define untangled_ns (nanotime))
-		(define reordered (optimize_logical_query ir))
+		(define reordered (optimize_logical_query ir planning_session))
 		(define reordered_ns (nanotime))
 		(define prepared (prepare_physical_queryplan reordered))
 		(define prepared_ns (nanotime))

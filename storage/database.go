@@ -1367,7 +1367,7 @@ func DropTable(schema, name string, ifexists bool) {
 	}
 	db.saveLockedAndUnlock(t.schemaSaveMode())
 	// fire AfterDropTable triggers after releasing schemalock (avoids deadlock on cascading drops)
-	t.ExecuteTableLifecycleTriggers(AfterDropTable)
+	t.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 
 	// deregister temp keytable from CacheManager (no-op if not registered or already evicted)
 	// Must be AFTER schemalock.Unlock to avoid deadlock: Remove → run() → evict → keytableCleanup → TryLock
@@ -1453,7 +1453,7 @@ func keytableCleanup(tbl *table, schemaName string, freedByType *[numEvictableTy
 	// The table's self-cleanup hooks remove exactly the source-table triggers
 	// installed for its computed columns. Trigger target pins above make this
 	// safe even when a writer snapshotted a trigger concurrently.
-	tbl.ExecuteTableLifecycleTriggers(AfterDropTable)
+	tbl.ExecuteTableLifecycleTriggers(AfterDropTable, nil)
 	// remove all shard+index+temp column registrations for this table (recursive)
 	for _, c := range tbl.Columns {
 		if c.IsTemp {

@@ -22,7 +22,6 @@ import "strings"
 import "strconv"
 import "runtime/debug"
 import "sync/atomic"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 
 // newCachedColumnReaderTx returns a per-goroutine ColumnReader for the given
@@ -40,17 +39,13 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext) ColumnReader {
 	return col.GetCachedReader()
 }
 
-func newCachedColumnReader(col ColumnStorage) ColumnReader {
-	return newCachedColumnReaderTx(col, CurrentTx())
-}
-
 func collectDependentSessionKeys(shard *storageShard, cols []string) []string {
 	if shard == nil || len(cols) == 0 {
 		return nil
 	}
 	keys := make([]string, 0)
 	for _, col := range cols {
-		cs := shard.getColumnStorageOrPanic(col)
+		cs := shard.getColumnStorageOrPanic(col, false, nil)
 		if proxy, ok := cs.(*StorageComputeProxy); ok {
 			keys = mergeSessionKeys(keys, proxy.sessionKeys)
 		}
@@ -58,18 +53,7 @@ func collectDependentSessionKeys(shard *storageShard, cols []string) []string {
 	return keys
 }
 
-func runWithTxSession(tx *TxContext, fn func()) {
-	if tx == nil || tx.Session.IsNil() {
-		fn()
-		return
-	}
-	scm.WithSession(tx.Session, scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		fn()
-		return scm.NewNil()
-	}))
-}
-
-func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, currentTx *TxContext) {
 	// Ordinary computed-column DDL installs one complete logical column.
 	// filter/filterCols only select the initial prewarm batch for values the caller
 	// expects to read; they never restrict the column's domain. Rows outside that
@@ -120,20 +104,17 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 			ddlLocked = false
 			done := make(chan error, 6)
 			shardlist := t.ActiveShards()
-			currentTx := CurrentTx()
 			for _, s := range shardlist {
-				gls.Go(func(s *storageShard) func() {
-					return func() {
-						defer func() {
-							if r := recover(); r != nil {
-								//fmt.Println("panic during compute:", r, string(debug.Stack()))
-								done <- scanError{r, string(debug.Stack())}
-							}
-						}()
-						s.ComputeColumn(name, inputCols, computor, filterCols, filter, currentTx)
-						done <- nil
-					}
-				}(s))
+				go func(s *storageShard) {
+					defer func() {
+						if r := recover(); r != nil {
+							//fmt.Println("panic during compute:", r, string(debug.Stack()))
+							done <- scanError{r, string(debug.Stack())}
+						}
+					}()
+					s.ComputeColumn(name, inputCols, computor, filterCols, filter, currentTx)
+					done <- nil
+				}(s)
 			}
 			for range shardlist {
 				err := <-done // collect finish signal before return
@@ -183,10 +164,10 @@ func (t *table) tempColumnMemory(column *column, shards []*storageShard) int64 {
 	return size
 }
 
-func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, currentTx *TxContext) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
+	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter, currentTx)
 }
 
 func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, tx *TxContext) {
@@ -218,13 +199,11 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 		proxy.computor = computor // update lambda
 		proxy.sessionKeys = mergeSessionKeys(extractSessionKeys(computor), extractSessionKeys(filter), dependentSessionKeys)
 		if proxy.hasSessionVariants() {
-			runWithTxSession(tx, func() {
-				if !filter.IsNil() {
-					proxy.CompressFiltered(filterCols, filter)
-				} else {
-					proxy.Compress()
-				}
-			})
+			if !filter.IsNil() {
+				proxy.CompressFiltered(tx, filterCols, filter)
+			} else {
+				proxy.Compress(tx)
+			}
 			return
 		}
 		// skip recompute if proxy is still valid (no invalidation since last compute)
@@ -233,18 +212,14 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 				return // fully prepared, nothing to do
 			}
 			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
-			runWithTxSession(tx, func() {
-				proxy.CompressFiltered(filterCols, filter)
-			})
+			proxy.CompressFiltered(tx, filterCols, filter)
 			return
 		}
-		runWithTxSession(tx, func() {
-			if !filter.IsNil() {
-				proxy.CompressFiltered(filterCols, filter)
-			} else {
-				proxy.Compress()
-			}
-		})
+		if !filter.IsNil() {
+			proxy.CompressFiltered(tx, filterCols, filter)
+		} else {
+			proxy.Compress(tx)
+		}
 		return
 	}
 
@@ -267,13 +242,11 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 
 	// pre-free memory before allocating the compute result array
 	GlobalCache.CheckPressure(int64(s.main_count) * 16)
-	runWithTxSession(tx, func() {
-		if !filter.IsNil() {
-			proxy.CompressFiltered(filterCols, filter)
-		} else {
-			proxy.Compress() // eagerly compute + compress all values (same behavior as before)
-		}
-	})
+	if !filter.IsNil() {
+		proxy.CompressFiltered(tx, filterCols, filter)
+	} else {
+		proxy.Compress(tx) // eagerly compute + compress all values (same behavior as before)
+	}
 }
 
 // ComputeOrderedColumn materializes an ordered-reduce computed (ORC) column.
@@ -391,7 +364,7 @@ func (t *table) initORCShard(s *storageShard, name string) {
 // The invalidation scan (run by triggers) has already set validMask bits to 0
 // for affected rows. This function finds the earliest invalid row's sort key,
 // predicts the accumulator from the last valid predecessor, and scans forward.
-func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32) {
+func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32, currentTx *TxContext) {
 	recomputeStart := time.Now()
 	defer func() {
 		// Record recompute cost for invalidation telemetry
@@ -517,22 +490,20 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		scanCallbackCols := make([]string, 0, 1+len(col.OrcMapCols))
 		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
 		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
-		scm.SetValues(map[string]any{orcRecomputeMarkerKey: t}, func() {
-			t.scan_order(
-				CurrentTx(),
-				col.OrcFilterCols, domainCondFn,
-				sortcolsScmer, sortdirsFns,
-				0, 0, -1,
-				scanCallbackCols,
-				col.OrcMapFn,
-				col.OrcReduceFn,
-				col.OrcReduceInit,
-				false,
-				col.OrcReduceInit,
-				nil,
-				scm.NewNil(),
-			)
-		})
+		t.scan_order(
+			currentTx,
+			col.OrcFilterCols, domainCondFn,
+			sortcolsScmer, sortdirsFns,
+			0, 0, -1,
+			scanCallbackCols,
+			col.OrcMapFn,
+			col.OrcReduceFn,
+			col.OrcReduceInit,
+			false,
+			col.OrcReduceInit,
+			nil,
+			scm.NewNil(),
+		)
 		// Speculative callback-column prefetch may read rows rejected by the
 		// predicate. Publish those holes as valid nils after every accepted row
 		// has been written, so it never starts a second domain rebuild.
@@ -552,7 +523,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	scanCallbackCols := make([]string, 0, 3+len(col.OrcMapCols))
 	scanCallbackCols = append(scanCallbackCols, "$set:"+name)
 	scanCallbackCols = append(scanCallbackCols, "$break")
-	scanCallbackCols = append(scanCallbackCols, name) // stored ORC value (nil if invalid)
+	scanCallbackCols = append(scanCallbackCols, "$orc_stored:"+name)
 	scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
 
 	innerMapFn := scm.OptimizeProcToSerialFunction(col.OrcMapFn)
@@ -598,45 +569,20 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		return newAcc
 	})
 
-	// Install a GLS marker so worker goroutines spawned by scan_order can detect
-	// that they are participating in this table's recompute. Other goroutines
-	// reading the same ORC column concurrently must wait on orcMu instead of
-	// observing the transient nil-for-invalid-row sentinel that the reducer needs.
-	scm.SetValues(map[string]any{orcRecomputeMarkerKey: t}, func() {
-		t.scan_order(
-			CurrentTx(),
-			condCols, condFn,
-			sortcolsScmer, sortdirsFns,
-			0, 0, -1,
-			scanCallbackCols,
-			scanMapFn,
-			scanReduceFn,
-			col.OrcReduceInit,
-			false,
-			col.OrcReduceInit,
-			nil,
-			scm.NewNil(),
-		)
-	})
-}
-
-// orcRecomputeMarkerKey is the GLS key set by incrementalRecomputeORC so that
-// re-entrant GetValue calls (made by the reducer itself) can distinguish the
-// recompute scan from concurrent reader goroutines on the same table.
-const orcRecomputeMarkerKey = "orcRecomputingTable"
-
-// isCurrentORCRecompute reports whether the current goroutine is participating
-// in an in-progress ORC recompute for the given table.
-func isCurrentORCRecompute(t *table) bool {
-	v, ok := scm.GetGLSValue(orcRecomputeMarkerKey)
-	if !ok {
-		return false
-	}
-	other, ok := v.(*table)
-	if !ok {
-		return false
-	}
-	return other == t
+	t.scan_order(
+		currentTx,
+		condCols, condFn,
+		sortcolsScmer, sortdirsFns,
+		0, 0, -1,
+		scanCallbackCols,
+		scanMapFn,
+		scanReduceFn,
+		col.OrcReduceInit,
+		false,
+		col.OrcReduceInit,
+		nil,
+		scm.NewNil(),
+	)
 }
 
 // invalidateORCFromSortKey clears validMask bits for rows affected by a mutation.
@@ -1802,14 +1748,19 @@ func buildSelectiveORCInvalidationBody(targetSchema, targetTable, colName string
 	}
 }
 
-func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable *table, colName string, acquire func() bool, release func()) string {
+func registerInvalidationPropagationTrigger(prefix string, srcTable, targetTable *table, colName string, acquire func(*TxContext) bool, release func()) string {
 	triggerName := prefix + targetTable.Name + ":" + colName + "|" + srcTable.Name + "|" + AfterInvalidate.String()
 	targetKey := targetTable.schema.Name + "\x00" + targetTable.Name + "\x00" + colName
-	propagationAcquire := func() bool {
-		if value, ok := scm.GetGLSValue(computeInvalidationWaveKey); ok && value.(map[string]bool)[targetKey] {
-			return false
+	propagationAcquire := func(tx *TxContext) bool {
+		if tx != nil {
+			tx.mu.Lock()
+			visited := tx.invalidationVisited[targetKey]
+			tx.mu.Unlock()
+			if visited {
+				return false
+			}
 		}
-		return acquire()
+		return acquire(tx)
 	}
 	for _, tr := range srcTable.Triggers {
 		if tr.Name == triggerName {
@@ -1855,7 +1806,7 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 	if targetColumn == nil {
 		panic("computed trigger target column does not exist: " + t.Name + "." + name)
 	}
-	acquireTarget := func() bool { return t.acquireColumnCacheUse(targetColumn) }
+	acquireTarget := func(_ *TxContext) bool { return t.acquireColumnCacheUse(targetColumn) }
 	releaseTarget := func() { t.releaseColumnCacheUse(targetColumn) }
 	// Collect trigger names placed on source tables for self-cleanup
 	type triggerRef struct{ schema, name string }
@@ -2022,7 +1973,7 @@ func (t *table) registerORCDependencyTriggers(name string, col *column, refs []s
 		return
 	}
 	targetSchema := t.schema.Name
-	acquireTarget := func() bool { return t.acquireColumnCacheUse(col) }
+	acquireTarget := func(_ *TxContext) bool { return t.acquireColumnCacheUse(col) }
 	releaseTarget := func() { t.releaseColumnCacheUse(col) }
 	type triggerRef struct{ schema, name string }
 	var registeredNames []triggerRef

@@ -16,23 +16,25 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestSQLTemporalOutputDateFromGenericRepresentations(t *testing.T) {
 	const unix = int64(1718451045)
 	for _, value := range []Scmer{NewDate(unix), NewInt(unix), NewFloat(float64(unix)), NewString("2024-06-15 10:30:45")} {
-		if got := sqlTemporalOutput(value, "DATE").String(); got != "2024-06-15" {
+		if got := sqlTemporalOutput(value, "DATE", NewString("UTC")).String(); got != "2024-06-15" {
 			t.Fatalf("DATE output = %q, want 2024-06-15", got)
 		}
 	}
 }
 
 func TestSQLTemporalOutputPreservesNilAndUnknownType(t *testing.T) {
-	if got := sqlTemporalOutput(NewNil(), "DATE"); !got.IsNil() {
+	if got := sqlTemporalOutput(NewNil(), "DATE", NewString("UTC")); !got.IsNil() {
 		t.Fatalf("DATE NULL output = %v, want nil", got)
 	}
 	value := NewInt(42)
-	if got := sqlTemporalOutput(value, "VARCHAR"); got != value {
+	if got := sqlTemporalOutput(value, "VARCHAR", NewString("UTC")); got != value {
 		t.Fatalf("unknown temporal type changed value: got %v, want %v", got, value)
 	}
 }
@@ -50,7 +52,7 @@ func TestSQLTemporalOutputPreservesMySQLZeroDates(t *testing.T) {
 		if !ok {
 			t.Fatalf("ParseDateString(%q) rejected a MySQL zero date", test.input)
 		}
-		if got := sqlTemporalOutput(NewDate(unix), test.sqlType).String(); got != test.want {
+		if got := sqlTemporalOutput(NewDate(unix), test.sqlType, NewString("UTC")).String(); got != test.want {
 			t.Fatalf("%s output = %q, want %q", test.sqlType, got, test.want)
 		}
 	}

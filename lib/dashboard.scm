@@ -152,6 +152,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(service_registry "Dashboard" (list (arg "api-port" (env "PORT" "4321")) "/dashboard" "GET, WebSocket"))
 	))
 	(lambda (req res) (begin
+		(define session (req "__session"))
 		(match (req "path")
 			/* API: list databases (admin: all, non-admin: filtered by system.access) */
 			"/dashboard/api/databases" (begin
@@ -429,9 +430,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define max_print (settings "MaxPrintLog"))
 	(if (> max_print 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan (session "__memcp_tx") (table "system_statistic" "logs") '() (lambda () true) '() (lambda () 1) + 0))
+			(define cnt (scan nil (table "system_statistic" "logs") '() (lambda () true) '() (lambda () 1) + 0))
 			(if (> cnt max_print)
-				(scan_order (session "__memcp_tx") (table "system_statistic" "logs") '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+				(scan_order nil (table "system_statistic" "logs") '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
 			)
 		)) (lambda (e) true))
 	))
@@ -439,9 +440,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define max_err (settings "MaxErrorQueryLog"))
 	(if (> max_err 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan (session "__memcp_tx") (table "system_statistic" "errors") '() (lambda () true) '() (lambda () 1) + 0))
+			(define cnt (scan nil (table "system_statistic" "errors") '() (lambda () true) '() (lambda () 1) + 0))
 			(if (> cnt max_err)
-				(scan_order (session "__memcp_tx") (table "system_statistic" "errors") '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
+				(scan_order nil (table "system_statistic" "errors") '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda ($update) ($update)) (lambda (a b) b) nil)
 			)
 		)) (lambda (e) true))
 	))

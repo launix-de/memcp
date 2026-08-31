@@ -45,7 +45,6 @@ import "runtime/pprof"
 import "runtime/debug"
 import "github.com/google/uuid"
 import "github.com/fsnotify/fsnotify"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/memcp/scm"
 import "github.com/launix-de/memcp/storage"
 
@@ -1167,12 +1166,10 @@ func main() {
 	}
 
 	storage.Basepath = basepath
-	// Run initialization inside a gls.Go goroutine so that storage operations
-	// (scans, inserts, triggers) always have a valid GLS goroutine ID.
-	// Without this, hasWriteOwner/enterMutationOwner silently no-op (goid==0),
-	// breaking reentrancy guards and causing deadlocks.
+	// Run initialization in one goroutine so startup keeps its existing
+	// sequencing while request state remains explicit.
 	initDone := make(chan struct{})
-	gls.Go(func() {
+	go func() {
 		defer close(initDone)
 		storage.LoadDatabases()
 		// scripts initialization
@@ -1225,7 +1222,7 @@ func main() {
 			code = scm.Optimize(code, &IOEnv, nil)
 			scm.Eval(code, &IOEnv)
 		}
-	})
+	}()
 	<-initDone
 	go func() {
 		// Cleanup is deliberately observable: legacy manifest backfill and orphan
@@ -1261,9 +1258,9 @@ func main() {
 		defer pprof.StopCPUProfile()
 	}
 
-	// start cron (inside gls.Go so storage scans in Rebuild have a valid GLS id)
+	// start cron
 	exitable.Add(1)
-	gls.Go(cronroutine)
+	go cronroutine()
 
 	// REPL shell or wait for signal
 	if noRepl {
@@ -1277,10 +1274,10 @@ func main() {
 	} else {
 		signal.Stop(cancelChan) // let readline handle SIGINT/SIGTERM in REPL mode
 		replDone := make(chan struct{})
-		gls.Go(func() {
+		go func() {
 			defer close(replDone)
 			scm.Repl(&IOEnv)
-		})
+		}()
 		<-replDone
 	}
 

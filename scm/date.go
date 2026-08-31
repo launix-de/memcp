@@ -84,7 +84,7 @@ func toTime(v Scmer) (time.Time, bool) {
 	}
 }
 
-func sqlTemporalOutput(value Scmer, sqlType string) Scmer {
+func sqlTemporalOutput(value Scmer, sqlType string, timezone Scmer) Scmer {
 	if value.IsNil() {
 		return NewNil()
 	}
@@ -102,14 +102,18 @@ func sqlTemporalOutput(value Scmer, sqlType string) Scmer {
 	if !ok {
 		return value
 	}
+	loc, err := ResolveLocation(timezone.String())
+	if err != nil {
+		loc = time.UTC
+	}
 	switch strings.ToUpper(sqlType) {
 	case "DATE":
 		return NewString(t.UTC().Format("2006-01-02"))
 	case "DATETIME", "TIMESTAMP":
 		if value.GetTag() == tagDate {
-			return NewString(DateToDisplay(value, GetCurrentSessionLocation()))
+			return NewString(DateToDisplay(value, loc))
 		}
-		return NewString(t.In(GetCurrentSessionLocation()).Format("2006-01-02 15:04:05"))
+		return NewString(t.In(loc).Format("2006-01-02 15:04:05"))
 	default:
 		return value
 	}
@@ -123,19 +127,23 @@ func init_date() {
 		Name: "sql_temporal_output",
 
 		Fn: func(a ...Scmer) Scmer {
-			return sqlTemporalOutput(a[0], a[1].String())
+			return sqlTemporalOutput(a[0], a[1].String(), a[2])
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "formats a temporal SQL result according to its compiler-tracked declared type",
 			Params: []*TypeDescriptor{
 				{Kind: "any", Label: "value", Description: "type-flexible temporal value"},
 				{Kind: "string", Label: "sql_type", Description: "declared SQL temporal type"},
+				{Kind: "string", Label: "timezone", Description: "explicit session timezone"},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_temporal_output"].Fn, args, result)
+				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-				argPinned0 := make([]Reg, 0, len(args)*2)
+				argPinned0 := make([]Reg, 0, len(args)*3)
 				seenArgRegs := make(map[Reg]bool)
 				for _, ai := range args {
 					if ai.Loc == LocReg {
@@ -155,8 +163,21 @@ func init_date() {
 							seenArgRegs[ai.Reg2] = true
 							argPinned0 = append(argPinned0, ai.Reg2)
 						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
 					}
 				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
 				d1 := args[0]
 				d1.ID = 0
 				d2 := args[1]
@@ -221,6 +242,8 @@ func init_date() {
 				}
 				d3 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d4}, 2)
 				ctx.FreeDesc(&d2)
+				d5 := args[2]
+				d5.ID = 0
 				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
 				if d1.Loc == LocImm {
@@ -261,19 +284,10 @@ func init_date() {
 				ctx.EnsureDesc(&d3)
 				if d3.Loc == LocImm {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					if d3.Imm.GetTag() == tagBool {
-						ctx.EmitMakeBool(tmpPair, d3)
-					} else if d3.Imm.GetTag() == tagInt {
-						ctx.EmitMakeInt(tmpPair, d3)
-					} else if d3.Imm.GetTag() == tagFloat {
-						ctx.EmitMakeFloat(tmpPair, d3)
-					} else if d3.Imm.GetTag() == tagNil {
-						ctx.EmitMakeNil(tmpPair)
-					} else {
-						ptrWord, auxWord := d3.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
-					}
+					ctx.TrackImm(d3.Imm)
+					ptrWord, _ := d3.Imm.RawWords()
+					ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+					ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d3.Imm.String())))
 					d3 = tmpPair
 				} else if d3.Loc == LocReg {
 					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d3.Type, Reg: ctx.AllocRegExcept(d3.Reg), Reg2: ctx.AllocRegExcept(d3.Reg)}
@@ -293,13 +307,53 @@ func init_date() {
 				if d3.Loc != LocRegPair && d3.Loc != LocStackPair {
 					panic("jit: generic call arg expects 2-word value (sqlTemporalOutput arg1)")
 				}
-				d5 := ctx.EmitGoCallScalar(GoFuncAddr(sqlTemporalOutput), []JITValueDesc{d1, d3}, 2)
-				ctx.BindReg(d5.Reg, &d5)
-				ctx.BindReg(d5.Reg2, &d5)
-				ctx.FreeDesc(&d1)
+				ctx.EnsureDesc(&d5)
+				ctx.EnsureDesc(&d5)
 				if d5.Loc == LocImm {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					if d5.Imm.GetTag() == tagBool {
+						ctx.EmitMakeBool(tmpPair, d5)
+					} else if d5.Imm.GetTag() == tagInt {
+						ctx.EmitMakeInt(tmpPair, d5)
+					} else if d5.Imm.GetTag() == tagFloat {
+						ctx.EmitMakeFloat(tmpPair, d5)
+					} else if d5.Imm.GetTag() == tagNil {
+						ctx.EmitMakeNil(tmpPair)
+					} else {
+						ptrWord, auxWord := d5.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+					}
+					d5 = tmpPair
+				} else if d5.Loc == LocReg {
+					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d5.Type, Reg: ctx.AllocRegExcept(d5.Reg), Reg2: ctx.AllocRegExcept(d5.Reg)}
+					switch d5.Type {
+					case tagBool:
+						ctx.EmitMakeBool(tmpPair, d5)
+					case tagInt:
+						ctx.EmitMakeInt(tmpPair, d5)
+					case tagFloat:
+						ctx.EmitMakeFloat(tmpPair, d5)
+					default:
+						panic("jit: generic call arg scalar type unknown for 2-word value")
+					}
+					ctx.FreeDesc(&d5)
+					d5 = tmpPair
+				}
+				if d5.Loc != LocRegPair && d5.Loc != LocStackPair {
+					panic("jit: generic call arg expects 2-word value (sqlTemporalOutput arg2)")
+				}
+				ctx.SyncDesc(&d1)
+				ctx.SyncDesc(&d3)
+				ctx.SyncDesc(&d5)
+				d6 := ctx.EmitGoCallScalar(GoFuncAddr(sqlTemporalOutput), []JITValueDesc{d1, d3, d5}, 2)
+				ctx.BindReg(d6.Reg, &d6)
+				ctx.BindReg(d6.Reg2, &d6)
+				ctx.FreeDesc(&d1)
+				ctx.FreeDesc(&d5)
+				if d6.Loc == LocImm {
 					if result.Loc == LocAny {
-						return d5
+						return d6
 					}
 				}
 				if result.Loc == LocAny {
@@ -307,20 +361,20 @@ func init_date() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d5)
-				if d5.Loc == LocRegPair {
-					ctx.EmitMovPairToResult(&d5, &result)
-					result.Type = d5.Type
+				ctx.EnsureDesc(&d6)
+				if d6.Loc == LocRegPair {
+					ctx.EmitMovPairToResult(&d6, &result)
+					result.Type = d6.Type
 				} else {
-					switch d5.Type {
+					switch d6.Type {
 					case tagBool:
-						ctx.EmitMakeBool(result, d5)
+						ctx.EmitMakeBool(result, d6)
 						result.Type = tagBool
 					case tagInt:
-						ctx.EmitMakeInt(result, d5)
+						ctx.EmitMakeInt(result, d6)
 						result.Type = tagInt
 					case tagFloat:
-						ctx.EmitMakeFloat(result, d5)
+						ctx.EmitMakeFloat(result, d6)
 						result.Type = tagFloat
 					case tagNil:
 						ctx.EmitMakeNil(result)
@@ -330,9 +384,6 @@ func init_date() {
 					}
 				}
 				return result
-				for _, r := range argPinned0 {
-					ctx.UnprotectReg(r)
-				}
 				return result
 			},
 		},
@@ -372,12 +423,20 @@ func init_date() {
 		Name: "current_date",
 
 		Fn: func(a ...Scmer) Scmer {
-			loc := GetCurrentSessionLocation()
+			timezone := "UTC"
+			if len(a) > 0 {
+				timezone = a[0].String()
+			}
+			loc, err := ResolveLocation(timezone)
+			if err != nil {
+				loc = time.UTC
+			}
 			now := time.Now().In(loc)
 			midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 			return NewDate(midnight.Unix())
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the current date (midnight in session timezone)",
+			Params: []*TypeDescriptor{{Kind: "string", Label: "timezone", Description: "explicit session timezone", Optional: true}},
 			Return: &TypeDescriptor{Kind: "date"},
 
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -426,12 +485,19 @@ func init_date() {
 			if !ok {
 				return NewNil()
 			}
-			// apply session timezone for display
-			t = t.In(GetCurrentSessionLocation())
+			timezone := "UTC"
+			if len(a) > 2 {
+				timezone = a[2].String()
+			}
+			loc, err := ResolveLocation(timezone)
+			if err != nil {
+				loc = time.UTC
+			}
+			t = t.In(loc)
 			return NewString(formatDateMySQL(t, String(a[1])))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "formats a unix timestamp, date, or datetime string into a date string",
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "timestamp", Description: "unix timestamp, date, or datetime string"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)"}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "timestamp", Description: "unix timestamp, date, or datetime string"}, &TypeDescriptor{Kind: "string", Label: "format", Description: "MySQL-style format string (e.g. %Y-%m-%d %H:%i:%s)"}, &TypeDescriptor{Kind: "string", Label: "timezone", Description: "explicit session timezone", Optional: true}},
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
@@ -454,7 +520,15 @@ func init_date() {
 			if !ok {
 				return NewNil()
 			}
-			t = t.In(GetCurrentSessionLocation())
+			timezone := "UTC"
+			if len(a) > 2 {
+				timezone = a[2].String()
+			}
+			loc, err := ResolveLocation(timezone)
+			if err != nil {
+				loc = time.UTC
+			}
+			t = t.In(loc)
 			field := strings.ToUpper(a[1].String())
 			switch field {
 			case "YEAR":
@@ -485,7 +559,7 @@ func init_date() {
 			}
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "extracts a date field (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY) from a date value",
-			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "date value"}, &TypeDescriptor{Kind: "string", Label: "field", Description: "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY"}},
+			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "any", Label: "value", Description: "date value"}, &TypeDescriptor{Kind: "string", Label: "field", Description: "field name: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, QUARTER, WEEK, DAYOFWEEK, WEEKDAY"}, &TypeDescriptor{Kind: "string", Label: "timezone", Description: "explicit session timezone", Optional: true}},
 			Return: &TypeDescriptor{Kind: "int"},
 			Const:  true,
 
