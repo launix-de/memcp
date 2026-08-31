@@ -74,12 +74,13 @@ const (
 	tagFastDict
 	tagDate
 	tagAny
-	tagRegex   // *regexp.Regexp
-	tagCString // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
-	tagBString // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
-	tagClosure // lightweight id-carrying closure; ptr=*func(uint32,...Scmer)Scmer, aux=(id<<8)|tagClosure
-	tagPromise // tagPromise Scmer; ptr points to cells[0] of a [2]Scmer backing (auxVal==0 heap, auxVal==1 list-backed)
-	tagBSON    // raw BSON value; ptr=payload bytes, aux packs BSON type and payload length
+	tagRegex       // *regexp.Regexp
+	tagCString     // compressed string; ptr=bytes in StorageString dict, aux=format+nibbleOff+charLen
+	tagBString     // binary blob; ptr=raw bytes in StorageString dict, aux=urlSafe(bit47)+byteLen(bits46-0)
+	tagClosure     // lightweight id-carrying closure; ptr=*func(uint32,...Scmer)Scmer, aux=(id<<8)|tagClosure
+	tagPromise     // tagPromise Scmer; ptr points to cells[0] of a [2]Scmer backing (auxVal==0 heap, auxVal==1 list-backed)
+	tagBSON        // raw BSON value; ptr=payload bytes, aux packs BSON type and payload length
+	tagSpecialForm // optimizer-resolved form receiving unevaluated operands and environment
 	// custom tags >= 100
 )
 
@@ -343,6 +344,15 @@ func NewAny(v any) Scmer {
 	return Scmer{(*byte)(unsafe.Pointer(p)), makeAux(tagAny, 0)}
 }
 
+// SpecialForm executes syntax whose operands must not be evaluated eagerly.
+type SpecialForm func(code []Scmer, en *Env) Scmer
+
+func NewSpecialForm(fn SpecialForm, dispatch specialFormDispatch) Scmer {
+	value := new(SpecialForm)
+	*value = fn
+	return Scmer{(*byte)(unsafe.Pointer(value)), makeAux(tagSpecialForm, uint64(dispatch))}
+}
+
 func NewRegex(re *regexp.Regexp) Scmer {
 	var ptr *byte
 	if re != nil {
@@ -533,7 +543,14 @@ func (s Scmer) IsSymbol() bool {
 }
 
 func (s Scmer) SymbolEquals(name string) bool {
-	return s.GetTag() == tagSymbol && s.String() == name
+	switch s.GetTag() {
+	case tagSymbol:
+		return s.Symbol() == Symbol(name)
+	case tagSpecialForm:
+		return s.SpecialFormName() == name
+	default:
+		return false
+	}
 }
 
 func (s Scmer) IsSlice() bool {
@@ -790,6 +807,8 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		return "[func]", dst
 	case tagFuncEnv:
 		return "[func]", dst
+	case tagSpecialForm:
+		return s.SpecialFormName(), dst
 	case tagSlice:
 		sl := s.Slice()
 		if len(sl) == 0 {
@@ -911,6 +930,27 @@ func (s Scmer) FuncEnv() func(*Env, ...Scmer) Scmer {
 		panic("not environment function")
 	}
 	return *(*func(*Env, ...Scmer) Scmer)(unsafe.Pointer(s.ptr))
+}
+
+func (s Scmer) SpecialForm() SpecialForm {
+	if s.GetTag() != tagSpecialForm {
+		panic("not special form")
+	}
+	return *(*SpecialForm)(unsafe.Pointer(s.ptr))
+}
+
+func (s Scmer) specialFormDispatch() specialFormDispatch {
+	if s.GetTag() != tagSpecialForm {
+		panic("not special form")
+	}
+	return specialFormDispatch(auxVal(s.aux))
+}
+
+func (s Scmer) SpecialFormName() string {
+	if s.GetTag() != tagSpecialForm {
+		panic("not special form")
+	}
+	return specialFormName(s)
 }
 
 func (s Scmer) IsProc() bool {
@@ -1035,6 +1075,8 @@ func (s Scmer) Any() any {
 		return s.Func()
 	case tagFuncEnv:
 		return s.FuncEnv()
+	case tagSpecialForm:
+		return s.SpecialForm()
 	case tagProc:
 		return s.Proc()
 	case tagJIT:
@@ -1129,6 +1171,8 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 				return map[string]any{"symbol": decl.Name}
 			}
 			return map[string]any{"symbol": "?"}
+		case tagSpecialForm:
+			return map[string]any{"symbol": v.SpecialFormName()}
 		case tagFuncEnv:
 			return map[string]any{"symbol": "?"}
 		case tagNthLocalVar:
@@ -1202,6 +1246,8 @@ func (s *Scmer) Write(w io.Writer) {
 		}
 	case tagFunc:
 		io.WriteString(w, "[func]")
+	case tagSpecialForm:
+		io.WriteString(w, s.SpecialFormName())
 	case tagSlice:
 		io.WriteString(w, "(")
 		list := s.Slice()

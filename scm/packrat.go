@@ -271,8 +271,8 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 		if len(list) == 0 {
 			panic("invalid parser ()")
 		}
-		if list[0].IsSymbol() {
-			switch list[0].Symbol() {
+		if head, ok := scmerSymbol(list[0]); ok {
+			switch head {
 			case "parser":
 				var resulter Scmer = NewNil()
 				if len(list) > 2 {
@@ -441,7 +441,7 @@ func NewParser(syntax, generator, whitespace Scmer, en *Env, ignoreResult bool) 
 
 func init_parser() {
 	DeclareTitle("Parsers")
-	Declare(&Globalenv, &Declaration{
+	DeclareSpecialForm(&Globalenv, &Declaration{
 		Name: "parser",
 
 		Fn: nil,
@@ -476,5 +476,5 @@ func init_parser() {
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value produced by the grammar generator"},
 			},
 		},
-	})
+	}, specialParser, jitEmitSpecialParser)
 }

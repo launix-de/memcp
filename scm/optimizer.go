@@ -47,7 +47,7 @@ func procBodyUsesNamedParam(body Scmer, named map[Symbol]struct{}) bool {
 		return false
 	}
 	items := body.Slice()
-	if len(items) > 0 && items[0].IsSymbol() && items[0].String() == "quote" {
+	if len(items) > 0 && scmerIsSymbol(items[0], "quote") {
 		return false
 	}
 	for _, item := range items {
@@ -925,6 +925,12 @@ func leafInlineBindingsStable(expr Scmer, source, target *Env) bool {
 	if stripped, ok := scmerStripSourceInfo(expr); ok {
 		expr = stripped
 	}
+	// Special forms replace unbound syntax symbols. Preserve the old inliner
+	// boundary so ownership-aware Proc specialization still gets first use of
+	// calls containing lazy selectors such as coalesceNil.
+	if expr.GetTag() == tagSpecialForm {
+		return false
+	}
 	if expr.IsNthLocalVar() || !expr.IsSlice() && !expr.IsSymbol() {
 		return true
 	}
@@ -937,6 +943,9 @@ func leafInlineBindingsStable(expr Scmer, source, target *Env) bool {
 		}
 		sourceValue, sourceOK := sourceOwner.Vars[sym]
 		targetValue, targetOK := targetOwner.Vars[sym]
+		if (sourceOK && sourceValue.GetTag() == tagSpecialForm) || (targetOK && targetValue.GetTag() == tagSpecialForm) {
+			return false
+		}
 		return sourceOK && targetOK && sourceValue == targetValue
 	}
 	items := expr.Slice()
@@ -1564,7 +1573,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	if len(v) == 0 {
 		return NewSlice(v), tiZero
 	}
-
+	if callable, ok := resolveSpecialFormSymbol(v[0], env); ok {
+		resolved := make([]Scmer, len(v))
+		copy(resolved, v)
+		resolved[0] = callable
+		v = resolved
+	}
 	headSym, headOk := scmerSymbol(v[0])
 
 	if headOk && headSym == Symbol("outer") && len(v) == 2 {
@@ -2993,11 +3007,14 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 //	(!list NthLocalVar(start) count expr...) -> (list expr...)
 //	(!!list NthLocalVar(start) cap) -> (list)
 func DeoptimizeExpr(expr Scmer) Scmer {
+	if expr.GetTag() == tagSpecialForm {
+		return NewSymbol(expr.SpecialFormName())
+	}
 	if !expr.IsSlice() {
 		return expr
 	}
 	items := expr.Slice()
-	if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "!list" {
+	if len(items) >= 3 && scmerIsSymbol(items[0], "!list") {
 		count := int(ToInt(items[2]))
 		if count == len(items)-3 {
 			newItems := make([]Scmer, 1+count)
@@ -3008,7 +3025,7 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 			return NewSlice(newItems)
 		}
 	}
-	if len(items) == 3 && items[0].IsSymbol() && items[0].String() == "!!list" && items[1].IsNthLocalVar() {
+	if len(items) == 3 && scmerIsSymbol(items[0], "!!list") && items[1].IsNthLocalVar() {
 		return NewSlice([]Scmer{NewSymbol("list")})
 	}
 	// recurse into sub-expressions
@@ -3016,7 +3033,7 @@ func DeoptimizeExpr(expr Scmer) Scmer {
 	changed := false
 	for i, item := range items {
 		newItems[i] = DeoptimizeExpr(item)
-		if !Equal(newItems[i], item) {
+		if newItems[i] != item {
 			changed = true
 		}
 	}

@@ -190,7 +190,7 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 		}
 		// !list special form: pure alloc-free optimization of (list expr...).
 		// Valid when count == number of value exprs. Check only the value exprs for rawDataset.
-		if items[0].IsSymbol() && items[0].String() == "!list" && len(items) >= 3 {
+		if items[0].SymbolEquals("!list") && len(items) >= 3 {
 			count := int(scm.ToInt(items[2]))
 			if count == len(items)-3 {
 				for _, item := range items[3:] {
@@ -245,7 +245,7 @@ func isIndependent(params []scm.Scmer, expr scm.Scmer) bool {
 			return true
 		}
 		// (outer ...) is independent
-		if items[0].IsSymbol() && items[0].String() == "outer" {
+		if items[0].SymbolEquals("outer") {
 			return true
 		}
 		for _, item := range items {
@@ -292,7 +292,7 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 	// (outer sym): look up sym in env
 	if expr.IsSlice() {
 		items := expr.Slice()
-		if len(items) == 2 && items[0].IsSymbol() && items[0].String() == "outer" {
+		if len(items) == 2 && items[0].SymbolEquals("outer") {
 			sym := scm.Symbol(items[1].String())
 			e := env.FindRead(sym)
 			if e != nil {
@@ -309,7 +309,7 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 	// Evaluate items[3:] directly without needing VarsNumbered context.
 	if expr.IsSlice() {
 		items2 := expr.Slice()
-		if len(items2) >= 3 && items2[0].IsSymbol() && items2[0].String() == "!list" {
+		if len(items2) >= 3 && items2[0].SymbolEquals("!list") {
 			count := int(scm.ToInt(scm.Scmer(items2[2])))
 			vals := make([]scm.Scmer, 0, count)
 			for i := 0; i < count && i+3 < len(items2); i++ {

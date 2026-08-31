@@ -1271,8 +1271,8 @@ func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map
 		if len(list) == 0 {
 			return
 		}
-		if list[0].IsSymbol() {
-			switch string(list[0].Symbol()) {
+		if head, ok := scmerSymbol(list[0]); ok {
+			switch string(head) {
 			case "quote":
 				return
 			case "lambda":
@@ -1314,8 +1314,8 @@ func jitCollectLambdaOuterVarIndices(expr Scmer, seen map[NthLocalVar]struct{}, 
 	if len(list) == 0 {
 		return
 	}
-	if list[0].IsSymbol() {
-		switch string(list[0].Symbol()) {
+	if head, ok := scmerSymbol(list[0]); ok {
+		switch string(head) {
 		case "quote":
 			return
 		case "outer":
@@ -2673,8 +2673,8 @@ func jitAutoImportSyntaxSafe(expr Scmer) bool {
 	if len(items) == 0 {
 		return true
 	}
-	if items[0].IsSymbol() {
-		switch items[0].String() {
+	if head, ok := scmerSymbol(items[0]); ok {
+		switch string(head) {
 		case "quote":
 			return true
 		case "lambda", "optimizer_proc_return":

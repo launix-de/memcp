@@ -1320,7 +1320,7 @@ func isConstantOneAggregate(mapFn scm.Scmer) bool {
 	}
 	if mapFn.IsSlice() {
 		items := mapFn.Slice()
-		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
 			return items[2].IsInt() && items[2].Int() == 1
 		}
 	}
@@ -1383,7 +1383,7 @@ func extractDeltaExpr(mapCols, mapFn scm.Scmer, dictSym string) scm.Scmer {
 		body = proc.Body
 	} else if mapFn.IsSlice() {
 		items := mapFn.Slice()
-		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
 			if items[1].IsSlice() {
 				params = items[1].Slice()
 			}

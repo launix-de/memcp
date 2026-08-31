@@ -160,7 +160,7 @@ func extractGetAssocOldKey(filterFn scm.Scmer) string {
 		body = filterFn.Proc().Body
 	} else if filterFn.IsSlice() {
 		items := filterFn.Slice()
-		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
 			body = items[2]
 		}
 	}
@@ -247,7 +247,7 @@ func findEqualParamIdx(filterFn scm.Scmer) int {
 		body = filterFn.Proc().Body
 	} else if filterFn.IsSlice() {
 		items := filterFn.Slice()
-		if len(items) >= 3 && items[0].IsSymbol() && items[0].String() == "lambda" {
+		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
 			if items[1].IsSlice() {
 				params = items[1].Slice()
 			}
