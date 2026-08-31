@@ -19,7 +19,11 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 package scm
 
-import "runtime/jit"
+import (
+	"runtime"
+	"runtime/jit"
+	"unsafe"
+)
 
 // registerJITArena registers a JIT arena with the Go runtime so the
 // unwinder, GC, and panic/recover can walk through JIT frames.
@@ -63,17 +67,22 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 	}
 	runtimeMaps := make([]jit.StackMap, len(maps))
 	for i := range maps {
+		if maps[i].frameWords == 0 {
+			panic("jit: invalid empty unwind frame")
+		}
+		frameBaseOffset := (maps[i].frameWords - 1) * unsafe.Sizeof(uintptr(0))
 		runtimeMaps[i] = jit.StackMap{
-			PCOffset:              maps[i].pcOffset,
-			FrameWords:            maps[i].frameWords,
-			PointerMask:           maps[i].pointerMap,
-			HasUnwind:             true,
-			UnwindBaseOffset:      jitGoSpillBytes + 16,
-			UnwindBaseDeltaOffset: jitGoSpillBytes,
-			UnwindBaseUsesDelta:   true,
-			CallerPCOffset:        8,
-			CallerSPOffset:        16,
-			CallerBPOffset:        0,
+			PCOffset:    maps[i].pcOffset,
+			FrameWords:  maps[i].frameWords,
+			PointerMask: maps[i].pointerMap,
+			HasUnwind:   true,
+			// Each safepoint already carries its final static plus dynamic frame
+			// size. Address the saved frame pointer directly instead of depending
+			// on transient delta words in the outgoing Go-call spill area.
+			UnwindBaseOffset: frameBaseOffset,
+			CallerPCOffset:   8,
+			CallerSPOffset:   16,
+			CallerBPOffset:   0,
 		}
 	}
 	handle.AddStackMaps(runtimeMaps...)
@@ -87,6 +96,13 @@ func jitWrapCallTarget(fn func(...Scmer) Scmer) func(...Scmer) Scmer {
 
 // callJIT invokes a JIT-compiled function directly. With runtime/jit,
 // panics propagate naturally through the unwinder.
+//
+//go:noinline
 func callJIT(native func(...Scmer) Scmer, args ...Scmer) Scmer {
-	return native(args...)
+	result := native(args...)
+	// Keep an ordinary Go frame between independently compiled JIT entries.
+	// The runtime currently resolves one registered foreign frame at a time;
+	// retaining this bridge also gives nested calls an unambiguous Go caller PC.
+	runtime.KeepAlive(native)
+	return result
 }

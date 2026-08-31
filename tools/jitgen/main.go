@@ -1641,7 +1641,13 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 			}
 			return params.At(i - argOffset).Type()
 		}()
-		switch goCallWordCount(paramType) {
+		wordCount := goCallWordCount(paramType)
+		if _, isAggregate := paramType.Underlying().(*types.Struct); isAggregate && resolved[i].marker == "_aggregate_ptr" && wordCount == 0 {
+			indirectArgs[i] = true
+			argVars = append(argVars, resolved[i].goVar)
+			continue
+		}
+		switch wordCount {
 		case 0:
 			// Zero-sized values have no Go internal-ABI words. Keep them in the
 			// source-level signature, but do not invent a machine operand.
@@ -3407,6 +3413,26 @@ func inlineInstructionCount(fn *ssa.Function) int {
 	return count
 }
 
+// functionBuildsScmerStruct reports helpers which assemble Scmer through a
+// local aggregate and FieldAddr stores. Those stores need a descriptor owned
+// by the caller's register namespace; keeping the helper as a native Go call
+// is both smaller and safer than expanding its allocation graph inline.
+func functionBuildsScmerStruct(fn *ssa.Function) bool {
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			allocation, ok := instruction.(*ssa.Alloc)
+			if !ok {
+				continue
+			}
+			pointer, ok := allocation.Type().Underlying().(*types.Pointer)
+			if ok && isScmerType(pointer.Elem()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func blockEndsInPanic(block *ssa.BasicBlock) bool {
 	return block != nil && len(block.Instrs) > 0 && func() bool {
 		_, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Panic)
@@ -3422,6 +3448,9 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 		return genVal{}, false
 	}
 	if callee.Signature.Results().Len() == 1 && goCallWordCount(callee.Signature.Results().At(0).Type()) == 0 {
+		return genVal{}, false
+	}
+	if functionBuildsScmerStruct(callee) {
 		return genVal{}, false
 	}
 	if cost := inlineInstructionCount(callee); cost > inlineInstructionBudget {
