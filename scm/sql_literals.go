@@ -75,6 +75,10 @@ func declareSQLLiteralParameterizer() {
 			Params: []*TypeDescriptor{{Kind: "string", Label: "query"}},
 			Return: &TypeDescriptor{Kind: "list"},
 			Const:  true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["parameterize_sql_select_literals"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 }

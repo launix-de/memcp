@@ -449,6 +449,10 @@ func init_processlist() {
 		Type: &TypeDescriptor{Kind: "func", Description: "returns a list of active sessions for SHOW [FULL] PROCESSLIST; pass true for full info",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "bool", Label: "full", Description: "if true, include full Info text", Optional: true}},
 			Return: &TypeDescriptor{Kind: "list"},
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["show_processlist"].Fn, args, result)
+			},
+			JITVirtualArgs: true,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -462,6 +466,305 @@ func init_processlist() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "returns the process-list ID of the current session (MySQL CONNECTION_ID() equivalent)",
 			Return: &TypeDescriptor{Kind: "int"},
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["connection_id"].Fn, args, result)
+				}
+				var d0 JITValueDesc
+				_ = d0
+				var d1 JITValueDesc
+				_ = d1
+				var d2 JITValueDesc
+				_ = d2
+				var d11 JITValueDesc
+				_ = d11
+				var d12 JITValueDesc
+				_ = d12
+				var d13 JITValueDesc
+				_ = d13
+				var d14 JITValueDesc
+				_ = d14
+				var d15 JITValueDesc
+				_ = d15
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				var bbs [3]BBDescriptor
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				lbl0 := ctx.ReserveLabel()
+				bbpos_0_0 := int32(-1)
+				_ = bbpos_0_0
+				lbl1 := ctx.ReserveLabel()
+				bbpos_0_1 := int32(-1)
+				_ = bbpos_0_1
+				lbl2 := ctx.ReserveLabel()
+				bbpos_0_2 := int32(-1)
+				_ = bbpos_0_2
+				lbl3 := ctx.ReserveLabel()
+				bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
+					if !ps.General {
+						if bbs[0].VisitCount >= 0 {
+							ps.General = true
+							return bbs[0].RenderPS(ps)
+						}
+					}
+					bbs[0].VisitCount++
+					if ps.General {
+						if bbs[0].Rendered {
+							ctx.EmitJmp(lbl1)
+							return result
+						}
+						bbs[0].Rendered = true
+						bbs[0].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+						bbpos_0_0 = bbs[0].Address
+						ctx.MarkLabel(lbl1)
+						ctx.ResolveFixups()
+					}
+					ctx.ReclaimUntrackedRegs()
+					d0 = ctx.EmitGoCallScalar(GoFuncAddr(GetCurrentSessionState), []JITValueDesc{}, 1)
+					ctx.BindReg(d0.Reg, &d0)
+					ctx.EnsureDesc(&d0)
+					var d1 JITValueDesc
+					if d0.Loc == LocImm {
+						d1 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d0.Imm.IsNil() != true)}
+					} else {
+						r0 := ctx.AllocRegExcept(d0.Reg)
+						ctx.EmitCmpRegImm32(d0.Reg, 0)
+						ctx.EmitSetcc(r0, CondNotEqual)
+						d1 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
+						ctx.BindReg(r0, &d1)
+					}
+					d2 = d1
+					ctx.EnsureDesc(&d2)
+					if d2.Loc != LocImm && d2.Loc != LocReg {
+						panic("jit: If condition is neither LocImm nor LocReg")
+					}
+					if d2.Loc == LocImm {
+						if d2.Imm.Bool() {
+							ps3 := PhiState{General: ps.General}
+							ps3.OverlayValues = make([]JITValueDesc, 3)
+							ps3.OverlayValues[0] = d0
+							ps3.OverlayValues[1] = d1
+							ps3.OverlayValues[2] = d2
+							return bbs[1].RenderPS(ps3)
+						}
+						ps4 := PhiState{General: ps.General}
+						ps4.OverlayValues = make([]JITValueDesc, 3)
+						ps4.OverlayValues[0] = d0
+						ps4.OverlayValues[1] = d1
+						ps4.OverlayValues[2] = d2
+						return bbs[2].RenderPS(ps4)
+					}
+					if !ps.General {
+						ps.General = true
+						return bbs[0].RenderPS(ps)
+					}
+					lbl4 := ctx.ReserveLabel()
+					lbl5 := ctx.ReserveLabel()
+					ctx.EmitCmpRegImm32(d2.Reg, 0)
+					ctx.EmitJump(CondNotEqual, lbl4)
+					ctx.EmitJmp(lbl5)
+					ctx.MarkLabel(lbl4)
+					ctx.EmitJmp(lbl2)
+					ctx.MarkLabel(lbl5)
+					ctx.EmitJmp(lbl3)
+					ps5 := PhiState{General: true}
+					ps5.OverlayValues = make([]JITValueDesc, 3)
+					ps5.OverlayValues[0] = d0
+					ps5.OverlayValues[1] = d1
+					ps5.OverlayValues[2] = d2
+					ps6 := PhiState{General: true}
+					ps6.OverlayValues = make([]JITValueDesc, 3)
+					ps6.OverlayValues[0] = d0
+					ps6.OverlayValues[1] = d1
+					ps6.OverlayValues[2] = d2
+					snap7 := d0
+					snap8 := d1
+					snap9 := d2
+					alloc10 := ctx.SnapshotAllocState()
+					if !bbs[2].Rendered {
+						bbs[2].RenderPS(ps6)
+					}
+					ctx.RestoreAllocState(alloc10)
+					d0 = snap7
+					d1 = snap8
+					d2 = snap9
+					if !bbs[1].Rendered {
+						return bbs[1].RenderPS(ps5)
+					}
+					return result
+					ctx.FreeDesc(&d1)
+					return result
+				}
+				bbs[1].RenderPS = func(ps PhiState) JITValueDesc {
+					if !ps.General {
+						if bbs[1].VisitCount >= 0 {
+							ps.General = true
+							return bbs[1].RenderPS(ps)
+						}
+					}
+					bbs[1].VisitCount++
+					if ps.General {
+						if bbs[1].Rendered {
+							ctx.EmitJmp(lbl2)
+							return result
+						}
+						bbs[1].Rendered = true
+						bbs[1].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+						bbpos_0_1 = bbs[1].Address
+						ctx.MarkLabel(lbl2)
+						ctx.ResolveFixups()
+					}
+					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
+						d0 = ps.OverlayValues[0]
+					}
+					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
+						d1 = ps.OverlayValues[1]
+					}
+					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
+						d2 = ps.OverlayValues[2]
+					}
+					ctx.ReclaimUntrackedRegs()
+					var d11 JITValueDesc
+					ctx.EnsureDesc(&d0)
+					if d0.Loc == LocImm {
+						fieldAddr := uintptr(d0.Imm.Int()) + 0
+						r1 := ctx.AllocReg()
+						ctx.EmitMovRegMem64(r1, fieldAddr)
+						d11 = JITValueDesc{Loc: LocReg, Reg: r1}
+						ctx.BindReg(r1, &d11)
+					} else {
+						off := int32(0)
+						baseReg := d0.Reg
+						r2 := ctx.AllocRegExcept(baseReg)
+						ctx.EmitMovRegMem(r2, baseReg, off)
+						d11 = JITValueDesc{Loc: LocReg, Reg: r2}
+						ctx.BindReg(r2, &d11)
+					}
+					ctx.FreeDesc(&d0)
+					ctx.EnsureDesc(&d11)
+					ctx.EnsureDesc(&d11)
+					var d12 JITValueDesc
+					if d11.Loc == LocImm {
+						d12 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(int64(uint64(d11.Imm.Int()))))}
+					} else {
+						r3 := ctx.AllocReg()
+						ctx.EmitMovRegReg(r3, d11.Reg)
+						d12 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
+						ctx.BindReg(r3, &d12)
+					}
+					ctx.FreeDesc(&d11)
+					ctx.EnsureDesc(&d12)
+					if d12.Loc == LocImm {
+						ctx.EmitMakeInt(result, d12)
+					} else {
+						ctx.EmitMovToReg(result.Reg2, d12)
+						d13 := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: result.Reg2, ID: 0}
+						ctx.EmitMakeInt(result, d13)
+						if d12.Loc == LocReg && d12.Reg != result.Reg2 {
+							ctx.FreeReg(d12.Reg)
+						}
+					}
+					result.Type = tagInt
+					ctx.EmitJmp(lbl0)
+					return result
+				}
+				bbs[2].RenderPS = func(ps PhiState) JITValueDesc {
+					if !ps.General {
+						if bbs[2].VisitCount >= 0 {
+							ps.General = true
+							return bbs[2].RenderPS(ps)
+						}
+					}
+					bbs[2].VisitCount++
+					if ps.General {
+						if bbs[2].Rendered {
+							ctx.EmitJmp(lbl3)
+							return result
+						}
+						bbs[2].Rendered = true
+						bbs[2].Address = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+						bbpos_0_2 = bbs[2].Address
+						ctx.MarkLabel(lbl3)
+						ctx.ResolveFixups()
+					}
+					if len(ps.OverlayValues) > 0 && ps.OverlayValues[0].Loc != LocNone {
+						d0 = ps.OverlayValues[0]
+					}
+					if len(ps.OverlayValues) > 1 && ps.OverlayValues[1].Loc != LocNone {
+						d1 = ps.OverlayValues[1]
+					}
+					if len(ps.OverlayValues) > 2 && ps.OverlayValues[2].Loc != LocNone {
+						d2 = ps.OverlayValues[2]
+					}
+					if len(ps.OverlayValues) > 11 && ps.OverlayValues[11].Loc != LocNone {
+						d11 = ps.OverlayValues[11]
+					}
+					if len(ps.OverlayValues) > 12 && ps.OverlayValues[12].Loc != LocNone {
+						d12 = ps.OverlayValues[12]
+					}
+					if len(ps.OverlayValues) > 13 && ps.OverlayValues[13].Loc != LocNone {
+						d13 = ps.OverlayValues[13]
+					}
+					ctx.ReclaimUntrackedRegs()
+					d14 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
+					if d14.Loc == LocImm {
+						ctx.EmitMakeInt(result, d14)
+					} else {
+						ctx.EmitMovToReg(result.Reg2, d14)
+						d15 := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: result.Reg2, ID: 0}
+						ctx.EmitMakeInt(result, d15)
+						if d14.Loc == LocReg && d14.Reg != result.Reg2 {
+							ctx.FreeReg(d14.Reg)
+						}
+					}
+					result.Type = tagInt
+					ctx.EmitJmp(lbl0)
+					return result
+				}
+				argPinned16 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned16 = append(argPinned16, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned16 = append(argPinned16, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned16 = append(argPinned16, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned16 = append(argPinned16, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned16 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				ps17 := PhiState{General: false}
+				_ = bbs[0].RenderPS(ps17)
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+				return result
+			},
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -473,6 +776,105 @@ func init_processlist() {
 		Type: &TypeDescriptor{Kind: "func", Description: "cancel the running query in session id; returns true if a query was killed",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "int", Label: "id", Description: "session ID from SHOW PROCESSLIST"}},
 			Return: &TypeDescriptor{Kind: "bool"},
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["kill_query"].Fn, args, result)
+				}
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				argPinned0 := make([]Reg, 0, len(args)*3)
+				seenArgRegs := make(map[Reg]bool)
+				for _, ai := range args {
+					if ai.Loc == LocReg {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+					} else if ai.Loc == LocRegPair {
+						if !seenArgRegs[ai.Reg] {
+							ctx.ProtectReg(ai.Reg)
+							seenArgRegs[ai.Reg] = true
+							argPinned0 = append(argPinned0, ai.Reg)
+						}
+						if !seenArgRegs[ai.Reg2] {
+							ctx.ProtectReg(ai.Reg2)
+							seenArgRegs[ai.Reg2] = true
+							argPinned0 = append(argPinned0, ai.Reg2)
+						}
+					} else if ai.Loc == LocRegTriple {
+						for _, r := range [...]Reg{ai.Reg, ai.Reg2, ai.Reg3} {
+							if !seenArgRegs[r] {
+								ctx.ProtectReg(r)
+								seenArgRegs[r] = true
+								argPinned0 = append(argPinned0, r)
+							}
+						}
+					}
+				}
+				defer func() {
+					for _, r := range argPinned0 {
+						ctx.UnprotectReg(r)
+					}
+				}()
+				d1 := args[0]
+				d1.ID = 0
+				var d2 JITValueDesc
+				if d1.Loc == LocImm {
+					d2 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d1.Imm.Int())}
+				} else if d1.Type == tagInt && d1.Loc == LocRegPair {
+					ctx.FreeReg(d1.Reg)
+					d2 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d1.Reg2}
+					ctx.BindReg(d1.Reg2, &d2)
+					ctx.BindReg(d1.Reg2, &d2)
+				} else if d1.Type == tagInt && d1.Loc == LocReg {
+					d2 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d1.Reg}
+					ctx.BindReg(d1.Reg, &d2)
+					ctx.BindReg(d1.Reg, &d2)
+				} else {
+					d2 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Int), []JITValueDesc{d1}, 1)
+					d2.Type = tagInt
+					ctx.BindReg(d2.Reg, &d2)
+				}
+				ctx.FreeDesc(&d1)
+				ctx.EnsureDesc(&d2)
+				ctx.EnsureDesc(&d2)
+				var d3 JITValueDesc
+				if d2.Loc == LocImm {
+					d3 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(int64(d2.Imm.Int()))))}
+				} else {
+					r0 := ctx.AllocReg()
+					ctx.EmitMovRegReg(r0, d2.Reg)
+					d3 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r0}
+					ctx.BindReg(r0, &d3)
+				}
+				ctx.FreeDesc(&d2)
+				ctx.EnsureDesc(&d3)
+				ctx.EnsureDesc(&d3)
+				if d3.Loc == LocRegPair || d3.Loc == LocStackPair || d3.Loc == LocRegTriple || d3.Loc == LocStackTriple {
+					panic("jit: generic call arg expects 1-word value")
+				}
+				ctx.SyncDesc(&d3)
+				d4 := ctx.EmitGoCallScalar(GoFuncAddr(KillSession), []JITValueDesc{d3}, 1)
+				ctx.EmitAndRegImm32(d4.Reg, 1)
+				d4.Type = tagBool
+				ctx.BindReg(d4.Reg, &d4)
+				ctx.FreeDesc(&d3)
+				ctx.EnsureDesc(&d4)
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				if d4.Loc == LocImm {
+					ctx.EmitMakeBool(result, d4)
+				} else {
+					ctx.EmitMakeBool(result, d4)
+					ctx.FreeReg(d4.Reg)
+				}
+				result.Type = tagBool
+				return result
+				return result
+			},
 		},
 	})
 }
