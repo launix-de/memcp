@@ -35,3 +35,33 @@ Run a taxonomy section through the pre-commit selector:
 ```sh
 ./git-pre-commit 'tests/planner/subqueries/*.yaml'
 ```
+
+## Disaster-recovery testbench
+
+The YAML runner cannot validate an external `mysqldump` restore. Build MemCP,
+start a local MariaDB test server, and run the separate disposable testbench:
+
+```sh
+make
+python3 tools/test_mysqldump_recovery.py \
+  --mariadb-socket=/run/mysqld/mysqld.sock
+```
+
+The default mode is a strict production gate and fails if a plain `mysqldump`
+cannot represent every fixture table. MemCP currently returns incompatible
+result metadata for empty tables. During an explicitly write-quiesced backup
+window, the testbench can verify the guarded workaround instead:
+
+```sh
+python3 tools/test_mysqldump_recovery.py \
+  --mariadb-socket=/run/mysqld/mysqld.sock \
+  --quiesced-empty-table-workaround
+```
+
+That mode discovers empty tables before the dump and passes them to the same
+`mysqldump` process with `--ignore-table-data`. Writes must remain stopped from
+discovery until `mysqldump` exits; otherwise a table that becomes non-empty can
+be omitted from the backup. The restored MariaDB fixture checks row aggregates,
+binary data, empty-table schema, `AUTO_INCREMENT`, and foreign-key cascades.
+Set `MEMCP_RECOVERY_MARIADB_PASSWORD` when the MariaDB test account requires a
+password. The testbench creates and removes a uniquely named target database.
