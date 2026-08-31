@@ -1518,7 +1518,7 @@ outer joins. */
 		(define initial_fill_expr (if (nil? base_group_into_plan)
 			nil
 			(list (quote initialize_cache_table)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) schema grouptbl)
 				(list (quote list) (source_table_expr src))
 				(list (quote lambda) '()
@@ -1658,7 +1658,7 @@ outer joins. */
 		(if (not (source_is_base_table? src))
 			(neumann_fail "build_queryplan" "ORC materialization expects base table source")
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(source_table_expr src)
 				(quoted_runtime_list '())
 				(list (quote lambda) '() true)
@@ -1681,7 +1681,7 @@ outer joins. */
 				(define filterfn (qassoc_get facts (quote physical_filterfn)
 					(list (quote lambda) '() true)))
 				(list (quote scan)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(source_table_expr src)
 					(quoted_runtime_list filtercols)
 					filterfn
@@ -2114,7 +2114,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 										(list (quote window_mut) (quote active_window) emit_expr (quote mapped))
 										(list (quote list) true (quote current_partition) (quote active_window)))))
 								(define scan_expr (list (quote scan_order)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									(source_table_expr src)
 									(cons (quote list) filtercols)
 									filter_expr
@@ -2204,7 +2204,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 													(list (quote continuation) (quote next_rownum))
 													(list (quote list) (quote row_partition) (quote next_rownum)))))
 											(define scan_expr (list (quote scan_order)
-												'(session "__memcp_tx")
+												(physical_query_tx_symbol)
 												(source_table_expr src)
 												(cons (quote list) filtercols)
 												filter_expr
@@ -2233,7 +2233,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 			(list (quote list) title
 				(list (quote car)
 					(list (quote scan_order)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(list (quote table) schema relation)
 						(quoted_runtime_list '())
 						(list (quote lambda) '() true)
@@ -3458,7 +3458,7 @@ lookup for each ordered driver candidate. */
 		(prepared_group_cache_expr stage
 			(list (quote lambda) (list probe_var)
 				(list (quote scan_exists)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
 					(cons (quote list) filtercols)
 					(list (quote lambda) (map filtercols symbol)
@@ -3518,7 +3518,7 @@ lookup for each ordered driver candidate. */
 					(source_table_expr input_src)
 					source_col
 					(list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(source_table_expr input_src)
 						(cons (quote list) filtercols)
 						(list (quote lambda)
@@ -3553,7 +3553,7 @@ lookup for each ordered driver candidate. */
 					(define keyset_expr (if group_cache_probe
 						(nth (car parts) 2)
 						(list (quote recset_key_index)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							candidate_recset
 							(quoted_runtime_list (list (nth (car parts) 1))))))
 					(map memberships (lambda (membership)
@@ -3595,7 +3595,7 @@ lookup for each ordered driver candidate. */
 			(begin
 				(define cols (extract_columns_for_alias src branch))
 				(list (quote scan_recset)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					source_table
 					(cons (quote list) cols)
 					(list (quote lambda)
@@ -3652,7 +3652,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 		(begin
 			(define cols (extract_columns_for_alias src condition))
 			(list (quote scan_recset)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				input
 				(cons (quote list) cols)
 				(list (quote lambda)
@@ -3747,7 +3747,7 @@ so complex ACL trees receive the same per-node physical choices as any scan. */
 				(define accepted_expr (if (equal? acceptance_probe true)
 					late_batch
 					(list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						late_batch
 						(cons (quote list) acceptance_cols)
 						(list (quote lambda)
@@ -3778,7 +3778,7 @@ RecSet; membership edges retain their own physical operators. */
 				(define alias (source_alias src))
 				(define cols (extract_columns_for_alias src driver_condition))
 				(list (quote scan_recset)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					source_table
 					(cons (quote list) cols)
 					(list (quote lambda)
@@ -4022,7 +4022,7 @@ RecSet; membership edges retain their own physical operators. */
 					(begin
 						(define base_cols (extract_columns_for_alias src membership_formula_residual))
 						(define base_recset (list (quote scan_recset)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							source_table
 							(cons (quote list) base_cols)
 							(list (quote lambda)
@@ -4132,7 +4132,7 @@ RecSet; membership edges retain their own physical operators. */
 					map_row))
 				(define scan_plan (if (and (empty_list? order_items) (not bounded))
 					(list (quote scan)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						table_expr
 						(cons (quote list) filtercols)
 						filter_expr
@@ -4146,7 +4146,7 @@ RecSet; membership edges retain their own physical operators. */
 						(begin
 							(define scan_expr (if use_batch_accept
 								(list (quote scan_order_batch_accept)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									batch_filter
 									(cons (quote list) batch_ordercols)
@@ -4160,7 +4160,7 @@ RecSet; membership edges retain their own physical operators. */
 									nil
 									(source_outer? src))
 								(list (quote scan_order)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
 									filter_expr
@@ -4392,7 +4392,7 @@ either bound a real row or supplied the synthetic NULL row. */
 							bundle_symbol
 							(rewrite_scalar_projection_bundle_expr entries bundle_symbol fields)
 							(list (quote scan_order)
-								'(session "__memcp_tx")
+								(physical_query_tx_symbol)
 								(source_table_expr src)
 								(cons (quote list) filtercols)
 								(list (quote lambda)
@@ -4631,7 +4631,7 @@ carrier into thousands of fictional downstream probes. */
 					(define batch_cost (ordered_batch_accept_cost cost_work))
 					(define lookup_cols (extract_columns_for_alias lookup lookup_condition))
 					(define lookup_recset (list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(source_table_expr lookup)
 						(cons (quote list) lookup_cols)
 						(list (quote lambda)
@@ -4639,7 +4639,7 @@ carrier into thousands of fictional downstream probes. */
 								(scan_callback_symbol_for_alias (source_alias lookup) col)))
 							(lower_column_expr_for_alias lookup lookup_condition))))
 					(define carrier (list (quote recset_project_join)
-						'(session "__memcp_tx") lookup_recset
+						(physical_query_tx_symbol) lookup_recset
 						(quoted_runtime_list (car edge_columns))
 						(source_table_expr src)
 						(quoted_runtime_list (cadr edge_columns))))
@@ -5242,13 +5242,13 @@ until the caller has selected this physical alternative. */
 			scalar_carrier))
 		(define scan_expr (if use_batch_accept
 			(list (quote scan_order_batch_accept)
-				'(session "__memcp_tx") table_expr batch_filter
+				(physical_query_tx_symbol) table_expr batch_filter
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
 				0 offset limit
 				(cons (quote list) mapcols) map_expr nil nil false)
 			(list (quote scan_order)
-				'(session "__memcp_tx") table_expr
+				(physical_query_tx_symbol) table_expr
 				(cons (quote list) filtercols) filter_expr
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
@@ -5298,7 +5298,7 @@ until the caller has selected this physical alternative. */
 		(define map_body (value_builder
 			(qassoc_get spec (quote output_rows) nil) nil))
 		(list (quote scan_join_order)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(cons (quote list) (map sources (lambda (src)
 				(source_table_expr_using stages src))))
 			(quoted_runtime_list filtercols)
@@ -5595,7 +5595,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 								(list (quote list) (quote row_partition) (quote next_rownum) (quote next_aggregate)))))
 					row_number_reduce_expr))
 				(define scan_expr (list (quote scan_order)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					table_expr
 					(cons (quote list) filtercols)
 					filter_expr
@@ -6001,7 +6001,7 @@ topology inequality by bounded binary search and guard that crossover. */
 		(define predicate (qassoc_get candidate (quote predicate) true))
 		(define cols (extract_columns_for_alias src predicate))
 		(list (quote scan_recset)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr_using stages src)
 			(cons (quote list) cols)
 			(list (quote lambda)
@@ -6189,7 +6189,7 @@ only the structural work counts are specific to this operator. */
 					0 group_rows 0.7))
 				(list direct_cost carrier_cost input_rows group_rows rows_per_probe))))))
 
-(define direct_group_join_source_selection (lambda (stages sources tree consumers src)
+(define direct_group_join_source_selection (lambda (stages sources tree consumers src planning_session)
 	(begin
 		(define stage (direct_group_probe_stage_for_block_source
 			stages sources src consumers))
@@ -6204,8 +6204,8 @@ only the structural work counts are specific to this operator. */
 					"direct_group_join" "group_carrier"))
 				(define decision_id (concat "direct_group_join:" (gs_id stage) ":" (source_alias src)))
 				(define chosen (planner_physical_choice decision_id normal_choice
-					(list "group_carrier" "direct_group_join")))
-				(define forced (planner_physical_override decision_id))
+					(list "group_carrier" "direct_group_join") planning_session))
+				(define forced (planner_physical_override decision_id planning_session))
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
 					(list "decision" "direct_group_join")
@@ -6222,7 +6222,8 @@ only the structural work counts are specific to this operator. */
 						(list "aggregate_width" (count (gs_aggregates stage)))))
 					(list "alternatives" (if (nil? costs) '() (list
 						(list (list "plan" "group_carrier") (list "cost" (planner_cost_explain (cadr costs))))
-						(list (list "plan" "direct_group_join") (list "cost" (planner_cost_explain (car costs)))))))))
+						(list (list "plan" "direct_group_join") (list "cost" (planner_cost_explain (car costs))))))))
+					planning_session)
 				(if (equal? chosen "direct_group_join") (list src stage) nil))))))
 
 (define direct_group_join_selections_for_block (lambda (stages block)
@@ -6230,8 +6231,11 @@ only the structural work counts are specific to this operator. */
 		(define sources (qb_sources block))
 		(define tree (query_block_join_plan block sources))
 		(define consumers (query_block_probe_consumers block))
+		(define planning_session
+			(qassoc_get (qb_facts block) (quote physical_planning_session) nil))
 		(filter (map sources (lambda (src)
-			(direct_group_join_source_selection stages sources tree consumers src)))
+			(direct_group_join_source_selection
+				stages sources tree consumers src planning_session)))
 			(lambda (selection) (not (nil? selection)))))))
 
 (define direct_group_join_canonical_name (lambda (stage)
@@ -6241,7 +6245,7 @@ only the structural work counts are specific to this operator. */
 	(and (not (nil? planning_session))
 		(not (nil? (planning_session "__memcp_physical_overrides"))))))
 
-(define direct_group_join_raw_scan_expr (lambda (all_sources default_alias stage)
+(define direct_group_join_raw_scan_expr (lambda (all_sources default_alias stage tx_depth)
 	(begin
 		(define src (gs_input stage))
 		(define keys (gs_keys stage))
@@ -6271,9 +6275,10 @@ only the structural work counts are specific to this operator. */
 		(if (single_source? ags)
 			(runtime_cons_list_expr (list
 				(lower_scalar_aggregate_probe_expr all_sources default_alias stage
-					(aggregate_col_name_using src (car ags)))))
+					(aggregate_col_name_using src (car ags))
+					(physical_query_tx_at_depth tx_depth))))
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_at_depth tx_depth)
 				(source_table_expr src)
 				(cons (quote list) filtercols)
 				(list (quote lambda)
@@ -6291,7 +6296,7 @@ only the structural work counts are specific to this operator. */
 				merge_payload
 				false)))))
 
-(define direct_group_join_cache_scan_expr (lambda (all_sources default_alias stage table_expr)
+(define direct_group_join_cache_scan_expr (lambda (all_sources default_alias stage table_expr tx_depth)
 	(begin
 		(define ags (gs_aggregates stage))
 		(define key_names (group_key_cols (gs_keys stage)))
@@ -6302,7 +6307,7 @@ only the structural work counts are specific to this operator. */
 		(define neutral_payload
 			(runtime_cons_list_expr (map ags (lambda (ag) (nth ag 2)))))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_at_depth tx_depth)
 			table_expr
 			(cons (quote list) key_names)
 			(list (quote lambda) (map key_names symbol)
@@ -6321,10 +6326,11 @@ measured time in a query-local session and flush it once after the complete
 query, rather than writing planner telemetry once per joined row. Forced
 Costgen alternatives remain uninstrumented so their timings contain only the
 operator being calibrated. */
-(define direct_group_join_scan_expr (lambda (all_sources default_alias stage)
+(define direct_group_join_scan_expr (lambda (all_sources default_alias stage scope_depth)
 	(begin
 		(define direct_values
-			(direct_group_join_raw_scan_expr all_sources default_alias stage))
+			(direct_group_join_raw_scan_expr all_sources default_alias stage
+				(if (direct_group_join_calibration_active?) scope_depth (+ scope_depth 1))))
 		(if (direct_group_join_calibration_active?)
 			direct_values
 			(begin
@@ -6363,7 +6369,7 @@ operator being calibrated. */
 								(list (quote if) (list (quote nil?) (list cache_promise "value"))
 									cold_values
 									(direct_group_join_cache_scan_expr all_sources default_alias stage
-										(list cache_promise "value"))))))
+										(list cache_promise "value") (+ scope_depth 1))))))
 					(list (quote newpromise)
 						(list (quote append_mut) (list (symbol "!!list") 2) nil nil))))))))
 
@@ -6441,8 +6447,7 @@ the costgen threshold. */
 (define direct_group_join_eval_prepare_recipe_expr (lambda (stage)
 	(list (quote eval)
 		(list (quote optimize)
-			(list (quote rewrite_physical_transaction_reads)
-				(direct_group_join_prepare_recipe_symbol stage))))))
+			(direct_group_join_prepare_recipe_symbol stage)))))
 
 (define direct_group_join_async_build_expr (lambda (stage canonical_name)
 	(begin
@@ -6547,6 +6552,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 	(begin
 		(define src (physical_join_leaf_source all_sources leaf))
 		(define alias (source_alias src))
+		(define scope_depth (- (count all_sources) (+ (count future_aliases) 1)))
 		(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
 		(define condition_parts (physical_partition_condition
 			default_alias src future_sources final_condition))
@@ -6586,7 +6592,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(list
 					(list (quote lambda) (list (quote __direct_group_final_payload)) bound_continuation)
 					final_payload))
-			(direct_group_join_scan_expr all_sources default_alias stage)))))
+			(direct_group_join_scan_expr all_sources default_alias stage scope_depth)))))
 
 (define strip_scan_access_path_predicate (lambda (condition candidate)
 	(if (nil? candidate)
@@ -6854,7 +6860,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 								(define tiebreaker_cols (filter (source_primary_key_columns src)
 									(lambda (col) (not (contains? ordercols col)))))
 								(list (quote scan_order_batch_accept)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr batch_filter
 									(cons (quote list) (merge (list ordercols tiebreaker_cols)))
 									(cons (quote list) (merge (list
@@ -6868,7 +6874,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(or outer_scan (source_outer? src))))
 							(if (and (empty_list? current_order_items) (not (query_limit_active? offset_value limit_value)))
 								(list (quote scan)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
 									filter_expr
@@ -6879,7 +6885,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(join_scan_shard_reduce_expr result_mode)
 									(or outer_scan (source_outer? src)))
 								(list (quote scan_order)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
 									filter_expr
@@ -7247,7 +7253,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define terms (map (produceN (count key_cols)) (lambda (i)
 			(list (quote equal?) (nth params i) (list (quote get_assoc) dict_symbol (nth key_cols i))))))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(list (quote table) (qb_schema block) table_name)
 			(cons (quote list) cache_cols)
 			(list (quote lambda) params (combine_where_terms terms true))
@@ -7295,7 +7301,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define computor (list (quote lambda)
 			(map input_cols symbol)
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(source_table_expr src)
 				(cons (quote list) key_cols)
 				(list (quote lambda) filter_params (combine_where_terms filter_terms true))
@@ -7357,7 +7363,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(list (quote createtable) (qb_schema block) table_name
 				(prejoin_create_columns sources) (quoted_runtime_list '("engine" "cache")) true)
 			(list (quote initialize_cache_table)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				table_expr
 				(cons (quote list) (map sources source_table_expr))
 				(list (quote lambda) '() (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
@@ -7987,7 +7993,7 @@ every title. */
 			true)
 		(define keyparams (map keycols (lambda (col) (symbol (concat alias "." col)))))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr target_src)
 			(cons (quote list) keycols)
 			(list (quote lambda) keyparams
@@ -8149,7 +8155,7 @@ every title. */
 				(list (quote if) (list (quote $update) update_values) 1 0))))
 		(if (and (empty_list? order_items) (not bounded))
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) target_schema target_tbl)
 				(cons (quote list) filtercols)
 				filter_expr
@@ -8160,7 +8166,7 @@ every title. */
 				nil
 				false)
 			(list (quote scan_order)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) target_schema target_tbl)
 				(cons (quote list) filtercols)
 				filter_expr
@@ -8407,12 +8413,12 @@ stars through the same catalog-aware path used by physical lowering. */
 							(qb_stages branch)
 							(qb_facts branch)))
 						(define lookup_recset (list (quote scan_recset)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							(source_table_expr lookup)
 							(quoted_runtime_list '())
 							(list (quote lambda) '() true)))
 						(define driver_recset (list (quote recset_project_join)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							lookup_recset
 							(quoted_runtime_list (list (car join_parts)))
 							(source_table_expr driver)
@@ -8573,7 +8579,7 @@ stars through the same catalog-aware path used by physical lowering. */
 					(union_ordered_scan_spec (nth plan 1) titles order_positions (nth plan 2)))))
 				(define membership_bindings (merge_unique (map specs (lambda (spec) (nth spec 6)))))
 				(define scan_plan (list (quote scan_order_multi)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(cons (quote list) (map specs (lambda (spec) (nth spec 0))))
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
 					(cons (quote list) (map specs (lambda (spec) (nth spec 2))))
@@ -8971,38 +8977,6 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 					(or found (physical_plan_uses_query_scope? item))) false))
 			_ false))))
 
-/* Match syntax structurally. Comparing a call head with the value of the
-session binding can classify an unrelated lambda as a session call. */
-(define physical_session_call_parts (lambda (expr)
-	(match expr
-		((symbol quote) _value) nil
-		((quote quote) _value) nil
-		(cons (symbol session) tail) (list tail)
-		(cons (quote session) tail) (list tail)
-		_ nil)))
-
-/* Physical operators share one transaction for the complete query. Keep
-ordinary session reads intact: the scan optimizer recognizes their lack of
-column dependencies and can lift invariant CASE dispatch out of row callbacks.
-Replacing them with lexical symbols here would hide that dependency fact. */
-(define rewrite_physical_transaction_reads (lambda (expr)
-	(begin
-		(define parts (physical_session_call_parts expr))
-		(if (not (nil? parts))
-			(begin
-				(define args (car parts))
-				(if (and (equal? (count args) 1) (equal? (car args) "__memcp_tx"))
-					(physical_query_tx_symbol)
-					expr))
-			(match expr
-				((symbol quote) _value) expr
-				((quote quote) _value) expr
-				(cons head tail) (cons
-					(rewrite_physical_transaction_reads head)
-					(map tail (lambda (item)
-						(rewrite_physical_transaction_reads item))))
-				_ expr)))))
-
 (define query_invariant_presence_memo_parts (lambda (expr)
 	(match expr
 		'(session_symbol "get_or_compute_scoped" scope_symbol key _tx producer)
@@ -9058,11 +9032,6 @@ row callback. */
 						expr)))
 				(list (rewrite_query_invariant_presence_memos plan)))))))))
 
-/* The SQL execution lambda already binds session and tx. Generated operators
-capture those values directly instead of rediscovering request state. */
-(define with_physical_query_context (lambda (plan)
-	(rewrite_physical_transaction_reads plan)))
-
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define plan (match (ir_return ir)
@@ -9084,8 +9053,7 @@ capture those values directly instead of rediscovering request state. */
 		(define memoized_plan (if (empty_list? (ir_stages ir))
 			deduplicated_plan
 			(consolidate_query_invariant_presence_memos deduplicated_plan)))
-		(require_physical_scan_relations
-			(with_physical_query_context memoized_plan)))))
+		(require_physical_scan_relations memoized_plan))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir nil))))

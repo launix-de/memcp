@@ -160,9 +160,11 @@ partner. */
 		((quote scalar_first_probe) stage requested_col stages)
 		(lower_scalar_first_probe_expr (list src) (source_alias src) stage requested_col stages probe_work_rows (quote value))
 		((symbol scalar_aggregate_probe) stage requested_col)
-		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col)
+		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col
+			(physical_query_tx_symbol))
 		((quote scalar_aggregate_probe) stage requested_col)
-		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col)
+		(lower_scalar_aggregate_probe_expr (list src) (source_alias src) stage requested_col
+			(physical_query_tx_symbol))
 		((symbol scalar_cardinality_probe) stage requested_col)
 		(lower_scalar_cardinality_probe_expr (list src) (source_alias src) stage requested_col)
 		((quote scalar_cardinality_probe) stage requested_col)
@@ -330,7 +332,7 @@ partner. */
 				(define mapcols (extract_columns_for_alias src value_expr))
 				(define check_cardinality (equal? on_overflow (quote error)))
 				(define raw_probe (list (quote scan_order)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(source_table_expr src)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -1226,7 +1228,7 @@ both names therefore bind to the same parameter. */
 			(extract_columns_for_alias src condition)
 			(extract_columns_for_alias src key_expr))))
 		(list (quote scan_exists)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr src)
 			(cons (quote list) filtercols)
 			(list (quote lambda)
@@ -1369,7 +1371,7 @@ through to reach the base table -- src already is it. */
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog physical_stage true nil)
 			(list (quote scan_order)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) cache_schema cache_relation)
 				(cons (quote list) (list "k0"))
 				(list (quote lambda) (list (quote __kt_k0))
@@ -1472,6 +1474,11 @@ membership set. */
 (define physical_query_tx_symbol (lambda ()
 	(quote tx)))
 
+(define physical_query_tx_at_depth (lambda (depth)
+	(if (equal? depth 0)
+		(physical_query_tx_symbol)
+		(list (quote outer) depth (physical_query_tx_symbol)))))
+
 (define physical_query_symbol_named? (lambda (expr expected_name)
 	(and (symbol? expr)
 		(equal? (string expr) expected_name))))
@@ -1514,7 +1521,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 					(define filtercols (extract_columns_for_alias src condition))
 					(list true
 						(list (quote scan_recset)
-							(list (quote session) "__memcp_tx")
+							(physical_query_tx_symbol)
 							(source_table_expr src)
 							(cons (quote list) filtercols)
 							(list (quote lambda)
@@ -1658,7 +1665,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 							(lower_group_stage_prepare_using
 								stage_catalog stage_catalog physical_stage true nil))
 						(list (quote scan_recset)
-							(list (quote session) "__memcp_tx")
+							(physical_query_tx_symbol)
 							(list (quote table) cache_schema cache_relation)
 							(quoted_runtime_list (list requested_col))
 							(list (quote lambda) (list (symbol requested_col))
@@ -1695,7 +1702,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 							(quote tx)
 							(list (quote lambda) '()
 								(list (quote recset_key_index)
-									(list (quote session) "__memcp_tx")
+									(physical_query_tx_symbol)
 									(cadr source_parts)
 									(quoted_runtime_list (nth source_parts 2)))))
 						(list (quote list) lookup_value))))
@@ -1718,7 +1725,7 @@ choice at the consuming join edge. */
 		(list (quote begin)
 			(car source_parts)
 			(list (quote recset_project_join)
-				(list (quote session) "__memcp_tx")
+				(physical_query_tx_symbol)
 				(cadr source_parts)
 				(quoted_runtime_list source_key_cols)
 				(source_table_expr target_src)
@@ -1908,7 +1915,7 @@ would still have to project that value over the segment. */
 					1 nil)
 				(lower_table_scalar_first_probe_expr
 					sources default_alias src stage value_expr keys lookup_keys
-					order_exprs dirs offset_value partition_limit '(session "__memcp_tx")))
+					order_exprs dirs offset_value partition_limit (physical_query_tx_symbol)))
 			_ (neumann_fail "build_queryplan" "scalar-first probe has no physical operator")))
 		(define memoized_lowered (if
 			(qassoc_get (gs_facts stage) (quote segment_invariant_scalar_probe) false)
@@ -1927,7 +1934,7 @@ would still have to project that value over the segment. */
 			memoized_lowered)))
 )
 
-(define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col)
+(define lower_scalar_aggregate_probe_expr (lambda (sources default_alias stage requested_col tx_expr)
 	(begin
 		(if (not (scalar_aggregate_probe_stage? stage))
 			(neumann_fail "build_queryplan" "scalar aggregate probe requires scalar_aggregate base stage")
@@ -1968,7 +1975,7 @@ would still have to project that value over the segment. */
 				(define value_cols (extract_columns_for_alias src value_expr))
 				(define filtercols (merge_unique (list condition_cols key_cols)))
 				(list (quote scan)
-					'(session "__memcp_tx")
+					tx_expr
 					(source_table_expr src)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -2023,7 +2030,7 @@ would still have to project that value over the segment. */
 				(define unset (list (quote quote) (quote __scalar_cardinality_unset)))
 				(define partition_limit (stage_partition_limit stage))
 				(list (quote scan_order)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(source_table_expr src)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -2128,9 +2135,11 @@ would still have to project that value over the segment. */
 		((quote scalar_first_probe) stage requested_col stages)
 		(lower_scalar_first_probe_expr sources default_alias stage requested_col stages probe_work_rows (quote value))
 		((symbol scalar_aggregate_probe) stage requested_col)
-		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col)
+		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col
+			(physical_query_tx_symbol))
 		((quote scalar_aggregate_probe) stage requested_col)
-		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col)
+		(lower_scalar_aggregate_probe_expr sources default_alias stage requested_col
+			(physical_query_tx_symbol))
 		((symbol scalar_cardinality_probe) stage requested_col)
 		(lower_scalar_cardinality_probe_expr sources default_alias stage requested_col)
 		((quote scalar_cardinality_probe) stage requested_col)
@@ -2244,8 +2253,7 @@ retain the scalar's complete value, including SQL NULL. */
 
 (define scan_order_sort_callback_symbols (lambda (driver_cols bound_symbols expr)
 	(match expr
-		((symbol session) "__memcp_tx") (symbol "$tx")
-		((quote session) "__memcp_tx") (symbol "$tx")
+		(symbol tx) (symbol "$tx")
 		((symbol quote) _value) expr
 		((symbol lambda) params body) (list (quote lambda) params
 			(scan_order_sort_callback_symbols driver_cols (merge_unique (list bound_symbols params)) body))
@@ -2268,8 +2276,7 @@ retain the scalar's complete value, including SQL NULL. */
 
 (define bind_nested_scan_tx (lambda (expr tx_expr)
 	(match expr
-		((symbol session) "__memcp_tx") tx_expr
-		((quote session) "__memcp_tx") tx_expr
+		(symbol tx) tx_expr
 		((symbol quote) _value) expr
 		((quote quote) _value) expr
 		(cons head tail) (cons head (map tail (lambda (item)
@@ -2414,7 +2421,7 @@ retain the scalar's complete value, including SQL NULL. */
 			(map lookup_map_cols (lambda (col) (symbol (concat lookup_alias "." col))))
 			(lower_column_expr_for_join sources default_alias expr)))
 		(define probe (list (quote scan_order)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr_using stages lookup)
 			(cons (quote list) lookup_filter_cols)
 			filter_expr
@@ -2578,7 +2585,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 		(define ordercols (order_cols_for_alias group_src replaced_order))
 		(define valuecols (extract_columns_for_alias group_src value_expr))
 		(list (quote scan_order)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(list (quote table) schema grouptbl)
 			(cons (quote list) filtercols)
 			(list (quote lambda)
@@ -2607,7 +2614,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 		(define condition (combine_where (qb_where branch) (source_join_expr src)))
 		(define filtercols (extract_columns_for_alias src condition))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr src)
 			(cons (quote list) filtercols)
 			(list (quote lambda)
@@ -2645,7 +2652,7 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 				(lower_column_expr_for_alias src rhs_expr)
 				(lower_column_expr_for_join sources default_alias probe))))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr src)
 			(cons (quote list) filtercols)
 			(list (quote lambda)
@@ -2688,7 +2695,7 @@ cache identity or a logical fallback. */
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 			(list (quote scan_exists)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) (group_stage_cache_schema stage) (group_stage_cache_relation stage))
 				(cons (quote list) filtercols)
 				(list (quote lambda)
@@ -2734,7 +2741,7 @@ would lose nested-stage and join semantics. */
 							(extract_columns_for_alias input_src condition)
 							(merge_unique (map keys (lambda (key) (extract_columns_for_alias input_src key)))))))
 						(list (quote scan_exists)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							(source_table_expr input_src)
 							(cons (quote list) filtercols)
 							(list (quote lambda)
@@ -2757,7 +2764,7 @@ would lose nested-stage and join semantics. */
 				(symbol (nth key_names i))
 				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
 		(list (quote scan_exists)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(list (quote table) cache_schema (group_stage_cache_relation stage))
 			(cons (quote list) filter_key_names)
 			(list (quote lambda)
@@ -2926,7 +2933,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 		(define alias (source_alias src))
 		(define cols (extract_columns_for_alias src condition))
 		(list (quote scan_recset)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			input
 			(cons (quote list) cols)
 			(list (quote lambda)
@@ -2942,7 +2949,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 				nil
 				(begin
 					(define projected (list (quote recset_project_join)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						current_recset
 						(quoted_runtime_list (car edge_columns))
 						(source_table_expr next_src)
@@ -2990,7 +2997,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 				(define filtercols (extract_columns_for_alias src condition))
 				(list src source_col
 					(list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(source_table_expr src)
 						(cons (quote list) filtercols)
 						(list (quote lambda)
@@ -3004,7 +3011,7 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 		(if (nil? carrier)
 			nil
 			(list (quote recset_project_join)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(nth carrier 2)
 				(quoted_runtime_list (list (nth carrier 1)))
 				(source_table_expr target_src)
@@ -3019,9 +3026,9 @@ here: their UNKNOWN rows are in neither SQL truth set. */
 				(define condition (combine_where (qb_where branch) (source_join_expr src)))
 				(define filtercols (extract_columns_for_alias src condition))
 				(list (quote recset_project_join)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(source_table_expr src)
 						(cons (quote list) filtercols)
 						(list (quote lambda)
@@ -3044,13 +3051,13 @@ rows outside the current batch. */
 			(define condition (combine_where (qb_where branch) (source_join_expr src)))
 			(define filtercols (extract_columns_for_alias src condition))
 			(define source_candidates (list (quote recset_project_join)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				batch_expr
 				(quoted_runtime_list (list target_col))
 				(source_table_expr src)
 				(quoted_runtime_list (list source_col))))
 			(define source_matches (list (quote scan_recset)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				source_candidates
 				(cons (quote list) filtercols)
 				(list (quote lambda)
@@ -3060,7 +3067,7 @@ rows outside the current batch. */
 				(cons (quote list) (list
 					batch_expr
 					(list (quote recset_project_join)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						source_matches
 						(quoted_runtime_list (list source_col))
 						(source_table_expr target_src)
@@ -3079,13 +3086,13 @@ rows outside the current batch. */
 				(define alias (source_alias src))
 				(define filtercols (extract_columns_for_alias src condition))
 				(define source_candidates (list (quote recset_project_join)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					batch_expr
 					(quoted_runtime_list (list target_col))
 					(source_table_expr src)
 					(quoted_runtime_list (list source_col))))
 				(define source_matches (list (quote scan_recset)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					source_candidates
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -3095,7 +3102,7 @@ rows outside the current batch. */
 					(cons (quote list) (list
 						batch_expr
 						(list (quote recset_project_join)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							source_matches
 							(quoted_runtime_list (list source_col))
 							(source_table_expr target_src)
@@ -3188,7 +3195,7 @@ alternative is a raw RecSet or direct probe. */
 		(define cache (group_stage_cache stage))
 		(prepared_group_cache_expr stage
 			(list (quote scan_recset)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
 				(list (quote list))
 				(list (quote lambda) '() true))))))
@@ -3217,9 +3224,9 @@ alternative is a raw RecSet or direct probe. */
 				(list (quote begin)
 					(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 					(list (quote recset_project_join)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(list (quote scan_recset)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							(list (quote table) cache_schema cache_relation)
 							(cons (quote list) filtercols)
 							(list (quote lambda)
@@ -3239,7 +3246,7 @@ the auto-index chooses the concrete access path on both tables. */
 		(begin
 			(define cache (group_stage_cache stage))
 			(list (quote recset_project_join)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(prepared_group_cache_recset_expr stage)
 				(quoted_runtime_list (list "k0"))
 				(source_table_expr target_src)
@@ -3410,7 +3417,7 @@ still rechecks current data and autoindex statistics. */
 		(define alias (source_alias src))
 		(define cols (extract_columns_for_alias src condition))
 		(define estimate_expr (list (quote scan_selectivity_estimate)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(list (quote table) (source_schema src) (source_relation src))
 			(cons (quote list) cols)
 			(list (quote lambda)
@@ -3944,9 +3951,11 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 		((symbol grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
 		((quote grouped_scalar_top) stage) (lower_grouped_scalar_top_expr stage)
 		((symbol scalar_aggregate_probe) stage requested_col)
-		(lower_scalar_aggregate_probe_expr '() nil stage requested_col)
+		(lower_scalar_aggregate_probe_expr '() nil stage requested_col
+			(physical_query_tx_symbol))
 		((quote scalar_aggregate_probe) stage requested_col)
-		(lower_scalar_aggregate_probe_expr '() nil stage requested_col)
+		(lower_scalar_aggregate_probe_expr '() nil stage requested_col
+			(physical_query_tx_symbol))
 		((symbol scalar_cardinality_probe) stage requested_col)
 		(lower_scalar_cardinality_probe_expr '() nil stage requested_col)
 		((quote scalar_cardinality_probe) stage requested_col)
@@ -4648,7 +4657,7 @@ self-joins of the same base table still describe two distinct row roles. */
 				(define params (map cols (lambda (col) (symbol (concat grouptbl "." col)))))
 				(list (quote not)
 					(list (quote scan_exists)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(list (quote table) schema grouptbl)
 						(cons (quote list) cols)
 						(list (quote lambda)
@@ -5104,7 +5113,7 @@ ever-larger subtrees. */
 			(list (quote lambda)
 				(map key_names (lambda (col) (symbol col)))
 				(list (quote scan_order)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -5151,7 +5160,7 @@ ever-larger subtrees. */
 			(list (quote lambda) (list (quote grouped))
 				(group_insert_finish_expr schema grouptbl key_names agg_cols false))
 			(list (quote scan_order)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) schema tbl)
 				(cons (quote list) filtercols)
 				(list (quote lambda)
@@ -5361,7 +5370,7 @@ ever-larger subtrees. */
 		(define merge_groups (list (quote lambda) (list (quote acc) (quote grouped))
 			(list (quote merge_assoc) (quote acc) (quote grouped) merge_payload)))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			table_expr
 			(cons (quote list) filtercols)
 			(list (quote lambda)
@@ -5588,7 +5597,7 @@ join reducer aggregate shard-local states and merge them once at the root. */
 		(define key_symbols (map key_names (lambda (col) (symbol col))))
 		(define key_expr (runtime_cons_list_expr key_symbols))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(list (quote table) schema grouptbl)
 			(quoted_runtime_list '())
 			(list (quote lambda) '() true)
@@ -5940,7 +5949,7 @@ one ordinary scan_recset, while stage leaves use the carrier projection above. *
 		(define alias (source_alias domain_src))
 		(define filtercols (extract_columns_for_alias domain_src expr))
 		(list (quote scan_recset)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr domain_src)
 			(cons (quote list) filtercols)
 			(list (quote lambda)
