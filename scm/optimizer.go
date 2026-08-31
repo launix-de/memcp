@@ -1868,6 +1868,12 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				}
 			}
 		}
+		var cseBindings int
+		v, cseBindings = optimizeBeginFoldableCSE(v, bodyStart, ome)
+		if headSym == Symbol("begin_mut") && cseBindings > 0 {
+			reserve += cseBindings
+			v[1] = NewInt(int64(reserve))
+		}
 		usedVariables := make(map[Symbol]int)
 		variableContent := make(map[Symbol]Scmer)
 		bindings := make(map[Symbol]localBindingFacts)
@@ -3360,8 +3366,58 @@ func matchTailDescriptor(td *TypeDescriptor) *TypeDescriptor {
 	return tail
 }
 
+// optimizeBooleanRegexMatch lowers the common predicate spelling
+// (match value (regex "pattern" _) true _ false) to one precompiled test.
+// With no captures, constructing a match environment and FindStringSubmatch's
+// result slice cannot contribute to the Scheme result.
+func optimizeBooleanRegexMatch(v []Scmer, value Scmer) (Scmer, TypeInfo, bool) {
+	if len(v) != 6 {
+		return NewNil(), tiZero, false
+	}
+	trueResult := v[3].WithoutSourceInfo()
+	falseResult := v[5].WithoutSourceInfo()
+	trueLiteral := (trueResult.IsBool() && trueResult.Bool()) || scmerIsSymbol(trueResult, "true")
+	falseLiteral := (falseResult.IsBool() && !falseResult.Bool()) || scmerIsSymbol(falseResult, "false")
+	if !trueLiteral || !falseLiteral ||
+		!scmerIsSymbol(v[4], "_") {
+		return NewNil(), tiZero, false
+	}
+	pattern, ok := scmerSlice(v[2])
+	if !ok || len(pattern) != 3 || !scmerIsSymbol(pattern[0], "regex") || !scmerIsSymbol(pattern[2], "_") {
+		return NewNil(), tiZero, false
+	}
+	regexValue := pattern[1].WithoutSourceInfo()
+	var compiled *regexp.Regexp
+	switch {
+	case regexValue.IsRegex():
+		compiled = regexValue.Regex()
+	case regexValue.IsString():
+		var err error
+		compiled, err = regexp.Compile(regexValue.String())
+		if err != nil {
+			return NewNil(), tiZero, false
+		}
+	default:
+		return NewNil(), tiZero, false
+	}
+	if compiled.NumSubexp() != 0 {
+		return NewNil(), tiZero, false
+	}
+	test := NewFunc(func(arguments ...Scmer) Scmer {
+		text, ok := scmerAsString(arguments[0])
+		if !ok {
+			panic("regex expects string")
+		}
+		return NewBool(compiled.MatchString(text))
+	})
+	return NewSlice([]Scmer{test, value}), TypeInfo{kind: KindBool, flags: FlagTransfer, length: UnknownLength}, true
+}
+
 func optimizeMatch(v []Scmer, headSym Symbol, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {
 	value, valueType := OptimizeEx(v[1], env, ome, true)
+	if result, resultType, optimized := optimizeBooleanRegexMatch(v, value); optimized {
+		return result, resultType
+	}
 	transferOwnership := valueType.Transfer()
 	var valueDescriptor *TypeDescriptor
 	if td := valueType.ToTypeDescriptor(); td != nil && (len(td.Keys) > 0 || td.Element != nil) {
