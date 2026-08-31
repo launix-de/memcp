@@ -171,6 +171,29 @@ curl -X POST http://localhost:4321/sql/myapp \
 
 ```
 
+### Build with the experimental JIT
+
+MemCP can compile Scheme expressions and query-planning code to native code. This
+integration needs the `runtime/jit` support from the
+[launix-de Go fork](https://github.com/launix-de/go/tree/jit-foreign-frames-go1.27.0):
+
+```bash
+# Build the patched Go toolchain next to the MemCP checkout.
+git clone --branch jit-foreign-frames-go1.27.0 \
+  https://github.com/launix-de/go.git ../go-jit
+(cd ../go-jit/src && ./make.bash)
+
+# Build MemCP with JIT support enabled.
+PATH="$(cd ../go-jit/bin && pwd):$PATH" GOEXPERIMENT=jit go build -o memcp
+
+# The experiment must also be enabled when running Go tests.
+PATH="$(cd ../go-jit/bin && pwd):$PATH" GOEXPERIMENT=jit go test ./scm
+```
+
+The JIT is deliberately guarded by `GOEXPERIMENT=jit`. A normal build with an
+official, unpatched Go compiler remains supported and uses the interpreter; it
+does not compile or activate the experimental runtime integration.
+
 ### CLI Flags
 
 | Flag | Default | Description |
