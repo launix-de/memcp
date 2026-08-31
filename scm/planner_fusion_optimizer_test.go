@@ -98,6 +98,7 @@ func BenchmarkPlannerFlattenAssoc(b *testing.B) {
 const plannerFusionSplitAndTermsSource = `(define split_and_terms (lambda (expr)
 	(match (coalesceNil expr true)
 		((symbol and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
+		((quote and) a b) (merge (list (split_and_terms a) (split_and_terms b)))
 		(cons head tail) (if (or (equal? head (quote and)) (equal? head (symbol "and")))
 			(merge (map tail split_and_terms))
 			(list expr))
