@@ -3054,11 +3054,6 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 (define query_block_has_aggregates? (lambda (block)
 	(not (empty_list? (stage_aggregates_for_fields (qb_fields block))))))
 
-(define table_column_names (lambda (schema tbl)
-	(if (table_function_relation? tbl)
-		(table_function_columns tbl)
-		(map (get_schema schema tbl) (lambda (col) (col "Field"))))))
-
 (define star_expr_alias (lambda (expr)
 	(match expr
 		((symbol get_column) tblvar _ "*" _) tblvar
@@ -3071,10 +3066,13 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 		((quote get_column) _ _ "*" _) true
 		_ false)))
 
+/* Star expansion must use each source's SQL-visible exported columns. A source
+may be a base table, table function, query block, or union; consulting only the
+base-table schema silently produces empty result metadata for derived.*. */
 (define expand_star_for_sources (lambda (sources requested_alias)
 	(merge (map (coalesceNil sources '()) (lambda (src)
 		(if (or (nil? requested_alias) (equal? requested_alias (source_alias src)))
-			(merge (map (table_column_names (source_schema src) (source_relation src)) (lambda (col)
+			(merge (map (binding_source_columns src) (lambda (col)
 				(list col (list (quote get_column) (source_alias src) false col false)))))
 			'()))))))
 
@@ -3119,7 +3117,7 @@ columns cannot change group cardinality because the primary key is unique. */
 	(merge (map (qb_sources block) (lambda (src)
 		(if (and (fields_request_star_for_source? (qb_fields block) src)
 			(source_primary_key_grouped? block src))
-			(map (table_column_names (source_schema src) (source_relation src)) (lambda (col)
+			(map (binding_source_columns src) (lambda (col)
 				(list (quote get_column) (source_alias src) false col false)))
 			'()))))))
 

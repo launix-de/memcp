@@ -37,9 +37,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
@@ -52,6 +54,7 @@ var doPatch bool
 var doWipe bool
 var verbose bool
 var missingOnly bool
+var jobs = runtime.GOMAXPROCS(0)
 
 const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */"
 const phiSlotBytes = 16
@@ -74,12 +77,19 @@ func main() {
 			missingOnly = true
 		} else if arg == "-v" || arg == "--verbose" {
 			verbose = true
+		} else if strings.HasPrefix(arg, "-jobs=") {
+			parsed, err := strconv.Atoi(strings.TrimPrefix(arg, "-jobs="))
+			if err != nil || parsed < 1 {
+				fmt.Fprintf(os.Stderr, "invalid worker count %q\n", arg)
+				os.Exit(1)
+			}
+			jobs = parsed
 		} else {
 			files = append(files, arg)
 		}
 	}
 	if len(files) == 0 {
-		fmt.Fprintf(os.Stderr, "usage: jitgen [-dump=OP] [-patch] [-missing-only] [-wipe] <file.go> ...\n")
+		fmt.Fprintf(os.Stderr, "usage: jitgen [-dump=OP] [-patch] [-missing-only] [-wipe] [-jobs=N] <file.go> ...\n")
 		os.Exit(1)
 	}
 
@@ -205,18 +215,19 @@ func main() {
 		ops[i].preservedEnd = preservedEmitterOffsets[path][offset]
 	}
 
+	// Generate operator emitters in parallel after the package and SSA graph have
+	// been built once. Patches are still assembled and applied serially below so
+	// source rewriting and diagnostics remain deterministic.
+	generated := generateOperators(ops, ssaFuncs, ssaFuncsByName)
+
 	// Process each operator (pattern 1: Declare)
 	patches := map[string][]patchEntry{}
-	for _, op := range ops {
+	for opIndex, op := range ops {
 		if onlyOp != "" && op.name != onlyOp {
 			continue
 		}
-		var ssaFn *ssa.Function
-		if op.funcLit != nil {
-			ssaFn = ssaFuncs[op.funcLit.Pos()]
-		} else {
-			ssaFn = ssaFuncsByName[op.funcName]
-		}
+		generation := generated[opIndex]
+		ssaFn := generation.ssaFn
 		if ssaFn == nil {
 			fmt.Fprintf(os.Stderr, "  %s: %s — SSA function not found\n", op.path, op.name)
 			continue
@@ -226,15 +237,9 @@ func main() {
 			dumpSSA(ssaFn)
 		}
 
-		// Single-pass: try to generate, recover on failure
-		newText, genErr := generateClosure(op.name, ssaFn, nil, op.path)
-		if genErr == "" {
-			if _, err := parser.ParseExpr(newText); err != nil {
-				genErr = "generated invalid Go expression: " + err.Error()
-				if verbose {
-					fmt.Fprintln(os.Stderr, newText)
-				}
-			}
+		newText, genErr := generation.newText, generation.genErr
+		if genErr != "" && verbose {
+			fmt.Fprintln(os.Stderr, newText)
 		}
 		usesFallback := false
 		usesNativeCall := false
@@ -367,6 +372,56 @@ func main() {
 			applyPatches(path, plist)
 		}
 	}
+}
+
+type operatorGeneration struct {
+	ssaFn   *ssa.Function
+	newText string
+	genErr  string
+}
+
+func generateOperators(ops []operatorInfo, ssaFuncs map[token.Pos]*ssa.Function, ssaFuncsByName map[string]*ssa.Function) []operatorGeneration {
+	results := make([]operatorGeneration, len(ops))
+	work := make(chan int)
+	workerCount := jobs
+	if workerCount > len(ops) {
+		workerCount = len(ops)
+	}
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range work {
+				op := ops[index]
+				if onlyOp != "" && op.name != onlyOp {
+					continue
+				}
+				var fn *ssa.Function
+				if op.funcLit != nil {
+					fn = ssaFuncs[op.funcLit.Pos()]
+				} else {
+					fn = ssaFuncsByName[op.funcName]
+				}
+				result := operatorGeneration{ssaFn: fn}
+				if fn != nil {
+					result.newText, result.genErr = generateClosure(op.name, fn, nil, op.path)
+					if result.genErr == "" {
+						if _, err := parser.ParseExpr(result.newText); err != nil {
+							result.genErr = "generated invalid Go expression: " + err.Error()
+						}
+					}
+				}
+				results[index] = result
+			}
+		}()
+	}
+	for index := range ops {
+		work <- index
+	}
+	close(work)
+	workers.Wait()
+	return results
 }
 
 // generatedEmitterOverlay replaces Declaration emitter expressions only for
