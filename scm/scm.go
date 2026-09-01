@@ -370,7 +370,7 @@ restart:
 	case tagFunc, tagFuncEnv, tagProc, tagJIT, tagClosure, tagPromise, tagSpecialForm:
 		// Optimizer-resolved native callables.
 		return expression
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector, tagFastDict, tagParser, tagAny, tagBSON:
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagRegex, tagVector, tagFastDict, tagParser, tagAny, tagBSON:
 		// Self-evaluating literals.
 		return expression
 	case tagNthLocalVar:

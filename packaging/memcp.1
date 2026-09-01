@@ -1,0 +1,57 @@
+.\" Copyright (C) 2026 Carl-Philip Haensch
+.\" This program is free software under the GNU GPL version 3 or later.
+.TH MEMCP 1 "September 2026" "MemCP" "User Commands"
+.SH NAME
+memcp \- run the MemCP database server
+.SH SYNOPSIS
+.B memcp
+.RI [ options ]
+.RI [ scheme-file ]
+.SH DESCRIPTION
+MemCP is a persistent, column-oriented in-memory database with HTTP and
+MySQL-compatible interfaces. With no Scheme file argument, the installed
+server automatically loads
+.IR /usr/lib/memcp/lib/main.scm .
+.SH OPTIONS
+.TP
+.BI \-data " directory"
+Store persistent database data in
+.IR directory .
+.TP
+.BI \-\-config= file
+Read command-line arguments from
+.IR file ,
+one argument per line.
+.TP
+.B \-\-no-repl
+Disable the interactive REPL. This is required for background services.
+.TP
+.B \-\-initialize
+Initialize a fresh data directory and exit through the normal persistence
+shutdown path. This is intended for unattended package provisioning.
+.TP
+.BI \-\-api-port= port
+Set the HTTP API port. The default is 4321.
+.TP
+.BI \-\-mysql-port= port
+Set the MySQL-compatible protocol port. The default is 3307.
+.TP
+.BI \-\-mysql-socket= path
+Set the MySQL-compatible Unix socket path.
+.TP
+.B \-\-disable-api
+Disable the HTTP API.
+.TP
+.B \-\-disable-mysql
+Disable the MySQL-compatible TCP listener.
+.SH FILES
+.TP
+.I /etc/memcp/memcp.conf
+Configuration used by the packaged systemd service.
+.TP
+.I /var/lib/memcp
+Default persistent data directory.
+.SH SEE ALSO
+The complete documentation is installed in
+.I /usr/share/doc/memcp/README.md
+and published at https://github.com/launix-de/memcp.

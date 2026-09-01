@@ -1,0 +1,8 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# MemCP is intentionally static so the same upstream binary has no host-glibc
+# dependency. The configuration is restricted because it controls database
+# listeners; the HTML files are runtime dashboard assets, not documentation.
+memcp: statically-linked-binary [usr/bin/memcp]
+memcp: non-standard-file-perm 0640 != 0644 [etc/memcp/memcp.conf]
+memcp: package-contains-documentation-outside-usr-share-doc [usr/lib/memcp/assets/dashboard.html]
+memcp: package-contains-documentation-outside-usr-share-doc [usr/lib/memcp/assets/info.html]

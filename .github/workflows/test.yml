@@ -39,10 +39,10 @@ jobs:
           --health-retries=12
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
@@ -63,3 +63,38 @@ jobs:
           --mariadb-host=127.0.0.1
           --mariadb-port=3306
           --mysqldump=mariadb-dump
+
+  packaging:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install package tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lintian mariadb-client rpm
+
+      - name: Test package lifecycle helpers
+        run: python3 tools/test_packaging.py
+
+      - name: Build and inspect DEB/RPM artifacts
+        run: |
+          make memcp.deb
+          make memcp.rpm RPMBUILD_FLAGS=--nodeps
+          make package-check
+          lintian --fail-on error,warning "dist/memcp_$(make -s version)_amd64.deb"
+          rpm -K "dist/memcp_$(make -s version)_x86_64.rpm"
+
+      - name: Test DEB install, upgrade, remove, reinstall, and purge
+        run: tools/test_deb_lifecycle.sh "dist/memcp_$(make -s version)_amd64.deb"
+
+      - name: Validate container definition without building it
+        run: docker build --check .

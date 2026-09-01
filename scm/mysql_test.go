@@ -20,9 +20,27 @@ package scm
 import (
 	"strings"
 	"testing"
+	"time"
 
 	querypb "github.com/launix-de/go-mysqlstack/sqlparser/depends/query"
 )
+
+func TestMySQLInitializationGate(t *testing.T) {
+	BeginMySQLInitialization()
+	ready := waitForMySQLInitialization()
+	select {
+	case <-ready:
+		t.Fatal("MySQL initialization gate opened before bootstrap completed")
+	default:
+	}
+
+	CompleteMySQLInitialization()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("MySQL initialization gate stayed closed after bootstrap completed")
+	}
+}
 
 func TestMySQLClientErrorMessageDropsInternalStackAndFitsCommandBuffer(t *testing.T) {
 	stack := strings.Repeat("runtime stack frame\n", 1000)

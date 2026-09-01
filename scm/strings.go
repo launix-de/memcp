@@ -27578,6 +27578,7 @@ func init_strings() {
 		},
 		Optimize: optimizeRegexpTest,
 	})
+	registerJITRegexBuiltins()
 
 }
 
@@ -27632,12 +27633,11 @@ func optimizeRegexpTest(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer,
 	if err != nil {
 		return result, td
 	}
-	compiled := NewFunc(func(a ...Scmer) Scmer {
-		if a[0].IsNil() {
-			return NewNil()
-		}
-		return NewBool(re.MatchString(String(a[0])))
-	})
-	// Rewrite: (regexp_test str pattern) -> (compiled_fn str)
-	return NewSlice([]Scmer{compiled, rv[1]}), td
+	// Keep a declared callable identity in the optimized AST so both Eval and
+	// the JIT can execute the same precompiled-regex operation directly.
+	return NewSlice([]Scmer{
+		NewSymbol(jitConstantRegexpTestName),
+		NewRegex(re),
+		rv[1],
+	}), td
 }
