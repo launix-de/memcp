@@ -58,6 +58,22 @@ class ReleaseSourceTests(unittest.TestCase):
 		self.assertNotRegex(dockerfile, r"(?m)^COPY\s+\.\s+\.")
 		self.assertRegex(dockerfile, r"(?m)^USER\s+10001:10001$")
 
+	def test_dependencies_are_not_vendored(self) -> None:
+		self.assertFalse((ROOT / "third_party").exists())
+		self.assertFalse((ROOT / "vendor").exists())
+		for name in ("Dockerfile", ".dockerignore"):
+			self.assertNotIn("third_party", (ROOT / name).read_text(encoding="utf-8"))
+
+		go_mod = (ROOT / "go.mod").read_text(encoding="utf-8")
+		for line in go_mod.splitlines():
+			if "=>" not in line:
+				continue
+			target = line.split("=>", 1)[1].strip().split()[0]
+			self.assertFalse(
+				target.startswith((".", "/")),
+				f"go.mod uses local dependency replacement: {line.strip()}",
+			)
+
 	def test_initializer_is_idempotent_and_keeps_credential(self) -> None:
 		with tempfile.TemporaryDirectory(prefix="memcp-package-test-") as tmp:
 			root = Path(tmp)
