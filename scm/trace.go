@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -33,8 +33,15 @@ var Trace *Tracefile // default trace: set to not nil if you want to trace
 var TracePrint bool  // whether to print traces to stdout
 
 // TracePrintFunc is the output function used by (time) when TracePrint is
-// true.  Defaults to fmt.Println.  Override from the application layer to
-// route trace output to a log table or other sink.
+// true. Defaults to fmt.Println. Override from the application layer to route
+// trace output to a log table or other sink.
+//
+// The message is a diagnostic record and must reach the sink byte-for-byte:
+// in particular, never truncate query labels here or in an overriding sink.
+// Full SQL text is required to reproduce planner and correctness failures.
+// A sink may rotate or frame its output only outside an individual message.
+// If bounded output is ever required, expose it as an explicit opt-in setting
+// whose default is unlimited, and visibly mark every truncated record.
 var TracePrintFunc = func(msg string) { fmt.Println(msg) }
 
 func SetTrace(on bool) { // sets Trace to nil or a value
