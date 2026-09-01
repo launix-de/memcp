@@ -117,6 +117,30 @@ func TestComputedBoundaryThroughCapturedCallable(t *testing.T) {
 	}
 }
 
+func TestCapturedConstantDoesNotBecomeComputedColumn(t *testing.T) {
+	outerEnv := &scm.Env{VarsNumbered: []scm.Scmer{scm.NewInt(1)}, Outer: &scm.Globalenv}
+	captured := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("outer"),
+		scm.NewInt(1),
+		scm.NewNthLocalVar(0),
+	})
+	condition := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("number")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal??"),
+			scm.NewInt(1),
+			captured,
+		}),
+		En:           outerEnv,
+		NumVars:      1,
+		NumberedOnly: true,
+	})
+
+	if bounds := extractBoundaries([]string{"number"}, condition); len(bounds) != 0 {
+		t.Fatalf("captured constant boundary = %#v, want no computed column", bounds)
+	}
+}
+
 func BenchmarkExtractBoundariesEqual(b *testing.B) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal?"),

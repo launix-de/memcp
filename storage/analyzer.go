@@ -273,6 +273,19 @@ func (c *indexAnalyzeContext) ExtractConstant(v scm.Scmer) (scm.Scmer, bool) {
 // the column-dependent expression while producing a stable, reusable index.
 func (c *indexAnalyzeContext) materializeComputedExpr(expr scm.Scmer) scm.Scmer {
 	expr = expr.WithoutSourceInfo()
+	// A computed column must depend on at least one scanned-row parameter. An
+	// explicit outer capture may itself be a slice; materializing that complete
+	// operand to (for example) integer 1 must not turn it into a constant
+	// computed index named ".1". Only materialize independent descendants once
+	// the complete expression is known to remain row-dependent.
+	if isIndependent(c.params, expr) {
+		return expr
+	}
+	return c.materializeComputedExprParts(expr)
+}
+
+func (c *indexAnalyzeContext) materializeComputedExprParts(expr scm.Scmer) scm.Scmer {
+	expr = expr.WithoutSourceInfo()
 	if isIndependent(c.params, expr) {
 		if value, ok := c.ExtractConstant(expr); ok {
 			return value
@@ -287,7 +300,7 @@ func (c *indexAnalyzeContext) materializeComputedExpr(expr scm.Scmer) scm.Scmer 
 	}
 	var materialized []scm.Scmer
 	for i, item := range items {
-		value := c.materializeComputedExpr(item)
+		value := c.materializeComputedExprParts(item)
 		if materialized == nil && value != item {
 			materialized = make([]scm.Scmer, len(items))
 			copy(materialized, items[:i])
