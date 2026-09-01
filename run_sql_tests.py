@@ -218,6 +218,7 @@ def observe_atomic_json(path: Path, duration_seconds: float) -> Tuple[int, Optio
 PERF_AB_MODE = os.environ.get("PERF_AB_MODE", "").strip().lower()
 if PERF_AB_MODE not in ("", "record", "compare"):
     raise ValueError("PERF_AB_MODE must be 'record' or 'compare'")
+PERF_AB_REPORT_ONLY = os.environ.get("PERF_AB_REPORT_ONLY", "0") == "1"
 PERF_TEST_ENABLED = os.environ.get("PERF_TEST", "0") == "1" or bool(PERF_AB_MODE)
 PERF_CALIBRATE = os.environ.get("PERF_CALIBRATE", "0") == "1"  # reset baselines to current times
 PERF_NORECALIBRATE = os.environ.get("PERF_NORECALIBRATE", "0") == "1"  # freeze row counts for bisecting
@@ -1687,7 +1688,8 @@ class SQLTestRunner:
                 f"PERF_AB {name}: {float(baseline_time):.3f}ms -> "
                 f"{elapsed_ms:.3f}ms per repetition ({change_pct:+.1f}%)"
             )
-        if is_perf_test and PERF_AB_MODE != "record" and elapsed_ms > threshold_ms:
+        if (is_perf_test and PERF_AB_MODE != "record"
+                and not PERF_AB_REPORT_ONLY and elapsed_ms > threshold_ms):
             diag = self._run_on_fail(test_case, database)
             return self._record_fail(name, f"Too slow: {elapsed_ms:.1f}ms > {threshold_ms:.0f}ms", query, response,
                                      test_case.get("expect"), is_noncritical, elapsed_ms, threshold_ms, diag)

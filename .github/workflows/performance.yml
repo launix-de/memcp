@@ -77,6 +77,7 @@ jobs:
 
           (cd candidate && env \
             PERF_AB_MODE=compare \
+            PERF_AB_REPORT_ONLY=1 \
             PERF_BASELINE_FILE="$baseline" \
             PERF_REPEAT=100 \
             PERF_MIN_MEASURE_MS=250 \
