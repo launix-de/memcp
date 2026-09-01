@@ -43,8 +43,8 @@ test_cases:
         (initialize_cache_table nil
           (table "memcp-tests" ".transactionless_cache_init")
           (list (table "memcp-tests" "aggregate_source"))
-          (lambda () true)
-          (lambda ()
+          (lambda (tx) true)
+          (lambda (tx)
             (insert
               (table "memcp-tests" ".transactionless_cache_init")
               (list "id")

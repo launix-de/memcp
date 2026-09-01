@@ -1514,7 +1514,7 @@ outer joins. */
 			(quote !begin)
 			(merge (list ensure_agg_columns agg_plans computed_order_plans))))
 		(define base_group_fill (symbol "__group_base_fill"))
-		(define base_group_fill_call (list base_group_fill))
+		(define base_group_fill_call (list base_group_fill (physical_query_tx_symbol)))
 		(define finalize_group_fill (list (quote rebuild) (list (quote table) schema grouptbl) true false))
 		(define partition_plan (group_cache_partition_plan schema tbl alias src grouptbl keys key_names))
 		(define initial_fill_expr (if (nil? base_group_into_plan)
@@ -1523,10 +1523,10 @@ outer joins. */
 				(physical_query_tx_symbol)
 				(list (quote table) schema grouptbl)
 				(list (quote list) (source_table_expr src))
-				(list (quote lambda) '()
+				(list (quote lambda) (list (physical_query_tx_symbol))
 					(cons (quote !begin) (filter (list partition_plan aggregate_prepare_expr cleanup_plan) (lambda (expr) (not (nil? expr))))))
 				base_group_fill
-				(list (quote lambda) '() finalize_group_fill))))
+				(list (quote lambda) (list (symbol "__group_finalize_tx")) finalize_group_fill))))
 		(define create_options (if (nil? initial_fill_expr)
 			(quoted_runtime_list '("engine" "cache"))
 			(list (quote list)
@@ -1605,7 +1605,7 @@ outer joins. */
 			lowered_plan
 			(list
 				(list (quote lambda) (list base_group_fill) lowered_plan)
-				(list (quote lambda) '() base_group_into_plan))))))
+				(list (quote lambda) (list (physical_query_tx_symbol)) base_group_into_plan))))))
 
 (define lower_orc_stage_prepare (lambda (stage)
 	(begin
@@ -7442,8 +7442,8 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(physical_query_tx_symbol)
 				table_expr
 				(cons (quote list) (map sources source_table_expr))
-				(list (quote lambda) '() (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
-				(list (quote lambda) '() (prejoin_initial_fill_plan block table_name)))
+				(list (quote lambda) (list (physical_query_tx_symbol)) (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
+				(list (quote lambda) (list (physical_query_tx_symbol)) (prejoin_initial_fill_plan block table_name)))
 			(cons (quote !begin) (prejoin_computed_column_plans block fields table_name))
 			(list (quote touch_keytable) table_expr)))
 		(list prepare_plan (prejoin_rewritten_block block fields table_name)))))

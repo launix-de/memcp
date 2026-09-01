@@ -2958,10 +2958,10 @@ func Init(en scm.Env) {
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
-				scm.Apply(a[3])
-				scm.Apply(a[4])
+				scm.Apply(a[3], a[0])
+				scm.Apply(a[4], a[0])
 				if len(a) > 5 {
-					scm.Apply(a[5])
+					scm.Apply(a[5], a[0])
 				}
 			})
 			return scm.NewBool(initialized)
@@ -2971,9 +2971,9 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "transaction", Description: "explicit transaction context carrying query-session ownership"},
 				{Kind: "table", Label: "table"},
 				{Kind: "list", Label: "source_tables"},
-				{Kind: "func", Label: "register_maintenance", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Label: "initializer", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}},
-				{Kind: "func", Label: "finalizer", Description: "optional zero-argument finalizer run under the same source-table locks after initialization", Params: []*scm.TypeDescriptor{}, Return: &scm.TypeDescriptor{Kind: "any"}, Optional: true},
+				{Kind: "func", Label: "register_maintenance", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "initializer", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}}, Return: &scm.TypeDescriptor{Kind: "any"}},
+				{Kind: "func", Label: "finalizer", Description: "optional finalizer run under the same source-table locks after initialization", Params: []*scm.TypeDescriptor{{Kind: "any", Label: "transaction"}}, Return: &scm.TypeDescriptor{Kind: "any"}, Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
