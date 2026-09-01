@@ -3660,14 +3660,11 @@ func optimizeBooleanRegexMatch(v []Scmer, value Scmer) (Scmer, TypeInfo, bool) {
 	if compiled.NumSubexp() != 0 {
 		return NewNil(), tiZero, false
 	}
-	test := NewFunc(func(arguments ...Scmer) Scmer {
-		text, ok := scmerAsString(arguments[0])
-		if !ok {
-			panic("regex expects string")
-		}
-		return NewBool(compiled.MatchString(text))
-	})
-	return NewSlice([]Scmer{test, value}), TypeInfo{kind: KindBool, flags: FlagTransfer, length: UnknownLength}, true
+	return NewSlice([]Scmer{
+		NewSymbol(jitConstantRegexpPredicateName),
+		NewRegex(compiled),
+		value,
+	}), TypeInfo{kind: KindBool, flags: FlagTransfer, length: UnknownLength}, true
 }
 
 func optimizeMatch(v []Scmer, headSym Symbol, env *Env, ome *optimizerMetainfo, useResult bool) (Scmer, TypeInfo) {

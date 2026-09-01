@@ -1874,7 +1874,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		expr = si.value
 	}
 	switch expr.GetTag() {
-	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector,
+	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagRegex, tagVector,
 		tagFunc, tagFuncEnv, tagJIT, tagParser, tagFastDict, tagAny,
 		tagClosure, tagPromise:
 		// Keep Eval's self-evaluating literal contract. Pointer-bearing constants

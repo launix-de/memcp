@@ -16,7 +16,11 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 */
 package scm
 
-import "unsafe"
+import (
+	"fmt"
+	"regexp"
+	"unsafe"
+)
 
 // Match lowering is architecture-independent. It describes values, branches,
 // loads, and calls through the common JIT emitter API; only that API's machine
@@ -602,6 +606,29 @@ func jitCompileMatchPattern(ctx *JITContext, value JITValueDesc, pattern Scmer, 
 			return jitMatchOutcome{possible: inner.possible, always: outcome.always && inner.always}
 		case "cons":
 			return jitMatchCons(ctx, value, p[1:], env, failLabel)
+		case "regex":
+			if len(p) < 3 {
+				panic("jit: malformed regex match pattern")
+			}
+			pattern := p[1].WithoutSourceInfo()
+			if pattern.IsString() {
+				compiled, err := regexp.Compile(pattern.String())
+				if err != nil {
+					panic(err)
+				}
+				pattern = NewRegex(compiled)
+			}
+			if !pattern.IsRegex() {
+				panic("regex expects string or precompiled regexp")
+			}
+			if pattern.Regex().NumSubexp() != len(p)-3 {
+				panic(fmt.Sprintf("regex %s contains %d subexpressions, found %d", pattern.Regex(), pattern.Regex().NumSubexp(), len(p)-3))
+			}
+			captures := jitEmitConstantRegexpCaptures(ctx, pattern.Regex(), value, failLabel)
+			for index, capture := range captures {
+				jitMatchBindValue(ctx, env, p[index+2], capture)
+			}
+			return jitMatchOutcome{possible: true, always: false}
 		default:
 			panic("jit: unsupported match pattern " + name)
 		}
