@@ -260,6 +260,7 @@ func init_scheduler() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["setTimeout"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -560,6 +561,7 @@ func init_scheduler() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  15,
 		},
 	})
 }

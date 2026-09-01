@@ -249,6 +249,7 @@ func declareSQLLiteralParameterizer() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  20,
 		},
 	})
 }

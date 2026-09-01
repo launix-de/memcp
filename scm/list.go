@@ -1610,6 +1610,7 @@ func init_list() {
 				return jitMaterializeVirtualSlice(ctx, d0, result)
 				return result
 			},
+			JITInlineCost: 2,
 		},
 		Optimize: optimizeListCall,
 	})
@@ -2636,6 +2637,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  32,
 		},
 		Optimize: optimizeCount,
 	})
@@ -3213,6 +3215,7 @@ func init_list() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 17,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -3803,6 +3806,7 @@ func init_list() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 20,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -5772,6 +5776,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  33,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -6464,6 +6469,7 @@ func init_list() {
 				ctx.FreeStack(int32(16))
 				return result
 			},
+			JITInlineCost: 19,
 		},
 		Optimize:                 optimizeFixedLengthInput("reverse_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -6550,6 +6556,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  10,
 		},
 		Optimize:                 optimizeAppend,
 		OptimizeFirstArgTransfer: true,
@@ -8522,6 +8529,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  34,
 		},
 		Optimize:                 FirstParameterMutable("append_unique_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -8917,6 +8925,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  27,
 		},
 		Optimize: optimizeCons,
 	})
@@ -9232,6 +9241,7 @@ func init_list() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 11,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -9690,6 +9700,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  13,
 		},
 		Optimize: optimizeCdr,
 	})
@@ -10005,6 +10016,7 @@ func init_list() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 11,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -13614,6 +13626,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  52,
 		},
 		Optimize: optimizeZip,
 	})
@@ -16046,6 +16059,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  36,
 		},
 		Optimize: optimizeMerge,
 	})
@@ -23361,6 +23375,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  62,
 		},
 		Optimize:                 optimizeMergeUnique,
 		OptimizeFirstArgTransfer: true,
@@ -24203,6 +24218,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  19,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -25496,6 +25512,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      32,
 		},
 		Optimize:                 optimizeFilter,
 		OptimizeFirstArgTransfer: true,
@@ -26880,6 +26897,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      30,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -27660,6 +27678,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      26,
 		},
 		Optimize:                 optimizeMap,
 		OptimizeFirstArgTransfer: true,
@@ -27729,6 +27748,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 		Optimize:                 optimizeFixedLengthInput("parallel_map_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -27797,6 +27817,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -28590,6 +28611,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      30,
 		},
 		Optimize:                 optimizeFixedLengthInput("mapIndex_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -30290,6 +30312,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      36,
 		},
 		Optimize: optimizeReduce,
 	})
@@ -31282,6 +31305,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      33,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -34143,6 +34167,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      46,
 		},
 		Optimize: optimizeProduceN,
 	})
@@ -34217,6 +34242,7 @@ func init_list() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["parallelN"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 		Optimize: optimizeParallelN,
 	})
@@ -38189,6 +38215,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      59,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -38301,6 +38328,7 @@ func init_list() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["parallelN_mut"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -38563,6 +38591,7 @@ func init_list() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 8,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -39403,6 +39432,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  19,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -41774,6 +41804,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  33,
 		},
 	})
 
@@ -44996,6 +45027,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      102,
 		},
 		Optimize:                 FirstParameterMutable("filter_assoc_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -49443,6 +49475,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      107,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -52758,6 +52791,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      93,
 		},
 		Optimize: optimizeAssocFixedLengthInput("map_assoc_mut"),
 	})
@@ -55250,6 +55284,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      99,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -55275,6 +55310,7 @@ func init_list() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["make_structural_index"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -55302,6 +55338,7 @@ func init_list() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["make_structural_catalog"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -57044,6 +57081,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  32,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -59280,6 +59318,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  39,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -61372,6 +61411,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  35,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -64765,6 +64805,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      92,
 		},
 		Optimize:                 optimizeExtractAssoc,
 		OptimizeFirstArgTransfer: true,
@@ -71187,6 +71228,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      97,
 		},
 		Optimize:                 FirstParameterMutable("set_assoc_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -74840,6 +74882,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      160,
 		},
 		Optimize:                 FirstParameterMutable("merge_assoc_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -79724,6 +79767,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      56,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -81188,6 +81232,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      40,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -82483,6 +82528,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      32,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -85409,6 +85455,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      45,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -87000,6 +87047,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      32,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -89551,6 +89599,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  133,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -92102,6 +92151,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  133,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -93693,6 +93743,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      32,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -106361,6 +106412,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      166,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -118323,6 +118375,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      161,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -119281,6 +119334,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      27,
 		},
 		Optimize: optimizeFindMapNotNull,
 	})
@@ -120697,6 +120751,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      40,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -121593,6 +121648,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      34,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -122464,6 +122520,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      39,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -124930,6 +124987,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      44,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -127999,6 +128057,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      46,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -133697,6 +133756,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      64,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -136997,6 +137057,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      54,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -140250,6 +140311,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      54,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -142110,6 +142172,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      42,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -143001,6 +143064,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      32,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -144090,6 +144154,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      34,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -145711,6 +145776,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  41,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -145752,6 +145818,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -148839,6 +148906,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      103,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -150303,6 +150371,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  36,
 		},
 	})
 	// _mut variants: optimizer-only, forbidden from .scm code
@@ -150964,6 +151033,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      24,
 		},
 	})
 
@@ -151636,6 +151706,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      28,
 		},
 	})
 
@@ -154793,6 +154864,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      89,
 		},
 	})
 
@@ -156003,6 +156075,7 @@ func init_list() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      29,
 		},
 	})
 
@@ -156705,6 +156778,7 @@ func init_list() {
 				ctx.FreeStack(int32(32))
 				return result
 			},
+			JITInlineCost: 23,
 		},
 	})
 
@@ -160552,6 +160626,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      103,
 		},
 	})
 
@@ -162960,6 +163035,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      89,
 		},
 	})
 
@@ -169214,6 +169290,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      94,
 		},
 	})
 
@@ -169296,6 +169373,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  7,
 		},
 	})
 
@@ -171227,6 +171305,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  31,
 		},
 	})
 
@@ -197406,6 +197485,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  126,
 		},
 	})
 
@@ -197845,6 +197925,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  13,
 		},
 	})
 
@@ -201498,6 +201579,7 @@ func init_list() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      160,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -202388,6 +202470,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  79,
 		},
 		Optimize:                 FirstParameterMutable("sort_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -203246,6 +203329,7 @@ func init_list() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  75,
 		},
 	})
 }

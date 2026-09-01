@@ -1069,6 +1069,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  24,
 		},
 	})
 
@@ -1160,6 +1161,7 @@ func init_timezone() {
 				return result
 				return result
 			},
+			JITInlineCost: 4,
 		},
 	})
 
@@ -5505,6 +5507,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  76,
 		},
 	})
 
@@ -12087,6 +12090,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  173,
 		},
 	})
 
@@ -12179,6 +12183,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  5,
 		},
 	})
 
@@ -12358,6 +12363,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  10,
 		},
 	})
 
@@ -12597,6 +12603,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  12,
 		},
 	})
 
@@ -12677,6 +12684,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  4,
 		},
 	})
 
@@ -16065,6 +16073,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  83,
 		},
 	})
 
@@ -25524,6 +25533,7 @@ func init_timezone() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  130,
 		},
 	})
 }

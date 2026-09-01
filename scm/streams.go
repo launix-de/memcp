@@ -170,6 +170,7 @@ func init_streams() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -200,6 +201,7 @@ func init_streams() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["gzip"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -233,6 +235,7 @@ func init_streams() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["xz"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -869,6 +872,7 @@ func init_streams() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  19,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1505,6 +1509,7 @@ func init_streams() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  19,
 		},
 	})
 }

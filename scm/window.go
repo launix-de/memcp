@@ -238,6 +238,7 @@ func init_window() {
 				return result
 				return result
 			},
+			JITInlineCost: 12,
 		},
 	})
 
@@ -298,6 +299,7 @@ func init_window() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["stream_window_reduce"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 
@@ -6261,6 +6263,7 @@ func init_window() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  81,
 		},
 	})
 
@@ -10294,6 +10297,7 @@ func init_window() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  62,
 		},
 	})
 }

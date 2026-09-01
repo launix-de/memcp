@@ -2229,6 +2229,7 @@ func init_list_assoc_extra() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      120,
 		},
 		Optimize: optimizeGroupAssoc,
 	})
@@ -4454,6 +4455,7 @@ func init_list_assoc_extra() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      124,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -6690,6 +6692,7 @@ func init_list_assoc_extra() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      127,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -8717,6 +8720,7 @@ func init_list_assoc_extra() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      105,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -10756,6 +10760,7 @@ func init_list_assoc_extra() {
 				return result
 			},
 			JITInlineCallbacks: true,
+			JITInlineCost:      108,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -12985,6 +12990,7 @@ func init_list_assoc_extra() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      104,
 		},
 		Optimize:                 FirstParameterMutable("mapkey_assoc_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -15789,6 +15795,7 @@ func init_list_assoc_extra() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      108,
 		},
 	})
 }
