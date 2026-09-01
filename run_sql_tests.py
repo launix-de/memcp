@@ -232,6 +232,7 @@ PERF_DEFAULT_ROWS = 10000  # default starting row count
 PERF_MAX_RAM_FRACTION = 0.30  # abort when MemAvailable drops below (1 - fraction) of MemTotal
 PERF_REPEAT = int(os.environ.get("PERF_REPEAT", "5"))
 PERF_MIN_MEASURE_MS = float(os.environ.get("PERF_MIN_MEASURE_MS", "250"))
+PERF_AB_JITTER_MS = float(os.environ.get("PERF_AB_JITTER_MS", "0"))
 PERF_SETUP_MAX_TIME_SEC = float(os.environ.get("PERF_SETUP_MAX_TIME_SEC", "120"))
 PERF_GATE_FILE = os.environ.get("PERF_GATE_FILE", ".perf_runner_gate.lock")
 _perf_gate_context = threading.local()
@@ -459,11 +460,13 @@ def performance_ab_threshold_ms(
     max_regression_pct: float,
     baseline_warmup: int,
     candidate_warmup: int,
+    candidate_repetitions: int = 1,
+    jitter_budget_ms: float = 0,
 ) -> float:
     warmup_bonus_pct = 100.0 if baseline_warmup > 0 and candidate_warmup == 0 else 0.0
     return baseline_time_per_repetition_ms * (
         1.0 + (max_regression_pct + warmup_bonus_pct) / 100.0
-    )
+    ) + jitter_budget_ms / candidate_repetitions
 
 
 def adaptive_measurement_complete(repetitions: int, total_ns: int) -> bool:
@@ -1682,6 +1685,14 @@ class SQLTestRunner:
 
         # Check performance threshold
         if is_perf_test and PERF_AB_MODE == "compare" and baseline_time:
+            # Shared runners have a small fixed scheduling/HTTP noise floor.
+            # Amortize it over the complete measurement block instead of
+            # weakening the percentage gate for every individual query run.
+            threshold_ms = performance_ab_threshold_ms(
+                float(baseline_time), max_regression_pct,
+                int(baseline.get("warmup", 2)), warmup_runs,
+                len(samples_ns), PERF_AB_JITTER_MS,
+            )
             change_pct = (elapsed_ms / float(baseline_time) - 1.0) * 100.0
             print(
                 f"PERF_AB {name}: {float(baseline_time):.3f}ms -> "
