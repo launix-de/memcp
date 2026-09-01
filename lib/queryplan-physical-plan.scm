@@ -1677,9 +1677,8 @@ outer joins. */
 				(quoted_runtime_list '())
 				(list (quote lambda) '() true)
 				(quoted_runtime_list (list col))
-				(list (quote lambda) (list (quote __scan_acc) (quote __orc_value))
-					(list (quote +) (quote __scan_acc)
-						(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1)))
+				(scan_mapreduce_expr (list (quote __orc_value)) (quote +)
+					(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1))
 				0
 				(quote +)
 				false))
@@ -1700,9 +1699,8 @@ outer joins. */
 					(quoted_runtime_list filtercols)
 					filterfn
 					(quoted_runtime_list (list col))
-					(list (quote lambda) (list (quote __scan_acc) (quote __orc_value))
-						(list (quote +) (quote __scan_acc)
-							(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1)))
+					(scan_mapreduce_expr (list (quote __orc_value)) (quote +)
+						(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1))
 					0
 					(quote +)
 					false)))
@@ -4441,11 +4439,11 @@ either bound a real row or supplied the synthetic NULL row. */
 								(cons (quote list) dirs)
 								0 order_offset 1
 								(cons (quote list) mapcols)
-								(list (quote lambda)
-									(cons (quote __scan_acc) (map mapcols (lambda (col) (symbol (concat (source_alias src) "." col)))))
-									(list (scalar_once_reduce_first) (quote __scan_acc)
-										(cons (quote list) (map value_exprs (lambda (expr)
-											(lower_column_expr_for_alias src expr))))))
+								(scan_mapreduce_expr
+									(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+									(scalar_once_reduce_first)
+									(cons (quote list) (map value_exprs (lambda (expr)
+										(lower_column_expr_for_alias src expr)))))
 								nil false))))))))))
 
 (define recset_contains_callback_symbol (symbol "__recset_contains"))
@@ -5352,12 +5350,10 @@ until the caller has selected this physical alternative. */
 		(define map_body (value_builder
 			(qassoc_get spec (quote output_rows) nil) nil))
 		(define map_params (scan_join_order_ref_params sources map_refs))
-		(define mapreduce_body (if (nil? reduce_expr)
-			map_body
-			(list reduce_expr (quote __scan_acc) map_body)))
-		(define mapreduce_expr (list (quote lambda)
-			(cons (quote __scan_acc) map_params)
-			mapreduce_body))
+		(define mapreduce_expr (match (list reduce_expr map_params map_body)
+			'(nil params body) (list (quote lambda)
+				(cons (quote __scan_acc) params) body)
+			'(reducer params body) (scan_mapreduce_expr params reducer body)))
 		(list (quote scan_join_order)
 			(physical_query_tx_symbol)
 			(cons (quote list) (map sources (lambda (src)
@@ -6375,10 +6371,10 @@ only the structural work counts are specific to this operator. */
 					(cons (quote and)
 						(cons (lower_column_expr_for_alias src condition) key_terms)))
 				(cons (quote list) value_cols)
-				(list (quote lambda)
-					(cons (quote __scan_acc) (map value_cols (lambda (col)
-						(symbol (concat (source_alias src) "." col)))))
-					(list merge_payload (quote __scan_acc) payload_expr))
+				(scan_mapreduce_expr
+					(map value_cols (lambda (col)
+						(symbol (concat (source_alias src) "." col))))
+					merge_payload payload_expr)
 				neutral_payload
 				merge_payload
 				false)))))
@@ -6945,13 +6941,13 @@ carrier remains on the measured direct path and is never built eagerly. */
 						(join_scan_skip_expr result_mode))))
 				(define combines_state (not (empty_list? future_aliases)))
 				(define reduce_expr (join_scan_reduce_expr result_mode combines_state))
-				(define mapreduce_body (if (nil? reduce_expr)
-					map_body
-					(list reduce_expr (symbol "__scan_acc") map_body)))
-				(define mapreduce_expr (list (quote lambda)
-					(cons (symbol "__scan_acc")
-						(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col))))
-					mapreduce_body))
+				(define mapreduce_expr (match
+					(list reduce_expr
+						(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+						map_body)
+					'(nil params body) (list (quote lambda)
+						(cons (quote __scan_acc) params) body)
+					'(reducer params body) (scan_mapreduce_expr params reducer body)))
 				(define scan_expr
 					(if (not (nil? row_number_stage_filter))
 						(build_join_row_number_scan_pipeline schema all_sources src default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe stages result_mode probe_context combines_state continuation outer_scan)

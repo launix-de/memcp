@@ -39,8 +39,8 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 		{scm.NewInt(3)},
 	}, nil, scm.NewNil(), false, nil)
 
-	countMapReduce := optimizedScanProc(t, "(lambda (acc) (+ acc 1))")
-	sumMapReduce := optimizedScanProc(t, "(lambda (acc value) (sql_sum_reduce acc value))")
+	countMapReduce := scm.Globalenv.Vars[scm.Symbol("scan_count")]
+	sumMapReduce := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
 	greaterEqualTwo := optimizedScanProc(t, "(lambda (value) (>= value 2))")
 	reversedLessThan := optimizedScanProc(t, "(lambda (value) (< 1 value))")
 	plus := scm.Globalenv.Vars[scm.Symbol("+")]
@@ -69,10 +69,8 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 	assertResults("main")
 }
 
-// BenchmarkScanPipelineOLTP records the common physical callback shapes emitted
-// for OLTP projections and aggregates. Keep the callbacks as optimized Scheme
-// procedures: native Go benchmark callbacks would bypass the adapter and hide
-// the setup and interpreter work this benchmark is intended to measure.
+// BenchmarkScanPipelineOLTP records the physical callbacks emitted by the
+// planner, including reducers which an identity map can pass through directly.
 func BenchmarkScanPipelineOLTP(b *testing.B) {
 	const rowsN = 60_000
 	dbName := "bench_scan_pipeline_oltp"
@@ -93,8 +91,8 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 
 	trueFilter := optimizedScanProc(b, "(lambda () true)")
 	lastIDFilter := optimizedScanProc(b, "(lambda (id) (equal?? id 59999))")
-	countMapReduce := optimizedScanProc(b, "(lambda (acc) (+ acc 1))")
-	sumMapReduce := optimizedScanProc(b, "(lambda (acc value) (sql_sum_reduce acc value))")
+	countMapReduce := scm.Globalenv.Vars[scm.Symbol("scan_count")]
+	sumMapReduce := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
 	takeRightMapReduce := optimizedScanProc(b, "(lambda (acc value) value)")
 	plus := scm.Globalenv.Vars[scm.Symbol("+")]
 	sqlSum := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]

@@ -1170,6 +1170,19 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_count",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(a[0].Int() + 1)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "planner-selected fused COUNT(*) map-reducer",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "int", Label: "accumulator", Description: "current row count"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "int", Label: "accumulator", Description: "row count incremented by one"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

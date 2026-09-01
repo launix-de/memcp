@@ -1992,20 +1992,38 @@ func (m *ShardMapReducer) processDirectReadBlock(acc scm.Scmer, recids []uint32)
 	if len(recids) == 0 {
 		return acc
 	}
-	// COUNT-style callbacks are emitted directly as (lambda (acc cols...)
-	// (+ acc 1)). Fold the complete block before loading any column values.
-	if m.mapReduceProgram.Argument == 0 && !m.mapReduceProgram.ConstantFirst &&
-		m.mapReduceProgram.Value.IsInt() && m.mapReduceProgram.Value.Int() == 1 &&
-		m.mapReduceProgram.IsNativeArgConstant(scm.Symbol("+")) {
-		if acc.IsInt() {
-			return scm.NewInt(acc.Int() + int64(len(recids)))
+	switch m.mapReduceProgram.Kind {
+	case scm.SerialProcConstant:
+		return m.mapReduceProgram.Value
+	case scm.SerialProcArgument:
+		argument := int(m.mapReduceProgram.Argument)
+		if argument == 0 {
+			return acc
 		}
-		if acc.IsFloat() {
-			return scm.NewFloat(acc.Float() + float64(len(recids)))
+		if argument < 0 || argument >= len(m.args) {
+			panic("serial map-reducer argument outside callback columns")
 		}
+		m.loadDirectReadArgs(recids[len(recids)-1], 0, false)
+		return m.args[argument]
 	}
 	if recids[0] < m.mainCount {
 		m.prefetchMainColumns(recids)
+	}
+	if m.mapReduceProgram.Kind == scm.SerialProcNative {
+		if recids[0] < m.mainCount && len(m.mainBulkReaders) == 1 {
+			for _, value := range m.mainBulkValues {
+				m.args[0] = acc
+				m.args[1] = value
+				acc = m.mapReduceProgram.Function(m.args...)
+			}
+			return acc
+		}
+		for rowOffset, id := range recids {
+			m.loadDirectReadArgs(id, rowOffset, true)
+			m.args[0] = acc
+			acc = m.mapReduceProgram.Function(m.args...)
+		}
+		return acc
 	}
 	for rowOffset, id := range recids {
 		m.loadDirectReadArgs(id, rowOffset, true)
