@@ -138,6 +138,28 @@ deduplicate immutable ASTs without serializing the growing expressions. */
 						(covered_bindings (if (nil? condition_catalog) (string expr) expr) true)) nil))
 				condition)))))
 
+/* Table statistics use a two-level cache guard: immutable generation tokens
+cover the hot path, while a coarse cost-class fingerprint keeps a statistically
+similar REBUILD generation on the cached plan without recompiling the query. */
+(define planner_record_statistics_dependency (lambda (table_expr token fingerprint planning_session)
+	(begin
+		(define planning_session (planner_effective_session planning_session))
+		(define dependencies (if (nil? planning_session) nil
+			(planning_session "__memcp_queryplan_statistics_dependencies")))
+		(if (nil? dependencies)
+			nil
+			(begin
+				(define catalog
+					(planning_session "__memcp_queryplan_statistics_dependency_catalog"))
+				(if (catalog table_expr)
+					nil
+					(begin
+						(define count (coalesceNil (dependencies "count") 0))
+						(catalog table_expr true)
+						(dependencies (concat "dependency:" count)
+							(list table_expr token fingerprint))
+						(dependencies "count" (+ count 1)))))))))
+
 (define planner_guarded_choice (lambda (chosen condition planning_session)
 	(begin
 		(planner_record_guard_condition

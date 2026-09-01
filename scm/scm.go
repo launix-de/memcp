@@ -1123,6 +1123,20 @@ func init() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "clone_optimizer_expression",
+
+		Fn: func(a ...Scmer) Scmer {
+			return CloneOptimizerExpression(a[0])
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "copy an AST before transferring a separate copy to the optimizer",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression"},
+			},
+			Return:         &TypeDescriptor{Kind: "any"},
+			HasSideEffects: true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "optimize",
 
 		Fn: func(a ...Scmer) Scmer {
