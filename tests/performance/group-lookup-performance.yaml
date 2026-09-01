@@ -239,7 +239,7 @@ test_cases:
         (session "schema" "memcp-tests")
         (define resultrow (lambda (_row) true))
         (define formula
-          (cached_parse (newcachemap) parse_sql "memcp-tests"
+          (cached_parse (newcachemap) (list parse_sql) "memcp-tests"
             "SELECT bucket AS value, COUNT(*) AS amount FROM lookup_group_items WHERE TRUE GROUP BY bucket"
             (lambda (_schema _table _write) true) "root" session true))
         (define elapsed
