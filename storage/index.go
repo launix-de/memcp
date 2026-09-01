@@ -1367,7 +1367,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		}
 		lessRecID := func(leftID, rightID uint32) bool {
 			for col := range s.Cols {
-				if len(s.ColMatchers) > col && !s.ColMatchers[col].IsSorted() {
+				if !s.columnIsSorted(col) {
 					continue
 				}
 				left := valueAt(leftID, col)
@@ -1428,7 +1428,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		}
 		hybridsort.Slice(items, func(i, j int) bool {
 			for col := range s.Cols {
-				if len(s.ColMatchers) > col && !s.ColMatchers[col].IsSorted() {
+				if !s.columnIsSorted(col) {
 					continue
 				}
 				left := valueAt(items[i], col)

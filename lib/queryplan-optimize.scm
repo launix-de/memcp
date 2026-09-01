@@ -2588,19 +2588,24 @@ the lowerer can cost it. */
 
 (define hybrid_reorder_query_block_using (lambda (stage_catalog block planning_session tx)
 	(if (or (empty_list? (qb_sources block)) (single_source? (qb_sources block)))
-		(make_query_block
-			(qb_schema block)
-			(qb_sources block)
-			(qb_fields block)
-			(qb_where block)
-			(qb_group block)
-			(qb_having block)
-			(qb_order block)
-			(qb_limit block)
-			(qb_offset block)
-			(qb_hidden block)
-			(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
-			(qb_facts block))
+		(begin
+			/* Single-source blocks still make statistics-sensitive physical scan
+			choices. Multi-source blocks record the same dependency during join
+			reordering; the structural guard catalog deduplicates nested uses. */
+			(planner_record_table_statistics_guards (qb_sources block) planning_session)
+			(make_query_block
+				(qb_schema block)
+				(qb_sources block)
+				(qb_fields block)
+				(qb_where block)
+				(qb_group block)
+				(qb_having block)
+				(qb_order block)
+				(qb_limit block)
+				(qb_offset block)
+				(qb_hidden block)
+				(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+				(qb_facts block)))
 		(begin
 			(define provenance_graph (extract_join_hypergraph block))
 			(define normalized (join_optimizer_normalize_inner_joins stage_catalog block))
