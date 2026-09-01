@@ -1320,6 +1320,55 @@ func (ctx *JITContext) EmitAndInt64(dst, src Reg) {
 	ctx.emitAluRegReg(0x21, dst, src) // AND r/m64, r64
 }
 
+// EmitXorInt64 emits XOR dst, src (64-bit XOR).
+//
+// XOR is part of the architecture-neutral integer emitter contract. Regex
+// literal lowering uses it to compare an unaligned input word against a
+// compile-time literal before applying the byte significance mask.
+func (ctx *JITContext) EmitXorInt64(dst, src Reg) {
+	ctx.emitAluRegReg(0x31, dst, src) // XOR r/m64, r64
+}
+
+// EmitMaskedLiteralCheck compares one to eight bytes at [base+disp] with a
+// compile-time literal. mask selects significant bits; callers clear bit 5 in
+// ASCII letters for case-insensitive matching. The unaligned load and native
+// byte order intentionally remain in the architecture-specific emitter.
+func (ctx *JITContext) EmitMaskedLiteralCheck(base Reg, disp int32, literal, mask []byte, failLabel uint8) {
+	if len(literal) == 0 || len(literal) > 8 || len(mask) != len(literal) {
+		panic("jit: x86 masked literal check requires one to eight bytes")
+	}
+	loaded := ctx.AllocRegExcept(base)
+	switch len(literal) {
+	case 1:
+		ctx.EmitMovRegMemB(loaded, base, disp)
+	case 2:
+		ctx.EmitMovRegMemW(loaded, base, disp)
+	case 4:
+		ctx.EmitMovRegMemL(loaded, base, disp)
+	case 8:
+		ctx.EmitMovRegMem(loaded, base, disp)
+	default:
+		panic("jit: x86 masked literal check width must be 1, 2, 4, or 8")
+	}
+	want := ctx.AllocRegExcept(base, loaded)
+	var literalWord uint64
+	var maskWord uint64
+	for i := range literal {
+		literalWord |= uint64(literal[i]) << (8 * i)
+		maskWord |= uint64(mask[i]) << (8 * i)
+	}
+	ctx.EmitMovRegImm64(want, literalWord)
+	ctx.EmitXorInt64(loaded, want)
+	if maskWord != ^uint64(0)>>(64-8*len(mask)) {
+		ctx.EmitMovRegImm64(want, maskWord)
+		ctx.EmitAndInt64(loaded, want)
+	}
+	ctx.EmitCmpRegImm32(loaded, 0)
+	ctx.EmitJump(CondNotEqual, failLabel)
+	ctx.FreeReg(want)
+	ctx.FreeReg(loaded)
+}
+
 // --- GetTag ---
 
 // EmitGetTagDesc extracts the type tag from a Scmer value descriptor.
