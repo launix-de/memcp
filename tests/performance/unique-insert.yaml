@@ -12,6 +12,9 @@ metadata:
 test_cases:
   # INSERT IGNORE with non-overlapping keys into empty table (fresh delta insert)
   - name: "Perf: UNIQUE INSERT fresh"
+    # Mutations cannot be repeated against one fixture without changing their
+    # workload. Use a sufficiently large independent trial instead.
+    performance_rows: 30000
     setup:
       - sql: "DROP TABLE IF EXISTS `perf_unique`"
       - sql: "DROP TABLE IF EXISTS `perf_source`"
@@ -29,6 +32,7 @@ test_cases:
 
   # INSERT IGNORE with non-overlapping keys into rebuilt table (main + delta)
   - name: "Perf: UNIQUE INSERT after rebuild"
+    performance_rows: 30000
     setup:
       - sql: "DROP TABLE IF EXISTS `perf_unique`"
       - sql: "DROP TABLE IF EXISTS `perf_source`"
@@ -49,6 +53,7 @@ test_cases:
 
   # INSERT IGNORE with all-duplicate keys (unique collision path)
   - name: "Perf: INSERT IGNORE duplicates"
+    performance_rows: 30000
     setup:
       - sql: "DROP TABLE IF EXISTS `perf_unique`"
       - scm: "(rebuild)"
