@@ -156,7 +156,7 @@ func specialTime(code []Scmer, en *Env) Scmer {
 		if len(code) > 1 {
 			message += " " + String(Eval(code[1], en))
 		}
-		TracePrintFunc(message)
+		EmitTracePrint(message)
 	}
 	return result
 }
