@@ -225,7 +225,8 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 		runtime.KeepAlive(args)
 		runtime.KeepAlive(jep)
 	}()
-	return callJIT(jep.Native, args...)
+	result = callJIT(jep.Native, args...)
+	return result
 }
 
 type jitHiddenArgKind uint8
@@ -288,6 +289,9 @@ type JITValueDesc struct {
 	// captures remain descriptors in Outer and are never materialized merely to
 	// cross a generated emitter boundary.
 	Lambda *JITLambdaTemplate
+	// Parser carries compiler-only grammar shape. It is materialized only when
+	// no native parser consumer can fuse the grammar into its surrounding code.
+	Parser *JITParserTemplate
 }
 
 type JITLambdaTemplate struct {
@@ -306,6 +310,11 @@ type Reg uint8
 // encoding; machine emitters translate it when they write a branch or a
 // boolean result.
 type JITCondition uint8
+
+// JITLabel identifies an architecture-independent control-flow target. Labels
+// are intentionally not byte-sized: generated parsers and other large native
+// functions routinely contain more than 256 basic blocks.
+type JITLabel uint32
 
 const (
 	CondEqual JITCondition = iota
@@ -359,15 +368,16 @@ const (
 	LocVirtualSlice
 	LocInputPair // Compiler-only reference to one Scmer in the native call's original variadic slice
 	LocLambdaTemplate
+	LocParserTemplate
 )
 
 // JITFixup records a forward reference that must be patched after all
 // labels are placed.
 type JITFixup struct {
-	CodePos  int32 // position in code
-	LabelID  uint8 // target label
-	Size     uint8 // 1=rel8, 4=rel32
-	Relative bool  // true for PC-relative jumps
+	CodePos  int32    // position in code
+	LabelID  JITLabel // target label
+	Size     uint8    // 1=rel8, 4=rel32
+	Relative bool     // true for PC-relative jumps
 }
 
 // PhiState carries incoming phi overlays for recursive BB renderers.
@@ -444,11 +454,8 @@ type JITContext struct {
 	End   unsafe.Pointer // page end minus reserve
 	Start unsafe.Pointer // page start for position calculation
 
-	Labels    [256]int32
-	LabelNext uint8
-
-	Fixups    [512]JITFixup
-	FixupNext uint8
+	Labels []int32
+	Fixups []JITFixup
 
 	Env       *JITEnv
 	FreeRegs  uint64
@@ -488,8 +495,9 @@ type JITContext struct {
 	ActiveBuiltinEmitters map[*Declaration]uint16
 	BuiltinInlineCost     int
 	NeedsStableArgs       bool
+	StackPhiTargets       bool
 	SelfSymbols           map[Symbol]struct{}
-	SelfLoopLabel         uint8
+	SelfLoopLabel         JITLabel
 	HasSelfLoop           bool
 	SelfParamCount        int
 	RegOwners             [16]*JITValueDesc // register → owner descriptor (nil = untracked)
@@ -2205,8 +2213,33 @@ func (ctx *JITContext) EmitGoCallScalarInto(funcAddr uint64, args []JITValueDesc
 	return result
 }
 
-// EmitMovPairToResult moves a LocRegPair value into the result descriptor registers.
+// EmitMovPairToResult moves a Scmer pair into the result descriptor registers.
+// Stack-backed producers load directly into their requested destination and do
+// not consume an intermediate register pair.
 func (ctx *JITContext) EmitMovPairToResult(src *JITValueDesc, dst *JITValueDesc) {
+	ctx.SyncDesc(src)
+	if src.Loc == LocStackPair {
+		base := ctx.StackReg
+		if src.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		ctx.EmitMovRegMem(dst.Reg, base, src.StackOff)
+		ctx.EmitMovRegMem(dst.Reg2, base, src.StackOff+8)
+		return
+	}
+	if src.Loc == LocInputPair {
+		base := ctx.SliceBase
+		if ctx.SliceBaseTracksRSP && int(src.StackOff) >= ctx.InputArgCount {
+			base = ctx.ScratchReg
+			ctx.EmitMovRegMem(base, RegRSP, ctx.OriginalArgsOff)
+		}
+		ctx.EmitMovRegMem(dst.Reg, base, src.StackOff*16)
+		ctx.EmitMovRegMem(dst.Reg2, base, src.StackOff*16+8)
+		return
+	}
+	if src.Loc != LocRegPair {
+		panic("jit: pair move requires a register, stack, or input pair")
+	}
 	if src.Reg != dst.Reg && src.Reg2 == dst.Reg {
 		// Preserve the pointer word before writing the aux word into its source
 		// register. This includes the full register-swap case.
@@ -2397,40 +2430,40 @@ func (p *jitPool) Free(ptr unsafe.Pointer, size int) {
 }
 
 // ReserveLabel allocates a label ID for later placement via MarkLabel.
-func (ctx *JITContext) ReserveLabel() uint8 {
-	id := ctx.LabelNext
-	ctx.LabelNext++
-	ctx.Labels[id] = -1 // undefined until MarkLabel
+func (ctx *JITContext) ReserveLabel() JITLabel {
+	id := JITLabel(len(ctx.Labels))
+	ctx.Labels = append(ctx.Labels, -1)
 	return id
 }
 
 // MarkLabel sets the position of a previously reserved label.
-func (ctx *JITContext) MarkLabel(id uint8) {
+func (ctx *JITContext) MarkLabel(id JITLabel) {
+	if int(id) >= len(ctx.Labels) {
+		panic("jit: invalid label")
+	}
 	ctx.Labels[id] = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
 }
 
 // AddFixup records a forward reference to be patched by ResolveFixups.
-func (ctx *JITContext) AddFixup(labelID uint8, size uint8, relative bool) {
-	ctx.Fixups[ctx.FixupNext] = JITFixup{
+func (ctx *JITContext) AddFixup(labelID JITLabel, size uint8, relative bool) {
+	ctx.Fixups = append(ctx.Fixups, JITFixup{
 		CodePos:  int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
 		LabelID:  labelID,
 		Size:     size,
 		Relative: relative,
-	}
-	ctx.FixupNext++
+	})
 }
 
 // ResolveFixups patches recorded forward references whose labels are defined.
 // Fixups referencing still-undefined labels are kept for a later call.
 func (ctx *JITContext) ResolveFixups() {
-	j := uint8(0)
-	for i := uint8(0); i < ctx.FixupNext; i++ {
+	pending := ctx.Fixups[:0]
+	for i := range ctx.Fixups {
 		f := &ctx.Fixups[i]
 		targetPos := ctx.Labels[f.LabelID]
 		if targetPos < 0 {
 			// label not yet defined — keep for later
-			ctx.Fixups[j] = ctx.Fixups[i]
-			j++
+			pending = append(pending, *f)
 			continue
 		}
 		patchAddr := unsafe.Add(ctx.Start, int(f.CodePos))
@@ -2442,12 +2475,12 @@ func (ctx *JITContext) ResolveFixups() {
 			*(*int32)(patchAddr) = targetPos
 		}
 	}
-	ctx.FixupNext = j
+	ctx.Fixups = pending
 }
 
 // ResolveFixupsFinal patches all remaining fixups, panicking on undefined labels.
 func (ctx *JITContext) ResolveFixupsFinal() {
-	for i := uint8(0); i < ctx.FixupNext; i++ {
+	for i := range ctx.Fixups {
 		f := &ctx.Fixups[i]
 		targetPos := ctx.Labels[f.LabelID]
 		if targetPos < 0 {
@@ -2462,7 +2495,7 @@ func (ctx *JITContext) ResolveFixupsFinal() {
 			*(*int32)(patchAddr) = targetPos
 		}
 	}
-	ctx.FixupNext = 0
+	ctx.Fixups = ctx.Fixups[:0]
 }
 
 // tryRewriteTrailingJmpToNop turns a resolved "jmp +0" (jump-to-next-ip) into
@@ -7115,7 +7148,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication bool, a ...
 			return v
 		}
 		// Try increasing buffer sizes for overflow retry
-		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024} {
+		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024} {
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
 			codeLen, roots, overflow, transferInputArgs, hiddenArgs, autoImportSafe, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
@@ -7197,4 +7230,24 @@ func maybeDumpJITCode(base unsafe.Pointer, code []byte) {
 		return
 	}
 	fmt.Printf("jitdump: %s\n", path)
+}
+
+func maybeLogJITCodeName(entry *JITEntryPoint) {
+	if os.Getenv("MEMCP_JIT_DUMP_DIR") == "" || entry == nil || entry.DebugName == "" {
+		return
+	}
+	fmt.Printf("jitdump: name=%s code=%p bytes=%d\n", entry.DebugName, entry.CodePtr, entry.CodeLen)
+}
+
+func maybeLogJITImportCandidate(name Symbol, entry *JITEntryPoint, selected bool) {
+	if os.Getenv("MEMCP_JIT_DUMP_DIR") == "" {
+		return
+	}
+	if entry == nil {
+		fmt.Printf("jitdump: import=%s compiled=false\n", name)
+		return
+	}
+	fmt.Printf("jitdump: import=%s selected=%t safe=%t expressions=%d dynamic-calls=%d native-calls=%d inlined-calls=%d\n",
+		name, selected, entry.AutoImportSafe, entry.Coverage.Expressions, entry.Coverage.DynamicCalls,
+		entry.Coverage.NativeCalls, entry.Coverage.InlinedCalls)
 }

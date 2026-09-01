@@ -3751,6 +3751,11 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 		slice[1] = OptimizeParser(slice[1], env, &ome2, ign2) // syntax expr -> collect new variables
 		if len(slice) > 2 {
 			slice[2], _ = OptimizeEx(slice[2], env, &ome2, !ignoreResult) // generator expr -> use variables
+			// The optimized tree is executable code. Preserve an empty list result
+			// as quoted data; a bare empty AST denotes nil to Eval and the JIT.
+			if slice[2].IsSlice() && len(slice[2].Slice()) == 0 {
+				slice[2] = NewSlice([]Scmer{NewSymbol("quote"), slice[2]})
+			}
 		}
 		if len(slice) > 3 {
 			slice[3], _ = OptimizeEx(slice[3], env, ome, true) // delimiter expr
@@ -3777,7 +3782,7 @@ func OptimizeParser(val Scmer, env *Env, ome *optimizerMetainfo, ignoreResult bo
 
 	p := parseSyntax(val, env, ome, ignoreResult)
 	if p != nil {
-		return NewAny(p)
+		return NewAny(&optimizedParserSyntax{Syntax: val, Parser: p})
 	}
 	return val
 }

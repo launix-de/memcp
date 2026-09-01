@@ -142,6 +142,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		LocalSlotCount:   numVars,
 		AutoImportSafe:   true,
 		RecursiveLambdas: recursiveLambdas,
+		StackPhiTargets:  jitExpressionContainsParser(body),
 		SelfSymbols:      selfSymbols,
 		SelfParamCount:   inputArgCount,
 		Arena:            buf.arena,
@@ -692,19 +693,19 @@ func (ctx *JITContext) EmitCmpInt64(a, b Reg) {
 }
 
 // EmitJump emits a conditional branch through the x86 rel32 encoding.
-func (ctx *JITContext) EmitJump(cc JITCondition, labelID uint8) {
+func (ctx *JITContext) EmitJump(cc JITCondition, labelID JITLabel) {
 	ctx.emitBytes(0x0F, 0x80|x86ConditionCode(cc)) // Jcc rel32
 	ctx.AddFixup(labelID, 4, true)
 	ctx.emitU32(0) // placeholder
 }
 
 // EmitJcc keeps already-generated emitters source-compatible.
-func (ctx *JITContext) EmitJcc(cc JITCondition, labelID uint8) {
+func (ctx *JITContext) EmitJcc(cc JITCondition, labelID JITLabel) {
 	ctx.EmitJump(cc, labelID)
 }
 
 // EmitJmp emits an unconditional JMP rel32.
-func (ctx *JITContext) EmitJmp(labelID uint8) {
+func (ctx *JITContext) EmitJmp(labelID JITLabel) {
 	ctx.emitByte(0xE9) // JMP rel32
 	ctx.AddFixup(labelID, 4, true)
 	ctx.emitU32(0) // placeholder
@@ -716,6 +717,38 @@ func (ctx *JITContext) EmitJmpToPos(targetPos int32) {
 	off := targetPos - curPos
 	ctx.emitByte(0xE9) // JMP rel32
 	ctx.emitU32(uint32(off))
+}
+
+// EmitJumpTable dispatches an unsigned integer to one of labels. The table
+// stores offsets from the current JIT entry point, keeping it relocatable
+// inside an arena. Parser continuations use this instead of a native call
+// stack, so recursive grammars retain one runtime-visible JIT frame.
+func (ctx *JITContext) EmitJumpTable(index Reg, labels []JITLabel, invalid JITLabel) {
+	if len(labels) == 0 {
+		ctx.EmitJmp(invalid)
+		return
+	}
+	ctx.EmitCmpRegImm32(index, int32(len(labels)))
+	ctx.EmitJump(CondUnsignedAboveOrEqual, invalid)
+
+	// MOV R11, entry start
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uintptr(ctx.Start)))
+	// MOVSXD index, dword ptr [R11 + index*4 + tableOffset]. The table starts
+	// directly after ADD+JMP below (six bytes).
+	tableOffset := int32(uintptr(ctx.Ptr)-uintptr(ctx.Start)) + 8 + 6
+	rex := byte(0x49) // REX.W + REX.B for the R11 base
+	if index >= 8 {
+		rex |= 0x04 // REX.R: destination register
+		rex |= 0x02 // REX.X: SIB index register
+	}
+	ctx.emitBytes(rex, 0x63, 0x84|byte((index&7)<<3), 0x83|byte((index&7)<<3))
+	ctx.emitU32(uint32(tableOffset))
+	ctx.EmitAddInt64(ctx.ScratchReg, index)
+	ctx.emitBytes(0x41, 0xFF, 0xE3) // JMP R11
+	for _, label := range labels {
+		ctx.AddFixup(label, 4, false)
+		ctx.emitU32(0)
+	}
 }
 
 func x86ConditionCode(cc JITCondition) byte {
@@ -845,6 +878,12 @@ func (ctx *JITContext) emitMovRegMem(dst, base Reg, disp int32) {
 // EmitMovRegMem emits MOV dst, [base + disp32] (load 64-bit from memory) — exported wrapper.
 func (ctx *JITContext) EmitMovRegMem(dst, base Reg, disp int32) {
 	ctx.emitMovRegMem(dst, base, disp)
+}
+
+// EmitOrRegMem emits OR dst, [base+disp]. Common lowering uses this to combine
+// words directly from spill slots without reserving another general register.
+func (ctx *JITContext) EmitOrRegMem(dst, base Reg, disp int32) {
+	ctx.emitRegMemOp(0x0B, dst, base, disp)
 }
 
 // EmitMovRegMemB emits MOVZX dst, byte [base + disp32] (8-bit zero-extended load).
@@ -1333,7 +1372,7 @@ func (ctx *JITContext) EmitXorInt64(dst, src Reg) {
 // compile-time literal. mask selects significant bits; callers clear bit 5 in
 // ASCII letters for case-insensitive matching. The unaligned load and native
 // byte order intentionally remain in the architecture-specific emitter.
-func (ctx *JITContext) EmitMaskedLiteralCheck(base Reg, disp int32, literal, mask []byte, failLabel uint8) {
+func (ctx *JITContext) EmitMaskedLiteralCheck(base Reg, disp int32, literal, mask []byte, failLabel JITLabel) {
 	if len(literal) == 0 || len(literal) > 8 || len(mask) != len(literal) {
 		panic("jit: x86 masked literal check requires one to eight bytes")
 	}
@@ -1578,14 +1617,17 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 
 	// Unknown or complex known types (string/symbol/slice/vector/fastdict/default):
 	// materialize a Scmer pair and reuse the canonical runtime helper.
-	pair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-	pair = jitPlaceIntoPair(ctx, src, pair)
+	pair := *src
+	if pair.Loc != LocRegPair {
+		pair = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		pair = jitPlaceIntoPair(ctx, src, pair)
+	}
 	out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Bool), []JITValueDesc{pair}, 1)
 	// Go bool returns may leave upper bits undefined; normalize to 0|1.
 	ctx.EmitAndRegImm32(out.Reg, 1)
 	out.Type = tagBool
 	ctx.FreeDesc(&pair)
-	ctx.FreeDesc(src)
+	src.Loc = LocNone
 	return emitResult(out)
 }
 
@@ -1820,12 +1862,12 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	targetHasRegs := target.Loc == LocRegPair
 	if targetHasRegs {
 		target.Type = JITTypeUnknown
+	} else if target.Loc == LocStackPair {
+		target.Type = JITTypeUnknown
 	} else {
-		targetReg := ctx.AllocRegExcept(arg.Reg, arg.Reg2)
-		target = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: targetReg, Reg2: ctx.AllocRegExcept(arg.Reg, arg.Reg2, targetReg)}
-		ctx.BindReg(target.Reg, &target)
-		ctx.BindReg(target.Reg2, &target)
-		targetHasRegs = true
+		targetOff := ctx.AllocSpill(16)
+		target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: targetOff, Rooted: true}
+		ctx.setStackPointer(jitStackRootFrameBP, targetOff, true)
 	}
 
 	ctx.ReclaimUntrackedRegs()
@@ -1926,15 +1968,26 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 
 	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
-	ctx.EmitMovPairToResult(&callResult, &target)
+	if targetHasRegs {
+		ctx.EmitMovPairToResult(&callResult, &target)
+	} else {
+		base := ctx.StackReg
+		if target.StackOff < 0 {
+			base = ctx.FrameReg
+		}
+		ctx.EmitStoreRegMem(RegRAX, base, target.StackOff)
+		ctx.EmitStoreRegMem(RegRBX, base, target.StackOff+8)
+	}
 	for i, r := range liveRegs {
 		ctx.EmitMovRegMem(r, RegRSP, int32(i*8))
 	}
 	if frameBytes != 0 {
 		ctx.EmitAddRSP32(frameBytes)
 	}
-	ctx.BindReg(target.Reg, &target)
-	ctx.BindReg(target.Reg2, &target)
+	if targetHasRegs {
+		ctx.BindReg(target.Reg, &target)
+		ctx.BindReg(target.Reg2, &target)
+	}
 
 	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 		ctx.emitMovRegReg(ctx.SliceBase, RegRSP)

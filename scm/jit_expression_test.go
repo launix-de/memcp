@@ -40,6 +40,21 @@ func requireNoDynamicJITCalls(t *testing.T, compiled Scmer) {
 	}
 }
 
+func TestJITExpressionListResultOwnsBackingStorage(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value) (list value))`)
+	requireNoDynamicJITCalls(t, compiled)
+	first := compiled.Proc().Compiled.Call(NewSymbol("list"))
+	_ = compiled.Proc().Compiled.Call(NewString("replacement"))
+	want := NewSlice([]Scmer{NewSymbol("list")})
+	if !Equal(first, want) {
+		t.Fatalf("retained list changed after a later invocation: %s", String(first))
+	}
+	empty := NewSlice(nil)
+	if got := compiled.Proc().Compiled.Call(empty); !Equal(got, NewSlice([]Scmer{empty})) {
+		t.Fatalf("retained nested empty list changed: %s", String(got))
+	}
+}
+
 func TestJITExpressionBeginDefine(t *testing.T) {
 	proc := &Proc{
 		Params: NewSlice([]Scmer{NewSymbol("x")}),

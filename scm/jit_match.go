@@ -129,7 +129,7 @@ func jitMatchMaterializeImm(ctx *JITContext, value Scmer) JITValueDesc {
 	return jitPlaceIntoPair(ctx, &source, target)
 }
 
-func jitEmitMatchBool(ctx *JITContext, condition JITValueDesc, failLabel uint8) jitMatchOutcome {
+func jitEmitMatchBool(ctx *JITContext, condition JITValueDesc, failLabel JITLabel) jitMatchOutcome {
 	if condition.Loc == LocImm {
 		return jitMatchOutcome{possible: condition.Imm.Bool(), always: condition.Imm.Bool()}
 	}
@@ -146,7 +146,7 @@ func jitEmitMatchBool(ctx *JITContext, condition JITValueDesc, failLabel uint8) 
 	return jitMatchOutcome{possible: true, always: false}
 }
 
-func jitEmitMatchTag(ctx *JITContext, value *JITValueDesc, tag uint8, failLabel uint8) jitMatchOutcome {
+func jitEmitMatchTag(ctx *JITContext, value *JITValueDesc, tag uint8, failLabel JITLabel) jitMatchOutcome {
 	condition := ctx.EmitTagEqualsBorrowed(value, tag, JITValueDesc{Loc: LocAny})
 	return jitEmitMatchBool(ctx, condition, failLabel)
 }
@@ -216,7 +216,7 @@ func jitMatchSliceTail(ctx *JITContext, slice *JITValueDesc) JITValueDesc {
 	return result
 }
 
-func jitMatchListValue(ctx *JITContext, value JITValueDesc, failLabel uint8) (JITValueDesc, JITValueDesc, jitMatchOutcome) {
+func jitMatchListValue(ctx *JITContext, value JITValueDesc, failLabel JITLabel) (JITValueDesc, JITValueDesc, jitMatchOutcome) {
 	if value.Loc == LocImm {
 		list, ok := scmerAsSlice(value.Imm)
 		if !ok {
@@ -256,7 +256,7 @@ func jitMatchListValue(ctx *JITContext, value JITValueDesc, failLabel uint8) (JI
 	return normalized, header, jitMatchOutcome{possible: true, always: typeKnown}
 }
 
-func jitMatchLiteral(ctx *JITContext, value JITValueDesc, pattern Scmer, failLabel uint8) jitMatchOutcome {
+func jitMatchLiteral(ctx *JITContext, value JITValueDesc, pattern Scmer, failLabel JITLabel) jitMatchOutcome {
 	if value.Loc == LocImm {
 		matched := Equal(value.Imm, pattern)
 		return jitMatchOutcome{possible: matched, always: matched}
@@ -267,7 +267,7 @@ func jitMatchLiteral(ctx *JITContext, value JITValueDesc, pattern Scmer, failLab
 	return jitEmitMatchBool(ctx, condition, failLabel)
 }
 
-func jitMatchDynamicValue(ctx *JITContext, value, expected JITValueDesc, failLabel uint8) jitMatchOutcome {
+func jitMatchDynamicValue(ctx *JITContext, value, expected JITValueDesc, failLabel JITLabel) jitMatchOutcome {
 	if value.Loc == LocImm && expected.Loc == LocImm {
 		matched := Equal(value.Imm, expected.Imm)
 		return jitMatchOutcome{possible: matched, always: matched}
@@ -295,7 +295,7 @@ func jitMatchDynamicValue(ctx *JITContext, value, expected JITValueDesc, failLab
 	return jitEmitMatchBool(ctx, condition, failLabel)
 }
 
-func jitMatchBoolLiteral(ctx *JITContext, value JITValueDesc, expected bool, failLabel uint8) jitMatchOutcome {
+func jitMatchBoolLiteral(ctx *JITContext, value JITValueDesc, expected bool, failLabel JITLabel) jitMatchOutcome {
 	if value.Loc == LocImm {
 		matched := value.Imm.IsBool() && value.Imm.Bool() == expected
 		return jitMatchOutcome{possible: matched, always: matched}
@@ -322,7 +322,7 @@ func jitMatchBoolLiteral(ctx *JITContext, value JITValueDesc, expected bool, fai
 	return jitMatchOutcome{possible: true, always: false}
 }
 
-func jitMatchSymbol(ctx *JITContext, value JITValueDesc, expected Scmer, failLabel uint8) jitMatchOutcome {
+func jitMatchSymbol(ctx *JITContext, value JITValueDesc, expected Scmer, failLabel JITLabel) jitMatchOutcome {
 	if value.Loc == LocImm {
 		matched := func() bool {
 			actualName, actualOK := scmerSymbolName(value.Imm)
@@ -340,7 +340,7 @@ func jitMatchSymbol(ctx *JITContext, value JITValueDesc, expected Scmer, failLab
 	return jitEmitMatchBool(ctx, condition, failLabel)
 }
 
-func jitMatchNumber(ctx *JITContext, value JITValueDesc, failLabel uint8) jitMatchOutcome {
+func jitMatchNumber(ctx *JITContext, value JITValueDesc, failLabel JITLabel) jitMatchOutcome {
 	if value.Loc == LocImm {
 		matched := value.Imm.IsInt() || value.Imm.IsFloat()
 		return jitMatchOutcome{possible: matched, always: matched}
@@ -367,7 +367,7 @@ func jitMatchNumber(ctx *JITContext, value JITValueDesc, failLabel uint8) jitMat
 	return jitMatchOutcome{possible: true, always: false}
 }
 
-func jitMatchString(ctx *JITContext, value JITValueDesc, failLabel uint8) jitMatchOutcome {
+func jitMatchString(ctx *JITContext, value JITValueDesc, failLabel JITLabel) jitMatchOutcome {
 	if value.Loc == LocImm {
 		_, matched := scmerAsString(value.Imm)
 		return jitMatchOutcome{possible: matched, always: matched}
@@ -382,7 +382,7 @@ func jitMatchString(ctx *JITContext, value JITValueDesc, failLabel uint8) jitMat
 	return jitEmitMatchBool(ctx, condition, failLabel)
 }
 
-func jitMatchFixedList(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JITEnv, failLabel uint8) jitMatchOutcome {
+func jitMatchFixedList(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JITEnv, failLabel JITLabel) jitMatchOutcome {
 	if value.Loc == LocVirtualSlice {
 		if len(value.Virtual) != len(patterns) {
 			return jitMatchOutcome{}
@@ -413,6 +413,9 @@ func jitMatchFixedList(ctx *JITContext, value JITValueDesc, patterns []Scmer, en
 			}
 		}
 		return jitMatchOutcome{possible: true, always: true}
+	}
+	if normalized.Loc == LocRegPair {
+		jitParkCallArgument(ctx, &normalized)
 	}
 	if header.SliceSizeKnown {
 		if int(header.KnownSliceLen) != len(patterns) {
@@ -445,7 +448,7 @@ func jitMatchFixedList(ctx *JITContext, value JITValueDesc, patterns []Scmer, en
 	return jitMatchOutcome{possible: true, always: allAlways}
 }
 
-func jitMatchCons(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JITEnv, failLabel uint8) jitMatchOutcome {
+func jitMatchCons(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JITEnv, failLabel JITLabel) jitMatchOutcome {
 	if len(patterns) != 2 {
 		panic("jit: cons match expects head and tail patterns")
 	}
@@ -502,7 +505,7 @@ func jitMatchCons(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JI
 	}
 }
 
-func jitCompileMatchPattern(ctx *JITContext, value JITValueDesc, pattern Scmer, env *JITEnv, failLabel uint8) jitMatchOutcome {
+func jitCompileMatchPattern(ctx *JITContext, value JITValueDesc, pattern Scmer, env *JITEnv, failLabel JITLabel) jitMatchOutcome {
 	for pattern.IsSourceInfo() {
 		pattern = pattern.SourceInfo().value
 	}
@@ -660,7 +663,14 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 		value = jitCompileExpr(ctx, valueExpr, sliceBase, JITValueDesc{Loc: LocAny})
 	}
 	value = jitMatchStableValue(ctx, value)
-	target := jitEnsureResultPair(ctx, result)
+	var target JITValueDesc
+	if result.Loc == LocStackPair {
+		target = result
+	} else if ctx.StackPhiTargets && result.Loc == LocAny {
+		target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: ctx.AllocStack(16), Rooted: true}
+	} else {
+		target = jitEnsureResultPair(ctx, result)
+	}
 	endLabel := ctx.ReserveLabel()
 	branchState := ctx.SnapshotAllocState()
 	hasBranch := false
@@ -676,7 +686,7 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 			ctx.Env = branchEnv
 			branchValue := jitCompileExpr(ctx, list[i+1], sliceBase, target)
 			ctx.Env = baseEnv
-			_ = jitPlaceIntoPair(ctx, &branchValue, target)
+			_ = jitPlaceScmerIntoTarget(ctx, branchValue, target)
 			ctx.EmitJmp(endLabel)
 			hasBranch = true
 		}
@@ -697,14 +707,16 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 		} else {
 			fallback = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 		}
-		_ = jitPlaceIntoPair(ctx, &fallback, target)
+		_ = jitPlaceScmerIntoTarget(ctx, fallback, target)
 	}
 	if hasBranch {
 		ctx.MarkLabel(endLabel)
 	}
 	ctx.FreeDesc(&value)
-	ctx.BindReg(target.Reg, &target)
-	ctx.BindReg(target.Reg2, &target)
+	if target.Loc == LocRegPair {
+		ctx.BindReg(target.Reg, &target)
+		ctx.BindReg(target.Reg2, &target)
+	}
 	return target
 }
 

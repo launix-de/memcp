@@ -95,6 +95,17 @@ func jitEmitSpecialDefine(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		panic("jit: define/set target is not a symbol")
 	}
 	value := jitCompileExpr(ctx, args[1], ctx.SliceBase, result)
+	if value.Loc == LocParserTemplate && value.Parser != nil {
+		value.Parser.Name = binding.Symbol()
+		if ctx.Env == nil {
+			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc)}
+		}
+		if ctx.Env.Vars == nil {
+			ctx.Env.Vars = make(map[Symbol]JITValueDesc)
+		}
+		ctx.Env.Vars[binding.Symbol()] = value
+		return value
+	}
 	ctx.EnsureDesc(&value)
 	stored := value
 	if stored.Loc != LocRegPair && stored.Loc != LocImm && stored.Loc != LocStackPair && stored.Loc != LocInputPair {
@@ -128,6 +139,18 @@ func jitEmitSpecialSetN(ctx *JITContext, args []Scmer, _ []JITValueDesc, result 
 		panic("jit: setN target outside invocation frame")
 	}
 	value := jitCompileExpr(ctx, args[1], ctx.SliceBase, result)
+	if value.Loc == LocParserTemplate && value.Parser != nil {
+		if ctx.Env == nil {
+			ctx.Env = &JITEnv{}
+		}
+		if len(ctx.Env.Numbered) < ctx.LocalSlotCount {
+			numbered := make([]JITValueDesc, ctx.LocalSlotCount)
+			copy(numbered, ctx.Env.Numbered)
+			ctx.Env.Numbered = numbered
+		}
+		ctx.Env.Numbered[idx] = value
+		return value
+	}
 	ctx.EnsureDesc(&value)
 	if value.Loc != LocRegPair && value.Loc != LocImm && value.Loc != LocStackPair && value.Loc != LocInputPair {
 		pair := jitAllocTrackedPair(ctx, value.Type)
@@ -150,14 +173,14 @@ func jitEmitSpecialParser(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	if len(args) > 2 {
 		whitespace = args[2]
 	}
-	callArgs := []Scmer{
-		NewSlice([]Scmer{NewSymbol("quote"), args[0]}),
-		NewSlice([]Scmer{NewSymbol("quote"), generator}),
-		NewSlice([]Scmer{NewSymbol("quote"), whitespace}),
-		NewBool(ignoreResult),
+	var runtimeOuter *Env
+	if ctx.RuntimeEnv.GetTag() == tagAny {
+		runtimeOuter, _ = ctx.RuntimeEnv.Any().(*Env)
 	}
-	callArgs = append(callArgs, jitRuntimeCaptureArgExprs(ctx)...)
-	return jitEmitGoVariadicCallFromExprs(ctx, jitParserSpecial, callArgs, ctx.SliceBase, result)
+	return JITValueDesc{Loc: LocParserTemplate, Type: tagParser, Parser: &JITParserTemplate{
+		Syntax: args[0], Generator: generator, Whitespace: whitespace,
+		IgnoreResult: ignoreResult, Outer: ctx.Env, RuntimeOuter: runtimeOuter,
+	}}
 }
 
 func jitEmitSpecialOptimizerProcReturn(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -272,7 +295,7 @@ func jitEmitSpecialIf(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JI
 		ctx.UnprotectReg(target.Reg2)
 		ctx.UnprotectReg(target.Reg)
 	}()
-	var endLabel uint8
+	var endLabel JITLabel
 	hasDynamic := false
 	i := 0
 	for i+1 < len(args) {
@@ -320,7 +343,7 @@ func jitEmitSpecialIf(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JI
 	return target
 }
 
-func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel uint8) {
+func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel) {
 	i := 0
 	for i+1 < len(args) {
 		thenLabel := ctx.ReserveLabel()
@@ -339,7 +362,7 @@ func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel u
 }
 
 func jitEmitSpecialBoolFoldCond(takeWhen bool) JITCondEmitter {
-	return func(ctx *JITContext, args []Scmer, trueLabel, falseLabel uint8) {
+	return func(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel) {
 		if len(args) == 0 {
 			if takeWhen {
 				ctx.EmitJmp(falseLabel)
@@ -369,7 +392,7 @@ func jitEmitSpecialBoolFold(takeWhen bool) func(*JITContext, []Scmer, []JITValue
 			ctx.TrackImm(imm)
 			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
 		}
-		var takeLabel, endLabel uint8
+		var takeLabel, endLabel JITLabel
 		hasDynamic := false
 		compileTimeTake := false
 		for _, expression := range args {

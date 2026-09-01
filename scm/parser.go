@@ -80,35 +80,94 @@ func EvalAllJIT(source, s string, en *Env) (expression Scmer) {
 
 func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scmer) {
 	tokens := tokenize(source, s)
+	deferredProcs := make(map[Symbol]struct{})
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
 		Validate(code, "any")
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
 		if compileProcedures && expression.GetTag() == tagProc {
-			compiled := jitCompile(expression)
 			sym, definition := topLevelDefinitionSymbol(code)
-			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil &&
-				compiled.Proc().Compiled.AutoImportSafe &&
-				jitAutoImportCoverageWorthwhile(compiled.Proc().Compiled.Coverage) &&
-				definition {
-				expression = compiled
-				target := en.definitionTarget()
-				if target.Vars == nil {
-					target.Vars = make(Vars)
+			if definition {
+				compiled, entry, selected := jitCompileImportProc(sym, expression)
+				if entry == nil && jitExpressionContainsParser(expression.Proc().Body) {
+					deferredProcs[sym] = struct{}{}
 				}
-				target.Vars[sym] = compiled
-				compiled.Proc().Compiled.DebugName = string(sym)
-				if JITLog {
-					entry := compiled.Proc().Compiled
-					fmt.Printf("JIT: import %s code=%p bytes=%d hidden-args=%d expressions=%d dynamic-calls=%d inlined-calls=%d\n",
-						sym, entry.CodePtr, entry.CodeLen, len(entry.HiddenArgs),
-						entry.Coverage.Expressions, entry.Coverage.DynamicCalls, entry.Coverage.InlinedCalls)
+				if selected {
+					expression = compiled
+					target := en.definitionTarget()
+					if target.Vars == nil {
+						target.Vars = make(Vars)
+					}
+					target.Vars[sym] = compiled
 				}
 			}
 		}
 	}
+	if compileProcedures && jitEnabled {
+		target := en.definitionTarget()
+		for sym := range deferredProcs {
+			value, exists := target.Vars[sym]
+			if !exists || value.GetTag() != tagProc || value.Proc() == nil || value.Proc().Compiled != nil {
+				continue
+			}
+			compiled, _, selected := jitCompileImportProc(sym, value)
+			if selected {
+				target.Vars[sym] = compiled
+			}
+		}
+		jitCompileEnvironmentParsers(en)
+	}
 	return
+}
+
+func jitExpressionContainsParser(expression Scmer) bool {
+	for expression.IsSourceInfo() {
+		expression = expression.SourceInfo().value
+	}
+	items, ok := scmerSlice(expression)
+	if !ok {
+		return false
+	}
+	if len(items) != 0 {
+		if scmerIsSymbol(items[0], "parser") {
+			return true
+		}
+		if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.IsSpecialForm && declaration.Name == "parser" {
+			return true
+		}
+	}
+	for _, item := range items {
+		if jitExpressionContainsParser(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool) {
+	compiled := jitCompile(value)
+	var entry *JITEntryPoint
+	if compiled.GetTag() == tagProc && compiled.Proc() != nil {
+		entry = compiled.Proc().Compiled
+	}
+	parserProc := value.GetTag() == tagProc && value.Proc() != nil && jitExpressionContainsParser(value.Proc().Body)
+	// Parser fusion roots every capture, generated list and parser workspace in
+	// the emitted frame. Older builtin-level AutoImportSafe markers remain
+	// conservative for ordinary small procedures, but must not discard a fully
+	// compiled parser merely because one of its inlined generators allocates.
+	selected := entry != nil && (entry.AutoImportSafe || parserProc) && jitAutoImportCoverageWorthwhile(entry.Coverage)
+	if entry != nil {
+		entry.DebugName = string(sym)
+		maybeLogJITCodeName(entry)
+	}
+	maybeLogJITImportCandidate(sym, entry, selected)
+	if selected && JITLog {
+		fmt.Printf("JIT: import %s code=%p bytes=%d hidden-args=%d expressions=%d dynamic-calls=%d inlined-calls=%d\n",
+			sym, entry.CodePtr, entry.CodeLen, len(entry.HiddenArgs),
+			entry.Coverage.Expressions, entry.Coverage.DynamicCalls, entry.Coverage.InlinedCalls)
+	}
+	return compiled, entry, selected
 }
 
 func jitAutoImportCoverageWorthwhile(coverage JITCoverage) bool {
