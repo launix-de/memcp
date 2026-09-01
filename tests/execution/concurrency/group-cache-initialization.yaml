@@ -20,6 +20,7 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS `.creation_barrier`"
+  - sql: "DROP TABLE IF EXISTS `.transactionless_cache_init`"
   - sql: "DROP TABLE IF EXISTS aggregate_source"
   - sql: |
       CREATE TABLE aggregate_source (
@@ -29,6 +30,36 @@ setup:
       )
 
 test_cases:
+  - name: "Internal cache initialization needs no client query session"
+    scm: |
+      (begin
+        (define cache
+          (createtable
+            "memcp-tests"
+            ".transactionless_cache_init"
+            (list (list "column" "id" "int" (list) (list)))
+            (list "engine" "cache")
+            true nil))
+        (initialize_cache_table nil
+          (table "memcp-tests" ".transactionless_cache_init")
+          (list (table "memcp-tests" "aggregate_source"))
+          (lambda () true)
+          (lambda ()
+            (insert
+              (table "memcp-tests" ".transactionless_cache_init")
+              (list "id")
+              (list (list 1))
+              (list)
+              (lambda () true)
+              false nil nil)))
+        (scan nil
+          (table "memcp-tests" ".transactionless_cache_init")
+          (list) (lambda () true)
+          (list) (lambda () 1)
+          + 0))
+    expect:
+      data: [1]
+
   - name: "Duplicate logical stage IDs retain every aggregate extension"
     scm: |
       (begin
@@ -170,4 +201,5 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS `.creation_barrier`"
+  - sql: "DROP TABLE IF EXISTS `.transactionless_cache_init`"
   - sql: "DROP TABLE IF EXISTS aggregate_source"

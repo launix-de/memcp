@@ -6467,7 +6467,7 @@ the costgen threshold. */
 					($update (list "accumulated_ns"
 						(if build 0 next_accumulated_ns)))
 					true))
-			false)
+			false nil nil)
 		(claim "build"))))
 
 (define group_cache_candidate_delete (lambda (current_tx canonical_name)

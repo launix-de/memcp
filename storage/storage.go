@@ -2931,10 +2931,11 @@ func Init(en scm.Env) {
 		Fn: func(a ...scm.Scmer) scm.Scmer {
 			currentTx := scmerToTxContext(a[0])
 			tbl := TableFromScmer(a[1])
-			// Cache preparation can execute inside a shard worker. Like every scan
-			// operator, it receives transaction and session ownership explicitly.
+			// Client-query cache preparation carries its lock owner through the
+			// transaction. An internal transactionless builder receives a local,
+			// unregistered lock owner from initializeCache instead.
 			ss := SessionStateFromTx(currentTx)
-			initialized := tbl.initializeCache(ss, func() {
+			initialized := tbl.initializeCache(ss, func(lockOwner *scm.SessionState) {
 				sources := mustScmerSlice(a[2], "source tables")
 				sourceTables := make([]*table, len(sources))
 				for i, source := range sources {
@@ -2953,7 +2954,7 @@ func Init(en scm.Env) {
 					}
 				}()
 				for _, source := range sourceTables {
-					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, ss, querySeqFromTx(currentTx)))
+					unlocks = append(unlocks, acquireTableLock(source.schema.Name, source.Name, false, true, lockOwner, querySeqFromTx(currentTx)))
 				}
 				// Install maintenance while source writes are blocked. Once the
 				// locks are released, every later mutation observes the triggers.
