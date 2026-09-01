@@ -671,7 +671,7 @@ test_cases:
     expect:
       data: [true]
 
-  - name: "Exact cached formula is an explicit request callable"
+  - name: "Exact cached formula keeps optimizer-resolved session calls"
     scm: |
       (begin
         (define execution_session (newsession))
