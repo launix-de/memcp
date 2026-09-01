@@ -50,18 +50,17 @@ test_cases:
           "sortdirs"  (list false)
           "partitioncount" 0
           "mapcols"   '("ref_id")
-          "mapfn"     (lambda ($set ref_id)
-                        (list $set
-                          (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_src")
+          "mapreducefn" (lambda (acc $set ref_id)
+                        (begin
+                          (define value
+                            (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_src")
                             '("ref_id")
                             (lambda (src.ref_id) (equal? src.ref_id (outer 1 ref_id)))
                             '("val")
-                            (lambda (val) val)
-                            + 0)))
-          "reducefn"  (lambda (acc mapped)
-                        (begin
-                          (define new_acc (+ acc (cadr mapped)))
-                          ((car mapped) new_acc)
+                            (lambda (inner_acc val) (+ inner_acc val))
+                            0 +))
+                          (define new_acc (+ acc value))
+                          ($set new_acc)
                           new_acc))
           "reduceinit" 0))
 
@@ -138,18 +137,17 @@ test_cases:
           "sortdirs"  (list false)
           "partitioncount" 0
           "mapcols"   '("ref_id")
-          "mapfn"     (lambda ($set ref_id)
-                        (list $set
-                          (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_fb_src")
+          "mapreducefn" (lambda (acc $set ref_id)
+                        (begin
+                          (define value
+                            (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_fb_src")
                             '("ref_id")
                             (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer 1 ref_id)))
                             '("val")
-                            (lambda (val) val)
-                            + 0)))
-          "reducefn"  (lambda (acc mapped)
-                        (begin
-                          (define new_acc (+ acc (cadr mapped)))
-                          ((car mapped) new_acc)
+                            (lambda (inner_acc val) (+ inner_acc val))
+                            0 +))
+                          (define new_acc (+ acc value))
+                          ($set new_acc)
                           new_acc))
           "reduceinit" 0))
 

@@ -298,8 +298,8 @@ test_cases:
           (scan nil
             (table "memcp-tests" "scp_source")
             '() (lambda () true)
-            '("amount") (lambda (amount) amount)
-            + 0)))
+            '("amount") (lambda (acc amount) (+ acc amount))
+            0 +)))
 
   - name: "Build a second computed cache over the first cache"
     scm: |
@@ -311,8 +311,8 @@ test_cases:
           (scan nil
             (table "memcp-tests" "scp_middle_cache")
             '() (lambda () true)
-            '("total") (lambda (total) (* total 2))
-            + 0)))
+            '("total") (lambda (acc total) (+ acc (* total 2)))
+            0 +)))
 
   - name: "Nested computed cache has its initial value"
     sql: "SELECT doubled_total FROM scp_outer_cache WHERE id = 1"

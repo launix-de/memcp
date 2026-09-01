@@ -25,7 +25,7 @@ import (
 // TestVectorizeTriggerDeletePattern tests that the DELETE trigger pattern is recognized.
 func TestVectorizeTriggerDeletePattern(t *testing.T) {
 	// Build a trigger body that matches the prejoin DELETE pattern:
-	// (lambda (OLD NEW) (scan nil (table schema tbl) (list "grp") (lambda (_pj.grp) (equal? _pj.grp (get_assoc OLD "grp"))) (list "$update") (lambda ($update) ($update)) + 0 nil false))
+	// (lambda (OLD NEW) (scan nil (table schema tbl) (list "grp") (lambda (_pj.grp) (equal? _pj.grp (get_assoc OLD "grp"))) (list "$update") (lambda (acc $update) (begin ($update) acc)) nil nil false))
 	filterBody := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal?"),
 		scm.NewSymbol("_pj.grp"),
@@ -49,12 +49,12 @@ func TestVectorizeTriggerDeletePattern(t *testing.T) {
 		filterFn,
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),
 		scm.NewProcStruct(scm.Proc{
-			Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}),
-			Body:   scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}),
-			En:     &scm.Env{Vars: make(scm.Vars)},
+			Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$update")}),
+			Body: scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}), scm.NewSymbol("acc")}),
+			En: &scm.Env{Vars: make(scm.Vars)},
 		}),
-		scm.NewSymbol("+"),
-		scm.NewInt(0),
+		scm.NewNil(),
 		scm.NewNil(),
 		scm.NewBool(false),
 	})

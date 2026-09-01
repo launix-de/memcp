@@ -1,7 +1,7 @@
 # Tests for ORC (ordered-reduce computed) columns.
 # Phase 1: full recompute only (Mode A — InvalidateAll on any mutation).
 #
-# ORC columns are created via createcolumn with sortcols/sortdirs/mapcols/mapfn/reducefn/reduceinit
+# ORC columns are created via createcolumn with sortcols/sortdirs/mapcols/mapreducefn/reduceinit
 # in the options assoc list. The proxy is compressed after the initial scan_order pass.
 # After INSERT/UPDATE/DELETE the proxy is invalidated; the next read triggers a full recompute.
 
@@ -45,11 +45,10 @@ test_cases:
           "sortdirs"  (list false)
           "partitioncount" 0
           "mapcols"   '()
-          "mapfn"     (lambda ($set) (list $set))
-          "reducefn"  (lambda (acc mapped)
-                        (begin
-                          ((car mapped) (+ acc 1))
-                          (+ acc 1)))
+          "mapreducefn" (lambda (acc $set)
+                          (begin
+                            ($set (+ acc 1))
+                            (+ acc 1)))
           "reduceinit" 0))
 
   - name: "rank values ordered by score ASC"
@@ -99,11 +98,10 @@ test_cases:
           "sortdirs"  (list false)
           "partitioncount" 0
           "mapcols"   '("amount")
-          "mapfn"     (lambda ($set amount) (list $set amount))
-          "reducefn"  (lambda (acc mapped)
-                        (begin
-                          ((car mapped) (+ acc (car (cdr mapped))))
-                          (+ acc (car (cdr mapped)))))
+          "mapreducefn" (lambda (acc $set amount)
+                          (begin
+                            ($set (+ acc amount))
+                            (+ acc amount)))
           "reduceinit" 0))
 
   - name: "running_total values ordered by day"

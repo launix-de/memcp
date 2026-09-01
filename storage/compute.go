@@ -1612,7 +1612,6 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 
 // buildInvalidateScan builds a scan expression that walks the keytable, matches rows
 // by join key values from a trigger dict (OLD or NEW), and invokes $invalidate: closures.
-// Pattern: (scan nil (table targetSchema targetTable) '("inputCol1" ...) (lambda (kt.col ...) (and (equal? kt.col (get_assoc dictSym "srcCol")) ...)) '("$invalidate:colName") (lambda ($inv) ($inv)) + 0 nil false)
 func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inputCols []string, dictSym string) scm.Scmer {
 	// Build filter column list: '("inputCol1" "inputCol2" ...)
 	filterColElems := make([]scm.Scmer, 1+len(inputCols))
@@ -1657,9 +1656,10 @@ func buildInvalidateScan(targetSchema, targetTable, colName string, srcCols, inp
 		scm.NewSlice(filterColElems),
 		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString(invColName)}),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("$inv")}),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("$inv")})}),
-		scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(), scm.NewBool(false),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$inv")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("$inv")}), scm.NewSymbol("acc")})}),
+		scm.NewNil(), scm.NewNil(), scm.NewBool(false),
 	})
 }
 
@@ -1707,10 +1707,11 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 		sortKeyExpr = scm.NewSlice(parts)
 	}
 	tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
-	mapBody := scm.NewSlice([]scm.Scmer{
+	mapReduceParams := append([]scm.Scmer{scm.NewSymbol("acc")}, mapParams...)
+	mapReduceBody := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("begin"),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("invalidateorc"), tblExpr, scm.NewString(colName), sortKeyExpr}),
-		scm.NewInt(0),
+		scm.NewSymbol("acc"),
 	})
 	return scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("scan"),
@@ -1719,8 +1720,8 @@ func buildInvalidateORCScan(targetSchema, targetTable, colName string, sortCols,
 		scm.NewSlice(filterColElems),
 		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
 		scm.NewSlice(resultCols),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(mapParams), mapBody}),
-		scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(), scm.NewBool(false),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(mapReduceParams), mapReduceBody}),
+		scm.NewNil(), scm.NewNil(), scm.NewBool(false),
 	})
 }
 

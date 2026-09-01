@@ -54,18 +54,22 @@ setup:
   - scm: "(rebuild)"
   # Feed representative equality probes into the automatic partition scorer,
   # then persist the selected layout. Shard size remains the production default.
-  - scm: |
-      (begin
-        (define tx (session "__memcp_tx"))
-        (define forums (table "memcp-tests" "forum_hierarchy_forums"))
-        (define threads (table "memcp-tests" "forum_hierarchy_threads"))
-        (map (produceN 8) (lambda (i)
-          (begin
-            (define forum_id (+ i 1))
-            (scan tx forums '("parentID") (lambda (parentID) (equal?? parentID forum_id))
-              '() (lambda (acc) (+ acc 1)) 0 + false)
-            (scan tx threads '("forumID") (lambda (threadForumID) (equal?? threadForumID forum_id))
-              '("postCount") (lambda (acc postCount) (+ acc postCount)) 0 + false)))))
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 1"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 1"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 2"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 2"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 3"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 3"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 4"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 4"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 5"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 5"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 6"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 6"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 7"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 7"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 8"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 8"
   - scm: "(rebuild)"
 
 test_cases:

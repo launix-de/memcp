@@ -44,7 +44,7 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS u3_main"
 
 test_cases:
-  - name: "system-table scan shape stays accepted"
+  - name: "legacy system-table scan shape stays accepted"
     scm: |
       (scan nil (table "system" "user")
         '() (lambda () true)

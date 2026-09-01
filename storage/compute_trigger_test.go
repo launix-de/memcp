@@ -97,9 +97,11 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewInt(1), scm.NewSymbol(outerParam)}),
 		})),
 		listAst(scm.NewString("val")),
-		lambdaAst([]string{"val"}, scm.NewSymbol("val")),
-		scm.NewSymbol("+"),
+		lambdaAst([]string{"acc", "val"}, scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewSymbol("val"),
+		})),
 		scm.NewInt(0),
+		scm.NewSymbol("+"),
 	})
 }
 
@@ -120,9 +122,11 @@ func TestExtractScanJoinInfoIncludesDynamicTablePlan(t *testing.T) {
 		listAst(),
 		lambdaAst(nil, scm.NewBool(true)),
 		listAst(),
-		lambdaAst(nil, scm.NewInt(1)),
-		scm.NewSymbol("+"),
+		lambdaAst([]string{"acc"}, scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewInt(1),
+		})),
 		scm.NewInt(0),
+		scm.NewSymbol("+"),
 	})
 
 	refs := extractScanJoinInfo(computor)
@@ -219,8 +223,8 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 	computorSource := `(lambda (ref_id)
 		(scan nil (table "tlookuptrigger" "src")
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
-			'("val") (lambda (val) val)
-			(lambda (old value) value) 0 nil false))`
+			'("val") (lambda (acc val) val)
+			0 (lambda (old value) value) false))`
 	rawComputor := scm.Eval(scm.Read("raw lookup trigger test", computorSource), &scm.Globalenv)
 	compiledComputor := scm.Eval(scm.Optimize(scm.Read("compiled lookup trigger test", computorSource), &scm.Globalenv, nil), &scm.Globalenv)
 	for variant, computor := range map[string]scm.Scmer{"raw": rawComputor, "compiled": compiledComputor} {

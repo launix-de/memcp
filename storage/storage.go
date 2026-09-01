@@ -2789,7 +2789,7 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			// Build count-scan: (scan tx (table base_schema base_table) (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
+			// Build a fused count scan over matching base rows.
 			buildCountScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
@@ -2799,12 +2799,13 @@ func Init(en scm.Env) {
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
 						buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols)))),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewInt(1)}),
-					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewInt(1)})}),
+					scm.NewInt(0), scm.NewSymbol("+"),
 				})
 			}
 
-			// Build delete-scan: (scan tx (table kt_schema kt_name) (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
+			// Build a fused delete scan over matching keytable rows.
 			buildDeleteScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
@@ -2814,9 +2815,10 @@ func Init(en scm.Env) {
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
 						buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols)))),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}),
-						scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")})}),
-					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$update")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
+							scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}), scm.NewSymbol("acc")})}),
+					scm.NewNil(), scm.NewNil(),
 				})
 			}
 

@@ -26,7 +26,7 @@ import "github.com/launix-de/memcp/scm"
 //
 //	(lambda (OLD NEW) (scan nil (table schema tbl) condCols
 //	    (lambda (cols...) (equal? col (get_assoc OLD key)))
-//	    (list "$update") (lambda ($update) ($update)) + 0 nil false))
+//	    (list "$update") (lambda (acc $update) (begin ($update) acc)) nil nil false))
 //
 // Vectorized form:
 //
@@ -34,7 +34,7 @@ import "github.com/launix-de/memcp/scm"
 //	    (define vals (map OLD_batch (lambda (OLD) (get_assoc OLD key))))
 //	    (scan nil (table schema tbl) condCols
 //	        (lambda (cols...) (has? vals col))
-//	        (list "$update") (lambda ($update) ($update)) + 0 nil false))
+//	        (list "$update") (lambda (acc $update) (begin ($update) acc)) nil nil false))
 func VectorizeTrigger(triggerFn scm.Scmer) scm.Scmer {
 	// Extract the proc body
 	if !triggerFn.IsProc() {

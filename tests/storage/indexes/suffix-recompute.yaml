@@ -30,10 +30,9 @@ test_cases:
           "sortdirs"  (list false)
           "partitioncount" 0
           "mapcols"   '("amount")
-          "mapfn"     (lambda ($set v) (list $set v))
-          "reducefn"  (lambda (acc mapped) (begin
-                        (define new_acc (+ acc (cadr mapped)))
-                        ((car mapped) new_acc)
+          "mapreducefn" (lambda (acc $set v) (begin
+                        (define new_acc (+ acc v))
+                        ($set new_acc)
                         new_acc))
           "reduceinit" 0))
 
