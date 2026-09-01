@@ -1602,6 +1602,7 @@ func init_sync() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  51,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1811,6 +1812,7 @@ func init_sync() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1954,6 +1956,7 @@ func init_sync() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1971,6 +1974,7 @@ func init_sync() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1997,6 +2001,7 @@ func init_sync() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2237,6 +2242,7 @@ func init_sync() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2288,6 +2294,7 @@ func init_sync() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["mutex"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2328,6 +2335,7 @@ func init_sync() {
 				return result
 				return result
 			},
+			JITInlineCost: 4,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2574,6 +2582,7 @@ func init_sync() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  36,
 		},
 	})
 }

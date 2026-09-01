@@ -1069,6 +1069,7 @@ func init() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	optimizerTelemetryType := &TypeDescriptor{Kind: "assoc", Keys: map[string]*TypeDescriptor{
@@ -1552,6 +1553,7 @@ func init() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  14,
 		},
 		Optimize: func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
 			if len(v) == 2 {
@@ -2624,6 +2626,7 @@ func init() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  22,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2652,6 +2655,7 @@ func init() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["try"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2794,6 +2798,7 @@ func init() {
 				return result
 				return result
 			},
+			JITInlineCost: 9,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -4288,6 +4293,7 @@ func init() {
 				return result
 				return result
 			},
+			JITInlineCost: 68,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -4439,6 +4445,7 @@ func init() {
 				return result
 				return result
 			},
+			JITInlineCost: 5,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -5654,6 +5661,7 @@ func init() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      32,
 		},
 		Optimize:                 FirstParameterMutable("for_mut"),
 		OptimizeFirstArgTransfer: true,
@@ -6844,6 +6852,7 @@ func init() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      26,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -6939,6 +6948,7 @@ func init() {
 				return result
 				return result
 			},
+			JITInlineCost: 5,
 		},
 	})
 	DeclareSpecialForm(&Globalenv, &Declaration{
@@ -7232,6 +7242,7 @@ Patterns can be any of:
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  29,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -7248,6 +7259,7 @@ Patterns can be any of:
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["source_coverage_report"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -13732,6 +13744,7 @@ Patterns can be any of:
 				ctx.FreeStack(int32(16))
 				return result
 			},
+			JITInlineCost: 2046,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -13814,6 +13827,7 @@ Patterns can be any of:
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  5,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -14274,6 +14288,7 @@ Patterns can be any of:
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  16,
 		},
 	})
 

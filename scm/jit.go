@@ -161,15 +161,16 @@ type JITEntryPoint struct {
 	// RecursiveLambdas makes lambda values constructed by this native body
 	// compile their own body before they are returned or passed onward.
 	RecursiveLambdas bool
-	// Coverage counts lowered Scheme expression nodes and calls which still
-	// cross the generic Eval/Apply bridge. It is diagnostic metadata, not a
-	// profile: one dynamic call may perform arbitrarily much runtime work.
+	// Coverage counts lowered Scheme expressions and distinguishes generic
+	// Eval/Apply bridges, compact native builtin calls, and inlined emitters.
+	// It is diagnostic metadata, not a runtime profile.
 	Coverage JITCoverage
 }
 
 type JITCoverage struct {
 	Expressions  int
 	DynamicCalls int
+	NativeCalls  int
 	InlinedCalls int
 }
 
@@ -487,6 +488,7 @@ type JITContext struct {
 	AutoImportSafe        bool
 	RecursiveLambdas      bool
 	ActiveBuiltinEmitters map[*Declaration]uint16
+	BuiltinInlineCost     int
 	NeedsStableArgs       bool
 	SelfSymbols           map[Symbol]struct{}
 	SelfLoopLabel         uint8
@@ -2919,6 +2921,7 @@ func init_jit() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  197,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -4538,6 +4541,7 @@ func init_jit() {
 				ctx.FreeStack(int32(32))
 				return result
 			},
+			JITInlineCost: 27,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -8340,6 +8344,7 @@ func init_jit() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  38,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -8376,6 +8381,7 @@ func init_jit() {
 				return result
 				return result
 			},
+			JITInlineCost: 2,
 		},
 	})
 }

@@ -19,6 +19,7 @@ package scm
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"unsafe"
 )
@@ -1603,6 +1604,135 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 	return jitCompileDynamicCall(ctx, callableExpr, operands, sliceBase, result)
 }
 
+func jitTypeDescriptorTag(td *TypeDescriptor) uint8 {
+	if td == nil {
+		return JITTypeUnknown
+	}
+	switch td.Kind {
+	case "bool":
+		return tagBool
+	case "int":
+		return tagInt
+	case "string":
+		return tagString
+	case "symbol":
+		return tagSymbol
+	case "nil":
+		return tagNil
+	case "list":
+		return tagSlice
+	default:
+		return JITTypeUnknown
+	}
+}
+
+// jitPreviewCallArgument extracts policy facts without writing machine code.
+// The real argument compiler remains the single source of value placement;
+// this preview only carries facts that are already explicit in the optimized
+// Scheme tree or its lexical descriptor environment.
+func jitPreviewCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer) JITValueDesc {
+	for expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	if param := jitDeclarationParam(decl, index); param != nil && param.Kind == "func" {
+		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
+			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+		}
+	}
+	if expr.IsNthLocalVar() {
+		local := int(expr.NthLocalVar())
+		if ctx.Env != nil && local < len(ctx.Env.Numbered) {
+			return ctx.Env.Numbered[local]
+		}
+		if local < ctx.InputArgCount {
+			return JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(local)}
+		}
+	}
+	if expr.GetTag() != tagSlice {
+		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
+	}
+	parts := expr.Slice()
+	if len(parts) == 2 && parts[0].SymbolEquals("quote") {
+		quoted := parts[1]
+		preview := JITValueDesc{Loc: LocImm, Type: quoted.GetTag(), Imm: quoted}
+		if quoted.IsSlice() {
+			preview.KnownSliceLen = int32(len(quoted.Slice()))
+			preview.SliceSizeKnown = true
+		}
+		return preview
+	}
+	if len(parts) == 0 {
+		return JITValueDesc{Type: JITTypeUnknown}
+	}
+	if nested := DeclarationForValue(parts[0]); nested != nil && nested.Type != nil {
+		preview := JITValueDesc{Type: jitTypeDescriptorTag(nested.Type.Return)}
+		if preview.Type == tagSlice && nested.Type.Return != nil && nested.Type.Return.Length >= 0 {
+			preview.KnownSliceLen = int32(nested.Type.Return.Length)
+			preview.SliceSizeKnown = true
+		}
+		return preview
+	}
+	return JITValueDesc{Type: JITTypeUnknown}
+}
+
+const jitBuiltinInlineBudget = 2048
+
+func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueDesc) bool {
+	if decl == nil || decl.Type == nil || decl.Type.JITInlineCost == 0 {
+		return true
+	}
+	knownTypes, knownShapes := 0, 0
+	knownCallback, hasCallback := false, false
+	for index, arg := range args {
+		if arg.Type != JITTypeUnknown {
+			knownTypes++
+		}
+		if arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice {
+			knownShapes++
+		}
+		param := jitDeclarationParam(decl, index)
+		if param != nil && param.Kind == "func" {
+			hasCallback = true
+			if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
+				(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
+				knownCallback = true
+			}
+		}
+	}
+	if hasCallback {
+		// A known callback removes the Apply boundary from every loop iteration;
+		// this dominates the one-time instruction-cache cost for map/reduce-style
+		// operators. Unknown callbacks retain the compact native Go loop.
+		if !decl.Type.JITInlineCallbacks || !knownCallback {
+			return false
+		}
+	} else {
+		cost := int(decl.Type.JITInlineCost)
+		switch {
+		case decl.Type.JITVirtualArgs:
+			// Virtual-list producers and consumers preserve fusion opportunities
+			// which a native Go call would force us to materialize.
+		case len(args) > 0 && knownTypes == len(args) && cost <= 256:
+			// Full type knowledge lets generated emitters discard dynamic type
+			// switches. Partial knowledge did not amortize emitted code in A/B.
+		case knownShapes > 0 && cost <= 32:
+			// Small shape-specialized emitters can eliminate list allocation and
+			// length/tag checks even when element types remain dynamic.
+		default:
+			return false
+		}
+	}
+	cost := int(decl.Type.JITInlineCost)
+	if cost == math.MaxUint16 {
+		return false
+	}
+	if ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+		return false
+	}
+	ctx.BuiltinInlineCost += cost
+	return true
+}
+
 func jitIsNativeReturnTarget(ctx *JITContext, result JITValueDesc) bool {
 	return result.Loc == LocRegPair && result.Reg == ctx.ResultPtrReg && result.Reg2 == ctx.ResultAuxReg
 }
@@ -1950,6 +2080,14 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 		}
 		if decl.Type != nil && decl.Type.JITEmit != nil {
+			policyArgs := make([]JITValueDesc, len(list)-1)
+			for i := 1; i < len(list); i++ {
+				policyArgs[i-1] = jitPreviewCallArgument(ctx, decl, i-1, list[i])
+			}
+			if !jitShouldInlineBuiltin(ctx, decl, policyArgs) {
+				ctx.Coverage.NativeCalls++
+				return jitEmitGoVariadicCallFromExprs(ctx, decl.Fn, list[1:], sliceBase, result)
+			}
 			ctx.Coverage.InlinedCalls++
 			if !jitAutoImportReturnSafe(name, decl.Type.Return) {
 				ctx.AutoImportSafe = false
