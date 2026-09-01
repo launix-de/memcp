@@ -3415,14 +3415,19 @@ path. */
 					(if (nth (nth terms i) 4) (list (nth (nth term_bindings i) 2)) '())))))
 				(define negative_union (if (single_source? negative_exprs)
 					(car negative_exprs)
-					(list (quote recset_union) (cons (quote list) negative_exprs))))
+					(list (quote recset_union)
+						(physical_query_tx_symbol)
+						(cons (quote list) negative_exprs))))
 				(define formula (if (empty_list? positive_exprs)
-					(list (quote recset_not) negative_union)
+					(list (quote recset_not) (physical_query_tx_symbol) negative_union)
 					(begin
 						(define positive_intersection (if (single_source? positive_exprs)
 							(car positive_exprs)
-							(list (quote recset_intersect) (cons (quote list) positive_exprs))))
+							(list (quote recset_intersect)
+								(physical_query_tx_symbol)
+								(cons (quote list) positive_exprs))))
 						(list (quote recset_difference)
+							(physical_query_tx_symbol)
 							(cons (quote list) (cons positive_intersection negative_exprs))))))
 				(list terms formula negative_exprs positive_exprs))))))
 
@@ -3523,6 +3528,7 @@ lookup for each ordered driver candidate. */
 										(source_table_expr (nth first_carrier 0))
 										(nth first_carrier 1)
 										(list (quote recset_union)
+											(physical_query_tx_symbol)
 											(cons (quote list) (map carriers (lambda (carrier)
 												(nth carrier 2))))))))))))
 			(begin
@@ -3566,7 +3572,9 @@ lookup for each ordered driver candidate. */
 					(define candidate_recsets (map parts (lambda (item) (nth item 2))))
 					(define candidate_recset (if (single_source? candidate_recsets)
 						(car candidate_recsets)
-						(list (quote recset_union) (cons (quote list) candidate_recsets))))
+						(list (quote recset_union)
+							(physical_query_tx_symbol)
+							(cons (quote list) candidate_recsets))))
 					(define keyset_expr (if group_cache_probe
 						(nth (car parts) 2)
 						(list (quote recset_key_index)
@@ -3627,6 +3635,7 @@ lookup for each ordered driver candidate. */
 					(if (single_source? branch_bindings)
 						(nth (car branch_bindings) 1)
 						(list (quote recset_union)
+							(physical_query_tx_symbol)
 							(cons (quote list) (map branch_bindings (lambda (binding) (nth binding 1))))))))))))
 
 /* When every OR alternative has a target-table candidate RecSet, the general
@@ -3648,7 +3657,9 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 				(if (reduce candidates (lambda (missing candidate)
 					(or missing (nil? candidate))) false)
 					nil
-					(list (quote recset_union) (cons (quote list) candidates))))))))
+					(list (quote recset_union)
+						(physical_query_tx_symbol)
+						(cons (quote list) candidates))))))))
 
 (define ordered_batch_membership_terms (lambda (src condition)
 	(filter (map (split_and_terms (coalesceNil condition true)) (lambda (term)
@@ -3745,6 +3756,7 @@ so complex ACL trees receive the same per-node physical choices as any scan. */
 				(define membership_expr (if (equal? (count batch_inputs) 1)
 					input_batch
 					(list (quote recset_intersect)
+						(physical_query_tx_symbol)
 						(cons (quote list) batch_inputs))))
 				(define residual_probe_work_rows
 					(batch_membership_survivor_rows memberships probe_work_rows planning_session))
@@ -4051,6 +4063,7 @@ RecSet; membership edges retain their own physical operators. */
 								(map base_cols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 								(lower_column_expr_for_alias src membership_formula_residual))))
 						(list (quote recset_difference)
+							(physical_query_tx_symbol)
 							(cons (quote list) (cons base_recset (nth membership_formula 2)))))
 					(if membership_formula_driver (nth membership_formula 1) nil)))
 				(define membership_driver (and
@@ -4114,6 +4127,7 @@ RecSet; membership edges retain their own physical operators. */
 					(if (equal? membership_table_expr source_table)
 						effective_scalar_carrier
 						(list (quote recset_intersect)
+							(physical_query_tx_symbol)
 							(cons (quote list) (list
 								effective_scalar_carrier
 								membership_table_expr))))))
@@ -6895,6 +6909,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 					(if (equal? base_table_expr (source_table_expr_using stages src))
 						consumed_scalar_carrier
 						(list (quote recset_intersect)
+							(physical_query_tx_symbol)
 							(cons (quote list) (list
 								consumed_scalar_carrier
 								base_table_expr))))))
