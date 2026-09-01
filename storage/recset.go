@@ -447,7 +447,7 @@ type recSetKeyResult struct {
 
 func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, condition scm.Scmer) *recSet {
 	ss := SessionStateFromTx(currentTx)
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
@@ -527,7 +527,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
@@ -543,7 +543,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, false)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 			t.mu.RLock()
 			locked = true
 		}
@@ -783,7 +783,7 @@ func (p *projectKeyIndices) Swap(i, j int) {
 }
 
 func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []string, ss *scm.SessionState) recSetProjectKeys {
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
 	values := make(chan recSetKeyResult, len(r.shards))
 	width := len(sourceKeyCols)
 	keys := recSetProjectKeys{width: width, values: make([]scm.Scmer, int(r.count)*width)}
@@ -858,7 +858,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 	readers := make([]ColumnReader, len(sourceKeyCols))
 	needsTxReader := make([]bool, len(sourceKeyCols))
 	for i, col := range sourceKeyCols {
-		cols[i] = t.getColumnStorageOrPanicEx(col, skipShardReadLock, currentTx)
+		cols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
 		readers[i] = newCachedColumnReaderTx(cols[i], currentTx)
 		if proxy, ok := cols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			needsTxReader[i] = true
@@ -872,7 +872,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, false)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 			t.mu.RLock()
 			locked = true
 		}
@@ -961,7 +961,7 @@ func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []st
 	if keys.count() == 0 {
 		return result
 	}
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
 	numeric := keys.buildNumericLookup()
 	type targetPartResult struct {
 		part recSetShard
@@ -1055,7 +1055,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	targetReaders := make([]ColumnReader, len(targetKeyCols))
 	targetNeedsTxReader := make([]bool, len(targetKeyCols))
 	for i, col := range targetKeyCols {
-		targetCols[i] = t.getColumnStorageOrPanicEx(col, skipShardReadLock, currentTx)
+		targetCols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
 		targetReaders[i] = newCachedColumnReaderTx(targetCols[i], currentTx)
 		if proxy, ok := targetCols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
 			targetNeedsTxReader[i] = true
@@ -1069,7 +1069,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, false)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 			t.mu.RLock()
 			locked = true
 		}
@@ -1235,7 +1235,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1247,7 +1247,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, false)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 			t.mu.RLock()
 			locked = true
 		}
@@ -1322,7 +1322,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 			conditionGetters[i] = getter
 			continue
 		}
-		ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+		ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 	}
 	cdataset := make([]scm.Scmer, len(conditionCols))
@@ -1344,7 +1344,7 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, false)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 			t.mu.RLock()
 			locked = true
 		}
@@ -1496,7 +1496,7 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
@@ -1509,7 +1509,7 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, false)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 			t.mu.RLock()
 			locked = true
 		}
@@ -1600,7 +1600,7 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 		currentTx = r.tx
 	}
 	ss := SessionStateFromTx(currentTx)
-	querySeq := scm.CurrentQuerySeq()
+	querySeq := querySeqFromTx(currentTx)
 	result := &recSet{tx: currentTx, table: r.table}
 	values := make(chan recSetBuildResult, len(r.shards))
 	activeParts := make([]int, 0, len(r.shards))

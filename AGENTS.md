@@ -22,10 +22,6 @@ published with a proper semantic version tag. MemCP may then update its normal
 as disposable local workspace while preparing an upstream patch; none of its
 contents may enter a MemCP commit or build.
 
-The existing tracked `third_party/gls` fork is a temporary legacy exception
-pending its dedicated removal PR. Do not add files, dependencies, or further
-patches to that directory.
-
 ## Query Planner Invariants
 - Before changing SQL parsing, `lib/queryplan.scm`, `lib/queryplan-*.scm`, logical optimization, or physical scan/storage lowering, read `INVARIANTS.md`.
 - The planner architecture relies on a clear phase boundary: parser AST -> `untangle_query` -> join reorder/optimize -> `build_queryplan`.

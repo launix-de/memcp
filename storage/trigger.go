@@ -139,18 +139,18 @@ func (tt *TriggerTiming) UnmarshalJSON(data []byte) error {
 
 // TriggerDescription holds all information about a trigger
 type TriggerDescription struct {
-	Name       string        `json:"name"`                 // Trigger name (user-defined or auto-generated)
-	Timing     TriggerTiming `json:"timing"`               // BEFORE/AFTER INSERT/UPDATE/DELETE
-	Func       scm.Scmer     `json:"func"`                 // The trigger function (compiled Scheme procedure)
-	FuncPlan   scm.Scmer     `json:"-"`                    // Unevaluated lambda AST for SQL triggers; compiled lazily on first use
-	SourceSQL  string        `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
-	IsSystem   bool          `json:"is_system,omitempty"`  // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
-	Hidden     bool          `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
-	Priority   int           `json:"priority,omitempty"`   // Execution order (lower = earlier)
-	Async      bool          `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
-	VectorFunc scm.Scmer     `json:"-"`                    // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
-	Acquire    func() bool   `json:"-"`                    // Optional lock-free pin for an ephemeral trigger target
-	Release    func()        `json:"-"`                    // Releases a successful Acquire
+	Name       string                `json:"name"`                 // Trigger name (user-defined or auto-generated)
+	Timing     TriggerTiming         `json:"timing"`               // BEFORE/AFTER INSERT/UPDATE/DELETE
+	Func       scm.Scmer             `json:"func"`                 // The trigger function (compiled Scheme procedure)
+	FuncPlan   scm.Scmer             `json:"-"`                    // Unevaluated lambda AST for SQL triggers; compiled lazily on first use
+	SourceSQL  string                `json:"source_sql,omitempty"` // Original SQL body text (for SHOW TRIGGERS)
+	IsSystem   bool                  `json:"is_system,omitempty"`  // True for Go-internal triggers (FK etc.) — not persisted via createtrigger
+	Hidden     bool                  `json:"hidden,omitempty"`     // True for Scheme-internal triggers — persisted but hidden from SHOW TRIGGERS
+	Priority   int                   `json:"priority,omitempty"`   // Execution order (lower = earlier)
+	Async      bool                  `json:"async,omitempty"`      // Run trigger in background goroutine (fire-and-forget, no transaction context)
+	VectorFunc scm.Scmer             `json:"-"`                    // Vectorized trigger: (lambda (OLD_batch NEW_batch) ...) for batch execution
+	Acquire    func(*TxContext) bool `json:"-"`                    // Optional lock-free pin for an ephemeral trigger target
+	Release    func()                `json:"-"`                    // Releases a successful Acquire
 }
 
 func acquireCacheUse(users *int64) bool {
@@ -169,8 +169,9 @@ func beginCacheEviction(users *int64) bool {
 	return atomic.CompareAndSwapInt64(users, 0, -1)
 }
 
-func (t *table) acquireCacheUse() bool { return acquireCacheUse(&t.cacheUsers) }
-func (t *table) releaseCacheUse()      { atomic.AddInt64(&t.cacheUsers, -1) }
+func (t *table) acquireCacheUse() bool                       { return acquireCacheUse(&t.cacheUsers) }
+func (t *table) acquireCacheUseForTrigger(_ *TxContext) bool { return t.acquireCacheUse() }
+func (t *table) releaseCacheUse()                            { atomic.AddInt64(&t.cacheUsers, -1) }
 func (t *table) beginCacheEviction() bool {
 	return beginCacheEviction(&t.cacheUsers)
 }
@@ -196,8 +197,8 @@ func (t *table) releaseColumnCacheUse(c *column) {
 	t.releaseCacheUse()
 }
 
-func (tr TriggerDescription) acquireTarget() bool {
-	return tr.Acquire == nil || tr.Acquire()
+func (tr TriggerDescription) acquireTarget(tx *TxContext) bool {
+	return tr.Acquire == nil || tr.Acquire(tx)
 }
 
 func (tr TriggerDescription) releaseTarget() {
@@ -267,7 +268,7 @@ func (tr *TriggerDescription) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func unavailableTriggerTarget() bool { return false }
+func unavailableTriggerTarget(_ *TxContext) bool { return false }
 
 func restoredTriggerRequiresRuntimeTarget(name string) bool {
 	// Older schema files predate requires_target. These are all current
@@ -446,7 +447,7 @@ func (db *database) dropTrigger(name string) bool {
 
 // SetTriggerTarget refreshes the runtime-only cache target pin on an
 // idempotently reused system trigger, including triggers restored from JSON.
-func (t *table) SetTriggerTarget(name string, acquire func() bool, release func()) bool {
+func (t *table) SetTriggerTarget(name string, acquire func(*TxContext) bool, release func()) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := range t.Triggers {
@@ -531,9 +532,9 @@ func (t *table) beforeInsertOutputColumns(dict scm.Scmer, columns []string) []st
 // If a transaction is active, a savepoint is created before each trigger;
 // on panic the savepoint is rolled back before re-panicking.
 // Triggers with Async=true are launched in a background goroutine (fire-and-forget).
-func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
+func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset, tx *TxContext) {
 	triggers := t.GetTriggers(timing)
-	session := txSessionScmer(CurrentTx())
+	session := txSessionScmer(tx)
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
 			continue
@@ -562,21 +563,20 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 					_ = trName
 					_ = tName
 				}()
-				if !tr.acquireTarget() {
+				if !tr.acquireTarget(nil) {
 					return
 				}
 				defer tr.releaseTarget()
-				scm.Apply(trFunc, oldDict, newDict, session)
+				scm.Apply(trFunc, oldDict, newDict, session, scm.NewNil())
 			}()
 			continue
 		}
-		if !tr.acquireTarget() {
+		if !tr.acquireTarget(tx) {
 			continue
 		}
 		// Execute trigger with savepoint for proper rollback
 		func() {
 			defer tr.releaseTarget()
-			tx := CurrentTx()
 			var sp Savepoint
 			hasSavepoint := false
 			if tx != nil {
@@ -591,7 +591,7 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 					panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
 				}
 			}()
-			scm.Apply(tr.Func, oldDict, newDict, session)
+			scm.Apply(tr.Func, oldDict, newDict, session, txContextScmer(tx))
 		}()
 	}
 }
@@ -599,17 +599,17 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset) {
 // ExecuteTriggersBatch fires triggers once per trigger with a batch of rows.
 // For triggers that have a vectorized form (VectorFunc), the batch is passed
 // as a single call. For non-vectorized triggers, falls back to per-row execution.
-func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld bool) {
+func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld bool, tx *TxContext) {
 	if len(rows) == 0 {
 		return
 	}
-	session := txSessionScmer(CurrentTx())
+	session := txSessionScmer(tx)
 	if len(rows) == 1 {
 		// Single row: use the normal path
 		if isOld {
-			t.ExecuteTriggers(timing, rows[0], nil)
+			t.ExecuteTriggers(timing, rows[0], nil, tx)
 		} else {
-			t.ExecuteTriggers(timing, nil, rows[0])
+			t.ExecuteTriggers(timing, nil, rows[0], tx)
 		}
 		return
 	}
@@ -631,16 +631,16 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 				tr := tr
 				go func() {
 					defer func() { recover() }()
-					if !tr.acquireTarget() {
+					if !tr.acquireTarget(nil) {
 						return
 					}
 					defer tr.releaseTarget()
-					scm.Apply(tr.Func, oldDict, newDict, session)
+					scm.Apply(tr.Func, oldDict, newDict, session, scm.NewNil())
 				}()
 			}
 			continue
 		}
-		if !tr.acquireTarget() {
+		if !tr.acquireTarget(tx) {
 			continue
 		}
 		func() {
@@ -650,7 +650,6 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 				// Build columnar dict-of-lists: {"col1": [v1,v2,...], "col2": [v1,v2,...]}
 				colBatch := t.rowsToColumnar(rows)
 				func() {
-					tx := CurrentTx()
 					var sp Savepoint
 					hasSavepoint := false
 					if tx != nil {
@@ -670,14 +669,14 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 								} else {
 									newDict = t.rowToDict(row)
 								}
-								scm.Apply(tr.Func, oldDict, newDict, session)
+								scm.Apply(tr.Func, oldDict, newDict, session, txContextScmer(tx))
 							}
 						}
 					}()
 					if isOld {
-						scm.Apply(tr.VectorFunc, colBatch, scm.NewNil(), session)
+						scm.Apply(tr.VectorFunc, colBatch, scm.NewNil(), session, txContextScmer(tx))
 					} else {
-						scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch, session)
+						scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch, session, txContextScmer(tx))
 					}
 				}()
 				return
@@ -691,7 +690,6 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 					newDict = t.rowToDict(row)
 				}
 				func() {
-					tx := CurrentTx()
 					var sp Savepoint
 					hasSavepoint := false
 					if tx != nil {
@@ -706,7 +704,7 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 							panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
 						}
 					}()
-					scm.Apply(tr.Func, oldDict, newDict, session)
+					scm.Apply(tr.Func, oldDict, newDict, session, txContextScmer(tx))
 				}()
 			}
 		}()
@@ -754,9 +752,9 @@ func (t *table) rowToDictWithColumns(row dataset, columns []string) scm.Scmer {
 
 // ExecuteTableLifecycleTriggers executes non-row-level table lifecycle triggers.
 // These are non-row-level triggers: OLD and NEW are both nil.
-func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming) {
+func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming, tx *TxContext) {
 	triggers := t.GetTriggers(timing)
-	session := txSessionScmer(CurrentTx())
+	session := txSessionScmer(tx)
 	for _, tr := range triggers {
 		if tr.Func.IsNil() {
 			continue
@@ -767,24 +765,24 @@ func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming) {
 					// lifecycle triggers are best-effort; log but don't propagate
 				}
 			}()
-			scm.Apply(tr.Func, scm.NewNil(), scm.NewNil(), session)
+			scm.Apply(tr.Func, scm.NewNil(), scm.NewNil(), session, txContextScmer(tx))
 		}()
 	}
 }
 
-func executeRegisteredCreateTableTriggers(t *table) {
+func executeRegisteredCreateTableTriggers(t *table, tx *TxContext) {
 	registrations := getCreateTableTriggers(t.schema.Name, t.Name)
 	if len(registrations) == 0 {
 		return
 	}
-	session := txSessionScmer(CurrentTx())
+	session := txSessionScmer(tx)
 	for _, reg := range registrations {
 		trigger := reg.triggerDescription()
 		finalizeTriggerCompilation(&trigger)
 		if triggerScmerMissing(trigger.Func) {
 			continue
 		}
-		scm.Apply(trigger.Func, scm.NewNil(), scm.NewNil(), session)
+		scm.Apply(trigger.Func, scm.NewNil(), scm.NewNil(), session, txContextScmer(tx))
 	}
 }
 
@@ -794,7 +792,7 @@ func executeRegisteredCreateTableTriggers(t *table) {
 // When isIgnore is true, rows whose triggers panic are silently skipped
 // and any partial transaction effects are rolled back via savepoints.
 // When isIgnore is false, trigger panics propagate to the caller.
-func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isIgnore bool) ([]string, dataset, bool) {
+func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isIgnore bool, tx *TxContext) ([]string, dataset, bool) {
 	triggers := t.GetTriggers(BeforeInsert)
 	if len(triggers) == 0 {
 		return columns, row, true
@@ -810,7 +808,6 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isI
 		if isIgnore {
 			// Per-row savepoint + panic recovery for INSERT IGNORE.
 			func() {
-				tx := CurrentTx()
 				var sp Savepoint
 				hasSavepoint := false
 				if tx != nil {
@@ -825,7 +822,7 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isI
 						triggerOk = false
 					}
 				}()
-				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(CurrentTx()))
+				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(tx), txContextScmer(tx))
 				if !returned.IsNil() && returned.IsFastDict() {
 					newDict = returned
 				}
@@ -836,7 +833,6 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isI
 		} else {
 			// Normal mode: savepoint for proper rollback on propagated panic.
 			func() {
-				tx := CurrentTx()
 				var sp Savepoint
 				hasSavepoint := false
 				if tx != nil {
@@ -851,7 +847,7 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isI
 						panic(fmt.Sprintf("trigger %s (BEFORE INSERT) on %s failed: %v", tr.Name, t.Name, r))
 					}
 				}()
-				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(CurrentTx()))
+				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(tx), txContextScmer(tx))
 				if !returned.IsNil() && returned.IsFastDict() {
 					newDict = returned
 				}
@@ -865,7 +861,7 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isI
 	return rowColumns, t.dictToRow(newDict, rowColumns), true
 }
 
-func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, isIgnore bool) ([]string, [][]scm.Scmer) {
+func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scmer, isIgnore bool, tx *TxContext) ([]string, [][]scm.Scmer) {
 	triggers := t.GetTriggers(BeforeInsert)
 	if len(triggers) == 0 {
 		return columns, values
@@ -875,7 +871,7 @@ func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scm
 	rowColumns := make([][]string, 0, len(values))
 	result := make([][]scm.Scmer, 0, len(values))
 	for _, row := range values {
-		newColumns, newRow, ok := t.executeBeforeInsertTriggerRow(columns, row, isIgnore)
+		newColumns, newRow, ok := t.executeBeforeInsertTriggerRow(columns, row, isIgnore, tx)
 		if !ok {
 			continue
 		}
@@ -907,7 +903,7 @@ func (t *table) ExecuteBeforeInsertTriggers(columns []string, values [][]scm.Scm
 // oldRow: the current row values (all columns in table order)
 // newRow: the row with changes applied (all columns in table order)
 // Returns the modified newRow. Panics from triggers propagate to the caller.
-func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
+func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContext) dataset {
 	triggers := t.GetTriggers(BeforeUpdate)
 	if len(triggers) == 0 {
 		return newRow
@@ -928,7 +924,6 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
 			continue
 		}
 		func() {
-			tx := CurrentTx()
 			var sp Savepoint
 			hasSavepoint := false
 			if tx != nil {
@@ -943,7 +938,7 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
 					panic(fmt.Sprintf("trigger %s (BEFORE UPDATE) on %s failed: %v", tr.Name, t.Name, r))
 				}
 			}()
-			returned := scm.Apply(tr.Func, oldDict, newDict, txSessionScmer(CurrentTx()))
+			returned := scm.Apply(tr.Func, oldDict, newDict, txSessionScmer(tx), txContextScmer(tx))
 			if !returned.IsNil() && (returned.IsFastDict() || returned.IsSlice()) {
 				newDict = returned
 			}
@@ -958,7 +953,7 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset) dataset {
 // oldRow: the row being deleted (all columns in table order)
 // Returns true if delete should proceed, false to abort.
 // Panics from triggers propagate to the caller.
-func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset) bool {
+func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset, tx *TxContext) bool {
 	triggers := t.GetTriggers(BeforeDelete)
 	if len(triggers) == 0 {
 		return true
@@ -979,7 +974,6 @@ func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset) bool {
 		}
 		var returned scm.Scmer
 		func() {
-			tx := CurrentTx()
 			var sp Savepoint
 			hasSavepoint := false
 			if tx != nil {
@@ -994,7 +988,7 @@ func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset) bool {
 					panic(fmt.Sprintf("trigger %s (BEFORE DELETE) on %s failed: %v", tr.Name, t.Name, r))
 				}
 			}()
-			returned = scm.Apply(tr.Func, oldDict, scm.NewNil(), txSessionScmer(CurrentTx()))
+			returned = scm.Apply(tr.Func, oldDict, scm.NewNil(), txSessionScmer(tx), txContextScmer(tx))
 		}()
 		// If trigger explicitly returns false, abort delete.
 		// nil return (side-effect-only triggers) does NOT abort.

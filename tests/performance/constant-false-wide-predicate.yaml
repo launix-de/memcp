@@ -51,7 +51,7 @@ test_cases:
         (session "username" "root")
         (session "schema" "memcp-tests")
         (define started (nanotime))
-        (cached_parse (newcachemap) parse_sql "memcp-tests" query
+        (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query
           (lambda (_schema _table _write) true) "root" session false)
         (define elapsed (- (nanotime) started))
         (if (< elapsed 1200000000)

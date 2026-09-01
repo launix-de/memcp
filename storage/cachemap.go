@@ -66,7 +66,7 @@ var cacheMapCallableTypeID = scm.RegisterCallableType(cacheMapCallableType)
 // (cachemap key value) — set entry
 // (cachemap key) — get entry (or nil)
 // (cachemap) — list all keys
-// (cachemap "get_or_compute" key producer) — get or run producer once per key
+// (cachemap "get_or_compute" key tx producer) — get or run producer once per key
 func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 	cm := &cacheMap{
 		entries: make(map[string]*cacheMapEntry),
@@ -104,9 +104,14 @@ func NewCacheMap(a ...scm.Scmer) scm.Scmer {
 			if scm.String(a[0]) != "get_or_compute" {
 				panic("cachemap: unknown 3-argument operation")
 			}
-			return cm.getOrCompute(scm.String(a[1]), a[2])
+			return cm.getOrCompute(scm.String(a[1]), scm.NewNil(), a[2])
+		case 4:
+			if scm.String(a[0]) != "get_or_compute" {
+				panic("cachemap: unknown 4-argument operation")
+			}
+			return cm.getOrCompute(scm.String(a[1]), a[2], a[3])
 		default:
-			panic("cachemap: expected 0, 1, 2, or 3 arguments")
+			panic("cachemap: expected 0, 1, 2, 3, or 4 arguments")
 		}
 	}, cacheMapCallableTypeID)
 }
@@ -145,16 +150,25 @@ func (cm *cacheMap) store(key string, value scm.Scmer) {
 	registerCacheMapEntry(entry)
 }
 
-func currentCacheMapContext() context.Context {
-	if value, ok := scm.GetGLSValue("context"); ok {
-		if ctx, ok := value.(context.Context); ok {
-			return ctx
-		}
+func cacheMapContext(queryState scm.Scmer) context.Context {
+	if queryState.IsNil() {
+		return context.Background()
+	}
+	tx := scmerToTxContext(queryState)
+	if tx == nil {
+		return context.Background()
+	}
+	ss, seq := tx.QuerySessionState()
+	if ss == nil || seq == 0 {
+		return context.Background()
+	}
+	if ctx := ss.QueryContext(seq); ctx != nil {
+		return ctx
 	}
 	return context.Background()
 }
 
-func (cm *cacheMap) getOrCompute(key string, producer scm.Scmer) scm.Scmer {
+func (cm *cacheMap) getOrCompute(key string, queryState scm.Scmer, producer scm.Scmer) scm.Scmer {
 	cm.mu.RLock()
 	if entry := cm.entries[key]; entry != nil {
 		entry.lastUsed.Store(time.Now().UnixNano())
@@ -184,7 +198,7 @@ func (cm *cacheMap) getOrCompute(key string, producer scm.Scmer) scm.Scmer {
 	}
 	cm.mu.Unlock()
 
-	ctx := currentCacheMapContext()
+	ctx := cacheMapContext(queryState)
 	select {
 	case <-flight.done:
 		if flight.failed {
@@ -250,9 +264,7 @@ func runCacheMapProducer(ctx context.Context, producer scm.Scmer) (value scm.Scm
 			panicValue = recovered
 		}
 	}()
-	scm.NewContext(ctx, func() {
-		value = scm.Apply(producer)
-	})
+	value = scm.Apply(producer)
 	failed = false
 	return
 }

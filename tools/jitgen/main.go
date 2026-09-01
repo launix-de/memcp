@@ -37,9 +37,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
@@ -52,6 +54,8 @@ var doPatch bool
 var doWipe bool
 var verbose bool
 var missingOnly bool
+var policyOnly bool
+var jobs = runtime.GOMAXPROCS(0)
 
 const generatedBanner = "/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */"
 const phiSlotBytes = 16
@@ -72,14 +76,23 @@ func main() {
 			doWipe = true
 		} else if arg == "-missing-only" {
 			missingOnly = true
+		} else if arg == "-policy-only" {
+			policyOnly = true
 		} else if arg == "-v" || arg == "--verbose" {
 			verbose = true
+		} else if strings.HasPrefix(arg, "-jobs=") {
+			parsed, err := strconv.Atoi(strings.TrimPrefix(arg, "-jobs="))
+			if err != nil || parsed < 1 {
+				fmt.Fprintf(os.Stderr, "invalid worker count %q\n", arg)
+				os.Exit(1)
+			}
+			jobs = parsed
 		} else {
 			files = append(files, arg)
 		}
 	}
 	if len(files) == 0 {
-		fmt.Fprintf(os.Stderr, "usage: jitgen [-dump=OP] [-patch] [-missing-only] [-wipe] <file.go> ...\n")
+		fmt.Fprintf(os.Stderr, "usage: jitgen [-dump=OP] [-patch] [-missing-only] [-policy-only] [-wipe] [-jobs=N] <file.go> ...\n")
 		os.Exit(1)
 	}
 
@@ -205,18 +218,19 @@ func main() {
 		ops[i].preservedEnd = preservedEmitterOffsets[path][offset]
 	}
 
+	// Generate operator emitters in parallel after the package and SSA graph have
+	// been built once. Patches are still assembled and applied serially below so
+	// source rewriting and diagnostics remain deterministic.
+	generated := generateOperators(ops, ssaFuncs, ssaFuncsByName)
+
 	// Process each operator (pattern 1: Declare)
 	patches := map[string][]patchEntry{}
-	for _, op := range ops {
+	for opIndex, op := range ops {
 		if onlyOp != "" && op.name != onlyOp {
 			continue
 		}
-		var ssaFn *ssa.Function
-		if op.funcLit != nil {
-			ssaFn = ssaFuncs[op.funcLit.Pos()]
-		} else {
-			ssaFn = ssaFuncsByName[op.funcName]
-		}
+		generation := generated[opIndex]
+		ssaFn := generation.ssaFn
 		if ssaFn == nil {
 			fmt.Fprintf(os.Stderr, "  %s: %s — SSA function not found\n", op.path, op.name)
 			continue
@@ -226,15 +240,9 @@ func main() {
 			dumpSSA(ssaFn)
 		}
 
-		// Single-pass: try to generate, recover on failure
-		newText, genErr := generateClosure(op.name, ssaFn, nil, op.path)
-		if genErr == "" {
-			if _, err := parser.ParseExpr(newText); err != nil {
-				genErr = "generated invalid Go expression: " + err.Error()
-				if verbose {
-					fmt.Fprintln(os.Stderr, newText)
-				}
-			}
+		newText, genErr := generation.newText, generation.genErr
+		if genErr != "" && verbose {
+			fmt.Fprintln(os.Stderr, newText)
 		}
 		usesFallback := false
 		usesNativeCall := false
@@ -254,6 +262,10 @@ func main() {
 			}
 			newText = generateFallbackClosure(op.name)
 		}
+		inlineCost := generation.inlineCost
+		if usesFallback || usesNativeCall {
+			inlineCost = math.MaxUint16
+		}
 		// Declaration emitters are expressions nested one indentation level below
 		// their TypeDescriptor field. Keep generated output gofmt-stable both when
 		// inserting a new JITEmit field and when replacing an existing closure.
@@ -261,6 +273,18 @@ func main() {
 
 		if doPatch {
 			if missingOnly && !operatorJITEmitMissing(op) {
+				continue
+			}
+			if policyOnly {
+				costText := strconv.FormatUint(uint64(inlineCost), 10)
+				if op.jitInlineCostExpr != nil {
+					pos := fset.Position(op.jitInlineCostExpr.Pos())
+					end := fset.Position(op.jitInlineCostExpr.End())
+					patches[op.path] = append(patches[op.path], patchEntry{startOff: pos.Offset, endOff: end.Offset, newText: costText, opName: op.name + ".JITInlineCost"})
+				} else if op.typeInsertPos.IsValid() {
+					insertPos := fset.Position(op.typeInsertPos)
+					patches[op.path] = append(patches[op.path], patchEntry{startOff: insertPos.Offset, endOff: insertPos.Offset, newText: "\tJITInlineCost: " + costText + ",\n\t\t", opName: op.name + ".JITInlineCost"})
+				}
 				continue
 			}
 			var pos, end token.Position
@@ -318,11 +342,23 @@ func main() {
 					patches[op.path] = append(patches[op.path], patchEntry{startOff: insertPos.Offset, endOff: insertPos.Offset, newText: "\tJITInlineCallbacks: " + value + ",\n\t\t", opName: op.name + ".JITInlineCallbacks"})
 				}
 			}
+			costText := strconv.FormatUint(uint64(inlineCost), 10)
+			if op.jitInlineCostExpr != nil {
+				pos := fset.Position(op.jitInlineCostExpr.Pos())
+				end := fset.Position(op.jitInlineCostExpr.End())
+				patches[op.path] = append(patches[op.path], patchEntry{startOff: pos.Offset, endOff: end.Offset, newText: costText, opName: op.name + ".JITInlineCost"})
+			} else if op.typeInsertPos.IsValid() {
+				insertPos := fset.Position(op.typeInsertPos)
+				patches[op.path] = append(patches[op.path], patchEntry{startOff: insertPos.Offset, endOff: insertPos.Offset, newText: "\tJITInlineCost: " + costText + ",\n\t\t", opName: op.name + ".JITInlineCost"})
+			}
 		}
 	}
 
 	// Process each storage type (pattern 2: ColumnStorage.GetValue → JITEmit)
 	for _, si := range stInfos {
+		if policyOnly {
+			continue
+		}
 		if onlyOp != "" && si.typeName != onlyOp && si.typeName+".GetValue" != onlyOp {
 			continue
 		}
@@ -367,6 +403,57 @@ func main() {
 			applyPatches(path, plist)
 		}
 	}
+}
+
+type operatorGeneration struct {
+	ssaFn      *ssa.Function
+	newText    string
+	genErr     string
+	inlineCost uint16
+}
+
+func generateOperators(ops []operatorInfo, ssaFuncs map[token.Pos]*ssa.Function, ssaFuncsByName map[string]*ssa.Function) []operatorGeneration {
+	results := make([]operatorGeneration, len(ops))
+	work := make(chan int)
+	workerCount := jobs
+	if workerCount > len(ops) {
+		workerCount = len(ops)
+	}
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range work {
+				op := ops[index]
+				if onlyOp != "" && op.name != onlyOp {
+					continue
+				}
+				var fn *ssa.Function
+				if op.funcLit != nil {
+					fn = ssaFuncs[op.funcLit.Pos()]
+				} else {
+					fn = ssaFuncsByName[op.funcName]
+				}
+				result := operatorGeneration{ssaFn: fn}
+				if fn != nil {
+					result.newText, result.genErr, result.inlineCost = generateClosureCost(op.name, fn, nil, op.path)
+					if result.genErr == "" {
+						if _, err := parser.ParseExpr(result.newText); err != nil {
+							result.genErr = "generated invalid Go expression: " + err.Error()
+						}
+					}
+				}
+				results[index] = result
+			}
+		}()
+	}
+	for index := range ops {
+		work <- index
+	}
+	close(work)
+	workers.Wait()
+	return results
 }
 
 // generatedEmitterOverlay replaces Declaration emitter expressions only for
@@ -563,6 +650,7 @@ type operatorInfo struct {
 	jitExpr                ast.Expr
 	jitVirtualExpr         ast.Expr
 	jitInlineCallbacksExpr ast.Expr
+	jitInlineCostExpr      ast.Expr
 	jitInsertPos           token.Pos
 	typeInsertPos          token.Pos
 	preservedEnd           int
@@ -602,7 +690,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			return true
 		}
 
-		var nameExpr, fnExpr, jitExpr, jitVirtualExpr, jitInlineCallbacksExpr ast.Expr
+		var nameExpr, fnExpr, jitExpr, jitVirtualExpr, jitInlineCallbacksExpr, jitInlineCostExpr ast.Expr
 		var jitInsertPos token.Pos
 		var typeInsertPos token.Pos
 		if len(comp.Elts) > 0 {
@@ -619,6 +707,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 						jitExpr = keyedValue(typeComp, "JITEmit")
 						jitVirtualExpr = keyedValue(typeComp, "JITVirtualArgs")
 						jitInlineCallbacksExpr = keyedValue(typeComp, "JITInlineCallbacks")
+						jitInlineCostExpr = keyedValue(typeComp, "JITInlineCost")
 						typeInsertPos = typeComp.Rbrace
 						if jitExpr == nil {
 							jitInsertPos = typeComp.Rbrace
@@ -652,6 +741,7 @@ func collectOperators(fset *token.FileSet, f *ast.File, path string) []operatorI
 			jitExpr:                jitExpr,
 			jitVirtualExpr:         jitVirtualExpr,
 			jitInlineCallbacksExpr: jitInlineCallbacksExpr,
+			jitInlineCostExpr:      jitInlineCostExpr,
 			jitInsertPos:           jitInsertPos,
 			typeInsertPos:          typeInsertPos,
 		})
@@ -1586,7 +1676,13 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 			}
 			return params.At(i - argOffset).Type()
 		}()
-		switch goCallWordCount(paramType) {
+		wordCount := goCallWordCount(paramType)
+		if _, isAggregate := paramType.Underlying().(*types.Struct); isAggregate && resolved[i].marker == "_aggregate_ptr" && wordCount == 0 {
+			indirectArgs[i] = true
+			argVars = append(argVars, resolved[i].goVar)
+			continue
+		}
+		switch wordCount {
 		case 0:
 			// Zero-sized values have no Go internal-ABI words. Keep them in the
 			// source-level signature, but do not invent a machine operand.
@@ -3352,6 +3448,26 @@ func inlineInstructionCount(fn *ssa.Function) int {
 	return count
 }
 
+// functionBuildsScmerStruct reports helpers which assemble Scmer through a
+// local aggregate and FieldAddr stores. Those stores need a descriptor owned
+// by the caller's register namespace; keeping the helper as a native Go call
+// is both smaller and safer than expanding its allocation graph inline.
+func functionBuildsScmerStruct(fn *ssa.Function) bool {
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			allocation, ok := instruction.(*ssa.Alloc)
+			if !ok {
+				continue
+			}
+			pointer, ok := allocation.Type().Underlying().(*types.Pointer)
+			if ok && isScmerType(pointer.Elem()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func blockEndsInPanic(block *ssa.BasicBlock) bool {
 	return block != nil && len(block.Instrs) > 0 && func() bool {
 		_, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Panic)
@@ -3367,6 +3483,9 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 		return genVal{}, false
 	}
 	if callee.Signature.Results().Len() == 1 && goCallWordCount(callee.Signature.Results().At(0).Type()) == 0 {
+		return genVal{}, false
+	}
+	if functionBuildsScmerStruct(callee) {
 		return genVal{}, false
 	}
 	if cost := inlineInstructionCount(callee); cost > inlineInstructionBudget {
@@ -3634,7 +3753,12 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	g.emit("return result")
 }
 
-func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter, sourcePath ...string) (code string, errMsg string) {
+func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter, sourcePath ...string) (string, string) {
+	code, errMsg, _ := generateClosureCost(opName, fn, rewrite, sourcePath...)
+	return code, errMsg
+}
+
+func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewriter, sourcePath ...string) (code string, errMsg string, inlineCost uint16) {
 	defer func() {
 		if r := recover(); r != nil {
 			if os.Getenv("JITGEN_DEBUG_PANIC") == "1" && (dumpOp == "" || dumpOp == opName) {
@@ -3642,6 +3766,7 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter, 
 			}
 			code = ""
 			errMsg = fmt.Sprintf("%v", r)
+			inlineCost = 0
 		}
 	}()
 
@@ -3688,7 +3813,11 @@ func generateClosure(opName string, fn *ssa.Function, rewrite ssaValueRewriter, 
 	guard := fmt.Sprintf("\tif !jitEnabled {\n\t\treturn jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)\n\t}\n", opName)
 	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s%s\t\t}",
 		guard, g.wDecl.String(), injectBindRegCalls(g.w.String()))
-	return result, ""
+	cost := inlineInstructionCount(fn) + g.inlineInstructions
+	if cost >= math.MaxUint16 {
+		cost = math.MaxUint16 - 1
+	}
+	return result, "", uint16(cost)
 }
 
 // generateStorageBody generates the body of a JITEmit method from GetValue SSA.

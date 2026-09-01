@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -845,7 +846,7 @@ func (s Scmer) AppendString(dst []byte) (string, []byte) {
 		}
 		return "false", dst
 	case tagDate:
-		return DateToDisplay(s, GetCurrentSessionLocation()), dst
+		return DateToDisplay(s, time.UTC), dst
 	case tagNil:
 		return "nil", dst
 	case tagFunc:
@@ -1182,7 +1183,7 @@ func (s Scmer) MarshalJSON() ([]byte, error) {
 		case tagFloat:
 			return v.Float()
 		case tagDate:
-			return DateToDisplay(v, GetCurrentSessionLocation())
+			return DateToDisplay(v, time.UTC)
 		case tagString:
 			s := v.String()
 			if !utf8.ValidString(s) {
@@ -1286,7 +1287,7 @@ func (s *Scmer) Write(w io.Writer) {
 		b := strconv.AppendFloat(buf[:0], f, 'g', -1, 64)
 		w.Write(b)
 	case tagDate:
-		io.WriteString(w, DateToDisplay(*s, GetCurrentSessionLocation()))
+		io.WriteString(w, DateToDisplay(*s, time.UTC))
 	case tagString, tagSymbol:
 		io.WriteString(w, s.String())
 	case tagBSON:
@@ -1349,7 +1350,7 @@ func (s *Scmer) UnmarshalJSON(data []byte) error {
 	// Used for deserializing Proc bodies so that inner (lambda ...) forms are kept as
 	// raw S-expression slices. This preserves the env chain: when the outer Proc fires,
 	// inner lambdas are compiled by the evaluator with the correct enclosing env, so
-	// symbol lookup (e.g. OLD/NEW) and (outer NthLocalVar(N)) resolve correctly.
+	// symbol lookup (e.g. OLD/NEW) and (outer depth NthLocalVar(N)) resolve correctly.
 	var fromBody func(any) Scmer
 	fromBody = func(x any) Scmer {
 		switch t := x.(type) {

@@ -52,7 +52,7 @@ func scanHoistTestCall(condition scm.Scmer) []scm.Scmer {
 func TestScanHoistsInvariantFilterCondition(t *testing.T) {
 	condition := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal??"),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewNthLocalVar(2)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewInt(1), scm.NewNthLocalVar(2)}),
 		scm.NewInt(1),
 	})
 	rewritten := tryScanInvariantFilterRewrite(scanHoistTestCall(condition))
@@ -63,7 +63,7 @@ func TestScanHoistsInvariantFilterCondition(t *testing.T) {
 	if !strings.Contains(serialized, "(if (equal?? (var 2) 1) (lambda") {
 		t.Fatalf("condition was not lifted out of the lambda frame: %s", serialized)
 	}
-	if strings.Contains(serialized, "(outer (var 2))") {
+	if strings.Contains(serialized, "(outer 1 (var 2))") {
 		t.Fatalf("lifted condition retained the inner lambda's outer hop: %s", serialized)
 	}
 }

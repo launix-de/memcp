@@ -26,15 +26,17 @@ type triggerBatch struct {
 	rows   []dataset
 	table  *table
 	isOld  bool // true for DELETE (rows are OLD), false for INSERT (rows are NEW)
+	tx     *TxContext
 }
 
 // BeginTriggerBatch starts collecting trigger rows for the given timing.
 // Returns a batch handle. Call Flush() when the DML operation is complete.
-func (t *table) BeginTriggerBatch(timing TriggerTiming, isOld bool) *triggerBatch {
+func (t *table) BeginTriggerBatch(timing TriggerTiming, isOld bool, tx *TxContext) *triggerBatch {
 	return &triggerBatch{
 		timing: timing,
 		table:  t,
 		isOld:  isOld,
+		tx:     tx,
 	}
 }
 
@@ -57,7 +59,7 @@ func (b *triggerBatch) Flush() {
 	if len(rows) == 0 {
 		return
 	}
-	b.table.ExecuteTriggersBatch(b.timing, rows, b.isOld)
+	b.table.ExecuteTriggersBatch(b.timing, rows, b.isOld, b.tx)
 }
 
 // Len returns the current batch size.

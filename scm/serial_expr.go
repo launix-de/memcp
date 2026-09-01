@@ -108,6 +108,27 @@ func prepareSerialExpr(proc *Proc, expression Scmer) serialExpr {
 		case "quote":
 			value := items[1]
 			return func(*Env) Scmer { return value }
+		case "outer":
+			if len(items) != 3 {
+				break
+			}
+			depth, validDepth := outerDepthLiteral(items[1])
+			if !validDepth {
+				break
+			}
+			operand := prepareSerialExpr(proc, items[2])
+			return func(en *Env) Scmer {
+				for remaining := depth; remaining > 0; remaining-- {
+					if en == nil {
+						return NewNil()
+					}
+					en = en.Outer
+				}
+				if en == nil {
+					return NewNil()
+				}
+				return operand(en)
+			}
 		case "begin":
 			if !serialExprMayCaptureEnv(expression) {
 				operands := prepareSerialOperands(proc, items[1:])

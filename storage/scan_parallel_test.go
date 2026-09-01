@@ -422,41 +422,32 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	tx.autoCommit = true
 	tx.Session = scm.NewSession()
 	tx.SessionState = &scm.SessionState{ID: 91}
+	tx.querySeq.Store(37)
 	scm.Apply(tx.Session, scm.NewString("worker-session-test"), scm.NewBool(true))
 
 	var calls atomic.Int32
-	var inheritedContext atomic.Bool
 	var missingSession atomic.Bool
 	var missingSessionState atomic.Bool
 	var missingQuerySeq atomic.Bool
-	scm.SetValues(map[string]any{"scan-worker-test": true, "querySeq": uint64(37)}, func() {
-		done := tbl.iterateShardsParallel(tx, nil, func(s *storageShard, solo bool) {
-			calls.Add(1)
-			if _, ok := scm.GetGLSValue("scan-worker-test"); ok {
-				inheritedContext.Store(true)
-			}
-			session := scm.Context(scm.NewString("session"))
-			if !scm.Apply(session, scm.NewString("worker-session-test")).Bool() {
-				missingSession.Store(true)
-			}
-			if scm.GetCurrentSessionState() != tx.SessionState {
-				missingSessionState.Store(true)
-			}
-			if scm.CurrentQuerySeq() != 37 {
-				missingQuerySeq.Store(true)
-			}
-		})
-		if done == nil {
-			t.Fatal("iterateShardsParallel autocommit multi-shard scan did not return done channel")
+	done := tbl.iterateShardsParallel(tx, nil, func(s *storageShard, solo bool) {
+		calls.Add(1)
+		if !scm.Apply(tx.Session, scm.NewString("worker-session-test")).Bool() {
+			missingSession.Store(true)
 		}
-		<-done
+		if SessionStateFromTx(tx) != tx.SessionState {
+			missingSessionState.Store(true)
+		}
+		if querySeqFromTx(tx) != 37 {
+			missingQuerySeq.Store(true)
+		}
 	})
+	if done == nil {
+		t.Fatal("iterateShardsParallel autocommit multi-shard scan did not return done channel")
+	}
+	<-done
 
 	if calls.Load() != 2 {
 		t.Fatalf("iterateShardsParallel autocommit calls = %d, want 2", calls.Load())
-	}
-	if inheritedContext.Load() {
-		t.Fatal("autocommit shard worker inherited GLS despite explicit transaction context")
 	}
 	if missingSession.Load() {
 		t.Fatal("autocommit shard worker did not install the transaction session")
@@ -467,83 +458,6 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	if missingQuerySeq.Load() {
 		t.Fatal("autocommit shard worker did not install the statement query sequence")
 	}
-}
-
-func TestShardWriteOwnershipUsesExplicitTransactionState(t *testing.T) {
-	tbl := setupScanParallelTestTable(t, "tscanpartxowner")
-	shard := tbl.Shards[0]
-	tx := NewTxContext(TxCursorStability)
-
-	if shard.hasWriteOwnerForTx(tx) {
-		t.Fatal("fresh transaction unexpectedly owns shard write lock")
-	}
-	tx.EnterShardWrite(shard)
-	if !shard.hasWriteOwnerForTx(tx) {
-		t.Fatal("transaction write ownership was not detected")
-	}
-	tx.ExitShardWrite(shard)
-	if shard.hasWriteOwnerForTx(tx) {
-		t.Fatal("released transaction write ownership remained visible")
-	}
-}
-
-func TestIterateShardsParallelReusesOwnedWriteAccess(t *testing.T) {
-	tbl := setupScanParallelTestTable(t, "tscanownedread")
-	shard := tbl.Shards[0]
-	tx := NewTxContext(TxCursorStability)
-
-	shard.mu.Lock()
-	shard.enterWriteOwner()
-	tx.EnterShardWrite(shard)
-	defer func() {
-		tx.ExitShardWrite(shard)
-		shard.exitWriteOwner()
-		shard.mu.Unlock()
-	}()
-
-	called := false
-	done := tbl.iterateShardsParallel(tx, nil, func(got *storageShard, solo bool) {
-		called = got == shard && solo
-	})
-	if done != nil {
-		<-done
-	}
-	if !called {
-		t.Fatal("nested scan did not reuse the worker's existing shard write access")
-	}
-}
-
-func TestShardWriteOwnershipIsLocalToParallelTransactionWorker(t *testing.T) {
-	shard := &storageShard{}
-	tx := NewTxContext(TxCursorStability)
-	ownerReady := make(chan struct{})
-	releaseOwner := make(chan struct{})
-	ownerDone := make(chan struct{})
-
-	go func() {
-		scm.SetValues(map[string]any{"write-owner-test": true}, func() {
-			shard.enterWriteOwner()
-			tx.EnterShardWrite(shard)
-			close(ownerReady)
-			<-releaseOwner
-			tx.ExitShardWrite(shard)
-			shard.exitWriteOwner()
-		})
-		close(ownerDone)
-	}()
-	<-ownerReady
-
-	visible := make(chan bool, 1)
-	go scm.SetValues(map[string]any{"write-observer-test": true}, func() {
-		visible <- shard.hasWriteOwnerForTx(tx)
-	})
-	if <-visible {
-		close(releaseOwner)
-		<-ownerDone
-		t.Fatal("parallel transaction worker inherited another goroutine's shard ownership")
-	}
-	close(releaseOwner)
-	<-ownerDone
 }
 
 func TestShowStatsLockedDoesNotReenterWithQueuedWriter(t *testing.T) {

@@ -183,7 +183,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	(parser (define col sql_identifier) col)
 )))
 
-(define parse_sql (lambda (schema s policy) (begin
+(define parse_sql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
 	/* mysqldump wraps CREATE TRIGGER in a versioned executable comment. MariaDB
 	splits CREATE, DEFINER, and TRIGGER across three comments; discard the
@@ -306,7 +306,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 						(list (symbol "lambda") (list (symbol "row"))
 							(list _psym "once" (list (symbol "nth") (symbol "row") 1) "scalar subselect returned more than one row")))
 					(list (symbol "set") (symbol "resultrow") _rrsym)
-					(build_queryplan_term (sql_expand_views transformed_subquery policy))
+					(build_queryplan_term (sql_expand_views transformed_subquery policy) planning_session tx)
 					(list _psym "value")))
 				expr)
 			(if (or (equal?? head "inner_select_in") (equal?? head (quote inner_select_in))
@@ -331,10 +331,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	/*        body from sql_trigger_body */
 	/*   - (!begin stmt1 stmt2 ...) for BEGIN...END blocks */
 	/*   - (list (col1 expr1) (col2 expr2) ...) for SET statements */
-	/* Output: (lambda (OLD NEW session) ...) that can be applied by ExecuteTriggers */
+	/* Output: (lambda (OLD NEW session tx) ...) that can be applied by ExecuteTriggers */
 	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
 	(define compile_trigger_body (lambda (schema timing body) (begin
-		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session")))
+		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session") (symbol "tx")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
 
@@ -434,7 +434,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 														(list (symbol "list"))
 														(if ignore (list (symbol "lambda") '() 0) nil)
 														false nil)))
-											(build_queryplan_term (sql_expand_views inner_t policy)))))
+											(build_queryplan_term (sql_expand_views inner_t policy) planning_session tx))))
 									(if (equal? tag '!update)
 										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
 										(begin
@@ -449,7 +449,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 												expr)))
 											(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
 											(define t_cols (map_assoc assignments (lambda (col expr) (fix_expr expr))))
-											(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) t_cols t_cond nil nil nil)))
+											(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) t_cols t_cond nil nil nil planning_session tx)))
 										(if (equal? tag '!delete)
 											/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
 											(begin
@@ -461,7 +461,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 													(cons h t) (cons (fix_expr h) (map t fix_expr))
 													expr)))
 												(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
-												(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) nil t_cond nil nil nil)))
+												(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) nil t_cond nil nil nil planning_session tx)))
 											(if (equal? tag '!delete_using)
 												/* DELETE FROM target USING target, other [AS alias] WHERE condition */
 												/* stmt is (!delete_using target tabledefs where) */
@@ -482,7 +482,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 													(define target_alias (match target_def '(id _ _ _ _) id))
 													(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 													(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-													(list (build_dml_plan schema target_tbl target_alias all_defs nil t_where nil nil nil)))
+													(list (build_dml_plan schema target_tbl target_alias all_defs nil t_where nil nil nil planning_session tx)))
 												(if (equal? tag '!update_multi)
 													/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
 													/* stmt is (!update_multi tbls assignments where) */
@@ -502,7 +502,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 														(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
 														(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
 														(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
-														(list (build_dml_plan schema target_tbl target_alias all_defs t_cols t_where nil nil nil)))
+														(list (build_dml_plan schema target_tbl target_alias all_defs t_cols t_where nil nil nil planning_session tx)))
 													(if (equal? tag '!nop)
 														/* No-op statement (e.g. SET @var) - return empty list */
 														'()
@@ -839,16 +839,27 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
+		/* Runtime helpers no longer consult goroutine-local state. Inject the
+		request session values while the SQL call is generated. */
+		(parser '((atom "FROM_UNIXTIME" true) "(" (define p sql_expression) ")")
+			'('from_unixtime p nil '('session_globalvar "time_zone")))
+		(parser '((atom "FROM_UNIXTIME" true) "(" (define p sql_expression) "," (define format sql_expression) ")")
+			'('from_unixtime p format '('session_globalvar "time_zone")))
+		(parser '((atom "DATE_FORMAT" true) "(" (define p sql_expression) "," (define format sql_expression) ")")
+			'('format_date p format '('session_globalvar "time_zone")))
+		(parser '((atom "CURRENT_USER" true) "(" ")") '('sql_concat '('session "username") "@%"))
+		(parser '((atom "USER" true) "(" ")") '('sql_concat '('session "username") "@%"))
+		(parser '((atom "SESSION_USER" true) "(" ")") '('sql_concat '('session "username") "@%"))
 
 		/* DATE literal: DATE 'yyyy-mm-dd' */
 		(parser '((atom "DATE" true) (define s sql_string)) '('date_trunc_day '('parse_date s)))
 
 		/* CURRENT_DATE / CURRENT_DATE() */
-		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date))
-		(parser (atom "CURRENT_DATE" true) '('current_date))
+		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date '('session_globalvar "time_zone")))
+		(parser (atom "CURRENT_DATE" true) '('current_date '('session_globalvar "time_zone")))
 
 		/* EXTRACT(field FROM expr) */
-		(parser '((atom "EXTRACT" true) "(" (define field sql_identifier_unquoted) (atom "FROM" true) (define e sql_expression) ")") '('extract_date e field))
+		(parser '((atom "EXTRACT" true) "(" (define field sql_identifier_unquoted) (atom "FROM" true) (define e sql_expression) ")") '('extract_date e field '('session_globalvar "time_zone")))
 
 		/* TIMESTAMPDIFF(unit, dt1, dt2) — unit is a keyword, not a column */
 		(parser '((atom "TIMESTAMPDIFF" true) "(" (define unit sql_identifier_unquoted) "," (define dt1 sql_expression) "," (define dt2 sql_expression) ")") '('timestampdiff unit dt1 dt2))
@@ -1043,10 +1054,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 	(define sql_build_select_plan (lambda (query) (begin
 		(define expanded_query (sql_expand_views query policy))
-		(define actual_plan (build_queryplan_term expanded_query))
+		(define actual_plan (build_queryplan_term expanded_query planning_session tx))
 		(define execution_plan (if (sql_select_calc_found_rows? query)
 			(begin
-				(define count_plan (build_queryplan_term (sql_expand_views (sql_select_clear_stage query) policy)))
+				(define count_plan (build_queryplan_term (sql_expand_views (sql_select_clear_stage query) policy) planning_session tx))
 				(list (quote !begin)
 					(list (quote session) "found_rows" 0)
 					(list
@@ -1147,8 +1158,8 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(if (and ignoreexists (nil? updaterows))
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-				'('lambda '('id) '('session "last_insert_id" 'id)))))
-			(build_queryplan_term (sql_expand_views inner policy))
+				nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))
+			(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
 		)
 	)))
 	(define sql_select_core (parser '(
@@ -1293,7 +1304,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(if policy (policy schema tbl true) true)
 			/* Route ALL UPDATE (single + multi-table) through the query planner.
 			The planner handles column resolution, inner_selects, joins. */
-			(build_dml_plan schema tbl tblalias all_defs (merge cols) (coalesceNil condition true) order limit offset)
+			(build_dml_plan schema tbl tblalias all_defs (merge cols) (coalesceNil condition true) order limit offset planning_session tx)
 	)))
 
 	(define sql_delete (parser '(
@@ -1337,7 +1348,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			cols = nil signals DELETE mode. */
 			(define del_schema (coalesce schema2 schema))
 			(define del_defs (list (list tbl del_schema tbl false nil)))
-			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset)
+			(build_dml_plan del_schema tbl nil del_defs nil (coalesceNil condition true) order limit offset planning_session tx)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -1350,7 +1361,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define trunc_schema (coalesce schema2 schema))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
-				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)))
+				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
 	)))
 
 	/* Multi-table DELETE: retain every target alias through physical lowering. */
@@ -1363,7 +1374,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(error (concat "DELETE target not found: " target))
 				(match target_def '(id target_schema target_tbl _ _)
 					(list id target_schema target_tbl)))))))
-		(build_multi_delete_plan schema target_specs all_defs condition)
+		(build_multi_delete_plan schema target_specs all_defs condition planning_session tx)
 	)))
 	(define sql_multi_delete (parser (or
 		/* DELETE t1 FROM t1 JOIN t2 ON ... WHERE ... */
@@ -1455,7 +1466,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					(if (and ignoreexists (nil? updaterows))
 						'((quote lambda) '() 0)
 						(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-					false '('lambda '('id) '('session "last_insert_id" 'id))))
+					false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
 	)))
 
 	/* MySQL REPLACE has INSERT syntax and overwrites every supplied column when
@@ -1481,7 +1492,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(cons list updatecols)
 				'('lambda (map updatecols (lambda (c) (symbol c)))
 					'('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v))))))
-				false '('lambda '('id) '('session "last_insert_id" 'id))
+				false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)
 	))))
 
 	(define sql_insert_values_select (parser '(
@@ -1561,7 +1572,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define dataset (map assignments (lambda (a) (match a '(_ value) value))))
 			'('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) '(list (cons list dataset)) '(list)
 				(if ignoreexists '('lambda '() true) nil)
-				false '('lambda '('id) '('session "last_insert_id" 'id))))))
+				false '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))))
 
 	(define sql_foreign_key_mode (parser (or
 		(parser (atom "RESTRICT" true) "restrict")
@@ -1632,7 +1643,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define collation (regex "[0-9]+"))) '("auto_increment" collation))
 		)))
-	) '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
+	) '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx))))
 
 	(define sql_alter_table (parser '(
 		(atom "ALTER" true)
@@ -1714,13 +1725,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser (atom "SHUTDOWN" true) (begin (if policy (policy "system" true true) true) '(shutdown)))
 		(parser (define query sql_select) (sql_build_select_plan query))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query sql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query sql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id sql_string) (define variant sql_string) (define query sql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query sql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query sql_select)) (explain_queryplan_physical (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy))) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query sql_select)) (explain_queryplan_reorder (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query sql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query sql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id sql_string) (define variant sql_string) (define query sql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query sql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query sql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (define query sql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
 		sql_insert_set
 		sql_insert_values_select
 		sql_insert_into
@@ -2005,13 +2016,18 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(atom "ISOLATION" true) (atom "LEVEL" true) (atom "REPEATABLE" true) (atom "READ" true)) (quote true))
 		(parser '((atom "SET" true) (? (atom "SESSION" true)) (? "@") (define key sql_identifier)
 			(or "=" (atom ":=" true)) (atom "DEFAULT" true))
-			(list (list (quote context) "session") key nil))
-		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
+			(list (quote session) key nil))
+		(parser '((atom "SET" true) (? (atom "SESSION" true)) (define vars (* (parser '((? "@") (define key sql_identifier) (or "=" (atom ":=" true)) (define value sql_expression)) (list (quote session) key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl sql_identifier) (? (atom "AS" true) (define alias sql_identifier)) (define mode sql_lock_table_mode)) (list tbl (not (nil? mode)))) ",")))
-			(list (quote locktables) (cons (quote list) (map locks (lambda (l) (cons (quote list) (list schema (nth l 0) (nth l 1))))))))
-		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) '((quote unlocktables)))
+			(list
+				(quote locktables)
+				(cons (quote list)
+					(map locks (lambda (l)
+						(cons (quote list) (list schema (nth l 0) (nth l 1))))))
+				(quote tx)))
+		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) '((quote unlocktables) (quote tx)))
 
 		/* CREATE INDEX syntax acceptance (no-op unless UNIQUE; MemCP auto-indexes) */
 		(parser '((atom "CREATE" true)
@@ -2082,22 +2098,22 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			'((quote droptrigger) schema name (if if_exists true false)))
 
 		/* USE database - change current schema */
-		(parser '((atom "USE" true) (define db sql_identifier)) (list (list (quote context) "session") "schema" db))
+		(parser '((atom "USE" true) (define db sql_identifier)) (list (quote session) "schema" db))
 
 		/* ANALYZE TABLE (no-op) */
 		(parser '((atom "ANALYZE" true) (atom "TABLE" true) sql_identifier) "ignore")
 
 		/* transaction control */
-		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (list (quote context) "session")))
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (list (quote context) "session")))
-		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (list (quote context) "session")))
-		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (list (quote context) "session")))
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (quote session) (quote tx)))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (quote session) (quote tx)))
+		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (quote session) (quote tx)))
+		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (quote session)))
 		/* mysqldump uses read-only savepoints around each table. MemCP keeps the
 		outer consistent transaction and accepts these markers as no-ops. */
 		(parser '((atom "SAVEPOINT" true) sql_identifier) (quote true))
 		(parser '((atom "ROLLBACK" true) (atom "TO" true) (? (atom "SAVEPOINT" true)) sql_identifier) (quote true))
 		(parser '((atom "RELEASE" true) (atom "SAVEPOINT" true) sql_identifier) (quote true))
-		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
+		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (quote session)))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
@@ -2115,7 +2131,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(concat start (eval (state "delimiter")) rest) (begin
 				/* command ended -> execute (at max one command per line) */
 				(print (concat (state "sql") start))
-				(set plan (parse_sql schema (concat (state "sql") start) nil))
+				(set plan (parse_sql schema (concat (state "sql") start) nil nil))
 				(print "SQL execute" plan)
 				(eval plan)
 				(state "sql" rest)

@@ -218,6 +218,8 @@ func Equal(a, b Scmer) bool {
 				return af == nil && bf == nil
 			}
 			return equalAssocPairs(af.Pairs, bf.Pairs)
+		case tagProc:
+			return a.ptr == b.ptr
 		case tagAny:
 			return a.Any() == b.Any()
 		}

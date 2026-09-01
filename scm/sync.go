@@ -23,7 +23,6 @@ import "unsafe"
 import "context"
 import "runtime"
 import "sync/atomic"
-import "github.com/jtolds/gls"
 
 // cachedMemStats provides a cached version of runtime.ReadMemStats. Cache
 // ownership accounting must not be added to this snapshot: those allocations
@@ -206,16 +205,19 @@ func sessionHasScopedFlight(sess *session, scope Scmer) bool {
 	return false
 }
 
-func sessionEnsureScopedCleanup(sess *session, scope Scmer) {
+func executionContextFrom(value Scmer) context.Context {
+	ss, seq := querySessionState(value)
+	if ss == nil || seq == 0 {
+		return context.Background()
+	}
+	return ss.QueryContext(seq)
+}
+
+func sessionEnsureScopedCleanup(sess *session, scope Scmer, ctx context.Context) {
 	if sess.ScopedCleanup[scope] {
 		return
 	}
-	value, ok := GetGLSValue("context")
-	if !ok {
-		return
-	}
-	ctx, ok := value.(context.Context)
-	if !ok || ctx.Done() == nil {
+	if ctx == nil || ctx.Done() == nil {
 		return
 	}
 	sess.ScopedCleanup[scope] = true
@@ -235,7 +237,7 @@ func sessionEnsureScopedCleanup(sess *session, scope Scmer) {
 	})
 }
 
-func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, producer Scmer) Scmer {
+func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, tx Scmer, producer Scmer) Scmer {
 	computeKey := sessionScopedKey{scope: scope, key: key}
 	sess.Mu.Lock()
 	if value, ok := sess.ScopedValues[computeKey]; ok {
@@ -248,15 +250,10 @@ func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, producer 
 		sess.ScopedCleanup = make(map[Scmer]bool)
 		sess.ScopedCanceled = make(map[Scmer]bool)
 	}
-	sessionEnsureScopedCleanup(sess, scope)
+	ctx := executionContextFrom(tx)
+	sessionEnsureScopedCleanup(sess, scope, ctx)
 	if flight := sess.ScopedFlights[computeKey]; flight != nil {
 		sess.Mu.Unlock()
-		ctx := context.Background()
-		if value, ok := GetGLSValue("context"); ok {
-			if current, ok := value.(context.Context); ok {
-				ctx = current
-			}
-		}
 		select {
 		case <-flight.done:
 			if flight.failed {
@@ -320,7 +317,12 @@ func NewSession(a ...Scmer) Scmer {
 			if a[0].String() != "get_or_compute_scoped" {
 				panic("session: unknown 4-argument operation")
 			}
-			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3])
+			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[1], a[3])
+		case 5:
+			if a[0].String() != "get_or_compute_scoped" {
+				panic("session: unknown 5-argument operation")
+			}
+			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3], a[4])
 		case 1:
 			sess.Mu.RLock()
 			defer sess.Mu.RUnlock()
@@ -346,156 +348,59 @@ func NewSession(a ...Scmer) Scmer {
 			}
 			return NewSlice(keys)
 		default:
-			panic("wrong number of parameters provided to session: 0, 1, 2, or 4 required")
+			panic("wrong number of parameters provided to session: 0, 1, 2, 4, or 5 required")
 		}
 	})
 }
 
-var sessionCallableType = &TypeDescriptor{Kind: "func", Label: "session", Description: "session accessor accepting exactly zero, one, two, or four arguments", HasSideEffects: true,
+var sessionCallableType = &TypeDescriptor{Kind: "func", Label: "session", Description: "session accessor accepting exactly zero, one, two, four, or five arguments", HasSideEffects: true,
 	Params: []*TypeDescriptor{
 		{Kind: "any", Label: "key_or_operation", Description: "key, or get_or_compute_scoped", Optional: true},
 		{Kind: "any", Label: "value_or_scope", Description: "value to store, or scope for get_or_compute_scoped", Optional: true},
 		{Kind: "any", Label: "scoped_key", Description: "cache key used by get_or_compute_scoped", Optional: true},
 		{Kind: "func", CallsOnce: true, Label: "scoped_producer", Description: "producer used only by the four-argument get_or_compute_scoped form", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "value", Description: "computed value cached for the scope and key"}},
+		{Kind: "any", Label: "scoped_finalizer", Description: "optional finalizer for scoped cache entries", Optional: true},
 	},
 	Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value list, stored value, retrieved value, or shared computed value"},
 }
 
-var mgr *gls.ContextManager
-
-func Context(a ...Scmer) (result Scmer) {
-	if mgr == nil {
-		// prone to race conditions, to the first call should be called in the initialization
-		mgr = gls.NewContextManager()
+// Context creates a Scheme session and passes it explicitly to fn.
+func Context(a ...Scmer) Scmer {
+	if len(a) == 0 || a[0].IsNil() {
+		panic("context requires a callback")
 	}
-	if a[0].IsString() {
-		switch a[0].String() {
-		case "session":
-			val, ok := mgr.GetValue("session")
-			if !ok {
-				panic("no session set")
-			}
-			return val.(Scmer)
-		case "query":
-			return NewInt(int64(CurrentQuerySeq()))
-		case "check":
-			ctxVal, ok := mgr.GetValue("context")
-			if !ok {
-				// Startup compilation and Scheme self-tests have no request to
-				// cancel. Treat that environment as live while preserving prompt
-				// cancellation whenever a request context exists.
-				return NewBool(true)
-			}
-			e := ctxVal.(context.Context).Err()
-			if e != nil {
-				panic(e)
-			}
-			return NewBool(true)
-		}
-	}
-	if !a[0].IsNil() {
-		NewContext(context.TODO(), func() {
-			result = Apply(a[0], a[1:]...)
-		})
-		return result
-	}
-	panic("unimplemented")
+	args := make([]Scmer, len(a))
+	args[0] = NewSession()
+	copy(args[1:], a[1:])
+	return Apply(a[0], args...)
 }
 
-func NewContext(ctx context.Context, fn func()) {
-	if mgr == nil {
-		// prone to race conditions, to the first call should be called in the initialization
-		mgr = gls.NewContextManager()
-	}
-	mgr.SetValues(gls.Values{
-		"session": NewSession(),
-		"context": ctx,
-		// TODO: logger for print and time, process ID etc. etc.
-	}, fn)
-}
-
-// NewContextWithSession installs a pre-existing Scheme session and any
-// request-local values in one GLS frame. Keeping one frame avoids repeating
-// goroutine stack tagging for every HTTP request.
-func NewContextWithSession(ctx context.Context, session Scmer, values map[string]any, fn func()) {
-	if mgr == nil {
-		mgr = gls.NewContextManager()
-	}
-	glsValues := gls.Values{
-		"session": session,
-		"context": ctx,
-	}
-	for key, value := range values {
-		glsValues[key] = value
-	}
-	mgr.SetValues(glsValues, fn)
-}
-
-func GetContext() context.Context {
-	if mgr == nil {
-		// prone to race conditions, to the first call should be called in the initialization
-		mgr = gls.NewContextManager()
-	}
-	r, ok := mgr.GetValue("context")
-	if !ok {
-		panic("no context set")
-	}
-	return r.(context.Context)
-}
-
-// GetCurrentTx returns the current transaction context by looking up the
-// session from GLS and reading the "__memcp_tx" key. Returns nil if no
-// transaction is active or no session is available.
-func GetCurrentTx() any {
-	if mgr == nil {
-		return nil
-	}
-	val, ok := mgr.GetValue("session")
-	if !ok {
-		return nil
-	}
-	sessionScmer := val.(Scmer)
-	txScmer := Apply(sessionScmer, NewString("__memcp_tx"))
-	if txScmer.IsNil() {
-		return nil
-	}
-	return txScmer.Any()
-}
-
-// SetValues wraps mgr.SetValues for use by other packages (e.g. MySQL
-// frontend) that need to install session/context into GLS.
-func SetValues(vals map[string]any, fn func()) {
-	if mgr == nil {
-		mgr = gls.NewContextManager()
-	}
-	glsVals := make(gls.Values, len(vals))
-	for k, v := range vals {
-		glsVals[k] = v
-	}
-	mgr.SetValues(glsVals, fn)
-}
-
-// GetGLSValue returns the GLS value for a given key, or nil if no GLS context
-// is installed. Used by packages outside scm to read goroutine-local markers
-// that propagate across gls.Go-spawned worker goroutines.
-func GetGLSValue(key string) (any, bool) {
-	if mgr == nil {
-		return nil, false
-	}
-	return mgr.GetValue(key)
-}
-
-// WithSession executes fn with the given session installed in GLS,
-// so that GetCurrentTx() and other GLS-based lookups use this session.
+// WithSession evaluates fn in a copy of its lexical closure with session bound.
+// Copying the existing frame, instead of inserting another one, preserves the
+// exact depth of optimizer-resolved outer references and keeps concurrent calls
+// isolated from each other.
 func WithSession(session Scmer, fn Scmer) Scmer {
-	var result Scmer
-	if mgr == nil {
-		mgr = gls.NewContextManager()
+	if !fn.IsProc() {
+		return Apply(fn)
 	}
-	mgr.SetValues(gls.Values{"session": session}, func() {
-		result = Apply(fn)
-	})
-	return result
+	proc := *fn.Proc()
+	outer := proc.En
+	if outer == nil {
+		outer = &Globalenv
+	}
+	vars := make(Vars, len(outer.Vars)+1)
+	for name, value := range outer.Vars {
+		vars[name] = value
+	}
+	vars[Symbol("session")] = session
+	proc.En = &Env{
+		Vars:         vars,
+		VarsNumbered: outer.VarsNumbered,
+		Outer:        outer.Outer,
+		Nodefine:     outer.Nodefine,
+	}
+	proc.Compiled = nil
+	return Apply(NewProcStruct(proc))
 }
 
 func init_sync() {
@@ -1602,6 +1507,7 @@ func init_sync() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  51,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1610,207 +1516,12 @@ func init_sync() {
 		Fn: NewSession,
 		Type: &TypeDescriptor{Kind: "func", Description: "Creates a thread-safe key-value session. Call it without arguments to list values, with a key to read, with a key and value to store, or with get_or_compute_scoped, a scope, a key, and a producer to share one concurrent computation.",
 			Return: sessionCallableType,
-			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["newsession"].Fn, args, result)
-				}
-				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(func() *session { return new(session) }), nil, 1)
-				ctx.BindReg(d0.Reg, &d0)
-				ctx.SyncDesc(&d0)
-				d1 := d0
-				_ = d1
-				d2 := ctx.EmitGoCallScalar(GoFuncAddr(func(size int) map[string]Scmer { return make(map[string]Scmer, size) }), []JITValueDesc{JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}}, 1)
-				ctx.EnsureDesc(&d2)
-				ctx.EnsureDesc(&d1)
-				ctx.EnsureDesc(&d2)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *session, value map[string]Scmer) { base.Map = value }), []JITValueDesc{d1, d2})
-				bbpos_1_0 := int32(-1)
-				_ = bbpos_1_0
-				bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				d3 := ctx.EmitGoCallScalar(GoFuncAddr(func() *func(...Scmer) Scmer { return new(func(...Scmer) Scmer) }), nil, 1)
-				ctx.BindReg(d3.Reg, &d3)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EmitGoCallVoid(GoFuncAddr(func(dst *func(...Scmer) Scmer, value func(...Scmer) Scmer) { *dst = value }), []JITValueDesc{d3})
-				ctx.ReclaimUntrackedRegs()
-				r0 := ctx.AllocReg()
-				r1 := ctx.AllocRegExcept(r0)
-				ctx.EmitMovRegImm64(r0, 0)
-				ctx.EmitMovRegImm64(r1, 0)
-				d4 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r0, Reg2: r1}
-				ctx.BindReg(r0, &d4)
-				ctx.BindReg(r1, &d4)
-				ctx.ReclaimUntrackedRegs()
-				d5 := args[0]
-				d5.ID = 0
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
-				ctx.EnsureDesc(&d3)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
-				ctx.EnsureDesc(&d3)
-				ctx.ReclaimUntrackedRegs()
-				d8 := args[0]
-				d8.ID = 0
-				ctx.ReclaimUntrackedRegs()
-				d9 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
-				d10 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
-				d11 := d9
-				_ = d11
-				ctx.StabilizeDescForControlFlow(&d11)
-				d12 := d10
-				_ = d12
-				ctx.StabilizeDescForControlFlow(&d12)
-				bbpos_2_0 := int32(-1)
-				_ = bbpos_2_0
-				bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d12)
-				var d13 JITValueDesc
-				if d12.Loc == LocImm {
-					d13 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d12.Imm.Int()) << 8))}
-				} else {
-					ctx.EmitShlRegImm8(d12.Reg, 8)
-					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d12.Reg}
-					ctx.BindReg(d12.Reg, &d13)
-				}
-				if d13.Loc == LocReg && d12.Loc == LocReg && d13.Reg == d12.Reg {
-					ctx.TransferReg(d12.Reg)
-					d12.Loc = LocNone
-				}
-				ctx.FreeDesc(&d12)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d11)
-				var d14 JITValueDesc
-				if d11.Loc == LocImm {
-					d14 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d11.Imm.Int() & 255)}
-				} else {
-					ctx.EmitAndRegImm32(d11.Reg, int32(255))
-					d14 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d11.Reg}
-					ctx.BindReg(d11.Reg, &d14)
-				}
-				if d14.Loc == LocImm {
-					d14 = JITValueDesc{Loc: LocImm, Type: d14.Type, Imm: NewInt(int64(uint64(d14.Imm.Int()) & 0xff))}
-				} else {
-					ctx.EmitShlRegImm8(d14.Reg, 56)
-					ctx.EmitShrRegImm8(d14.Reg, 56)
-				}
-				if d14.Loc == LocReg && d11.Loc == LocReg && d14.Reg == d11.Reg {
-					ctx.TransferReg(d11.Reg)
-					d11.Loc = LocNone
-				}
-				ctx.FreeDesc(&d11)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d14)
-				ctx.EnsureDesc(&d14)
-				var d15 JITValueDesc
-				if d14.Loc == LocImm {
-					d15 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(uint8(d14.Imm.Int()))))}
-				} else {
-					r2 := ctx.AllocReg()
-					ctx.EmitMovRegReg(r2, d14.Reg)
-					ctx.EmitShlRegImm8(r2, 56)
-					ctx.EmitShrRegImm8(r2, 56)
-					d15 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r2}
-					ctx.BindReg(r2, &d15)
-				}
-				ctx.FreeDesc(&d14)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d13)
-				ctx.EnsureDesc(&d15)
-				var d16 JITValueDesc
-				if d13.Loc == LocImm && d15.Loc == LocImm {
-					d16 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d13.Imm.Int() | d15.Imm.Int())}
-				} else if d13.Loc == LocImm && d13.Imm.Int() == 0 {
-					d16 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d15.Reg}
-					ctx.BindReg(d15.Reg, &d16)
-				} else if d15.Loc == LocImm && d15.Imm.Int() == 0 {
-					d16 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d13.Reg}
-					ctx.BindReg(d13.Reg, &d16)
-				} else if d13.Loc == LocImm {
-					scratch := ctx.AllocRegExcept(d15.Reg)
-					ctx.EmitMovRegImm64(scratch, uint64(d13.Imm.Int()))
-					ctx.EmitOrInt64(scratch, d15.Reg)
-					d16 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
-					ctx.BindReg(scratch, &d16)
-				} else if d15.Loc == LocImm {
-					if d15.Imm.Int() >= -2147483648 && d15.Imm.Int() <= 2147483647 {
-						ctx.EmitOrRegImm32(d13.Reg, int32(d15.Imm.Int()))
-					} else {
-						ctx.EmitMovRegImm64(RegR11, uint64(d15.Imm.Int()))
-						ctx.EmitOrInt64(d13.Reg, RegR11)
-					}
-					d16 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d13.Reg}
-					ctx.BindReg(d13.Reg, &d16)
-				} else {
-					ctx.EmitOrInt64(d13.Reg, d15.Reg)
-					d16 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d13.Reg}
-					ctx.BindReg(d13.Reg, &d16)
-				}
-				if d16.Loc == LocReg && d13.Loc == LocReg && d16.Reg == d13.Reg {
-					ctx.TransferReg(d13.Reg)
-					d13.Loc = LocNone
-				}
-				ctx.FreeDesc(&d13)
-				ctx.FreeDesc(&d15)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d16)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
-				ctx.EnsureDesc(&d3)
-				ctx.EmitMovToReg(d5.Reg, d3)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d16)
-				ctx.EnsureDesc(&d16)
-				ctx.EmitMovToReg(d8.Reg2, d16)
-				ctx.FreeDesc(&d16)
-				ctx.ReclaimUntrackedRegs()
-				d17 := d4
-				_ = d17
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d17)
-				if d17.Loc == LocImm {
-					if result.Loc == LocAny {
-						return d17
-					}
-				}
-				if result.Loc == LocAny {
-					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					ctx.BindReg(result.Reg, &result)
-					ctx.BindReg(result.Reg2, &result)
-				}
-				ctx.EnsureDesc(&d17)
-				if d17.Loc == LocRegPair {
-					ctx.EmitMovPairToResult(&d17, &result)
-					result.Type = d17.Type
-				} else {
-					switch d17.Type {
-					case tagBool:
-						ctx.EmitMakeBool(result, d17)
-						result.Type = tagBool
-					case tagInt:
-						ctx.EmitMakeInt(result, d17)
-						result.Type = tagInt
-					case tagFloat:
-						ctx.EmitMakeFloat(result, d17)
-						result.Type = tagFloat
-					case tagNil:
-						ctx.EmitMakeNil(result)
-						result.Type = tagNil
-					default:
-						panic("jit: single-block scalar return with unknown type")
-					}
-				}
-				return result
-				return result
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// JITGen native call boundary: escaping or recursive Go closure.
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["newsession"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1954,6 +1665,7 @@ func init_sync() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -1966,28 +1678,35 @@ func init_sync() {
 			},
 			Return: &TypeDescriptor{Kind: "any"},
 			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				// JITGen native call boundary: escaping or recursive Go closure.
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["context"].Fn, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "sleep",
 
 		Fn: func(a ...Scmer) Scmer {
-			ctx := GetContext()
+			queryState := NewNil()
+			duration := a[0]
+			if len(a) > 1 {
+				queryState = a[0]
+				duration = a[1]
+			}
+			ctx := executionContextFrom(queryState)
 			select {
 			case <-ctx.Done():
 				panic(ctx.Err())
-			case <-time.After(time.Duration(ToFloat(a[0]) * float64(time.Second))):
+			case <-time.After(time.Duration(ToFloat(duration) * float64(time.Second))):
 				return NewBool(true)
 			}
 		},
-		Type: &TypeDescriptor{Kind: "func", Description: "sleeps the amount of seconds",
+		Type: &TypeDescriptor{Kind: "func", Description: "sleeps the amount of seconds and observes cancellation through tx",
 			Params: []*TypeDescriptor{
-				{Kind: "number", Label: "duration", Description: "number of seconds to sleep"},
+				{Kind: "any", Label: "duration_or_tx", Description: "duration, or explicit transaction context followed by duration", Optional: true},
+				{Kind: "number", Label: "duration", Description: "number of seconds to sleep when a transaction context is supplied", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 
@@ -1997,6 +1716,7 @@ func init_sync() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2023,220 +1743,12 @@ func init_sync() {
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result cached from the first call"},
 			},
 
-			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["once"].Fn, args, result)
-				}
-				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
-				bbpos_1_0 := int32(-1)
-				_ = bbpos_1_0
-				bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				bbpos_2_0 := int32(-1)
-				_ = bbpos_2_0
-				bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				bbpos_3_0 := int32(-1)
-				_ = bbpos_3_0
-				bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				d0 := ctx.EmitGoCallScalar(GoFuncAddr(func() *func(...Scmer) Scmer { return new(func(...Scmer) Scmer) }), nil, 1)
-				ctx.BindReg(d0.Reg, &d0)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EmitGoCallVoid(GoFuncAddr(func(dst *func(...Scmer) Scmer, value func(...Scmer) Scmer) { *dst = value }), []JITValueDesc{d0})
-				ctx.ReclaimUntrackedRegs()
-				r0 := ctx.AllocReg()
-				r1 := ctx.AllocRegExcept(r0)
-				ctx.EmitMovRegImm64(r0, 0)
-				ctx.EmitMovRegImm64(r1, 0)
-				d1 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r0, Reg2: r1}
-				ctx.BindReg(r0, &d1)
-				ctx.BindReg(r1, &d1)
-				ctx.ReclaimUntrackedRegs()
-				d2 := args[0]
-				d2.ID = 0
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
-				ctx.ReclaimUntrackedRegs()
-				d5 := args[0]
-				d5.ID = 0
-				ctx.ReclaimUntrackedRegs()
-				d6 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(8)}
-				d7 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
-				d8 := d6
-				_ = d8
-				ctx.StabilizeDescForControlFlow(&d8)
-				d9 := d7
-				_ = d9
-				ctx.StabilizeDescForControlFlow(&d9)
-				bbpos_4_0 := int32(-1)
-				_ = bbpos_4_0
-				bbpos_4_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d9)
-				var d10 JITValueDesc
-				if d9.Loc == LocImm {
-					d10 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(d9.Imm.Int()) << 8))}
-				} else {
-					ctx.EmitShlRegImm8(d9.Reg, 8)
-					d10 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d9.Reg}
-					ctx.BindReg(d9.Reg, &d10)
-				}
-				if d10.Loc == LocReg && d9.Loc == LocReg && d10.Reg == d9.Reg {
-					ctx.TransferReg(d9.Reg)
-					d9.Loc = LocNone
-				}
-				ctx.FreeDesc(&d9)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d8)
-				var d11 JITValueDesc
-				if d8.Loc == LocImm {
-					d11 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d8.Imm.Int() & 255)}
-				} else {
-					ctx.EmitAndRegImm32(d8.Reg, int32(255))
-					d11 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d8.Reg}
-					ctx.BindReg(d8.Reg, &d11)
-				}
-				if d11.Loc == LocImm {
-					d11 = JITValueDesc{Loc: LocImm, Type: d11.Type, Imm: NewInt(int64(uint64(d11.Imm.Int()) & 0xff))}
-				} else {
-					ctx.EmitShlRegImm8(d11.Reg, 56)
-					ctx.EmitShrRegImm8(d11.Reg, 56)
-				}
-				if d11.Loc == LocReg && d8.Loc == LocReg && d11.Reg == d8.Reg {
-					ctx.TransferReg(d8.Reg)
-					d8.Loc = LocNone
-				}
-				ctx.FreeDesc(&d8)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d11)
-				ctx.EnsureDesc(&d11)
-				var d12 JITValueDesc
-				if d11.Loc == LocImm {
-					d12 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uint64(uint8(d11.Imm.Int()))))}
-				} else {
-					r2 := ctx.AllocReg()
-					ctx.EmitMovRegReg(r2, d11.Reg)
-					ctx.EmitShlRegImm8(r2, 56)
-					ctx.EmitShrRegImm8(r2, 56)
-					d12 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r2}
-					ctx.BindReg(r2, &d12)
-				}
-				ctx.FreeDesc(&d11)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d10)
-				ctx.EnsureDesc(&d12)
-				var d13 JITValueDesc
-				if d10.Loc == LocImm && d12.Loc == LocImm {
-					d13 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d10.Imm.Int() | d12.Imm.Int())}
-				} else if d10.Loc == LocImm && d10.Imm.Int() == 0 {
-					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d12.Reg}
-					ctx.BindReg(d12.Reg, &d13)
-				} else if d12.Loc == LocImm && d12.Imm.Int() == 0 {
-					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d10.Reg}
-					ctx.BindReg(d10.Reg, &d13)
-				} else if d10.Loc == LocImm {
-					scratch := ctx.AllocRegExcept(d12.Reg)
-					ctx.EmitMovRegImm64(scratch, uint64(d10.Imm.Int()))
-					ctx.EmitOrInt64(scratch, d12.Reg)
-					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
-					ctx.BindReg(scratch, &d13)
-				} else if d12.Loc == LocImm {
-					if d12.Imm.Int() >= -2147483648 && d12.Imm.Int() <= 2147483647 {
-						ctx.EmitOrRegImm32(d10.Reg, int32(d12.Imm.Int()))
-					} else {
-						ctx.EmitMovRegImm64(RegR11, uint64(d12.Imm.Int()))
-						ctx.EmitOrInt64(d10.Reg, RegR11)
-					}
-					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d10.Reg}
-					ctx.BindReg(d10.Reg, &d13)
-				} else {
-					ctx.EmitOrInt64(d10.Reg, d12.Reg)
-					d13 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d10.Reg}
-					ctx.BindReg(d10.Reg, &d13)
-				}
-				if d13.Loc == LocReg && d10.Loc == LocReg && d13.Reg == d10.Reg {
-					ctx.TransferReg(d10.Reg)
-					d10.Loc = LocNone
-				}
-				ctx.FreeDesc(&d10)
-				ctx.FreeDesc(&d12)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d13)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d0)
-				ctx.EnsureDesc(&d0)
-				ctx.EmitMovToReg(d2.Reg, d0)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d13)
-				ctx.EnsureDesc(&d13)
-				ctx.EmitMovToReg(d5.Reg2, d13)
-				ctx.FreeDesc(&d13)
-				ctx.ReclaimUntrackedRegs()
-				d14 := d1
-				_ = d14
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d14)
-				if d14.Loc == LocImm {
-					if result.Loc == LocAny {
-						return d14
-					}
-				}
-				if result.Loc == LocAny {
-					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					ctx.BindReg(result.Reg, &result)
-					ctx.BindReg(result.Reg2, &result)
-				}
-				ctx.EnsureDesc(&d14)
-				if d14.Loc == LocRegPair {
-					ctx.EmitMovPairToResult(&d14, &result)
-					result.Type = d14.Type
-				} else {
-					switch d14.Type {
-					case tagBool:
-						ctx.EmitMakeBool(result, d14)
-						result.Type = tagBool
-					case tagInt:
-						ctx.EmitMakeInt(result, d14)
-						result.Type = tagInt
-					case tagFloat:
-						ctx.EmitMakeFloat(result, d14)
-						result.Type = tagFloat
-					case tagNil:
-						ctx.EmitMakeNil(result)
-						result.Type = tagNil
-					default:
-						panic("jit: single-block scalar return with unknown type")
-					}
-				}
-				return result
-				return result
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// JITGen native call boundary: escaping or recursive Go closure.
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["once"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2246,12 +1758,13 @@ func init_sync() {
 			token := make(chan struct{}, 1)
 			token <- struct{}{}
 			return NewFunc(func(a ...Scmer) Scmer {
-				ctx := context.Background()
-				if value, ok := GetGLSValue("context"); ok {
-					if current, ok := value.(context.Context); ok {
-						ctx = current
-					}
+				queryState := NewNil()
+				fn := a[0]
+				if len(a) > 1 {
+					queryState = a[0]
+					fn = a[1]
 				}
+				ctx := executionContextFrom(queryState)
 				select {
 				case <-token:
 					if err := ctx.Err(); err != nil {
@@ -2271,14 +1784,15 @@ func init_sync() {
 				}()
 
 				// execute serially
-				return Apply(a[0])
+				return Apply(fn)
 			})
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "Creates a context-aware mutex. The return value serializes calls to parameterless functions and stops waiting when the current request is cancelled.",
 			Params: []*TypeDescriptor{},
 			Return: &TypeDescriptor{Kind: "func", Label: "locked", Description: "executes one parameterless function while holding the mutex", HasSideEffects: true,
 				Params: []*TypeDescriptor{
-					{Kind: "func", CallsOnce: true, Label: "fn", Description: "parameterless function to execute under the lock", Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
+					{Kind: "any", Label: "fn_or_tx", Description: "function, or explicit transaction context followed by function", Optional: true},
+					{Kind: "func", CallsOnce: true, Label: "fn", Description: "parameterless function to execute under the lock", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "result"}},
 				},
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result returned by the protected function"},
 			},
@@ -2288,6 +1802,7 @@ func init_sync() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["mutex"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2328,6 +1843,7 @@ func init_sync() {
 				return result
 				return result
 			},
+			JITInlineCost: 4,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2574,6 +2090,7 @@ func init_sync() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  36,
 		},
 	})
 }

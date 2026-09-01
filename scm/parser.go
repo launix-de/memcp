@@ -93,14 +93,12 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 				jitAutoImportCoverageWorthwhile(compiled.Proc().Compiled.Coverage) &&
 				definition {
 				expression = compiled
-				if definition {
-					target := en.definitionTarget()
-					if target.Vars == nil {
-						target.Vars = make(Vars)
-					}
-					target.Vars[sym] = compiled
-					compiled.Proc().Compiled.DebugName = string(sym)
+				target := en.definitionTarget()
+				if target.Vars == nil {
+					target.Vars = make(Vars)
 				}
+				target.Vars[sym] = compiled
+				compiled.Proc().Compiled.DebugName = string(sym)
 				if JITLog {
 					entry := compiled.Proc().Compiled
 					fmt.Printf("JIT: import %s code=%p bytes=%d hidden-args=%d expressions=%d dynamic-calls=%d inlined-calls=%d\n",
@@ -129,10 +127,15 @@ func topLevelDefinitionSymbol(code Scmer) (Symbol, bool) {
 		return "", false
 	}
 	items := code.Slice()
-	if len(items) < 3 || !items[0].IsSymbol() || (!items[0].SymbolEquals("define") && !items[0].SymbolEquals("set")) || !items[1].IsSymbol() {
+	if len(items) < 3 {
 		return "", false
 	}
-	return items[1].Symbol(), true
+	head, headOK := scmerSymbol(items[0])
+	symbol, symbolOK := scmerSymbol(items[1])
+	if !headOK || (head != "define" && head != "set") || !symbolOK {
+		return "", false
+	}
+	return symbol, true
 }
 
 // Syntactic Analysis

@@ -1049,7 +1049,7 @@ test_cases:
     expect:
       contains:
         - '"dtl_group_child"'
-        - "(outer (var 0))"
+        - "(outer 1 (var 0))"
       not_contains:
         - ".grp:query:"
         - "createcolumn"

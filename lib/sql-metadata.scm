@@ -454,16 +454,16 @@ relations are deliberately resolved by the single public get_schema dispatcher. 
 	(begin
 		/* scan helpers receive a runtime source as their table argument.
 		Materialized subqueries are stored in the session and therefore must be
-		lowered to ((context "session") key) before scan/scan_order/scan_batch
+		lowered to (session key) before scan/scan_order/scan_batch
 		see them. Do not stringify this source and do not add table-name
 		fallbacks in Go for it. */
 		(define scan-table-source (lambda (table_source) (match table_source
 			'(scan-tagged-table base _ _ _ _ _) (scan-table-source base)
 			'((symbol scan-tagged-table) base _ _ _ _ _) (scan-table-source base)
 			'((quote scan-tagged-table) base _ _ _ _ _) (scan-table-source base)
-			'(materialized-subquery key) (list (list (quote context) "session") key)
-			'((symbol materialized-subquery) key) (list (list (quote context) "session") key)
-			'((quote materialized-subquery) key) (list (list (quote context) "session") key)
+			'(materialized-subquery key) (list (quote session) key)
+			'((symbol materialized-subquery) key) (list (quote session) key)
+			'((quote materialized-subquery) key) (list (quote session) key)
 			table_source)))
 		(define tbl_resolved (scan-table-source tbl))
 		/* materialized subqueries produce list expressions — pass as-is; real tables get (table schema name) */

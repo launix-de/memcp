@@ -24,7 +24,6 @@ import "sync/atomic"
 import "time"
 import "runtime"
 import "strings"
-import "github.com/jtolds/gls"
 import "github.com/launix-de/NonLockingReadMap"
 import "github.com/launix-de/memcp/scm"
 
@@ -61,7 +60,7 @@ func computeShardIndex(schema []shardDimension, values []scm.Scmer) (result int)
 // runFanoutTasks executes a fanout without recursively multiplying worker
 // pools. Transactions reserve at most half of their remaining budget. When
 // only one worker is available, the caller performs the work directly without
-// goroutines, channels, wait groups, or GLS propagation.
+// goroutines, channels, or wait groups.
 func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <-chan struct{} {
 	if taskCount <= 0 {
 		return nil
@@ -93,26 +92,8 @@ func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <
 	doneCh := make(chan struct{})
 	var remainingWorkers atomic.Int32
 	remainingWorkers.Store(int32(workers))
-	startWorker := gls.Go
-	if currentTx != nil {
-		ss := SessionStateFromTx(currentTx)
-		querySeq := querySeqFromTx(currentTx)
-		startWorker = func(worker func()) {
-			go func() {
-				// A worker needs one complete execution context. Nesting
-				// SetValues around WithSession makes go-gls discover and tag the
-				// goroutine stack twice for every fanout worker, even though all
-				// values have the same lifetime.
-				scm.SetValues(map[string]any{
-					"session":         currentTx.Session,
-					"sessionStatePtr": ss,
-					"querySeq":        querySeq,
-				}, worker)
-			}()
-		}
-	}
 	for i := 0; i < workers; i++ {
-		startWorker(func() {
+		go func() {
 			defer func() {
 				if remainingWorkers.Add(-1) == 0 {
 					if currentTx != nil {
@@ -124,7 +105,7 @@ func runFanoutTasks(currentTx *TxContext, taskCount int, task func(int, bool)) <
 			for taskIndex := range jobs {
 				task(taskIndex, false)
 			}
-		})
+		}()
 	}
 	for i := 0; i < taskCount; i++ {
 		jobs <- i
@@ -332,7 +313,7 @@ func (t *table) NewShardDimension(col string, n int) (result shardDimension) {
 		// Ensure shard and column are loaded. If metadata is corrupted, panic early
 		// instead of proceeding with potentially destructive repartitioning.
 		s.ensureLoaded()
-		stor := s.getColumnStorageOrPanic(col)
+		stor := s.getColumnStorageOrPanic(col, false, nil)
 		// snapshot main_count without holding lock; guard indices and skip if inconsistent
 		mc := s.main_count
 		if mc > 0 {

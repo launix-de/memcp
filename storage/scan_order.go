@@ -1112,7 +1112,7 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	if foundShard == nil {
 		return notFoundValue
 	}
-	mapperAlreadyLocked := foundShard.hasWriteOwnerForTx(currentTx)
+	mapperAlreadyLocked := false
 	var mapperStorage ShardMapReducer
 	var mapperWorkspace shardMapReducerWorkspace
 	mapper := &mapperStorage
@@ -1240,7 +1240,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	if t.t.hasTableLock() {
-		t.t.waitTableLock(ss, false)
+		t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 	}
 
 	// main storage — use skipShardReadLock to avoid redundant hasWriteOwner() per column
@@ -1265,7 +1265,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
@@ -1276,7 +1276,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 	aReaders := make([]ColumnReader, len(acceptCols))
 	aNeedsCachedReader := make([]bool, len(acceptCols))
 	for i, column := range acceptCols {
-		acols[i] = t.getColumnStorageOrPanicEx(column, skipShardReadLock, currentTx)
+		acols[i] = t.getColumnStorageOrPanic(column, skipShardReadLock, currentTx)
 		aReaders[i] = newCachedColumnReaderTx(acols[i], currentTx)
 		if _, ok := acols[i].(*StorageComputeProxy); ok {
 			aNeedsCachedReader[i] = true
@@ -1298,7 +1298,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 			if t.t.hasTableLock() {
 				t.mu.RUnlock()
 				shardLocked = false
-				t.t.waitTableLock(ss, false)
+				t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 				t.mu.RLock()
 				shardLocked = true
 			}

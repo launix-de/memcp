@@ -19,6 +19,7 @@ package scm
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"unsafe"
 )
@@ -389,6 +390,14 @@ func jitApplyCallableSlice(callable, envValue Scmer, args []Scmer) Scmer {
 		}
 	}
 	return ApplyEx(callable, args, envValue.Any().(*Env))
+}
+
+// jitCallSelfCode preserves a Go unwind frame around a non-tail recursive JIT
+// call. Tail recursion stays inside the generated entry point as a direct jump.
+func jitCallSelfCode(code uintptr, args []Scmer) Scmer {
+	fnData := unsafe.Pointer(&struct{ *byte }{(*byte)(unsafe.Pointer(code))})
+	native := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fnData))
+	return callJIT(native, args...)
 }
 
 func jitInvokeCallback1(callback, arg0 Scmer) Scmer {
@@ -1091,7 +1100,29 @@ func jitMaterializeVirtualGoSlice(ctx *JITContext, elements []JITValueDesc) JITV
 }
 
 func jitCondToBool(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
-	return ctx.EmitBoolDesc(cond, JITValueDesc{Loc: LocAny})
+	ctx.EnsureDesc(cond)
+	regs := jitDescRegs(*cond)
+	for _, reg := range regs {
+		ctx.ProtectReg(reg)
+	}
+	boolean := ctx.EmitBoolDesc(cond, JITValueDesc{Loc: LocAny})
+	for _, reg := range regs {
+		ctx.UnprotectReg(reg)
+	}
+	return boolean
+}
+
+// jitCompileCondition gives an arbitrarily large child CFG a stable producer
+// target before lowering Scheme truthiness. This is shared by every special
+// form so nested map/reduce emitters see the same register-bank contract.
+func jitCompileCondition(ctx *JITContext, expr Scmer, sliceBase Reg) JITValueDesc {
+	target := jitAllocTrackedPair(ctx, JITTypeUnknown)
+	ctx.ProtectReg(target.Reg)
+	ctx.ProtectReg(target.Reg2)
+	condition := jitCompileExpr(ctx, expr, sliceBase, target)
+	ctx.UnprotectReg(target.Reg2)
+	ctx.UnprotectReg(target.Reg)
+	return jitCondToBool(ctx, &condition)
 }
 
 // jitCompileStackList lowers the optimizer-internal
@@ -1458,8 +1489,8 @@ func jitRuntimeCaptureArgExprs(ctx *JITContext) []Scmer {
 		for _, symbol := range symbols {
 			key := NewSymbol(string(symbol))
 			value := Scmer(key)
-			for level := 0; level < depth; level++ {
-				value = NewSlice([]Scmer{NewSymbol("outer"), value})
+			if depth > 0 {
+				value = NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), value})
 			}
 			args = append(args, NewSlice([]Scmer{NewSymbol("quote"), key}), value)
 		}
@@ -1573,6 +1604,135 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 	return jitCompileDynamicCall(ctx, callableExpr, operands, sliceBase, result)
 }
 
+func jitTypeDescriptorTag(td *TypeDescriptor) uint8 {
+	if td == nil {
+		return JITTypeUnknown
+	}
+	switch td.Kind {
+	case "bool":
+		return tagBool
+	case "int":
+		return tagInt
+	case "string":
+		return tagString
+	case "symbol":
+		return tagSymbol
+	case "nil":
+		return tagNil
+	case "list":
+		return tagSlice
+	default:
+		return JITTypeUnknown
+	}
+}
+
+// jitPreviewCallArgument extracts policy facts without writing machine code.
+// The real argument compiler remains the single source of value placement;
+// this preview only carries facts that are already explicit in the optimized
+// Scheme tree or its lexical descriptor environment.
+func jitPreviewCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer) JITValueDesc {
+	for expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	if param := jitDeclarationParam(decl, index); param != nil && param.Kind == "func" {
+		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
+			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+		}
+	}
+	if expr.IsNthLocalVar() {
+		local := int(expr.NthLocalVar())
+		if ctx.Env != nil && local < len(ctx.Env.Numbered) {
+			return ctx.Env.Numbered[local]
+		}
+		if local < ctx.InputArgCount {
+			return JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(local)}
+		}
+	}
+	if expr.GetTag() != tagSlice {
+		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
+	}
+	parts := expr.Slice()
+	if len(parts) == 2 && parts[0].SymbolEquals("quote") {
+		quoted := parts[1]
+		preview := JITValueDesc{Loc: LocImm, Type: quoted.GetTag(), Imm: quoted}
+		if quoted.IsSlice() {
+			preview.KnownSliceLen = int32(len(quoted.Slice()))
+			preview.SliceSizeKnown = true
+		}
+		return preview
+	}
+	if len(parts) == 0 {
+		return JITValueDesc{Type: JITTypeUnknown}
+	}
+	if nested := DeclarationForValue(parts[0]); nested != nil && nested.Type != nil {
+		preview := JITValueDesc{Type: jitTypeDescriptorTag(nested.Type.Return)}
+		if preview.Type == tagSlice && nested.Type.Return != nil && nested.Type.Return.Length >= 0 {
+			preview.KnownSliceLen = int32(nested.Type.Return.Length)
+			preview.SliceSizeKnown = true
+		}
+		return preview
+	}
+	return JITValueDesc{Type: JITTypeUnknown}
+}
+
+const jitBuiltinInlineBudget = 2048
+
+func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueDesc) bool {
+	if decl == nil || decl.Type == nil || decl.Type.JITInlineCost == 0 {
+		return true
+	}
+	knownTypes, knownShapes := 0, 0
+	knownCallback, hasCallback := false, false
+	for index, arg := range args {
+		if arg.Type != JITTypeUnknown {
+			knownTypes++
+		}
+		if arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice {
+			knownShapes++
+		}
+		param := jitDeclarationParam(decl, index)
+		if param != nil && param.Kind == "func" {
+			hasCallback = true
+			if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
+				(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
+				knownCallback = true
+			}
+		}
+	}
+	if hasCallback {
+		// A known callback removes the Apply boundary from every loop iteration;
+		// this dominates the one-time instruction-cache cost for map/reduce-style
+		// operators. Unknown callbacks retain the compact native Go loop.
+		if !decl.Type.JITInlineCallbacks || !knownCallback {
+			return false
+		}
+	} else {
+		cost := int(decl.Type.JITInlineCost)
+		switch {
+		case decl.Type.JITVirtualArgs:
+			// Virtual-list producers and consumers preserve fusion opportunities
+			// which a native Go call would force us to materialize.
+		case len(args) > 0 && knownTypes == len(args) && cost <= 256:
+			// Full type knowledge lets generated emitters discard dynamic type
+			// switches. Partial knowledge did not amortize emitted code in A/B.
+		case knownShapes > 0 && cost <= 32:
+			// Small shape-specialized emitters can eliminate list allocation and
+			// length/tag checks even when element types remain dynamic.
+		default:
+			return false
+		}
+	}
+	cost := int(decl.Type.JITInlineCost)
+	if cost == math.MaxUint16 {
+		return false
+	}
+	if ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+		return false
+	}
+	ctx.BuiltinInlineCost += cost
+	return true
+}
+
 func jitIsNativeReturnTarget(ctx *JITContext, result JITValueDesc) bool {
 	return result.Loc == LocRegPair && result.Reg == ctx.ResultPtrReg && result.Reg2 == ctx.ResultAuxReg
 }
@@ -1605,19 +1765,19 @@ func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result
 	}
 
 	argsPtr := ctx.AllocReg()
+	argsLen := ctx.AllocRegExcept(argsPtr)
+	argsCap := ctx.AllocRegExcept(argsPtr, argsLen)
+	argsSlice := JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: argsPtr, Reg2: argsLen, Reg3: argsCap}
+	ctx.BindReg(argsPtr, &argsSlice)
+	ctx.BindReg(argsLen, &argsSlice)
+	ctx.BindReg(argsCap, &argsSlice)
 	ctx.EmitLeaRegMem(argsPtr, ctx.StackReg, argsOff)
-	words := []goCallArgWord{
-		{loc: LocReg, reg: argsPtr},
-		{loc: LocImm, imm: uint64(ctx.SelfParamCount)},
-		{loc: LocImm, imm: uint64(ctx.SelfParamCount)},
-	}
+	ctx.EmitMovRegImm64(argsLen, uint64(ctx.SelfParamCount))
+	ctx.EmitMovRegImm64(argsCap, uint64(ctx.SelfParamCount))
+	code := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(ctx.Start)))}
 	target := jitEnsureResultPair(ctx, result)
-	var resultsBuf [16]Reg
-	targets := [...]Reg{target.Reg, target.Reg2}
-	results := ctx.EmitGoCall(uint64(uintptr(ctx.Start)), words, 2, &resultsBuf, targets[:])
-	ctx.FreeReg(argsPtr)
-	target.Reg = results[0]
-	target.Reg2 = results[1]
+	target = ctx.EmitGoCallScalarInto(GoFuncAddr(jitCallSelfCode), []JITValueDesc{code, argsSlice}, target)
+	ctx.FreeDesc(&argsSlice)
 	target.Type = JITTypeUnknown
 	ctx.BindReg(target.Reg, &target)
 	ctx.BindReg(target.Reg2, &target)
@@ -1675,8 +1835,11 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 		}
 	}
 
-	cond := jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
-	b := jitCondToBool(ctx, &cond)
+	// Conditions are consumed immediately, but generated multi-block emitters
+	// still need a stable pair destination while rendering their internal CFG.
+	// Reserving it here prevents a returned spill descriptor from becoming
+	// relative to a later nested emitter's stack frame.
+	b := jitCompileCondition(ctx, expr, sliceBase)
 	if b.Loc == LocImm {
 		if b.Imm.Bool() {
 			ctx.EmitJmp(trueLbl)
@@ -1689,6 +1852,7 @@ func jitEmitCondJump(ctx *JITContext, expr Scmer, sliceBase Reg, trueLbl, falseL
 	ctx.EmitJump(CondNotEqual, trueLbl)
 	ctx.EmitJmp(falseLbl)
 	ctx.FreeDesc(&b)
+	ctx.ReclaimUntrackedRegs()
 }
 
 // jitCompileExpr recursively compiles a Scheme expression to machine code.
@@ -1711,13 +1875,23 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 	}
 	switch expr.GetTag() {
 	case tagNil, tagBool, tagInt, tagFloat, tagDate, tagString, tagVector,
-		tagFunc, tagFuncEnv, tagProc, tagJIT, tagParser, tagFastDict, tagAny,
+		tagFunc, tagFuncEnv, tagJIT, tagParser, tagFastDict, tagAny,
 		tagClosure, tagPromise:
 		// Keep Eval's self-evaluating literal contract. Pointer-bearing constants
 		// are retained through the entry point's ConstRoots for the lifetime of
 		// the generated code.
 		ctx.TrackImm(expr)
 		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
+	case tagProc:
+		if ctx.RecursiveLambdas && expr.Proc() != nil && expr.Proc().Compiled == nil {
+			compiled := jitCompileModeDeferred(true, expr)
+			if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+				panic("jit: embedded procedure could not be compiled")
+			}
+			expr = compiled
+		}
+		ctx.TrackImm(expr)
+		return JITValueDesc{Loc: LocImm, Type: tagProc, Imm: expr}
 	case tagSymbol:
 		sym := expr.Symbol()
 		if string(sym) == "nil" {
@@ -1731,6 +1905,17 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					ctx.TrackImm(desc.Imm)
 				}
 				return desc
+			}
+		}
+		// A compiled closure keeps its interpreter environment in RuntimeEnv.
+		// Preserve lexical shadowing before considering a same-named global for
+		// static specialization; the global may only be used when it is the
+		// binding the interpreter would resolve as well.
+		if runtimeEnv, ok := ctx.RuntimeEnv.Any().(*Env); ok && runtimeEnv != nil {
+			if binding := runtimeEnv.FindRead(sym); binding != nil && binding != &Globalenv {
+				if _, exists := binding.Vars[sym]; exists {
+					return jitCompileRuntimeSymbol(ctx, expr, result)
+				}
 			}
 		}
 		if v, ok := Globalenv.Vars[sym]; ok {
@@ -1895,6 +2080,14 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 		}
 		if decl.Type != nil && decl.Type.JITEmit != nil {
+			policyArgs := make([]JITValueDesc, len(list)-1)
+			for i := 1; i < len(list); i++ {
+				policyArgs[i-1] = jitPreviewCallArgument(ctx, decl, i-1, list[i])
+			}
+			if !jitShouldInlineBuiltin(ctx, decl, policyArgs) {
+				ctx.Coverage.NativeCalls++
+				return jitEmitGoVariadicCallFromExprs(ctx, decl.Fn, list[1:], sliceBase, result)
+			}
 			ctx.Coverage.InlinedCalls++
 			if !jitAutoImportReturnSafe(name, decl.Type.Return) {
 				ctx.AutoImportSafe = false
@@ -1974,6 +2167,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			allocatedBeforeEmitter := ctx.AllRegs &^ ctx.FreeRegs
 			labelsBefore := ctx.LabelNext
 			out := decl.Type.JITEmit(ctx, list[1:], args, result)
+			ctx.SyncDesc(&out)
 			// Generated control-flow emitters may spill their result placement while
 			// rendering sibling blocks and then write the final value back into its
 			// registers. Rebind that placement at the declaration boundary so stale
