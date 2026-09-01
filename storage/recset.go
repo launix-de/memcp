@@ -128,11 +128,19 @@ func (t *storageShard) forEachVisibleRun(part *recSetShard, visibleUpper uint32,
 	})
 }
 
-// recSet is a query-local, non-persistent subset of one table represented by
-// physical record IDs. It is intentionally table-shaped so the planner can swap
-// repeated scans over the same filtered base relation for a scan over this value.
+// recSet is a query-local, non-persistent set of candidate record IDs for one
+// table. It is intentionally table-shaped so the planner can replace repeated
+// scans of the same filtered base relation with scans of this value.
+//
+// A RecSet deliberately does not own transaction, session, cancellation, or
+// visibility state. scan_recset constructs it during one query after applying
+// that query's visibility rules, and every later storage operation receives the
+// same query transaction explicitly. The ordinary scan path then applies
+// visibility again while consuming the candidates. Keeping execution state out
+// of this immutable value prevents a nil transaction from silently acquiring an
+// old context and makes RecSet algebra independent of the former GLS transport.
+// RecSets must never be persisted or reused across queries.
 type recSet struct {
-	tx     *TxContext
 	table  *table
 	shards []recSetShard
 	count  int64
@@ -170,21 +178,22 @@ func (r *recSet) contains(shard *storageShard, recid uint32) bool {
 	return r.shardEntry(shard).contains(recid)
 }
 
-func recSetUnion(items []*recSet) *recSet {
+// RecSet algebra combines immutable candidate IDs only. currentTx is an
+// execution parameter for cancellation and per-session fanout limits; it is
+// neither stored in the result nor consulted to reinterpret membership.
+func recSetUnion(currentTx *TxContext, items []*recSet) *recSet {
 	var base *table
-	var tx *TxContext
 	for _, rs := range items {
 		if rs == nil || rs.table == nil {
 			continue
 		}
 		if base == nil {
 			base = rs.table
-			tx = rs.tx
 		} else if base != rs.table {
 			panic("recset_union: all recsets must belong to the same table")
 		}
 	}
-	result := &recSet{tx: tx, table: base}
+	result := &recSet{table: base}
 	if base == nil {
 		return result
 	}
@@ -218,8 +227,8 @@ func recSetUnion(items []*recSet) *recSet {
 	// its own channel-dispatch overhead is roughly 1µs — well under 1% of a
 	// single combine's cost, let alone many shards' worth done serially.
 	values := make(chan recSetBuildResult, len(tasks))
-	done := runFanoutTasks(tx, len(tasks), func(taskIndex int, _ bool) {
-		withTxSession(tx, func() scm.Scmer {
+	done := runFanoutTasks(currentTx, len(tasks), func(taskIndex int, _ bool) {
+		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {
 					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
@@ -259,21 +268,19 @@ func recSetUnion(items []*recSet) *recSet {
 	return result
 }
 
-func recSetIntersect(items []*recSet) *recSet {
+func recSetIntersect(currentTx *TxContext, items []*recSet) *recSet {
 	var base *table
-	var tx *TxContext
 	for _, rs := range items {
 		if rs == nil || rs.table == nil {
 			continue
 		}
 		if base == nil {
 			base = rs.table
-			tx = rs.tx
 		} else if base != rs.table {
 			panic("recset_intersect: all recsets must belong to the same table")
 		}
 	}
-	result := &recSet{tx: tx, table: base}
+	result := &recSet{table: base}
 	if base == nil || len(items) == 0 {
 		return result
 	}
@@ -283,8 +290,8 @@ func recSetIntersect(items []*recSet) *recSet {
 	// shard: channel-dispatch overhead (~1µs) is under 1% of a single
 	// combine's cost (~100µs-1ms).
 	values := make(chan recSetBuildResult, len(shards))
-	done := runFanoutTasks(tx, len(shards), func(taskIndex int, _ bool) {
-		withTxSession(tx, func() scm.Scmer {
+	done := runFanoutTasks(currentTx, len(shards), func(taskIndex int, _ bool) {
+		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {
 					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
@@ -336,7 +343,7 @@ func recSetIntersect(items []*recSet) *recSet {
 
 // recSetDifference returns the records in the first RecSet which occur in none
 // of the following RecSets. All operands must belong to the same base table.
-func recSetDifference(items []*recSet) *recSet {
+func recSetDifference(currentTx *TxContext, items []*recSet) *recSet {
 	if len(items) == 0 || items[0] == nil || items[0].table == nil {
 		panic("recset_difference requires a non-empty list of recsets")
 	}
@@ -346,10 +353,10 @@ func recSetDifference(items []*recSet) *recSet {
 			panic("recset_difference: all recsets must belong to the same table")
 		}
 	}
-	result := &recSet{tx: left.tx, table: left.table}
+	result := &recSet{table: left.table}
 	values := make(chan recSetBuildResult, len(left.shards))
-	done := runFanoutTasks(left.tx, len(left.shards), func(taskIndex int, _ bool) {
-		withTxSession(left.tx, func() scm.Scmer {
+	done := runFanoutTasks(currentTx, len(left.shards), func(taskIndex int, _ bool) {
+		withTxSession(currentTx, func() scm.Scmer {
 			defer func() {
 				if rec := recover(); rec != nil {
 					values <- recSetBuildResult{err: scanError{rec, string(debug.Stack())}}
@@ -397,17 +404,18 @@ func recSetDifference(items []*recSet) *recSet {
 	return result
 }
 
-// recSetNot complements a RecSet against the currently visible rows of its
-// base table. Building that visible universe through the ordinary scan path is
-// essential: raw recid inversion would resurrect deleted or tx-invisible rows.
-func recSetNot(item *recSet) *recSet {
+// recSetNot complements a RecSet against the rows visible to currentTx. Unlike
+// the pure set operations above it therefore needs a storage scan. Building the
+// universe through that ordinary scan path is essential: raw RecID inversion
+// would resurrect deleted or transaction-invisible rows.
+func recSetNot(currentTx *TxContext, item *recSet) *recSet {
 	if item == nil || item.table == nil {
 		panic("recset_not requires a recset with a base table")
 	}
-	visible := item.table.scanRecSet(item.tx, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
+	visible := item.table.scanRecSet(currentTx, nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer {
 		return scm.NewBool(true)
 	}))
-	return recSetDifference([]*recSet{visible, item})
+	return recSetDifference(currentTx, []*recSet{visible, item})
 }
 
 func recSetContainsClosure(shard *storageShard) *func(uint32, ...scm.Scmer) scm.Scmer {
@@ -451,7 +459,7 @@ func (t *table) scanRecSet(currentTx *TxContext, conditionCols []string, conditi
 	boundaries := extractBoundaries(conditionCols, condition)
 	reorderByFrequency(boundaries, t)
 	lower, upperLast := indexFromBoundaries(boundaries)
-	result := &recSet{tx: currentTx, table: t}
+	result := &recSet{table: t}
 
 	values := make(chan recSetBuildResult, t.shardResultBufferSize())
 	done := t.iterateShardsParallel(currentTx, boundaries, func(shard *storageShard, solo bool) {
@@ -616,13 +624,10 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 
 func (r *recSet) projectJoin(currentTx *TxContext, sourceKeyCols []string, target *table, targetKeyCols []string) *recSet {
 	if r == nil || r.table == nil {
-		return &recSet{tx: currentTx, table: target}
+		return &recSet{table: target}
 	}
 	if len(sourceKeyCols) == 0 || len(sourceKeyCols) != len(targetKeyCols) {
 		panic("recset_project_join: source and target key columns must have the same non-zero length")
-	}
-	if currentTx == nil {
-		currentTx = r.tx
 	}
 	ss := SessionStateFromTx(currentTx)
 	keys := r.collectProjectJoinKeys(currentTx, sourceKeyCols, ss)
@@ -957,7 +962,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 }
 
 func (t *table) projectJoinKeysToRecSet(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState) *recSet {
-	result := &recSet{tx: currentTx, table: t}
+	result := &recSet{table: t}
 	if keys.count() == 0 {
 		return result
 	}
@@ -1201,9 +1206,6 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 			panic("recset scan mutation callbacks are not implemented")
 		}
 	}
-	if currentTx == nil {
-		currentTx = r.tx
-	}
 	return r.table.scanWithBatchFrom(currentTx, r, conditionCols, condition,
 		callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil, nil)
 }
@@ -1211,9 +1213,6 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
 	if r == nil || r.table == nil {
 		return false
-	}
-	if currentTx == nil {
-		currentTx = r.tx
 	}
 	return r.table.scanExistsFrom(currentTx, r, conditionCols, condition)
 }
@@ -1596,12 +1595,9 @@ func (r *recSet) filterToRecSet(currentTx *TxContext, conditionCols []string, co
 	if r == nil {
 		return nil
 	}
-	if currentTx == nil {
-		currentTx = r.tx
-	}
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
-	result := &recSet{tx: currentTx, table: r.table}
+	result := &recSet{table: r.table}
 	values := make(chan recSetBuildResult, len(r.shards))
 	activeParts := make([]int, 0, len(r.shards))
 	for i := range r.shards {

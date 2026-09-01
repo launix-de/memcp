@@ -537,6 +537,35 @@ func (s *StorageIndex) rowWithinBounds(bounds boundaries, cmpCols int, lower []s
 	return true, false
 }
 
+// queryIndexPrefixLen returns the part of the query boundary list which is
+// physically represented by this index. Query-local hooks are orthogonal to
+// the stored index key: in particular, a trailing $recset_contains boundary
+// must never be interpreted as the next column of a longer reusable index.
+// Matching the column and matcher kind here preserves prefix reuse without
+// coupling an invocation-only matcher to an unrelated physical suffix.
+func (s *StorageIndex) queryIndexPrefixLen(bounds boundaries, lower []scm.Scmer) int {
+	limit := len(lower)
+	if limit > len(bounds) {
+		limit = len(bounds)
+	}
+	if limit > len(s.Cols) {
+		limit = len(s.Cols)
+	}
+	for i := 0; i < limit; i++ {
+		if bounds[i].col != s.Cols[i] {
+			return i
+		}
+		var indexedMatcher IndexAnalyzer
+		if i < len(s.ColMatchers) {
+			indexedMatcher = s.ColMatchers[i]
+		}
+		if !indexMatcherCompatible(bounds[i].matcher, indexedMatcher) {
+			return i
+		}
+	}
+	return limit
+}
+
 func (s *StorageIndex) compareMainAndDelta(state *storageIndexState, mainRecid uint32, mainGetters []colGetter, delta indexPair) int {
 	for i := range s.Cols {
 		if !s.columnIsSorted(i) {
@@ -1338,7 +1367,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		}
 		lessRecID := func(leftID, rightID uint32) bool {
 			for col := range s.Cols {
-				if len(s.ColMatchers) > col && !s.ColMatchers[col].IsSorted() {
+				if !s.columnIsSorted(col) {
 					continue
 				}
 				left := valueAt(leftID, col)
@@ -1353,10 +1382,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 			return leftID < rightID
 		}
 		if len(deltaItems) > 0 {
-			cmpCols := len(lower)
-			if cmpCols > len(s.Cols) {
-				cmpCols = len(s.Cols)
-			}
+			cmpCols := s.queryIndexPrefixLen(bounds, lower)
 			keptDelta := deltaItems[:0]
 			for _, recid := range deltaItems {
 				inRange, _ := s.rowWithinBounds(bounds, cmpCols, lower, upperLast, upperInclusive, func(col int) scm.Scmer {
@@ -1402,7 +1428,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		}
 		hybridsort.Slice(items, func(i, j int) bool {
 			for col := range s.Cols {
-				if len(s.ColMatchers) > col && !s.ColMatchers[col].IsSorted() {
+				if !s.columnIsSorted(col) {
 					continue
 				}
 				left := valueAt(items[i], col)
@@ -1418,7 +1444,7 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 		})
 	}
 
-	matchers := s.bindRowMatchers(bounds, cols, func() []IndexHook {
+	matchers := s.bindRowMatchers(tx, bounds, cols, func() []IndexHook {
 		if persistent && state != nil {
 			return state.indexHooks
 		}
@@ -1440,19 +1466,28 @@ func (s *StorageIndex) iterateRecSetFirst(tx *TxContext, state *storageIndexStat
 // bindRowMatchers returns only matcher state. The terminal callback deliberately
 // stays outside this value: storing it in a returned wrapper closure makes the
 // complete shard scan state escape even though index iteration is synchronous.
-func (s *StorageIndex) bindRowMatchers(bounds boundaries, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool) []IndexRowMatcher {
+func (s *StorageIndex) bindRowMatchers(tx *TxContext, bounds boundaries, cols []colGetter, hooks []IndexHook, persistent bool, exactMain *bool) []IndexRowMatcher {
 	var matchers []IndexRowMatcher
 	for colIdx, bound := range bounds {
 		if bound.matcher == nil || bound.matcher.IsSorted() {
 			continue
 		}
 		var hook IndexHook
-		if persistent && colIdx < len(hooks) {
+		alignedWithIndex := colIdx < len(s.Cols) && s.Cols[colIdx] == bound.col
+		if alignedWithIndex && colIdx < len(s.ColMatchers) {
+			alignedWithIndex = indexMatcherCompatible(bound.matcher, s.ColMatchers[colIdx])
+		} else if alignedWithIndex {
+			alignedWithIndex = bound.matcher.IsSorted()
+		}
+		if persistent && alignedWithIndex && colIdx < len(hooks) {
 			hook = hooks[colIdx]
-		} else {
+		}
+		if hook == nil {
 			var reader ColumnReader
-			if colIdx < len(cols) {
+			if alignedWithIndex && colIdx < len(cols) {
 				reader = cols[colIdx].raw
+			} else if !isScanPseudoColName(bound.col) && bound.mapFn.IsNil() {
+				reader = newCachedColumnReaderTx(s.t.getColumnStorageRLocked(bound.col), tx)
 			}
 			hook = bound.matcher.Deploy(IndexDeployContext{
 				MainCount: s.t.main_count,
@@ -1600,7 +1635,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 			if selected != nil {
 				selected(s, false)
 			}
-			matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+			matchers := s.bindRowMatchers(tx, bounds, cols, nil, false, exactMain)
 			s.fullScan(maxInsertIndex, buf, matchers, callback)
 			return
 		} else {
@@ -1612,7 +1647,7 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 				if selected != nil {
 					selected(s, false)
 				}
-				matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+				matchers := s.bindRowMatchers(tx, bounds, cols, nil, false, exactMain)
 				s.fullScan(maxInsertIndex, buf, matchers, callback)
 				return
 			}
@@ -1636,7 +1671,7 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
-		matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+		matchers := s.bindRowMatchers(tx, bounds, cols, nil, false, exactMain)
 		s.fullScan(maxInsertIndex, buf, matchers, callback)
 		return
 	}
@@ -1646,7 +1681,7 @@ start_scan:
 		if selected != nil {
 			selected(s, false)
 		}
-		matchers := s.bindRowMatchers(bounds, cols, nil, false, exactMain)
+		matchers := s.bindRowMatchers(tx, bounds, cols, nil, false, exactMain)
 		s.fullScan(maxInsertIndex, buf, matchers, callback)
 		return
 	}
@@ -1666,8 +1701,9 @@ start_scan:
 	// per callback so LIMIT can brake inside the index walk. The caller-owned
 	// pooled buffer remains allocated at its normal size; only its visible slice
 	// is shortened, so the hot path adds no allocation.
+	cmpCols := s.queryIndexPrefixLen(bounds, lower)
 	if options != nil && options.boundaryCoveredLimit && options.orderedLimit > 0 &&
-		options.orderedLimit < len(buf) && indexCoversBoundaryOrder(s, true, bounds, len(lower)) {
+		options.orderedLimit < len(buf) && indexCoversBoundaryOrder(s, true, bounds, cmpCols) {
 		buf = buf[:options.orderedLimit]
 	}
 
@@ -1679,12 +1715,9 @@ start_scan:
 		getRecid = func(idx int) uint32 { return uint32(idx) }
 	}
 
-	// bisect where the lower bound is found
-	// Only compare as many columns as provided in 'lower' (index can have more cols)
-	cmpCols := len(lower)
-	if cmpCols > len(s.Cols) {
-		cmpCols = len(s.Cols)
-	}
+	// Bisect only over the query prefix physically represented by this index.
+	// Invocation-only hooks remain in bounds for bindRowMatchers below, but do
+	// not occupy a key position in a reusable longer index.
 
 	// Find the leading physical sort key. Non-sorted matchers such as LIKE are
 	// deliberately present in the logical boundary list but do not participate
@@ -1806,7 +1839,7 @@ start_scan:
 	}
 
 	rawCallback := callback
-	matchers := s.bindRowMatchers(bounds, cols, snapIndexHooks, true, exactMain)
+	matchers := s.bindRowMatchers(tx, bounds, cols, snapIndexHooks, true, exactMain)
 	adaptiveSwitchRows := int64(0)
 	if options != nil && hasRecSetBoundary && maxInsertIndex == 0 {
 		adaptiveSwitchRows = orderedRecSetSwitchRows(recsetPart.count)

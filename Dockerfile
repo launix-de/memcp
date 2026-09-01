@@ -14,7 +14,6 @@ WORKDIR /build
 RUN apk add --no-cache git
 
 COPY go.mod go.sum ./
-COPY third_party/ ./third_party/
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Keep this list explicit in addition to .dockerignore. A MemCP checkout often

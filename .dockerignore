@@ -8,7 +8,6 @@
 !go.sum
 !scm/**
 !storage/**
-!third_party/**
 !lib/**
 !assets/**
 !packaging/docker-entrypoint.sh

@@ -518,7 +518,7 @@ test_cases:
           '("active")
           (lambda (value) (equal? value 1))))
         (define lookup (recset_key_index nil
-          (recset_union (list tenant1 active))
+          (recset_union nil (list tenant1 active))
           '("tenant" "active")))
         (if (and
               (lookup 1 1)
@@ -548,7 +548,7 @@ test_cases:
         (define active (scan_recset nil tbl
           '("active")
           (lambda (active) (equal? active 1))))
-        (define combined (recset_union (list tenant1 active)))
+        (define combined (recset_union nil (list tenant1 active)))
         (define sum_ids
           (scan nil combined
             '()
@@ -583,27 +583,27 @@ test_cases:
               (equal? (recset_count positive) 10)
               (equal? (recset_count negative) 4086)
               (equal? (recset_count even) 2048)
-              (equal? (recset_count (recset_union (list positive positive2))) 14)
-              (equal? (recset_count (recset_intersect (list positive positive2))) 6)
-              (equal? (recset_count (recset_union (list negative negative2))) 4096)
-              (equal? (recset_count (recset_intersect (list negative negative2))) 4076)
-              (equal? (recset_count (recset_union (list negative negative3))) 4091)
-              (equal? (recset_count (recset_intersect (list negative negative3))) 4086)
-              (equal? (recset_count (recset_union (list positive2 negative))) 4092)
-              (equal? (recset_count (recset_intersect (list positive2 negative))) 4)
-              (equal? (recset_count (recset_union (list even third))) 2731)
-              (equal? (recset_count (recset_intersect (list even third))) 682)
-              (equal? (recset_count (recset_union (list positive even))) 2053)
-              (equal? (recset_count (recset_intersect (list positive even))) 5)
-              (equal? (recset_count (recset_union (list negative even))) 4091)
-              (equal? (recset_count (recset_intersect (list negative even))) 2043)
-              (equal? (recset_count (recset_union (list full positive))) 4096)
-              (equal? (recset_count (recset_intersect (list empty negative))) 0)
-              (equal? (recset_count (recset_union (list empty positive))) 10)
-              (equal? (recset_count (recset_intersect (list full negative))) 4086)
-              (equal? (recset_count (recset_not positive)) 4086)
-              (equal? (recset_count (recset_difference (list negative even))) 2043)
-              (equal? (recset_count (recset_difference (list full positive even))) 2043))
+              (equal? (recset_count (recset_union nil (list positive positive2))) 14)
+              (equal? (recset_count (recset_intersect nil (list positive positive2))) 6)
+              (equal? (recset_count (recset_union nil (list negative negative2))) 4096)
+              (equal? (recset_count (recset_intersect nil (list negative negative2))) 4076)
+              (equal? (recset_count (recset_union nil (list negative negative3))) 4091)
+              (equal? (recset_count (recset_intersect nil (list negative negative3))) 4086)
+              (equal? (recset_count (recset_union nil (list positive2 negative))) 4092)
+              (equal? (recset_count (recset_intersect nil (list positive2 negative))) 4)
+              (equal? (recset_count (recset_union nil (list even third))) 2731)
+              (equal? (recset_count (recset_intersect nil (list even third))) 682)
+              (equal? (recset_count (recset_union nil (list positive even))) 2053)
+              (equal? (recset_count (recset_intersect nil (list positive even))) 5)
+              (equal? (recset_count (recset_union nil (list negative even))) 4091)
+              (equal? (recset_count (recset_intersect nil (list negative even))) 2043)
+              (equal? (recset_count (recset_union nil (list full positive))) 4096)
+              (equal? (recset_count (recset_intersect nil (list empty negative))) 0)
+              (equal? (recset_count (recset_union nil (list empty positive))) 10)
+              (equal? (recset_count (recset_intersect nil (list full negative))) 4086)
+              (equal? (recset_count (recset_not nil positive)) 4086)
+              (equal? (recset_count (recset_difference nil (list negative even))) 2043)
+              (equal? (recset_count (recset_difference nil (list full positive even))) 2043))
           "ok"
           (error "adaptive recset algebra returned wrong cardinality")))
 
@@ -614,7 +614,7 @@ test_cases:
         (define tenant1 (scan_recset nil tbl
           '("tenant")
           (lambda (tenant) (equal? tenant 1))))
-        (define complement (recset_not tenant1))
+        (define complement (recset_not nil tenant1))
         (define sum_ids
           (scan nil complement '() (lambda () true) '("id")
             (lambda (id) id) (lambda (acc id) (+ acc id)) 0))
@@ -629,7 +629,7 @@ test_cases:
         (define full (scan_recset nil tbl '() (lambda () true)))
         (define tenant1 (scan_recset nil tbl '("tenant") (lambda (tenant) (equal? tenant 1))))
         (define active (scan_recset nil tbl '("active") (lambda (value) (equal? value 1))))
-        (define remaining (recset_difference (list full tenant1 active)))
+        (define remaining (recset_difference nil (list full tenant1 active)))
         (define sum_ids
           (scan nil remaining '() (lambda () true) '("id")
             (lambda (id) id) (lambda (acc id) (+ acc id)) 0))
@@ -638,7 +638,7 @@ test_cases:
           (error "recset_difference returned wrong row set")))
 
   - name: "recset_difference requires a left operand"
-    scm: "(recset_difference (list))"
+    scm: "(recset_difference nil (list))"
     expect:
       error: true
 
@@ -647,7 +647,7 @@ test_cases:
       (begin
         (define left (scan_recset nil (table "memcp-tests" "recset_items") '() (lambda () true)))
         (define right (scan_recset nil (table "memcp-tests" "recset_other") '() (lambda () true)))
-        (recset_union (list left right)))
+        (recset_union nil (list left right)))
     expect:
       error: true
 
@@ -656,7 +656,7 @@ test_cases:
       (begin
         (define left (scan_recset nil (table "memcp-tests" "recset_items") '() (lambda () true)))
         (define right (scan_recset nil (table "memcp-tests" "recset_other") '() (lambda () true)))
-        (recset_intersect (list left right)))
+        (recset_intersect nil (list left right)))
     expect:
       error: true
 
@@ -665,7 +665,7 @@ test_cases:
       (begin
         (define left (scan_recset nil (table "memcp-tests" "recset_items") '() (lambda () true)))
         (define right (scan_recset nil (table "memcp-tests" "recset_other") '() (lambda () true)))
-        (recset_difference (list left right)))
+        (recset_difference nil (list left right)))
     expect:
       error: true
 
