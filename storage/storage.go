@@ -2766,11 +2766,11 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			// Build count-scan: (scan (session) (table base_schema base_table) (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
+			// Build count-scan: (scan tx (table base_schema base_table) (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
 			buildCountScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
-					scm.NewSymbol("session"),
+					scm.NewSymbol("tx"),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(baseSchema), scm.NewString(baseTable.Name)}),
 					scanFilterCols(baseCols),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
@@ -2781,11 +2781,11 @@ func Init(en scm.Env) {
 				})
 			}
 
-			// Build delete-scan: (scan (session) (table kt_schema kt_name) (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
+			// Build delete-scan: (scan tx (table kt_schema kt_name) (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
 			buildDeleteScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
-					scm.NewSymbol("session"),
+					scm.NewSymbol("tx"),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(ktSchema), scm.NewString(ktName)}),
 					scanFilterCols(ktCols),
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
@@ -4203,10 +4203,15 @@ func initFKBuiltins(en scm.Env) {
 // buildFKProc constructs a serializable Proc that calls a builtin with the given args.
 // body is the Scheme expression as an S-expression (a Scmer list).
 func buildFKProc(body scm.Scmer) scm.Scmer {
+	// Generated trigger bodies may contain optimized child closures which address
+	// these four trigger arguments through outer numbered slots. Persist the
+	// complete frame shape so the closures keep the same lexical layout after a
+	// schema reload, while NumberedOnly remains false for symbolic trigger bodies.
 	return scm.NewProc(&scm.Proc{
-		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("OLD"), scm.NewSymbol("NEW"), scm.NewSymbol("session")}),
-		Body:   body,
-		En:     &scm.Globalenv,
+		Params:  scm.NewSlice([]scm.Scmer{scm.NewSymbol("OLD"), scm.NewSymbol("NEW"), scm.NewSymbol("session"), scm.NewSymbol("tx")}),
+		Body:    body,
+		En:      &scm.Globalenv,
+		NumVars: 4,
 	})
 }
 
@@ -4235,7 +4240,7 @@ func fkQuotedList(cols []string) scm.Scmer {
 }
 
 func fkTxExpr() scm.Scmer {
-	return scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("__memcp_tx")})
+	return scm.NewSymbol("tx")
 }
 
 // installFKTriggers creates system triggers on child (t1) and parent (t2) tables

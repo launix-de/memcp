@@ -1765,30 +1765,33 @@ the emitter and failing after the ordinary carrier has been discarded. */
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
 		(define lookup_value (symbol (concat "__recset_lookup_value_"
 			(fnv_hash (gs_id stage)))))
+		(define lookup_expr (list (quote apply)
+			(list
+				(physical_query_session_symbol)
+				"get_or_compute_scoped"
+				(physical_query_scope_symbol)
+				lookup_key
+				(quote tx)
+				(list (quote lambda) '()
+					(list (quote recset_key_index)
+						(physical_query_tx_symbol)
+						(cadr source_parts)
+						(quoted_runtime_list (nth source_parts 2)))))
+			(list (quote list) lookup_value)))
 		/* Bind the consumer-row key before entering the producer begin. begin owns a
 		shared numbered scope, while scan adapters may close the producer callbacks
 		independently. Lowering the row key inside that scope would bake its extra
 		outer hop into the cached producer and can escape the actual row closure when
-		several correlated projections share one continuation. The explicit value
-		parameter keeps producer construction closed and makes lexical ownership
-		independent of the surrounding projection shape. */
+		several correlated projections share one continuation. Do not emit that scope
+		when preparation is the literal no-op true: removing it only after nested
+		callbacks were optimized would leave their outer depths one level too large.
+		The explicit value parameter keeps producer construction closed and makes
+		lexical ownership independent of the surrounding projection shape. */
 		(list
 			(list (quote lambda) (list lookup_value)
-				(list (quote begin)
-					(car source_parts)
-					(list (quote apply)
-						(list
-							(physical_query_session_symbol)
-							"get_or_compute_scoped"
-							(physical_query_scope_symbol)
-							lookup_key
-							(quote tx)
-							(list (quote lambda) '()
-								(list (quote recset_key_index)
-									(physical_query_tx_symbol)
-									(cadr source_parts)
-									(quoted_runtime_list (nth source_parts 2)))))
-						(list (quote list) lookup_value))))
+				(if (equal? (car source_parts) true)
+					lookup_expr
+					(list (quote begin) (car source_parts) lookup_expr)))
 			resolved_lookup_key))))
 
 /* Once the consuming scan has selected the RecSet alternative, project the

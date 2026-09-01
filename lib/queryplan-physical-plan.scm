@@ -7340,7 +7340,9 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 (define prejoin_deferred_trigger (lambda (body)
 	(list (quote quote)
 		(list (quote deferred_trigger)
-			(list (quote lambda) (list (quote OLD) (quote NEW)) body)))))
+			(list (quote lambda)
+				(list (quote OLD) (quote NEW) (quote session) (physical_query_tx_symbol))
+				body)))))
 
 (define prejoin_create_trigger_plan (lambda (src name timing body)
 	(list (quote createtrigger)
