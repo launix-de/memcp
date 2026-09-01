@@ -34,9 +34,9 @@ func nestedScanBatchRewriteCall(innerMapBody scm.Scmer) []scm.Scmer {
 		}),
 		scm.NewSlice([]scm.Scmer{scm.NewString("ID")}),
 		scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("inner_id")}), innerMapBody,
+			scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("inner_acc"), scm.NewSymbol("inner_id")}), innerMapBody,
 		}),
-		scm.NewNil(), scm.NewNil(), scm.NewNil(), scm.NewBool(false),
+		scm.NewNil(), scm.NewNil(), scm.NewBool(false),
 	})
 	return []scm.Scmer{
 		scm.NewSymbol("scan"), scm.NewNil(), scm.NewSymbol("outer_table"),
@@ -44,9 +44,9 @@ func nestedScanBatchRewriteCall(innerMapBody scm.Scmer) []scm.Scmer {
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(nil), scm.NewBool(true)}),
 		scm.NewSlice([]scm.Scmer{scm.NewString("ID")}),
 		scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{outerID}), innerScan,
+			scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer_acc"), outerID}), innerScan,
 		}),
-		scm.NewNil(), scm.NewNil(), scm.NewNil(), scm.NewBool(false),
+		scm.NewNil(), scm.NewNil(), scm.NewBool(false),
 	}
 }
 

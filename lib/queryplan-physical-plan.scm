@@ -1613,6 +1613,13 @@ outer joins. */
 		(if (not (source_is_base_table? src))
 			(neumann_fail "build_queryplan" "ORC stage lowering only supports base tables")
 			true)
+		(define map_params (cons (quote $set)
+			(map (os_mapcols stage) (lambda (col) (symbol col)))))
+		(define mapped_expr (cons (os_mapfn stage) map_params))
+		(define mapreduce_expr
+			(list (quote lambda)
+				(cons (quote __orc_acc) map_params)
+				(list (os_reducefn stage) (quote __orc_acc) mapped_expr)))
 		(list (quote createcolumn)
 			(source_table_expr src)
 			(os_column stage)
@@ -1624,8 +1631,7 @@ outer joins. */
 				"sortdirs" (cons (quote list) (os_sortdirs stage))
 				"partitioncount" (os_partitioncount stage)
 				"mapcols" (quoted_runtime_list (os_mapcols stage))
-				"mapfn" (os_mapfn stage)
-				"reducefn" (os_reducefn stage)
+				"mapreducefn" mapreduce_expr
 				"reduceinit" (os_reduceinit stage))))))
 
 (define lower_window_stage_prepare (lambda (stage)
@@ -1635,6 +1641,13 @@ outer joins. */
 			(if (not (source_is_base_table? source))
 				(neumann_fail "build_queryplan" "window-stage lowering only supports base tables")
 				true)
+			(define map_params (cons (quote $set)
+				(map mapcols (lambda (col) (symbol col)))))
+			(define mapped_expr (cons mapfn map_params))
+			(define mapreduce_expr
+				(list (quote lambda)
+					(cons (quote __orc_acc) map_params)
+					(list reducefn (quote __orc_acc) mapped_expr)))
 			(list (quote createcolumn)
 				(source_table_expr source)
 				column
@@ -1649,8 +1662,7 @@ outer joins. */
 						(qassoc_get facts (quote physical_filtercols) '()))
 					"filter" (qassoc_get facts (quote physical_filterfn) nil)
 					"mapcols" (quoted_runtime_list mapcols)
-					"mapfn" mapfn
-					"reducefn" reducefn
+					"mapreducefn" mapreduce_expr
 					"reduceinit" reduceinit)))
 		_ (neumann_fail "build_queryplan" "malformed window-stage"))))
 
@@ -1665,11 +1677,11 @@ outer joins. */
 				(quoted_runtime_list '())
 				(list (quote lambda) '() true)
 				(quoted_runtime_list (list col))
-				(list (quote lambda) (list (quote __orc_value))
-					(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1))
-				(quote +)
+				(list (quote lambda) (list (quote __scan_acc) (quote __orc_value))
+					(list (quote +) (quote __scan_acc)
+						(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1)))
 				0
-				nil
+				(quote +)
 				false))
 		_ nil)))
 
@@ -1688,11 +1700,11 @@ outer joins. */
 					(quoted_runtime_list filtercols)
 					filterfn
 					(quoted_runtime_list (list col))
-					(list (quote lambda) (list (quote __orc_value))
-						(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1))
-					(quote +)
+					(list (quote lambda) (list (quote __scan_acc) (quote __orc_value))
+						(list (quote +) (quote __scan_acc)
+							(list (quote if) (list (quote nil?) (quote __orc_value)) 0 1)))
 					0
-					nil
+					(quote +)
 					false)))
 		_ nil)))
 
@@ -2081,10 +2093,8 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 									(map filtercols (lambda (column)
 										(scan_callback_symbol_for_alias (source_alias src) column)))
 									(lower_column_expr_for_alias src condition)))
-								(define map_expr (list (quote lambda)
-									(map mapcols (lambda (column) (symbol (concat (source_alias src) "." column))))
-									(cons (quote list) (map mapcols (lambda (column)
-										(symbol (concat (source_alias src) "." column)))))))
+								(define map_params (map mapcols (lambda (column) (symbol (concat (source_alias src) "." column)))))
+								(define mapped_expr (cons (quote list) map_params))
 								(define fresh_window (window_offset_fresh_state_expr
 									max_lead window_size stride))
 								(define partition_cols (slice (os_sortcols stage) 0 (os_partitioncount stage)))
@@ -2115,6 +2125,9 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 												fresh_window)))
 										(list (quote window_mut) (quote active_window) emit_expr (quote mapped))
 										(list (quote list) true (quote current_partition) (quote active_window)))))
+								(define mapreduce_expr (list (quote lambda)
+									(cons (quote state) map_params)
+									(list reduce_expr (quote state) mapped_expr)))
 								(define scan_expr (list (quote scan_order)
 									(physical_query_tx_symbol)
 									(source_table_expr src)
@@ -2125,7 +2138,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 										(window_offset_stage_stream_dirs stage)))
 									0 0 -1
 									(cons (quote list) mapcols)
-									map_expr reduce_expr
+									mapreduce_expr
 									(list (quote list) false nil fresh_window)
 									(source_outer? src)))
 								(if (> max_lead 0)
@@ -2188,11 +2201,10 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 													(lower_column_expr_for_alias src rewritten_condition)
 													row_expr
 													nil)))
-											(define map_expr (list (quote lambda)
-												(map scan_mapcols (lambda (map_col) (symbol (concat (source_alias src) "." map_col))))
-												(list (quote list)
-													(row_number_scan_partition_expr (source_alias src) mapcols)
-													continuation_expr)))
+											(define map_params (map scan_mapcols (lambda (map_col) (symbol (concat (source_alias src) "." map_col)))))
+											(define mapped_expr (list (quote list)
+												(row_number_scan_partition_expr (source_alias src) mapcols)
+												continuation_expr))
 											(define reduce_expr (list (quote lambda) (list (quote state) (quote mapped))
 												(list (quote begin)
 													(list (quote define) (quote prev_partition) (list (quote car) (quote state)))
@@ -2205,6 +2217,9 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 													(list (quote define) (quote next_rownum) (list (quote if) (quote same_partition) (list (quote +) (quote prev_rownum) 1) 1))
 													(list (quote continuation) (quote next_rownum))
 													(list (quote list) (quote row_partition) (quote next_rownum)))))
+											(define mapreduce_expr (list (quote lambda)
+												(cons (quote state) map_params)
+												(list reduce_expr (quote state) mapped_expr)))
 											(define scan_expr (list (quote scan_order)
 												(physical_query_tx_symbol)
 												(source_table_expr src)
@@ -2216,8 +2231,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 												(coalesceNil (qb_offset block) 0)
 												(coalesceNil (qb_limit block) -1)
 												(cons (quote list) scan_mapcols)
-												map_expr
-												reduce_expr
+												mapreduce_expr
 												(list (quote list) nil 0)
 												(source_outer? src)))
 											(if (nil? membership_table_expr)
@@ -2245,8 +2259,11 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 						0
 						-1
 						(quoted_runtime_list mapcols)
-						(row_number_count_mapfn mapcols)
-						(row_number_count_reducefn mode limit)
+						(list (quote lambda)
+							(cons (quote __scan_acc) (map mapcols symbol))
+							(list (row_number_count_reducefn mode limit)
+								(quote __scan_acc)
+								(cons (row_number_count_mapfn mapcols) (map mapcols symbol))))
 						(list (quote list) 0 nil 0)
 						false))))
 		_ nil)))
@@ -4150,8 +4167,8 @@ RecSet; membership edges retain their own physical operators. */
 					(list
 						(list (quote lambda) (list (nth projection_bundle 0)) raw_map_row)
 						(nth projection_bundle 2))))
-				(define map_expr (list (quote lambda)
-					(map mapcols (lambda (col) (symbol (concat alias "." col))))
+				(define mapreduce_expr (list (quote lambda)
+					(cons (symbol "__scan_acc") (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 					map_row))
 				(define scan_plan (if (and (empty_list? order_items) (not bounded))
 					(list (quote scan)
@@ -4160,8 +4177,7 @@ RecSet; membership edges retain their own physical operators. */
 						(cons (quote list) filtercols)
 						filter_expr
 						(cons (quote list) mapcols)
-						map_expr
-						nil
+						mapreduce_expr
 						nil
 						nil
 						(source_outer? src))
@@ -4178,8 +4194,7 @@ RecSet; membership edges retain their own physical operators. */
 									(coalesceNil (qb_offset block) 0)
 									(coalesceNil (qb_limit block) -1)
 									(cons (quote list) mapcols)
-									map_expr
-									nil
+									mapreduce_expr
 									nil
 									(source_outer? src))
 								(list (quote scan_order)
@@ -4193,8 +4208,7 @@ RecSet; membership edges retain their own physical operators. */
 									(coalesceNil (qb_offset block) 0)
 									(coalesceNil (qb_limit block) -1)
 									(cons (quote list) mapcols)
-									map_expr
-									nil
+									mapreduce_expr
 									nil
 									(source_outer? src))))
 							scan_expr)
@@ -4428,10 +4442,10 @@ either bound a real row or supplied the synthetic NULL row. */
 								0 order_offset 1
 								(cons (quote list) mapcols)
 								(list (quote lambda)
-									(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
-									(cons (quote list) (map value_exprs (lambda (expr)
-										(lower_column_expr_for_alias src expr)))))
-								(scalar_once_reduce_first)
+									(cons (quote __scan_acc) (map mapcols (lambda (col) (symbol (concat (source_alias src) "." col)))))
+									(list (scalar_once_reduce_first) (quote __scan_acc)
+										(cons (quote list) (map value_exprs (lambda (expr)
+											(lower_column_expr_for_alias src expr))))))
 								nil false))))))))))
 
 (define recset_contains_callback_symbol (symbol "__recset_contains"))
@@ -5264,7 +5278,7 @@ until the caller has selected this physical alternative. */
 				(if use_batch_accept true remaining_condition) row_expr
 				remaining_order_items 0 -1 true projection_probe_work_rows nil stages nil facts)))
 		(define map_expr (list (quote lambda)
-			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
+			(cons (quote __scan_acc) (map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col))))
 			projection))
 		(define ordercols (scan_order_sort_columns_for_join_driver
 			ordered_sources default_alias src driver_order_items stages carrier_condition))
@@ -5286,7 +5300,7 @@ until the caller has selected this physical alternative. */
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
 				0 offset limit
-				(cons (quote list) mapcols) map_expr nil nil false)
+				(cons (quote list) mapcols) map_expr nil false nil)
 			(list (quote scan_order)
 				(physical_query_tx_symbol) table_expr
 				(cons (quote list) filtercols) filter_expr
@@ -5294,7 +5308,7 @@ until the caller has selected this physical alternative. */
 				(cons (quote list) physical_orderdirs)
 				0 0 (if defer_complex_acceptance -1 target)
 				(cons (quote list) mapcols)
-				map_expr nil nil false nil
+				map_expr nil false nil
 				(cons (quote list) (if projected_join_exact '() acceptance_cols))
 				(if projected_join_exact nil acceptance_expr))))
 		(define window_expr (list (quote stream_window_reduce)
@@ -5337,6 +5351,13 @@ until the caller has selected this physical alternative. */
 					(qassoc_get spec (quote output_rows) nil)))))
 		(define map_body (value_builder
 			(qassoc_get spec (quote output_rows) nil) nil))
+		(define map_params (scan_join_order_ref_params sources map_refs))
+		(define mapreduce_body (if (nil? reduce_expr)
+			map_body
+			(list reduce_expr (quote __scan_acc) map_body)))
+		(define mapreduce_expr (list (quote lambda)
+			(cons (quote __scan_acc) map_params)
+			mapreduce_body))
 		(list (quote scan_join_order)
 			(physical_query_tx_symbol)
 			(cons (quote list) (map sources (lambda (src)
@@ -5352,10 +5373,8 @@ until the caller has selected this physical alternative. */
 			(qassoc_get spec (quote offset) 0)
 			(qassoc_get spec (quote limit) -1)
 			(quoted_runtime_list map_refs)
-			(list (quote lambda)
-				(scan_join_order_ref_params sources map_refs)
-				map_body)
-			reduce_expr neutral_expr shard_reduce_expr false neutral_expr batched_probe))))
+			mapreduce_expr
+			neutral_expr shard_reduce_expr false neutral_expr batched_probe))))
 
 (define join_ordered_streaming_limit_plan (lambda (schema all_sources plan default_alias output_exprs needed_exprs final_condition order_items offset_value limit_value stages facts value_builder reduce_expr neutral_expr)
 	(begin
@@ -5639,6 +5658,10 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 										(quote aggregate)))
 								(list (quote list) (quote row_partition) (quote next_rownum) (quote next_aggregate)))))
 					row_number_reduce_expr))
+				(define mapreduce_expr (list (quote lambda)
+					(cons (quote state) (map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col)))))
+					(list dataset_reduce_expr (quote state)
+						(cons map_expr (map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))))))
 				(define scan_expr (list (quote scan_order)
 					(physical_query_tx_symbol)
 					table_expr
@@ -5650,8 +5673,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 					0
 					-1
 					(cons (quote list) scan_mapcols)
-					map_expr
-					dataset_reduce_expr
+					mapreduce_expr
 					(if (join_scan_reduce? result_mode)
 						(list (quote list) nil 0 (join_scan_neutral_expr result_mode))
 						(list (quote list) nil 0))
@@ -6354,10 +6376,9 @@ only the structural work counts are specific to this operator. */
 						(cons (lower_column_expr_for_alias src condition) key_terms)))
 				(cons (quote list) value_cols)
 				(list (quote lambda)
-					(map value_cols (lambda (col)
-						(symbol (concat (source_alias src) "." col))))
-					payload_expr)
-				merge_payload
+					(cons (quote __scan_acc) (map value_cols (lambda (col)
+						(symbol (concat (source_alias src) "." col)))))
+					(list merge_payload (quote __scan_acc) payload_expr))
 				neutral_payload
 				merge_payload
 				false)))))
@@ -6381,11 +6402,12 @@ only the structural work counts are specific to this operator. */
 					(list (quote equal??) (symbol (nth key_names i)) (nth lookup_values i))))
 					true))
 			(cons (quote list) aggregate_cols)
-			(list (quote lambda) (map aggregate_cols symbol)
+			(list (quote lambda) (cons (quote __old_group_values) (map aggregate_cols symbol))
 				(runtime_cons_list_expr (map aggregate_cols symbol)))
+			neutral_payload
 			(list (quote lambda) (list (quote __old_group_values) (quote __new_group_values))
 				(quote __new_group_values))
-			neutral_payload nil false))))
+			false))))
 
 /* Direct grouped probes execute inside an outer join scan. Accumulate their
 measured time in a query-local session and flush it once after the complete
@@ -6479,8 +6501,8 @@ the costgen threshold. */
 				'("canonical_name")
 				(lambda (candidate_name) (equal? candidate_name canonical_name))
 				'("$update")
-				(lambda ($update) ($update))
-				+ 0 nil false)))))
+				(lambda (acc $update) (begin ($update) (+ acc 1)))
+				0 + false)))))
 
 (define direct_group_join_cache_threshold_ns (lambda (stage)
 	(begin
@@ -6921,11 +6943,15 @@ carrier remains on the measured direct path and is never built eagerly. */
 							(probe_work_context_rows_for_alias probe_context alias))
 						continuation_expr
 						(join_scan_skip_expr result_mode))))
-				(define map_expr (list (quote lambda)
-					(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
-					map_body))
 				(define combines_state (not (empty_list? future_aliases)))
 				(define reduce_expr (join_scan_reduce_expr result_mode combines_state))
+				(define mapreduce_body (if (nil? reduce_expr)
+					map_body
+					(list reduce_expr (symbol "__scan_acc") map_body)))
+				(define mapreduce_expr (list (quote lambda)
+					(cons (symbol "__scan_acc")
+						(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col))))
+					mapreduce_body))
 				(define scan_expr
 					(if (not (nil? row_number_stage_filter))
 						(build_join_row_number_scan_pipeline schema all_sources src default_alias needed_exprs remaining_condition row_expr row_number_stage_filter membership_var membership_filter column_recipe stages result_mode probe_context combines_state continuation outer_scan)
@@ -6945,7 +6971,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 											(canonical_order_relation <
 												(source_column_order_collation src col)))))))
 									0 (coalesceNil offset_value 0) (coalesceNil limit_value -1)
-									(cons (quote list) mapcols) map_expr reduce_expr
+									(cons (quote list) mapcols) mapreduce_expr
 									(join_scan_neutral_expr result_mode)
 									(or outer_scan (source_outer? src))))
 							(if (and (empty_list? current_order_items) (not (query_limit_active? offset_value limit_value)))
@@ -6955,8 +6981,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(cons (quote list) filtercols)
 									filter_expr
 									(cons (quote list) mapcols)
-									map_expr
-									reduce_expr
+									mapreduce_expr
 									(join_scan_neutral_expr result_mode)
 									(join_scan_shard_reduce_expr result_mode)
 									(or outer_scan (source_outer? src)))
@@ -6972,8 +6997,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(coalesceNil offset_value 0)
 									(coalesceNil limit_value -1)
 									(cons (quote list) mapcols)
-									map_expr
-									reduce_expr
+									mapreduce_expr
 									(join_scan_neutral_expr result_mode)
 									(or outer_scan (source_outer? src)))))))
 				(define membership_bound_scan (if membership_filter
@@ -7334,8 +7358,10 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(cons (quote list) cache_cols)
 			(list (quote lambda) params (combine_where_terms terms true))
 			(quoted_runtime_list (list "$update"))
-			(list (quote lambda) (list (symbol "$update")) (list (symbol "$update")))
-			(quote +) 0 nil false))))
+			(list (quote lambda) (list (quote __scan_acc) (symbol "$update"))
+				(list (quote begin) (list (symbol "$update"))
+					(list (quote +) (quote __scan_acc) 1)))
+			0 (quote +) false))))
 
 (define prejoin_deferred_trigger (lambda (body)
 	(list (quote quote)
@@ -7384,8 +7410,8 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 				(cons (quote list) key_cols)
 				(list (quote lambda) filter_params (combine_where_terms filter_terms true))
 				(quoted_runtime_list (list col))
-				(list (quote lambda) (list value_symbol) value_symbol)
-				reduce_expr nil reduce_expr false)))
+				(list (quote lambda) (list (quote __scan_acc) value_symbol) value_symbol)
+				nil reduce_expr false)))
 		(list (quote createcolumn)
 			(list (quote table) (qb_schema block) table_name)
 			(prejoin_column_name sources alias col)
@@ -8086,11 +8112,11 @@ every title. */
 				(list (quote has_assoc?) target_rows
 					(cons (quote list) keyparams)))
 			(quoted_runtime_list (list "$update"))
-			(list (quote lambda) (list (symbol "$update"))
-				(list (quote if) (list (symbol "$update")) 1 0))
-			(quote +)
+			(list (quote lambda) (list (quote __scan_acc) (symbol "$update"))
+				(list (quote +) (quote __scan_acc)
+					(list (quote if) (list (symbol "$update")) 1 0)))
 			0
-			nil
+			(quote +)
 			false))))
 
 (define lower_multi_target_delete_query_block (lambda (block target_specs)
@@ -8234,11 +8260,12 @@ every title. */
 			nil
 			(cons (quote list) (lower_dml_update_values src cols))))
 		(define map_expr (list (quote lambda)
-			(map mapcols (lambda (col)
-				(if (equal? col "$update") (symbol "$update") (symbol (concat alias "." col)))))
-			(if delete_mode
-				(list (quote if) (list (quote $update)) 1 0)
-				(list (quote if) (list (quote $update) update_values) 1 0))))
+			(cons (quote __scan_acc) (map mapcols (lambda (col)
+				(if (equal? col "$update") (symbol "$update") (symbol (concat alias "." col))))))
+			(list (quote +) (quote __scan_acc)
+				(if delete_mode
+					(list (quote if) (list (quote $update)) 1 0)
+					(list (quote if) (list (quote $update) update_values) 1 0)))))
 		(if (and (empty_list? order_items) (not bounded))
 			(list (quote scan)
 				(physical_query_tx_symbol)
@@ -8247,9 +8274,8 @@ every title. */
 				filter_expr
 				(cons (quote list) mapcols)
 				map_expr
-				(quote +)
 				0
-				nil
+				(quote +)
 				false)
 			(list (quote scan_order)
 				(physical_query_tx_symbol)
@@ -8263,7 +8289,6 @@ every title. */
 				(coalesceNil (qb_limit block) -1)
 				(cons (quote list) mapcols)
 				map_expr
-				(quote +)
 				0
 				false)))))
 
@@ -8638,7 +8663,7 @@ stars through the same catalog-aware path used by physical lowering. */
 			(map filtercols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			(lower_column_expr_for_alias src filter_condition)))
 		(define map_expr (list (quote lambda)
-			(map mapcols (lambda (col) (symbol (concat alias "." col))))
+			(cons (quote __scan_acc) (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 			(list (quote resultrow)
 				(cons (quote list) (merge (map (produceN (count titles)) (lambda (i)
 					(list (nth titles i) (lower_column_expr_for_alias src (nth exprs i))))))))))
@@ -8677,7 +8702,8 @@ stars through the same catalog-aware path used by physical lowering. */
 					(coalesceNil (union_offset block) 0)
 					(coalesceNil (union_limit block) -1)
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 4)))))
-					(cons (quote list) (map specs (lambda (spec) (nth spec 5))))))
+					(cons (quote list) (map specs (lambda (spec) (nth spec 5))))
+					nil false nil))
 				(define bound_scan_plan (wrap_membership_recset_bindings membership_bindings scan_plan))
 				(if (empty_list? prepares)
 					bound_scan_plan

@@ -129,22 +129,22 @@ func (db *database) IncrBlobRefcount(hash string) {
 
 	hashVal := scm.NewString(hash)
 
-	// callback: (lambda (refcount $update) (if ($update (list "refcount" (+ refcount 1))) 1 0))
+	// callback: (lambda (acc refcount $update) (if ($update (list "refcount" (+ refcount 1))) (+ acc 1) acc))
 	callback := scm.NewProcStruct(scm.Proc{
-		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("refcount"), scm.NewSymbol("$update")}),
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("refcount"), scm.NewSymbol("$update")}),
 		Body: scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"),
 			scm.NewSlice([]scm.Scmer{
-				scm.NewNthLocalVar(1),
+				scm.NewNthLocalVar(2),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
 					scm.NewString("refcount"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewNthLocalVar(0), scm.NewInt(1)}),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewNthLocalVar(1), scm.NewInt(1)}),
 				}),
 			}),
-			scm.NewInt(1),
-			scm.NewInt(0),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewNthLocalVar(0), scm.NewInt(1)}),
+			scm.NewNthLocalVar(0),
 		}),
 		En:      &scm.Globalenv,
-		NumVars: 2,
+		NumVars: 3,
 	})
 
 	aggr := sumProc()
@@ -153,7 +153,7 @@ func (db *database) IncrBlobRefcount(hash string) {
 			nil,
 			[]string{"hash"}, blobCondition(hashVal),
 			[]string{"refcount", "$update"}, callback,
-			aggr, scm.NewInt(0), aggr, false,
+			scm.NewInt(0), aggr, false,
 		)
 		return scm.ToInt(result) > 0
 	}
@@ -190,33 +190,33 @@ func (db *database) DecrBlobRefcount(hash string) {
 
 	hashVal := scm.NewString(hash)
 
-	// callback: (lambda (refcount $update)
+	// callback: (lambda (acc refcount $update)
 	//   (if (<= refcount 1)
 	//     (if ($update) 1 0)
 	//     (if ($update (list "refcount" (- refcount 1))) 0 0)))
 	callback := scm.NewProcStruct(scm.Proc{
-		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("refcount"), scm.NewSymbol("$update")}),
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("refcount"), scm.NewSymbol("$update")}),
 		Body: scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("<="), scm.NewNthLocalVar(0), scm.NewInt(1)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("<="), scm.NewNthLocalVar(1), scm.NewInt(1)}),
 			// then: delete row, return 1
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"),
-				scm.NewSlice([]scm.Scmer{scm.NewNthLocalVar(1)}),
-				scm.NewInt(1), scm.NewInt(0),
+				scm.NewSlice([]scm.Scmer{scm.NewNthLocalVar(2)}),
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewNthLocalVar(0), scm.NewInt(1)}), scm.NewNthLocalVar(0),
 			}),
 			// else: decrement, return 0
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"),
 				scm.NewSlice([]scm.Scmer{
-					scm.NewNthLocalVar(1),
+					scm.NewNthLocalVar(2),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"),
 						scm.NewString("refcount"),
-						scm.NewSlice([]scm.Scmer{scm.NewSymbol("-"), scm.NewNthLocalVar(0), scm.NewInt(1)}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("-"), scm.NewNthLocalVar(1), scm.NewInt(1)}),
 					}),
 				}),
-				scm.NewInt(0), scm.NewInt(0),
+				scm.NewNthLocalVar(0), scm.NewNthLocalVar(0),
 			}),
 		}),
 		En:      &scm.Globalenv,
-		NumVars: 2,
+		NumVars: 3,
 	})
 
 	aggr := sumProc()
@@ -224,7 +224,7 @@ func (db *database) DecrBlobRefcount(hash string) {
 		nil,
 		[]string{"hash"}, blobCondition(hashVal),
 		[]string{"refcount", "$update"}, callback,
-		aggr, scm.NewInt(0), aggr, false,
+		scm.NewInt(0), aggr, false,
 	)
 
 	// If row was deleted (RC was <=1), remove the blob file

@@ -69,14 +69,14 @@ func lambdaAst(params []string, body scm.Scmer) scm.Scmer {
 func TestStorageAnalyzersRecognizeLoweredSpecialFormHeads(t *testing.T) {
 	constantOne := scm.NewSlice([]scm.Scmer{
 		scm.Globalenv.Vars[scm.Symbol("lambda")],
-		scm.NewSlice(nil),
-		scm.NewInt(1),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewInt(1)}),
 	})
 	if constantOne.Slice()[0].IsSymbol() {
 		t.Fatal("optimizer did not lower lambda head for the regression fixture")
 	}
 	if !isConstantOneAggregate(constantOne) {
-		t.Fatal("constant COUNT mapper was hidden by its lowered lambda head")
+		t.Fatal("constant COUNT mapreducer was hidden by its lowered lambda head")
 	}
 
 	outer := scm.Globalenv.Vars[scm.Symbol("outer")]
@@ -264,13 +264,11 @@ func TestLookupInvalidationIncludesComputedDeltaRows(t *testing.T) {
 	proxy.validMask.Set(1, true)
 	shard.columns["cached"] = proxy
 
-	mapFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		return scm.Apply(args[0])
+	mapReduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		scm.Apply(args[1])
+		return args[0]
 	})
-	reduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		return args[1]
-	})
-	mr := shard.OpenMapReducer([]string{"$invalidate:cached"}, mapFn, reduceFn, false, 0, nil, nil)
+	mr := shard.OpenMapReducer([]string{"$invalidate:cached"}, mapReduceFn, false, 0, nil, nil)
 	mr.processDeltaBlock(scm.NewNil(), []uint32{1})
 	mr.FlushSideEffects()
 
@@ -447,19 +445,14 @@ func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T
 	src.CreateColumn("val", "INT", nil, nil)
 	src.CreateColumn("note", "TEXT", nil, nil)
 
-	mapFn := lambdaAst([]string{"$set", "ref_id"}, scm.NewSlice([]scm.Scmer{
-		scm.NewSymbol("list"),
-		scm.NewSymbol("$set"),
-		nestedScanAst("torctrigger", "src", "ref_id"),
-	}))
-	reduceFn := lambdaAst([]string{"acc", "mapped"}, scm.NewSlice([]scm.Scmer{
+	mapReduceFn := lambdaAst([]string{"acc", "$set", "ref_id"}, scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("begin"),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("define"),
 			scm.NewSymbol("new_acc"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("cadr"), scm.NewSymbol("mapped")})}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewSymbol("acc"), nestedScanAst("torctrigger", "src", "ref_id")}),
 		}),
-		scm.NewSlice([]scm.Scmer{scm.NewSlice([]scm.Scmer{scm.NewSymbol("car"), scm.NewSymbol("mapped")}), scm.NewSymbol("new_acc")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("$set"), scm.NewSymbol("new_acc")}),
 		scm.NewSymbol("new_acc"),
 	}))
 	for i, col := range base.Columns {
@@ -467,13 +460,12 @@ func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T
 			base.Columns[i].OrcSortCols = []string{"sortk"}
 			base.Columns[i].OrcSortDirs = []bool{false}
 			base.Columns[i].OrcMapCols = []string{"ref_id"}
-			base.Columns[i].OrcMapFn = mapFn
-			base.Columns[i].OrcReduceFn = reduceFn
+			base.Columns[i].OrcMapReduceFn = mapReduceFn
 			base.Columns[i].OrcReduceInit = scm.NewInt(0)
 			break
 		}
 	}
-	refs := append(extractScanJoinInfo(mapFn), extractScanJoinInfo(reduceFn)...)
+	refs := extractScanJoinInfo(mapReduceFn)
 	base.registerORCTriggers("running")
 
 	prefix := ".orcdep:base:running|scan0|src|"
@@ -484,7 +476,7 @@ func TestORCDependencyTriggersUseRelevantColumnsAndInvalidateSuffix(t *testing.T
 		}
 	}
 	if triggerCount != 3 {
-		t.Fatalf("ORC dependency trigger count = %d, want 3 (refs=%#v map=%s)", triggerCount, refs, serializeScmerForTest(mapFn))
+		t.Fatalf("ORC dependency trigger count = %d, want 3 (refs=%#v mapreduce=%s)", triggerCount, refs, serializeScmerForTest(mapReduceFn))
 	}
 
 	tr, ok := findTriggerByPrefixAndTiming(src.Triggers, prefix, AfterUpdate)

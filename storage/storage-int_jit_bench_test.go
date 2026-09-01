@@ -312,16 +312,8 @@ func BenchmarkStorageIntSum(b *testing.B) {
 		shard := buildBenchShard(s, benchN)
 
 		// identity map: (lambda (x) x) — body = (var 0), NumVars=1
-		mapProc := scm.NewProcStruct(scm.Proc{
-			Params:  scm.NewSlice([]scm.Scmer{scm.NewSymbol("x")}),
-			Body:    scm.NewNthLocalVar(0),
-			En:      &scm.Globalenv,
-			NumVars: 1,
-		})
-
-		// reduce: (lambda (acc new) (+ acc new))
-		reduceProc := scm.NewProcStruct(scm.Proc{
-			Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("new")}),
+		mapReduceProc := scm.NewProcStruct(scm.Proc{
+			Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("x")}),
 			Body: scm.NewSlice([]scm.Scmer{
 				scm.NewSymbol("+"),
 				scm.NewNthLocalVar(0),
@@ -331,7 +323,7 @@ func BenchmarkStorageIntSum(b *testing.B) {
 			NumVars: 2,
 		})
 
-		mr := shard.OpenMapReducer([]string{"x"}, mapProc, reduceProc, false, 1, nil, nil)
+		mr := shard.OpenMapReducer([]string{"x"}, mapReduceProc, false, 1, nil, nil)
 		defer mr.Close()
 
 		// build recid list [0..benchN-1]

@@ -16,6 +16,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+import "reflect"
+
 // SerialProcKind describes callback shapes whose semantics can be consumed by
 // a physical operator without entering Eval. Operators must dispatch on Kind
 // outside their row loops; Call is the compatibility path for code which does
@@ -291,4 +293,18 @@ func (p *SerialProc) IsNative(name Symbol) bool {
 	}
 	value, ok := binding.Vars[name]
 	return ok && value.GetTag() == tagFunc && value.ptr == p.Value.ptr && value.aux == p.Value.aux
+}
+
+// IsNativeArgConstant reports whether this callback is a binary native call
+// with one procedure argument and one constant operand.
+func (p *SerialProc) IsNativeArgConstant(name Symbol) bool {
+	if p.Kind != SerialProcNativeArgConstant || p.Function == nil {
+		return false
+	}
+	binding := Globalenv.FindRead(name)
+	if binding == nil {
+		return false
+	}
+	value, ok := binding.Vars[name]
+	return ok && value.GetTag() == tagFunc && reflect.ValueOf(value.Func()).Pointer() == reflect.ValueOf(p.Function).Pointer()
 }

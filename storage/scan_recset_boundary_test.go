@@ -64,10 +64,9 @@ func scanOrderedRecSetIDsWithCondition(tbl *table, source *recSet, limit int, or
 		[]scm.Scmer{scm.NewString("rank")}, []func(...scm.Scmer) scm.Scmer{order},
 		0, 0, limit, []string{"id"},
 		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-			result = append(result, values[0].Int())
+			result = append(result, values[1].Int())
 			return values[0]
 		}),
-		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
 		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
 	return result
 }
@@ -99,10 +98,9 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 	got := make([]int64, 0, 2)
 	source.scan(nil, []string{"id"}, condition, []string{"id"},
 		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-			got = append(got, values[0].Int())
+			got = append(got, values[1].Int())
 			return values[0]
-		}), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
-		scm.NewNil(), scm.NewNil(), false)
+		}), scm.NewNil(), scm.NewNil(), false)
 
 	if want := []int64{103, 150}; !equalInt64s(got, want) {
 		t.Fatalf("RecSet boundary scan rows = %v, want %v", got, want)
@@ -125,10 +123,9 @@ func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
 		got := make([]int64, 0, 2)
 		source.scan(nil, []string{"id"}, condition, []string{"id"},
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-				got = append(got, values[0].Int())
+				got = append(got, values[1].Int())
 				return values[0]
-			}), scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
-			scm.NewNil(), scm.NewNil(), false)
+			}), scm.NewNil(), scm.NewNil(), false)
 		if want := []int64{103, 1_503}; !equalInt64s(got, want) {
 			t.Fatalf("repeated RecSet scan rows = %v, want %v", got, want)
 		}

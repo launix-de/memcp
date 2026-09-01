@@ -60,11 +60,10 @@ func TestScanJoinOrderFiltersJoinsAndBrakesInDriverOrder(t *testing.T) {
 		return scm.NewBool(values[0].Int() == 1)
 	})
 	got := make([][2]int64, 0)
-	mapFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		got = append(got, [2]int64{values[0].Int(), values[1].Int()})
+	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		got = append(got, [2]int64{values[1].Int(), values[2].Int()})
 		return values[0]
 	})
-	reduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
 
 	scanJoinOrder(nil, scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
@@ -79,8 +78,7 @@ func TestScanJoinOrderFiltersJoinsAndBrakesInDriverOrder(t *testing.T) {
 		offset:        1,
 		limit:         3,
 		mapCols:       []scanJoinOrderColumn{{table: 0, column: "id"}, {table: 2, column: "tag"}},
-		mapFn:         mapFn,
-		reduceFn:      reduceFn,
+		mapReduceFn:   mapReduceFn,
 		neutral:       scm.NewNil(),
 		notFoundValue: scm.NewNil(),
 		batchedProbe:  true,
@@ -118,8 +116,7 @@ func TestScanJoinOrderDoesNotJoinNullKeys(t *testing.T) {
 		orderDirs:     []func(...scm.Scmer) scm.Scmer{ascending},
 		limit:         1,
 		mapCols:       []scanJoinOrderColumn{{table: 0, column: "id"}},
-		mapFn:         scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
-		reduceFn:      scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
+		mapReduceFn:   scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
 		neutral:       scm.NewNil(),
 		notFoundValue: scm.NewString("missing"),
 	})
@@ -144,11 +141,10 @@ func TestScanJoinOrderDeclarationSupportsOrderFromJoinedTable(t *testing.T) {
 	})
 	ascendingValue, _ := integerOrder(false)
 	got := make([]int64, 0, 1)
-	mapFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		got = append(got, values[0].Int())
+	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		got = append(got, values[1].Int())
 		return values[0]
 	})
-	reduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
 	trueFn := scanJoinTrue()
 	ref := func(tableIndex int64, column string) scm.Scmer {
 		return scm.NewSlice([]scm.Scmer{scm.NewInt(tableIndex), scm.NewString(column)})
@@ -166,7 +162,7 @@ func TestScanJoinOrderDeclarationSupportsOrderFromJoinedTable(t *testing.T) {
 		scm.NewSlice([]scm.Scmer{ref(1, "rank_col")}),
 		scm.NewSlice([]scm.Scmer{ascendingValue}),
 		scm.NewInt(0), scm.NewInt(0), scm.NewInt(1),
-		scm.NewSlice([]scm.Scmer{ref(0, "id")}), mapFn, reduceFn, scm.NewNil())
+		scm.NewSlice([]scm.Scmer{ref(0, "id")}), mapReduceFn, scm.NewNil())
 
 	if len(got) != 1 || got[0] != 2 {
 		t.Fatalf("declared joined-table order returned %v, want [2]", got)
@@ -212,12 +208,11 @@ func TestScanJoinOrderPrunesCompatibleJoinKeyShardPairs(t *testing.T) {
 			{table: left},
 			{table: right, sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
 		},
-		orderCols: []scanJoinOrderColumn{{table: 0, column: "id"}},
-		orderDirs: []func(...scm.Scmer) scm.Scmer{descending},
-		limit:     5,
-		mapCols:   []scanJoinOrderColumn{{table: 0, column: "id"}},
-		mapFn:     scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
-		reduceFn:  scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
+		orderCols:   []scanJoinOrderColumn{{table: 0, column: "id"}},
+		orderDirs:   []func(...scm.Scmer) scm.Scmer{descending},
+		limit:       5,
+		mapCols:     []scanJoinOrderColumn{{table: 0, column: "id"}},
+		mapReduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
 	}
 	prepareScanJoinOrderSpec(&spec)
 	streams := make([][]*scanJoinOrderShardStream, 2)
@@ -234,8 +229,8 @@ func TestScanJoinOrderPrunesCompatibleJoinKeyShardPairs(t *testing.T) {
 	}
 
 	got := make([]int64, 0, 5)
-	spec.mapFn = scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		got = append(got, values[0].Int())
+	spec.mapReduceFn = scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		got = append(got, values[1].Int())
 		return values[0]
 	})
 	scanJoinOrder(nil, spec)
@@ -245,7 +240,7 @@ func TestScanJoinOrderPrunesCompatibleJoinKeyShardPairs(t *testing.T) {
 	}
 }
 
-func TestScanJoinOrderRejectsReduce2WithLimit(t *testing.T) {
+func TestScanJoinOrderRejectsCombineWithLimit(t *testing.T) {
 	database := "tscanjoinorderreduce2limit"
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
@@ -258,18 +253,17 @@ func TestScanJoinOrderRejectsReduce2WithLimit(t *testing.T) {
 		}
 	}()
 	scanJoinOrder(nil, scanJoinOrderSpec{
-		inputs:    []scanJoinOrderInput{{table: table}},
-		orderCols: []scanJoinOrderColumn{{table: 0, column: "id"}},
-		orderDirs: []func(...scm.Scmer) scm.Scmer{ascending},
-		limit:     1,
-		mapCols:   []scanJoinOrderColumn{{table: 0, column: "id"}},
-		mapFn:     scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
-		reduceFn:  scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
-		reduce2Fn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
+		inputs:      []scanJoinOrderInput{{table: table}},
+		orderCols:   []scanJoinOrderColumn{{table: 0, column: "id"}},
+		orderDirs:   []func(...scm.Scmer) scm.Scmer{ascending},
+		limit:       1,
+		mapCols:     []scanJoinOrderColumn{{table: 0, column: "id"}},
+		mapReduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
+		combineFn:   scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
 	})
 }
 
-func TestScanJoinOrderReduce2CombinesUnlimitedRunnerPartials(t *testing.T) {
+func TestScanJoinOrderCombineCombinesUnlimitedRunnerPartials(t *testing.T) {
 	database := "tscanjoinorderreduce2"
 	databases.Remove(database)
 	t.Cleanup(func() { databases.Remove(database) })
@@ -297,12 +291,11 @@ func TestScanJoinOrderReduce2CombinesUnlimitedRunnerPartials(t *testing.T) {
 		},
 		limit:   -1,
 		mapCols: []scanJoinOrderColumn{{table: 0, column: "amount"}},
-		mapFn:   scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
-		reduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		mapReduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			localReduceCalls.Add(1)
 			return scm.NewInt(values[0].Int() + values[1].Int())
 		}),
-		reduce2Fn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		combineFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			globalReduceCalls.Add(1)
 			return scm.NewInt(values[0].Int() + values[1].Int())
 		}),
@@ -330,18 +323,16 @@ func TestScanJoinOrderUsesSerialCountPipeline(t *testing.T) {
 	right := setupScanJoinOrderTable(t, database, "right_rows", []string{"key_col"}, [][]scm.Scmer{
 		{scm.NewInt(1)}, {scm.NewInt(2)}, {scm.NewInt(3)},
 	})
-	mapFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count mapper", "(lambda (value) 1)"), &scm.Globalenv, nil), &scm.Globalenv)
-	reduceFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count reducer", "(lambda (acc value) (+ acc value))"), &scm.Globalenv, nil), &scm.Globalenv)
+	mapReduceFn := scm.Eval(scm.Optimize(scm.Read("scan_join_order count mapreducer", "(lambda (acc value) (+ acc 1))"), &scm.Globalenv, nil), &scm.Globalenv)
 	result := scanJoinOrder(nil, scanJoinOrderSpec{
 		inputs: []scanJoinOrderInput{
 			{table: left},
 			{table: right, sourceKeyCols: []scanJoinOrderColumn{{table: 0, column: "key_col"}}, targetKeyCols: []string{"key_col"}},
 		},
-		limit:    -1,
-		mapCols:  []scanJoinOrderColumn{{table: 0, column: "key_col"}},
-		mapFn:    mapFn,
-		reduceFn: reduceFn,
-		neutral:  scm.NewInt(0),
+		limit:       -1,
+		mapCols:     []scanJoinOrderColumn{{table: 0, column: "key_col"}},
+		mapReduceFn: mapReduceFn,
+		neutral:     scm.NewInt(0),
 	})
 	if result.Int() != 3 {
 		t.Fatalf("serial COUNT pipeline result = %v, want 3", result)

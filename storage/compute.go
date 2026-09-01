@@ -251,17 +251,15 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 
 // ComputeOrderedColumn materializes an ordered-reduce computed (ORC) column.
 // The column value for each row is produced by a scan_order pass over the table:
-// mapFn receives a $set closure plus any mapCols values; reduceFn threads an
-// accumulator, writing results via ($set val).
+// mapReduceFn receives the accumulator, a $set closure, and any mapCols values.
 //
 // sortCols: ORDER BY column names (partition cols first)
 // sortDirs: false=ASC, true=DESC, one per sortCol
 // partCount: leading sortCols that are partition keys (0 = unpartitioned)
-// mapCols:   additional input columns passed to mapFn (beyond the implicit $set closure)
-// mapFn:     (lambda ($set mapCols...) ...) — passes data through to reduceFn
-// reduceFn:  (lambda (acc mapped) ...) — calls ($set newVal), returns new acc
+// mapCols:   additional input columns passed to mapReduceFn (beyond accumulator and $set)
+// mapReduceFn: (lambda (acc $set mapCols...) ...) — calls ($set newVal), returns new acc
 // reduceInit: initial accumulator value
-func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapReduceFn scm.Scmer, reduceInit scm.Scmer) {
 	found := false
 	paramsChanged := false
 	isTemp := false
@@ -280,8 +278,7 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 			t.Columns[i].OrcFilterCols = filterCols
 			t.Columns[i].OrcFilterFn = filterFn
 			t.Columns[i].OrcMapCols = mapCols
-			t.Columns[i].OrcMapFn = mapFn
-			t.Columns[i].OrcReduceFn = reduceFn
+			t.Columns[i].OrcMapReduceFn = mapReduceFn
 			t.Columns[i].OrcReduceInit = reduceInit
 			isTemp = c.IsTemp
 			found = true
@@ -323,10 +320,10 @@ func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, so
 	}
 }
 
-func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapFn scm.Scmer, reduceFn scm.Scmer, reduceInit scm.Scmer) {
+func (t *table) ComputeOrderedColumn(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapReduceFn scm.Scmer, reduceInit scm.Scmer) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeOrderedColumnDDLLocked(name, sortCols, sortDirs, partCount, filterCols, filterFn, mapCols, mapFn, reduceFn, reduceInit)
+	t.computeOrderedColumnDDLLocked(name, sortCols, sortDirs, partCount, filterCols, filterFn, mapCols, mapReduceFn, reduceInit)
 }
 
 // initORCShard ensures a StorageComputeProxy with isOrdered=true exists on shard s.
@@ -412,7 +409,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	// Identity enables: skip valid prefix (Phase 1) + convergence break (Phase 3).
 	// Non-identity: must compute every row but still benefits from validMask to detect
 	// when the recomputed range ends.
-	isIdentity := analyzeOrcSuffix(col.OrcReduceFn) == OrcSuffixIdentity
+	isIdentity := analyzeOrcSuffix(col.OrcMapReduceFn) == OrcSuffixIdentity
 
 	// Build condition filter. For partitioned ORCs, restrict the scan to the
 	// partition containing the requested row. This avoids scanning all partitions
@@ -496,8 +493,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			sortcolsScmer, sortdirsFns,
 			0, 0, -1,
 			scanCallbackCols,
-			col.OrcMapFn,
-			col.OrcReduceFn,
+			col.OrcMapReduceFn,
 			col.OrcReduceInit,
 			false,
 			col.OrcReduceInit,
@@ -526,23 +522,11 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	scanCallbackCols = append(scanCallbackCols, "$orc_stored:"+name)
 	scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
 
-	innerMapFn := scm.OptimizeProcToSerialFunction(col.OrcMapFn)
-	scanMapFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		brk := args[1]
-		storedVal := args[2] // nil = invalid row, non-nil = valid cached value
-		innerArgs := make([]scm.Scmer, 1+len(col.OrcMapCols))
-		innerArgs[0] = args[0] // $set
-		copy(innerArgs[1:], args[3:])
-		return scm.NewSlice([]scm.Scmer{brk, storedVal, innerMapFn(innerArgs...)})
-	})
-
-	innerReduceFn := scm.OptimizeProcToSerialFunction(col.OrcReduceFn)
+	innerMapReduceFn := scm.OptimizeProcToSerialFunction(col.OrcMapReduceFn)
 	recomputeStarted := false
-	scanReduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-		mapped := args[1].Slice()
-		brk := mapped[0]
-		storedVal := mapped[1] // nil = invalid (orcRecomputing returns nil for invalid rows)
-		innerMapped := mapped[2]
+	scanMapReduceFn := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
+		brk := args[2]
+		storedVal := args[3] // nil = invalid row, non-nil = valid cached value
 
 		if isIdentity && !recomputeStarted && !storedVal.IsNil() {
 			// Phase 1 (identity only): valid row before first invalid.
@@ -554,7 +538,11 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		}
 
 		// Phase 2: compute new value via inner reducer (calls $set internally)
-		newAcc := innerReduceFn(args[0], innerMapped)
+		innerArgs := make([]scm.Scmer, 2+len(col.OrcMapCols))
+		innerArgs[0] = args[0]
+		innerArgs[1] = args[1]
+		copy(innerArgs[2:], args[4:])
+		newAcc := innerMapReduceFn(innerArgs...)
 
 		if isIdentity && recomputeStarted && !storedVal.IsNil() && !newAcc.IsNil() {
 			// Phase 3 (identity only): valid row after recompute region.
@@ -575,8 +563,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		sortcolsScmer, sortdirsFns,
 		0, 0, -1,
 		scanCallbackCols,
-		scanMapFn,
-		scanReduceFn,
+		scanMapReduceFn,
 		col.OrcReduceInit,
 		false,
 		col.OrcReduceInit,
@@ -851,7 +838,7 @@ func (t *table) registerORCTriggers(name string) {
 		})
 	}
 	if col != nil {
-		refs := append(extractScanJoinInfo(col.OrcMapFn), extractScanJoinInfo(col.OrcReduceFn)...)
+		refs := extractScanJoinInfo(col.OrcMapReduceFn)
 		t.registerORCDependencyTriggers(name, col, refs)
 	}
 }
@@ -1227,18 +1214,53 @@ func isAdditiveReduce(reduce scm.Scmer) bool {
 	return ok
 }
 
+// mapReduceParts extracts the accumulator parameters and mapped value from the
+// direct callback shape (lambda (acc cols...) (reduce acc mapped)).
+func mapReduceParts(mapReduceFn scm.Scmer) ([]scm.Scmer, scm.Scmer, bool) {
+	var params []scm.Scmer
+	var body scm.Scmer
+	if mapReduceFn.IsProc() {
+		proc := mapReduceFn.Proc()
+		if proc.Params.IsSlice() {
+			params = proc.Params.Slice()
+		}
+		body = proc.Body
+	} else if mapReduceFn.IsSlice() {
+		items := mapReduceFn.Slice()
+		if len(items) >= 3 && callHeadIs(items[0], "lambda") {
+			if items[1].IsSlice() {
+				params = items[1].Slice()
+			}
+			body = items[2]
+		}
+	}
+	if len(params) == 0 || !body.IsSlice() {
+		return nil, scm.NewNil(), false
+	}
+	call := body.Slice()
+	if len(call) != 3 {
+		return nil, scm.NewNil(), false
+	}
+	accRef := call[1]
+	if accRef.IsNthLocalVar() {
+		if accRef.NthLocalVar() != 0 {
+			return nil, scm.NewNil(), false
+		}
+	} else if !accRef.IsSymbol() || !params[0].IsSymbol() || accRef.String() != params[0].String() {
+		return nil, scm.NewNil(), false
+	}
+	return params, call[2], true
+}
+
 // isAdditiveAggregate checks whether a scan node represents an additive aggregate
-// (reduce=+, neutral=0) whose mapFn contains no inner scans.
+// (combine=+, neutral=0) whose fused callback contains no inner scans.
 func isAdditiveAggregate(scanNode []scm.Scmer) bool {
-	if len(scanNode) < 8 {
+	if len(scanNode) < 9 {
 		return false
 	}
-	// scan layout: [fn, tx, table, filterCols, filter, mapCols, map, reduce, neutral, ...]
-	mapFnIdx, reduceIdx, neutralIdx := 6, 7, 8
-	if len(scanNode) <= neutralIdx {
-		return false
-	}
-	reduce := scanNode[reduceIdx]
+	// scan layout: [fn, tx, table, filterCols, filter, mapCols, mapreduce, neutral, combine, ...]
+	mapReduceIdx, neutralIdx, combineIdx := 6, 7, 8
+	reduce := scanNode[combineIdx]
 	neutral := scanNode[neutralIdx]
 	if !isAdditiveReduce(reduce) {
 		return false
@@ -1247,8 +1269,8 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 	if !isZero {
 		return false
 	}
-	// mapFn must not contain inner scans
-	if containsScan(scanNode[mapFnIdx]) {
+	_, delta, ok := mapReduceParts(scanNode[mapReduceIdx])
+	if !ok || containsScan(delta) {
 		return false
 	}
 	return true
@@ -1258,18 +1280,9 @@ func isAdditiveAggregate(scanNode []scm.Scmer) bool {
 // controls group visibility via COUNT>0, so DML must not rely on key-local
 // arithmetic folding. A full column invalidation is semantically robust and
 // lets the next read recompute the visible domain from source rows.
-func isConstantOneAggregate(mapFn scm.Scmer) bool {
-	if mapFn.IsProc() {
-		body := mapFn.Proc().Body
-		return body.IsInt() && body.Int() == 1
-	}
-	if mapFn.IsSlice() {
-		items := mapFn.Slice()
-		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
-			return items[2].IsInt() && items[2].Int() == 1
-		}
-	}
-	return false
+func isConstantOneAggregate(mapReduceFn scm.Scmer) bool {
+	_, delta, ok := mapReduceParts(mapReduceFn)
+	return ok && delta.IsInt() && delta.Int() == 1
 }
 
 // containsScan returns true if the expression contains a scan/scan_order/etc. call.
@@ -1314,32 +1327,16 @@ func scanMapColumns(mapCols scm.Scmer) []string {
 	return cols
 }
 
-// extractDeltaExpr transforms a scan's mapFn body by substituting parameter
+// extractDeltaExpr transforms a scan's fused callback value by substituting parameter
 // references (symbols or NthLocalVar) with (get_assoc dictSym "col") to
 // reference OLD/NEW trigger dicts.
-func extractDeltaExpr(mapCols, mapFn scm.Scmer, dictSym string) scm.Scmer {
-	var params []scm.Scmer
-	var body scm.Scmer
-	if mapFn.IsProc() {
-		proc := mapFn.Proc()
-		if proc.Params.IsSlice() {
-			params = proc.Params.Slice()
-		}
-		body = proc.Body
-	} else if mapFn.IsSlice() {
-		items := mapFn.Slice()
-		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
-			if items[1].IsSlice() {
-				params = items[1].Slice()
-			}
-			body = items[2]
-		}
-	}
-	if body.IsNil() {
+func extractDeltaExpr(mapCols, mapReduceFn scm.Scmer, dictSym string) scm.Scmer {
+	params, body, ok := mapReduceParts(mapReduceFn)
+	if !ok {
 		return scm.NewNil()
 	}
-	if len(params) == 0 {
-		// No parameters (e.g. COUNT(*) mapFn = (lambda () 1)) — body is the delta
+	if len(params) == 1 {
+		// No physical columns (e.g. COUNT(*) mapreduce = (lambda (acc) (+ acc 1))).
 		return body
 	}
 	sourceCols := scanMapColumns(mapCols)
@@ -1347,7 +1344,7 @@ func extractDeltaExpr(mapCols, mapFn scm.Scmer, dictSym string) scm.Scmer {
 	// Compiled Procs use NthLocalVar for param references; uncompiled lambdas use symbols.
 	symSubs := make(map[string]scm.Scmer, len(params))
 	idxSubs := make(map[int]scm.Scmer, len(params))
-	for i, p := range params {
+	for i, p := range params[1:] {
 		if p.IsSymbol() {
 			name := p.String()
 			col := name
@@ -1358,7 +1355,7 @@ func extractDeltaExpr(mapCols, mapFn scm.Scmer, dictSym string) scm.Scmer {
 			}
 			expr := fkGetAssocExpr(dictSym, col)
 			symSubs[name] = expr
-			idxSubs[i] = expr
+			idxSubs[i+1] = expr
 		}
 	}
 	return substituteParamRefs(body, symSubs, idxSubs)
@@ -1439,11 +1436,12 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 	// Result columns: (list "$increment:colName")
 	resultCols := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$increment:" + colName)})
 
-	// Map function: (lambda ($incr) ($incr valueExpr))
-	mapFn := scm.NewSlice([]scm.Scmer{
+	// Fused callback: (lambda (acc $incr) (+ acc ($incr valueExpr)))
+	mapReduceFn := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("lambda"),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr")}),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr"), valueExpr}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$incr")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewSymbol("acc"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("$incr"), valueExpr})}),
 	})
 
 	tableExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(targetTable)})
@@ -1454,8 +1452,8 @@ func buildIncrementScan(targetSchema, targetTable, colName string, srcCols, inpu
 		scm.NewSlice(filterColElems),
 		scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice(filterParams)}, filterBody)),
 		resultCols,
-		mapFn,
-		scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(), scm.NewBool(false),
+		mapReduceFn,
+		scm.NewInt(0), scm.NewSymbol("+"), scm.NewBool(false),
 	})
 }
 
@@ -1549,18 +1547,18 @@ func wrapUpdateBodyWithRelevantChangeGuard(body scm.Scmer, cols []string) scm.Sc
 // updates. For AfterInsert it adds the delta, for AfterUpdate it subtracts
 // OLD and adds NEW. For AfterDelete it falls back to selective invalidation
 // to ensure proper group removal when the last row in a group is deleted.
-func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, inputCols []string, mapCols, mapFn scm.Scmer, timing TriggerTiming) scm.Scmer {
+func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, inputCols []string, mapCols, mapReduceFn scm.Scmer, timing TriggerTiming) scm.Scmer {
 	switch timing {
 	case AfterInsert:
-		deltaExpr := extractDeltaExpr(mapCols, mapFn, "NEW")
+		deltaExpr := extractDeltaExpr(mapCols, mapReduceFn, "NEW")
 		return buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "NEW", deltaExpr, false)
 	case AfterUpdate:
 		// Build runtime check: if group key unchanged → $increment, else → invalidate.
 		// When the group key changes, keytable rows may be created/deleted by the
 		// cleanup trigger, making the old $increment targets stale. Full invalidation
 		// lets the next query recompute correctly.
-		oldDelta := extractDeltaExpr(mapCols, mapFn, "OLD")
-		newDelta := extractDeltaExpr(mapCols, mapFn, "NEW")
+		oldDelta := extractDeltaExpr(mapCols, mapReduceFn, "OLD")
+		newDelta := extractDeltaExpr(mapCols, mapReduceFn, "NEW")
 		incrementBody := scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("begin"),
 			buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD", oldDelta, true),
@@ -1600,7 +1598,7 @@ func buildIncrementalBody(targetSchema, targetTable, colName string, srcCols, in
 		// The COUNT column on the keytable naturally tracks group membership;
 		// when COUNT reaches 0, HAVING (COUNT > 0) excludes the empty group.
 		// The keytable cleanup trigger (priority 90) removes the row entirely.
-		oldDelta := extractDeltaExpr(mapCols, mapFn, "OLD")
+		oldDelta := extractDeltaExpr(mapCols, mapReduceFn, "OLD")
 		return buildIncrementScan(targetSchema, targetTable, colName, srcCols, inputCols, "OLD", oldDelta, true)
 	default:
 		// Fallback: full invalidation.
@@ -1852,17 +1850,17 @@ func (t *table) registerComputeTriggers(name string, computor scm.Scmer) {
 			if !exists {
 				var body scm.Scmer
 				if incremental && timing != AfterInvalidate {
-					// scan layout: [fn, tx, table, filterCols, filter, mapCols, map, ...]
-					mapColsIdx, mapFnIdx := 5, 6
+					// scan layout: [fn, tx, table, filterCols, filter, mapCols, mapreduce, ...]
+					mapColsIdx, mapReduceIdx := 5, 6
 					tblExpr := scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(targetSchema), scm.NewString(t.Name)})
-					if isConstantOneAggregate(scanNode[mapFnIdx]) {
+					if isConstantOneAggregate(scanNode[mapReduceIdx]) {
 						body = scm.NewSlice([]scm.Scmer{
 							scm.NewSymbol("invalidatecolumn"),
 							tblExpr,
 							scm.NewString(name),
 						})
 					} else {
-						body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapFnIdx], timing)
+						body = buildIncrementalBody(targetSchema, t.Name, name, ref.srcCols, ref.inputCols, scanNode[mapColsIdx], scanNode[mapReduceIdx], timing)
 					}
 				} else if selective {
 					// A scalar/lookup computor with analyzable equality keys defines an

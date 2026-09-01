@@ -1517,11 +1517,10 @@ const inlineMapReducerColumns = 8
 type shardMapReducerWorkspace struct {
 	mainCols        [inlineMapReducerColumns]ColumnStorage
 	mainBulkReaders [inlineMapReducerColumns]ColumnReader
-	args            [inlineMapReducerColumns]scm.Scmer
-	reduceArgs      [2]scm.Scmer
+	args            [inlineMapReducerColumns + 1]scm.Scmer
 }
 
-// ShardMapReducer pre-allocates args and applies map+reduce over batches of record IDs.
+// ShardMapReducer pre-allocates args and applies a fused map-reducer over batches of record IDs.
 // Local implementation of the streaming MapReducer pattern (see todos/cluster.md §15.7).
 // Stream() partitions recid batches into main/delta runs and dispatches to
 // processMainBlock/processDeltaBlock – tight loops suitable for JIT compilation.
@@ -1547,23 +1546,21 @@ type ShardMapReducer struct {
 	isBreak         []bool // true for $break column
 	hasBreakCol     bool
 	// tagClosure hoisted fn ptrs — allocated once per mapper, reused per row
-	setClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
-	incrClosureFn  []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
-	invClosureFn   []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
-	noopClosureFn  *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
-	breakClosureFn *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
-	args           []scm.Scmer                             // pre-allocated args buffer
-	reduceArgs     []scm.Scmer                             // pre-allocated binary reducer arguments
-	mapProgram     scm.SerialProc
-	reduceProgram  scm.SerialProc
-	mapScmer       scm.Scmer     // original Scmer for network serialization
-	deleteBatch    *triggerBatch // when set, DELETE triggers are batched instead of per-row
-	deletedRows    uint64        // applied DELETEs, published once when the mapper flushes
+	setClosureFn     []*func(uint32, ...scm.Scmer) scm.Scmer // per $set col
+	incrClosureFn    []*func(uint32, ...scm.Scmer) scm.Scmer // per $increment col
+	invClosureFn     []*func(uint32, ...scm.Scmer) scm.Scmer // per $invalidate col
+	noopClosureFn    *func(uint32, ...scm.Scmer) scm.Scmer   // shared noop
+	breakClosureFn   *func(uint32, ...scm.Scmer) scm.Scmer   // shared break
+	args             []scm.Scmer                             // pre-allocated [accumulator, column...] buffer
+	mapProgram       scm.SerialProc
+	mapReduceProgram scm.SerialProc
+	mapReduceScmer   scm.Scmer     // original Scmer for network serialization
+	deleteBatch      *triggerBatch // when set, DELETE triggers are batched instead of per-row
+	deletedRows      uint64        // applied DELETEs, published once when the mapper flushes
 	// Batched side effects: collected during scan, flushed after lock release.
 	// $increment calls are aggregated per (proxy, recid) → one update per unique target.
 	incrementBatch  map[*StorageComputeProxy]map[uint32]scm.Scmer // proxy → recid → accumulated delta
 	invalidateBatch map[*StorageComputeProxy]map[uint32]struct{}  // proxy -> matching rows to invalidate after scan
-	reduceScmer     scm.Scmer                                     // original Scmer for network serialization
 	mainCount       uint32
 	hasUpdateCol    bool
 	hasIncrementCol bool
@@ -1597,26 +1594,23 @@ func prepareReadMapReducerStorage(mr *ShardMapReducer, workspace *shardMapReduce
 	if width <= inlineMapReducerColumns {
 		mr.mainCols = workspace.mainCols[:width]
 		mr.mainBulkReaders = workspace.mainBulkReaders[:width]
-		mr.args = workspace.args[:width]
+		mr.args = workspace.args[:width+1]
 	} else {
 		mr.mainCols = make([]ColumnStorage, width)
 		mr.mainBulkReaders = make([]ColumnReader, width)
-		mr.args = make([]scm.Scmer, width)
+		mr.args = make([]scm.Scmer, width+1)
 	}
-	mr.reduceArgs = workspace.reduceArgs[:]
 }
 
 // initReadMapReducer initializes an ordinary read-only mapper without the
 // per-column closures required by pseudo-column and mutation scans.
-func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext) {
+func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext) {
 	mr.shard = t
 	mr.currentTx = currentTx
 	mr.acidMode = currentTx != nil && currentTx.Mode == TxACID
 	mr.colNames = cols
-	mr.mapProgram = scm.PrepareSerialProc(mapFn)
-	mr.reduceProgram = scm.PrepareSerialProc(reduceFn)
-	mr.mapScmer = mapFn
-	mr.reduceScmer = reduceFn
+	mr.mapReduceProgram = scm.PrepareSerialProc(mapReduceFn)
+	mr.mapReduceScmer = mapReduceFn
 	mr.mainCount = t.main_count
 	mr.shardWriteLocked = alreadyLocked
 	mr.directRead = true
@@ -1634,21 +1628,21 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 func (m *ShardMapReducer) MapOne(id uint32) scm.Scmer {
 	if m.directRead {
 		m.loadDirectReadArgs(id, 0, false)
-		return m.mapProgram.Call(m.args)
+		return m.mapProgram.Call(m.args[1:])
 	}
 	getters := m.mainGetters
 	if id >= m.mainCount {
 		getters = m.deltaGetters
 	}
 	for i, getter := range getters {
-		m.args[i] = getter(id, 0)
+		m.args[i+1] = getter(id, 0)
 	}
-	return m.mapProgram.Call(m.args)
+	return m.mapProgram.Call(m.args[1:])
 }
 
 // initMapReducer initializes the general mapper, including pseudo-columns and
 // mutation metadata. Retained operators allocate it through OpenMapReducer.
-func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) {
+func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) {
 	*mr = ShardMapReducer{
 		shard:            t,
 		currentTx:        currentTx,
@@ -1658,12 +1652,9 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapFn 
 		mainCols:         make([]ColumnStorage, len(cols)),
 		mainBulkReaders:  make([]ColumnReader, len(cols)),
 		colNames:         cols,
-		args:             make([]scm.Scmer, len(cols)),
-		reduceArgs:       make([]scm.Scmer, 2),
-		mapProgram:       scm.PrepareSerialProc(mapFn),
-		reduceProgram:    scm.PrepareSerialProc(reduceFn),
-		mapScmer:         mapFn,
-		reduceScmer:      reduceFn,
+		args:             make([]scm.Scmer, len(cols)+1),
+		mapReduceProgram: scm.PrepareSerialProc(mapReduceFn),
+		mapReduceScmer:   mapReduceFn,
 		mainCount:        t.main_count,
 		shardWriteLocked: alreadyLocked,
 	}
@@ -1931,9 +1922,18 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapFn 
 
 // OpenMapReducer creates a retained MapReducer for operators whose mapper
 // outlives one synchronous shard call.
-func (t *storageShard) OpenMapReducer(cols []string, mapFn scm.Scmer, reduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) *ShardMapReducer {
+func (t *storageShard) OpenMapReducer(cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, stride int, batchdata []scm.Scmer, currentTx *TxContext) *ShardMapReducer {
 	mr := new(ShardMapReducer)
-	t.initMapReducer(mr, cols, mapFn, reduceFn, alreadyLocked, stride, batchdata, currentTx)
+	t.initMapReducer(mr, cols, mapReduceFn, alreadyLocked, stride, batchdata, currentTx)
+	return mr
+}
+
+// OpenMapper creates a retained mapper for materialization and predicates that
+// do not participate in a reduction.
+func (t *storageShard) OpenMapper(cols []string, mapFn scm.Scmer, alreadyLocked bool, currentTx *TxContext) *ShardMapReducer {
+	mr := new(ShardMapReducer)
+	t.initMapReducer(mr, cols, scm.NewNil(), alreadyLocked, 0, nil, currentTx)
+	mr.mapProgram = scm.PrepareSerialProc(mapFn)
 	return mr
 }
 
@@ -1971,19 +1971,19 @@ func (m *ShardMapReducer) loadDirectReadArgs(id uint32, rowOffset int, useBulkVa
 	if id < m.mainCount {
 		width := len(m.mainBulkReaders)
 		if useBulkValues && width > 0 && len(m.mainBulkValues) >= (rowOffset+1)*width {
-			copy(m.args, m.mainBulkValues[rowOffset*width:(rowOffset+1)*width])
+			copy(m.args[1:], m.mainBulkValues[rowOffset*width:(rowOffset+1)*width])
 			return
 		}
 		for i, reader := range m.mainBulkReaders {
-			m.args[i] = reader.GetValue(id)
+			m.args[i+1] = reader.GetValue(id)
 		}
 		return
 	}
 	for i, mainCol := range m.mainCols {
 		if _, isProxy := mainCol.(*StorageComputeProxy); isProxy {
-			m.args[i] = m.mainBulkReaders[i].GetValue(id)
+			m.args[i+1] = m.mainBulkReaders[i].GetValue(id)
 		} else {
-			m.args[i] = m.shard.getDelta(int(id-m.mainCount), m.colNames[i])
+			m.args[i+1] = m.shard.getDelta(int(id-m.mainCount), m.colNames[i])
 		}
 	}
 }
@@ -1992,111 +1992,24 @@ func (m *ShardMapReducer) processDirectReadBlock(acc scm.Scmer, recids []uint32)
 	if len(recids) == 0 {
 		return acc
 	}
-	switch m.mapProgram.Kind {
-	case scm.SerialProcArgument:
-		return m.processDirectArgumentBlock(acc, recids, int(m.mapProgram.Argument))
-	case scm.SerialProcConstant:
-		return m.processDirectConstantBlock(acc, recids, m.mapProgram.Value)
+	// COUNT-style callbacks are emitted directly as (lambda (acc cols...)
+	// (+ acc 1)). Fold the complete block before loading any column values.
+	if m.mapReduceProgram.Argument == 0 && !m.mapReduceProgram.ConstantFirst &&
+		m.mapReduceProgram.Value.IsInt() && m.mapReduceProgram.Value.Int() == 1 &&
+		m.mapReduceProgram.IsNativeArgConstant(scm.Symbol("+")) {
+		if acc.IsInt() {
+			return scm.NewInt(acc.Int() + int64(len(recids)))
+		}
+		if acc.IsFloat() {
+			return scm.NewFloat(acc.Float() + float64(len(recids)))
+		}
 	}
 	if recids[0] < m.mainCount {
 		m.prefetchMainColumns(recids)
 	}
 	for rowOffset, id := range recids {
 		m.loadDirectReadArgs(id, rowOffset, true)
-		acc = m.reduce(acc, m.mapProgram.Call(m.args))
-	}
-	return acc
-}
-
-func (m *ShardMapReducer) directArgumentValue(id uint32, argument int) scm.Scmer {
-	if id < m.mainCount {
-		return m.mainBulkReaders[argument].GetValue(id)
-	}
-	if _, isProxy := m.mainCols[argument].(*StorageComputeProxy); isProxy {
-		return m.mainBulkReaders[argument].GetValue(id)
-	}
-	return m.shard.getDelta(int(id-m.mainCount), m.colNames[argument])
-}
-
-func (m *ShardMapReducer) directArgumentValues(recids []uint32, argument int) []scm.Scmer {
-	if cap(m.mainBulkValues) < len(recids) {
-		m.mainBulkValues = make([]scm.Scmer, len(recids))
-	} else {
-		m.mainBulkValues = m.mainBulkValues[:len(recids)]
-	}
-	if recids[0] < m.mainCount {
-		m.mainBulkReaders[argument].GetValueMulti(recids, m.mainBulkValues, 1)
-		return m.mainBulkValues
-	}
-	for i, id := range recids {
-		m.mainBulkValues[i] = m.directArgumentValue(id, argument)
-	}
-	return m.mainBulkValues
-}
-
-// processDirectArgumentBlock removes an identity/projection mapper from the
-// row loop. Reducer shape dispatch happens once per batch, not once per row.
-func (m *ShardMapReducer) processDirectArgumentBlock(acc scm.Scmer, recids []uint32, argument int) scm.Scmer {
-	if argument < 0 || argument >= len(m.mainCols) {
-		panic("serial mapper argument outside callback columns")
-	}
-	switch m.reduceProgram.Kind {
-	case scm.SerialProcArgument:
-		switch m.reduceProgram.Argument {
-		case 0:
-			return acc
-		case 1:
-			return m.directArgumentValue(recids[len(recids)-1], argument)
-		}
-	case scm.SerialProcConstant:
-		return m.reduceProgram.Value
-	case scm.SerialProcNative:
-		for _, value := range m.directArgumentValues(recids, argument) {
-			m.reduceArgs[0] = acc
-			m.reduceArgs[1] = value
-			acc = m.reduceProgram.Function(m.reduceArgs...)
-		}
-		return acc
-	}
-	for _, value := range m.directArgumentValues(recids, argument) {
-		m.reduceArgs[0] = acc
-		m.reduceArgs[1] = value
-		acc = m.reduceProgram.Call(m.reduceArgs)
-	}
-	return acc
-}
-
-// processDirectConstantBlock recognizes the canonical COUNT pipeline. Mapping
-// every row to one and reducing with + is exactly one addition by the accepted
-// batch length; this is a dominance rewrite, not a cost-dependent plan choice.
-func (m *ShardMapReducer) processDirectConstantBlock(acc scm.Scmer, recids []uint32, value scm.Scmer) scm.Scmer {
-	if m.reduceProgram.IsNative(scm.Symbol("+")) && value.IsInt() && value.Int() == 1 {
-		m.reduceArgs[0] = acc
-		m.reduceArgs[1] = scm.NewInt(int64(len(recids)))
-		return m.reduceProgram.Function(m.reduceArgs...)
-	}
-	switch m.reduceProgram.Kind {
-	case scm.SerialProcArgument:
-		switch m.reduceProgram.Argument {
-		case 0:
-			return acc
-		case 1:
-			return value
-		}
-	case scm.SerialProcConstant:
-		return m.reduceProgram.Value
-	case scm.SerialProcNative:
-		for range recids {
-			m.reduceArgs[0] = acc
-			m.reduceArgs[1] = value
-			acc = m.reduceProgram.Function(m.reduceArgs...)
-		}
-		return acc
-	}
-	for range recids {
-		m.reduceArgs[0] = acc
-		m.reduceArgs[1] = value
-		acc = m.reduceProgram.Call(m.reduceArgs)
+		acc = m.callMapReduce(acc)
 	}
 	return acc
 }
@@ -2110,7 +2023,7 @@ func withTxSession(currentTx *TxContext, fn func() scm.Scmer) scm.Scmer {
 	}))
 }
 
-// Stream applies map+reduce over a batch of record IDs. The recid list is
+// Stream applies the fused map-reducer over a batch of record IDs. The recid list is
 // partitioned order-preserving into runs of main-storage IDs and delta IDs.
 // batchids is optional and, when present, must align 1:1 with recids.
 func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32, batchids []uint32) scm.Scmer {
@@ -2142,12 +2055,9 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32, batchids []uint
 	return acc
 }
 
-func (m *ShardMapReducer) reduce(acc scm.Scmer, value scm.Scmer) scm.Scmer {
-	// A direct variadic call with two values allocates its temporary argument
-	// slice on every row because reduceFn may retain it.
-	m.reduceArgs[0] = acc
-	m.reduceArgs[1] = value
-	return m.reduceProgram.Call(m.reduceArgs)
+func (m *ShardMapReducer) callMapReduce(acc scm.Scmer) scm.Scmer {
+	m.args[0] = acc
+	return m.mapReduceProgram.Call(m.args)
 }
 
 // processMainBlock is a tight loop over main-storage records – no branching
@@ -2192,9 +2102,9 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 			}
 			for i, getter := range m.mainGetters {
 				if hasBulkValues && m.mainBulkReaders[i] != nil {
-					m.args[i] = m.mainBulkValues[rowIndex*bulkWidth+i]
+					m.args[i+1] = m.mainBulkValues[rowIndex*bulkWidth+i]
 				} else {
-					m.args[i] = getter(effectiveID, 0)
+					m.args[i+1] = getter(effectiveID, 0)
 				}
 			}
 			// Release write lock before mapFn: allows nested scans on same shard.
@@ -2203,7 +2113,7 @@ func (m *ShardMapReducer) processMainBlock(acc scm.Scmer, recids []uint32) scm.S
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduce(acc, m.mapProgram.Call(m.args))
+			acc = m.callMapReduce(acc)
 		}()
 	}
 	return acc
@@ -2246,16 +2156,16 @@ func (m *ShardMapReducer) processMainBlockBatch(acc scm.Scmer, recids []uint32, 
 			}
 			for i, getter := range m.mainGetters {
 				if hasBulkValues && m.mainBulkReaders[i] != nil {
-					m.args[i] = m.mainBulkValues[rowidx*bulkWidth+i]
+					m.args[i+1] = m.mainBulkValues[rowidx*bulkWidth+i]
 				} else {
-					m.args[i] = getter(effectiveID, batchid)
+					m.args[i+1] = getter(effectiveID, batchid)
 				}
 			}
 			if needsPerRowLock {
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduce(acc, m.mapProgram.Call(m.args))
+			acc = m.callMapReduce(acc)
 		}()
 	}
 	return acc
@@ -2293,13 +2203,13 @@ func (m *ShardMapReducer) processDeltaBlock(acc scm.Scmer, recids []uint32) scm.
 				}
 			}
 			for i, getter := range m.deltaGetters {
-				m.args[i] = getter(effectiveID, 0)
+				m.args[i+1] = getter(effectiveID, 0)
 			}
 			if needsPerRowLock {
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduce(acc, m.mapProgram.Call(m.args))
+			acc = m.callMapReduce(acc)
 		}()
 	}
 	return acc
@@ -2336,13 +2246,13 @@ func (m *ShardMapReducer) processDeltaBlockBatch(acc scm.Scmer, recids []uint32,
 				}
 			}
 			for i, getter := range m.deltaGetters {
-				m.args[i] = getter(effectiveID, batchid)
+				m.args[i+1] = getter(effectiveID, batchid)
 			}
 			if needsPerRowLock {
 				m.shard.mu.Unlock()
 				rowLocked = false
 			}
-			acc = m.reduce(acc, m.mapProgram.Call(m.args))
+			acc = m.callMapReduce(acc)
 		}()
 	}
 	return acc
