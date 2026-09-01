@@ -59,8 +59,7 @@ test_cases:
           '(<)
           0 0 16
           '("id")
-          (lambda (id) id)
-          +
+          (lambda (acc id) (+ acc id))
           0
           false)))
       (warm)
@@ -74,9 +73,9 @@ test_cases:
           '("acl_visible")
           (lambda (acl_visible) (equal? acl_visible true))
           '("id")
-          (lambda (id) 1)
-          +
-          0))
+          (lambda (acc id) (+ acc 1))
+          0
+          +))
       (if (equal? counted 4096)
         "ok"
         (error "a query-local RecSet boundary was aligned with a longer base-index column")))
@@ -94,17 +93,17 @@ test_cases:
           '("id")
           (lambda (id) (equal? id 12))
           '("$update")
-          (lambda ($update) (if ($update) 1 0))
-          +
-          0))
+          (lambda (acc $update) (+ acc (if ($update) 1 0)))
+          0
+          +))
       (define unordered
         (scan nil before_delete
           '("id")
           (lambda (id) true)
           '("id")
-          (lambda (id) id)
-          +
-          0))
+          (lambda (acc id) (+ acc id))
+          0
+          +))
       (define ordered
         (scan_order nil before_delete
           '("id")
@@ -113,8 +112,7 @@ test_cases:
           '(< <)
           0 0 10
           '("id")
-          (lambda (id) (list id))
-          (lambda (rows row) (append rows row))
+          (lambda (rows id) (append rows (list id)))
           '()
           false))
       (define narrowed

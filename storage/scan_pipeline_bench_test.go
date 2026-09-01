@@ -39,23 +39,22 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 		{scm.NewInt(3)},
 	}, nil, scm.NewNil(), false, nil)
 
-	constantOne := optimizedScanProc(t, "(lambda () 1)")
-	identity := optimizedScanProc(t, "(lambda (value) value)")
+	countMapReduce := scm.Globalenv.Vars[scm.Symbol("scan_count")]
+	sumMapReduce := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
 	greaterEqualTwo := optimizedScanProc(t, "(lambda (value) (>= value 2))")
 	reversedLessThan := optimizedScanProc(t, "(lambda (value) (< 1 value))")
 	plus := scm.Globalenv.Vars[scm.Symbol("+")]
-	sqlSum := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
 
 	assertResults := func(stage string) {
 		t.Helper()
 		for _, condition := range []scm.Scmer{greaterEqualTwo, reversedLessThan} {
-			count := tbl.scan(nil, []string{"id"}, condition, nil, constantOne,
-				plus, scm.NewInt(0), scm.NewNil(), false)
+			count := tbl.scan(nil, []string{"id"}, condition, nil, countMapReduce,
+				scm.NewInt(0), plus, false)
 			if got := scm.ToInt(count); got != 2 {
 				t.Fatalf("%s count = %d, want 2", stage, got)
 			}
-			sum := tbl.scan(nil, []string{"id"}, condition, []string{"id"}, identity,
-				sqlSum, scm.NewNil(), scm.NewNil(), false)
+			sum := tbl.scan(nil, []string{"id"}, condition, []string{"id"}, sumMapReduce,
+				scm.NewNil(), scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")], false)
 			if got := scm.ToInt(sum); got != 5 {
 				t.Fatalf("%s sum = %d, want 5", stage, got)
 			}
@@ -70,10 +69,8 @@ func TestScanPipelineSpecializationsPreserveMainAndDeltaResults(t *testing.T) {
 	assertResults("main")
 }
 
-// BenchmarkScanPipelineOLTP records the common physical callback shapes emitted
-// for OLTP projections and aggregates. Keep the callbacks as optimized Scheme
-// procedures: native Go benchmark callbacks would bypass the adapter and hide
-// the setup and interpreter work this benchmark is intended to measure.
+// BenchmarkScanPipelineOLTP records the physical callbacks emitted by the
+// planner, including reducers which an identity map can pass through directly.
 func BenchmarkScanPipelineOLTP(b *testing.B) {
 	const rowsN = 60_000
 	dbName := "bench_scan_pipeline_oltp"
@@ -94,9 +91,9 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 
 	trueFilter := optimizedScanProc(b, "(lambda () true)")
 	lastIDFilter := optimizedScanProc(b, "(lambda (id) (equal?? id 59999))")
-	constantOne := optimizedScanProc(b, "(lambda () 1)")
-	identity := optimizedScanProc(b, "(lambda (value) value)")
-	takeRight := optimizedScanProc(b, "(lambda (acc value) value)")
+	countMapReduce := scm.Globalenv.Vars[scm.Symbol("scan_count")]
+	sumMapReduce := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
+	takeRightMapReduce := optimizedScanProc(b, "(lambda (acc value) value)")
 	plus := scm.Globalenv.Vars[scm.Symbol("+")]
 	sqlSum := scm.Globalenv.Vars[scm.Symbol("sql_sum_reduce")]
 
@@ -105,14 +102,14 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 		conditionCols []string
 		condition     scm.Scmer
 		mapCols       []string
-		mapper        scm.Scmer
-		reducer       scm.Scmer
+		mapReducer    scm.Scmer
+		combine       scm.Scmer
 		neutral       scm.Scmer
 	}{
-		{name: "count", condition: trueFilter, mapper: constantOne, reducer: plus, neutral: scm.NewInt(0)},
-		{name: "filtered_count", conditionCols: []string{"id"}, condition: lastIDFilter, mapper: constantOne, reducer: plus, neutral: scm.NewInt(0)},
-		{name: "sum", condition: trueFilter, mapCols: []string{"amount"}, mapper: identity, reducer: sqlSum, neutral: scm.NewNil()},
-		{name: "take_right", condition: trueFilter, mapCols: []string{"amount"}, mapper: identity, reducer: takeRight, neutral: scm.NewNil()},
+		{name: "count", condition: trueFilter, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
+		{name: "filtered_count", conditionCols: []string{"id"}, condition: lastIDFilter, mapReducer: countMapReduce, combine: plus, neutral: scm.NewInt(0)},
+		{name: "sum", condition: trueFilter, mapCols: []string{"amount"}, mapReducer: sumMapReduce, combine: sqlSum, neutral: scm.NewNil()},
+		{name: "take_right", condition: trueFilter, mapCols: []string{"amount"}, mapReducer: takeRightMapReduce, combine: takeRightMapReduce, neutral: scm.NewNil()},
 	}
 
 	for _, benchmark := range benchmarks {
@@ -120,8 +117,8 @@ func BenchmarkScanPipelineOLTP(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				tbl.scan(nil, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapper,
-					benchmark.reducer, benchmark.neutral, scm.NewNil(), false)
+				tbl.scan(nil, benchmark.conditionCols, benchmark.condition, benchmark.mapCols, benchmark.mapReducer,
+					benchmark.neutral, benchmark.combine, false)
 			}
 		})
 	}

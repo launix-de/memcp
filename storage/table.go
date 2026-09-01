@@ -129,9 +129,8 @@ type column struct {
 	OrcPartitionCount int       `json:",omitempty"` // number of leading OrcSortCols that form the window partition
 	OrcFilterCols     []string  `json:",omitempty"` // rows admitted to the ordered reduction before window evaluation
 	OrcFilterFn       scm.Scmer // predicate over OrcFilterCols; nil means every row
-	OrcMapCols        []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
-	OrcMapFn          scm.Scmer // (lambda ($set mapcols...) ...) — passes data to reduceFn
-	OrcReduceFn       scm.Scmer // (lambda (acc mapped) ...) — accumulates and writes via $set
+	OrcMapCols        []string  `json:",omitempty"` // additional input columns passed to OrcMapReduceFn
+	OrcMapReduceFn    scm.Scmer // (lambda (acc $set mapcols...) ...) — accumulates and writes via $set
 	OrcReduceInit     scm.Scmer // initial accumulator value (neutral element)
 }
 
@@ -2022,7 +2021,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter":
 			// handled by createcolumn builtin, not a column property
-		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapfn", "reducefn", "reduceinit":
+		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapreducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn
 		default:
 			panic("unknown column attribute: " + key)

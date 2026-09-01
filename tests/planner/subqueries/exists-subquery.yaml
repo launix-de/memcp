@@ -386,10 +386,9 @@ test_cases:
             (list 'lambda (list 'customer_id 'total)
               (list 'and (list 'equal?? 'customer_id 1) (list '> 'total 150)))
             (list)
-            (list 'lambda (list) true)
-            (list 'lambda (list 'acc 'row) (list 'or 'acc 'row))
+            (list 'lambda (list 'acc) (list 'or 'acc true))
             false
-            nil
+            (list 'lambda (list 'a 'b) (list 'or 'a 'b))
             false))))
         (if (not (match plan (regex "scan_exists" _) true false))
           (error (concat "expected scan_exists rewrite, got " plan)))
@@ -407,10 +406,9 @@ test_cases:
             (list "customer_id")
             (list 'lambda (list 'customer_id) (list 'equal?? 'customer_id 1))
             (list "ID")
-            (list 'lambda (list 'ID) true)
-            (list 'lambda (list 'a 'b) (list 'or 'b 'a))
+            (list 'lambda (list 'acc 'ID) (list 'or true 'acc))
             false
-            nil
+            (list 'lambda (list 'a 'b) (list 'or 'b 'a))
             false))))
         (if (not (match plan (regex "scan_exists" _) true false))
           (error (concat "expected scan_exists rewrite with ignored map column, got " plan)))
@@ -426,10 +424,9 @@ test_cases:
             (list "customer_id")
             (list 'lambda (list 'customer_id) (list 'equal?? 'customer_id 1))
             (list "ID")
-            (list 'lambda (list 'ID) 'ID)
-            (list 'lambda (list 'a 'b) (list 'or 'a 'b))
+            (list 'lambda (list 'acc 'ID) (list 'or 'acc 'ID))
             false
-            nil
+            (list 'lambda (list 'a 'b) (list 'or 'a 'b))
             false))))
         (if (match plan (regex "scan_exists" _) true false)
           (error (concat "projecting scan must not become scan_exists: " plan)))

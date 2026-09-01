@@ -30,12 +30,11 @@ const (
 )
 
 type batchAcceptBenchmarkFixture struct {
-	documents *table
-	files     *table
-	sortCols  []scm.Scmer
-	sortDirs  []func(...scm.Scmer) scm.Scmer
-	mapFn     scm.Scmer
-	reduceFn  scm.Scmer
+	documents   *table
+	files       *table
+	sortCols    []scm.Scmer
+	sortDirs    []func(...scm.Scmer) scm.Scmer
+	mapReduceFn scm.Scmer
 }
 
 func insertBatchAcceptBenchmarkRows(tbl *table, columns []string, count int, makeRow func(int) []scm.Scmer) {
@@ -86,12 +85,11 @@ func newBatchAcceptBenchmarkFixture(b *testing.B) *batchAcceptBenchmarkFixture {
 
 	_, ascending := integerOrder(false)
 	fixture := &batchAcceptBenchmarkFixture{
-		documents: documents,
-		files:     files,
-		sortCols:  []scm.Scmer{scm.NewString("id")},
-		sortDirs:  []func(...scm.Scmer) scm.Scmer{ascending},
-		mapFn:     scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
-		reduceFn:  scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
+		documents:   documents,
+		files:       files,
+		sortCols:    []scm.Scmer{scm.NewString("id")},
+		sortDirs:    []func(...scm.Scmer) scm.Scmer{ascending},
+		mapReduceFn: scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
 	}
 
 	// Warm the adaptive unique id order index outside the timed sections.
@@ -101,7 +99,7 @@ func newBatchAcceptBenchmarkFixture(b *testing.B) *batchAcceptBenchmarkFixture {
 	for i := 0; i < 4; i++ {
 		scanOrderBatchAccept(nil, scanOrderTableSpec{table: documents}, identity,
 			fixture.sortCols, fixture.sortDirs, 0, 0, batchAcceptBenchmarkPageSize,
-			[]string{"id"}, fixture.mapFn, fixture.reduceFn, scm.NewNil(), false, scm.NewNil())
+			[]string{"id"}, fixture.mapReduceFn, scm.NewNil(), false, scm.NewNil())
 	}
 	return fixture
 }
@@ -110,14 +108,14 @@ func (f *batchAcceptBenchmarkFixture) scanOrder(postOrderCols []string, postOrde
 	return f.documents.scan_order(nil,
 		nil, scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }),
 		f.sortCols, f.sortDirs, 0, 0, batchAcceptBenchmarkPageSize,
-		[]string{"id"}, f.mapFn, f.reduceFn, scm.NewNil(), false, scm.NewNil(),
+		[]string{"id"}, f.mapReduceFn, scm.NewNil(), false, scm.NewNil(),
 		postOrderCols, postOrderFilter)
 }
 
 func (f *batchAcceptBenchmarkFixture) batchAccept(batchFilter scm.Scmer) scm.Scmer {
 	return scanOrderBatchAccept(nil, scanOrderTableSpec{table: f.documents}, batchFilter,
 		f.sortCols, f.sortDirs, 0, 0, batchAcceptBenchmarkPageSize,
-		[]string{"id"}, f.mapFn, f.reduceFn, scm.NewNil(), false, scm.NewNil())
+		[]string{"id"}, f.mapReduceFn, scm.NewNil(), false, scm.NewNil())
 }
 
 func benchmarkBatchAcceptPair(b *testing.B, scan func() scm.Scmer, batch func() scm.Scmer) {

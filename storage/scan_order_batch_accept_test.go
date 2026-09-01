@@ -54,18 +54,17 @@ func recSetModuloFilter(batchSizes *[]int64, divisor int, remainder int) scm.Scm
 
 func runBatchAcceptIDs(table *table, input *recSet, batchFilter scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, offset int, limit int) []int64 {
 	got := make([]int64, 0, limit)
-	mapFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		got = append(got, int64(scm.ToInt(values[0])))
+	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		got = append(got, int64(scm.ToInt(values[1])))
 		return values[0]
 	})
-	reduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
 	source := scanOrderTableSpec{table: table}
 	if input != nil {
 		source.table = nil
 		source.recset = input
 	}
 	scanOrderBatchAccept(nil, source, batchFilter, sortcols, sortdirs, 0, offset, limit,
-		[]string{"id"}, mapFn, reduceFn, scm.NewNil(), false, scm.NewNil())
+		[]string{"id"}, mapReduceFn, scm.NewNil(), false, scm.NewNil())
 	return got
 }
 
@@ -209,11 +208,10 @@ func TestScanOrderBatchAcceptDeclarationSignature(t *testing.T) {
 	identityFilter := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 	relation, _ := integerOrder(true)
 	got := make([]int64, 0, 2)
-	mapFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		got = append(got, int64(scm.ToInt(values[0])))
+	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		got = append(got, int64(scm.ToInt(values[1])))
 		return values[0]
 	})
-	reduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
 
 	scm.Apply(scm.Globalenv.Vars[scm.Symbol("scan_order_batch_accept")],
 		scm.NewNil(),
@@ -225,8 +223,7 @@ func TestScanOrderBatchAcceptDeclarationSignature(t *testing.T) {
 		scm.NewInt(1),
 		scm.NewInt(2),
 		scm.NewSlice([]scm.Scmer{scm.NewString("id")}),
-		mapFn,
-		reduceFn,
+		mapReduceFn,
 		scm.NewNil(),
 	)
 
@@ -286,14 +283,12 @@ func TestShardMapReducerBulkReadsFinalMapColumns(t *testing.T) {
 			func(id uint32, _ uint32) scm.Scmer { return scm.NewInt(int64(id * 100)) },
 		},
 		mainBulkReaders: []ColumnReader{first, second, nil},
-		args:            make([]scm.Scmer, 3),
-		reduceArgs:      make([]scm.Scmer, 2),
-		mapProgram: scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-			got = append(got, int64(scm.ToInt(values[0])+scm.ToInt(values[1])+scm.ToInt(values[2])))
+		args:            make([]scm.Scmer, 4),
+		mapReduceProgram: scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+			got = append(got, int64(scm.ToInt(values[1])+scm.ToInt(values[2])+scm.ToInt(values[3])))
 			return values[0]
 		})),
-		reduceProgram: scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })),
-		mainCount:     4,
+		mainCount: 4,
 	}
 	mapper.Stream(scm.NewNil(), []uint32{3, 1, 2}, nil)
 

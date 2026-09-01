@@ -44,8 +44,8 @@ func scanHoistTestCall(condition scm.Scmer) []scm.Scmer {
 		scm.NewSymbol("scan"), scm.NewNil(), scm.NewSymbol("table_value"),
 		scm.NewSlice([]scm.Scmer{scm.NewString("value")}), filter,
 		scm.NewSlice([]scm.Scmer{scm.NewString("value")}),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("row")}), row, scm.NewInt(1)}),
-		scm.NewNil(), scm.NewNil(), scm.NewNil(), scm.NewBool(false),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("row")}), row, scm.NewInt(1)}),
+		scm.NewNil(), scm.NewNil(), scm.NewBool(false),
 	}
 }
 

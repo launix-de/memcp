@@ -1195,7 +1195,7 @@ func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, tar
 	return true
 }
 
-func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
+func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
 	if r == nil || r.table == nil {
 		return neutral
 	}
@@ -1207,7 +1207,7 @@ func (r *recSet) scan(currentTx *TxContext, conditionCols []string, condition sc
 		}
 	}
 	return r.table.scanWithBatchFrom(currentTx, r, conditionCols, condition,
-		callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil, nil)
+		callbackCols, mapReduce, neutral, combine, isOuter, 0, nil, nil)
 }
 
 func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condition scm.Scmer) bool {
@@ -1303,7 +1303,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 	return found
 }
 
-func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
+func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
@@ -1330,9 +1330,9 @@ func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string,
 	mapper := &mapperStorage
 	if mapReducerCanUseReadWorkspace(callbackCols) {
 		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
-		t.initReadMapReducer(&mapperStorage, callbackCols, callback, aggregate, skipShardReadLock, currentTx)
+		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
 	} else {
-		mapper = t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, 0, nil, currentTx)
+		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
 	}
 	defer mapper.Close()
 

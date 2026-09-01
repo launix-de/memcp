@@ -606,9 +606,8 @@ if the user is not allowed to access this property, the function will throw an e
 	(begin
 		(define is_admin (scan nil (table "system" "user")
 			'("username") (lambda (u) (equal?? u username))
-			'("admin") (lambda (a) a)
-			(lambda (a b) (or a b))
-			false))
+			'("admin") (lambda (acc a) (or acc a))
+			false (lambda (a b) (or a b))))
 		(if is_admin (lambda (schema tblname write) true) /* admin -> allow all */
 			/* else: complicated policy */
 			(lambda (schema tblname write)
@@ -618,8 +617,8 @@ if the user is not allowed to access this property, the function will throw an e
 						/* Database-level check via system.access */
 						(define access_count (scan nil (table "system" "access")
 							'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db schema)))
-							'() (lambda () 1)
-							+ 0))
+							'() (lambda (acc) (+ acc 1))
+							0 +))
 						(if (> access_count 0) true (error (concat "access denied: user '" username "' may not " (if write "write" "read") " " schema "." tblname)))
 					))
 			))
@@ -646,7 +645,7 @@ if the user is not allowed to access this property, the function will throw an e
 			true
 			(begin
 				(createcolumn (table "system" "user") "admin" "boolean" '() '())
-				(scan nil (table "system" "user") '() (lambda () true) '("$update") (lambda ($update) ($update '("admin" true))))
+				(scan nil (table "system" "user") '() (lambda () true) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 			)
 		)
 	) true)
@@ -664,7 +663,7 @@ if the user is not allowed to access this property, the function will throw an e
 /* migration: ensure root always has admin=true */
 (try (lambda () (begin
 	(if (has? (show "system") "user")
-		(scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("$update") (lambda ($update) ($update '("admin" true))))
+		(scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("$update") (lambda (acc $update) (begin ($update '("admin" true)) acc)))
 		true)
 )) (lambda (e) true))
 
@@ -731,7 +730,7 @@ the latter is expanded before logical planning and never materialized. */
 )) (lambda (e) true))
 
 (sql_view_catalog_set_count
-	(scan nil (table "system" "views") '() (lambda () true) '() (lambda () 1) + 0))
+	(scan nil (table "system" "views") '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 
 /* migration: ensure unique (username, database) constraint on system.access */
 (try (lambda () (begin
@@ -767,7 +766,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	(set old_handler http_handler)
 	(define handle_query (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (acc password) password) nil (lambda (a b) b)))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -812,7 +811,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	)))
 	(define handle_query_postgres (lambda (req res schema query) (begin
 		/* check for password */
-		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (password) password) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password") (lambda (acc password) password) nil (lambda (a b) b)))
 		(if (and pw (equal? pw (password (req "password"))))
 			(begin
 				(try (lambda () (time (begin
@@ -873,7 +872,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 	/* handler for raw Scheme code execution (global, no schema) */
 	(define handle_scm (lambda (req res code) (begin
 		/* check for password - must be admin */
-		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (password admin) (list password admin)) (lambda (a b) b) nil))
+		(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (acc password admin) (list password admin)) nil (lambda (a b) b)))
 		(if (and pw (equal? (car pw) (password (req "password"))) (car (cdr pw)))
 			(begin
 				(try (lambda () (begin
@@ -942,7 +941,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 (service_registry "SCM Frontend" (list (arg "api-port" (env "PORT" "4321")) "/scm" "POST, JSON"))
 
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
-(set mysql_auth (lambda (username_) (scan nil (table "system" "user") '("username") (lambda (username) (equal? username username_)) '("password") (lambda (password) password) (lambda (a b) b) nil)))
+(set mysql_auth (lambda (username_) (scan nil (table "system" "user") '("username") (lambda (username) (equal? username username_)) '("password") (lambda (acc password) password) nil (lambda (a b) b))))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
 (set mysql_handler (lambda (schema sql resultrow_sql resultfields_sql session session_state query_seq) (begin
 	(session "schema" schema)

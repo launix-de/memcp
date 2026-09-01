@@ -86,11 +86,13 @@ func countCollapsedComputor() scm.Scmer {
 		En:      &scm.Globalenv,
 		NumVars: 4,
 	})
-	mapFn := scm.NewProcStruct(scm.Proc{
-		Params:  scm.NewSlice([]scm.Scmer{}),
-		Body:    scm.NewInt(1),
+	mapReduceFn := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewInt(1),
+		}),
 		En:      &scm.Globalenv,
-		NumVars: 0,
+		NumVars: 1,
 	})
 	return scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("group")}),
@@ -107,10 +109,9 @@ func countCollapsedComputor() scm.Scmer {
 			}),
 			filter,
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
-			mapFn,
-			scm.NewSymbol("+"),
+			mapReduceFn,
 			scm.NewInt(0),
-			scm.NewNil(),
+			scm.NewSymbol("+"),
 			scm.NewBool(false),
 		}),
 		En:      &scm.Globalenv,

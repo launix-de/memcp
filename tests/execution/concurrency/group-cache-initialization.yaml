@@ -66,12 +66,12 @@ test_cases:
                     (scan nil
                       (table "memcp-tests" "stream_cache_source")
                       '() (lambda () true)
-                      '("id") (lambda (id) (emit 1)))))))
+                      '("id") (lambda (acc id) (begin (emit 1) acc)))))))
               '() (lambda () true) false nil nil)))
         (scan nil cache
           '() (lambda () true)
-          '("row_count") (lambda (row_count) row_count)
-          + 0))
+          '("row_count") (lambda (acc row_count) (+ acc row_count))
+          0 +))
     expect:
       data: [64]
 
@@ -100,8 +100,8 @@ test_cases:
         (scan nil
           (table "memcp-tests" ".transactionless_cache_init")
           (list) (lambda () true)
-          (list) (lambda () 1)
-          + 0))
+          (list) (lambda (acc) (+ acc 1))
+          0 +))
     expect:
       data: [1]
 
