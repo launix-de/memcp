@@ -1,0 +1,156 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Warm reusable indexes keep request-local hooks aligned for every scan consumer"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS wicm_rows"
+  - sql: "CREATE TABLE wicm_rows (id INT PRIMARY KEY, enabled BOOL, label TEXT, sort_key INT)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "wicm_rows") '("id" "enabled" "label" "sort_key")
+          (map (produceN 4096) (lambda (i)
+            (list (+ i 1) true
+              (if (equal? (mod i 2) 0) (concat "needle-" i) (concat "other-" i))
+              (- 4096 i)))))
+        (rebuild (table "memcp-tests" "wicm_rows") true false))
+
+test_cases:
+  - name: "Warm longer equality and LIKE indexes"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (define warm_equal (lambda ()
+          (scan_order nil tbl '("enabled")
+            (lambda (enabled) (equal? enabled true))
+            '("sort_key") '(<) 0 0 16 '("id")
+            (lambda (id) id) + 0 false)))
+        (define warm_like (lambda ()
+          (scan_order nil tbl '("label")
+            (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
+            '("sort_key") '(<) 0 0 16 '("id")
+            (lambda (id) id) + 0 false)))
+        (warm_equal)
+        (warm_equal)
+        (warm_like)
+        (warm_like)
+        "ok")
+    expect:
+      data: ["ok"]
+
+  - name: "Warm hook alignment covers scan, exists, ordered and RecSet-first consumers"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (define selected (scan_recset nil tbl '("id") (lambda (id) (<= id 32))))
+        (define unordered (scan nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
+          '("id") (lambda (_id) 1) + 0))
+        (define exists_hit (scan_exists nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
+        (define exists_miss (scan_exists nil selected '("label")
+          (lambda (label) (strlike label "%absent%" "utf8mb4_general_ci"))))
+        (define ordered (scan_order nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
+          '("sort_key") '(<) 0 0 4 '("id")
+          (lambda (id) (list id)) (lambda (rows row) (append rows row)) '() false))
+        (define narrowed (scan_recset nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
+        (if (and (equal? unordered 16) exists_hit (not exists_miss)
+          (equal? ordered (list (list 31) (list 29) (list 27) (list 25)))
+          (equal? (recset_count narrowed) 16))
+          "ok"
+          (error (concat "warm hook consumer mismatch: " unordered "/" ordered "/" (recset_count narrowed)))))
+    expect:
+      data: ["ok"]
+
+  - name: "Rebuilt warm metadata retains matcher alignment"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (rebuild tbl true false)
+        (define selected (scan_recset nil tbl '("id") (lambda (id) (<= id 4))))
+        (define narrowed (scan_recset nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
+        (define indexes ((show "memcp-tests" "wicm_rows" 0 true) "indexes"))
+        (define like_indexes (reduce indexes (lambda (count index)
+          (if (strlike (get_assoc index "cols") "%label(like)%" "utf8mb4_bin")
+            (+ count 1) count)) 0))
+        (define ordered (scan_order nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
+          '("sort_key") '(<) 0 0 10 '("id")
+          (lambda (id) (list id)) (lambda (rows row) (append rows row)) '() false))
+        (if (and (>= like_indexes 1) (equal? (recset_count narrowed) 2)
+          (equal? ordered (list (list 3) (list 1))))
+          "ok"
+          (error (concat "rebuilt matcher metadata mismatch: " ordered "/" (serialize indexes)))))
+    expect:
+      data: ["ok"]
+
+  - name: "Insert delta rows below the warm index order"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (insert tbl '("id" "enabled" "label" "sort_key")
+          (list (list 4097 true "needle-delta" -1) (list 4098 true "other-delta" -2))))
+
+  - name: "Delta RecSet can be built with warm indexes"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
+        (recset_count selected))
+    expect:
+      data: [2]
+
+  - name: "Delta scan uses query-local hooks outside the warm index suffix"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
+        (define count_like (scan nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
+          '("id") (lambda (_id) 1) + 0))
+        count_like)
+    expect:
+      data: [1]
+
+  - name: "Delta scan_exists uses query-local hooks outside the warm index suffix"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
+        (scan_exists nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
+    expect:
+      data: [true]
+
+  - name: "Delta scan_order uses query-local hooks outside the warm index suffix"
+    scm: |
+      (begin
+        (define tbl (table "memcp-tests" "wicm_rows"))
+        (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
+        (scan_order nil selected '("label")
+          (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
+          '("sort_key") '(<) 0 0 4 '("id")
+          (lambda (id) (list id)) (lambda (rows row) (append rows row)) '() false))
+    expect:
+      data: [[[4097]]]
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS wicm_rows"

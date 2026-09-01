@@ -196,6 +196,47 @@ func TestOptimizerCollapsesExplicitAndCapturedOuterDepth(t *testing.T) {
 	}
 }
 
+func TestOptimizerRebasesExplicitOuterWhenRemovingBeginScope(t *testing.T) {
+	optimized := Optimize(
+		Read(t.Name(), "(lambda (captured) (begin (lambda (inner) (+ (outer 2 captured) inner))))"),
+		&Globalenv,
+		nil,
+	)
+	serialized := SerializeToString(optimized, &Globalenv)
+	if !strings.Contains(serialized, "(outer 1 (var 0))") {
+		t.Fatalf("removed begin scope did not rebase captured parameter: %s", serialized)
+	}
+	if strings.Contains(serialized, "(outer 2 (var 0))") {
+		t.Fatalf("removed begin scope retained stale outer depth: %s", serialized)
+	}
+	outer := OptimizeProcToSerialFunction(Eval(optimized, &Globalenv))
+	inner := OptimizeProcToSerialFunction(outer(NewInt(7)))
+	if got := inner(NewInt(5)); !Equal(got, NewInt(12)) {
+		t.Fatalf("rebased closure returned %s, want 12", String(got))
+	}
+}
+
+func TestOptimizerKeepsReferencesInsideRemovedBeginSubtree(t *testing.T) {
+	optimized := Optimize(
+		Read(t.Name(), "(lambda (captured) (begin (lambda (middle) (lambda (inner) (+ (outer 1 middle) (outer 3 captured) inner)))))"),
+		&Globalenv,
+		nil,
+	)
+	serialized := SerializeToString(optimized, &Globalenv)
+	if !strings.Contains(serialized, "(outer 1 (var 0))") {
+		t.Fatalf("internal middle capture changed while removing outer begin: %s", serialized)
+	}
+	if !strings.Contains(serialized, "(outer 2 (var 0))") {
+		t.Fatalf("external capture was not rebased across removed begin: %s", serialized)
+	}
+	outer := OptimizeProcToSerialFunction(Eval(optimized, &Globalenv))
+	middle := OptimizeProcToSerialFunction(outer(NewInt(7)))
+	inner := OptimizeProcToSerialFunction(middle(NewInt(3)))
+	if got := inner(NewInt(2)); !Equal(got, NewInt(12)) {
+		t.Fatalf("nested rebased closure returned %s, want 12", String(got))
+	}
+}
+
 func TestOptimizerDoesNotLowerConstructedSyntaxData(t *testing.T) {
 	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
 	expression := Optimize(Read(t.Name(), "(list (quote if) true 1 0)"), environment, nil)
