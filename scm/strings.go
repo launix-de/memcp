@@ -3684,6 +3684,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  8,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -12166,6 +12167,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  29,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -12348,6 +12350,7 @@ func init_strings() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -13062,6 +13065,7 @@ func init_strings() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 25,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -16700,6 +16704,7 @@ func init_strings() {
 				ctx.FreeStack(int32(32))
 				return result
 			},
+			JITInlineCost: 51,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -16851,6 +16856,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 5,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -16971,6 +16977,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 7,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -18991,6 +18998,7 @@ func init_strings() {
 				ctx.FreeStack(int32(16))
 				return result
 			},
+			JITInlineCost: 51,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -19682,6 +19690,7 @@ func init_strings() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 19,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -19807,6 +19816,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -19932,6 +19942,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -22004,6 +22015,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 69,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -22129,6 +22141,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -22283,6 +22296,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -22437,6 +22451,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	// SQL-level NULL-safe wrappers for TRIM/LTRIM/RTRIM
@@ -22797,6 +22812,7 @@ func init_strings() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 12,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -23187,6 +23203,7 @@ func init_strings() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 12,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -23577,6 +23594,7 @@ func init_strings() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 12,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -24957,6 +24975,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  28,
 		},
 	})
 
@@ -25629,6 +25648,7 @@ func init_strings() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 22,
 		},
 	})
 
@@ -25891,6 +25911,7 @@ func init_strings() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["collate"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 
@@ -26018,6 +26039,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -26143,6 +26165,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -26523,6 +26546,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  19,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -26848,6 +26872,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  13,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -28694,6 +28719,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  49,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -28743,6 +28769,7 @@ func init_strings() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -29257,6 +29284,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  14,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -29716,6 +29744,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  13,
 		},
 	})
 
@@ -29901,6 +29930,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  14,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -30310,6 +30340,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  21,
 		},
 	})
 	sql_escapings := regexp.MustCompile("\\\\[\\\\'\"nr0]")
@@ -30347,6 +30378,7 @@ func init_strings() {
 				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_unescape"].Fn, args, result)
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -31379,6 +31411,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  29,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -32411,6 +32444,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  29,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -32798,6 +32832,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  20,
 		},
 	})
 
@@ -33108,6 +33143,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  17,
 		},
 	})
 
@@ -33929,6 +33965,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  30,
 		},
 	})
 
@@ -34768,6 +34805,7 @@ func init_strings() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      27,
 		},
 		Optimize: optimizeRegexpReplace,
 	})
@@ -34895,6 +34933,7 @@ func init_strings() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 		Optimize: optimizeFNVHash,
 	})
@@ -36183,6 +36222,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  33,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -36389,6 +36429,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  19,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -36593,6 +36634,7 @@ func init_strings() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  19,
 		},
 	})
 
@@ -37585,6 +37627,7 @@ func init_strings() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      28,
 		},
 		Optimize: optimizeRegexpTest,
 	})

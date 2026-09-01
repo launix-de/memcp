@@ -7899,6 +7899,7 @@ func init_vector() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  80,
 		},
 	})
 }

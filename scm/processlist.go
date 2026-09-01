@@ -3443,6 +3443,7 @@ func init_processlist() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  97,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -3732,6 +3733,7 @@ func init_processlist() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 10,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -3943,6 +3945,7 @@ func init_processlist() {
 				return result
 				return result
 			},
+			JITInlineCost: 16,
 		},
 	})
 }

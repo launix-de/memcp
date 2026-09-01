@@ -98,6 +98,11 @@ type TypeDescriptor struct {
 	// calls as recursive lambda emitters. It is capability metadata, not a
 	// runtime permission gate.
 	JITInlineCallbacks bool
+	// JITInlineCost is jitgen's architecture-neutral estimate of the emitted
+	// builtin body: the builtin's SSA instructions plus recursively inlined Go
+	// helpers. Zero denotes a handwritten emitter without generated cost data;
+	// the maximum value denotes a generated native-call boundary.
+	JITInlineCost uint16
 }
 
 // OptimizerContext is an exported wrapper so packages like storage can use

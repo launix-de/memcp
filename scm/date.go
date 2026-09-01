@@ -2430,6 +2430,7 @@ func init_date() {
 				return result
 				return result
 			},
+			JITInlineCost: 84,
 		},
 	})
 
@@ -2791,6 +2792,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  4,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -2841,6 +2843,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  4,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -3310,6 +3313,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  11,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -6276,6 +6280,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  38,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -6964,6 +6969,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  22,
 		},
 	})
 
@@ -15938,6 +15944,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  92,
 		},
 	})
 
@@ -25480,6 +25487,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  64,
 		},
 	})
 
@@ -35557,6 +35565,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  71,
 		},
 	})
 
@@ -36578,6 +36587,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  22,
 		},
 	})
 
@@ -64097,6 +64107,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  199,
 		},
 	})
 
@@ -65862,6 +65873,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  47,
 		},
 	})
 
@@ -69407,6 +69419,7 @@ func init_date() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  84,
 		},
 	})
 }

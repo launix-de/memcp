@@ -128,6 +128,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -689,6 +690,7 @@ func init_alu() {
 				ctx.FreeStack(int32(16))
 				return result
 			},
+			JITInlineCost: 12,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -744,6 +746,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -3962,6 +3965,7 @@ func init_alu() {
 				ctx.FreeStack(int32(64))
 				return result
 			},
+			JITInlineCost: 38,
 		},
 		Optimize: optimizeAssociative,
 	})
@@ -5323,6 +5327,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 40,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -12851,6 +12856,7 @@ func init_alu() {
 				ctx.FreeStack(int32(112))
 				return result
 			},
+			JITInlineCost: 72,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -13515,6 +13521,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 41,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -14179,6 +14186,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 41,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -20356,6 +20364,7 @@ func init_alu() {
 				ctx.FreeStack(int32(96))
 				return result
 			},
+			JITInlineCost: 57,
 		},
 		Optimize: optimizeAssociative,
 	})
@@ -22190,6 +22199,7 @@ func init_alu() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  30,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -24237,6 +24247,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 47,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -24823,6 +24834,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 18,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -25373,6 +25385,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 17,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -25923,6 +25936,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 17,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -26509,6 +26523,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 18,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -26635,6 +26650,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 7,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -26779,6 +26795,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -27085,6 +27102,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 12,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -30319,6 +30337,7 @@ func init_alu() {
 				return result
 			},
 			JITVirtualArgs: true,
+			JITInlineCost:  51,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -31011,6 +31030,7 @@ func init_alu() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      26,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -31081,6 +31101,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -31151,6 +31172,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -31196,6 +31218,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 5,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -33007,6 +33030,7 @@ func init_alu() {
 				ctx.FreeStack(int32(32))
 				return result
 			},
+			JITInlineCost: 18,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -34818,6 +34842,7 @@ func init_alu() {
 				ctx.FreeStack(int32(32))
 				return result
 			},
+			JITInlineCost: 18,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -34899,6 +34924,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -34980,6 +35006,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -35048,6 +35075,7 @@ func init_alu() {
 				return result
 				return result
 			},
+			JITInlineCost: 6,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -41978,6 +42006,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 259,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -43683,6 +43712,7 @@ func init_alu() {
 				ctx.FreeStack(int32(16))
 				return result
 			},
+			JITInlineCost: 33,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -44254,6 +44284,7 @@ func init_alu() {
 				ctx.ResolveFixups()
 				return result
 			},
+			JITInlineCost: 16,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -45316,6 +45347,7 @@ func init_alu() {
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: true,
+			JITInlineCost:      60,
 		},
 	})
 }
