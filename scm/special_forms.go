@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"runtime"
 	"time"
-
-	"github.com/jtolds/gls"
 )
 
 var specialFormNames = make(map[*byte]string)
@@ -92,7 +90,16 @@ func registerSpecialForms() {
 			},
 		}, fn, jitEmit)
 	}
-	register("outer", nil, jitEmitSpecialOuter)
+	DeclareSpecialForm(&Globalenv, &Declaration{
+		Name: "outer",
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params:    []*TypeDescriptor{{Kind: "any", Variadic: true}},
+			Return:    &TypeDescriptor{Kind: "any"},
+		},
+		Optimize: optimizeOuter,
+	}, nil, jitEmitSpecialOuter)
 	register("setN", specialSetN, jitEmitSpecialSetN)
 	register("parser", specialParser, jitEmitSpecialParser)
 	register("optimizer_proc_return", specialOptimizerProcReturn, jitEmitSpecialOptimizerProcReturn)
@@ -328,7 +335,7 @@ func specialParallel(code []Scmer, en *Env) Scmer {
 	errs := make(chan any, len(code))
 	for _, expression := range code {
 		expression := expression
-		gls.Go(func(value Scmer) func() {
+		go func(value Scmer) func() {
 			return func() {
 				defer func() {
 					if recovered := recover(); recovered != nil {
@@ -339,7 +346,7 @@ func specialParallel(code []Scmer, en *Env) Scmer {
 				}()
 				Eval(value, en)
 			}
-		}(expression))
+		}(expression)()
 	}
 	for range code {
 		if err := <-errs; err != nil {

@@ -72,57 +72,59 @@ func (s *StorageConst) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-			ctx.FreeDesc(&idx)
-			var d0 scm.JITValueDesc
-			if thisptr.Loc == scm.LocImm {
-				fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageConst)(nil).value)
-				val := *(*scm.Scmer)(unsafe.Pointer(fieldAddr))
-				ctx.TrackImm(val)
-				d0 = scm.JITValueDesc{Loc: scm.LocImm, Type: val.GetTag(), Imm: val}
-			} else {
-				off := int32(unsafe.Offsetof((*StorageConst)(nil).value))
-				r0 := ctx.AllocReg()
-				r1 := ctx.AllocRegExcept(r0)
-				ctx.EmitMovRegMem(r0, thisptr.Reg, off)
-				ctx.EmitMovRegMem(r1, thisptr.Reg, off+8)
-				d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r0, Reg2: r1}
-				ctx.BindReg(r0, &d0)
-				ctx.BindReg(r1, &d0)
-				ctx.BindReg(r0, &d0)
-				ctx.BindReg(r1, &d0)
-			}
-			if d0.Loc == scm.LocImm {
-				if result.Loc == scm.LocAny { return d0 }
-			}
-			if result.Loc == scm.LocAny {
-				result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-				ctx.BindReg(result.Reg, &result)
-				ctx.BindReg(result.Reg2, &result)
-			}
-			ctx.EnsureDesc(&d0)
-			if d0.Loc == scm.LocRegPair {
-				ctx.EmitMovPairToResult(&d0, &result)
-				result.Type = d0.Type
-			} else {
-				switch d0.Type {
-				case scm.TagBool:
-					ctx.EmitMakeBool(result, d0)
-					result.Type = scm.TagBool
-				case scm.TagInt:
-					ctx.EmitMakeInt(result, d0)
-					result.Type = scm.TagInt
-				case scm.TagFloat:
-					ctx.EmitMakeFloat(result, d0)
-					result.Type = scm.TagFloat
-				case scm.TagNil:
-					ctx.EmitMakeNil(result)
-					result.Type = scm.TagNil
-				default:
-					panic("jit: single-block scalar return with unknown type")
-				}
-			}
-			return result
-			return result
+	ctx.FreeDesc(&idx)
+	var d0 scm.JITValueDesc
+	if thisptr.Loc == scm.LocImm {
+		fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*StorageConst)(nil).value)
+		val := *(*scm.Scmer)(unsafe.Pointer(fieldAddr))
+		ctx.TrackImm(val)
+		d0 = scm.JITValueDesc{Loc: scm.LocImm, Type: val.GetTag(), Imm: val}
+	} else {
+		off := int32(unsafe.Offsetof((*StorageConst)(nil).value))
+		r0 := ctx.AllocReg()
+		r1 := ctx.AllocRegExcept(r0)
+		ctx.EmitMovRegMem(r0, thisptr.Reg, off)
+		ctx.EmitMovRegMem(r1, thisptr.Reg, off+8)
+		d0 = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: r0, Reg2: r1}
+		ctx.BindReg(r0, &d0)
+		ctx.BindReg(r1, &d0)
+		ctx.BindReg(r0, &d0)
+		ctx.BindReg(r1, &d0)
+	}
+	if d0.Loc == scm.LocImm {
+		if result.Loc == scm.LocAny {
+			return d0
+		}
+	}
+	if result.Loc == scm.LocAny {
+		result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		ctx.BindReg(result.Reg, &result)
+		ctx.BindReg(result.Reg2, &result)
+	}
+	ctx.EnsureDesc(&d0)
+	if d0.Loc == scm.LocRegPair {
+		ctx.EmitMovPairToResult(&d0, &result)
+		result.Type = d0.Type
+	} else {
+		switch d0.Type {
+		case scm.TagBool:
+			ctx.EmitMakeBool(result, d0)
+			result.Type = scm.TagBool
+		case scm.TagInt:
+			ctx.EmitMakeInt(result, d0)
+			result.Type = scm.TagInt
+		case scm.TagFloat:
+			ctx.EmitMakeFloat(result, d0)
+			result.Type = scm.TagFloat
+		case scm.TagNil:
+			ctx.EmitMakeNil(result)
+			result.Type = scm.TagNil
+		default:
+			panic("jit: single-block scalar return with unknown type")
+		}
+	}
+	return result
+	return result
 }
 
 func (s *StorageConst) prepare()                                  {}

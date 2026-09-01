@@ -94,7 +94,7 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 		lambdaAst([]string{"src.ref_id"}, scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("equal?"),
 			scm.NewSymbol("src.ref_id"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewSymbol(outerParam)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("outer"), scm.NewInt(1), scm.NewSymbol(outerParam)}),
 		})),
 		listAst(scm.NewString("val")),
 		lambdaAst([]string{"val"}, scm.NewSymbol("val")),
@@ -218,7 +218,7 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 
 	computorSource := `(lambda (ref_id)
 		(scan nil (table "tlookuptrigger" "src")
-			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer ref_id)))
+			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
 			'("val") (lambda (val) val)
 			(lambda (old value) value) 0 nil false))`
 	rawComputor := scm.Eval(scm.Read("raw lookup trigger test", computorSource), &scm.Globalenv)

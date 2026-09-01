@@ -39,7 +39,7 @@ test_cases:
         (lambda (folder_id)
           (scan nil
             (table "memcp-tests" "lookup_cache_folder")
-            '("id") (lambda (id) (equal? id (outer folder_id)))
+            '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp") (lambda (stamp) stamp)
             (lambda (old value) value) 0 nil false)))
 
@@ -52,7 +52,7 @@ test_cases:
         (lambda (folder_id)
           (scan nil
             (table "memcp-tests" "lookup_cache_folder")
-            '("id") (lambda (id) (equal? id (outer folder_id)))
+            '("id") (lambda (id) (equal? id (outer 1 folder_id)))
             '("stamp" "label_code") (lambda (stamp label_code) (+ stamp label_code))
             (lambda (old value) value) 0 nil false)))
 
@@ -65,7 +65,7 @@ test_cases:
         (lambda (file_id)
           (scan nil
             (table "memcp-tests" "lookup_cache_file")
-            '("id") (lambda (id) (equal? id (outer file_id)))
+            '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_stamp") (lambda (folder_stamp) folder_stamp)
             (lambda (old value) value) 0 nil false)))
 
@@ -78,7 +78,7 @@ test_cases:
         (lambda (file_id)
           (scan nil
             (table "memcp-tests" "lookup_cache_file")
-            '("id") (lambda (id) (equal? id (outer file_id)))
+            '("id") (lambda (id) (equal? id (outer 1 file_id)))
             '(".lookup:folder_pair") (lambda (folder_pair) folder_pair)
             (lambda (old value) value) 0 nil false)))
 

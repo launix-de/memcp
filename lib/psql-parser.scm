@@ -128,7 +128,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	psql_identifier
 )))
 
-(define parse_psql (lambda (schema s policy) (begin
+(define parse_psql (lambda (schema s policy planning_session tx) (begin
 	(define parse_started_ns (nanotime))
 
 	/* counter for positional $N placeholders: each $N compiles to (session "vN") */
@@ -689,7 +689,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define tbl (car tables))
 			(if policy (policy schema tbl true) true)
 			(define all_defs (map tables (lambda (t) (list t schema t false nil))))
-			(build_dml_plan schema tbl nil all_defs (merge cols) (coalesceNil condition true) nil nil nil)
+			(build_dml_plan schema tbl nil all_defs (merge cols) (coalesceNil condition true) nil nil nil planning_session tx)
 	)))
 
 	(define psql_delete (parser '(
@@ -729,7 +729,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define del_schema (coalesce schema2 schema))
-			(build_dml_plan del_schema tbl nil (list (list tbl del_schema tbl false nil)) nil (coalesceNil condition true) order limit offset)
+			(build_dml_plan del_schema tbl nil (list (list tbl del_schema tbl false nil)) nil (coalesceNil condition true) order limit offset planning_session tx)
 	)))
 
 	/* TRUNCATE [TABLE] tbl — alias for DELETE FROM tbl without WHERE */
@@ -742,7 +742,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define trunc_schema (coalesce schema2 schema))
 			(cons '!begin (list
 				(list (quote checktablemaintenance) trunc_schema tbl "truncate")
-				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil)))
+				(build_dml_plan trunc_schema tbl nil (list (list tbl trunc_schema tbl false nil)) nil true nil nil nil planning_session tx)))
 	)))
 
 	(define psql_insert_into (parser '(
@@ -831,7 +831,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
 			'('begin
 				'('set 'resultrow '('lambda '('item) '('insert '('table (coalesce schema2 schema) tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols) (if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))) false '('lambda '('id) '('session "last_insert_id" 'id)))))
-				(build_queryplan_term (sql_expand_views inner policy))
+				(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
 			)
 	)))
 
@@ -912,7 +912,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser '((atom "COLLATE" true) (define collation (regex "[a-zA-Z0-9_]+"))) '("collation" collation))
 			(parser '((atom "AUTO_INCREMENT" true) "=" (define collation (regex "[0-9]+"))) '("auto_increment" collation))
 		)))
-	) '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists)))
+	) '((quote createtable) (coalesce schema2 schema) id (cons (quote list) cols) (cons (quote list) (merge options)) ifnotexists (quote tx))))
 
 	(define psql_alter_table (parser '(
 		(atom "ALTER" true)
@@ -965,15 +965,15 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(alter auto_increment), not be wrapped as a SELECT projection. */
 		(parser '((atom "SELECT" true) (atom "pg_catalog" true) "." (atom "setval" true) "(" (define seq_name psql_string) "," (define val psql_expression) "," (define is_called psql_expression) ")")
 			(psql_setval_command seq_name val is_called))
-		(parser (define query psql_select) (build_queryplan_term (sql_expand_views query policy)))
+		(parser (define query psql_select) (build_queryplan_term (sql_expand_views query policy) planning_session tx))
 		(parser '((atom "EXPLAIN" true) (atom "IR" true) (define query psql_select)) (explain_queryplan_ir (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query psql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id psql_string) (define variant psql_string) (define query psql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query psql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query psql_select)) (explain_queryplan_physical (sql_expand_views query policy)))
-		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy))) (settings "ExplainWidth")))))
+		(parser '((atom "EXPLAIN" true) (atom "REORDER" true) (define query psql_select)) (explain_queryplan_reorder (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "COMPILE" true) (define query psql_select)) (explain_queryplan_compile (sql_expand_views query policy) parse_started_ns (strlen s) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "DISCOVER" true) (define query psql_select)) (explain_queryplan_physical_calibrate_discover (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (atom "VARIANT" true) (define decision_id psql_string) (define variant psql_string) (define query psql_select)) (explain_queryplan_physical_calibrate_variant (sql_expand_views query policy) decision_id variant planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (atom "CALIBRATE" true) (define query psql_select)) (explain_queryplan_physical_calibrate (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (atom "PHYSICAL" true) (define query psql_select)) (explain_queryplan_physical (sql_expand_views query policy) planning_session))
+		(parser '((atom "EXPLAIN" true) (define query psql_select)) '('resultrow '('list "code" (pretty_print (optimize (build_queryplan_term (sql_expand_views query policy) planning_session tx)) (settings "ExplainWidth")))))
 		psql_insert_into
 		psql_insert_select
 		psql_create_view
@@ -1234,12 +1234,17 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(parser (atom "warning" true) "warning") /* quirks for SET client_min_messages = warning */
 			(parser (atom "heap" true) "heap") /* quirks for SET default_table_access_method = heap */
 			psql_expression
-		))) (list (list (quote context) "session") key value)) ","))) (cons '!begin vars))
+		))) (list (quote session) key value)) ","))) (cons '!begin vars))
 
 		(parser '((atom "LOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))
 			(define locks (+ (parser '((define tbl psql_identifier) (? (atom "AS" true) (define alias psql_identifier)) (define mode (or (parser (atom "WRITE" true) true) (parser '((atom "LOW_PRIORITY" true) (atom "WRITE" true)) true) (parser '((atom "READ" true) (? (atom "LOCAL" true))) nil)))) (list tbl (not (nil? mode)))) ",")))
-			(list (quote locktables) (cons (quote list) (map locks (lambda (l) (cons (quote list) (list schema (nth l 0) (nth l 1))))))))
-		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) '((quote unlocktables)))
+			(list
+				(quote locktables)
+				(cons (quote list)
+					(map locks (lambda (l)
+						(cons (quote list) (list schema (nth l 0) (nth l 1))))))
+				(quote tx)))
+		(parser '((atom "UNLOCK" true) (or (atom "TABLES" true) (atom "TABLE" true))) '((quote unlocktables) (quote tx)))
 
 		/* SHOW INDEXES FROM t / SHOW INDEX FROM t / SHOW KEYS FROM t (no-op, returns empty) */
 		(parser '((atom "SHOW" true) (or (atom "INDEXES" true) (atom "INDEX" true) (atom "KEYS" true)) (atom "FROM" true) psql_identifier (? (atom "WHERE" true) psql_expression)) "ignore")
@@ -1248,14 +1253,14 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "ANALYZE" true) (atom "TABLE" true) psql_identifier) "ignore")
 
 		/* USE database - change current schema */
-		(parser '((atom "USE" true) (define db psql_identifier)) (list (list (quote context) "session") "schema" db))
+		(parser '((atom "USE" true) (define db psql_identifier)) (list (quote session) "schema" db))
 
 		/* transaction control */
-		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (list (quote context) "session")))
-		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (list (quote context) "session")))
-		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (list (quote context) "session")))
-		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (list (quote context) "session")))
-		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (list (quote context) "session")))
+		(parser '((atom "START" true) (atom "ACID" true) (atom "TRANSACTION" true)) (list (quote tx_begin_acid) (quote session) (quote tx)))
+		(parser '((atom "START" true) (atom "TRANSACTION" true)) (list (quote tx_begin) (quote session) (quote tx)))
+		(parser '((atom "BEGIN" true)) (list (quote tx_begin) (quote session) (quote tx)))
+		(parser '((atom "COMMIT" true)) (list (quote tx_commit) (quote session)))
+		(parser '((atom "ROLLBACK" true)) (list (quote tx_rollback) (quote session)))
 		"" /* comment only command */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
@@ -1421,8 +1426,8 @@ substring replace (which is the historical behaviour). */
 		false)
 ))
 
-(define psql_import_plan (lambda (schema dump_schema command policy) (begin
-	(define raw_plan (parse_psql schema command policy))
+(define psql_import_plan (lambda (schema dump_schema command policy tx) (begin
+	(define raw_plan (parse_psql schema command policy nil tx))
 	(define created_schema (psql_import_createdatabase_name raw_plan))
 	(if created_schema
 		(list (coalesce dump_schema created_schema) '((quote createdatabase) schema true))
@@ -1430,18 +1435,18 @@ substring replace (which is the historical behaviour). */
 			(list dump_schema true)
 			(list dump_schema
 				(if dump_schema
-					(parse_psql schema (psql_retarget_command command dump_schema schema) policy)
+					(parse_psql schema (psql_retarget_command command dump_schema schema) policy nil tx)
 					raw_plan))))
 )))
 
-(define psql_eval_import_command (lambda (schema source_dir dump_schema command policy) (begin
+(define psql_eval_import_command (lambda (schema source_dir dump_schema command policy tx) (begin
 	(define resultrow (lambda (row) true))
 	(match command
 		(regex "^[\\r\\n\\t ]*COPY (.*) FROM '([^']+)'\\z" _ def path)
 		(begin
 			(psql_handle_copy_path schema source_dir def path)
 			dump_schema)
-		(match (psql_import_plan schema dump_schema command policy) '(next_dump_schema plan) (begin
+		(match (psql_import_plan schema dump_schema command policy tx) '(next_dump_schema plan) (begin
 			(eval plan)
 			next_dump_schema)))
 )))
@@ -1475,7 +1480,7 @@ substring replace (which is the historical behaviour). */
 						source_dir
 						(state "dump_schema")
 						(psql_normalize_command (concat (state "sql") start))
-						policy))
+						policy nil))
 					(state "sql" rest))
 				(state "sql" (concat (state "sql") line))))
 	)))

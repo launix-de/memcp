@@ -119,10 +119,7 @@ func mysqlScmSession(session *driver.Session) Scmer {
 }
 
 func withMySQLScmSession(session *driver.Session, fn func()) {
-	SetValues(map[string]any{
-		"session": mysqlScmSession(session),
-		"context": context.Background(),
-	}, fn)
+	fn()
 }
 
 /* session storage -> map from session id to SCM session object */
@@ -518,19 +515,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			resultSet = true
 			return NewBool(true)
 		})
-		// Execute query within GLS context so storage layer can access
-		// the session (and its TxContext) via GetCurrentTx().
-		var rc Scmer
-		SetValues(map[string]any{
-			"session":         scmSessionScmer,
-			"sessionStatePtr": ss,
-			"querySeq":        querySeq,
-			"context":         queryCtx,
-		}, func() {
-			rc = Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, fieldsFn, scmSessionScmer,
-				NewAny(&QueryExecutionContext{SessionState: ss, QuerySeq: querySeq}))
-		})
-		return rc
+		return Apply(m.querycallback, NewString(session.Schema()), NewString(query), callbackFn, fieldsFn,
+			scmSessionScmer, NewAny(ss), NewInt(int64(querySeq)))
 	}()
 	if myerr != nil {
 		return myerr

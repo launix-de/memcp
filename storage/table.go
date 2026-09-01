@@ -393,8 +393,7 @@ type foreignKey struct {
 // table lock, so collecting keys and probing the existing adaptive indexes are
 // one atomic DDL observation. NULL-containing tuples are excluded, matching
 // the insert-time UNIQUE contract which permits multiple SQL NULL values.
-func (t *table) hasDuplicateUniqueValues(cols []string) bool {
-	currentTx := CurrentTx()
+func (t *table) hasDuplicateUniqueValues(cols []string, currentTx *TxContext) bool {
 	shards := t.ActiveShards()
 	rows := make([]uniqueValidationRow, 0, t.CountEstimate())
 
@@ -652,7 +651,7 @@ func (t *table) waitForTransactions(shards []*storageShard) {
 // already-published table. Persisted MEMORY/CACHE schemas deliberately reload
 // without data, so their closed oninit callback runs again on the first
 // createtable guard after every restart.
-func (t *table) awaitCreationInitialization() {
+func (t *table) awaitCreationInitialization(tx scm.Scmer) {
 	if !t.creationMu.TryLock() {
 		t.creationMu.Lock()
 	}
@@ -675,49 +674,12 @@ func (t *table) awaitCreationInitialization() {
 		defer func() {
 			t.creationPanic = recover()
 		}()
-		scm.Apply(*t.OnInit)
+		scm.Apply(*t.OnInit, tx)
 		t.onInitComplete = true
 	}()
 	if t.creationPanic != nil {
 		panic(t.creationPanic)
 	}
-}
-
-func (t *table) enterMutationOwner() {
-	goid := currentGoroutineID()
-	if goid == 0 {
-		return
-	}
-	t.mutationOwnMu.Lock()
-	if t.mutationOwners == nil {
-		t.mutationOwners = make(map[uint64]uint32)
-	}
-	t.mutationOwners[goid]++
-	t.mutationOwnMu.Unlock()
-}
-
-func (t *table) exitMutationOwner() {
-	goid := currentGoroutineID()
-	if goid == 0 {
-		return
-	}
-	t.mutationOwnMu.Lock()
-	if d := t.mutationOwners[goid]; d <= 1 {
-		delete(t.mutationOwners, goid)
-	} else {
-		t.mutationOwners[goid] = d - 1
-	}
-	t.mutationOwnMu.Unlock()
-}
-
-func (t *table) hasMutationOwner() bool {
-	goid := currentGoroutineID()
-	if goid == 0 {
-		return false
-	}
-	t.mutationOwnMu.Lock()
-	defer t.mutationOwnMu.Unlock()
-	return t.mutationOwners[goid] > 0
 }
 
 // bumpColFreq increments the query frequency counter for a column.
@@ -1132,15 +1094,9 @@ func (t *table) getTableLockCond() *sync.Cond {
 // tableLockQueryContext resolves the exact statement generation rather than
 // the session's latest query. Autocommit workers carry that generation in the
 // transaction, which keeps overlapping persistent HTTP requests independent.
-func tableLockQueryContext(ss *scm.SessionState) context.Context {
+func tableLockQueryContext(ss *scm.SessionState, querySeq uint64) context.Context {
 	if ss == nil {
 		return nil
-	}
-	querySeq := scm.CurrentQuerySeq()
-	if tx := CurrentTx(); tx != nil {
-		if txSeq := querySeqFromTx(tx); txSeq != 0 {
-			querySeq = txSeq
-		}
 	}
 	return ss.QueryContext(querySeq)
 }
@@ -1150,9 +1106,9 @@ func tableLockQueryContext(ss *scm.SessionState) context.Context {
 // isWrite=false means the caller wants to read (blocked only by WRITE lock from another session).
 // SHOW PROCESSLIST derives its waiting state from the active lock-wait count.
 // Panics if the owning session tries to write while holding a READ lock (MySQL semantics).
-func (t *table) waitTableLock(ss *scm.SessionState, isWrite bool) {
+func (t *table) waitTableLock(ss *scm.SessionState, querySeq uint64, isWrite bool) {
 	cond := t.getTableLockCond()
-	ctx := tableLockQueryContext(ss)
+	ctx := tableLockQueryContext(ss, querySeq)
 	if ctx != nil {
 		stopWake := context.AfterFunc(ctx, func() {
 			t.tableLockMu.Lock()
@@ -2114,7 +2070,7 @@ func (t *table) dropColumnDDLLocked(name string) bool {
 			t.finishSchemaMutationLocked(t.schemaSaveMode())
 			// Fire lifecycle hooks after unlock so dependents (e.g. prejoin caches)
 			// can invalidate without lock-ordering cycles.
-			t.ExecuteTableLifecycleTriggers(AfterDropColumn)
+			t.ExecuteTableLifecycleTriggers(AfterDropColumn, nil)
 			// deregister temp column AFTER releasing schemalock
 			if removedCol.IsTemp {
 				GlobalCache.Remove(removedCol)
@@ -2253,7 +2209,11 @@ func (t *table) finishOverflowRebuild(index int, source *storageShard) {
 	t.collectStatistics()
 }
 
-func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64)) int {
+func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols []string, onCollision scm.Scmer, mergeNull bool, onFirstInsertId func(int64), currentTxArgs ...*TxContext) int {
+	var currentTx *TxContext
+	if len(currentTxArgs) > 0 {
+		currentTx = currentTxArgs[0]
+	}
 	result := 0
 	inserted := 0
 	isIgnore := !onCollision.IsNil() // INSERT IGNORE or ON DUPLICATE KEY UPDATE
@@ -2358,7 +2318,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 			// check unique constraints in a thread safe manner
 			if len(t.Unique) > 0 {
 				t.ProcessUniqueCollision(columns, chunk, mergeNull, func(chunk [][]scm.Scmer) {
-					shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore)
+					shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore, currentTx)
 					result += len(chunk)
 					inserted += len(chunk)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -2385,10 +2345,10 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					} else {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
-				}, 0)
+				}, 0, currentTx)
 			} else {
 				// physically insert (no unique constraints)
-				shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore)
+				shard.Insert(columns, chunk, false, onFirstInsertId, isIgnore, currentTx)
 				result += len(chunk)
 				inserted += len(chunk)
 			}
@@ -2442,7 +2402,7 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 				// this function will do the locking for us
 				t.ProcessUniqueCollision(columns, values, mergeNull, func(values [][]scm.Scmer) {
 					// physically insert
-					s.Insert(columns, values, false, onFirstInsertId, isIgnore)
+					s.Insert(columns, values, false, onFirstInsertId, isIgnore, currentTx)
 					result += len(values)
 					inserted += len(values)
 				}, onCollisionCols, func(errmsg string, data []scm.Scmer) {
@@ -2466,10 +2426,10 @@ func (t *table) Insert(columns []string, values [][]scm.Scmer, onCollisionCols [
 					} else {
 						panic(sqldb.NewSQLError1(1062, "23000", "Duplicate entry in table %s: %s", t.Name, errmsg))
 					}
-				}, 0)
+				}, 0, currentTx)
 			} else {
 				// physically insert (parallel)
-				s.Insert(columns, values, false, onFirstInsertId, isIgnore)
+				s.Insert(columns, values, false, onFirstInsertId, isIgnore, currentTx)
 				result += len(values)
 				inserted += len(values)
 			}
@@ -2640,7 +2600,7 @@ checks a number of datasets for unique collisions.
 For each block of datasets that pass, success is called.
 For each single unique collision that fails, failure is called.
 */
-func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int) {
+func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, mergeNull bool, success func([][]scm.Scmer), onCollisionCols []string, failure func(string, []scm.Scmer), idx int, currentTx *TxContext) {
 	// check for duplicates
 	if idx >= len(t.Unique) {
 		success(values) // we finally made it, these values have passed all unique checks
@@ -2725,7 +2685,6 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			uniquelockHeld = true
 		}
 
-		currentTx := CurrentTx()
 		last_j := 0
 		for j, row := range values {
 			shardlist2 := shardlist
@@ -2764,7 +2723,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 						var flushPanic interface{}
 						func() {
 							defer func() { flushPanic = recover() }()
-							t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1) // flush
+							t.ProcessUniqueCollision(columns, values[last_j:j], mergeNull, success, onCollisionCols, failure, idx+1, currentTx) // flush
 						}()
 						if flushPanic != nil {
 							// Only deeper unique-check levels (idx+1 < len(t.Unique)) can
@@ -2787,7 +2746,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 							// proxies need a point write because they are not row payload;
 							// ordinary cache columns retain normal UPDATE semantics.
 							cacheColName := p[5:]
-							column := s.getColumnStorageOrPanic(cacheColName)
+							column := s.getColumnStorageOrPanic(cacheColName, false, currentTx)
 							proxy, computed := column.(*StorageComputeProxy)
 							update := s.UpdateFunction(uid, true, false, currentTx)
 							params[i] = scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
@@ -2842,7 +2801,7 @@ func (t *table) ProcessUniqueCollision(columns []string, values [][]scm.Scmer, m
 			var flushPanic interface{}
 			func() {
 				defer func() { flushPanic = recover() }()
-				t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1) // flush the rest
+				t.ProcessUniqueCollision(columns, values[last_j:], mergeNull, success, onCollisionCols, failure, idx+1, currentTx) // flush the rest
 			}()
 			if flushPanic != nil {
 				// Same rationale as above: only inner unique-check levels may have

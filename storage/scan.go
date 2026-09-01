@@ -212,8 +212,8 @@ func scanExprSafeToHoist(expr scm.Scmer, belowOuter bool) bool {
 	if scanSymbolIs(items[0], "quote") {
 		return true
 	}
-	if scanSymbolIs(items[0], "outer") {
-		return len(items) == 2 && scanExprSafeToHoist(items[1], true)
+	if depth, inner, ok := scanOuterReference(expr); ok {
+		return depth > 0 && scanExprSafeToHoist(inner, true)
 	}
 	name, named := scanSymbolName(items[0])
 	if !named {
@@ -237,8 +237,11 @@ func scanLiftOutOfLambda(expr scm.Scmer) scm.Scmer {
 	if !ok || len(items) == 0 || scanSymbolIs(items[0], "quote") {
 		return expr
 	}
-	if scanSymbolIs(items[0], "outer") && len(items) == 2 {
-		return items[1]
+	if depth, inner, ok := scanOuterReference(expr); ok && depth > 0 {
+		if depth == 1 {
+			return inner
+		}
+		return scm.NewSlice([]scm.Scmer{items[0], scm.NewInt(int64(depth - 1)), inner})
 	}
 	lifted := make([]scm.Scmer, len(items))
 	for i, item := range items {
@@ -358,6 +361,30 @@ func scanExprIsLambdaParam(v scm.Scmer, name string, idx int) bool {
 func scanSymbolIs(v scm.Scmer, name string) bool {
 	s, ok := scanSymbolName(v)
 	return ok && s == name
+}
+
+func scanOuterReference(v scm.Scmer) (int, scm.Scmer, bool) {
+	items, ok := scmerSlice(v)
+	if !ok || len(items) != 3 || !scanSymbolIs(items[0], "outer") {
+		return 0, scm.NewNil(), false
+	}
+	depthValue := items[1].WithoutSourceInfo()
+	var depth int64
+	switch {
+	case depthValue.IsInt():
+		depth = depthValue.Int()
+	case depthValue.IsFloat():
+		depth = depthValue.Int()
+		if depthValue.Float() != float64(depth) {
+			return 0, scm.NewNil(), false
+		}
+	default:
+		return 0, scm.NewNil(), false
+	}
+	if depth < 0 || int64(int(depth)) != depth {
+		return 0, scm.NewNil(), false
+	}
+	return int(depth), items[2], true
 }
 
 func scanSymbolName(v scm.Scmer) (string, bool) {
@@ -615,14 +642,12 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 			break
 		}
 	}
-	if hasMutationCallback && !t.hasMutationOwner() {
+	if hasMutationCallback {
 		t.mutationMu.Lock()
 		defer t.mutationMu.Unlock()
-		t.enterMutationOwner()
-		defer t.exitMutationOwner()
 	}
 	if t.hasTableLock() {
-		t.waitTableLock(ss, hasMutationCallback)
+		t.waitTableLock(ss, querySeqFromTx(currentTx), hasMutationCallback)
 	}
 	// touch temp columns so CacheManager knows they're still in use
 	touchTempColumns(t, conditionCols, callbackCols)
@@ -951,7 +976,7 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 				}
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
@@ -967,7 +992,7 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, false)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 			t.mu.RLock()
 			locked = true
 		}
@@ -1161,13 +1186,13 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		}
 		return true
 	}
-	ownsWrite := t.hasWriteOwnerForTx(currentTx)
+	ownsWrite := false
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
 		for {
 			prepareOrdered()
-			t.lockForMutation(ss)
+			t.lockForMutation(currentTx)
 			if orderedReadyLocked() {
 				writeLocked = true
 				break
@@ -1177,12 +1202,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		defer func() {
 			if writeLocked {
 				t.mu.Unlock()
-			}
-		}()
-		t.enterWriteOwner()
-		defer func() {
-			if writeLocked {
-				t.exitWriteOwner()
 			}
 		}()
 		if currentTx != nil {
@@ -1214,7 +1233,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				conditionGetters[i] = getter
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 		}
 		cdataset = make([]scm.Scmer, len(conditionCols))
@@ -1252,7 +1271,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, hasMutationCallback)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), hasMutationCallback)
 			// A writer may have invalidated an ordered value while this scan was
 			// waiting. Prepare and verify again instead of blindly reacquiring RLock.
 			acquireVerifiedReadLock()
@@ -1330,7 +1349,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		// processMainBlock/processDeltaBlock when shardWriteLocked=false.
 		// Table-level mutationMu still serializes concurrent mutations.
 		if writeLocked {
-			t.exitWriteOwner()
 			t.mu.Unlock()
 			writeLocked = false
 			mapper.SetShardWriteLocked(false)
@@ -1350,7 +1368,6 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		locked = false
 	}
 	if writeLocked {
-		t.exitWriteOwner()
 		t.mu.Unlock()
 		writeLocked = false
 	}
@@ -1374,7 +1391,7 @@ func (t *storageShard) appendOrderedScanProxies(result []*StorageComputeProxy, c
 		if _, ok := parseBatchPseudoColName(col); ok {
 			continue
 		}
-		proxy, ok := t.getColumnStorageOrPanicEx(col, false, currentTx).(*StorageComputeProxy)
+		proxy, ok := t.getColumnStorageOrPanic(col, false, currentTx).(*StorageComputeProxy)
 		if !ok || !proxy.isOrdered {
 			continue
 		}
@@ -1409,7 +1426,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 		if _, ok := parseBatchPseudoColName(col); ok {
 			continue
 		}
-		proxy, ok := t.getColumnStorageOrPanicEx(col, false, currentTx).(*StorageComputeProxy)
+		proxy, ok := t.getColumnStorageOrPanic(col, false, currentTx).(*StorageComputeProxy)
 		if ok && proxy.isOrdered {
 			return true
 		}
@@ -1436,21 +1453,15 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	}
 
 	t.ensureLoaded()
-	ownsWrite := t.hasWriteOwnerForTx(currentTx)
+	ownsWrite := false
 	lockMutationExclusively := hasMutationCallback && !ownsWrite
 	writeLocked := false
 	if lockMutationExclusively {
-		t.lockForMutation(ss)
+		t.lockForMutation(currentTx)
 		writeLocked = true
 		defer func() {
 			if writeLocked {
 				t.mu.Unlock()
-			}
-		}()
-		t.enterWriteOwner()
-		defer func() {
-			if writeLocked {
-				t.exitWriteOwner()
 			}
 		}()
 		if currentTx != nil {
@@ -1489,7 +1500,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 				conditionBatchSubidx[i] = subidx + 1
 				continue
 			}
-			ccols[i] = t.getColumnStorageOrPanicEx(k, skipShardReadLock, currentTx)
+			ccols[i] = t.getColumnStorageOrPanic(k, skipShardReadLock, currentTx)
 			cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
 			if _, ok := ccols[i].(*StorageComputeProxy); ok {
 				cNeedsCachedReader[i] = true
@@ -1516,7 +1527,7 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		if t.t.hasTableLock() {
 			t.mu.RUnlock()
 			locked = false
-			t.t.waitTableLock(ss, hasMutationCallback)
+			t.t.waitTableLock(ss, querySeqFromTx(currentTx), hasMutationCallback)
 			t.mu.RLock()
 			locked = true
 		}
@@ -1626,7 +1637,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
 		if writeLocked {
-			t.exitWriteOwner()
 			t.mu.Unlock()
 			writeLocked = false
 			mapper.SetShardWriteLocked(false)
@@ -1644,7 +1654,6 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 		locked = false
 	}
 	if writeLocked {
-		t.exitWriteOwner()
 		t.mu.Unlock()
 		writeLocked = false
 	}

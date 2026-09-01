@@ -31,10 +31,7 @@ func TestHTTPSQLBodyUpdatesProcesslistInfo(t *testing.T) {
 		if body := Apply(bodyFn).String(); body != query {
 			t.Fatalf("expected request body %q, got %q", query, body)
 		}
-		ss := GetCurrentSessionState()
-		if ss == nil {
-			t.Fatal("expected HTTP session state")
-		}
+		ss := Apply(a[0], NewString("__session_state")).Any().(*SessionState)
 		observed = strPtr(&ss.Info)
 		return NewNil()
 	})}
@@ -48,21 +45,19 @@ func TestHTTPSQLBodyUpdatesProcesslistInfo(t *testing.T) {
 	}
 }
 
-func TestHTTPRequestCarriesExecutionContextInSingleSessionFrame(t *testing.T) {
+func TestHTTPRequestCarriesSessionAndQueryIdentity(t *testing.T) {
 	server := &HttpServer{callback: NewFunc(func(a ...Scmer) Scmer {
 		request := a[0]
 		session := Apply(request, NewString("__session"))
-		executionContext, ok := Apply(request, NewString("__execution_context")).Any().(*QueryExecutionContext)
+		ss, ok := Apply(request, NewString("__session_state")).Any().(*SessionState)
 		if !ok {
-			t.Fatal("expected typed query execution context")
+			t.Fatal("expected typed session state")
 		}
-		if executionContext.SessionState != GetCurrentSessionState() {
-			t.Fatal("request and goroutine-local session state differ")
+		querySeq := Apply(request, NewString("__query_seq")).Int()
+		if querySeq == 0 {
+			t.Fatal("request is missing explicit query state")
 		}
-		if executionContext.QuerySeq != CurrentQuerySeq() {
-			t.Fatal("request and goroutine-local query sequence differ")
-		}
-		if session != executionContext.SessionState.GetOrCreateScmSession() {
+		if session != ss.GetOrCreateScmSession() {
 			t.Fatal("request and process-list Scheme sessions differ")
 		}
 		return NewNil()

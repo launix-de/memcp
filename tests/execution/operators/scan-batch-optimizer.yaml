@@ -220,7 +220,7 @@ test_cases:
     expect:
       rows: 1
       data_contains:
-        - code: "(outer c.cid)"
+        - code: "(outer 1 c.cid)"
       data_not_contains:
         - code: "legacy_materialized"
 

@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jtolds/gls"
 	"github.com/launix-de/memcp/scm"
 )
 
@@ -50,10 +49,10 @@ func TestApplyWithTxRebindsCapturedPhysicalQueryTransaction(t *testing.T) {
 	currentTx := &TxContext{}
 	computor := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice(nil),
-		Body:   scm.NewSymbol("__physical_query_tx"),
+		Body:   scm.NewSymbol("tx"),
 		En: &scm.Env{
 			Vars: scm.Vars{
-				scm.Symbol("__physical_query_tx"): scm.NewAny(staleTx),
+				scm.Symbol("tx"): scm.NewAny(staleTx),
 			},
 			Outer: &scm.Globalenv,
 		},
@@ -63,8 +62,8 @@ func TestApplyWithTxRebindsCapturedPhysicalQueryTransaction(t *testing.T) {
 	if got.Any().(*TxContext) != currentTx {
 		t.Fatal("computed column reused the transaction captured by its creating query")
 	}
-	binding := computor.Proc().En.FindRead(scm.Symbol("__physical_query_tx"))
-	if binding.Vars[scm.Symbol("__physical_query_tx")].Any().(*TxContext) != staleTx {
+	binding := computor.Proc().En.FindRead(scm.Symbol("tx"))
+	if binding.Vars[scm.Symbol("tx")].Any().(*TxContext) != staleTx {
 		t.Fatal("transaction rebinding mutated the shared computed-column closure")
 	}
 }
@@ -136,7 +135,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 	keytable.Insert([]string{"1"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 
 	computor := countCollapsedComputor()
-	keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil())
+	keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil(), nil)
 
 	row := []scm.Scmer{
 		scm.NewNil(),
@@ -156,7 +155,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 
 	for worker := 0; worker < computeWorkers; worker++ {
 		wg.Add(1)
-		gls.Go(func(worker int) func() {
+		go func(worker int) func() {
 			return func() {
 				defer wg.Done()
 				defer func() {
@@ -166,15 +165,15 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 				}()
 				<-start
 				for iter := 0; iter < iterations; iter++ {
-					keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil())
+					keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil(), nil)
 				}
 			}
-		}(worker))
+		}(worker)()
 	}
 
 	for worker := 0; worker < insertWorkers; worker++ {
 		wg.Add(1)
-		gls.Go(func(worker int) func() {
+		go func(worker int) func() {
 			return func() {
 				defer wg.Done()
 				defer func() {
@@ -187,7 +186,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 					src.Insert([]string{"uid", "form", "subid", "k", "value"}, [][]scm.Scmer{row}, nil, scm.NewNil(), false, nil)
 				}
 			}
-		}(worker))
+		}(worker)()
 	}
 
 	close(start)
@@ -254,17 +253,17 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 		NumVars: 1,
 	})
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2, nil)
 	if got := computeCalls.Load(); got != 2 {
 		t.Fatalf("first filtered compute invoked computor %d times, want 2", got)
 	}
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2, nil)
 	if got := computeCalls.Load(); got != 4 {
 		t.Fatalf("repeated filtered compute invoked computor %d times, want 4 total", got)
 	}
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1)
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1, nil)
 	if got := computeCalls.Load(); got != 7 {
 		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
 	}

@@ -69,9 +69,128 @@ const overlayBlobVersion = 0
 //	             of a 7-byte ASCII dummy "1234567" (byte value '1'=49).
 //	             Legacy: version byte '1'=49 → treat as v0 (inline blobs still possible).
 func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
-
-	/* TODO: dynamic call: invoke t1.GetValue(i) */
-	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*OverlayBlob).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
+	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	var idxInt scm.JITValueDesc
+	if idx.Loc == scm.LocImm {
+		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
+	} else if idx.Loc == scm.LocRegPair {
+		ctx.FreeReg(idx.Reg)
+		idxInt = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagInt, Reg: idx.Reg2}
+		ctx.BindReg(idx.Reg2, &idxInt)
+	} else {
+		idxInt = idx
+	}
+	if idxInt.Loc == scm.LocImm {
+		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(int64(uint64(idxInt.Imm.Int()) & 0xffffffff))}
+	} else {
+		ctx.EnsureDesc(&idxInt)
+		if idxInt.Loc != scm.LocReg {
+			panic("jit: idxInt not in register")
+		}
+		ctx.EmitShlRegImm8(idxInt.Reg, 32)
+		ctx.EmitShrRegImm8(idxInt.Reg, 32)
+		ctx.BindReg(idxInt.Reg, &idxInt)
+	}
+	var d0 scm.JITValueDesc
+	if thisptr.Loc == scm.LocImm {
+		fieldAddr := uintptr(thisptr.Imm.Int()) + unsafe.Offsetof((*OverlayBlob)(nil).Base)
+		r0 := ctx.AllocReg()
+		ctx.EmitMovRegMem64(r0, fieldAddr)
+		d0 = scm.JITValueDesc{Loc: scm.LocReg, Reg: r0}
+		ctx.BindReg(r0, &d0)
+	} else {
+		off := int32(unsafe.Offsetof((*OverlayBlob)(nil).Base))
+		r1 := ctx.AllocReg()
+		ctx.EmitMovRegMem(r1, thisptr.Reg, off)
+		d0 = scm.JITValueDesc{Loc: scm.LocReg, Reg: r1}
+		ctx.BindReg(r1, &d0)
+	}
+	ctx.EnsureDesc(&d0)
+	ctx.EnsureDesc(&idxInt)
+	d1 := ctx.EmitGoCallScalar(scm.GoFuncAddr(func(receiver ColumnStorage, arg0 uint32) scm.Scmer { return receiver.GetValue(arg0) }), []scm.JITValueDesc{d0, idxInt}, 2)
+	ctx.FreeDesc(&idxInt)
+	ctx.EnsureDesc(&thisptr)
+	ctx.EnsureDesc(&thisptr)
+	if thisptr.Loc == scm.LocRegPair || thisptr.Loc == scm.LocStackPair || thisptr.Loc == scm.LocRegTriple || thisptr.Loc == scm.LocStackTriple {
+		panic("jit: generic call arg expects 1-word value")
+	}
+	ctx.EnsureDesc(&d1)
+	ctx.EnsureDesc(&d1)
+	ctx.EnsureDesc(&d1)
+	if d1.Loc == scm.LocImm {
+		tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		if d1.Imm.GetTag() == scm.TagBool {
+			ctx.EmitMakeBool(tmpPair, d1)
+		} else if d1.Imm.GetTag() == scm.TagInt {
+			ctx.EmitMakeInt(tmpPair, d1)
+		} else if d1.Imm.GetTag() == scm.TagFloat {
+			ctx.EmitMakeFloat(tmpPair, d1)
+		} else if d1.Imm.GetTag() == scm.TagNil {
+			ctx.EmitMakeNil(tmpPair)
+		} else {
+			ptrWord, auxWord := d1.Imm.RawWords()
+			ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+			ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
+		}
+		d1 = tmpPair
+	} else if d1.Loc == scm.LocReg {
+		tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+		switch d1.Type {
+		case scm.TagBool:
+			ctx.EmitMakeBool(tmpPair, d1)
+		case scm.TagInt:
+			ctx.EmitMakeInt(tmpPair, d1)
+		case scm.TagFloat:
+			ctx.EmitMakeFloat(tmpPair, d1)
+		default:
+			panic("jit: generic call arg scalar type unknown for 2-word value")
+		}
+		ctx.FreeDesc(&d1)
+		d1 = tmpPair
+	}
+	if d1.Loc != scm.LocRegPair && d1.Loc != scm.LocStackPair {
+		panic("jit: generic call arg expects 2-word value ((*OverlayBlob).resolveBlob arg1)")
+	}
+	ctx.SyncDesc(&thisptr)
+	ctx.SyncDesc(&d1)
+	d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*OverlayBlob).resolveBlob), []scm.JITValueDesc{thisptr, d1}, 2)
+	ctx.BindReg(d2.Reg, &d2)
+	ctx.BindReg(d2.Reg2, &d2)
+	ctx.FreeDesc(&d1)
+	if d2.Loc == scm.LocImm {
+		if result.Loc == scm.LocAny {
+			return d2
+		}
+	}
+	if result.Loc == scm.LocAny {
+		result = scm.JITValueDesc{Loc: scm.LocRegPair, Type: scm.JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		ctx.BindReg(result.Reg, &result)
+		ctx.BindReg(result.Reg2, &result)
+	}
+	ctx.EnsureDesc(&d2)
+	if d2.Loc == scm.LocRegPair {
+		ctx.EmitMovPairToResult(&d2, &result)
+		result.Type = d2.Type
+	} else {
+		switch d2.Type {
+		case scm.TagBool:
+			ctx.EmitMakeBool(result, d2)
+			result.Type = scm.TagBool
+		case scm.TagInt:
+			ctx.EmitMakeInt(result, d2)
+			result.Type = scm.TagInt
+		case scm.TagFloat:
+			ctx.EmitMakeFloat(result, d2)
+			result.Type = scm.TagFloat
+		case scm.TagNil:
+			ctx.EmitMakeNil(result)
+			result.Type = scm.TagNil
+		default:
+			panic("jit: single-block scalar return with unknown type")
+		}
+	}
+	return result
+	return result
 }
 
 func (s *OverlayBlob) Serialize(f io.Writer) {

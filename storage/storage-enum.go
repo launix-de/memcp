@@ -563,7 +563,7 @@ func (s *StorageEnum) findChunk(idx int) int {
 
 func (s *StorageEnum) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 
-	/* TODO: Extract: extract t20 #0 */
+	/* TODO: Extract index 0 outside tuple of 0 values */
 	return ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageEnum).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)
 }
 

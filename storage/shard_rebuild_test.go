@@ -408,7 +408,7 @@ func TestShardRebuildForwardsConcurrentInsertsViaNext(t *testing.T) {
 			scm.NewString(fmt.Sprintf("%032x", 20001+i)),
 		})
 	}
-	shard.Insert([]string{"id", "payload"}, extraRows, false, nil, false)
+	shard.Insert([]string{"id", "payload"}, extraRows, false, nil, false, nil)
 
 	rebuilt := <-rebuiltCh
 	if rebuilt == nil {
@@ -430,7 +430,7 @@ func TestShardRebuildForwardsInsertAcrossSuccessorChain(t *testing.T) {
 	firstSuccessor.storeNext(latestSuccessor)
 	firstSuccessor.nextReady.Store(true)
 
-	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, false)
+	source.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(42)}}, false, nil, false, nil)
 
 	if got := source.Count(); got != 1 {
 		t.Fatalf("source count = %d, want 1", got)
@@ -653,7 +653,7 @@ func TestManualRepartitionInsertDeleteUsesTranslationMap(t *testing.T) {
 	oldShard.Insert([]string{"id", "payload"}, [][]scm.Scmer{{
 		scm.NewInt(30001),
 		scm.NewString("transient"),
-	}}, false, nil, false)
+	}}, false, nil, false, nil)
 	oldShard.UpdateFunction(oldRecid, false, false, nil)()
 
 	<-done
@@ -1967,9 +1967,7 @@ func TestACIDRolledBackInsertDoesNotReplayAfterRestart(t *testing.T) {
 	tx := NewTxContext(TxACID)
 	tx.Session = session
 	scm.Apply(session, scm.NewString("__memcp_tx"), scm.NewAny(tx))
-	scm.SetValues(map[string]any{"session": session}, func() {
-		tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("rolled-back")}}, nil, scm.NewNil(), false, nil)
-	})
+	tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(1), scm.NewString("rolled-back")}}, nil, scm.NewNil(), false, nil, tx)
 	tx.Rollback()
 	if got := tbl.Count(); got != 0 {
 		t.Fatalf("live count after ACID rollback = %d, want 0", got)

@@ -182,8 +182,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (ir_context_get (ir_context_of simple_ir) 'compile-budget-ms nil) 1000) true "untangle_query carries compile budget in context")
 	(assert (equal? (join_reorder simple_ir) simple_ir) true "join_reorder is an IR-only phase")
 	(define simple_physical_plan (build_queryplan_term simple_select_ast))
-	(assert (equal? (logical_op simple_physical_plan) 'begin) true "build_queryplan adds a lexical physical query context boundary")
-	(assert (equal? (logical_op (nth simple_physical_plan 4)) 'scan) true "build_queryplan lowers simple query-block to physical scan")
+	(assert (equal? (logical_op simple_physical_plan) 'scan) true "build_queryplan captures the caller's explicit query context")
+	(assert (equal? (logical_op simple_physical_plan) 'scan) true "build_queryplan lowers simple query-block to physical scan")
 	(assert (physical_relational_list_collector?
 		(list 'sort 'arbitrarily_renamed_rows (list 'lambda '(a b) true)))
 		true "physical plan guard rejects structurally sorted Scheme relations")
@@ -847,8 +847,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			(list (quote membership_order_limit_driver) true))) 3)
 		(quote ordered_base_membership)) true
 		"dense ordered RecSets retain the base-index membership kernel")
-	(assert (equal? (logical_op scalar_no_from_plan) 'begin) true "zero-domain subqueries retain the lexical physical query context boundary")
-	(assert (equal? (serialize (nth scalar_no_from_plan 4))
+	(assert (equal? (logical_op scalar_no_from_plan) 'resultrow) true "zero-domain subqueries use the caller's lexical query context")
+	(assert (equal? (serialize scalar_no_from_plan)
 		"(resultrow '(\"x\" 8 \"in_ok\" (if (nil? 8) nil (if (nil? 8) nil (equal?? 8 8))) \"exists_ok\" true))") true "build_queryplan_term lowers zero-domain expression subqueries")
 	(define nested_catalog_stage (make_group_stage
 		"nested-catalog-stage"
@@ -1395,7 +1395,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (coalesceNil nil "" 0) "") true "coalesceNil returns first non-nil")
 	/* outer evaluates expression in outer environment */
 	(define ox_eval 10)
-	(assert (equal? (begin (define ox_eval 20) (eval (list 'outer 'ox_eval))) 10) true "outer reads outer var")
+	(assert (equal? (begin (define ox_eval 20) (eval (list 'outer 1 'ox_eval))) 10) true "outer reads outer var")
 	/* begin creates new scope; final value is last expression */
 	(assert (equal? (begin (define p 1) (define q (+ p 1)) q) 2) true "begin uses new scope and returns last")
 	/* !begin executes in parent env */
@@ -1479,7 +1479,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (optimize '('concat "a" 2)) "a2" "optimize folds string concat")
 	(assert (optimize '('and true '(equal? 2 2))) true "optimize folds and/equal")
 	(assert (optimize '('begin '('define 'x 4) '(+ 'x 1))) 5 "optimize inlines define use-once")
-	(assert (optimize '('and '('and '('and '(> 'LINEITEM.L_QUANTITY 10)) true) '('equal? 1 '('outer 1)))) '(> 'LINEITEM.L_QUANTITY 10) "SQL filter optimization")
+	(assert (optimize '('and '('and '('and '(> 'LINEITEM.L_QUANTITY 10)) true) '('equal? 1 '('outer 1 1)))) '(> 'LINEITEM.L_QUANTITY 10) "SQL filter optimization")
 
 	/* Flatten nested + and * (associative operators) */
 	(assert (optimize '('+ 1 '('+ 2 3))) 6 "optimize flattens nested + constants")
@@ -1915,11 +1915,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (contains? keys "a") true "session lists key a")
 	(assert (contains? keys "b") true "session lists key b")
 	/* context + sleep */
-	(assert (context (lambda () (sleep 0.005))) true "sleep inside context")
+	(assert (context (lambda (_session) (sleep 0.005))) true "sleep inside context")
 	/* context session */
-	(assert (context (lambda () (begin (define s (context "session")) (s "k" 7) (equal? (s "k") 7)))) true "context session set/get")
+	(assert (context (lambda (s) (begin (s "k" 7) (equal? (s "k") 7)))) true "context session set/get")
 	/* context check inside valid context */
-	(assert (context (lambda () (context "check"))) true "context check returns true in valid context")
+	(assert (context (lambda (s) (not (nil? s)))) true "context passes an explicit session")
 	/* once */
 	(define once_calls (newsession))
 	(once_calls "n" 0)
@@ -1964,11 +1964,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (p5 "state") false) true "failed promise with payload keeps failed state")
 	(assert (equal? (p5 "value") "boom") true "failed promise stores payload")
 	(define p6 (newpromise))
-	(context (lambda () (p6 "value" 99)))
+	(context (lambda (_session) (p6 "value" 99)))
 	(assert (equal? (p6 "value") 99) true "promise resolves from inside context")
 	(define p7 (newpromise))
 	(setTimeout (lambda () (p7 "value" "async")) 1)
-	(context (lambda () (sleep 0.02)))
+	(context (lambda (_session) (sleep 0.02)))
 	(assert (equal? (p7 "value") "async") true "promise resolves from async callback")
 
 	/* Scheduler */
@@ -1976,18 +1976,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define sched (newsession))
 	(sched "done" false)
 	(setTimeout (lambda () (sched "done" true)) 1)
-	(context (lambda () (sleep 0.01)))
+	(context (lambda (_session) (sleep 0.01)))
 	(assert (sched "done") true "setTimeout fires callback")
 	/* clearTimeout */
 	(sched "done" false)
 	(define tid (setTimeout (lambda () (sched "done" true)) 50))
 	(clearTimeout tid)
-	(context (lambda () (sleep 0.02)))
+	(context (lambda (_session) (sleep 0.02)))
 	(assert (sched "done") false "clearTimeout cancels callback")
 	/* setTimeout with negative delay fires immediately */
 	(sched "done" false)
 	(setTimeout (lambda () (sched "done" true)) -50)
-	(context (lambda () (sleep 0.01)))
+	(context (lambda (_session) (sleep 0.01)))
 	(assert (sched "done") true "setTimeout negative delay fires")
 	/* clearTimeout on non-existent ID */
 	(assert (clearTimeout 999999) false "clearTimeout non-existent ID returns false")
@@ -2916,8 +2916,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	/* serialize: symbol with special chars (unquote branch) */
 	(assert (equal? (serialize (_i (symbol "hello world"))) "(unquote \"hello world\")") true "serialize symbol with space triggers unquote")
 	(assert (equal? (serialize (_i (symbol "a\"b"))) "(unquote \"a\\\"b\")") true "serialize symbol with quote triggers unquote")
-	/* serialize: (outer ...) pattern */
-	(assert (equal? (serialize (list (symbol "outer") (symbol "x"))) "(outer x)") true "serialize outer expression")
+	/* serialize: (outer depth expression) pattern */
+	(assert (equal? (serialize (list (symbol "outer") 1 (symbol "x"))) "(outer 1 x)") true "serialize outer expression")
 	/* serialize: list starting with 'list symbol (quote shorthand '(...) ) */
 	(assert (strlike (serialize (list (symbol "list") 1 2 3)) "%1 2 3%") true "serialize list-prefixed list")
 	/* serialize: collate function (serializeNativeFunc collate branch) */
@@ -3129,11 +3129,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (equal? (p5 "state") false) true "failed promise with payload keeps failed state")
 	(assert (equal? (p5 "value") "boom") true "failed promise stores payload")
 	(define p6 (newpromise))
-	(context (lambda () (p6 "value" 99)))
+	(context (lambda (_session) (p6 "value" 99)))
 	(assert (equal? (p6 "value") 99) true "promise resolves from inside context")
 	(define p7 (newpromise))
 	(setTimeout (lambda () (p7 "value" "async")) 1)
-	(context (lambda () (sleep 0.02)))
+	(context (lambda (_session) (sleep 0.02)))
 	(assert (equal? (p7 "value") "async") true "promise resolves from async callback")
 	/* once: resolve exactly once, panic on second */
 	(define p8 (newpromise))

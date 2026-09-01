@@ -325,9 +325,11 @@ func serializeEx(b *schemeTextWriter, v Scmer, en *Env, glob *Env, p *Proc) {
 		}
 	case tagSlice:
 		slice := v.Slice()
-		if len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
+		if len(slice) == 3 && scmerIsSymbol(slice[0], "outer") {
 			b.WriteString("(outer ")
 			serializeEx(b, slice[1], en, glob, nil)
+			b.WriteByte(' ')
+			serializeEx(b, slice[2], en, glob, nil)
 			b.WriteByte(')')
 			return
 		}

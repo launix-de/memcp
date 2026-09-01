@@ -24,14 +24,14 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(planner_direct_presence_probe_cost probe_rows)
 					(planner_presence_carrier_cost input_rows probe_rows)))))))
 
-(define stage_direct_probe_cost_preferred? (lambda (stage probe_rows_value)
+(define stage_direct_probe_cost_preferred? (lambda (stage probe_rows_value planning_session)
 	(begin
 		/* A merged scalar stage exposes several values from the same bounded row.
 		Direct lowering performs one probe per requested aggregate, whereas the
 		keytable carrier fills all columns in one ordered scan. Cost the complete
 		consumer work instead of comparing one probe with one carrier build. */
 		(define probe_width (max 1 (count (gs_aggregates stage))))
-		(define raw_probe_rows (planner_literal_value probe_rows_value))
+		(define raw_probe_rows (planner_literal_value probe_rows_value planning_session))
 		(define probe_rows (if (number? raw_probe_rows)
 			(* raw_probe_rows probe_width)
 			raw_probe_rows))
@@ -45,11 +45,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 						(list (quote quote) (gs_input stage)))))
 			chosen))))
 
-(define stage_direct_probe_cost_preferred_for_limit? (lambda (stage limit_value)
+(define stage_direct_probe_cost_preferred_for_limit? (lambda (stage limit_value planning_session)
 	(begin
-		(define work_rows (probe_limit_work_rows limit_value))
+		(define work_rows (probe_limit_work_rows limit_value planning_session))
 		(and (not (nil? work_rows))
-			(stage_direct_probe_cost_preferred? stage limit_value)))))
+			(stage_direct_probe_cost_preferred? stage limit_value planning_session)))))
 
 (define source_column_bound_by_equality? (lambda (src col condition)
 	(reduce (split_and_terms (coalesceNil condition true)) (lambda (found term)
@@ -204,7 +204,7 @@ separate route can represent arbitrary dependency shapes safely. */
 /* Scalar-first stages enter the generic cost-based carrier chain whenever
 their lookup is valid. Presence stages retain their established bounded/small
 context gates because bare EXISTS also has a separate membership lowerer. */
-(define probeable_stage_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src)
+(define probeable_stage_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src planning_session)
 	(if (scalar_first_stage_output_source? stages src)
 		(begin
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
@@ -223,12 +223,12 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 					(not (presence_stage_output_source? stages candidate)))))
 				(and (stage_probe_dependencies_resolve_in_catalog? stages stage)
 					(and (stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
-						(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value)
+						(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
 							(or (presence_stage_probe_allowed_in_context? stage probe_sources)
 								(probe_context_unique_point?
 									cardinality_sources default_alias driver_condition))))))))))
 
-(define scalar_aggregate_probe_output_source_for_block? (lambda (stages sources default_alias limit_value src)
+(define scalar_aggregate_probe_output_source_for_block? (lambda (stages sources default_alias limit_value src planning_session)
 	(if (not (scalar_aggregate_probe_stage_output_source? stages src))
 		false
 		(begin
@@ -244,11 +244,11 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 							(or
 								(stage_has_residual_outer_refs? stage)
 								(or
-									(stage_direct_probe_cost_preferred_for_limit? stage limit_value)
+									(stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
 									(probe_context_small_enough? probe_sources))))
 						(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias))))))))
 
-(define scalar_cardinality_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src)
+(define scalar_cardinality_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition src planning_session)
 	(if (not (scalar_cardinality_probe_stage_output_source? stages src))
 		false
 		(begin
@@ -256,11 +256,11 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 			(define probe_sources (filter sources (lambda (candidate)
 				(not (equal? (source_alias candidate) (source_alias src))))))
 			(and (stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
-				(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value)
+				(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
 					(or (probe_context_small_enough? probe_sources)
 						(probe_context_unique_point? probe_sources default_alias driver_condition))))))))
 
-(define direct_group_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition consumers src)
+(define direct_group_probe_output_source_for_block? (lambda (stages sources default_alias limit_value driver_condition consumers src planning_session)
 	(begin
 		(define stage (direct_group_probe_stage_for_block_source stages sources src consumers))
 		(if (nil? stage)
@@ -270,19 +270,20 @@ context gates because bare EXISTS also has a separate membership lowerer. */
 					(not (equal? (source_alias candidate) (source_alias src))))))
 				(and
 					(stage_lookup_keys_resolve_in_sources? stage probe_sources default_alias)
-					(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value)
+					(or (stage_direct_probe_cost_preferred_for_limit? stage limit_value planning_session)
 						(or (probe_context_small_enough? probe_sources)
 							(probe_context_unique_point? probe_sources default_alias driver_condition)))))))))
 
-(define probe_output_sources_for_block (lambda (stages sources default_alias limit_value driver_condition consumers)
+(define probe_output_sources_for_block (lambda (stages sources default_alias limit_value driver_condition consumers planning_session)
 	(filter (coalesceNil sources '()) (lambda (src)
 		(or
 			(probeable_stage_output_source_for_block?
-				stages sources default_alias limit_value driver_condition src)
+				stages sources default_alias limit_value driver_condition src planning_session)
 			(or
-				(scalar_aggregate_probe_output_source_for_block? stages sources default_alias limit_value src)
+				(scalar_aggregate_probe_output_source_for_block?
+					stages sources default_alias limit_value src planning_session)
 				(scalar_cardinality_probe_output_source_for_block?
-					stages sources default_alias limit_value driver_condition src)))))))
+					stages sources default_alias limit_value driver_condition src planning_session)))))))
 
 (define sources_without_probe_outputs (lambda (sources probe_sources)
 	(begin
@@ -700,9 +701,10 @@ only partitioned FROM source would erase the block's row multiplicity
 			(coalesceNil (qb_where block) true) (coalesceNil (qb_order block) '())))
 		(define prelimit_aliases (map prelimit_sources source_alias))
 		(define dml_block (qassoc_get (qb_facts block) (quote dml) false))
+		(define planning_session (planner_context_session (qb_facts block)))
 		(define eligible_probe_sources (lambda (limit_value)
 			(filter (probe_output_sources_for_block
-				stages sources default_alias limit_value (qb_where block) consumers)
+				stages sources default_alias limit_value (qb_where block) consumers planning_session)
 				(lambda (src)
 					(or (not dml_block)
 						(not (scalar_first_stage_output_source? stages src)))))))
@@ -1518,7 +1520,7 @@ outer joins. */
 		(define initial_fill_expr (if (nil? base_group_into_plan)
 			nil
 			(list (quote initialize_cache_table)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) schema grouptbl)
 				(list (quote list) (source_table_expr src))
 				(list (quote lambda) '()
@@ -1529,14 +1531,14 @@ outer joins. */
 			(quoted_runtime_list '("engine" "cache"))
 			(list (quote list)
 				"engine" "cache"
-				"oninit" (list (quote lambda) '() initial_fill_expr))))
+				"oninit" (list (quote lambda) (list (quote tx)) initial_fill_expr))))
 		(define group_cache_created (symbol "__group_cache_created"))
 		(define keytable_init (list
 			(list (quote lambda) (list group_cache_created)
 				(list (quote !begin)
 					(list (quote touch_keytable) (list (quote table) schema grouptbl))
 					group_cache_created))
-			(list (quote createtable) schema grouptbl create_cols create_options true)))
+			(list (quote createtable) schema grouptbl create_cols create_options true (quote tx))))
 		(define boolean_row_keys (if (equal? result_sink (quote boolean-recset))
 			(scalar_first_probe_recset_row_keys stage
 				(scalar_first_probe_carrier_source prepared_src)) '()))
@@ -1658,7 +1660,7 @@ outer joins. */
 		(if (not (source_is_base_table? src))
 			(neumann_fail "build_queryplan" "ORC materialization expects base table source")
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(source_table_expr src)
 				(quoted_runtime_list '())
 				(list (quote lambda) '() true)
@@ -1681,7 +1683,7 @@ outer joins. */
 				(define filterfn (qassoc_get facts (quote physical_filterfn)
 					(list (quote lambda) '() true)))
 				(list (quote scan)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(source_table_expr src)
 					(quoted_runtime_list filtercols)
 					filterfn
@@ -2114,7 +2116,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 										(list (quote window_mut) (quote active_window) emit_expr (quote mapped))
 										(list (quote list) true (quote current_partition) (quote active_window)))))
 								(define scan_expr (list (quote scan_order)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									(source_table_expr src)
 									(cons (quote list) filtercols)
 									filter_expr
@@ -2204,7 +2206,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 													(list (quote continuation) (quote next_rownum))
 													(list (quote list) (quote row_partition) (quote next_rownum)))))
 											(define scan_expr (list (quote scan_order)
-												'(session "__memcp_tx")
+												(physical_query_tx_symbol)
 												(source_table_expr src)
 												(cons (quote list) filtercols)
 												filter_expr
@@ -2233,7 +2235,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 			(list (quote list) title
 				(list (quote car)
 					(list (quote scan_order)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(list (quote table) schema relation)
 						(quoted_runtime_list '())
 						(list (quote lambda) '() true)
@@ -2400,7 +2402,7 @@ column expressions, without creating a temporary storage table. */
 		(or found (row_number_stage_consumed_by_source? stage src)))
 		false)))
 
-(define stage_consumed_by_probe_source? (lambda (stage stages sources default_alias limit_value driver_condition)
+(define stage_consumed_by_probe_source? (lambda (stage stages sources default_alias limit_value driver_condition planning_session)
 	(reduce (coalesceNil sources '()) (lambda (found src)
 		(or found
 			(and (stage_output_relation? (source_relation src))
@@ -2408,7 +2410,7 @@ column expressions, without creating a temporary storage table. */
 					(and
 						(probeable_stage_output_source? stages src)
 						(probeable_stage_output_source_for_block?
-							stages sources default_alias limit_value driver_condition src))))))
+							stages sources default_alias limit_value driver_condition src planning_session))))))
 		false)))
 
 (define scalar_first_inline_only_stage? (lambda (stage)
@@ -2478,7 +2480,8 @@ column expressions, without creating a temporary storage table. */
 			(row_number_stage_consumed_by_join? stage sources)
 			(stage_consumed_by_membership_source? stage (qb_stages block) sources (qb_facts block))
 			(stage_consumed_by_probe_source?
-				stage (qb_stages block) sources default_alias (qb_limit block) (qb_where block)))))))
+				stage (qb_stages block) sources default_alias (qb_limit block) (qb_where block)
+				(planner_context_session (qb_facts block))))))))
 
 (define stage_direct_prepare_semantic_candidate? (lambda (consumed_probe_ids consumed_source_probe_ids stage_output_ids stage)
 	(and
@@ -2513,7 +2516,8 @@ must not pay for an unused group cache. */
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias) (if (empty_list? sources) nil (source_alias (car sources)))))
 		(define consumed_probe_ids (qassoc_get (qb_facts block) (quote consumed_probe_stage_ids) '()))
 		(define consumed_source_probe_ids (stage_output_source_ids (probe_output_sources_for_block
-			all_stages sources default_alias (qb_limit block) (qb_where block) (query_block_probe_consumers block))))
+			all_stages sources default_alias (qb_limit block) (qb_where block)
+			(query_block_probe_consumers block) (planner_context_session (qb_facts block)))))
 		(define stage_output_ids (stage_output_source_ids sources))
 		(define physical_membership_stage_ids
 			(physical_membership_probe_stage_ids (query_block_probe_consumers block)))
@@ -2567,7 +2571,8 @@ must not pay for an unused group cache. */
 		(define default_alias (qassoc_get (qb_facts block) (quote default_alias)
 			(if (empty_list? sources) nil (source_alias (car sources)))))
 		(or
-			(probe_limit_bounded? (qb_limit block))
+			(probe_limit_bounded? (qb_limit block)
+				(planner_context_session (qb_facts block)))
 			(probe_context_unique_point? sources default_alias (qb_where block))))))
 
 (define query_block_bounded_scalar_probe_recipe_keys (lambda (block entries)
@@ -2694,7 +2699,7 @@ for one-off tiny relations. The emitted guard repeats this same cost inequality
 against the live table cardinality, so a cached direct plan cannot survive data
 growth into the expensive range. The per-probe coefficient is generated by
 tools/costgen; this lowering adds no hand-tuned crossover. */
-(define select_scalar_order_lookup_cache_candidate (lambda (candidate)
+(define select_scalar_order_lookup_cache_candidate (lambda (candidate planning_session)
 	(if (nil? candidate)
 		nil
 		(begin
@@ -2722,60 +2727,63 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(list "inputs" (list
 					(list "driver_rows" driver_rows)
 					(list "risk_budget_ns" planner_adaptive_observation_budget_ns)))
-				(list "alternatives" alternatives)))
+				(list "alternatives" alternatives)) planning_session)
 			(if (equal? chosen "canonical_computed_column") candidate nil)))))
 
 (define scalar_order_lookup_cache_candidate (lambda (stages block)
-	(if (not (query_limit_active? (qb_offset block) (qb_limit block)))
-		nil
-		(begin
-			(define sources (qb_sources block))
-			(define relational (if (empty_list? (qb_order block)) nil
-				(scalar_order_relational_cache_marker
-					stages sources (car (order_exprs (qb_order block))))))
-			(define marker (if (not (nil? relational))
-				relational
-				(begin
-					(define probe (if (empty_list? (qb_order block)) nil
-						(scalar_order_lookup_cache_marker (car (order_exprs (qb_order block))) nil)))
-					(if (nil? probe) nil (list (nth probe 0) (nth probe 1) nil)))))
-			(if (nil? marker)
-				nil
-				(begin
-					(define stage (nth marker 0))
-					(define requested_col (nth marker 1))
-					(define stage_source (nth marker 2))
-					(define target_parts (scalar_order_lookup_cache_target block stage))
-					(define target (nth target_parts 0))
-					(define input_cols (nth target_parts 1))
-					(define lookup_keys (nth target_parts 2))
-					(define ag (scalar_first_probe_aggregate stage requested_col))
-					(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
-					(if (not (scalar_order_lookup_cache_eligible?
-						stage target input_cols parts))
-						nil
-						(begin
-							(define cache (group_stage_cache stage))
-							(define column_name (concat ".lookup:"
-								(stable_structural_hash
-									(list (group_cache_relation cache) requested_col) true)))
-							(define params (map input_cols (lambda (col)
-								(symbol (concat (source_alias target) "." col)))))
-							(define lookup_expr (lower_table_scalar_first_probe_expr
-								(qb_sources block)
-								(qassoc_get (qb_facts block) (quote default_alias) (source_alias target))
-								(gs_input stage) stage (nth parts 0) (gs_keys stage) lookup_keys
-								'() '() 0 1 nil))
-							(select_scalar_order_lookup_cache_candidate
-								(list target stage requested_col column_name
-									(list (quote createcolumn)
-										(source_table_expr target)
-										column_name "any"
-										(quoted_runtime_list '())
-										(quoted_runtime_list '("temp" true))
-										(cons (quote list) input_cols)
-										(list (quote lambda) params lookup_expr))
-									stage_source))))))))))))
+	(begin
+		(define planning_session (planner_context_session (qb_facts block)))
+		(if (not (query_limit_active? (qb_offset block) (qb_limit block)))
+			nil
+			(begin
+				(define sources (qb_sources block))
+				(define relational (if (empty_list? (qb_order block)) nil
+					(scalar_order_relational_cache_marker
+						stages sources (car (order_exprs (qb_order block))))))
+				(define marker (if (not (nil? relational))
+					relational
+					(begin
+						(define probe (if (empty_list? (qb_order block)) nil
+							(scalar_order_lookup_cache_marker (car (order_exprs (qb_order block))) nil)))
+						(if (nil? probe) nil (list (nth probe 0) (nth probe 1) nil)))))
+				(if (nil? marker)
+					nil
+					(begin
+						(define stage (nth marker 0))
+						(define requested_col (nth marker 1))
+						(define stage_source (nth marker 2))
+						(define target_parts (scalar_order_lookup_cache_target block stage))
+						(define target (nth target_parts 0))
+						(define input_cols (nth target_parts 1))
+						(define lookup_keys (nth target_parts 2))
+						(define ag (scalar_first_probe_aggregate stage requested_col))
+						(define parts (if (nil? ag) nil (scalar_first_probe_parts ag)))
+						(if (not (scalar_order_lookup_cache_eligible?
+							stage target input_cols parts))
+							nil
+							(begin
+								(define cache (group_stage_cache stage))
+								(define column_name (concat ".lookup:"
+									(stable_structural_hash
+										(list (group_cache_relation cache) requested_col) true)))
+								(define params (map input_cols (lambda (col)
+									(symbol (concat (source_alias target) "." col)))))
+								(define lookup_expr (lower_table_scalar_first_probe_expr
+									(qb_sources block)
+									(qassoc_get (qb_facts block) (quote default_alias) (source_alias target))
+									(gs_input stage) stage (nth parts 0) (gs_keys stage) lookup_keys
+									'() '() 0 1 nil))
+								(select_scalar_order_lookup_cache_candidate
+									(list target stage requested_col column_name
+										(list (quote createcolumn)
+											(source_table_expr target)
+											column_name "any"
+											(quoted_runtime_list '())
+											(quoted_runtime_list '("temp" true))
+											(cons (quote list) input_cols)
+											(list (quote lambda) params lookup_expr))
+										stage_source)
+									planning_session)))))))))))))
 
 (define replace_scalar_order_lookup_with_cache (lambda (candidate expr)
 	(if (nil? candidate)
@@ -2898,6 +2906,17 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(define direct_group_join_stages
 					(qassoc_get (qb_facts raw_prepared_block)
 						(quote direct_group_join_stages) '()))
+				/* The selected direct stages carry compile-local physical context.
+				Publish those exact stage values into the lowering catalog so the
+				leaf emitter sees the same selection made above. */
+				(define physical_stage_catalog (if (empty_list? direct_group_join_stages)
+					stage_catalog
+					(make_lowering_catalog
+						(map (lowering_catalog_stages stage_catalog) (lambda (stage)
+							(begin
+								(define selected (if (group_stage? stage)
+									(stage_by_id direct_group_join_stages (gs_id stage)) nil))
+								(if (nil? selected) stage selected)))))))
 				(define eager_stages (filter candidate_eager_stages (lambda (stage)
 					(and (not (has_assoc? probe_marker_stage_ids (gs_id stage)))
 						(not (contains? direct_group_join_stage_ids (gs_id stage)))))))
@@ -2925,7 +2944,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 					(stages_without_prepare_backbones stage_catalog eager_stages)
 					direct_group_join_stage_ids))
 				(define core_block (query_block_without_stages
-					(query_block_with_stage_catalog prepared_block stage_catalog)))
+					(query_block_with_stage_catalog prepared_block physical_stage_catalog)))
 				(define lazy_stages (group_cache_stages_from_sources lazy_catalog (qb_sources core_block)))
 				(list
 					(merge (list
@@ -3015,7 +3034,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 
 (define stage_prepare_call_expr (lambda (stage)
 	(list (quote apply)
-		(list (list (quote context) "session") (stage_prepare_key stage))
+		(list (physical_query_session_symbol) (stage_prepare_key stage))
 		(quoted_runtime_list '()))))
 
 (define lazy_stage_prepare_binding (lambda (dependency_graph stage stage_catalog)
@@ -3024,7 +3043,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 		(define direct_dependencies
 			(coalesceNil (get_assoc dependency_graph (logical_stage_key stage)) '()))
 		(list
-			(list (quote context) "session")
+			(physical_query_session_symbol)
 			(stage_prepare_key stage)
 			(list (quote once)
 				(list (quote lambda)
@@ -3044,7 +3063,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 
 (define prepared_stage_binding (lambda (stage)
 	(list
-		(list (quote context) "session")
+		(physical_query_session_symbol)
 		(stage_prepare_key stage)
 		(list (quote once) (list (quote lambda) '() true)))))
 
@@ -3188,7 +3207,7 @@ columns cannot change group cardinality because the primary key is unique. */
 
 (define mark_outer_join_symbols (lambda (sources current_alias expr)
 	(if (join_outer_symbol? sources current_alias expr)
-		(list (quote outer) expr)
+		(list (quote outer) 1 expr)
 		(match expr
 			((symbol quote) _value) expr
 			((symbol lambda) _params _body) expr
@@ -3234,10 +3253,10 @@ columns cannot change group cardinality because the primary key is unique. */
 		(ordered_join_sources_are_unique_lookups_acc
 			sources default_alias stages final_condition (list (car sources)) (cdr sources)))))
 
-(define driver_limit_cannot_brake? (lambda (sources default_alias final_condition offset_value limit_value stages)
+(define driver_limit_cannot_brake? (lambda (sources default_alias final_condition offset_value limit_value stages planning_session)
 	(begin
-		(define compile_offset (planner_literal_value offset_value))
-		(define compile_limit (planner_literal_value limit_value))
+		(define compile_offset (planner_literal_value offset_value planning_session))
+		(define compile_limit (planner_literal_value limit_value planning_session))
 		/* Row-count statistics are estimates, not upper bounds, and may lag
 		concurrent inserts. They can rank plans but cannot prove that LIMIT covers
 		the complete driver. A unique point predicate is the available structural
@@ -3253,11 +3272,11 @@ columns cannot change group cardinality because the primary key is unique. */
 							(downstream_sources_at_most_one_driver_row?
 								sources default_alias final_condition stages)))))))))
 
-(define ordered_join_limit_requires_complete_rows? (lambda (sources default_alias final_condition offset_value limit_value stages)
+(define ordered_join_limit_requires_complete_rows? (lambda (sources default_alias final_condition offset_value limit_value stages planning_session)
 	(and
 		(query_limit_active? offset_value limit_value)
 		(and (not (driver_limit_cannot_brake?
-			sources default_alias final_condition offset_value limit_value stages))
+			sources default_alias final_condition offset_value limit_value stages planning_session))
 			(and (not (empty_list? (cdr sources)))
 				(not (downstream_sources_preserve_driver_rows? sources default_alias final_condition stages)))))))
 
@@ -3456,13 +3475,13 @@ lookup for each ordered driver candidate. */
 		(prepared_group_cache_expr stage
 			(list (quote lambda) (list probe_var)
 				(list (quote scan_exists)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(list (quote table) (group_cache_schema cache) (group_cache_relation cache))
 					(cons (quote list) filtercols)
 					(list (quote lambda) (map filtercols symbol)
 						(list (quote and)
 							(list (quote equal??) (symbol key_name)
-								(list (quote outer) probe_var))
+								(list (quote outer) 1 probe_var))
 							(stage_recset_value_filter_term stage value_col)))))))))
 
 (define membership_keyset_parts (lambda (membership)
@@ -3516,7 +3535,7 @@ lookup for each ordered driver candidate. */
 					(source_table_expr input_src)
 					source_col
 					(list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(source_table_expr input_src)
 						(cons (quote list) filtercols)
 						(list (quote lambda)
@@ -3551,7 +3570,7 @@ lookup for each ordered driver candidate. */
 					(define keyset_expr (if group_cache_probe
 						(nth (car parts) 2)
 						(list (quote recset_key_index)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							candidate_recset
 							(quoted_runtime_list (list (nth (car parts) 1))))))
 					(map memberships (lambda (membership)
@@ -3593,7 +3612,7 @@ lookup for each ordered driver candidate. */
 			(begin
 				(define cols (extract_columns_for_alias src branch))
 				(list (quote scan_recset)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					source_table
 					(cons (quote list) cols)
 					(list (quote lambda)
@@ -3650,7 +3669,7 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 		(begin
 			(define cols (extract_columns_for_alias src condition))
 			(list (quote scan_recset)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				input
 				(cons (quote list) cols)
 				(list (quote lambda)
@@ -3663,14 +3682,14 @@ factoring, or other proven set transformations without adding SQL-shape cases. *
 membership facts used to choose the outer carrier. The residual lowerer can
 therefore choose RecSet, keytable, or direct probes for the smaller batch just
 as it would for an ordinary scan input. */
-(define batch_membership_survivor_rows (lambda (memberships probe_work_rows)
+(define batch_membership_survivor_rows (lambda (memberships probe_work_rows planning_session)
 	(reduce memberships (lambda (rows membership)
-		(if (not (number? (planner_literal_value rows)))
+		(if (not (number? (planner_literal_value rows planning_session)))
 			rows
 			(begin
 				(define stage (nth membership 0))
 				(define facts (merge (list
-					(membership_candidate_work_facts stage)
+					(membership_candidate_work_facts stage planning_session)
 					/* merge is right-biased; retain the index-reduced stage facts. */
 					(gs_facts stage))))
 				(define candidate_input_rows (coalesceNil
@@ -3690,7 +3709,7 @@ as it would for an ordinary scan input. */
 						the batch expands to roughly 720 driver rows and 72 survivors. */
 						(define visited_rows (membership_expected_driver_rows_visited
 							candidate_input_rows candidate_rows
-							(planner_literal_value rows) facts))
+							(planner_literal_value rows planning_session) facts))
 						(* visited_rows
 							(membership_candidate_density
 								candidate_input_rows candidate_rows facts)))))))
@@ -3703,7 +3722,7 @@ driver-predicate-first execution. Keeping those alternatives distinct makes
 the emitted work agree with the cost comparison. All residual conditions then
 re-enter the ordinary expression lowerer with the candidate-reduced row count,
 so complex ACL trees receive the same per-node physical choices as any scan. */
-(define ordered_batch_filter_expr (lambda (sources default_alias src condition memberships required_recsets probe_work_rows acceptance_cols acceptance_probe)
+(define ordered_batch_filter_expr (lambda (sources default_alias src condition memberships required_recsets probe_work_rows acceptance_cols acceptance_probe planning_session)
 	(begin
 		(define input_batch (symbol "__ordered_input_batch"))
 		(define residual (reduce memberships (lambda (remaining membership)
@@ -3728,24 +3747,24 @@ so complex ACL trees receive the same per-node physical choices as any scan. */
 					(list (quote recset_intersect)
 						(cons (quote list) batch_inputs))))
 				(define residual_probe_work_rows
-					(batch_membership_survivor_rows memberships probe_work_rows))
+					(batch_membership_survivor_rows memberships probe_work_rows planning_session))
 				(planner_record_physical_decision (list
 					(list "decision" "batch_predicate_lowering")
 					(list "chosen" "candidate_then_residual")
 					(list "reason" "selected_ordered_batch_carrier_cost")
 					(list "inputs" (list
-						(list "input_rows" (planner_literal_value probe_work_rows))
+						(list "input_rows" (planner_literal_value probe_work_rows planning_session))
 						(list "residual_probe_rows"
-							(planner_literal_value residual_probe_work_rows))
+							(planner_literal_value residual_probe_work_rows planning_session))
 						(list "membership_count" (count memberships))
-						(list "residual_probe_count" (count (expr_probe_stages residual)))))))
+						(list "residual_probe_count" (count (expr_probe_stages residual)))))) planning_session)
 				(define late_expr (scan_input_recset_for_condition
 					sources default_alias src membership_batch residual
 					residual_probe_work_rows))
 				(define accepted_expr (if (equal? acceptance_probe true)
 					late_batch
 					(list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						late_batch
 						(cons (quote list) acceptance_cols)
 						(list (quote lambda)
@@ -3776,7 +3795,7 @@ RecSet; membership edges retain their own physical operators. */
 				(define alias (source_alias src))
 				(define cols (extract_columns_for_alias src driver_condition))
 				(list (quote scan_recset)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					source_table
 					(cons (quote list) cols)
 					(list (quote lambda)
@@ -3899,7 +3918,8 @@ RecSet; membership edges retain their own physical operators. */
 				A native ordered LIMIT asks only for its bounded result window; an
 				unorderable LIMIT cannot brake the source and retains full-table work. */
 				(define probe_work_rows (if (and scan_order_supported bounded)
-					(coalesceNil (probe_limit_work_rows (qb_limit block))
+					(coalesceNil (probe_limit_work_rows (qb_limit block)
+						(planner_context_session (qb_facts block)))
 						(probe_context_row_count (list src)))
 					(probe_context_row_count (list src))))
 				(define source_table (source_table_expr_using (query_block_stage_catalog block) src))
@@ -3924,7 +3944,8 @@ RecSet; membership edges retain their own physical operators. */
 							src membership
 							(if bounded (quote order_limit) (quote filter))
 							(if (and scan_order_supported bounded)
-								(probe_limit_work_rows (qb_limit block)) nil)
+								(probe_limit_work_rows (qb_limit block)
+									(planner_context_session (qb_facts block))) nil)
 							allow_ordered_batch_binding
 							(prefiltered_driver_recset_expr_for_membership
 								src source_table raw_condition membership)
@@ -3934,7 +3955,9 @@ RecSet; membership edges retain their own physical operators. */
 								(count (expr_probe_stages raw_condition)))
 							(not row_number_membership_consumer)
 							source_order_partitioning
-							(quote single_source)))
+							(quote single_source)
+							(planner_context_session (qb_facts block))
+							(planner_context_tx (qb_facts block))))
 						(if (nil? plan) nil (list membership plan)))))
 					(lambda (entry) (not (nil? entry)))))
 				(define batch_membership_entries (filter membership_plans (lambda (entry)
@@ -3956,7 +3979,8 @@ RecSet; membership edges retain their own physical operators. */
 					(physical_scalar_truth_plan
 						(list src) src alias raw_condition
 						probe_work_rows (probe_context_row_count (list src))
-						(query_block_stage_catalog block))))
+						(query_block_stage_catalog block)
+						(planner_context_session (qb_facts block)))))
 				(define scalar_carrier (physical_scalar_truth_plan_carrier scalar_plan))
 				/* An exact scalar truth carrier is always attached as a scan boundary.
 				Storage chooses the ordered base-membership or inverse-RecSet kernel from
@@ -4020,7 +4044,7 @@ RecSet; membership edges retain their own physical operators. */
 					(begin
 						(define base_cols (extract_columns_for_alias src membership_formula_residual))
 						(define base_recset (list (quote scan_recset)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							source_table
 							(cons (quote list) base_cols)
 							(list (quote lambda)
@@ -4115,7 +4139,8 @@ RecSet; membership edges retain their own physical operators. */
 					(ordered_batch_filter_expr (list src) alias src batch_residual_condition
 						remaining_batch_memberships
 						(if scalar_membership_filter (list scalar_membership_var) '())
-						(probe_context_row_count (list src)) '() true)
+						(probe_context_row_count (list src)) '() true
+						(planner_context_session (qb_facts block)))
 					nil))
 				(define raw_map_row (list (quote resultrow)
 					(cons (quote list) (map_assoc bundled_fields (lambda (title expr)
@@ -4130,7 +4155,7 @@ RecSet; membership edges retain their own physical operators. */
 					map_row))
 				(define scan_plan (if (and (empty_list? order_items) (not bounded))
 					(list (quote scan)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						table_expr
 						(cons (quote list) filtercols)
 						filter_expr
@@ -4144,7 +4169,7 @@ RecSet; membership edges retain their own physical operators. */
 						(begin
 							(define scan_expr (if use_batch_accept
 								(list (quote scan_order_batch_accept)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									batch_filter
 									(cons (quote list) batch_ordercols)
@@ -4158,7 +4183,7 @@ RecSet; membership edges retain their own physical operators. */
 									nil
 									(source_outer? src))
 								(list (quote scan_order)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
 									filter_expr
@@ -4390,7 +4415,7 @@ either bound a real row or supplied the synthetic NULL row. */
 							bundle_symbol
 							(rewrite_scalar_projection_bundle_expr entries bundle_symbol fields)
 							(list (quote scan_order)
-								'(session "__memcp_tx")
+								(physical_query_tx_symbol)
 								(source_table_expr src)
 								(cons (quote list) filtercols)
 								(list (quote lambda)
@@ -4561,9 +4586,11 @@ carrier into thousands of fictional downstream probes. */
 									(and (contains? aliases driver_alias)
 										(not (nil? (union_semijoin_equal_parts src lookup term))))))))))) true))))
 
-(define ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
+(define ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit planning_session tx)
 	(if (or (not (single_source? remaining_sources))
-		(or (source_outer? src) (source_outer? (car remaining_sources))))
+		(or (source_outer? src)
+			(or (source_outer? (car remaining_sources))
+				(source_unique_point_condition? src condition))))
 		nil
 		(begin
 			(define lookup (car remaining_sources))
@@ -4581,14 +4608,14 @@ carrier into thousands of fictional downstream probes. */
 				sources default_alias (source_alias lookup) terms true))
 			(define lookup_estimate (if (and (number? lookup_input_rows)
 				(not (empty_list? (car edge_columns))))
-				(planner_source_filter_estimate lookup lookup_condition 512)
+				(planner_source_filter_estimate lookup lookup_condition 512 tx planning_session)
 				nil))
 			(define lookup_rows (if (nil? lookup_estimate) nil
 				(planner_estimated_matching_rows lookup_estimate
 					lookup_input_rows lookup_input_rows)))
-			(define requested_rows (if (number? (planner_literal_value limit))
-				(+ (coalesceNil (planner_literal_value offset) 0)
-					(planner_literal_value limit)) nil))
+			(define requested_rows (if (number? (planner_literal_value limit planning_session))
+				(+ (coalesceNil (planner_literal_value offset planning_session) 0)
+					(planner_literal_value limit planning_session)) nil))
 			(if (or (empty_list? (car edge_columns))
 				(or (not (number? lookup_rows))
 					(or (not (number? driver_input_rows))
@@ -4596,7 +4623,7 @@ carrier into thousands of fictional downstream probes. */
 				nil
 				(begin
 					(define lookup_work (membership_source_work_profile
-						lookup lookup_condition true))
+						lookup lookup_condition true planning_session))
 					(define work (merge (list lookup_work (list
 						(list (quote membership_candidate_input_rows) lookup_input_rows)
 						(list (quote membership_candidate_estimated_rows) lookup_rows)
@@ -4610,8 +4637,8 @@ carrier into thousands of fictional downstream probes. */
 						(list (quote membership_driver_expression_operations) 0)
 						(list (quote membership_order_limit_driver) true)
 						(list (quote membership_ordered_scan_invocations) 0)
-						(list (quote membership_order_limit) (planner_literal_value limit))
-						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
+						(list (quote membership_order_limit) (planner_literal_value limit planning_session))
+						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset planning_session) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
 					(define order_partitioning (planner_source_order_partitioning src order_items))
 					(define cost_work (if (nil? order_partitioning) work
@@ -4629,7 +4656,7 @@ carrier into thousands of fictional downstream probes. */
 					(define batch_cost (ordered_batch_accept_cost cost_work))
 					(define lookup_cols (extract_columns_for_alias lookup lookup_condition))
 					(define lookup_recset (list (quote scan_recset)
-						'(session "__memcp_tx")
+						(physical_query_tx_symbol)
 						(source_table_expr lookup)
 						(cons (quote list) lookup_cols)
 						(list (quote lambda)
@@ -4637,7 +4664,7 @@ carrier into thousands of fictional downstream probes. */
 								(scan_callback_symbol_for_alias (source_alias lookup) col)))
 							(lower_column_expr_for_alias lookup lookup_condition))))
 					(define carrier (list (quote recset_project_join)
-						'(session "__memcp_tx") lookup_recset
+						(physical_query_tx_symbol) lookup_recset
 						(quoted_runtime_list (car edge_columns))
 						(source_table_expr src)
 						(quoted_runtime_list (cadr edge_columns))))
@@ -4646,10 +4673,11 @@ carrier into thousands of fictional downstream probes. */
 							driver_input_rows cost_work)
 						lookup_condition lookup_estimate exact batch_cost order_partitioning)))))))
 
-(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
+(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit planning_session tx)
 	(begin
 		(define candidate (ordered_join_projected_candidate
-			sources default_alias src remaining_sources condition order_items offset limit))
+			sources default_alias src remaining_sources condition order_items offset limit
+			planning_session tx))
 		(if (nil? candidate)
 			nil
 			(begin
@@ -4663,8 +4691,9 @@ carrier into thousands of fictional downstream probes. */
 							alternative best))
 					(list "projected_candidate_keyset" (nth candidate 1)))))
 				(define chosen (planner_physical_choice decision_id normal_choice
-					(list "projected_candidate_keyset" "ordered_postfilter" "ordered_batch_accept")))
-				(define forced (planner_physical_override decision_id))
+					(list "projected_candidate_keyset" "ordered_postfilter" "ordered_batch_accept")
+					planning_session))
+				(define forced (planner_physical_override decision_id planning_session))
 				(define lookup (car remaining_sources))
 				(define lookup_input_rows (planner_source_row_count lookup))
 				/* Cache guards execute outside the optimized query lambda. Sampling a
@@ -4682,7 +4711,7 @@ carrier into thousands of fictional downstream probes. */
 						(planner_record_guard_condition (list (quote equal?)
 							(list (quote planner_estimated_matching_rows)
 								runtime_rows lookup_input_rows lookup_input_rows)
-							(nth candidate 3))))
+							(nth candidate 3)) planning_session))
 					nil)
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
@@ -4706,13 +4735,14 @@ carrier into thousands of fictional downstream probes. */
 						(list (list "plan" "ordered_postfilter")
 							(list "cost" (planner_cost_explain (nth candidate 2))))
 						(list (list "plan" "ordered_batch_accept")
-							(list "cost" (planner_cost_explain (nth candidate 8))))))))
+							(list "cost" (planner_cost_explain (nth candidate 8)))))))
+					planning_session)
 				(if (nil? (nth candidate 9)) true
 					(planner_record_guard_condition (list (quote equal?)
 						(list (quote table_order_partitioned?)
 							(list (quote table) (source_schema src) (source_relation src))
 							(car (nth candidate 9)))
-						(cadr (nth candidate 9)))))
+						(cadr (nth candidate 9))) planning_session))
 				(if (equal? chosen "projected_candidate_keyset")
 					(list (car candidate) (nth candidate 7)) nil))))))
 
@@ -4806,9 +4836,11 @@ flatten or reorder a bushy plan to make the operator applicable. */
 /* Cost the established two-table carrier without constructing its RecSet AST.
 This keeps physical enumeration side-effect free until the outer cost decision
 has selected a lowerer. */
-(define ordered_join_projected_candidate_cost (lambda (sources default_alias src remaining_sources condition order_items offset limit)
+(define ordered_join_projected_candidate_cost (lambda (sources default_alias src remaining_sources condition order_items offset limit planning_session tx)
 	(if (or (not (single_source? remaining_sources))
-		(or (source_outer? src) (source_outer? (car remaining_sources))))
+		(or (source_outer? src)
+			(or (source_outer? (car remaining_sources))
+				(source_unique_point_condition? src condition))))
 		nil
 		(begin
 			(define lookup (car remaining_sources))
@@ -4826,14 +4858,14 @@ has selected a lowerer. */
 				sources default_alias (source_alias lookup) terms true))
 			(define lookup_estimate (if (and (number? lookup_input_rows)
 				(not (empty_list? (car edge_columns))))
-				(planner_source_filter_estimate lookup lookup_condition 512)
+				(planner_source_filter_estimate lookup lookup_condition 512 tx planning_session)
 				nil))
 			(define lookup_rows (if (nil? lookup_estimate) nil
 				(planner_estimated_matching_rows lookup_estimate
 					lookup_input_rows lookup_input_rows)))
-			(define requested_rows (if (number? (planner_literal_value limit))
-				(+ (coalesceNil (planner_literal_value offset) 0)
-					(planner_literal_value limit)) nil))
+			(define requested_rows (if (number? (planner_literal_value limit planning_session))
+				(+ (coalesceNil (planner_literal_value offset planning_session) 0)
+					(planner_literal_value limit planning_session)) nil))
 			(if (or (empty_list? (car edge_columns))
 				(or (not (number? lookup_rows))
 					(or (not (number? driver_input_rows))
@@ -4841,7 +4873,7 @@ has selected a lowerer. */
 				nil
 				(begin
 					(define lookup_work (membership_source_work_profile
-						lookup lookup_condition true))
+						lookup lookup_condition true planning_session))
 					(define work (merge (list lookup_work (list
 						(list (quote membership_candidate_input_rows) lookup_input_rows)
 						(list (quote membership_candidate_estimated_rows) lookup_rows)
@@ -4855,8 +4887,8 @@ has selected a lowerer. */
 						(list (quote membership_driver_expression_operations) 0)
 						(list (quote membership_order_limit_driver) true)
 						(list (quote membership_ordered_scan_invocations) 0)
-						(list (quote membership_order_limit) (planner_literal_value limit))
-						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset) 0))
+						(list (quote membership_order_limit) (planner_literal_value limit planning_session))
+						(list (quote membership_order_offset) (coalesceNil (planner_literal_value offset planning_session) 0))
 						(list (quote membership_downstream_probe_branches) 0)))))
 					(define order_partitioning (planner_source_order_partitioning src order_items))
 					(define cost_work (if (nil? order_partitioning) work
@@ -4896,8 +4928,14 @@ until the caller has selected this physical alternative. */
 	(begin
 		(define sources (join_optimizer_sources_for_order all_sources
 			(join_optimizer_tree_aliases plan)))
-		(define offset (coalesceNil (planner_literal_value offset_value) 0))
-		(define limit (coalesceNil (planner_literal_value limit_value) -1))
+		(define planning_session (planner_context_session facts))
+		(define planning_tx (planner_context_tx facts))
+		(define offset (coalesceNil
+			(qassoc_get facts (quote join_order_planning_offset) nil)
+			(coalesceNil (planner_literal_value offset_value) 0)))
+		(define limit (coalesceNil
+			(qassoc_get facts (quote join_order_planning_limit) nil)
+			(coalesceNil (planner_literal_value limit_value) -1)))
 		(define terms (scan_join_order_terms sources plan final_condition))
 		(define joins (map (produceN (- (count sources) 1)) (lambda (raw_index)
 			(begin
@@ -4937,7 +4975,8 @@ until the caller has selected this physical alternative. */
 						base_rows
 						(begin
 							(define estimate
-								(planner_source_filter_estimate src local_condition 512))
+								(planner_source_filter_estimate src local_condition 512
+									planning_tx planning_session))
 							(max 1 (planner_estimated_matching_rows estimate
 								base_rows base_rows))))))) nil))
 		/* A local driver predicate is only the first acceptance stage. Every
@@ -5028,11 +5067,15 @@ until the caller has selected this physical alternative. */
 		(define src (car ordered_sources))
 		(define remaining_sources (cdr ordered_sources))
 		(define alias (source_alias src))
-		(define offset (coalesceNil (planner_literal_value offset_value) 0))
-		(define limit (coalesceNil (planner_literal_value limit_value) -1))
+		(define planning_session
+			(qassoc_get facts (quote physical_planning_session) nil))
+		(define offset (coalesceNil
+			(planner_literal_value offset_value planning_session) 0))
+		(define limit (coalesceNil
+			(planner_literal_value limit_value planning_session) -1))
 		(define target (if (< limit 0) -1 (+ offset limit)))
 		(define acceptance_probe_work_rows (coalesceNil
-			(probe_limit_work_rows limit_value)
+			(probe_limit_work_rows limit planning_session)
 			(if (< target 0) nil target)))
 		/* The ordered driver is consumed here. Preserve the optimizer's remaining
 		subtree instead of rebuilding a left-deep tree from the source catalog. */
@@ -5052,7 +5095,8 @@ until the caller has selected this physical alternative. */
 			(downstream_sources_at_most_one_driver_row?
 				ordered_sources default_alias final_condition stages))
 			(choose_ordered_join_projected_candidate all_sources default_alias src
-				remaining_sources final_condition driver_order_items offset_value limit_value)
+				remaining_sources final_condition driver_order_items offset_value limit_value
+				planning_session (planner_context_tx facts))
 			nil))
 		(define projected_join_carrier (if (nil? projected_join_choice)
 			nil (car projected_join_choice)))
@@ -5074,7 +5118,7 @@ until the caller has selected this physical alternative. */
 			(recset_project_join_plan_for_membership_using src membership
 				(if (query_limit_active? offset_value limit_value) (quote order_limit) (quote filter))
 				(if (query_limit_active? offset_value limit_value)
-					(probe_limit_work_rows limit_value) nil)
+					(probe_limit_work_rows limit_value planning_session) nil)
 				allow_ordered_batch
 				(prefiltered_driver_recset_expr_for_membership
 					src (source_table_expr_using stages src) raw_condition membership)
@@ -5083,7 +5127,7 @@ until the caller has selected this physical alternative. */
 					(count (expr_probe_stages final_condition)))
 				true
 				driver_order_partitioning
-				(quote ordered_join_stream))))
+				(quote ordered_join_stream) planning_session (planner_context_tx facts))))
 		(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 		(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 		/* A scalar truth carrier over the complete driver would defeat adaptive
@@ -5092,7 +5136,7 @@ until the caller has selected this physical alternative. */
 		(define scalar_plan (if use_batch_accept nil
 			(physical_scalar_truth_plan
 				all_sources src default_alias final_condition acceptance_probe_work_rows
-				(planner_source_row_count src) stages)))
+				(planner_source_row_count src) stages planning_session)))
 		(define scalar_carrier (physical_scalar_truth_plan_carrier scalar_plan))
 		(define scalar_probe (physical_scalar_truth_plan_probe scalar_plan))
 		(define carrier_condition (rewrite_physical_scalar_truth_plan scalar_plan final_condition))
@@ -5120,7 +5164,8 @@ until the caller has selected this physical alternative. */
 				(list "inputs" (list
 					(list "carrier_exact" projected_join_exact)
 					(list "lookup_output_required" projected_join_lookup_output_required)
-					(list "remaining_order_items" (count remaining_order_items)))))))
+					(list "remaining_order_items" (count remaining_order_items)))))
+				planning_session))
 		(define condition_parts (physical_partition_condition
 			default_alias src remaining_sources carrier_condition))
 		(define local_condition (nth condition_parts 0))
@@ -5186,7 +5231,7 @@ until the caller has selected this physical alternative. */
 					false
 					(list (quote lambda) (list (quote accepted) (quote shard_accepted))
 						(list (quote or) (quote accepted) (quote shard_accepted)))
-					nil))))
+					nil facts))))
 		(define filtercols (merge_unique (list
 			(join_cols_for_alias all_sources default_alias alias (list effective_condition)))))
 		(define filter_expr (list (quote lambda)
@@ -5199,13 +5244,14 @@ until the caller has selected this physical alternative. */
 			acceptance_probe))
 		(define batch_filter (if use_batch_accept
 			(ordered_batch_filter_expr all_sources default_alias src condition
-				(list membership) '() acceptance_probe_work_rows acceptance_cols acceptance_probe)
+				(list membership) '() acceptance_probe_work_rows acceptance_cols acceptance_probe
+				planning_session)
 			nil))
 		(if (and use_batch_accept (nil? batch_filter))
 			(neumann_fail "build_queryplan" "chosen ordered batch membership has no executable filter")
 			true)
 		(define projection_probe_work_rows (coalesceNil
-			(probe_limit_work_rows limit_value)
+			(probe_limit_work_rows limit_value planning_session)
 			acceptance_probe_work_rows))
 		(define emit_value (quote __ordered_join_emit_value))
 		(define row_expr (list (quote stream_emit) emit_value
@@ -5216,7 +5262,7 @@ until the caller has selected this physical alternative. */
 			(build_join_scan_pipeline_using_recipe
 				schema all_sources remaining_plan default_alias carrier_needed_exprs
 				(if use_batch_accept true remaining_condition) row_expr
-				remaining_order_items 0 -1 true projection_probe_work_rows nil stages nil)))
+				remaining_order_items 0 -1 true projection_probe_work_rows nil stages nil facts)))
 		(define map_expr (list (quote lambda)
 			(map mapcols (lambda (col) (scan_callback_symbol_for_alias alias col)))
 			projection))
@@ -5236,13 +5282,13 @@ until the caller has selected this physical alternative. */
 			scalar_carrier))
 		(define scan_expr (if use_batch_accept
 			(list (quote scan_order_batch_accept)
-				'(session "__memcp_tx") table_expr batch_filter
+				(physical_query_tx_symbol) table_expr batch_filter
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
 				0 offset limit
 				(cons (quote list) mapcols) map_expr nil nil false)
 			(list (quote scan_order)
-				'(session "__memcp_tx") table_expr
+				(physical_query_tx_symbol) table_expr
 				(cons (quote list) filtercols) filter_expr
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
@@ -5292,7 +5338,7 @@ until the caller has selected this physical alternative. */
 		(define map_body (value_builder
 			(qassoc_get spec (quote output_rows) nil) nil))
 		(list (quote scan_join_order)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(cons (quote list) (map sources (lambda (src)
 				(source_table_expr_using stages src))))
 			(quoted_runtime_list filtercols)
@@ -5338,7 +5384,8 @@ until the caller has selected this physical alternative. */
 						legacy_sources default_alias final_condition stages))
 					(ordered_join_projected_candidate_cost
 						all_sources default_alias (car legacy_sources) (cdr legacy_sources)
-						final_condition order_items offset_value limit_value)
+						final_condition order_items offset_value limit_value
+						(planner_context_session facts) (planner_context_tx facts))
 					nil))
 				(define driver_input_rows (planner_source_row_count
 					(car (if (nil? legacy_sources) sources legacy_sources))))
@@ -5388,8 +5435,11 @@ until the caller has selected this physical alternative. */
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
 				(define alternatives (list "legacy_join_tree" "scan_join_order"
 					"scan_join_order_batched_probe"))
-				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-				(define forced (planner_physical_override decision_id))
+				(define physical_planning_session
+					(qassoc_get facts (quote physical_planning_session) nil))
+				(define chosen (planner_physical_choice decision_id normal_choice alternatives
+					physical_planning_session))
+				(define forced (planner_physical_override decision_id physical_planning_session))
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
 					(list "decision" "scan_join_order")
@@ -5418,7 +5468,8 @@ until the caller has selected this physical alternative. */
 						(list (list "plan" "scan_join_order")
 							(list "cost" (planner_cost_explain scan_cost)))
 						(list (list "plan" "scan_join_order_batched_probe")
-							(list "cost" (planner_cost_explain batched_probe_cost)))))))
+							(list "cost" (planner_cost_explain batched_probe_cost))))))
+					physical_planning_session)
 				(if (or (equal? chosen "scan_join_order")
 					(equal? chosen "scan_join_order_batched_probe"))
 					(scan_join_order_emit_plan spec default_alias
@@ -5462,8 +5513,11 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 				(define decision_id (concat "scan_join_order:reduce:"
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
 				(define alternatives (list "legacy_join_tree" "scan_join_order"))
-				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-				(define forced (planner_physical_override decision_id))
+				(define physical_planning_session
+					(qassoc_get facts (quote physical_planning_session) nil))
+				(define chosen (planner_physical_choice decision_id normal_choice alternatives
+					physical_planning_session))
+				(define forced (planner_physical_override decision_id physical_planning_session))
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
 					(list "decision" "scan_join_order")
@@ -5487,7 +5541,8 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 						(list (list "plan" "legacy_join_tree")
 							(list "cost" (planner_cost_explain legacy_cost)))
 						(list (list "plan" "scan_join_order")
-							(list "cost" (planner_cost_explain scan_cost)))))))
+							(list "cost" (planner_cost_explain scan_cost))))))
+					physical_planning_session)
 				(if (equal? chosen "scan_join_order")
 					(scan_join_order_emit_plan spec default_alias value_builder
 						reduce_expr neutral_expr shard_reduce_expr stages false)
@@ -5585,7 +5640,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 								(list (quote list) (quote row_partition) (quote next_rownum) (quote next_aggregate)))))
 					row_number_reduce_expr))
 				(define scan_expr (list (quote scan_order)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					table_expr
 					(cons (quote list) filtercols)
 					filter_expr
@@ -5764,7 +5819,7 @@ an operator, change join order, or remove a predicate. Adding a leaf-local
 "if this expression then use that scan" below the common selector is a code
 smell: add a descriptor here and let choose_scan_access_path compare it with
 every other carrier instead. Logical join order remains owned by join_plan. */
-(define scan_access_path_text_candidates (lambda (src all_sources default_alias condition ordered_window_rows)
+(define scan_access_path_text_candidates (lambda (src all_sources default_alias condition ordered_window_rows planning_session tx)
 	(begin
 		(define alias (source_alias src))
 		(define aliases (source_aliases all_sources))
@@ -5778,9 +5833,9 @@ every other carrier instead. Logical join order remains owned by join_plan. */
 							(list alias))))
 						nil
 						(begin
-							(define estimate (planner_source_filter_estimate src term 512))
+							(define estimate (planner_source_filter_estimate src term 512 tx planning_session))
 							(define rows (qassoc_get estimate (quote estimated_rows) nil))
-							(define work (membership_source_work_profile src term true))
+							(define work (membership_source_work_profile src term true planning_session))
 							(if (number? rows)
 								(list
 									(list (quote kind) (quote predicate_recset))
@@ -5794,10 +5849,10 @@ every other carrier instead. Logical join order remains owned by join_plan. */
 								nil)))))
 				(lambda (item) (not (nil? item))))))))
 
-(define scan_access_path_candidates (lambda (src all_sources default_alias condition ordered_window_rows)
+(define scan_access_path_candidates (lambda (src all_sources default_alias condition ordered_window_rows planning_session tx)
 	/* Text-backed exact RecSets are the first descriptor kind. Index ranges,
 	persisted RecSets, or future scan primitives belong in this same list. */
-	(scan_access_path_text_candidates src all_sources default_alias condition ordered_window_rows)))
+	(scan_access_path_text_candidates src all_sources default_alias condition ordered_window_rows planning_session tx)))
 
 /* The text predicate itself is common work. The carrier decision determines
 whether the downstream join continuation is entered for every driver row or
@@ -5914,7 +5969,7 @@ topology inequality by bounded binary search and guard that crossover. */
 			(qassoc_get candidate (quote input_rows) nil)
 			(qassoc_get candidate (quote input_rows) nil)))))
 
-(define choose_scan_access_path (lambda (src candidates)
+(define choose_scan_access_path (lambda (src candidates planning_session)
 	(if (empty_list? candidates)
 		(list "fused_base_scan" nil)
 		(begin
@@ -5943,10 +5998,10 @@ topology inequality by bounded binary search and guard that crossover. */
 						crossover_rows)
 					(list (quote >=)
 						(scan_access_path_runtime_rows_expr src candidate)
-						crossover_rows)))
+						crossover_rows)) planning_session)
 			(define alternatives (list candidate_plan "fused_base_scan"))
-			(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-			(define forced nil)
+			(define chosen (planner_physical_choice decision_id normal_choice alternatives planning_session))
+			(define forced (planner_physical_override decision_id planning_session))
 			(planner_record_physical_decision (list
 				(list "decision_id" decision_id)
 				(list "decision" "scan_access_path")
@@ -5982,7 +6037,8 @@ topology inequality by bounded binary search and guard that crossover. */
 						(list "plan" "fused_base_scan")
 						(list "status" (if (equal? chosen "fused_base_scan") "chosen" "rejected"))
 						(list "reason" (if (equal? chosen "fused_base_scan") "selected" "higher_total_ns_or_forced_alternative"))
-						(list "cost" (planner_cost_explain base_cost)))))))
+						(list "cost" (planner_cost_explain base_cost))))))
+				planning_session)
 			(list chosen candidate)))))
 
 (define scan_access_path_recset_expr (lambda (stages src candidate)
@@ -5991,7 +6047,7 @@ topology inequality by bounded binary search and guard that crossover. */
 		(define predicate (qassoc_get candidate (quote predicate) true))
 		(define cols (extract_columns_for_alias src predicate))
 		(list (quote scan_recset)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr_using stages src)
 			(cons (quote list) cols)
 			(list (quote lambda)
@@ -6179,7 +6235,17 @@ only the structural work counts are specific to this operator. */
 					0 group_rows 0.7))
 				(list direct_cost carrier_cost input_rows group_rows rows_per_probe))))))
 
-(define direct_group_join_source_selection (lambda (stages sources tree consumers src)
+(define group_stage_with_physical_planning_session (lambda (stage planning_session)
+	(if (nil? planning_session)
+		stage
+		(make_group_stage
+			(gs_id stage) (gs_input stage) (gs_domain stage) (gs_keys stage)
+			(gs_aggregates stage) (gs_having stage) (gs_output stage)
+			(gs_order stage) (gs_limit stage) (gs_offset stage)
+			(qassoc_set (gs_facts stage) (quote physical_planning_session)
+				planning_session)))))
+
+(define direct_group_join_source_selection (lambda (stages sources tree consumers src planning_session)
 	(begin
 		(define stage (direct_group_probe_stage_for_block_source
 			stages sources src consumers))
@@ -6194,8 +6260,8 @@ only the structural work counts are specific to this operator. */
 					"direct_group_join" "group_carrier"))
 				(define decision_id (concat "direct_group_join:" (gs_id stage) ":" (source_alias src)))
 				(define chosen (planner_physical_choice decision_id normal_choice
-					(list "group_carrier" "direct_group_join")))
-				(define forced (planner_physical_override decision_id))
+					(list "group_carrier" "direct_group_join") planning_session))
+				(define forced (planner_physical_override decision_id planning_session))
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
 					(list "decision" "direct_group_join")
@@ -6212,27 +6278,40 @@ only the structural work counts are specific to this operator. */
 						(list "aggregate_width" (count (gs_aggregates stage)))))
 					(list "alternatives" (if (nil? costs) '() (list
 						(list (list "plan" "group_carrier") (list "cost" (planner_cost_explain (cadr costs))))
-						(list (list "plan" "direct_group_join") (list "cost" (planner_cost_explain (car costs)))))))))
-				(if (equal? chosen "direct_group_join") (list src stage) nil))))))
+						(list (list "plan" "direct_group_join") (list "cost" (planner_cost_explain (car costs))))))))
+					planning_session)
+				(if (equal? chosen "direct_group_join")
+					(list src (group_stage_with_physical_planning_session stage planning_session))
+					nil))))))
 
 (define direct_group_join_selections_for_block (lambda (stages block)
 	(begin
 		(define sources (qb_sources block))
 		(define tree (query_block_join_plan block sources))
 		(define consumers (query_block_probe_consumers block))
+		(define planning_session
+			(qassoc_get (qb_facts block) (quote physical_planning_session) nil))
 		(filter (map sources (lambda (src)
-			(direct_group_join_source_selection stages sources tree consumers src)))
+			(direct_group_join_source_selection
+				stages sources tree consumers src planning_session)))
 			(lambda (selection) (not (nil? selection)))))))
 
 (define direct_group_join_canonical_name (lambda (stage)
 	(concat (group_stage_cache_schema stage) "\n" (group_stage_cache_relation stage))))
 
-(define direct_group_join_calibration_active? (lambda ()
-	(not (nil? (try
-		(lambda () ((context "session") "__memcp_physical_overrides"))
-		(lambda (_error) nil))))))
+(define direct_group_join_calibration_active? (lambda (planning_session)
+	(and (not (nil? planning_session))
+		(not (nil? (planning_session "__memcp_physical_overrides"))))))
 
-(define direct_group_join_raw_scan_expr (lambda (all_sources default_alias stage)
+(define direct_group_join_stage_planning_session (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote physical_planning_session) nil)))
+
+(define direct_group_join_stages_calibration_active? (lambda (stages)
+	(reduce (coalesceNil stages '()) (lambda (active stage)
+		(or active (direct_group_join_calibration_active?
+			(direct_group_join_stage_planning_session stage)))) false)))
+
+(define direct_group_join_raw_scan_expr (lambda (all_sources default_alias stage tx_depth)
 	(begin
 		(define src (gs_input stage))
 		(define keys (gs_keys stage))
@@ -6262,9 +6341,10 @@ only the structural work counts are specific to this operator. */
 		(if (single_source? ags)
 			(runtime_cons_list_expr (list
 				(lower_scalar_aggregate_probe_expr all_sources default_alias stage
-					(aggregate_col_name_using src (car ags)))))
+					(aggregate_col_name_using src (car ags))
+					(physical_query_tx_at_depth tx_depth))))
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_at_depth tx_depth)
 				(source_table_expr src)
 				(cons (quote list) filtercols)
 				(list (quote lambda)
@@ -6282,7 +6362,7 @@ only the structural work counts are specific to this operator. */
 				merge_payload
 				false)))))
 
-(define direct_group_join_cache_scan_expr (lambda (all_sources default_alias stage table_expr)
+(define direct_group_join_cache_scan_expr (lambda (all_sources default_alias stage table_expr tx_depth)
 	(begin
 		(define ags (gs_aggregates stage))
 		(define key_names (group_key_cols (gs_keys stage)))
@@ -6293,7 +6373,7 @@ only the structural work counts are specific to this operator. */
 		(define neutral_payload
 			(runtime_cons_list_expr (map ags (lambda (ag) (nth ag 2)))))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_at_depth tx_depth)
 			table_expr
 			(cons (quote list) key_names)
 			(list (quote lambda) (map key_names symbol)
@@ -6312,11 +6392,14 @@ measured time in a query-local session and flush it once after the complete
 query, rather than writing planner telemetry once per joined row. Forced
 Costgen alternatives remain uninstrumented so their timings contain only the
 operator being calibrated. */
-(define direct_group_join_scan_expr (lambda (all_sources default_alias stage)
+(define direct_group_join_scan_expr (lambda (all_sources default_alias stage scope_depth)
 	(begin
+		(define calibration_active (direct_group_join_calibration_active?
+			(direct_group_join_stage_planning_session stage)))
 		(define direct_values
-			(direct_group_join_raw_scan_expr all_sources default_alias stage))
-		(if (direct_group_join_calibration_active?)
+			(direct_group_join_raw_scan_expr all_sources default_alias stage
+				(if calibration_active scope_depth (+ scope_depth 1))))
+		(if calibration_active
 			direct_values
 			(begin
 				(define canonical_name (direct_group_join_canonical_name stage))
@@ -6354,7 +6437,7 @@ operator being calibrated. */
 								(list (quote if) (list (quote nil?) (list cache_promise "value"))
 									cold_values
 									(direct_group_join_cache_scan_expr all_sources default_alias stage
-										(list cache_promise "value"))))))
+										(list cache_promise "value") (+ scope_depth 1))))))
 					(list (quote newpromise)
 						(list (quote append_mut) (list (symbol "!!list") 2) nil nil))))))))
 
@@ -6387,12 +6470,12 @@ the costgen threshold. */
 			false)
 		(claim "build"))))
 
-(define group_cache_candidate_delete (lambda (canonical_name)
+(define group_cache_candidate_delete (lambda (current_tx canonical_name)
 	(begin
 		(define candidates (table "system_statistic" "group_cache_candidates"))
 		(if (nil? candidates)
 			0
-			(scan (session "__memcp_tx") candidates
+			(scan current_tx candidates
 				'("canonical_name")
 				(lambda (candidate_name) (equal? candidate_name canonical_name))
 				'("$update")
@@ -6420,7 +6503,7 @@ the costgen threshold. */
 			(list (quote quote) prepare_expr)))))
 
 (define direct_group_join_prepare_recipe_exprs (lambda (stages)
-	(if (direct_group_join_calibration_active?)
+	(if (direct_group_join_stages_calibration_active? stages)
 		'()
 		(begin
 			(define unique_stages (extract_assoc
@@ -6431,7 +6514,8 @@ the costgen threshold. */
 
 (define direct_group_join_eval_prepare_recipe_expr (lambda (stage)
 	(list (quote eval)
-		(list (quote optimize) (direct_group_join_prepare_recipe_symbol stage)))))
+		(list (quote optimize)
+			(direct_group_join_prepare_recipe_symbol stage)))))
 
 (define direct_group_join_async_build_expr (lambda (stage canonical_name)
 	(begin
@@ -6440,26 +6524,24 @@ the costgen threshold. */
 				(list (quote try)
 					(list (quote lambda) '()
 						(list
-							(list (quote lambda) (list (quote __group_cache_build_session))
-								(list (quote with_session) (quote __group_cache_build_session)
-									(list (quote lambda) '()
-										(list (quote with_autocommit) (quote __group_cache_build_session) nil
-											(list (quote lambda) '()
-												(list (quote !begin)
-													(direct_group_join_eval_prepare_recipe_expr stage)
-													(list (quote group_cache_candidate_delete)
-														canonical_name))))))
-								(list (quote newsession))))
-						(list (quote lambda) (list (quote __group_cache_build_error))
-							(list (quote !begin)
-								(list (quote try)
-									(list (quote lambda) '()
-										(list (quote droptable)
-											(group_stage_cache_schema stage)
-											(group_stage_cache_relation stage) true))
-									(list (quote lambda) (list (quote __group_cache_cleanup_error)) nil))
-								(list (quote error) (quote __group_cache_build_error)))))))
-			0))))
+							(list (quote lambda) (list (quote session))
+								(list (quote with_autocommit) (quote session) nil 0 "group cache build"
+									(list (quote lambda) (list (quote tx))
+										(list (quote !begin)
+											(direct_group_join_eval_prepare_recipe_expr stage)
+											(list (quote group_cache_candidate_delete)
+												(quote tx) canonical_name)))))
+							(list (quote newsession))))
+					(list (quote lambda) (list (quote __group_cache_build_error))
+						(list (quote !begin)
+							(list (quote try)
+								(list (quote lambda) '()
+									(list (quote droptable)
+										(group_stage_cache_schema stage)
+										(group_stage_cache_relation stage) true))
+								(list (quote lambda) (list (quote __group_cache_cleanup_error)) nil))
+							(list (quote error) (quote __group_cache_build_error)))))))
+		0))))
 
 (define direct_group_join_usage_flush_expr (lambda (stage)
 	(begin
@@ -6481,10 +6563,10 @@ the costgen threshold. */
 					(direct_group_join_async_build_expr stage canonical_name)
 					nil)
 				nil)
-			(list (quote group_cache_candidate_delete) canonical_name)))))
+			(list (quote group_cache_candidate_delete) (physical_query_tx_symbol) canonical_name)))))
 
 (define direct_group_join_usage_flush_exprs (lambda (stages)
-	(if (direct_group_join_calibration_active?)
+	(if (direct_group_join_stages_calibration_active? stages)
 		'()
 		(begin
 			(define unique_stages (extract_assoc
@@ -6519,7 +6601,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(list (quote append_mut) (list (symbol "!!list") 2) nil nil))))))
 
 (define direct_group_join_warm_prepare_exprs (lambda (stages)
-	(if (direct_group_join_calibration_active?)
+	(if (direct_group_join_stages_calibration_active? stages)
 		'()
 		(begin
 			(define unique_stages (extract_assoc
@@ -6534,10 +6616,11 @@ carrier remains on the measured direct path and is never built eagerly. */
 			found
 			(if (aggregate_count_like? (nth ags index)) index -1))) -1)))
 
-(define build_direct_group_join_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan stage)
+(define build_direct_group_join_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan stage facts)
 	(begin
 		(define src (physical_join_leaf_source all_sources leaf))
 		(define alias (source_alias src))
+		(define scope_depth (- (count all_sources) (+ (count future_aliases) 1)))
 		(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
 		(define condition_parts (physical_partition_condition
 			default_alias src future_sources final_condition))
@@ -6577,7 +6660,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(list
 					(list (quote lambda) (list (quote __direct_group_final_payload)) bound_continuation)
 					final_payload))
-			(direct_group_join_scan_expr all_sources default_alias stage)))))
+			(direct_group_join_scan_expr all_sources default_alias stage scope_depth)))))
 
 (define strip_scan_access_path_predicate (lambda (condition candidate)
 	(if (nil? candidate)
@@ -6589,16 +6672,18 @@ carrier remains on the measured direct path and is never built eagerly. */
 					(not (equal? term predicate))))
 				true)))))
 
-(define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan)
+(define build_join_scan_leaf_using_recipe (lambda (schema all_sources leaf future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 	(begin
 		(define src (physical_join_leaf_source all_sources leaf))
+		(define planning_session (planner_context_session facts))
+		(define planning_tx (planner_context_tx facts))
 		(define direct_group_stage
 			(direct_group_probe_stage_for_source stages src (list true)))
 		(if (not (nil? direct_group_stage))
 			(build_direct_group_join_leaf_using_recipe
 				schema all_sources leaf future_aliases default_alias needed_exprs final_condition
 				row_expr order_items offset_value limit_value allow_membership_recset column_recipe
-				stages result_mode probe_context scalar_plan continuation outer_scan direct_group_stage)
+				stages result_mode probe_context scalar_plan continuation outer_scan direct_group_stage facts)
 			(begin
 				(define future_sources (join_optimizer_sources_for_order all_sources future_aliases))
 				(if (not (source_is_base_table? src))
@@ -6622,7 +6707,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(define membership (driver_membership_for_source src condition))
 				(define delay_limit_after_join (ordered_join_limit_requires_complete_rows?
 					(join_optimizer_sources_for_order all_sources (cons alias future_aliases))
-					default_alias final_condition offset_value limit_value stages))
+					default_alias final_condition offset_value limit_value stages planning_session))
 				(define allow_ordered_batch (and (not (nil? membership))
 					(and (not delay_limit_after_join)
 						(and (not (empty_list? current_order_items))
@@ -6641,7 +6726,12 @@ carrier remains on the measured direct path and is never built eagerly. */
 					(membership_row_number_consumer? membership direct_order_limit))
 				(define current_order_partitioning
 					(planner_source_order_partitioning src current_order_items))
-				(define membership_plan (if (or (nil? membership) (or delay_limit_after_join (not allow_membership_recset)))
+				/* A unique point condition already bounds the driver to one row. Building
+				a projected membership carrier cannot reduce that bound and would only add
+				a second scan of the joined source. */
+				(define membership_plan (if (or (nil? membership)
+					(or (source_unique_point_condition? src condition)
+						(or delay_limit_after_join (not allow_membership_recset))))
 					nil
 					(recset_project_join_plan_for_membership_using src membership
 						(if (join_scan_reduce? result_mode) (quote aggregate)
@@ -6649,7 +6739,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 								(quote order_limit) (quote filter)))
 						(if (and (not (empty_list? current_order_items))
 							(query_limit_active? offset_value limit_value))
-							(probe_limit_work_rows limit_value) nil)
+							(probe_limit_work_rows limit_value planning_session) nil)
 						allow_ordered_batch
 						(prefiltered_driver_recset_expr_for_membership
 							src (source_table_expr_using stages src) condition membership)
@@ -6661,7 +6751,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 								(physical_scalar_truth_plan_stages scalar_plan)))))
 						(not row_number_membership_consumer)
 						current_order_partitioning
-						(quote join_leaf))))
+						(quote join_leaf) planning_session planning_tx)))
 				(define membership_strategy (if (nil? membership_plan) nil (car membership_plan)))
 				(define use_batch_accept (equal? membership_strategy "ordered_batch_accept"))
 				(define residual_probe_work_rows (membership_plan_residual_work_rows
@@ -6678,7 +6768,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 					not be pre-empted by a driver-context estimate from another tree node. */
 					(if (or (nil? membership_plan) use_batch_accept) nil
 						(physical_scalar_truth_plan all_sources src default_alias condition
-							residual_probe_work_rows residual_probe_work_rows stages))))
+							residual_probe_work_rows residual_probe_work_rows stages planning_session))))
 				(define effective_scalar_carrier
 					(physical_scalar_truth_plan_carrier effective_scalar_plan))
 				(define scalar_carrier_driver (and (not (nil? effective_scalar_carrier))
@@ -6724,7 +6814,8 @@ carrier remains on the measured direct path and is never built eagerly. */
 							(list "keyset_binding_count" (count membership_keysets))
 							(list "carrier_allowed" allow_membership_recset)
 							(list "limit_delayed" delay_limit_after_join)
-							(list "projection_built" (not (nil? membership_table_expr)))))))
+							(list "projection_built" (not (nil? membership_table_expr))))))
+						planning_session)
 					nil)
 				(define effective_membership (if (or use_batch_accept
 					(not (nil? membership_table_expr))) membership nil))
@@ -6754,12 +6845,12 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(define access_path_order_window (if (and
 					(not (empty_list? current_order_items))
 					(query_limit_active? offset_value limit_value))
-					(+ (coalesceNil (planner_literal_value offset_value) 0)
-						(coalesceNil (planner_literal_value limit_value) 0))
+					(+ (coalesceNil (planner_literal_value offset_value planning_session) 0)
+						(coalesceNil (planner_literal_value limit_value planning_session) 0))
 					nil))
 				(define access_path_candidates_before_point_check (if access_path_build_allowed
 					(scan_access_path_candidates src all_sources default_alias effective_condition
-						access_path_order_window)
+						access_path_order_window planning_session planning_tx)
 					'()))
 				/* A unique point lookup already bounds downstream work. This capability
 				check applies uniformly to every candidate; an enumerator must not hide a
@@ -6769,7 +6860,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 					(source_unique_point_condition? src effective_condition))
 					'()
 					access_path_candidates_before_point_check))
-				(define access_path_plan (choose_scan_access_path src access_path_candidates))
+				(define access_path_plan (choose_scan_access_path src access_path_candidates planning_session))
 				(define access_path_candidate (cadr access_path_plan))
 				(define access_path_selected (and (not (nil? access_path_candidate))
 					(equal? (car access_path_plan)
@@ -6819,7 +6910,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(define batch_filter (if use_batch_accept
 					(ordered_batch_filter_expr all_sources default_alias src condition
 						(list membership) '()
-						(probe_work_context_rows_for_alias probe_context alias) '() true)
+						(probe_work_context_rows_for_alias probe_context alias) '() true planning_session)
 					nil))
 				(define continuation_expr (continuation remaining_condition row_expr remaining_order_items))
 				(define map_body (if (equal? post_outer_condition true)
@@ -6845,7 +6936,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 								(define tiebreaker_cols (filter (source_primary_key_columns src)
 									(lambda (col) (not (contains? ordercols col)))))
 								(list (quote scan_order_batch_accept)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr batch_filter
 									(cons (quote list) (merge (list ordercols tiebreaker_cols)))
 									(cons (quote list) (merge (list
@@ -6859,7 +6950,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(or outer_scan (source_outer? src))))
 							(if (and (empty_list? current_order_items) (not (query_limit_active? offset_value limit_value)))
 								(list (quote scan)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
 									filter_expr
@@ -6870,7 +6961,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(join_scan_shard_reduce_expr result_mode)
 									(or outer_scan (source_outer? src)))
 								(list (quote scan_order)
-									'(session "__memcp_tx")
+									(physical_query_tx_symbol)
 									table_expr
 									(cons (quote list) filtercols)
 									filter_expr
@@ -6902,19 +6993,19 @@ carrier remains on the measured direct path and is never built eagerly. */
 /* Consume the logical join tree recursively. The right subtree is lowered as
 the continuation of the left subtree, so join-node boundaries and outer-join
 ownership remain available until the physical scans are emitted. */
-(define build_join_tree_scan_using_recipe (lambda (schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan)
+(define build_join_tree_scan_using_recipe (lambda (schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 	(match tree
 		((symbol join-leaf) _alias)
-		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan)
+		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 		((quote join-leaf) alias)
-		(build_join_tree_scan_using_recipe schema all_sources (make_join_optimizer_leaf alias) future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan)
+		(build_join_tree_scan_using_recipe schema all_sources (make_join_optimizer_leaf alias) future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 		((symbol join-leaf) _alias _predicates)
-		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan)
+		(build_join_scan_leaf_using_recipe schema all_sources tree future_aliases default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 		((quote join-leaf) alias predicates)
 		(build_join_tree_scan_using_recipe schema all_sources
 			(list (quote join-leaf) alias predicates) future_aliases default_alias needed_exprs
 			final_condition row_expr order_items offset_value limit_value allow_membership_recset
-			column_recipe stages result_mode probe_context scalar_plan continuation outer_scan)
+			column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 		((symbol join-node) kind left right predicates)
 		(begin
 			/* NULL extension is a property of the LEFT boundary, independent of
@@ -6938,16 +7029,16 @@ ownership remain available until the physical scans are emitted. */
 						schema all_sources right future_aliases
 						default_alias needed_exprs left_condition left_row_expr
 						left_order_items 0 -1 allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation
-						(equal? kind (quote left-outer))))
-				outer_scan))
+						(equal? kind (quote left-outer)) facts))
+				outer_scan facts))
 		((quote join-node) kind left right predicates)
 		(build_join_tree_scan_using_recipe schema all_sources
 			(make_join_optimizer_node kind left right predicates) future_aliases
 			default_alias needed_exprs final_condition row_expr order_items offset_value limit_value
-			allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan)
+			allow_membership_recset column_recipe stages result_mode probe_context scalar_plan continuation outer_scan facts)
 		_ (neumann_fail "build_queryplan" "malformed logical join tree"))))
 
-(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_work_rows scalar_plan)
+(define build_join_scan_with_mapper_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_work_rows scalar_plan facts)
 	(begin
 		(define tree (physical_join_plan_for_sources sources))
 		(define probe_context (join_scan_probe_context tree all_sources probe_work_rows))
@@ -6971,24 +7062,24 @@ ownership remain available until the physical scans are emitted. */
 			(build_join_tree_scan_using_recipe
 				schema all_sources tree '() default_alias needed_exprs residual_condition row_expr
 				order_items offset_value limit_value allow_membership_recset column_recipe stages result_mode probe_context
-				scalar_plan terminal false)))))
+				scalar_plan terminal false facts)))))
 
-(define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier probe_work_rows column_recipe stages scalar_plan)
+(define build_join_scan_pipeline_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier probe_work_rows column_recipe stages scalar_plan facts)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
 		order_items offset_value limit_value allow_membership_carrier column_recipe stages
-		(list (quote pipeline)) probe_work_rows scalar_plan)))
+		(list (quote pipeline)) probe_work_rows scalar_plan facts)))
 
-(define build_join_scan_reduce_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier probe_work_rows column_recipe stages reduce_expr neutral_expr shard_reduce_expr scalar_plan)
+(define build_join_scan_reduce_using_recipe (lambda (schema all_sources sources default_alias needed_exprs final_condition row_expr order_items offset_value limit_value allow_membership_carrier probe_work_rows column_recipe stages reduce_expr neutral_expr shard_reduce_expr scalar_plan facts)
 	(build_join_scan_with_mapper_using_recipe
 		schema all_sources sources default_alias needed_exprs final_condition row_expr
 		order_items offset_value limit_value allow_membership_carrier column_recipe stages
-		(list (quote reduce) reduce_expr neutral_expr shard_reduce_expr) probe_work_rows scalar_plan)))
+		(list (quote reduce) reduce_expr neutral_expr shard_reduce_expr) probe_work_rows scalar_plan facts)))
 
 (define build_join_scan_sink (lambda (schema sources default_alias needed_exprs final_condition sink_expr stages)
 	(build_join_scan_pipeline_using_recipe
 		schema sources sources default_alias needed_exprs final_condition sink_expr
-		'() 0 -1 false nil nil stages nil)))
+		'() 0 -1 false nil nil stages nil '())))
 
 /* ------------------------------------------------------------------------- */
 /* Canonical physical prejoin relations                                      */
@@ -7238,7 +7329,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define terms (map (produceN (count key_cols)) (lambda (i)
 			(list (quote equal?) (nth params i) (list (quote get_assoc) dict_symbol (nth key_cols i))))))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(list (quote table) (qb_schema block) table_name)
 			(cons (quote list) cache_cols)
 			(list (quote lambda) params (combine_where_terms terms true))
@@ -7280,13 +7371,13 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(prejoin_column_name sources alias key_col))))
 		(define filter_params (map key_cols (lambda (key_col) (symbol (concat alias "." key_col)))))
 		(define filter_terms (map (produceN (count key_cols)) (lambda (i)
-			(list (quote equal?) (nth filter_params i) (list (quote outer) (symbol (nth input_cols i)))))))
+			(list (quote equal?) (nth filter_params i) (list (quote outer) 1 (symbol (nth input_cols i)))))))
 		(define value_symbol (symbol (concat alias "." col)))
 		(define reduce_expr (list (quote lambda) (list (quote _old) (quote new)) (quote new)))
 		(define computor (list (quote lambda)
 			(map input_cols symbol)
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(source_table_expr src)
 				(cons (quote list) key_cols)
 				(list (quote lambda) filter_params (combine_where_terms filter_terms true))
@@ -7348,7 +7439,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 			(list (quote createtable) (qb_schema block) table_name
 				(prejoin_create_columns sources) (quoted_runtime_list '("engine" "cache")) true)
 			(list (quote initialize_cache_table)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				table_expr
 				(cons (quote list) (map sources source_table_expr))
 				(list (quote lambda) '() (cons (quote !begin) (prejoin_trigger_registration_plans block table_name)))
@@ -7530,7 +7621,7 @@ scalar cannot require more driver work than projecting a full carrier. Do not
 extend this branch with estimated-selectivity or row-count thresholds. Whenever
 either alternative can win for different data, feed both costs into the normal
 physical decision and preserve its runtime recompile gate. */
-(define physical_scalar_truth_plan (lambda (sources driver_src default_alias condition probe_work_rows carrier_work_rows stages)
+(define physical_scalar_truth_plan (lambda (sources driver_src default_alias condition probe_work_rows carrier_work_rows stages planning_session)
 	(begin
 		(define probe (physical_scalar_truth_probe condition))
 		(if (nil? probe)
@@ -7540,10 +7631,10 @@ physical decision and preserve its runtime recompile gate. */
 				(define requested_col (cadr probe))
 				(define dependencies (nth probe 2))
 				(define bounded_direct_context (and
-					(number? (planner_literal_value probe_work_rows))
-					(and (number? (planner_literal_value carrier_work_rows))
-						(< (planner_literal_value probe_work_rows)
-							(planner_literal_value carrier_work_rows)))))
+					(number? (planner_literal_value probe_work_rows planning_session))
+					(and (number? (planner_literal_value carrier_work_rows planning_session))
+						(< (planner_literal_value probe_work_rows planning_session)
+							(planner_literal_value carrier_work_rows planning_session)))))
 				(define bound_stage (if bounded_direct_context
 					(scalar_probe_stage_with_bound_lookup_keys driver_src condition raw_stage)
 					nil))
@@ -7574,14 +7665,14 @@ physical decision and preserve its runtime recompile gate. */
 					(scalar_first_probe_physical_operator
 						probe_stages
 						(stage_dependency_graph probe_stages)
-						raw_stage src keys effective_probe_work_rows carrier_work_rows requested_col (quote truth))))
+						raw_stage src keys effective_probe_work_rows carrier_work_rows requested_col (quote truth) planning_session)))
 				(if (and (not (equal? operator (quote recset))) (nil? bound_stage))
 					nil
 					(list
 						(source_alias driver_src)
 						(if (equal? operator (quote recset))
 							(lower_projected_recset_scalar_first_probe_expr
-								probe_stages raw_stage requested_col driver_src target_col true)
+								probe_stages raw_stage requested_col driver_src target_col true planning_session)
 							nil)
 						probe
 						(if (equal? operator (quote recset)) raw_stage stage))))))))
@@ -7598,7 +7689,8 @@ physical decision and preserve its runtime recompile gate. */
 		window requests, just as join_ordered_streaming_limit_plan does. Plans whose
 		ORDER cannot brake retain the complete filtered workload. */
 		(define bounded_probe_work_rows (if limit_brakes
-			(coalesceNil (probe_limit_work_rows limit_value) filter_probe_work_rows)
+			(coalesceNil (probe_limit_work_rows limit_value
+				(planner_context_session facts)) filter_probe_work_rows)
 			filter_probe_work_rows))
 		/* Membership is an AND-carrier alternative, not merely a predicate leaf.
 		When present at the driver, its physical choice must establish the rows
@@ -7609,12 +7701,14 @@ physical decision and preserve its runtime recompile gate. */
 		(define scalar_plan (if defer_scalar_carrier nil
 			(physical_scalar_truth_plan
 				sources driver_source default_alias final_condition
-				bounded_probe_work_rows filter_probe_work_rows stages)))
+				bounded_probe_work_rows filter_probe_work_rows stages
+				(planner_context_session facts))))
 		(define effective_condition (rewrite_physical_scalar_truth_plan scalar_plan final_condition))
 		(define effective_fields (rewrite_physical_scalar_truth_plan scalar_plan fields))
 		(define effective_needed_exprs (rewrite_physical_scalar_truth_plan scalar_plan needed_exprs))
 		(define projection_probe_work_rows (if (query_limit_active? offset_value limit_value)
-			(coalesceNil (probe_limit_work_rows limit_value) 0)
+			(coalesceNil (probe_limit_work_rows limit_value
+				(planner_context_session facts)) 0)
 			(if (probe_context_unique_point? sources default_alias effective_condition)
 				1
 				filter_probe_work_rows)))
@@ -7633,7 +7727,7 @@ physical decision and preserve its runtime recompile gate. */
 				(nth projection_bundle 2))))
 		(build_join_scan_pipeline_using_recipe
 			schema sources plan default_alias effective_needed_exprs effective_condition row_expr
-			order_items offset_value limit_value true bounded_probe_work_rows nil stages scalar_plan))))
+			order_items offset_value limit_value true bounded_probe_work_rows nil stages scalar_plan facts))))
 
 (define lower_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr shard_reduce_expr)
 	(begin
@@ -7659,7 +7753,7 @@ physical decision and preserve its runtime recompile gate. */
 		(define direct_order_safe (and direct_order
 			(not (ordered_join_limit_requires_complete_rows?
 				ordered_sources first_alias final_condition (qb_offset block) (qb_limit block)
-				(query_block_stage_catalog block)))))
+				(query_block_stage_catalog block) (planner_context_session (qb_facts block))))))
 		(define hierarchical_order (order_items_follow_join_tree?
 			ordered_sources first_alias order_items (query_block_stage_catalog block) final_condition))
 		(define field_exprs (extract_assoc fields (lambda (_title expr) expr)))
@@ -7678,7 +7772,8 @@ physical decision and preserve its runtime recompile gate. */
 			(planner_row_count_after_selectivity
 				driver_source scan_sources first_alias final_condition nil)))
 		(define projection_probe_work_rows (if (query_limit_active? (qb_offset block) (qb_limit block))
-			(coalesceNil (probe_limit_work_rows (qb_limit block)) 0)
+			(coalesceNil (probe_limit_work_rows (qb_limit block)
+				(planner_context_session (qb_facts block))) 0)
 			(if (probe_context_unique_point? scan_sources first_alias final_condition) 1
 				unbounded_probe_work_rows)))
 		(define scalar_carrier_probe_work_rows (if direct_order_safe
@@ -7688,12 +7783,14 @@ physical decision and preserve its runtime recompile gate. */
 			(and hierarchical_order
 				(driver_limit_cannot_brake?
 					ordered_sources first_alias final_condition
-					(qb_offset block) (qb_limit block) (query_block_stage_catalog block))))
+					(qb_offset block) (qb_limit block) (query_block_stage_catalog block)
+					(planner_context_session (qb_facts block)))))
 			(begin
 				(define scalar_plan (physical_scalar_truth_plan
 					scan_sources driver_source first_alias final_condition
 					scalar_carrier_probe_work_rows unbounded_probe_work_rows
-					(query_block_stage_catalog block)))
+					(query_block_stage_catalog block)
+					(planner_context_session (qb_facts block))))
 				(define effective_condition (rewrite_physical_scalar_truth_plan scalar_plan final_condition))
 				(define effective_field_exprs (rewrite_physical_scalar_truth_plan scalar_plan field_exprs))
 				(define effective_needed_exprs (rewrite_physical_scalar_truth_plan scalar_plan needed_exprs))
@@ -7712,7 +7809,7 @@ physical decision and preserve its runtime recompile gate. */
 					(coalesceNil (qb_offset block) 0)
 					(coalesceNil (qb_limit block) -1)
 					true projection_probe_work_rows nil (query_block_stage_catalog block)
-					reduce_expr neutral_expr shard_reduce_expr scalar_plan))
+					reduce_expr neutral_expr shard_reduce_expr scalar_plan (qb_facts block)))
 				(if (and (empty_list? order_items)
 					(and (equal? (coalesceNil (qb_offset block) 0) 0)
 						(equal? (coalesceNil (qb_limit block) -1) -1)))
@@ -7841,7 +7938,8 @@ physical decision and preserve its runtime recompile gate. */
 						scan_sources first_alias driver_source order_items stage_catalog final_condition))
 				(define direct_order_safe (and direct_order
 					(not (ordered_join_limit_requires_complete_rows? ordered_sources first_alias final_condition
-						(qb_offset block) (qb_limit block) stage_catalog))))
+						(qb_offset block) (qb_limit block) stage_catalog
+						(planner_context_session (qb_facts block))))))
 				(define hierarchical_order
 					(order_items_follow_join_tree? ordered_sources first_alias order_items stage_catalog final_condition))
 				(define needed_exprs (merge (list
@@ -7854,7 +7952,8 @@ physical decision and preserve its runtime recompile gate. */
 						(or (not (query_limit_active? (qb_offset block) (qb_limit block)))
 							(driver_limit_cannot_brake?
 								ordered_sources first_alias final_condition
-								(qb_offset block) (qb_limit block) stage_catalog))))
+								(qb_offset block) (qb_limit block) stage_catalog
+								(planner_context_session (qb_facts block))))))
 					(build_join_scan_rows
 						(qb_schema block) scan_sources scan_plan first_alias needed_exprs
 						final_condition fields order_items (qb_offset block) (qb_limit block)
@@ -7978,7 +8077,7 @@ every title. */
 			true)
 		(define keyparams (map keycols (lambda (col) (symbol (concat alias "." col)))))
 		(list (quote scan)
-			'(session "__memcp_tx")
+			(physical_query_tx_symbol)
 			(source_table_expr target_src)
 			(cons (quote list) keycols)
 			(list (quote lambda) keyparams
@@ -8047,7 +8146,7 @@ every title. */
 					(list (quote set_assoc) (quote rows) (quote row) true))
 				(list (quote list))
 				merge_target_rows
-				nil))))
+				nil (qb_facts block)))))
 		(cons
 			(list (quote lambda) target_rows_symbols
 				(dml_sum_exprs (map target_indexes (lambda (i)
@@ -8101,7 +8200,7 @@ every title. */
 			0
 			-1
 			true nil nil (qb_stages block)
-			(quote +) 0 (quote +) nil))))
+			(quote +) 0 (quote +) nil (qb_facts block)))))
 
 (define lower_single_source_dml_query_block (lambda (block target_schema target_tbl)
 	(begin
@@ -8140,7 +8239,7 @@ every title. */
 				(list (quote if) (list (quote $update) update_values) 1 0))))
 		(if (and (empty_list? order_items) (not bounded))
 			(list (quote scan)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) target_schema target_tbl)
 				(cons (quote list) filtercols)
 				filter_expr
@@ -8151,7 +8250,7 @@ every title. */
 				nil
 				false)
 			(list (quote scan_order)
-				'(session "__memcp_tx")
+				(physical_query_tx_symbol)
 				(list (quote table) target_schema target_tbl)
 				(cons (quote list) filtercols)
 				filter_expr
@@ -8398,12 +8497,12 @@ stars through the same catalog-aware path used by physical lowering. */
 							(qb_stages branch)
 							(qb_facts branch)))
 						(define lookup_recset (list (quote scan_recset)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							(source_table_expr lookup)
 							(quoted_runtime_list '())
 							(list (quote lambda) '() true)))
 						(define driver_recset (list (quote recset_project_join)
-							'(session "__memcp_tx")
+							(physical_query_tx_symbol)
 							lookup_recset
 							(quoted_runtime_list (list (car join_parts)))
 							(source_table_expr driver)
@@ -8564,7 +8663,7 @@ stars through the same catalog-aware path used by physical lowering. */
 					(union_ordered_scan_spec (nth plan 1) titles order_positions (nth plan 2)))))
 				(define membership_bindings (merge_unique (map specs (lambda (spec) (nth spec 6)))))
 				(define scan_plan (list (quote scan_order_multi)
-					'(session "__memcp_tx")
+					(physical_query_tx_symbol)
 					(cons (quote list) (map specs (lambda (spec) (nth spec 0))))
 					(cons (quote list) (map specs (lambda (spec) (cons (quote list) (nth spec 1)))))
 					(cons (quote list) (map specs (lambda (spec) (nth spec 2))))
@@ -8662,18 +8761,27 @@ stars through the same catalog-aware path used by physical lowering. */
 without emitting runtime operators. Keeping this boundary explicit makes
 analysis and emission independently measurable while preserving the normal
 build_queryplan contract. */
-(define prepare_physical_queryplan (lambda (ir)
+(define prepare_physical_queryplan (lambda (ir planning_session tx)
 	(begin
 		(require_unnested_node "build_queryplan input" (ir_root ir))
-		(define planned_root (apply_join_optimizer_plan_node (ir_root ir)))
-		(define stages (if (query_block? planned_root)
-			(stage_catalog_with_nested (query_block_stage_catalog planned_root))
+		/* This native handle exists only between physical preparation and emission.
+		It never enters the logical IR or the emitted/cached runtime plan. */
+		(define contextual_input (if (and (query_block? (ir_root ir))
+			(not (nil? planning_session)))
+			(query_block_with_reorder_facts (ir_root ir)
+				(list
+					(list (quote physical_planning_session) planning_session)
+					(list (quote physical_planning_tx) tx)))
+			(ir_root ir)))
+		(define contextual_root (apply_join_optimizer_plan_node contextual_input))
+		(define stages (if (query_block? contextual_root)
+			(stage_catalog_with_nested (query_block_stage_catalog contextual_root))
 			'()))
 		(make_ir
 			(ir_kind ir)
-			(if (query_block? planned_root)
-				(query_block_with_full_stage_catalog_using planned_root stages)
-				planned_root)
+			(if (query_block? contextual_root)
+				(query_block_with_full_stage_catalog_using contextual_root stages)
+				contextual_root)
 			(map (ir_stages ir) apply_join_optimizer_plan_stage)
 			(ir_context_of ir)
 			(ir_return ir)))))
@@ -8701,8 +8809,12 @@ build_queryplan contract. */
 	(match expr
 		'(((symbol context) "session") key ((symbol once) ((symbol lambda) _params true))) nil
 		'(((quote context) "session") key ((quote once) ((quote lambda) _params true))) nil
+		'((symbol session) key ((symbol once) ((symbol lambda) _params true))) nil
+		'((quote session) key ((quote once) ((quote lambda) _params true))) nil
 		'(((symbol context) "session") key ((symbol once) _initializer)) key
 		'(((quote context) "session") key ((quote once) _initializer)) key
+		'((symbol session) key ((symbol once) _initializer)) key
+		'((quote session) key ((quote once) _initializer)) key
 		_ nil)))
 
 (define emitted_prepare_binding_keys (lambda (expr keys)
@@ -8727,13 +8839,15 @@ build_queryplan contract. */
 				(equal? (count target) 2))
 				(begin
 					(define session_call (nth target 0))
-					(if (and
-						(list? session_call)
-						(equal? (count session_call) 2)
-						(or
-							(equal? (nth session_call 0) (quote context))
-							(equal? (nth session_call 0) (symbol "context")))
-						(equal? (nth session_call 1) "session"))
+					(if (or
+						(equal? session_call (physical_query_session_symbol))
+						(and
+							(list? session_call)
+							(equal? (count session_call) 2)
+							(or
+								(equal? (nth session_call 0) (quote context))
+								(equal? (nth session_call 0) (symbol "context")))
+							(equal? (nth session_call 1) "session")))
 						(nth target 1)
 						nil))
 				nil))
@@ -8868,7 +8982,7 @@ recipe in one zero-argument helper. */
 
 (define shared_prepare_owner_binding (lambda (dependency_graph catalog stage)
 	(list
-		(list (quote context) "session")
+		(physical_query_session_symbol)
 		(shared_prepare_owner_key stage)
 		(list (quote once)
 			(list (quote lambda) '()
@@ -8880,12 +8994,12 @@ recipe in one zero-argument helper. */
 
 (define shared_prepare_alias_binding (lambda (stage)
 	(list
-		(list (quote context) "session")
+		(physical_query_session_symbol)
 		(stage_prepare_key stage)
 		(list (quote once)
 			(list (quote lambda) '()
 				(list (quote apply)
-					(list (list (quote context) "session") (shared_prepare_owner_key stage))
+					(list (physical_query_session_symbol) (shared_prepare_owner_key stage))
 					(quoted_runtime_list '())))))))
 
 (define closed_group_prepare_consolidation_required? (lambda (ir)
@@ -8955,43 +9069,9 @@ Both AST walks are linear; no pairwise recipe comparison is performed. */
 					(or found (physical_plan_uses_query_scope? item))) false))
 			_ false))))
 
-/* `session` is optimized to its helper closure while planner code is loaded,
-whereas dynamically-built fragments can retain the symbol. Normalize both
-representations without depending on their printed form. */
-(define physical_session_call_parts (lambda (expr)
-	(match expr
-		((symbol quote) _value) nil
-		((quote quote) _value) nil
-		(cons head tail) (if (or (equal? head session) (equal? head (quote session)))
-			(list tail)
-			nil)
-		_ nil)))
-
-/* Physical operators share one transaction for the complete query. Keep
-ordinary session reads intact: the scan optimizer recognizes their lack of
-column dependencies and can lift invariant CASE dispatch out of row callbacks.
-Replacing them with lexical symbols here would hide that dependency fact. */
-(define rewrite_physical_transaction_reads (lambda (expr)
-	(begin
-		(define parts (physical_session_call_parts expr))
-		(if (not (nil? parts))
-			(begin
-				(define args (car parts))
-				(if (and (equal? (count args) 1) (equal? (car args) "__memcp_tx"))
-					(physical_query_tx_symbol)
-					expr))
-			(match expr
-				((symbol quote) _value) expr
-				((quote quote) _value) expr
-				(cons head tail) (cons
-					(rewrite_physical_transaction_reads head)
-					(map tail (lambda (item)
-						(rewrite_physical_transaction_reads item))))
-				_ expr)))))
-
 (define query_invariant_presence_memo_parts (lambda (expr)
 	(match expr
-		'(session_symbol "get_or_compute_scoped" scope_symbol key producer)
+		'(session_symbol "get_or_compute_scoped" scope_symbol key _tx producer)
 		(if (and (equal? session_symbol (physical_query_session_symbol))
 			(and (equal? scope_symbol (physical_query_scope_symbol))
 				(and (string? key) (strlike key "__query_presence_probe_%"))))
@@ -9044,24 +9124,6 @@ row callback. */
 						expr)))
 				(list (rewrite_query_invariant_presence_memos plan)))))))))
 
-/* Resolve request-local state once at the physical-plan boundary. RecSet
-lookups execute inside deeply nested row callbacks; resolving `(context
-"session")` there would repeat the goroutine-local lookup for every row even
-though both handles are constant for the complete query generation. */
-(define with_physical_query_context (lambda (plan)
-	(begin
-		(define rewritten (rewrite_physical_transaction_reads plan))
-		(if (not (physical_plan_uses_query_scope? rewritten))
-			rewritten
-			(cons (quote begin) (merge (list
-				(list (list (quote define) (physical_query_session_symbol)
-					(list (quote context) "session")))
-				(list (list (quote define) (physical_query_scope_symbol)
-					(list (quote context) "query")))
-				(list (list (quote define) (physical_query_tx_symbol)
-					(list (physical_query_session_symbol) "__memcp_tx")))
-				(list rewritten))))))))
-
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define plan (match (ir_return ir)
@@ -9083,11 +9145,10 @@ though both handles are constant for the complete query generation. */
 		(define memoized_plan (if (empty_list? (ir_stages ir))
 			deduplicated_plan
 			(consolidate_query_invariant_presence_memos deduplicated_plan)))
-		(require_physical_scan_relations
-			(with_physical_query_context memoized_plan)))))
+		(require_physical_scan_relations memoized_plan))))
 
 (define build_queryplan (lambda (ir)
-	(emit_physical_queryplan (prepare_physical_queryplan ir))))
+	(emit_physical_queryplan (prepare_physical_queryplan ir nil nil))))
 
 /* Keep phase ownership explicit. normalize_query_ast inside untangle_query
 removes parser-specific spelling before dependent joins are identified; this
@@ -9100,42 +9161,42 @@ ordering run. Storage artifacts begin in build_queryplan. */
 (define decorrelate_logical_query (lambda (ast)
 	(untangle_query_term (normalize_sql_syntax ast) nil)))
 
-(define optimize_logical_query (lambda (ir)
-	(join_reorder (aggregate_pushdown_logical ir))))
+(define optimize_logical_query (lambda (ir planning_session tx)
+	(join_reorder (aggregate_pushdown_logical ir) planning_session tx)))
 
-(define neumann_compile_pipeline (lambda (ast)
+(define neumann_compile_pipeline (lambda (ast planning_session tx)
 	(begin
-		(context "check")
+		(tx_check tx)
 		(define ir (decorrelate_logical_query ast))
-		(context "check")
-		(define reordered (optimize_logical_query ir))
-		(context "check")
-		(define prepared (prepare_physical_queryplan reordered))
-		(context "check")
+		(tx_check tx)
+		(define reordered (optimize_logical_query ir planning_session tx))
+		(tx_check tx)
+		(define prepared (prepare_physical_queryplan reordered planning_session tx))
+		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
-		(context "check")
+		(tx_check tx)
 		plan)))
 
-(define neumann_compile_ir_pipeline (lambda (ir)
+(define neumann_compile_ir_pipeline (lambda (ir planning_session tx)
 	(begin
-		(context "check")
+		(tx_check tx)
 		(define normalized (require_flat_stage_dependencies "compile_ir" (normalize_stage_dependencies ir)))
-		(context "check")
-		(define reordered (optimize_logical_query normalized))
-		(context "check")
-		(define prepared (prepare_physical_queryplan reordered))
-		(context "check")
+		(tx_check tx)
+		(define reordered (optimize_logical_query normalized planning_session tx))
+		(tx_check tx)
+		(define prepared (prepare_physical_queryplan reordered planning_session tx))
+		(tx_check tx)
 		(define plan (emit_physical_queryplan prepared))
-		(context "check")
+		(tx_check tx)
 		plan)))
 
 /* ------------------------------------------------------------------------- */
 /* Parser-facing adapters                                                     */
 
-(define build_queryplan_term (lambda (query)
-	(neumann_compile_pipeline query)))
+(define build_queryplan_term (lambda (query planning_session tx)
+	(neumann_compile_pipeline query planning_session tx)))
 
-(define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset)
+(define build_dml_plan (lambda (schema tbl _tblalias all_defs cols condition order limit offset planning_session tx)
 	(begin
 		(define query (make_query_block
 			schema
@@ -9149,9 +9210,10 @@ ordering run. Storage artifacts begin in build_queryplan. */
 			'() '()
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
-			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))))))
+			(ir_with_return (decorrelate_logical_query query) (list (quote dml) schema tbl))
+			planning_session tx))))
 
-(define build_multi_delete_plan (lambda (schema target_specs all_defs condition)
+(define build_multi_delete_plan (lambda (schema target_specs all_defs condition planning_session tx)
 	(begin
 		(define query (make_query_block
 			schema
@@ -9162,12 +9224,13 @@ ordering run. Storage artifacts begin in build_queryplan. */
 			(list (list (quote dml) true))))
 		(neumann_compile_ir_pipeline
 			(ir_with_return (decorrelate_logical_query query)
-				(list (quote dml-many) target_specs))))))
+				(list (quote dml-many) target_specs))
+			planning_session tx))))
 
-(define sql_truncate (lambda (schema tbl)
+(define sql_truncate (lambda (schema tbl planning_session tx)
 	(build_dml_plan schema tbl nil
 		(list (list tbl schema tbl false nil))
-		nil true nil nil nil)))
+		nil true nil nil nil planning_session tx)))
 
 (define explain_union_ir_metadata (lambda (ir)
 	(begin
@@ -9186,11 +9249,11 @@ ordering run. Storage artifacts begin in build_queryplan. */
 					(pretty_print ir (settings "ExplainWidth"))
 					(explain_union_ir_metadata ir)))))))
 
-(define explain_queryplan_reorder (lambda (query)
+(define explain_queryplan_reorder (lambda (query planning_session)
 	(begin
-		(define planning_session (context "session"))
 		(planning_session "__memcp_explain_reorder_selectivities" true)
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
 		(planning_session "__memcp_explain_reorder_selectivities" nil)
 		(list (quote resultrow)
 			(list (quote list)
@@ -9378,14 +9441,13 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 				(merge (list decisions (physical_recset_project_join_decisions item)))) own))
 		_ '())))
 
-(define compile_physical_explain_variant (lambda (reordered overrides)
+(define compile_physical_explain_variant (lambda (reordered overrides planning_session)
 	(begin
-		(define planning_session (context "session"))
 		(define accumulator (newsession))
 		(accumulator "count" 0)
 		(planning_session "__memcp_explain_physical" accumulator)
 		(planning_session "__memcp_physical_overrides" overrides)
-		(define prepared (prepare_physical_queryplan reordered))
+		(define prepared (prepare_physical_queryplan reordered planning_session nil))
 		(define plan (emit_physical_queryplan prepared))
 		(define operator_family (physical_membership_operator_family plan))
 		(define optimized_plan (optimize plan))
@@ -9527,14 +9589,14 @@ potentially large calibrated SELECT result. */
 							"result_equal" (quote __calibration_equal)))))
 			(quote resultrow)))))
 
-(define physical_calibration_variants_for_decision (lambda (reordered decision suite_var)
+(define physical_calibration_variants_for_decision (lambda (reordered decision suite_var planning_session)
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" nil))
 		(map (qassoc_get decision "alternatives" '()) (lambda (alternative)
 			(begin
 				(define variant (qassoc_get alternative "plan" nil))
 				(define compilation (compile_physical_explain_variant reordered
-					(list (list decision_id variant))))
+					(list (list decision_id variant)) planning_session))
 				(define variant_decision (physical_decision_by_id (nth compilation 1) decision_id))
 				(define variant_alternative (physical_decision_alternative variant_decision variant))
 				(define variant_cost (qassoc_get variant_alternative "cost" '()))
@@ -9569,10 +9631,11 @@ potentially large calibrated SELECT result. */
 							(number? (qassoc_get inputs "driver_rows" nil))))))))))
 
 
-(define explain_queryplan_physical_calibrate_discover (lambda (query)
+(define explain_queryplan_physical_calibrate_discover (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
-		(define compilation (compile_physical_explain_variant reordered nil))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
+		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define decisions (filter (nth compilation 1) (lambda (decision)
 			(physical_decision_calibratable? decision))))
 		(if (empty_list? decisions)
@@ -9589,11 +9652,12 @@ potentially large calibrated SELECT result. */
 						(map (qassoc_get decision "alternatives" '()) (lambda (alternative)
 							(qassoc_get (qassoc_get alternative "cost" '()) "total_ns" nil)))))))))))))
 
-(define explain_queryplan_physical_calibrate_variant (lambda (query decision_id variant)
+(define explain_queryplan_physical_calibrate_variant (lambda (query decision_id variant planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
 		(define compilation (compile_physical_explain_variant reordered
-			(list (list decision_id variant))))
+			(list (list decision_id variant)) planning_session))
 		(define decision (physical_decision_by_id (nth compilation 1) decision_id))
 		(define alternative (if (nil? decision) nil
 			(physical_decision_alternative decision variant)))
@@ -9613,10 +9677,11 @@ potentially large calibrated SELECT result. */
 							(nth compilation 0) decision)
 						suite_var)))))))
 
-(define explain_queryplan_physical_calibrate (lambda (query)
+(define explain_queryplan_physical_calibrate (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
-		(define default_compilation (compile_physical_explain_variant reordered nil))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
+		(define default_compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define uncalibratable (filter (nth default_compilation 1) (lambda (decision)
 			(and (equal? (qassoc_get decision "decision" nil) "membership_carrier")
 				(not (physical_decision_calibratable? decision))))))
@@ -9632,15 +9697,16 @@ potentially large calibrated SELECT result. */
 				(begin
 					(define suite_var (quote __physical_calibration_suite))
 					(define variants (merge (map decisions (lambda (decision)
-						(physical_calibration_variants_for_decision reordered decision suite_var)))))
+						(physical_calibration_variants_for_decision reordered decision suite_var planning_session)))))
 					(cons (quote !begin) (cons
 						(list (quote define) suite_var (list (quote newsession)))
 						variants))))))))
 
-(define explain_queryplan_physical (lambda (query)
+(define explain_queryplan_physical (lambda (query planning_session)
 	(begin
-		(define reordered (optimize_logical_query (decorrelate_logical_query query)))
-		(define compilation (compile_physical_explain_variant reordered nil))
+		(define reordered (optimize_logical_query
+			(decorrelate_logical_query query) planning_session nil))
+		(define compilation (compile_physical_explain_variant reordered nil planning_session))
 		(define optimized_plan (nth compilation 0))
 		(define decisions (nth compilation 1))
 		(list (quote resultrow)
@@ -9650,7 +9716,7 @@ potentially large calibrated SELECT result. */
 				"code"
 				(pretty_print optimized_plan (settings "ExplainWidth")))))))
 
-(define explain_queryplan_compile (lambda (query parse_started_ns sql_bytes)
+(define explain_queryplan_compile (lambda (query parse_started_ns sql_bytes planning_session)
 	(begin
 		(define logical_count (lambda (node target)
 			(begin
@@ -9682,9 +9748,9 @@ potentially large calibrated SELECT result. */
 		(define started_ns (nanotime))
 		(define ir (decorrelate_logical_query query))
 		(define untangled_ns (nanotime))
-		(define reordered (optimize_logical_query ir))
+		(define reordered (optimize_logical_query ir planning_session nil))
 		(define reordered_ns (nanotime))
-		(define prepared (prepare_physical_queryplan reordered))
+		(define prepared (prepare_physical_queryplan reordered planning_session nil))
 		(define prepared_ns (nanotime))
 		(define plan (emit_physical_queryplan prepared))
 		(define emitted_ns (nanotime))

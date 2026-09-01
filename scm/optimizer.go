@@ -347,7 +347,7 @@ type optimizerRewriteState struct {
 const defaultOptimizerRewriteBudget = 64
 
 type optimizerMetainfo struct {
-	variableReplacement       map[Symbol]Scmer
+	variableReplacement       map[Symbol]optimizerReplacement
 	variableTypes             map[Symbol]*TypeDescriptor
 	numberedTypes             map[NthLocalVar]*TypeDescriptor
 	ownedLocalBindings        map[Symbol]bool
@@ -373,8 +373,13 @@ type optimizerMetainfo struct {
 	argumentTypes             []TypeInfo
 }
 
+type optimizerReplacement struct {
+	value      Scmer
+	outerDepth int
+}
+
 func newOptimizerMetainfo() (result optimizerMetainfo) {
-	result.variableReplacement = make(map[Symbol]Scmer)
+	result.variableReplacement = make(map[Symbol]optimizerReplacement)
 	result.variableTypes = make(map[Symbol]*TypeDescriptor)
 	result.numberedTypes = make(map[NthLocalVar]*TypeDescriptor)
 	result.rewrite = &optimizerRewriteState{
@@ -767,8 +772,8 @@ func (ome *optimizerMetainfo) applyPendingCallbackParams(params Scmer, child *op
 			td = unknownOptimizerParameterType
 		}
 		child.variableTypes[sym] = td
-		if replacement, ok := child.variableReplacement[sym]; ok && replacement.IsNthLocalVar() {
-			child.numberedTypes[replacement.NthLocalVar()] = td
+		if replacement, ok := child.variableReplacement[sym]; ok && replacement.outerDepth == 0 && replacement.value.IsNthLocalVar() {
+			child.numberedTypes[replacement.value.NthLocalVar()] = td
 		}
 	}
 	ome.pendingCallbackParams = nil
@@ -777,11 +782,12 @@ func (ome *optimizerMetainfo) applyPendingCallbackParams(params Scmer, child *op
 // LoopDepth returns the current loop nesting depth.
 func (ome *optimizerMetainfo) LoopDepth() int { return ome.loopDepth }
 func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
-	result.variableReplacement = make(map[Symbol]Scmer)
+	result.variableReplacement = make(map[Symbol]optimizerReplacement)
 	result.variableTypes = make(map[Symbol]*TypeDescriptor)
 	result.numberedTypes = make(map[NthLocalVar]*TypeDescriptor)
-	for k, v := range ome.variableReplacement {
-		result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
+	for k, replacement := range ome.variableReplacement {
+		replacement.outerDepth++
+		result.variableReplacement[k] = replacement
 	}
 	result.setBlacklist = ome.setBlacklist
 	result.loopDepth = ome.loopDepth
@@ -804,15 +810,16 @@ func (ome *optimizerMetainfo) Copy() (result optimizerMetainfo) {
 // their parent (begin, match). NthLocalVar entries are kept as-is instead of
 // being wrapped in (outer ...) since they access the same VarsNumbered array.
 func (ome *optimizerMetainfo) CopySharedScope() (result optimizerMetainfo) {
-	result.variableReplacement = make(map[Symbol]Scmer)
+	result.variableReplacement = make(map[Symbol]optimizerReplacement)
 	result.variableTypes = ome.variableTypes
 	result.numberedTypes = ome.numberedTypes
 	result.ownedLocalBindings = ome.ownedLocalBindings
-	for k, v := range ome.variableReplacement {
-		if v.IsNthLocalVar() {
-			result.variableReplacement[k] = v
+	for k, replacement := range ome.variableReplacement {
+		if replacement.outerDepth == 0 && replacement.value.IsNthLocalVar() {
+			result.variableReplacement[k] = replacement
 		} else {
-			result.variableReplacement[k] = NewSlice([]Scmer{NewSymbol("outer"), v})
+			replacement.outerDepth++
+			result.variableReplacement[k] = replacement
 		}
 	}
 	result.setBlacklist = ome.setBlacklist
@@ -1533,6 +1540,13 @@ func scmerSymbol(v Scmer) (Symbol, bool) {
 	return "", false
 }
 
+func materializeOptimizerReplacement(replacement optimizerReplacement) Scmer {
+	if replacement.outerDepth == 0 {
+		return replacement.value
+	}
+	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(replacement.outerDepth)), replacement.value})
+}
+
 func assignedSymbolsInLambda(body Scmer) map[Symbol]bool {
 	var assigned map[Symbol]bool
 	var visit func(Scmer)
@@ -1687,21 +1701,21 @@ func OptimizeEx(val Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (Sc
 		sym := mustSymbol(val)
 		varType := ome.variableTypes[sym]
 		if replacement, ok := ome.variableReplacement[sym]; ok {
-			if replacement.IsSymbol() && mustSymbol(replacement) == sym {
+			if replacement.outerDepth == 0 && replacement.value.IsSymbol() && mustSymbol(replacement.value) == sym {
 				if varType != nil {
 					return val, TypeInfoFromTD(varType)
 				}
 				return val, tiZero
 			}
-			if slice, ok := scmerSlice(replacement); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
-				if s2, ok := scmerSymbol(slice[1]); ok && s2 == sym {
+			if replacement.outerDepth > 0 {
+				if s2, ok := scmerSymbol(replacement.value); ok && s2 == sym {
 					if varType != nil {
 						return val, TypeInfoFromTD(varType)
 					}
 					return val, tiZero
 				}
 			}
-			result, ti := OptimizeEx(replacement, env, ome, useResult)
+			result, ti := OptimizeEx(materializeOptimizerReplacement(replacement), env, ome, useResult)
 			if varType != nil {
 				ti = TypeInfoFromTD(varType)
 			}
@@ -1945,30 +1959,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		v = resolved
 	}
 	headSym, headOk := scmerSymbol(v[0])
-
-	if headOk && headSym == Symbol("outer") && len(v) == 2 {
-		// When we see (outer expr), expr should be resolved in the parent scope.
-		// Copy() wraps inherited variable replacements in (outer ...), but (outer expr)
-		// already represents one scope transition. We need to "unwrap" one (outer ...)
-		// level from the variable replacements to avoid double-wrapping.
-		outerOme := optimizerMetainfo{
-			variableReplacement: make(map[Symbol]Scmer),
-			setBlacklist:        ome.setBlacklist,
-		}
-		for k, repl := range ome.variableReplacement {
-			if slice, ok := scmerSlice(repl); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
-				outerOme.variableReplacement[k] = slice[1]
-			}
-			// Local NthLocalVar replacements (current lambda params) are NOT
-			// accessible in the outer scope, so we intentionally exclude them.
-		}
-		inner, transferOwnership, isConstant := optimizeExCompat(v[1], env, &outerOme, useResult)
-		if isConstant {
-			return inner, tiConstTransfer
-		}
-		v[1] = inner
-		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
-	}
 
 	if headOk && (headSym == Symbol("begin") || headSym == Symbol("begin_mut")) {
 		bodyStart := 1
@@ -2288,7 +2278,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 				delete(usedVariables, sym)
 				delete(bindings, sym)
 				ome2.setBlacklist = append(ome2.setBlacklist, sym)
-				ome2.variableReplacement[sym] = content
+				ome2.variableReplacement[sym] = optimizerReplacement{value: content}
 			}
 		}
 		var numberedLocals map[Symbol]Scmer
@@ -2313,9 +2303,10 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 		}
 		if len(usedVariables) == 0 && len(bindings) == 0 {
 			v[0] = NewSymbol("!begin")
-			for sym, content := range ome2.variableReplacement {
-				if slice, ok := scmerSlice(content); ok && len(slice) == 2 && scmerIsSymbol(slice[0], "outer") {
-					ome2.variableReplacement[sym] = slice[1]
+			for sym, replacement := range ome2.variableReplacement {
+				if replacement.outerDepth > 0 {
+					replacement.outerDepth--
+					ome2.variableReplacement[sym] = replacement
 				}
 			}
 		}
@@ -2327,7 +2318,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			if items, ok := scmerSlice(expr); ok && len(items) == 3 && (scmerIsSymbol(items[0], "define") || scmerIsSymbol(items[0], "set")) {
 				if sym, ok := scmerSymbol(items[1]); ok {
 					if slot, numbered := numberedLocals[sym]; numbered {
-						ome2.variableReplacement[sym] = slot
+						ome2.variableReplacement[sym] = optimizerReplacement{value: slot}
 					}
 				}
 			}
@@ -2446,11 +2437,11 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 						break
 					}
 					if sym, ok := scmerSymbol(param); ok && sym != Symbol("_") && !assigned[sym] {
-						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(i))
+						ome2.variableReplacement[sym] = optimizerReplacement{value: NewNthLocalVar(NthLocalVar(i))}
 					}
 				}
 			} else if sym, ok := scmerSymbol(params); ok && !assigned[sym] {
-				ome2.variableReplacement[sym] = NewNthLocalVar(0)
+				ome2.variableReplacement[sym] = optimizerReplacement{value: NewNthLocalVar(0)}
 			}
 			ome.applyPendingCallbackParams(params, &ome2)
 			var bodyType TypeInfo
@@ -2471,14 +2462,14 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			for _, param := range list {
 				if sym, ok := scmerSymbol(param); ok {
 					if sym != Symbol("_") && !assigned[sym] {
-						ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+						ome2.variableReplacement[sym] = optimizerReplacement{value: NewNthLocalVar(NthLocalVar(slotIndex))}
 					}
 				}
 				slotIndex++
 			}
 		} else if sym, ok := scmerSymbol(params); ok {
 			if !assigned[sym] {
-				ome2.variableReplacement[sym] = NewNthLocalVar(NthLocalVar(slotIndex))
+				ome2.variableReplacement[sym] = optimizerReplacement{value: NewNthLocalVar(NthLocalVar(slotIndex))}
 			}
 			slotIndex++
 		}
@@ -2507,13 +2498,13 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			for _, black := range ome.setBlacklist {
 				if black == sym {
 					if useResult {
-						return ome.variableReplacement[sym], tiZero
+						return materializeOptimizerReplacement(ome.variableReplacement[sym]), tiZero
 					}
 					return NewNil(), tiConstTransfer
 				}
 			}
-			if repl, ok := ome.variableReplacement[sym]; ok && repl.IsNthLocalVar() {
-				v[1] = repl
+			if repl, ok := ome.variableReplacement[sym]; ok && repl.outerDepth == 0 && repl.value.IsNthLocalVar() {
+				v[1] = repl.value
 			}
 		}
 		if v[1].IsNthLocalVar() {
@@ -2576,6 +2567,43 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	}
 
 	return NewSlice(v), MakeTypeInfo(transferOwnership, false)
+}
+
+// optimizeOuter resolves the operand in the explicitly selected parent scope.
+// The call head has already been resolved to its registered special form, so
+// this hook must preserve the same scope accounting as symbolic input.
+func optimizeOuter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if len(v) != 3 {
+		return NewSlice(v), tiZero.ToTypeDescriptor()
+	}
+	depthValue, validDepth := outerDepthLiteral(v[1])
+	if !validDepth {
+		return NewSlice(v), tiZero.ToTypeDescriptor()
+	}
+	depth := int(depthValue)
+	if depth == 0 {
+		return oc.OptimizeSub(v[2], useResult)
+	}
+	outerOme := optimizerMetainfo{
+		variableReplacement: make(map[Symbol]optimizerReplacement),
+		setBlacklist:        oc.Ome.setBlacklist,
+	}
+	for symbol, replacement := range oc.Ome.variableReplacement {
+		if replacement.outerDepth >= depth {
+			replacement.outerDepth -= depth
+			outerOme.variableReplacement[symbol] = replacement
+		}
+	}
+	inner, transferOwnership, isConstant := optimizeExCompat(v[2], oc.Env, &outerOme, useResult)
+	if isConstant {
+		return inner, tiConstTransfer.ToTypeDescriptor()
+	}
+	if nested, ok := scmerSlice(inner); ok && len(nested) == 3 && scmerIsSymbol(nested[0], "outer") {
+		if nestedDepth, validNestedDepth := outerDepthLiteral(nested[1]); validNestedDepth && nestedDepth <= int64(^uint64(0)>>1)-depthValue {
+			return NewSlice([]Scmer{v[0], NewInt(depthValue + nestedDepth), nested[2]}), MakeTypeInfo(transferOwnership, false).ToTypeDescriptor()
+		}
+	}
+	return NewSlice([]Scmer{v[0], v[1], inner}), MakeTypeInfo(transferOwnership, false).ToTypeDescriptor()
 }
 
 // OptimizeSub optimizes a sub-expression and returns its result TypeDescriptor.
@@ -3236,7 +3264,11 @@ func optimizerStableReference(expr Scmer) bool {
 		return true
 	}
 	items, ok := scmerSlice(expr)
-	return ok && len(items) == 2 && scmerIsSymbol(items[0], "outer") && optimizerStableReference(items[1])
+	validDepth := false
+	if ok && len(items) == 3 && scmerIsSymbol(items[0], "outer") {
+		_, validDepth = outerDepthLiteral(items[1])
+	}
+	return validDepth && optimizerStableReference(items[2])
 }
 
 // optimizeAnd is the Optimize hook for the lazy (and ...) special form.
@@ -3518,10 +3550,10 @@ func bindMatchPatternType(pattern Scmer, td *TypeDescriptor, ome *optimizerMetai
 		if derived && td != nil && td.Transfer {
 			ome.specializationOwnedVars[sym] = true
 		}
-		if replacement, exists := ome.variableReplacement[sym]; exists && replacement.IsNthLocalVar() {
-			ome.numberedTypes[replacement.NthLocalVar()] = td
+		if replacement, exists := ome.variableReplacement[sym]; exists && replacement.outerDepth == 0 && replacement.value.IsNthLocalVar() {
+			ome.numberedTypes[replacement.value.NthLocalVar()] = td
 			if derived && td != nil && td.Transfer {
-				ome.specializationOwnedSlots[replacement.NthLocalVar()] = true
+				ome.specializationOwnedSlots[replacement.value.NthLocalVar()] = true
 			}
 		}
 		return

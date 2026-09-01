@@ -19,7 +19,6 @@ package scm
 
 import (
 	"container/heap"
-	"context"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -581,9 +580,7 @@ func setTimeout(a ...Scmer) Scmer {
 	duration := time.Duration(millis * float64(time.Millisecond))
 	callbackArgs := append([]Scmer(nil), a[2:]...)
 	id, ok := DefaultScheduler.ScheduleAfter(duration, func() {
-		NewContext(context.TODO(), func() {
-			Apply(callback, callbackArgs...)
-		})
+		Apply(callback, callbackArgs...)
 	})
 	if !ok {
 		return NewBool(false)

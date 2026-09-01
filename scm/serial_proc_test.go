@@ -134,3 +134,23 @@ func TestSerialExprDetectsCapturedBeginScope(t *testing.T) {
 		t.Fatalf("eval-created closure was classified as reusable: %s", dynamic.Proc().Body.String())
 	}
 }
+
+func TestPrepareSerialProcTraversesExplicitOuterScope(t *testing.T) {
+	factory := preparedTestProc(t, "(lambda (captured) (lambda (value) (+ value captured)))")
+	callback := Apply(factory, NewInt(7))
+	prepared := PrepareSerialProc(callback)
+	if got := prepared.Call([]Scmer{NewInt(5)}).Int(); got != 12 {
+		t.Fatalf("prepared outer-scope result = %d, want 12; body=%s", got, callback.Proc().Body.String())
+	}
+}
+
+func TestEqualProceduresUsesIdentity(t *testing.T) {
+	first := Eval(Read("procedure equality test", "(lambda (x) x)"), &Globalenv)
+	second := Eval(Read("procedure equality test", "(lambda (x) (+ x 1))"), &Globalenv)
+	if !Equal(first, first) {
+		t.Fatal("a procedure must equal itself")
+	}
+	if Equal(first, second) {
+		t.Fatal("distinct procedures must not compare equal through their printed representation")
+	}
+}

@@ -54,7 +54,7 @@ test_cases:
                         (list $set
                           (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_src")
                             '("ref_id")
-                            (lambda (src.ref_id) (equal? src.ref_id (outer ref_id)))
+                            (lambda (src.ref_id) (equal? src.ref_id (outer 1 ref_id)))
                             '("val")
                             (lambda (val) val)
                             + 0)))
@@ -142,7 +142,7 @@ test_cases:
                         (list $set
                           (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_fb_src")
                             '("ref_id")
-                            (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer ref_id)))
+                            (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer 1 ref_id)))
                             '("val")
                             (lambda (val) val)
                             + 0)))
