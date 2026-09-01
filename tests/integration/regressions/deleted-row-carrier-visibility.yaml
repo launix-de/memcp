@@ -22,16 +22,20 @@ setup:
   - sql: "DROP TABLE IF EXISTS drcv_access"
   - sql: "DROP TABLE IF EXISTS drcv_item"
   - sql: "DROP TABLE IF EXISTS drcv_domain"
-  - sql: "CREATE TABLE drcv_domain (id INT PRIMARY KEY, direct_flag BOOL, label TEXT)"
+  - sql: "DROP TABLE IF EXISTS drcv_tenant"
+  - sql: "CREATE TABLE drcv_tenant (id INT PRIMARY KEY, direct_flag BOOL, label TEXT)"
+  - sql: "CREATE TABLE drcv_domain (id INT PRIMARY KEY, tenant_id INT, direct_flag BOOL, label TEXT)"
   - sql: "CREATE TABLE drcv_item (id INT PRIMARY KEY, domain_id INT, bucket_id INT, sort_key INT)"
-  - sql: "CREATE TABLE drcv_access (id INT PRIMARY KEY, actor_id INT, domain_id INT, allowed BOOL)"
+  - sql: "CREATE TABLE drcv_access (id INT PRIMARY KEY, actor_id INT, tenant_id INT, domain_id INT, allowed BOOL)"
   - sql: "CREATE TABLE drcv_idlist (list_id INT, item_id INT)"
-  - sql: "INSERT INTO drcv_domain (id, direct_flag, label) VALUES (1, FALSE, 'one'), (2, FALSE, 'two'), (3, TRUE, 'three')"
+  - sql: "INSERT INTO drcv_tenant (id, direct_flag, label) VALUES (1, FALSE, 'tenant-one'), (2, FALSE, 'tenant-two')"
+  - sql: "INSERT INTO drcv_domain (id, tenant_id, direct_flag, label) VALUES (1, 1, FALSE, 'one'), (2, 2, FALSE, 'two'), (3, 1, TRUE, 'three')"
   - sql: "INSERT INTO drcv_item (id, domain_id, bucket_id, sort_key) VALUES (11, 1, 7, 40), (12, 1, 7, 30), (21, 2, 7, 20), (31, 3, 7, 10)"
-  - sql: "INSERT INTO drcv_access (id, actor_id, domain_id, allowed) VALUES (1, 101, NULL, TRUE), (2, 202, 2, TRUE)"
+  - sql: "INSERT INTO drcv_access (id, actor_id, tenant_id, domain_id, allowed) VALUES (1, 101, NULL, NULL, TRUE), (2, 202, 2, 2, TRUE)"
   - scm: |
       (begin
       (rebuild (table "memcp-tests" "drcv_domain") true false)
+      (rebuild (table "memcp-tests" "drcv_tenant") true false)
       (rebuild (table "memcp-tests" "drcv_item") true false)
       (rebuild (table "memcp-tests" "drcv_access") true false))
 
@@ -210,6 +214,99 @@ test_cases:
   - <<: *derived_id_projection
     name: "The shared query shape rebinds the unrestricted request again"
 
+  - &nested_acl_id_filter
+    name: "A nested request ACL retains the selected ID list"
+    session_id: "drcv_unrestricted"
+    sql: |
+      SELECT i.id
+      FROM drcv_item i
+      WHERE (
+        EXISTS (
+          SELECT 1
+          FROM drcv_access global_access
+          WHERE global_access.actor_id = @drcv_actor
+            AND global_access.tenant_id IS NULL
+            AND global_access.domain_id IS NULL
+          LIMIT 1
+        )
+        OR NOT EXISTS (
+          SELECT 1
+          FROM drcv_access global_deny_guard
+          WHERE global_deny_guard.actor_id = @drcv_actor
+            AND global_deny_guard.tenant_id IS NULL
+            AND global_deny_guard.domain_id IS NULL
+          LIMIT 1
+        )
+      )
+      AND COALESCE((
+        SELECT
+          (
+            EXISTS (
+              SELECT 1
+              FROM drcv_access repeated_global_access
+              WHERE repeated_global_access.actor_id = @drcv_actor
+                AND repeated_global_access.tenant_id IS NULL
+                AND repeated_global_access.domain_id IS NULL
+              LIMIT 1
+            )
+            OR CASE
+              WHEN d.direct_flag THEN TRUE
+              ELSE EXISTS (
+                SELECT 1
+                FROM drcv_access domain_access
+                WHERE domain_access.actor_id = @drcv_actor
+                  AND COALESCE(domain_access.domain_id, d.id) = d.id
+                  AND domain_access.allowed
+                LIMIT 1
+              )
+            END
+          )
+          AND COALESCE((
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM drcv_access repeated_tenant_global_access
+                WHERE repeated_tenant_global_access.actor_id = @drcv_actor
+                  AND repeated_tenant_global_access.tenant_id IS NULL
+                  AND repeated_tenant_global_access.domain_id IS NULL
+                LIMIT 1
+              )
+              OR CASE
+                WHEN t.direct_flag THEN TRUE
+                ELSE EXISTS (
+                  SELECT 1
+                  FROM drcv_access tenant_access
+                  WHERE tenant_access.actor_id = @drcv_actor
+                    AND COALESCE(tenant_access.tenant_id, t.id) = t.id
+                    AND tenant_access.allowed
+                  LIMIT 1
+                )
+              END
+            FROM drcv_tenant t
+            WHERE t.id = d.tenant_id
+            LIMIT 1
+          ), FALSE)
+        FROM drcv_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      AND i.id IN (11, 12, 21, 31)
+      ORDER BY i.id
+    expect:
+      rows: 3
+      data:
+        - id: 11
+        - id: 21
+        - id: 31
+
+  - <<: *nested_acl_id_filter
+    name: "The nested request ACL rebinds all repeated stages"
+    session_id: "drcv_restricted"
+    expect:
+      rows: 1
+      data:
+        - id: 21
+
   - name: "Delete the selected base row through SQL"
     sql: "DELETE FROM drcv_item WHERE id = 11"
     expect:
@@ -259,3 +356,4 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS drcv_access"
   - sql: "DROP TABLE IF EXISTS drcv_item"
   - sql: "DROP TABLE IF EXISTS drcv_domain"
+  - sql: "DROP TABLE IF EXISTS drcv_tenant"
