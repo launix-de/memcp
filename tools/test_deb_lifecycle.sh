@@ -31,12 +31,12 @@ wait_for_mysql() {
 integrity_signature() {
 	mysql --protocol=socket --socket="$SOCKET" -uroot -p"$PASSWORD" \
 		-N -B memcp-tests -e \
-		'SELECT COUNT(*), SUM(amount), GROUP_CONCAT(label ORDER BY id) FROM package_integrity'
+		'SELECT id, amount, label FROM package_integrity ORDER BY id'
 }
 
 assert_integrity() {
 	actual=$(integrity_signature)
-	expected=$(printf '3\t60\talpha,beta,gamma')
+	expected=$(printf '1\t10\talpha\n2\t20\tbeta\n3\t30\tgamma')
 	[ "$actual" = "$expected" ] || {
 		printf 'unexpected package lifecycle signature: %s\n' "$actual" >&2
 		return 1
