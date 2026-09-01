@@ -1547,6 +1547,65 @@ func materializeOptimizerReplacement(replacement optimizerReplacement) Scmer {
 	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(replacement.outerDepth)), replacement.value})
 }
 
+// rebaseOuterReferencesAfterScopeRemoval adjusts explicit lexical addresses
+// when an enclosing scope is removed. References which still resolve inside
+// expression keep their depth; only references crossing expression's root lose
+// one hop. Quoted syntax is data and match fallback arms do not enter the
+// branch-local environment.
+func rebaseOuterReferencesAfterScopeRemoval(expression Scmer, innerDepth int) Scmer {
+	if expression.IsSourceInfo() {
+		source := *expression.SourceInfo()
+		source.value = rebaseOuterReferencesAfterScopeRemoval(source.value, innerDepth)
+		return NewSourceInfo(source)
+	}
+	items, ok := scmerSlice(expression)
+	if !ok || len(items) == 0 || scmerIsSymbol(items[0], "quote") {
+		return expression
+	}
+	if scmerIsSymbol(items[0], "outer") && len(items) == 3 {
+		depth, valid := outerDepthLiteral(items[1])
+		if valid && depth > int64(innerDepth) {
+			return NewSlice([]Scmer{items[0], NewInt(depth - 1), items[2]})
+		}
+		return expression
+	}
+
+	rewritten := make([]Scmer, len(items))
+	copy(rewritten, items)
+	switch {
+	case scmerIsSymbol(items[0], "lambda"):
+		if len(items) > 2 {
+			rewritten[2] = rebaseOuterReferencesAfterScopeRemoval(items[2], innerDepth+1)
+		}
+	case scmerIsSymbol(items[0], "begin"):
+		for i := 1; i < len(items); i++ {
+			rewritten[i] = rebaseOuterReferencesAfterScopeRemoval(items[i], innerDepth+1)
+		}
+	case scmerIsSymbol(items[0], "begin_mut"):
+		if len(items) > 1 {
+			rewritten[1] = rebaseOuterReferencesAfterScopeRemoval(items[1], innerDepth)
+		}
+		for i := 2; i < len(items); i++ {
+			rewritten[i] = rebaseOuterReferencesAfterScopeRemoval(items[i], innerDepth+1)
+		}
+	case scmerIsSymbol(items[0], "match") || scmerIsSymbol(items[0], "match_mut"):
+		if len(items) > 1 {
+			rewritten[1] = rebaseOuterReferencesAfterScopeRemoval(items[1], innerDepth)
+		}
+		for i := 3; i < len(items); i += 2 {
+			rewritten[i] = rebaseOuterReferencesAfterScopeRemoval(items[i], innerDepth+1)
+		}
+		if len(items)%2 == 1 {
+			rewritten[len(items)-1] = rebaseOuterReferencesAfterScopeRemoval(items[len(items)-1], innerDepth)
+		}
+	default:
+		for i, item := range items {
+			rewritten[i] = rebaseOuterReferencesAfterScopeRemoval(item, innerDepth)
+		}
+	}
+	return NewSlice(rewritten)
+}
+
 func assignedSymbolsInLambda(body Scmer) map[Symbol]bool {
 	var assigned map[Symbol]bool
 	var visit func(Scmer)
@@ -2309,6 +2368,9 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 					ome2.variableReplacement[sym] = replacement
 				}
 			}
+			for i := bodyStart; i < len(v); i++ {
+				v[i] = rebaseOuterReferencesAfterScopeRemoval(v[i], 0)
+			}
 		}
 		for i := bodyStart; i < len(v); i++ {
 			expr := v[i]
@@ -2356,7 +2418,7 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 			return OptimizeEx(v[1], env, &ome2, useResult)
 		}
 		if scmerIsSymbol(v[0], "begin") && len(v) == 2 {
-			return OptimizeEx(v[1], env, &ome2, useResult)
+			return OptimizeEx(rebaseOuterReferencesAfterScopeRemoval(v[1], 0), env, &ome2, useResult)
 		}
 		if scmerIsSymbol(v[0], "begin") || scmerIsSymbol(v[0], "begin_mut") {
 			isConstant = false

@@ -191,6 +191,15 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	if publishedToken == 0 {
 		t.Fatal("published planner statistics have no dependency token")
 	}
+	publishedFingerprint := tbl.PlannerStatisticsFingerprint()
+	tbl.publishShowColumnsSnapshot()
+	if tbl.PlannerStatsToken() == publishedToken {
+		t.Fatal("republished planner statistics retained their generation token")
+	}
+	if got := tbl.PlannerStatisticsFingerprint(); got != publishedFingerprint {
+		t.Fatalf("unchanged planner statistics changed fingerprint from %d to %d", publishedFingerprint, got)
+	}
+	publishedToken = tbl.PlannerStatsToken()
 
 	root := tbl.PlannerStatistics().FastDict()
 	rowCount, ok := root.Get(scm.NewString("row_count"))
@@ -231,6 +240,9 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	if adjustedToken == publishedToken {
 		t.Fatal("planner row-count update retained a stale dependency token")
 	}
+	if got := tbl.PlannerStatisticsFingerprint(); got != publishedFingerprint {
+		t.Fatalf("same-magnitude row-count update changed fingerprint from %d to %d", publishedFingerprint, got)
+	}
 	updatedRoot := tbl.PlannerStatistics().FastDict()
 	updatedRows, _ := updatedRoot.Get(scm.NewString("row_count"))
 	if updatedRows.Int() != 100 {
@@ -249,6 +261,38 @@ func TestPlannerStatisticsUsesHashedImmutableSnapshot(t *testing.T) {
 	tbl.adjustPlannerRows(-200)
 	if got := tbl.CountEstimate(); got != 0 {
 		t.Fatalf("saturated CountEstimate() = %d, want 0", got)
+	}
+}
+
+func TestPlannerStatisticsFingerprintUsesMagnitudeBuckets(t *testing.T) {
+	const columnsFingerprint = uint64(12345)
+	if plannerStatisticsFingerprint(91, columnsFingerprint) != plannerStatisticsFingerprint(100, columnsFingerprint) {
+		t.Fatal("ordinary row-count growth crossed a planner fingerprint bucket")
+	}
+	if plannerStatisticsFingerprint(91, columnsFingerprint) == plannerStatisticsFingerprint(182, columnsFingerprint) {
+		t.Fatal("doubling the row count retained the planner fingerprint")
+	}
+	if plannerMagnitudeBucket(17) != plannerMagnitudeBucket(31) {
+		t.Fatal("same-magnitude distinct estimates use different buckets")
+	}
+	if plannerMagnitudeBucket(17) == plannerMagnitudeBucket(34) {
+		t.Fatal("doubled distinct estimate retained its magnitude bucket")
+	}
+	col := &column{Name: "payload", Typ: "VARCHAR"}
+	first := &columnPlannerStatistics{
+		Confidence: 0.91, Source: "rebuild", NullFraction: 0.11, AverageValueBytes: 12.5,
+	}
+	nearby := &columnPlannerStatistics{
+		Confidence: 0.95, Source: "rebuild", NullFraction: 0.12, AverageValueBytes: 15.9,
+	}
+	base := plannerColumnFingerprint(42, col, 17, first)
+	if got := plannerColumnFingerprint(42, col, 31, nearby); got != base {
+		t.Fatalf("nearby column statistics changed cost class from %d to %d", base, got)
+	}
+	wide := *nearby
+	wide.AverageValueBytes = 32
+	if got := plannerColumnFingerprint(42, col, 31, &wide); got == base {
+		t.Fatal("large average-width change retained its column cost class")
 	}
 }
 

@@ -73,7 +73,7 @@ func collectOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpe
 	scanOrderMulti(currentTx, []scanOrderTableSpec{source}, sortdirs, 0, offset, limit,
 		scm.NewNil(), false, scm.NewNil())
 
-	batch := &recSet{tx: currentTx, table: table, shards: make([]recSetShard, 0, len(partOrder))}
+	batch := &recSet{table: table, shards: make([]recSetShard, 0, len(partOrder))}
 	for _, part := range partOrder {
 		sort.Slice(part.recids, func(i, j int) bool { return part.recids[i] < part.recids[j] })
 		shardPart := newRecSetShardFromSortedIDs(part.shard, part.universe, part.recids)
@@ -178,7 +178,7 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 			}
 		}()
 
-		batch := &recSet{tx: currentTx, table: table, shards: make([]recSetShard, 0, len(partOrder))}
+		batch := &recSet{table: table, shards: make([]recSetShard, 0, len(partOrder))}
 		for _, part := range partOrder {
 			sort.Slice(part.recids, func(i, j int) bool { return part.recids[i] < part.recids[j] })
 			shardPart := newRecSetShardFromSortedIDs(part.shard, part.universe, part.recids)
@@ -189,16 +189,13 @@ func collectPartitionOrderedCandidateBatch(currentTx *TxContext, source scanOrde
 	}
 }
 
-func validateAcceptedBatch(currentTx *TxContext, batch *recSet, acceptedValue scm.Scmer) *recSet {
+func validateAcceptedBatch(batch *recSet, acceptedValue scm.Scmer) *recSet {
 	if !acceptedValue.IsCustom(TagRecSet) {
 		panic("scan_order_batch_accept: batch filter must return a recset")
 	}
 	accepted := RecSetFromScmer(acceptedValue)
 	if accepted == nil || accepted.table != batch.table {
 		panic("scan_order_batch_accept: batch filter must return a recset of the input table")
-	}
-	if accepted.tx != currentTx {
-		panic("scan_order_batch_accept: batch filter returned a recset from a different transaction")
 	}
 	for i := range accepted.shards {
 		part := &accepted.shards[i]
@@ -263,13 +260,6 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	if len(sortcols) != len(sortdirs) {
 		panic("scan_order_batch_accept: sortcols and sortdirs must have equal length")
 	}
-	if source.recset != nil {
-		if currentTx == nil {
-			currentTx = source.recset.tx
-		} else if currentTx != source.recset.tx {
-			panic("scan_order_batch_accept: input recset belongs to a different transaction")
-		}
-	}
 	if source.backingTable() == nil {
 		panic("scan_order_batch_accept: input must have a backing table")
 	}
@@ -327,7 +317,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 			break
 		}
 		filterArgs[0] = NewRecSetScmer(batch)
-		accepted := validateAcceptedBatch(currentTx, batch, filterProgram.Call(filterArgs[:]))
+		accepted := validateAcceptedBatch(batch, filterProgram.Call(filterArgs[:]))
 
 		var pendingShard *storageShard
 		pending := make([]uint32, 0, len(records))

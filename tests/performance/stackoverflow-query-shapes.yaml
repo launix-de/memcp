@@ -162,7 +162,7 @@ test_cases:
             (list (list 0 "created_at")) (list >)
             0 0 1
             (list (list 0 "id"))
-            (lambda (_id) 1) + 0))
+            (lambda (acc _id) (+ acc 1)) 0))
         (if (equal? found 1) "ok" (error "wrong scan_join_order row count")))
 
   - name: "SO 6037843 selective ordered join"
@@ -191,7 +191,7 @@ test_cases:
             (list (list 0 "id")) (list >)
             0 0 5
             (list (list 0 "id"))
-            (lambda (_id) 1) + 0))
+            (lambda (acc _id) (+ acc 1)) 0))
         (if (equal? found 5) "ok" (error "wrong scan_join_order row count")))
 
   - name: "SO 73024688 string FK ordered join"
@@ -225,7 +225,7 @@ test_cases:
             (lambda (input)
               (scan_recset tx input '("product_unique_id")
                 (lambda (product_unique_id) (product_lookup product_unique_id))))
-            '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
+          '("id") '(<) 0 0 1000 '() (lambda (acc) (+ acc 1)) 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong batch carrier row count")))
 
   - name: "SO 73024688 handwritten complete projected carrier"
@@ -242,7 +242,7 @@ test_cases:
             images '("product_unique_id")))
         (define found
           (scan_order tx selected_images '() (lambda () true)
-            '("id") '(<) 0 0 1000 '() (lambda () 1) + 0 false 0))
+          '("id") '(<) 0 0 1000 '() (lambda (acc) (+ acc 1)) 0 false 0))
         (if (equal? found 1000) "ok" (error "wrong projected carrier row count")))
 
   - name: "SO 73024688 handwritten scan_join_order"
@@ -260,7 +260,7 @@ test_cases:
             (list (list 0 "id")) (list <)
             0 0 1000
             (list (list 0 "id"))
-            (lambda (_id) 1) + 0))
+            (lambda (acc _id) (+ acc 1)) 0))
         (if (equal? found 1000) "ok" (error "wrong scan_join_order row count")))
 
   - name: "SO 79837534 selective joined SUM"
@@ -282,7 +282,7 @@ test_cases:
         (define total
           (scan tx selected_transactions '("created_at")
             (lambda (created_at) (>= created_at 100000))
-            '("amount") (lambda (amount) amount) + 0))
+            '("amount") (lambda (acc amount) (+ acc amount)) 0 +))
         (if (equal? total 250) "ok" (error "wrong projected SUM result")))
 
   - name: "SO 79571812 LIKE contains scan"
@@ -323,9 +323,9 @@ test_cases:
               (list (list 1 "bpk" "bk")))
             (list) nil
             (list (list 0 "apk")) (list <)
-            0 0 1
-            (list (list 0 "apk"))
-            (lambda (apk) apk) (lambda (_acc apk) apk) nil))
+      0 0 1
+      (list (list 0 "apk"))
+      (lambda (_acc apk) apk) nil))
         (if (equal? minimum 1) "ok" (error "wrong scan_join_order minimum")))
 
   - name: "SO 79644544 handwritten ordered batch join carrier"
@@ -351,12 +351,12 @@ test_cases:
                 (define b_from_d
                   (recset_project_join tx d_batch '("bk") b '("bpk")))
                 (define valid_b
-                  (recset_intersect (list b_batch b_from_c b_from_d)))
+                  (recset_intersect tx (list b_batch b_from_c b_from_d)))
                 (define valid_a
                   (recset_project_join tx valid_b '("ak") a '("apk")))
-                (recset_intersect (list a_batch valid_a))))
-            '("apk") '(<) 0 0 1 '("apk")
-            (lambda (apk) apk) (lambda (_acc value) value) nil false))
+                (recset_intersect tx (list a_batch valid_a))))
+      '("apk") '(<) 0 0 1 '("apk")
+      (lambda (_acc apk) apk) nil false))
         (if (equal? minimum 1) "ok" (error "wrong ordered batch MIN result")))
 
   - name: "SO 79550978 missing latest sensor value"
@@ -385,7 +385,7 @@ test_cases:
             (list (list 0 "ts")) (list >)
             0 0 4
             (list (list 0 "val"))
-            (lambda (_val) 1) + 0 nil false 0))
+            (lambda (acc _val) (+ acc 1)) 0 nil false 0))
         (if (equal? found 0) "ok" (error "wrong scan_join_order row count")))
 
   - name: "SO 79550978 handwritten intersected join carriers"
@@ -409,12 +409,12 @@ test_cases:
           (scan_recset tx measures '("ts")
             (lambda (ts) (and (>= ts 0) (<= ts 120000)))))
         (define selected
-          (recset_intersect (list node_measures sensor_measures time_measures)))
+          (recset_intersect tx (list node_measures sensor_measures time_measures)))
         (define rows
           (scan_order tx selected '() (lambda () true) '("ts") '(>) 0 0 4
             '("ts" "sensor_id" "val")
-            (lambda (ts sensor_id val) (list ts sensor_id val))
-            (lambda (acc row) (cons row acc)) '() false))
+            (lambda (acc ts sensor_id val) (cons (list ts sensor_id val) acc))
+            '() false))
         (if (empty_list? rows) "ok" (error "missing sensor returned rows")))
 
   - name: "SO 77990392 original NOT IN UNION"
@@ -449,10 +449,10 @@ test_cases:
         (define excluded1
           (recset_project_join tx other_t1 '("otherpid") t1 '("pid")))
         (define excluded
-          (recset_union (list excluded2 excluded3 excluded1)))
-        (define allowed (recset_difference (list all_t1 excluded)))
+          (recset_union tx (list excluded2 excluded3 excluded1)))
+        (define allowed (recset_difference tx (list all_t1 excluded)))
         (define row_count
-          (scan tx allowed '() (lambda () true) '() (lambda () 1) + 0))
+          (scan tx allowed '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
         (if (equal? row_count 60000) "ok" (error "wrong anti-membership result")))
 
   - name: "SO 79828237 DISTINCT cursor join"
@@ -479,15 +479,18 @@ test_cases:
           (scan_order tx year_performance '() (lambda () true)
             '("hashed_player_id") '(<) 0 0 5000
             '("player_id" "fps_score" "hashed_player_id")
-            (lambda (player_id fps_score hashed_player_id)
-              (scan tx players '("player_id")
-                (lambda (id) (equal? id (outer 1 player_id)))
-                '("business_name" "first_name" "last_name")
-                (lambda (business_name first_name last_name)
-                  (list business_name (outer 1 fps_score) (outer 1 hashed_player_id)
-                    first_name last_name))
-                (lambda (_old row) row) nil nil false))
-            (lambda (acc row) (if (nil? row) acc (+ acc 1))) 0 false))
+            (lambda (acc player_id fps_score hashed_player_id)
+              (begin
+                (define row
+                  (scan tx players '("player_id")
+                    (lambda (id) (equal? id (outer 1 player_id)))
+                    '("business_name" "first_name" "last_name")
+                    (lambda (_old business_name first_name last_name)
+                      (list business_name (outer 1 fps_score) (outer 1 hashed_player_id)
+                        first_name last_name))
+                    nil (lambda (_old value) value) false))
+                (if (nil? row) acc (+ acc 1))))
+            0 false))
         (if (equal? row_count 5000) "ok" (error "wrong DISTINCT semijoin result")))
 
 cleanup:

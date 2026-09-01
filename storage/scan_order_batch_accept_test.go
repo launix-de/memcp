@@ -48,7 +48,7 @@ func recSetModuloFilter(batchSizes *[]int64, divisor int, remainder int) scm.Scm
 	return scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		batch := RecSetFromScmer(values[0])
 		*batchSizes = append(*batchSizes, batch.count)
-		return NewRecSetScmer(batch.filterToRecSet(batch.tx, []string{"id"}, condition))
+		return NewRecSetScmer(batch.filterToRecSet(nil, []string{"id"}, condition))
 	})
 }
 
@@ -201,26 +201,6 @@ func TestScanOrderBatchAcceptRejectsNonSubset(t *testing.T) {
 	}()
 	runBatchAcceptIDs(table, nil, badFilter, []scm.Scmer{scm.NewString("id")},
 		[]func(...scm.Scmer) scm.Scmer{ascending}, 0, 2)
-}
-
-func TestScanOrderBatchAcceptRejectsInputFromDifferentTransaction(t *testing.T) {
-	table := setupBatchAcceptTable(t, "tbatchacceptinputtx", 4)
-	inputTx := &TxContext{}
-	otherTx := &TxContext{}
-	input := table.scanRecSet(nil, nil,
-		scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) }))
-	input.tx = inputTx
-
-	defer func() {
-		if recover() == nil {
-			t.Fatal("input RecSet from another transaction did not panic")
-		}
-	}()
-	scanOrderBatchAccept(otherTx, scanOrderTableSpec{recset: input},
-		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] }),
-		nil, nil, 0, 0, 1, []string{"id"},
-		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }),
-		scm.NewNil(), false, scm.NewNil())
 }
 
 func TestScanOrderBatchAcceptDeclarationSignature(t *testing.T) {

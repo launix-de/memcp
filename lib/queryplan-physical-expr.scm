@@ -3153,6 +3153,7 @@ rows outside the current batch. */
 					(map filtercols (lambda (col) (symbol (concat alias "." col))))
 					(lower_column_expr_for_alias src condition))))
 			(list (quote recset_intersect)
+				(physical_query_tx_symbol)
 				(cons (quote list) (list
 					batch_expr
 					(list (quote recset_project_join)
@@ -3188,6 +3189,7 @@ rows outside the current batch. */
 						(map filtercols (lambda (col) (symbol (concat alias "." col))))
 						(lower_column_expr_for_alias src condition))))
 				(list (quote recset_intersect)
+					(physical_query_tx_symbol)
 					(cons (quote list) (list
 						batch_expr
 						(list (quote recset_project_join)
@@ -3208,6 +3210,7 @@ rows outside the current batch. */
 			driver. Intersecting a batch with that immutable RecSet is exact and avoids
 			repeating text scans and FK projection for every expanded window. */
 			(list (quote recset_intersect)
+				(physical_query_tx_symbol)
 				(cons (quote list) (list batch_expr
 					(planner_queryplan_observation_read_expr
 						(planner_queryplan_observation_value_key decision_id)))))
@@ -3219,11 +3222,14 @@ rows outside the current batch. */
 						(or unsupported (nil? branch_expr))) false)
 						nil
 						(list (quote recset_intersect)
+							(physical_query_tx_symbol)
 							(cons (quote list) (list
 								batch_expr
 								(if (single_source? branches)
 									(car branches)
-									(list (quote recset_union) (cons (quote list) branches))))))))
+									(list (quote recset_union)
+										(physical_query_tx_symbol)
+										(cons (quote list) branches))))))))
 				(batch_membership_base_expr target_src stage target_col batch_expr))))))
 
 /* A stage's own group-cache is keyed positionally by its gs_keys, named
@@ -3354,7 +3360,9 @@ the auto-index chooses the concrete access path on both tables. */
 					nil
 					(if (single_source? projected)
 						(car projected)
-						(list (quote recset_union) (cons (quote list) projected)))))
+						(list (quote recset_union)
+							(physical_query_tx_symbol)
+							(cons (quote list) projected)))))
 			(if (equal? (qassoc_get (gs_facts stage) (quote purpose) nil) (quote in_membership))
 				(membership_cache_recset_project_join_expr src stage target_col)
 				(if (recset_probe_stage_shape? stage)
@@ -5933,7 +5941,7 @@ ordinary physical carrier choice. */
 (define boolean_recset_combine (lambda (operator plans)
 	(if (equal? (count plans) 1)
 		(car plans)
-		(list operator (cons (quote list) plans)))))
+		(list operator (physical_query_tx_symbol) (cons (quote list) plans)))))
 
 /* RecSet complement represents FALSE as "not in the TRUE set" and is exact
 only for a two-valued operand. SQL NOT must retain UNKNOWN, so nullable probe
@@ -5989,6 +5997,7 @@ one ordinary scan_recset, while stage leaves use the carrier projection above. *
 				((symbol sql_not) inner)
 				(if (boolean_recset_two_valued? inner)
 					(list (quote recset_not)
+						(physical_query_tx_symbol)
 						(boolean_recset_expr_plan stage_catalog domain_src inner))
 					(neumann_fail "build_queryplan"
 						"boolean RecSet complement requires a two-valued operand"))
@@ -6036,7 +6045,8 @@ one ordinary scan_recset, while stage leaves use the carrier projection above. *
 						(boolean_recset_combine (quote recset_intersect)
 							(list condition_set then_set))
 						(boolean_recset_combine (quote recset_intersect)
-							(list (list (quote recset_not) condition_set) else_set)))))
+							(list (list (quote recset_not)
+								(physical_query_tx_symbol) condition_set) else_set)))))
 				((quote if) condition then_expr else_expr)
 				(boolean_recset_expr_plan stage_catalog domain_src
 					(list (symbol "if") condition then_expr else_expr))

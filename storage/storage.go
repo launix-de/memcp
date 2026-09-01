@@ -832,6 +832,52 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics_fingerprint",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewNil()
+			}
+			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatisticsFingerprint()))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the coarse cost-class fingerprint of a table's immutable planner-statistics snapshot",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", Label: "table"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics_compatible?",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewBool(false)
+			}
+			tbl := db.GetTable(scm.String(a[1]))
+			if tbl == nil {
+				return scm.NewBool(false)
+			}
+			compileToken := uint64(a[2].Int())
+			if tbl.PlannerStatsToken() == compileToken {
+				return scm.NewBool(true)
+			}
+			compileFingerprint := uint64(a[3].Int())
+			return scm.NewBool(tbl.PlannerStatisticsFingerprint() == compileFingerprint)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "check whether cached-plan table statistics remain in the same cost class",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table"},
+				{Kind: "int", Label: "compile_token"},
+				{Kind: "int", Label: "compile_fingerprint"},
+			},
+			Return:         &scm.TypeDescriptor{Kind: "bool"},
+			HasSideEffects: true,
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_order_partitioned?",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1063,16 +1109,18 @@ func Init(en scm.Env) {
 		Name: "recset_union",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			values := mustScmerSlice(a[0], "recsets")
+			currentTx := scmerToTxContext(a[0])
+			values := mustScmerSlice(a[1], "recsets")
 			recsets := make([]*recSet, 0, len(values))
 			for _, value := range values {
 				recsets = append(recsets, RecSetFromScmer(value))
 			}
-			return NewRecSetScmer(recSetUnion(recsets))
+			return NewRecSetScmer(recSetUnion(currentTx, recsets))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "combines query-local recsets from the same table and removes duplicate record IDs",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used for cancellation and parallelism limits"},
 				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
@@ -1082,16 +1130,18 @@ func Init(en scm.Env) {
 		Name: "recset_intersect",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			values := mustScmerSlice(a[0], "recsets")
+			currentTx := scmerToTxContext(a[0])
+			values := mustScmerSlice(a[1], "recsets")
 			recsets := make([]*recSet, 0, len(values))
 			for _, value := range values {
 				recsets = append(recsets, RecSetFromScmer(value))
 			}
-			return NewRecSetScmer(recSetIntersect(recsets))
+			return NewRecSetScmer(recSetIntersect(currentTx, recsets))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "intersects query-local recsets from the same table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used for cancellation and parallelism limits"},
 				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
@@ -1101,16 +1151,18 @@ func Init(en scm.Env) {
 		Name: "recset_difference",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			values := mustScmerSlice(a[0], "recsets")
+			currentTx := scmerToTxContext(a[0])
+			values := mustScmerSlice(a[1], "recsets")
 			recsets := make([]*recSet, 0, len(values))
 			for _, value := range values {
 				recsets = append(recsets, RecSetFromScmer(value))
 			}
-			return NewRecSetScmer(recSetDifference(recsets))
+			return NewRecSetScmer(recSetDifference(currentTx, recsets))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the records from the first query-local recset which occur in none of the following same-table recsets",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used for cancellation and parallelism limits"},
 				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
@@ -1120,11 +1172,12 @@ func Init(en scm.Env) {
 		Name: "recset_not",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			return NewRecSetScmer(recSetNot(RecSetFromScmer(a[0])))
+			return NewRecSetScmer(recSetNot(scmerToTxContext(a[0]), RecSetFromScmer(a[1])))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the complement of a query-local recset relative to the currently visible rows of its base table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used to build the visible complement"},
 				{Kind: "recset", Label: "recset"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},

@@ -1710,21 +1710,22 @@ particular star shape. */
 (define planner_record_table_statistics_guards (lambda (sources planning_session)
 	(reduce (filter sources source_is_base_table?) (lambda (_ src)
 		(begin
-			(define token (table_planner_statistics_token
-				(table (source_schema src) (source_relation src))))
-			(planner_record_guard_condition
-				(list (quote equal?)
-					(list (quote table_planner_statistics_token)
-						(list (quote table) (source_schema src) (source_relation src)))
-					token) planning_session))) nil)))
+			(define table_value (table (source_schema src) (source_relation src)))
+			(define table_expr
+				(list (quote table) (source_schema src) (source_relation src)))
+			(planner_record_statistics_dependency
+				table_expr
+				(table_planner_statistics_token table_value)
+				(table_planner_statistics_fingerprint table_value)
+				planning_session))) nil)))
 
 (define planner_table_statistics_aliases (lambda (sources)
 	(map (filter sources source_is_base_table?) source_alias)))
 
 /* Equality and join selectivity depend only on immutable table statistics.
 Text-pattern priors additionally depend on the current pattern value, so keep
-that value in the guard while replacing repeated statistic derivation with one
-O(1) dependency token per base table. */
+that value in the guard. Table dependencies use a token fast path and compare
+their published statistics fingerprint only when REBUILD changes generation. */
 (define planner_selectivity_value_dependent? (lambda (expr)
 	(match expr
 		((symbol strlike) _value _pattern) true
@@ -2588,19 +2589,24 @@ the lowerer can cost it. */
 
 (define hybrid_reorder_query_block_using (lambda (stage_catalog block planning_session tx)
 	(if (or (empty_list? (qb_sources block)) (single_source? (qb_sources block)))
-		(make_query_block
-			(qb_schema block)
-			(qb_sources block)
-			(qb_fields block)
-			(qb_where block)
-			(qb_group block)
-			(qb_having block)
-			(qb_order block)
-			(qb_limit block)
-			(qb_offset block)
-			(qb_hidden block)
-			(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
-			(qb_facts block))
+		(begin
+			/* Single-source blocks still make statistics-sensitive physical scan
+			choices. Multi-source blocks record the same dependency during join
+			reordering; the structural guard catalog deduplicates nested uses. */
+			(planner_record_table_statistics_guards (qb_sources block) planning_session)
+			(make_query_block
+				(qb_schema block)
+				(qb_sources block)
+				(qb_fields block)
+				(qb_where block)
+				(qb_group block)
+				(qb_having block)
+				(qb_order block)
+				(qb_limit block)
+				(qb_offset block)
+				(qb_hidden block)
+				(map (qb_stages block) (lambda (stage) (join_reorder_stage_using stage_catalog stage planning_session tx)))
+				(qb_facts block)))
 		(begin
 			(define provenance_graph (extract_join_hypergraph block))
 			(define normalized (join_optimizer_normalize_inner_joins stage_catalog block))
@@ -2948,28 +2954,12 @@ source itself has no known row count (not a base table). */
 				4096
 				0)))))
 
-(define planner_runtime_column_average_value_bytes (lambda (schema relation column)
-	(begin
-		(define stats (table_planner_statistics (table schema relation)))
-		(define columns (if (nil? stats) nil (stats "columns")))
-		(define column_stats (if (nil? columns) nil (columns column)))
-		(planner_column_average_value_bytes_from_statistics column_stats))))
-
-(define planner_column_average_value_bytes (lambda (src column planning_session)
-	(begin
-		(define measured (planner_column_average_value_bytes_from_statistics
-			(planner_column_statistics src column)))
-		(if (source_is_base_table? src)
-			/* Average width is a physical cost input refined by REBUILD. Keep the
-			cached plan while it is unchanged; a different width recompiles the full
-			cost inequality instead of making every guard walk the logical stage AST. */
-			(planner_record_guard_condition
-				(list (quote equal?)
-					(list (quote planner_runtime_column_average_value_bytes)
-						(source_schema src) (source_relation src) column)
-					measured) planning_session)
-			nil)
-		measured)))
+(define planner_column_average_value_bytes (lambda (src column)
+	/* Base-table width is covered by the table's coarse statistics fingerprint.
+	Do not add a second exact-value guard here: small sampling differences inside
+	the same cost class must retain the cached physical plan. */
+	(planner_column_average_value_bytes_from_statistics
+		(planner_column_statistics src column))))
 
 (define planner_group_distinct_estimate (lambda (src keys row_count)
 	(reduce keys (lambda (estimate key)
@@ -3336,7 +3326,7 @@ either physical alternative or sampling the table again. */
 					(if (physical_text_scan_operation? expr)
 						(reduce (extract_columns_for_alias src (car tail)) (lambda (total column)
 							(+ total (coalesceNil
-								(planner_column_average_value_bytes src column planning_session) 0))) 0)
+								(planner_column_average_value_bytes src column) 0))) 0)
 						0)
 					(reduce children (lambda (total child)
 						(+ total (qassoc_get child (quote broad_text_average_bytes) 0))) 0)))))
