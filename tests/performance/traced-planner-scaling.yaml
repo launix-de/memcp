@@ -56,6 +56,34 @@ setup:
   - sql: "INSERT INTO tps_prop SELECT id + 512, CASE WHEN id % 2 = 0 THEN 1 ELSE 2 END, FALSE FROM tps_prop"
 
 test_cases:
+  # This deliberately times the first cache lookup after an unchanged rebuild.
+  # Ordinary warm-query benchmarks cannot detect a periodic statistics-token
+  # invalidation because their warmup has already hidden the recompilation.
+  - name: "Unchanged rebuild retains a complex cached plan"
+    sql: &rebuild_cache_query >-
+      SELECT
+      (SELECT SUM(1) FROM tps_prop item_1 WHERE item_1.id = 1 AND COALESCE((SELECT (parent_1.owner_id = 7 OR EXISTS (SELECT TRUE FROM tps_assignment member_1 WHERE member_1.team_id = parent_1.team_id AND member_1.member_id = 7 LIMIT 1)) FROM tps_parent parent_1 WHERE parent_1.id = item_1.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_1,
+      (SELECT SUM(1) FROM tps_prop item_2 WHERE item_2.id = 1 AND COALESCE((SELECT (parent_2.owner_id = 7 OR EXISTS (SELECT TRUE FROM tps_assignment member_2 WHERE member_2.team_id = parent_2.team_id AND member_2.member_id = 7 LIMIT 1)) FROM tps_parent parent_2 WHERE parent_2.id = item_2.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_2,
+      (SELECT SUM(1) FROM tps_prop item_3 WHERE item_3.id = 1 AND COALESCE((SELECT (parent_3.owner_id = 7 OR EXISTS (SELECT TRUE FROM tps_assignment member_3 WHERE member_3.team_id = parent_3.team_id AND member_3.member_id = 7 LIMIT 1)) FROM tps_parent parent_3 WHERE parent_3.id = item_3.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_3,
+      (SELECT SUM(1) FROM tps_prop item_4 WHERE item_4.id = 1 AND COALESCE((SELECT (parent_4.owner_id = 7 OR EXISTS (SELECT TRUE FROM tps_assignment member_4 WHERE member_4.team_id = parent_4.team_id AND member_4.member_id = 7 LIMIT 1)) FROM tps_parent parent_4 WHERE parent_4.id = item_4.parent_id LIMIT 1), FALSE) LIMIT 1) AS metric_4
+    setup:
+      - scm: |
+          (begin
+            (rebuild (table "memcp-tests" "tps_prop") true false)
+            (rebuild (table "memcp-tests" "tps_parent") true false)
+            (rebuild (table "memcp-tests" "tps_assignment") true false))
+      - sql: *rebuild_cache_query
+      - scm: |
+          (begin
+            (rebuild (table "memcp-tests" "tps_prop") true false)
+            (rebuild (table "memcp-tests" "tps_parent") true false)
+            (rebuild (table "memcp-tests" "tps_assignment") true false))
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 5000
+    expect:
+      rows: 1
+
   - name: "Independent nested scalar aggregates compile within a linear budget"
     max_time: 1.0
     # The separate 48-stage suite owns the asymptotic gate. Retain this small

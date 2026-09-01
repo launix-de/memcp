@@ -193,6 +193,9 @@ functional planner return value. */
 		(planning_session "__memcp_queryplan_guard_condition_catalog" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_guard_bindings" (newsession))
 		(planning_session "__memcp_queryplan_guard_binding_catalog" (make_structural_catalog (quote ast)))
+		(planning_session "__memcp_queryplan_statistics_dependencies" (newsession))
+		(planning_session "__memcp_queryplan_statistics_dependency_catalog"
+			(make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_guarded_session_keys" (make_structural_catalog (quote ast)))
 		(planning_session "__memcp_queryplan_observed_session_keys" (newsession))
 		(planning_session "__memcp_queryplan_preparations" (newsession))
@@ -293,6 +296,40 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 				(or found (sql_queryplan_guard_references_symbol? item target))) false))
 		_ (equal? expr target))))
 
+(define sql_queryplan_statistics_guard_from_session (lambda (planning_session)
+	(begin
+		(define dependency_session
+			(planning_session "__memcp_queryplan_statistics_dependencies"))
+		(define dependencies (if (nil? dependency_session) '() (map
+			(produceN (coalesceNil (dependency_session "count") 0))
+			(lambda (idx) (dependency_session (concat "dependency:" idx))))))
+		(if (empty_list? dependencies)
+			true
+			(begin
+				(define validation_state (newsession))
+				(define compile_tokens (map dependencies cadr))
+				(define compile_fingerprints (map dependencies (lambda (dependency) (nth dependency 3))))
+				(define current_tokens_symbol (quote __queryplan_current_statistics_tokens))
+				(validation_state "tokens" compile_tokens)
+				/* Mutable validation state stays behind apply so formula optimization
+				cannot freeze the generation observed during compilation. Coarse cost
+				fingerprints are read only after a token miss. */
+				(define validated_tokens_expr (list (quote apply)
+					validation_state (list (quote list) "tokens")))
+				(define update_validated_tokens_expr (list (quote apply)
+					validation_state (list (quote list) "tokens" current_tokens_symbol)))
+				(list
+					(list (quote lambda) (list current_tokens_symbol)
+						(list (quote or)
+							(list (quote equal?) current_tokens_symbol validated_tokens_expr)
+							(list (quote if)
+								(list (quote equal?)
+									(cons (quote list) (map dependencies (lambda (dependency) (nth dependency 2))))
+									(cons (quote list) compile_fingerprints))
+								(list (quote begin) update_validated_tokens_expr true)
+								false)))
+					(cons (quote list) (map dependencies car))))))))
+
 (define sql_queryplan_guard_from_session (lambda (planning_session)
 	(begin
 		(define condition_accumulator (planning_session "__memcp_queryplan_guard_conditions"))
@@ -303,10 +340,11 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 				(map (produceN (coalesceNil (condition_accumulator "count") 0))
 					(lambda (idx) (condition_accumulator (concat "condition:" idx)))))
 			(sql_queryplan_uncovered_binding_conditions planning_session))))
+		(define statistics_guard (sql_queryplan_statistics_guard_from_session planning_session))
 		(define raw_guard (match conditions
-			(cons condition '()) condition
-			(cons _head _tail) (cons (quote and) conditions)
-			_ true))
+			(cons condition '()) (list (quote and) condition statistics_guard)
+			(cons _head _tail) (cons (quote and) (append conditions statistics_guard))
+			_ statistics_guard))
 		(define binding_session (planning_session "__memcp_queryplan_guard_bindings"))
 		(define binding_catalog (planning_session "__memcp_queryplan_guard_binding_catalog"))
 		(define all_bindings (if (nil? binding_catalog)

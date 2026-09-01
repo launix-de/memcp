@@ -835,6 +835,22 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics_fingerprint",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewNil()
+			}
+			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatisticsFingerprint()))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the coarse cost-class fingerprint of a table's immutable planner-statistics snapshot",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", Label: "table"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_order_partitioned?",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
