@@ -182,9 +182,9 @@ func BenchmarkScanOrderBatchAcceptMillion(b *testing.B) {
 		batchACLFilter := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			batch := RecSetFromScmer(values[0])
 			candidateFiles := batch.projectJoin(nil, []string{"file_id"}, fixture.files, []string{"id"})
-			acceptedFiles := recSetIntersect([]*recSet{candidateFiles, allowedFiles})
+			acceptedFiles := recSetIntersect(nil, []*recSet{candidateFiles, allowedFiles})
 			projectedDocuments := acceptedFiles.projectJoin(nil, []string{"id"}, fixture.documents, []string{"file_id"})
-			return NewRecSetScmer(recSetIntersect([]*recSet{batch, projectedDocuments}))
+			return NewRecSetScmer(recSetIntersect(nil, []*recSet{batch, projectedDocuments}))
 		})
 		b.Run(fmt.Sprintf("acl_projection_%02dpct", percent), func(b *testing.B) {
 			benchmarkBatchAcceptPair(b,

@@ -1128,9 +1128,6 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 }
 
 func (r *recSet) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
-	if currentTx == nil {
-		currentTx = r.tx
-	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{
 		recset:          r,
 		conditionCols:   conditionCols,

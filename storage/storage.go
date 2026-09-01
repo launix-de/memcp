@@ -1066,16 +1066,18 @@ func Init(en scm.Env) {
 		Name: "recset_union",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			values := mustScmerSlice(a[0], "recsets")
+			currentTx := scmerToTxContext(a[0])
+			values := mustScmerSlice(a[1], "recsets")
 			recsets := make([]*recSet, 0, len(values))
 			for _, value := range values {
 				recsets = append(recsets, RecSetFromScmer(value))
 			}
-			return NewRecSetScmer(recSetUnion(recsets))
+			return NewRecSetScmer(recSetUnion(currentTx, recsets))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "combines query-local recsets from the same table and removes duplicate record IDs",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used for cancellation and parallelism limits"},
 				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
@@ -1085,16 +1087,18 @@ func Init(en scm.Env) {
 		Name: "recset_intersect",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			values := mustScmerSlice(a[0], "recsets")
+			currentTx := scmerToTxContext(a[0])
+			values := mustScmerSlice(a[1], "recsets")
 			recsets := make([]*recSet, 0, len(values))
 			for _, value := range values {
 				recsets = append(recsets, RecSetFromScmer(value))
 			}
-			return NewRecSetScmer(recSetIntersect(recsets))
+			return NewRecSetScmer(recSetIntersect(currentTx, recsets))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "intersects query-local recsets from the same table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used for cancellation and parallelism limits"},
 				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
@@ -1104,16 +1108,18 @@ func Init(en scm.Env) {
 		Name: "recset_difference",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			values := mustScmerSlice(a[0], "recsets")
+			currentTx := scmerToTxContext(a[0])
+			values := mustScmerSlice(a[1], "recsets")
 			recsets := make([]*recSet, 0, len(values))
 			for _, value := range values {
 				recsets = append(recsets, RecSetFromScmer(value))
 			}
-			return NewRecSetScmer(recSetDifference(recsets))
+			return NewRecSetScmer(recSetDifference(currentTx, recsets))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the records from the first query-local recset which occur in none of the following same-table recsets",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used for cancellation and parallelism limits"},
 				{Kind: "list", Label: "recsets"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
@@ -1123,11 +1129,12 @@ func Init(en scm.Env) {
 		Name: "recset_not",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			return NewRecSetScmer(recSetNot(RecSetFromScmer(a[0])))
+			return NewRecSetScmer(recSetNot(scmerToTxContext(a[0]), RecSetFromScmer(a[1])))
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the complement of a query-local recset relative to the currently visible rows of its base table",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "current query transaction used to build the visible complement"},
 				{Kind: "recset", Label: "recset"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
