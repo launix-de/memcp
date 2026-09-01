@@ -1,0 +1,14 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# Keep the build context allow-listed: this repository is commonly used next to
+# real database directories and dumps which must never reach a build daemon.
+
+**
+!*.go
+!go.mod
+!go.sum
+!scm/**
+!storage/**
+!third_party/**
+!lib/**
+!assets/**
+!packaging/docker-entrypoint.sh

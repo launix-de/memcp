@@ -1,57 +1,65 @@
 # syntax=docker/dockerfile:1
+# Copyright (C) 2023 - 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 
-# Build stage
 FROM golang:1.24-alpine AS builder
 
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /build
-
-# Install git for go modules that might need it
 RUN apk add --no-cache git
 
-# Copy go mod files and local replace dependencies first for better caching
 COPY go.mod go.sum ./
 COPY third_party/ ./third_party/
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-# Copy source code
-COPY . .
+# Keep this list explicit in addition to .dockerignore. A MemCP checkout often
+# sits next to real database files which must never enter a builder context.
+COPY *.go ./
+COPY scm/ ./scm/
+COPY storage/ ./storage/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -buildvcs=false -ldflags="-s -w" -o memcp .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o memcp .
+FROM alpine:3.22
 
-# Runtime stage
-FROM alpine:3.21
+ARG VERSION=dev
+ARG REVISION=unknown
+LABEL org.opencontainers.image.title="MemCP" \
+      org.opencontainers.image.description="Smart clusterable distributed database" \
+      org.opencontainers.image.url="https://github.com/launix-de/memcp" \
+      org.opencontainers.image.source="https://github.com/launix-de/memcp" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$REVISION" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
 
-# Install ca-certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S -g 10001 memcp \
+    && adduser -S -D -H -u 10001 -G memcp memcp \
+    && install -d -o memcp -g memcp -m 0700 /data
 
 WORKDIR /app
+COPY --from=builder --chown=root:root /build/memcp ./memcp
+COPY --chown=root:root lib/ ./lib/
+COPY --chown=root:root assets/ ./assets/
+COPY --chown=root:root packaging/docker-entrypoint.sh /usr/local/bin/memcp-entrypoint
 
-# Copy the binary from builder stage
-COPY --from=builder /build/memcp .
-# Copy Scheme library (runtime scripts)
-COPY --from=builder /build/lib ./lib
-# Copy dashboard and static assets
-COPY --from=builder /build/assets ./assets
-
-# Create data directory
-RUN mkdir -p /data
-
-# Set up volumes and expose ports
+USER 10001:10001
 VOLUME /data
-EXPOSE 4321
-EXPOSE 3307
+EXPOSE 4321 3307
+STOPSIGNAL SIGTERM
 
-# Set environment variables (overridable via docker-compose)
-# ROOT_PASSWORD is only considered on the first run with a fresh data directory.
-# The image only contains the well-known default "admin"; the actual secret is
-# supplied at runtime via -e ROOT_PASSWORD=... and never baked into the image.
-# hadolint ignore=DL3002
-ENV PARAMS=
-ENV ROOT_PASSWORD=admin
-ENV APP=lib/main.scm
+ENV MEMCP_DATA_DIR=/data \
+    MEMCP_ROOT_PASSWORD_FILE=/run/secrets/memcp_root_password
 
-# Run the application (load default Scheme entrypoint)
-# --no-repl prevents the process from exiting when stdin is closed (required in containers)
-# exec replaces the shell so SIGTERM from docker stop reaches memcp directly
-CMD ["sh", "-c", "exec ./memcp --no-repl -data /data --root-password=\"$ROOT_PASSWORD\" $PARAMS $APP"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:4321/ || exit 1
+
+ENTRYPOINT ["/usr/local/bin/memcp-entrypoint"]
+CMD ["lib/main.scm"]

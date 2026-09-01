@@ -973,7 +973,8 @@ func setupIO(wd string) {
 
 			// Check for --longname=value or --longname value
 			longPrefix := "--" + longname
-			for i, arg := range os.Args {
+			for i := len(os.Args) - 1; i >= 0; i-- {
+				arg := os.Args[i]
 				if arg == longPrefix && i+1 < len(os.Args) {
 					return scm.NewString(os.Args[i+1])
 				}
@@ -985,7 +986,8 @@ func setupIO(wd string) {
 			// Check for -shortname value if shortname provided
 			if shortname != "" {
 				shortPrefix := "-" + shortname
-				for i, arg := range os.Args {
+				for i := len(os.Args) - 1; i >= 0; i-- {
+					arg := os.Args[i]
 					if arg == shortPrefix && i+1 < len(os.Args) {
 						return scm.NewString(os.Args[i+1])
 					}
@@ -1038,6 +1040,41 @@ func readConfigFile(path string) ([]string, error) {
 	return args, nil
 }
 
+// expandRootPasswordFileArgs resolves password files before the Scheme CLI
+// sees the arguments. The secret therefore never needs to be part of the
+// process command line, while the existing (arg "root-password") API remains
+// unchanged for the runtime.
+func expandRootPasswordFileArgs(args []string) ([]string, error) {
+	result := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		var passwordPath string
+		if strings.HasPrefix(arg, "--root-password-file=") {
+			passwordPath = strings.TrimPrefix(arg, "--root-password-file=")
+		} else if arg == "--root-password-file" {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--root-password-file requires a path")
+			}
+			i++
+			passwordPath = args[i]
+		} else {
+			result = append(result, arg)
+			continue
+		}
+
+		passwordBytes, err := os.ReadFile(passwordPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading root password file %s: %w", passwordPath, err)
+		}
+		password := strings.TrimRight(string(passwordBytes), "\r\n")
+		if password == "" {
+			return nil, fmt.Errorf("root password file %s is empty", passwordPath)
+		}
+		result = append(result, "--root-password="+password)
+	}
+	return result, nil
+}
+
 func main() {
 	scm.SettingsTrackSourceCoverage = os.Getenv("MEMCP_SCM_COVERAGE") == "1"
 	fmt.Print(`memcp Copyright (C) 2023 - 2026   Carl-Philip Hänsch
@@ -1078,6 +1115,12 @@ func main() {
 		}
 		os.Args = remaining
 	}
+	var err error
+	os.Args, err = expandRootPasswordFileArgs(os.Args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	// parse command line options
 	var commands arrayFlags
@@ -1098,6 +1141,9 @@ func main() {
 	noRepl := false
 	flag.BoolVar(&noRepl, "no-repl", false, "Run without interactive REPL (wait for SIGTERM/SIGINT instead)")
 
+	initialize := false
+	flag.BoolVar(&initialize, "initialize", false, "Initialize a fresh data directory and exit cleanly")
+
 	// Parse only known flags, ignore unknown ones for Scheme to handle
 	flag.CommandLine.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -1107,6 +1153,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --mysql-port=PORT      MySQL protocol port (default 3307)\n")
 		fmt.Fprintf(os.Stderr, "  --disable-api          Disable HTTP API server\n")
 		fmt.Fprintf(os.Stderr, "  --mysql-socket=PATH    Unix socket path (default /tmp/memcp.sock, empty to disable)\n")
+		fmt.Fprintf(os.Stderr, "  --root-password-file=PATH  Read the initial root password from a file\n")
 		fmt.Fprintf(os.Stderr, "  --disable-mysql        Disable MySQL protocol server\n")
 		fmt.Fprintf(os.Stderr, "... and much more (please refer to your module's documentation)\n\n")
 	}
@@ -1131,6 +1178,8 @@ func main() {
 			}
 		} else if arg == "-no-repl" || arg == "--no-repl" {
 			knownArgs = append(knownArgs, "-no-repl")
+		} else if arg == "-initialize" || arg == "--initialize" {
+			knownArgs = append(knownArgs, "-initialize")
 		} else if arg == "-h" || arg == "-help" || arg == "--help" {
 			knownArgs = append(knownArgs, arg)
 		} else if len(arg) > 2 && arg[:2] == "--" {
@@ -1169,6 +1218,7 @@ func main() {
 	// Run initialization in one goroutine so startup keeps its existing
 	// sequencing while request state remains explicit.
 	initDone := make(chan struct{})
+	scm.BeginMySQLInitialization()
 	go func() {
 		defer close(initDone)
 		storage.LoadDatabases()
@@ -1224,6 +1274,12 @@ func main() {
 		}
 	}()
 	<-initDone
+	scm.CompleteMySQLInitialization()
+	if initialize {
+		fmt.Println(storage.Clean())
+		exitroutine()
+		return
+	}
 	go func() {
 		// Cleanup is deliberately observable: legacy manifest backfill and orphan
 		// removal may reclaim substantial disk space on the first upgraded start.

@@ -37,6 +37,39 @@ type mysqlCloser interface {
 
 var mysqlListenersMu sync.Mutex
 var mysqlListeners []mysqlCloser
+var mysqlInitializationMu sync.Mutex
+var mysqlInitializationDone = func() chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}()
+var mysqlInitializationComplete = true
+
+// BeginMySQLInitialization prevents newly bound MySQL listeners from accepting
+// clients while the Scheme bootstrap is still mutating global runtime state.
+func BeginMySQLInitialization() {
+	mysqlInitializationMu.Lock()
+	defer mysqlInitializationMu.Unlock()
+	mysqlInitializationDone = make(chan struct{})
+	mysqlInitializationComplete = false
+}
+
+// CompleteMySQLInitialization publishes the initialized runtime to listeners.
+func CompleteMySQLInitialization() {
+	mysqlInitializationMu.Lock()
+	defer mysqlInitializationMu.Unlock()
+	if mysqlInitializationComplete {
+		return
+	}
+	close(mysqlInitializationDone)
+	mysqlInitializationComplete = true
+}
+
+func waitForMySQLInitialization() <-chan struct{} {
+	mysqlInitializationMu.Lock()
+	defer mysqlInitializationMu.Unlock()
+	return mysqlInitializationDone
+}
 
 // build this function into your SCM environment to offer http server capabilities
 func MySQLServe(a ...Scmer) Scmer {
@@ -59,6 +92,7 @@ func MySQLServe(a ...Scmer) Scmer {
 	mysqlListenersMu.Unlock()
 	go func() {
 		defer mysql.Close()
+		<-waitForMySQLInitialization()
 		mysql.Accept()
 	}()
 	return NewBool(true)
@@ -92,6 +126,7 @@ func MySQLServeSocket(a ...Scmer) Scmer {
 	mysqlListenersMu.Unlock()
 	go func() {
 		defer mysql.Close()
+		<-waitForMySQLInitialization()
 		mysql.Accept()
 	}()
 	return NewBool(true)

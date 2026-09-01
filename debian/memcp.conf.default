@@ -1,6 +1,6 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # memcp daemon configuration
 # One CLI argument per line. Lines starting with # are ignored.
-# Run 'dpkg-reconfigure memcp' to reconfigure interactively.
 # After editing, run: systemctl restart memcp
 
 -data /var/lib/memcp

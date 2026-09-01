@@ -1,21 +1,30 @@
 #!/bin/sh
-set -e
+# Copyright (C) 2026 Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 
-case "$1" in
+set -eu
+
+case "${1:-}" in
 	remove|purge)
-		systemctl daemon-reload 2>/dev/null || true
+		if [ -d /run/systemd/system ]; then
+			systemctl --system daemon-reload >/dev/null || true
+		fi
 		;;
 esac
 
-case "$1" in
+case "${1:-}" in
 	purge)
-		rm -rf /var/lib/memcp
-		rm -rf /etc/memcp
-		if getent passwd memcp >/dev/null 2>&1; then
-			deluser --quiet memcp 2>/dev/null || true
-		fi
-		if getent group memcp >/dev/null 2>&1; then
-			delgroup --quiet memcp 2>/dev/null || true
+		deb-systemd-helper purge memcp.service >/dev/null || true
+		# Database contents, the service account, and the one-time credential
+		# are deliberately retained. Removing a database package must never be
+		# an implicit data-destruction operation.
+		if [ -d /var/lib/memcp ] || [ -e /etc/memcp/initial-root-password ]; then
+			printf '%s\n' \
+				'memcp: database data and initial credentials were preserved' >&2
 		fi
 		;;
 esac

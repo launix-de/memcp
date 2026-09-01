@@ -285,31 +285,28 @@ The Makefile reads `VERSION` from the first word of that line (`awk '{print $1}'
 ### Release Steps
 1. Add a new entry at the top of `CHANGELOG.md` with the new version and date.
 2. Commit the changelog update to `master` (via PR as usual).
-3. Tag the release commit:
+3. Ensure the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` GitHub Actions secrets
+   are configured. Tag the reviewed release commit:
    ```
    git tag -a v0.2 -m "Release 0.2"
    git push origin v0.2
    ```
-4. Build artefacts:
+4. The tag workflow performs the release. It verifies tag/version/master,
+   rebuilds and checks the DEB, RPM, SRPM, and static binary, creates checksums
+   and provenance attestations, publishes amd64/arm64 container images, and only
+   then creates the GitHub release. Do not upload locally built replacements.
+5. For a local packaging dry run without publishing or Docker:
    ```
-   make memcp_0.2_amd64.deb memcp_0.2_x86_64.rpm
+   make memcp.deb
+   make memcp.rpm
+   make package-check
    ```
-   Output filenames include version and arch automatically (e.g. `memcp_0.2_amd64.deb`, `memcp_0.2_x86_64.rpm`).
-5. Create GitHub release with artefacts:
-   ```
-   gh release create v0.2 memcp_0.2_amd64.deb memcp_0.2_x86_64.rpm \
-     --title "v0.2" --notes-file <(sed -n '/^0\.2/,/^[0-9]/p' CHANGELOG.md | head -n -2)
-   ```
-6. Push Docker image (requires `docker login` once):
-   ```
-   make docker-release
-   ```
-   This tags `carli2/memcp:0.2` **and** `carli2/memcp:latest` and pushes both.
 
 ### Makefile Variables
-- `VERSION` — auto-read from `CHANGELOG.md`; override with `make VERSION=0.2 memcp_0.2_amd64.deb`.
+- `VERSION` — auto-read from `CHANGELOG.md`; override with `make VERSION=0.2 memcp.deb`.
 - `DEB_ARCH` — defaults to `dpkg --print-architecture` (e.g. `amd64`).
 - `RPM_ARCH` — defaults to `uname -m` (e.g. `x86_64`).
+- Package artifacts are written below `dist/`.
 
 ## MySQL ↔ MemCP Parallel Run Plan
 - Goal: operate MemCP alongside MySQL for months with minimal risk, validating correctness and performance before cutover.
