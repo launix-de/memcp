@@ -3175,6 +3175,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define s1_scope_b (newsession))
 	(assert (s1 "get_or_compute_scoped" s1_scope_a "shared" (lambda () 7)) 123 "session: scoped compute reuses first scope")
 	(assert (s1 "get_or_compute_scoped" s1_scope_b "value" (lambda () 9)) 9 "session: scoped compute isolates scopes")
+	(define s1_explicit_tx (newsession))
+	(assert (equal?
+		(s1 "get_or_compute_scoped" s1_scope_b "explicit-tx" s1_explicit_tx (lambda (tx) tx))
+		s1_explicit_tx) true "session: transactional scoped producer receives explicit tx")
+	(assert (equal?
+		(s1 "get_or_compute_scoped" s1_scope_b "explicit-tx" nil (lambda (_tx) false))
+		s1_explicit_tx) true "session: transactional scoped compute reuses the first value")
 	(assert (equal? (try (lambda () (s1 "a" "b" "c")) (lambda (e) "caught")) "caught") true "session: too many args panics")
 
 	/* deep callback signature validation */

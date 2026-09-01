@@ -32,6 +32,7 @@ type SettingsT struct {
 	Backtrace              bool
 	Trace                  bool
 	TracePrint             bool
+	TracePrintMaxLength    int // max TracePrint record bytes before a visible marker (0 = unlimited)
 	PartitionMaxDimensions int
 	DefaultEngine          string
 	ShardSize              uint
@@ -78,7 +79,7 @@ func (r CreateTableTriggerRegistration) triggerDescription() TriggerDescription 
 	}
 }
 
-var Settings SettingsT = SettingsT{false, false, false, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, 256, false, 0, false, 0, nil}
+var Settings SettingsT = SettingsT{false, false, false, 0, 10, "safe", 60000, 50, 5, 0, 0, 0, 0, false, 0, 0, false, false, 20, 256, false, 0, false, 0, nil}
 var createTableTriggerMu sync.Mutex
 
 func registerCreateTableTrigger(reg CreateTableTriggerRegistration) {
@@ -122,6 +123,7 @@ func InitSettings() {
 	scm.SettingsHaveGoodBacktraces = Settings.Backtrace
 	scm.SetTrace(Settings.Trace)
 	scm.TracePrint = Settings.TracePrint
+	scm.SetTracePrintMaxLength(Settings.TracePrintMaxLength)
 	scm.JITLog = Settings.LogJIT
 	onexit.Register(func() { scm.SetTrace(false) }) // close trace file on exit
 	InitCacheManager()
@@ -134,6 +136,7 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			scm.NewString("Backtrace"), scm.NewBool(Settings.Backtrace),
 			scm.NewString("Trace"), scm.NewBool(Settings.Trace),
 			scm.NewString("TracePrint"), scm.NewBool(Settings.TracePrint),
+			scm.NewString("TracePrintMaxLength"), scm.NewInt(int64(Settings.TracePrintMaxLength)),
 			scm.NewString("PartitionMaxDimensions"), scm.NewInt(int64(Settings.PartitionMaxDimensions)),
 			scm.NewString("DefaultEngine"), scm.NewString(Settings.DefaultEngine),
 			scm.NewString("ShardSize"), scm.NewInt(int64(Settings.ShardSize)),
@@ -163,6 +166,8 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 			return scm.NewBool(Settings.Trace)
 		case "TracePrint":
 			return scm.NewBool(Settings.TracePrint)
+		case "TracePrintMaxLength":
+			return scm.NewInt(int64(Settings.TracePrintMaxLength))
 		case "PartitionMaxDimensions":
 			return scm.NewInt(int64(Settings.PartitionMaxDimensions))
 		case "DefaultEngine":
@@ -217,6 +222,12 @@ func ChangeSettings(a ...scm.Scmer) scm.Scmer {
 		case "TracePrint":
 			Settings.TracePrint = scm.ToBool(a[1])
 			scm.TracePrint = Settings.TracePrint
+		case "TracePrintMaxLength":
+			Settings.TracePrintMaxLength = scm.ToInt(a[1])
+			if Settings.TracePrintMaxLength < 0 {
+				Settings.TracePrintMaxLength = 0
+			}
+			scm.SetTracePrintMaxLength(Settings.TracePrintMaxLength)
 		case "PartitionMaxDimensions":
 			Settings.PartitionMaxDimensions = scm.ToInt(a[1])
 		case "DefaultEngine":

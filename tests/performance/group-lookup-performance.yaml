@@ -245,10 +245,12 @@ test_cases:
         (define elapsed
           (with_session session (lambda ()
             (with_autocommit session nil 0 "group lookup setup" (lambda (tx) (begin
-              (eval formula)
+              (sql_execute_formula session tx formula resultrow (lambda (_fields) nil))
               (define started (nanotime))
               (reduce (produceN iterations)
-                (lambda (count _index) (begin (eval formula) (+ count 1))) 0)
+                (lambda (count _index) (begin
+                  (sql_execute_formula session tx formula resultrow (lambda (_fields) nil))
+                  (+ count 1))) 0)
               (- (nanotime) started)))))))
         (define average_ns (/ elapsed iterations))
         (if (< average_ns 1000000)

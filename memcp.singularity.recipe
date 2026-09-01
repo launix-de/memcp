@@ -1,22 +1,26 @@
-Bootstrap: docker
-From: ubuntu:22.04
+# Copyright (C) 2026 Carl-Philip Haensch
+# This program is free software under the GNU GPL version 3 or later.
 
-# build with: sudo singularity build memcp.sif memcp.singularity.recipe
-# run with: singularity run --bind `pwd`:/data memcp.sif
+Bootstrap: docker
+From: alpine:3.22
+
+%files
+	memcp /app/memcp
+	lib /app/lib
+	assets /app/assets
+	packaging/docker-entrypoint.sh /usr/local/bin/memcp-entrypoint
 
 %post
-	apt-get -y update
-	apt-get -y install git software-properties-common
-	add-apt-repository -y ppa:longsleep/golang-backports
-	apt-get -y install golang
-
-	git clone https://github.com/launix-de/memcp /memcp
-	cd /memcp
-	go get
-	go build
+	apk add --no-cache ca-certificates
+	chmod 0755 /app/memcp /usr/local/bin/memcp-entrypoint
+	mkdir -p /data
 
 %environment
-	export PATH="/memcp:$PATH"
+	export MEMCP_DATA_DIR=/data
+	export MEMCP_ROOT_PASSWORD_FILE=/run/secrets/memcp_root_password
 
 %runscript
-	cd /memcp && ./memcp -data /data
+	if [ "$#" -eq 0 ]; then
+		set -- lib/main.scm
+	fi
+	exec /usr/local/bin/memcp-entrypoint "$@"

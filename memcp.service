@@ -1,5 +1,9 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+# This program is free software under the GNU GPL version 3 or later.
+
 [Unit]
 Description=memcp smart clusterable distributed database
+Documentation=https://github.com/launix-de/memcp
 After=network.target
 
 [Service]
@@ -12,6 +16,33 @@ ConfigurationDirectory=memcp
 ExecStart=/usr/bin/memcp --no-repl --config=/etc/memcp/memcp.conf
 Restart=on-failure
 TimeoutStopSec=300
+UMask=0077
+
+# The JIT requires executable mappings, so MemoryDenyWriteExecute cannot be
+# enabled. The remaining sandbox keeps the database state and runtime socket as
+# the only writable host paths.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/memcp /run/memcp
 
 [Install]
 WantedBy=multi-user.target

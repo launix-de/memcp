@@ -1,0 +1,359 @@
+# Copyright (C) 2026  Carl-Philip Haensch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+metadata:
+  version: "1.0"
+  description: "Deleted rows and request-local ACL carriers remain visible only in their valid snapshot"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS drcv_idlist"
+  - sql: "DROP TABLE IF EXISTS drcv_access"
+  - sql: "DROP TABLE IF EXISTS drcv_item"
+  - sql: "DROP TABLE IF EXISTS drcv_domain"
+  - sql: "DROP TABLE IF EXISTS drcv_tenant"
+  - sql: "CREATE TABLE drcv_tenant (id INT PRIMARY KEY, direct_flag BOOL, label TEXT)"
+  - sql: "CREATE TABLE drcv_domain (id INT PRIMARY KEY, tenant_id INT, direct_flag BOOL, label TEXT)"
+  - sql: "CREATE TABLE drcv_item (id INT PRIMARY KEY, domain_id INT, bucket_id INT, sort_key INT)"
+  - sql: "CREATE TABLE drcv_access (id INT PRIMARY KEY, actor_id INT, tenant_id INT, domain_id INT, allowed BOOL)"
+  - sql: "CREATE TABLE drcv_idlist (list_id INT, item_id INT)"
+  - sql: "INSERT INTO drcv_tenant (id, direct_flag, label) VALUES (1, FALSE, 'tenant-one'), (2, FALSE, 'tenant-two')"
+  - sql: "INSERT INTO drcv_domain (id, tenant_id, direct_flag, label) VALUES (1, 1, FALSE, 'one'), (2, 2, FALSE, 'two'), (3, 1, TRUE, 'three')"
+  - sql: "INSERT INTO drcv_item (id, domain_id, bucket_id, sort_key) VALUES (11, 1, 7, 40), (12, 1, 7, 30), (21, 2, 7, 20), (31, 3, 7, 10)"
+  - sql: "INSERT INTO drcv_access (id, actor_id, tenant_id, domain_id, allowed) VALUES (1, 101, NULL, NULL, TRUE), (2, 202, 2, 2, TRUE)"
+  - scm: |
+      (begin
+      (rebuild (table "memcp-tests" "drcv_domain") true false)
+      (rebuild (table "memcp-tests" "drcv_tenant") true false)
+      (rebuild (table "memcp-tests" "drcv_item") true false)
+      (rebuild (table "memcp-tests" "drcv_access") true false))
+
+test_cases:
+  - name: "Build a RecSet before deleting one of its rows"
+    scm: |
+      (begin
+      (define tbl (table "memcp-tests" "drcv_item"))
+      (define before_delete
+        (scan_recset nil tbl
+          '("bucket_id")
+          (lambda (bucket_id) (equal? bucket_id 7))))
+      (define deleted
+        (scan nil tbl
+          '("id")
+          (lambda (id) (equal? id 12))
+          '("$update")
+          (lambda ($update) (if ($update) 1 0))
+          +
+          0))
+      (define unordered
+        (scan nil before_delete
+          '("id")
+          (lambda (id) true)
+          '("id")
+          (lambda (id) id)
+          +
+          0))
+      (define ordered
+        (scan_order nil before_delete
+          '("id")
+          (lambda (id) true)
+          '("sort_key" "id")
+          '(< <)
+          0 0 10
+          '("id")
+          (lambda (id) (list id))
+          (lambda (rows row) (append rows row))
+          '()
+          false))
+      (define narrowed
+        (scan_recset nil before_delete
+          '("id")
+          (lambda (id) true)))
+      (if (and (equal? deleted 1)
+        (equal? unordered 63)
+        (equal? ordered (list (list 31) (list 21) (list 11)))
+        (equal? (recset_count narrowed) 3)
+        (not (scan_exists nil before_delete
+          '("id")
+          (lambda (id) (equal? id 12)))))
+        "ok"
+        (error "a RecSet consumer emitted a row deleted after RecSet construction")))
+
+  - name: "Bind the unrestricted request session"
+    session_id: "drcv_unrestricted"
+    sql: "SET @drcv_actor = 101"
+    expect:
+      rows_affected: 0
+
+  - name: "Bind the restricted request session"
+    session_id: "drcv_restricted"
+    sql: "SET @drcv_actor = 202"
+    expect:
+      rows_affected: 0
+
+  - name: "A residual outer key inside OR is bound for every correlated domain row"
+    session_id: "drcv_unrestricted"
+    sql: |
+      SELECT i.id
+      FROM drcv_item i
+      WHERE i.bucket_id = 7
+        AND COALESCE((
+          SELECT CASE
+            WHEN d.direct_flag THEN TRUE
+            ELSE EXISTS (
+              SELECT 1
+              FROM drcv_access a
+              WHERE a.actor_id = @drcv_actor
+                AND (a.domain_id IS NULL OR a.domain_id = d.id)
+                AND a.allowed
+              LIMIT 1
+            )
+          END
+          FROM drcv_domain d
+          WHERE d.id = i.domain_id
+          LIMIT 1
+        ), FALSE)
+      ORDER BY i.id
+    expect:
+      rows: 3
+      data:
+        - id: 11
+        - id: 21
+        - id: 31
+
+  - &derived_id_projection
+    name: "ID-only projection keeps rows from a compound request-local ACL carrier"
+    session_id: "drcv_unrestricted"
+    sql: |
+      SELECT projected.id
+      FROM (
+      SELECT
+        i.id,
+        i.domain_id,
+        ref_domain.label AS domain_label,
+        COALESCE((
+          SELECT CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM drcv_access global_access
+              WHERE global_access.actor_id = @drcv_actor
+                AND global_access.domain_id IS NULL
+              LIMIT 1
+            ) THEN TRUE
+            ELSE (
+              EXISTS (
+                SELECT 1
+                FROM drcv_access direct_access
+                WHERE direct_access.actor_id = @drcv_actor
+                  AND direct_access.domain_id = acl_domain.id
+                  AND direct_access.allowed
+                LIMIT 1
+              )
+              OR COALESCE((
+                SELECT fallback_access.allowed
+                FROM drcv_access fallback_access
+                WHERE fallback_access.actor_id = @drcv_actor
+                  AND fallback_access.domain_id = acl_domain.id
+                LIMIT 1
+              ), FALSE)
+            )
+          END
+          FROM drcv_domain acl_domain
+          WHERE acl_domain.id = i.domain_id
+          LIMIT 1
+        ), FALSE) AS can_view
+      FROM drcv_item i
+      LEFT JOIN (
+        SELECT id, label
+        FROM drcv_domain
+      ) ref_domain ON ref_domain.id = i.domain_id
+      WHERE i.bucket_id = 7
+        AND COALESCE((
+          SELECT CASE
+            WHEN acl_domain.direct_flag THEN TRUE
+            ELSE EXISTS (
+              SELECT 1
+              FROM drcv_access row_access
+              WHERE row_access.actor_id = @drcv_actor
+                AND (row_access.domain_id IS NULL OR row_access.domain_id = acl_domain.id)
+                AND row_access.allowed
+              LIMIT 1
+            )
+          END
+          FROM drcv_domain acl_domain
+          WHERE acl_domain.id = i.domain_id
+          LIMIT 1
+        ), FALSE)
+      ) projected
+      LEFT JOIN drcv_domain sorter_domain ON sorter_domain.id = projected.domain_id
+      WHERE projected.domain_id = 1
+        AND TRUE
+    expect:
+      rows: 1
+      data:
+        - id: 11
+
+  - <<: *derived_id_projection
+    name: "The shared query shape rebinds a restricted request session"
+    session_id: "drcv_restricted"
+    expect:
+      rows: 0
+      data: []
+
+  - <<: *derived_id_projection
+    name: "The shared query shape rebinds the unrestricted request again"
+
+  - &nested_acl_id_filter
+    name: "A nested request ACL retains the selected ID list"
+    session_id: "drcv_unrestricted"
+    sql: |
+      SELECT i.id
+      FROM drcv_item i
+      WHERE (
+        EXISTS (
+          SELECT 1
+          FROM drcv_access global_access
+          WHERE global_access.actor_id = @drcv_actor
+            AND global_access.tenant_id IS NULL
+            AND global_access.domain_id IS NULL
+          LIMIT 1
+        )
+        OR NOT EXISTS (
+          SELECT 1
+          FROM drcv_access global_deny_guard
+          WHERE global_deny_guard.actor_id = @drcv_actor
+            AND global_deny_guard.tenant_id IS NULL
+            AND global_deny_guard.domain_id IS NULL
+          LIMIT 1
+        )
+      )
+      AND COALESCE((
+        SELECT
+          (
+            EXISTS (
+              SELECT 1
+              FROM drcv_access repeated_global_access
+              WHERE repeated_global_access.actor_id = @drcv_actor
+                AND repeated_global_access.tenant_id IS NULL
+                AND repeated_global_access.domain_id IS NULL
+              LIMIT 1
+            )
+            OR CASE
+              WHEN d.direct_flag THEN TRUE
+              ELSE EXISTS (
+                SELECT 1
+                FROM drcv_access domain_access
+                WHERE domain_access.actor_id = @drcv_actor
+                  AND COALESCE(domain_access.domain_id, d.id) = d.id
+                  AND domain_access.allowed
+                LIMIT 1
+              )
+            END
+          )
+          AND COALESCE((
+            SELECT
+              EXISTS (
+                SELECT 1
+                FROM drcv_access repeated_tenant_global_access
+                WHERE repeated_tenant_global_access.actor_id = @drcv_actor
+                  AND repeated_tenant_global_access.tenant_id IS NULL
+                  AND repeated_tenant_global_access.domain_id IS NULL
+                LIMIT 1
+              )
+              OR CASE
+                WHEN t.direct_flag THEN TRUE
+                ELSE EXISTS (
+                  SELECT 1
+                  FROM drcv_access tenant_access
+                  WHERE tenant_access.actor_id = @drcv_actor
+                    AND COALESCE(tenant_access.tenant_id, t.id) = t.id
+                    AND tenant_access.allowed
+                  LIMIT 1
+                )
+              END
+            FROM drcv_tenant t
+            WHERE t.id = d.tenant_id
+            LIMIT 1
+          ), FALSE)
+        FROM drcv_domain d
+        WHERE d.id = i.domain_id
+        LIMIT 1
+      ), FALSE)
+      AND i.id IN (11, 12, 21, 31)
+      ORDER BY i.id
+    expect:
+      rows: 3
+      data:
+        - id: 11
+        - id: 21
+        - id: 31
+
+  - <<: *nested_acl_id_filter
+    name: "The nested request ACL rebinds all repeated stages"
+    session_id: "drcv_restricted"
+    expect:
+      rows: 1
+      data:
+        - id: 21
+
+  - name: "Delete the selected base row through SQL"
+    sql: "DELETE FROM drcv_item WHERE id = 11"
+    expect:
+      rows_affected: 1
+
+  - <<: *derived_id_projection
+    name: "The same planned carrier excludes the SQL-deleted row"
+    expect:
+      rows: 0
+      data: []
+
+  - name: "Select-all ID insertion cannot copy a deleted row"
+    session_id: "drcv_unrestricted"
+    sql: |
+      INSERT INTO drcv_idlist (list_id, item_id)
+      SELECT 77, i.id
+      FROM drcv_item i
+      WHERE i.bucket_id = 7
+        AND i.domain_id = 1
+        AND COALESCE((
+          SELECT CASE
+            WHEN d.direct_flag THEN TRUE
+            ELSE EXISTS (
+              SELECT 1
+              FROM drcv_access a
+              WHERE a.actor_id = @drcv_actor
+                AND (a.domain_id IS NULL OR a.domain_id = d.id)
+                AND a.allowed
+              LIMIT 1
+            )
+          END
+          FROM drcv_domain d
+          WHERE d.id = i.domain_id
+          LIMIT 1
+        ), FALSE)
+    expect:
+      rows_affected: 0
+
+  - name: "The ID helper remains empty"
+    sql: "SELECT item_id FROM drcv_idlist WHERE list_id = 77"
+    expect:
+      rows: 0
+      data: []
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS drcv_idlist"
+  - sql: "DROP TABLE IF EXISTS drcv_access"
+  - sql: "DROP TABLE IF EXISTS drcv_item"
+  - sql: "DROP TABLE IF EXISTS drcv_domain"
+  - sql: "DROP TABLE IF EXISTS drcv_tenant"

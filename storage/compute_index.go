@@ -252,6 +252,28 @@ func isIndependent(params []scm.Scmer, expr scm.Scmer) bool {
 	return true
 }
 
+// hasExplicitOuterReference reports whether expr contains an optimizer-lowered
+// capture. The expression is part of a procedure body, so evaluating such a
+// capture must start in a synthetic call frame rather than directly in the
+// procedure's creation environment.
+func hasExplicitOuterReference(expr scm.Scmer) bool {
+	if expr.IsProc() {
+		return false
+	}
+	if !expr.IsSlice() {
+		return false
+	}
+	if _, _, ok := scanOuterReference(expr); ok {
+		return true
+	}
+	for _, item := range expr.Slice() {
+		if hasExplicitOuterReference(item) {
+			return true
+		}
+	}
+	return false
+}
+
 // evalIndependentScmer evaluates an expression that doesn't depend on row params.
 // Returns (value, true) when evaluation succeeds with a scalar result.
 func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bool) {
@@ -333,6 +355,19 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 		return res, true
 	}
 	return scm.NewNil(), false
+}
+
+// evalIndependentProcBodyScmer evaluates an independent fragment extracted
+// from proc.Body. An explicit (outer 1 ...) is relative to the procedure call
+// frame which normally exists while the body runs, not directly to proc.En.
+// Build that otherwise-empty frame only for expressions which need it; common
+// literal and session-read boundaries retain the allocation-free path.
+func evalIndependentProcBodyScmer(expr scm.Scmer, proc *scm.Proc) (scm.Scmer, bool) {
+	if !hasExplicitOuterReference(expr) {
+		return evalIndependentScmer(expr, proc.En)
+	}
+	bodyEnv := scm.Env{Outer: proc.En}
+	return evalIndependentScmer(expr, &bodyEnv)
 }
 
 // canonicalColName builds a stable canonical name for a computed index column.

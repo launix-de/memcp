@@ -21,6 +21,8 @@ metadata:
 setup:
   - sql: "DROP TABLE IF EXISTS `.creation_barrier`"
   - sql: "DROP TABLE IF EXISTS `.transactionless_cache_init`"
+  - sql: "DROP TABLE IF EXISTS `.transactionless_stream_cache`"
+  - sql: "DROP TABLE IF EXISTS stream_cache_source"
   - sql: "DROP TABLE IF EXISTS aggregate_source"
   - sql: |
       CREATE TABLE aggregate_source (
@@ -28,8 +30,51 @@ setup:
         nullable_key INT,
         value DECIMAL(12,2)
       )
+  - sql: "CREATE TABLE stream_cache_source (id INT PRIMARY KEY)"
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "stream_cache_source")
+          '("id")
+          (map (produceN 64) (lambda (id) (list id))))
+        (partitiontable
+          (table "memcp-tests" "stream_cache_source")
+          (list (list "id"
+            (list 8 16 24 32 40 48 56)))))
 
 test_cases:
+  - name: "Transactionless cache serializes emissions from parallel source shards"
+    scm: |
+      (begin
+        (createtable
+          "memcp-tests"
+          ".transactionless_stream_cache"
+          (list (list "column" "row_count" "int" (list) (list)))
+          (list "engine" "cache")
+          true nil)
+        (define cache (table "memcp-tests" ".transactionless_stream_cache"))
+        (initialize_cache_table nil cache
+          (list (table "memcp-tests" "stream_cache_source"))
+          (lambda (_tx) true)
+          (lambda (_tx)
+            (insert cache '("row_count")
+              (list (list
+                (stream_window_reduce 0 -1
+                  (lambda (acc value)
+                    (+ (begin (sleep 0.001) acc) value))
+                  0
+                  (lambda (emit)
+                    (scan nil
+                      (table "memcp-tests" "stream_cache_source")
+                      '() (lambda () true)
+                      '("id") (lambda (id) (emit 1)))))))
+              '() (lambda () true) false nil nil)))
+        (scan nil cache
+          '() (lambda () true)
+          '("row_count") (lambda (row_count) row_count)
+          + 0))
+    expect:
+      data: [64]
+
   - name: "Internal cache initialization needs no client query session"
     scm: |
       (begin
@@ -43,8 +88,8 @@ test_cases:
         (initialize_cache_table nil
           (table "memcp-tests" ".transactionless_cache_init")
           (list (table "memcp-tests" "aggregate_source"))
-          (lambda () true)
-          (lambda ()
+          (lambda (tx) true)
+          (lambda (tx)
             (insert
               (table "memcp-tests" ".transactionless_cache_init")
               (list "id")
@@ -202,4 +247,6 @@ test_cases:
 cleanup:
   - sql: "DROP TABLE IF EXISTS `.creation_barrier`"
   - sql: "DROP TABLE IF EXISTS `.transactionless_cache_init`"
+  - sql: "DROP TABLE IF EXISTS `.transactionless_stream_cache`"
+  - sql: "DROP TABLE IF EXISTS stream_cache_source"
   - sql: "DROP TABLE IF EXISTS aggregate_source"
