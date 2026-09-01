@@ -67,8 +67,9 @@ jobs:
             PERF_AB_MODE=record \
             PERF_BASELINE_FILE="$baseline" \
             PERF_BASELINE_SEED="$seed" \
-            PERF_REPEAT=100 \
-            PERF_MIN_MEASURE_MS=250 \
+            PERF_REPEAT=1000 \
+            PERF_MIN_MEASURE_MS=1000 \
+            PERF_AB_JITTER_MS=50 \
             PERF_SETUP_MAX_TIME_SEC=120 \
             MEMCP_TEST_JOBS=4 \
             MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/base" \
@@ -78,8 +79,9 @@ jobs:
           (cd candidate && env \
             PERF_AB_MODE=compare \
             PERF_BASELINE_FILE="$baseline" \
-            PERF_REPEAT=100 \
-            PERF_MIN_MEASURE_MS=250 \
+            PERF_REPEAT=1000 \
+            PERF_MIN_MEASURE_MS=1000 \
+            PERF_AB_JITTER_MS=50 \
             PERF_SETUP_MAX_TIME_SEC=120 \
             MEMCP_TEST_JOBS=4 \
             MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/candidate" \
