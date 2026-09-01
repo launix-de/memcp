@@ -254,13 +254,65 @@ func (c *indexAnalyzeContext) ExtractConstant(v scm.Scmer) (scm.Scmer, bool) {
 		}
 	}
 	if isIndependent(c.params, v) {
-		if value, ok := evalIndependentScmer(v, c.proc.En); ok {
+		if value, ok := evalIndependentProcBodyScmer(v, c.proc); ok {
 			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsBool() || value.IsNil() || value.IsCustom(TagRecSet) {
 				return value, true
 			}
 		}
 	}
 	return scm.NewNil(), false
+}
+
+// materializeComputedExpr replaces request-local constant subexpressions with
+// their values before a computed index is identified and named. Optimized SQL
+// plans represent an explicit session lookup as ((outer n (var i)) key). That
+// lookup is independent of the scanned row, but isRawDataset cannot classify
+// the dynamic callable head as a foldable storage expression. Keeping it in
+// the index formula would also make the canonical name independent of the
+// actual lookup value. Materializing only row-independent subtrees preserves
+// the column-dependent expression while producing a stable, reusable index.
+func (c *indexAnalyzeContext) materializeComputedExpr(expr scm.Scmer) scm.Scmer {
+	expr = expr.WithoutSourceInfo()
+	// A computed column must depend on at least one scanned-row parameter. An
+	// explicit outer capture may itself be a slice; materializing that complete
+	// operand to (for example) integer 1 must not turn it into a constant
+	// computed index named ".1". Only materialize independent descendants once
+	// the complete expression is known to remain row-dependent.
+	if isIndependent(c.params, expr) {
+		return expr
+	}
+	return c.materializeComputedExprParts(expr)
+}
+
+func (c *indexAnalyzeContext) materializeComputedExprParts(expr scm.Scmer) scm.Scmer {
+	expr = expr.WithoutSourceInfo()
+	if isIndependent(c.params, expr) {
+		if value, ok := c.ExtractConstant(expr); ok {
+			return value
+		}
+	}
+	if !expr.IsSlice() {
+		return expr
+	}
+	items := expr.Slice()
+	if len(items) > 0 && scanSymbolIs(items[0], "quote") {
+		return expr
+	}
+	var materialized []scm.Scmer
+	for i, item := range items {
+		value := c.materializeComputedExprParts(item)
+		if materialized == nil && value != item {
+			materialized = make([]scm.Scmer, len(items))
+			copy(materialized, items[:i])
+		}
+		if materialized != nil {
+			materialized[i] = value
+		}
+	}
+	if materialized == nil {
+		return expr
+	}
+	return scm.NewSlice(materialized)
 }
 
 func (c *indexAnalyzeContext) FunctionIs(v scm.Scmer, name string) bool {
@@ -678,18 +730,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			}
 			// computed col: (equal? rawDataset independent) or reversed
 			if len(params) > 0 && v[1].IsSlice() {
-				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
-					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
-						canon := canonicalColName(v[1], params, conditionCols)
-						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+				computedExpr := analyzeContext.materializeComputedExpr(v[1])
+				if isRawDataset(params, computedExpr) && isIndependent(params, v[2]) {
+					if v2, ok2 := evalIndependentProcBodyScmer(v[2], p); ok2 {
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
-				} else if isRawDataset(params, v[1]) {
+				} else if isRawDataset(params, computedExpr) {
 					if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
-						canon := canonicalColName(v[1], params, conditionCols)
-						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
@@ -697,18 +750,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 				}
 			}
 			if len(params) > 0 && v[2].IsSlice() {
-				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
-					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
-						canon := canonicalColName(v[2], params, conditionCols)
-						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+				computedExpr := analyzeContext.materializeComputedExpr(v[2])
+				if isRawDataset(params, computedExpr) && isIndependent(params, v[1]) {
+					if v2, ok2 := evalIndependentProcBodyScmer(v[1], p); ok2 {
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lower: v2, lowerInclusive: true, upper: v2, upperInclusive: true, mapCols: mc, mapFn: mf}}
 						}
 					}
-				} else if isRawDataset(params, v[2]) {
+				} else if isRawDataset(params, computedExpr) {
 					if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
-						canon := canonicalColName(v[2], params, conditionCols)
-						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: EqualMatcher, lowerInclusive: true, upperInclusive: true, lowerBatch: true, lowerBatchSubidx: subidx, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
@@ -737,18 +791,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			}
 			// computed col: rawDataset < independent → rawDataset has upper bound
 			if len(params) > 0 && v[1].IsSlice() {
-				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
-					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
-						canon := canonicalColName(v[1], params, conditionCols)
-						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+				computedExpr := analyzeContext.materializeComputedExpr(v[1])
+				if isRawDataset(params, computedExpr) && isIndependent(params, v[2]) {
+					if v2, ok2 := evalIndependentProcBodyScmer(v[2], p); ok2 {
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
-				} else if isRawDataset(params, v[1]) {
+				} else if isRawDataset(params, computedExpr) {
 					if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
-						canon := canonicalColName(v[1], params, conditionCols)
-						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
@@ -757,18 +812,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			}
 			// reversed computed: independent < rawDataset → rawDataset has lower bound
 			if len(params) > 0 && v[2].IsSlice() {
-				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
-					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
-						canon := canonicalColName(v[2], params, conditionCols)
-						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+				computedExpr := analyzeContext.materializeComputedExpr(v[2])
+				if isRawDataset(params, computedExpr) && isIndependent(params, v[1]) {
+					if v2, ok2 := evalIndependentProcBodyScmer(v[1], p); ok2 {
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
-				} else if isRawDataset(params, v[2]) {
+				} else if isRawDataset(params, computedExpr) {
 					if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
-						canon := canonicalColName(v[2], params, conditionCols)
-						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
@@ -797,18 +853,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			}
 			// computed col: rawDataset > independent → rawDataset has lower bound
 			if len(params) > 0 && v[1].IsSlice() {
-				if isRawDataset(params, v[1]) && isIndependent(params, v[2]) {
-					if v2, ok2 := evalIndependentScmer(v[2], p.En); ok2 {
-						canon := canonicalColName(v[1], params, conditionCols)
-						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+				computedExpr := analyzeContext.materializeComputedExpr(v[1])
+				if isRawDataset(params, computedExpr) && isIndependent(params, v[2]) {
+					if v2, ok2 := evalIndependentProcBodyScmer(v[2], p); ok2 {
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: v2, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, mapCols: mc, mapFn: mf}}
 						}
 					}
-				} else if isRawDataset(params, v[1]) {
+				} else if isRawDataset(params, computedExpr) {
 					if subidx, ok := analyzeContext.resolveBatchSubidx(v[2]); ok {
-						canon := canonicalColName(v[1], params, conditionCols)
-						mc, mf := buildComputedFn(v[1], p.Params, p.En, conditionCols)
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lowerInclusive: incl, upper: scm.NewNil(), upperInclusive: false, lowerBatch: true, lowerBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}
@@ -817,18 +874,19 @@ func extractBoundariesGeneral(conditionCols []string, condition scm.Scmer) bound
 			}
 			// reversed computed: independent > rawDataset → rawDataset has upper bound
 			if len(params) > 0 && v[2].IsSlice() {
-				if isRawDataset(params, v[2]) && isIndependent(params, v[1]) {
-					if v2, ok2 := evalIndependentScmer(v[1], p.En); ok2 {
-						canon := canonicalColName(v[2], params, conditionCols)
-						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+				computedExpr := analyzeContext.materializeComputedExpr(v[2])
+				if isRawDataset(params, computedExpr) && isIndependent(params, v[1]) {
+					if v2, ok2 := evalIndependentProcBodyScmer(v[1], p); ok2 {
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upper: v2, upperInclusive: incl, mapCols: mc, mapFn: mf}}
 						}
 					}
-				} else if isRawDataset(params, v[2]) {
+				} else if isRawDataset(params, computedExpr) {
 					if subidx, ok := analyzeContext.resolveBatchSubidx(v[1]); ok {
-						canon := canonicalColName(v[2], params, conditionCols)
-						mc, mf := buildComputedFn(v[2], p.Params, p.En, conditionCols)
+						canon := canonicalColName(computedExpr, params, conditionCols)
+						mc, mf := buildComputedFn(computedExpr, p.Params, p.En, conditionCols)
 						if !mf.IsNil() && mc != nil {
 							return boundaries{columnboundaries{col: canon, matcher: RangeMatcher, lower: scm.NewNil(), lowerInclusive: false, upperInclusive: incl, upperBatch: true, upperBatchSubidx: subidx, mapCols: mc, mapFn: mf}}
 						}

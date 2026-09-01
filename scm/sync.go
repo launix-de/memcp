@@ -237,7 +237,7 @@ func sessionEnsureScopedCleanup(sess *session, scope Scmer, ctx context.Context)
 	})
 }
 
-func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, tx Scmer, producer Scmer) Scmer {
+func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, tx Scmer, producer Scmer, passTx bool) Scmer {
 	computeKey := sessionScopedKey{scope: scope, key: key}
 	sess.Mu.Lock()
 	if value, ok := sess.ScopedValues[computeKey]; ok {
@@ -275,7 +275,11 @@ func sessionGetOrComputeScoped(sess *session, scope Scmer, key string, tx Scmer,
 				flight.failed = true
 			}
 		}()
-		flight.value = Apply(producer)
+		if passTx {
+			flight.value = Apply(producer, tx)
+		} else {
+			flight.value = Apply(producer)
+		}
 	}()
 
 	sess.Mu.Lock()
@@ -317,12 +321,12 @@ func NewSession(a ...Scmer) Scmer {
 			if a[0].String() != "get_or_compute_scoped" {
 				panic("session: unknown 4-argument operation")
 			}
-			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[1], a[3])
+			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[1], a[3], false)
 		case 5:
 			if a[0].String() != "get_or_compute_scoped" {
 				panic("session: unknown 5-argument operation")
 			}
-			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3], a[4])
+			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3], a[4], true)
 		case 1:
 			sess.Mu.RLock()
 			defer sess.Mu.RUnlock()
@@ -358,8 +362,8 @@ var sessionCallableType = &TypeDescriptor{Kind: "func", Label: "session", Descri
 		{Kind: "any", Label: "key_or_operation", Description: "key, or get_or_compute_scoped", Optional: true},
 		{Kind: "any", Label: "value_or_scope", Description: "value to store, or scope for get_or_compute_scoped", Optional: true},
 		{Kind: "any", Label: "scoped_key", Description: "cache key used by get_or_compute_scoped", Optional: true},
-		{Kind: "func", CallsOnce: true, Label: "scoped_producer", Description: "producer used only by the four-argument get_or_compute_scoped form", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "value", Description: "computed value cached for the scope and key"}},
-		{Kind: "any", Label: "scoped_finalizer", Description: "optional finalizer for scoped cache entries", Optional: true},
+		{Kind: "func", CallsOnce: true, Label: "scoped_producer", Description: "producer used by the four-argument get_or_compute_scoped form", Optional: true, Params: []*TypeDescriptor{}, Return: &TypeDescriptor{Kind: "any", Label: "value", Description: "computed value cached for the scope and key"}},
+		{Kind: "func", CallsOnce: true, Label: "transactional_scoped_producer", Description: "producer used by the five-argument get_or_compute_scoped form and called with its explicit transaction argument", Optional: true, Params: []*TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &TypeDescriptor{Kind: "any", Label: "value", Description: "computed value cached for the scope and key"}},
 	},
 	Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "value list, stored value, retrieved value, or shared computed value"},
 }

@@ -41,6 +41,106 @@ func TestSortedBoundariesCoverCondition(t *testing.T) {
 	}
 }
 
+func TestBoundaryConstantThroughCapturedCallable(t *testing.T) {
+	dictionary := scm.NewFastDictValue(1)
+	dictionary.Set(scm.NewString("id"), scm.NewInt(424), nil)
+	lookup := scm.NewFastDict(dictionary)
+	outerEnv := &scm.Env{VarsNumbered: []scm.Scmer{lookup}, Outer: &scm.Globalenv}
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewNthLocalVar(0),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("outer"),
+				scm.NewInt(1),
+				scm.NewNthLocalVar(0),
+			}),
+			scm.NewString("id"),
+		}),
+	})
+	condition := scm.NewProcStruct(scm.Proc{
+		Params:       scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")}),
+		Body:         body,
+		En:           outerEnv,
+		NumVars:      1,
+		NumberedOnly: true,
+	})
+
+	bounds := extractBoundaries([]string{"ID"}, condition)
+	if len(bounds) != 1 || bounds[0].col != "ID" || bounds[0].matcher != EqualMatcher || bounds[0].lower.Int() != 424 {
+		t.Fatalf("captured callable boundary = %#v, want ID = 424", bounds)
+	}
+}
+
+func TestComputedBoundaryThroughCapturedCallable(t *testing.T) {
+	dictionary := scm.NewFastDictValue(2)
+	dictionary.Set(scm.NewString("offset"), scm.NewInt(1), nil)
+	dictionary.Set(scm.NewString("value"), scm.NewInt(18), nil)
+	lookup := scm.NewFastDict(dictionary)
+	outerEnv := &scm.Env{VarsNumbered: []scm.Scmer{lookup}, Outer: &scm.Globalenv}
+	captured := func(key string) scm.Scmer {
+		return scm.NewSlice([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("outer"),
+				scm.NewInt(1),
+				scm.NewNthLocalVar(0),
+			}),
+			scm.NewString(key),
+		})
+	}
+	computed := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("+"),
+		scm.NewNthLocalVar(0),
+		captured("offset"),
+	})
+	condition := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("number")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal??"),
+			computed,
+			captured("value"),
+		}),
+		En:           outerEnv,
+		NumVars:      1,
+		NumberedOnly: true,
+	})
+
+	bounds := extractBoundaries([]string{"number"}, condition)
+	if len(bounds) != 1 || bounds[0].matcher != EqualMatcher || bounds[0].lower.Int() != 18 {
+		t.Fatalf("captured computed boundary = %#v, want computed value = 18", bounds)
+	}
+	if bounds[0].col != ".(+ number 1)" {
+		t.Fatalf("computed column = %q, want stable materialized expression", bounds[0].col)
+	}
+	if bounds[0].mapFn.IsNil() || scm.Apply(bounds[0].mapFn, scm.NewInt(17)).Int() != 18 {
+		t.Fatal("computed index mapper did not retain the materialized expression")
+	}
+}
+
+func TestCapturedConstantDoesNotBecomeComputedColumn(t *testing.T) {
+	outerEnv := &scm.Env{VarsNumbered: []scm.Scmer{scm.NewInt(1)}, Outer: &scm.Globalenv}
+	captured := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("outer"),
+		scm.NewInt(1),
+		scm.NewNthLocalVar(0),
+	})
+	condition := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("number")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("equal??"),
+			scm.NewInt(1),
+			captured,
+		}),
+		En:           outerEnv,
+		NumVars:      1,
+		NumberedOnly: true,
+	})
+
+	if bounds := extractBoundaries([]string{"number"}, condition); len(bounds) != 0 {
+		t.Fatalf("captured constant boundary = %#v, want no computed column", bounds)
+	}
+}
+
 func BenchmarkExtractBoundariesEqual(b *testing.B) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal?"),

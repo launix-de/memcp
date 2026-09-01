@@ -54,8 +54,8 @@ test_cases:
         (define cache (table "memcp-tests" ".transactionless_stream_cache"))
         (initialize_cache_table nil cache
           (list (table "memcp-tests" "stream_cache_source"))
-          (lambda () true)
-          (lambda ()
+          (lambda (_tx) true)
+          (lambda (_tx)
             (insert cache '("row_count")
               (list (list
                 (stream_window_reduce 0 -1
@@ -88,8 +88,8 @@ test_cases:
         (initialize_cache_table nil
           (table "memcp-tests" ".transactionless_cache_init")
           (list (table "memcp-tests" "aggregate_source"))
-          (lambda () true)
-          (lambda ()
+          (lambda (tx) true)
+          (lambda (tx)
             (insert
               (table "memcp-tests" ".transactionless_cache_init")
               (list "id")

@@ -1659,7 +1659,7 @@ func jitTimeSpecial(args ...Scmer) Scmer {
 		if hasLabel {
 			message += " " + String(jitCallSpecialThunk(label))
 		}
-		TracePrintFunc(message)
+		EmitTracePrint(message)
 	}
 	return timedResult
 }

@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2024  Carl-Philip Hänsch
+Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU General Public License as published by
@@ -20,8 +20,10 @@ import "io"
 import "os"
 import "fmt"
 import "sync"
+import "sync/atomic"
 import "time"
 import "encoding/json"
+import "unicode/utf8"
 
 type Tracefile struct {
 	isFirst bool
@@ -31,11 +33,42 @@ type Tracefile struct {
 
 var Trace *Tracefile // default trace: set to not nil if you want to trace
 var TracePrint bool  // whether to print traces to stdout
+var tracePrintMaxLength atomic.Int64
 
 // TracePrintFunc is the output function used by (time) when TracePrint is
-// true.  Defaults to fmt.Println.  Override from the application layer to
-// route trace output to a log table or other sink.
+// true. Defaults to fmt.Println. Override from the application layer to route
+// trace output to a log table or other sink.
+//
+// The message is a diagnostic record and must reach the sink byte-for-byte
+// unless the user explicitly opted into TracePrintMaxLength. Never add an
+// implicit limit here or in an overriding sink: full SQL text is required to
+// reproduce planner and correctness failures. A sink may rotate or frame its
+// output only outside an individual message. Bounded records are visibly
+// marked by EmitTracePrint; the default limit of zero is unlimited.
 var TracePrintFunc = func(msg string) { fmt.Println(msg) }
+
+func SetTracePrintMaxLength(maxLength int) {
+	if maxLength < 0 {
+		maxLength = 0
+	}
+	tracePrintMaxLength.Store(int64(maxLength))
+}
+
+func TracePrintMaxLength() int {
+	return int(tracePrintMaxLength.Load())
+}
+
+func EmitTracePrint(message string) {
+	maxLength := TracePrintMaxLength()
+	if maxLength > 0 && len(message) > maxLength {
+		end := maxLength
+		for end > 0 && !utf8.RuneStart(message[end]) {
+			end--
+		}
+		message = message[:end] + fmt.Sprintf("... [truncated; original_bytes=%d]", len(message))
+	}
+	TracePrintFunc(message)
+}
 
 func SetTrace(on bool) { // sets Trace to nil or a value
 	if Trace != nil {

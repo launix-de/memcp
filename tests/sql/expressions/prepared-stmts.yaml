@@ -405,15 +405,18 @@ test_cases:
         (sess "v1" "%C%")
         (define first_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
-        (define first_result (with_session sess (lambda () (eval first_formula))))
+        (define first_result (sql_execute_formula sess nil first_formula
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" "%Needle389%")
         (define second_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
-        (define second_result (with_session sess (lambda () (eval second_formula))))
+        (define second_result (sql_execute_formula sess nil second_formula
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" "%AnotherSelectiveValue%")
         (define third_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
-        (define third_result (with_session sess (lambda () (eval third_formula))))
+        (define third_result (sql_execute_formula sess nil third_formula
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (define entry (car (cache (car (cache)))))
         (define latest_formula (entry "formula"))
         (if (and
@@ -422,8 +425,9 @@ test_cases:
           (equal? third_result "selective")
           (equal? (count (compiles)) 2)
           (equal? (count (entry "variants")) 2)
-          (equal? (car latest_formula) (quote if))
-          (with_session sess (lambda () (eval (nth latest_formula 1)))))
+          (strlike (pretty_print latest_formula 120) "%(lambda (session tx resultrow resultfields)%")
+          ((sql_queryplan_compile_formula (car (car (entry "variants"))))
+            sess nil (lambda (_row) nil) (lambda (_fields) nil)))
           "ok"
           (error (concat "unexpected guarded cache state: " first_result "/" second_result "/" third_result
             " compiles=" (count (compiles)) " values=" (string (map (compiles) (lambda (key) (compiles key))))
@@ -447,13 +451,15 @@ test_cases:
         (define query "SELECT id FROM ps_test WHERE EXISTS (SELECT id FROM ps_test) LIMIT ?")
         (define results (map (produceN 12) (lambda (value) (begin
           (sess "v1" value)
-          (with_session sess (lambda ()
-            (eval (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true))))))))
+          (sql_execute_formula sess nil
+            (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true)
+            (lambda (_row) nil) (lambda (_fields) nil))))))
         (define entry (car (cache (car (cache)))))
         (define bounded_count (count (entry "variants")))
         (sess "v1" 0)
-        (define revisited (with_session sess (lambda ()
-          (eval (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true)))))
+        (define revisited (sql_execute_formula sess nil
+          (cached_parse cache (list parser) "memcp-tests" query nil "root" sess true)
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (if (and
           (equal? results (produceN 12))
           (equal? revisited 0)
@@ -559,11 +565,13 @@ test_cases:
         (sess "v1" "first")
         (define first_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
-        (define first_result (with_session sess (lambda () (eval first_formula))))
+        (define first_result (sql_execute_formula sess nil first_formula
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" "second")
         (define second_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT id FROM ps_test WHERE name LIKE ?" nil "root" sess true))
-        (define second_result (with_session sess (lambda () (eval second_formula))))
+        (define second_result (sql_execute_formula sess nil second_formula
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (define entry (car (cache (car (cache)))))
         (if (and
           (equal? first_result "first")
@@ -672,8 +680,14 @@ test_cases:
           (cached_parse (newcachemap) (list parse_sql) "memcp-tests" "SELECT ?"
             (lambda (_schema _table _write) true)
             "root" execution_session false))
-        (equal? (pretty_print formula 120)
-          "(resultrow '(\"?\" (session \"v1\")))"))
+        (define resultrow (lambda (row) (cadr row)))
+        (define first (sql_execute_formula execution_session nil formula resultrow (lambda (_fields) nil)))
+        (execution_session "v1" 9)
+        (define second (sql_execute_formula execution_session nil formula resultrow (lambda (_fields) nil)))
+        (and
+          (strlike (pretty_print formula 120) "%(lambda (session tx resultrow resultfields)%")
+          (equal? first 7)
+          (equal? second 9)))
     expect:
       data: [true]
 
@@ -687,14 +701,14 @@ test_cases:
         (define resultrow (lambda (_row) nil))
         (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
         (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
-        (with_session sess (lambda () (eval first_formula)))
+        (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
         (define entry (car (cache (car (cache)))))
         (define variants_after_first (count (entry "variants")))
         (insert (table "memcp-tests" "ps_guard_right") '("id")
           (map (produceN 500) (lambda (i) (list (+ i 2)))))
         (rebuild (table "memcp-tests" "ps_guard_right") true false)
         (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
-        (with_session sess (lambda () (eval second_formula)))
+        (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
           "ok"
           (error (concat "unexpected statistics variants: first=" variants_after_first
@@ -737,12 +751,14 @@ test_cases:
         (define first_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
           nil "root" sess true))
-        (define first_result (with_session sess (lambda () (eval first_formula))))
+        (define first_result (sql_execute_formula sess nil first_formula
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (sess "v1" 10000)
         (define second_formula (cached_parse cache (list parser) "memcp-tests"
           "SELECT EXISTS (SELECT id FROM ps_test LIMIT 1) FROM ps_test LIMIT ?"
           nil "root" sess true))
-        (define second_result (with_session sess (lambda () (eval second_formula))))
+        (define second_result (sql_execute_formula sess nil second_formula
+          (lambda (_row) nil) (lambda (_fields) nil)))
         (define entry (car (cache (car (cache)))))
         (if (and
           (equal? first_result "probe")
