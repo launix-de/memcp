@@ -17,6 +17,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
+import "sync"
 import "unsafe"
 
 /*
@@ -264,7 +265,15 @@ func init_window() {
 			var producerArgs [1]Scmer
 			seen := 0
 			emitted := 0
+			// A streaming producer may fan out over table shards and invoke emit
+			// concurrently. The window state, reducer environment, and its borrowed
+			// native-call frames are intentionally serial. Keep that contract at the
+			// stream boundary instead of forcing every producer to abandon parallel
+			// scans or making all prepared callbacks pay for synchronization.
+			var emitMu sync.Mutex
 			emit := NewFunc(func(values ...Scmer) Scmer {
+				emitMu.Lock()
+				defer emitMu.Unlock()
 				if len(values) != 1 {
 					panic("stream_window_reduce: emit expects exactly one complete value")
 				}
