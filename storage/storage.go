@@ -851,6 +851,36 @@ func Init(en scm.Env) {
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics_compatible?",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewBool(false)
+			}
+			tbl := db.GetTable(scm.String(a[1]))
+			if tbl == nil {
+				return scm.NewBool(false)
+			}
+			compileToken := uint64(a[2].Int())
+			if tbl.PlannerStatsToken() == compileToken {
+				return scm.NewBool(true)
+			}
+			compileFingerprint := uint64(a[3].Int())
+			return scm.NewBool(tbl.PlannerStatisticsFingerprint() == compileFingerprint)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "check whether cached-plan table statistics remain in the same cost class",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table"},
+				{Kind: "int", Label: "compile_token"},
+				{Kind: "int", Label: "compile_fingerprint"},
+			},
+			Return:         &scm.TypeDescriptor{Kind: "bool"},
+			HasSideEffects: true,
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "table_order_partitioned?",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

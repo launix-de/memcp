@@ -743,8 +743,8 @@ test_cases:
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
           resultrow (lambda (_fields) nil))
-        /* A second token miss proves the guard updated its validated generation;
-        it must not accumulate variants merely because REBUILD ran. */
+        /* Repeated token misses exercise the coarse fingerprint fallback; they
+        must not accumulate variants merely because REBUILD ran. */
         (rebuild right_table true false)
         (sql_execute_formula sess nil
           (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)

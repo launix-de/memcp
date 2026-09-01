@@ -1714,9 +1714,8 @@ particular star shape. */
 			(define table_expr
 				(list (quote table) (source_schema src) (source_relation src)))
 			(planner_record_statistics_dependency
-				(list (quote table_planner_statistics_token) table_expr)
+				table_expr
 				(table_planner_statistics_token table_value)
-				(list (quote table_planner_statistics_fingerprint) table_expr)
 				(table_planner_statistics_fingerprint table_value)
 				planning_session))) nil)))
 

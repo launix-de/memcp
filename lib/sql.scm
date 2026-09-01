@@ -296,6 +296,14 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 				(or found (sql_queryplan_guard_references_symbol? item target))) false))
 		_ (equal? expr target))))
 
+/* Avoid degenerate generated `and` forms while retaining normal short-circuit
+semantics for multiple independent cache assumptions. */
+(define sql_queryplan_conjoin_guards (lambda (guards)
+	(match guards
+		'() true
+		(cons guard '()) guard
+		_ (cons (quote and) guards))))
+
 (define sql_queryplan_statistics_guard_from_session (lambda (planning_session)
 	(begin
 		(define dependency_session
@@ -306,29 +314,15 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 		(if (empty_list? dependencies)
 			true
 			(begin
-				(define validation_state (newsession))
-				(define compile_tokens (map dependencies cadr))
-				(define compile_fingerprints (map dependencies (lambda (dependency) (nth dependency 3))))
-				(define current_tokens_symbol (quote __queryplan_current_statistics_tokens))
-				(validation_state "tokens" compile_tokens)
-				/* Mutable validation state stays behind apply so formula optimization
-				cannot freeze the generation observed during compilation. Coarse cost
-				fingerprints are read only after a token miss. */
-				(define validated_tokens_expr (list (quote apply)
-					validation_state (list (quote list) "tokens")))
-				(define update_validated_tokens_expr (list (quote apply)
-					validation_state (list (quote list) "tokens" current_tokens_symbol)))
-				(list
-					(list (quote lambda) (list current_tokens_symbol)
-						(list (quote or)
-							(list (quote equal?) current_tokens_symbol validated_tokens_expr)
-							(list (quote if)
-								(list (quote equal?)
-									(cons (quote list) (map dependencies (lambda (dependency) (nth dependency 2))))
-									(cons (quote list) compile_fingerprints))
-								(list (quote begin) update_validated_tokens_expr true)
-								false)))
-					(cons (quote list) (map dependencies car))))))))
+				/* Keep the guard as ordinary literal AST so it remains valid when tools
+				compile it independently from its query plan. The token comparison is the
+				normal hot path. After REBUILD, each dependency performs one cheap atomic
+				fingerprint read; no cost formula or mutable Scheme payload is rebuilt. */
+				(define dependency_guards (map dependencies (lambda (dependency)
+					(list (quote table_planner_statistics_compatible?)
+						(cadr (car dependency)) (nth (car dependency) 2)
+						(cadr dependency) (nth dependency 2)))))
+				(sql_queryplan_conjoin_guards dependency_guards))))))
 
 (define sql_queryplan_guard_from_session (lambda (planning_session)
 	(begin
@@ -341,10 +335,8 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 					(lambda (idx) (condition_accumulator (concat "condition:" idx)))))
 			(sql_queryplan_uncovered_binding_conditions planning_session))))
 		(define statistics_guard (sql_queryplan_statistics_guard_from_session planning_session))
-		(define raw_guard (match conditions
-			(cons condition '()) (list (quote and) condition statistics_guard)
-			(cons _head _tail) (cons (quote and) (append conditions statistics_guard))
-			_ statistics_guard))
+		(define raw_guard (sql_queryplan_conjoin_guards
+			(merge (list conditions (list statistics_guard)))))
 		(define binding_session (planning_session "__memcp_queryplan_guard_bindings"))
 		(define binding_catalog (planning_session "__memcp_queryplan_guard_binding_catalog"))
 		(define all_bindings (if (nil? binding_catalog)
@@ -472,7 +464,13 @@ otherwise side-effect-free guard. */
 (define sql_queryplan_install_variants (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
 	(begin
 		(define recent_variants (sql_queryplan_recent_variants variants))
-		(entry "variants" recent_variants)
+		/* Optimize owns and rewrites the dispatcher AST in place. The registry is
+		read again by the miss path, so its guard must not alias the compiler-owned
+		copy or inherit dispatcher-local NthLocalVar slots. */
+		(entry "variants" (map recent_variants (lambda (variant) (list
+			(clone_optimizer_expression (car variant))
+			(cadr variant)
+			(nth variant 2)))))
 		(entry "formula" (sql_queryplan_compile_formula
 			(sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants)))
 		(entry "formula"))))
@@ -485,7 +483,7 @@ otherwise side-effect-free guard. */
 			(list (sql_compile_queryplan_variant parse_fn schema parse_query policy source_session tx))))
 		(list entry formula))))
 
-(define sql_queryplan_matching_variant (lambda (variants session tx resultrow)
+(define sql_queryplan_matching_variant (lambda (variants session tx resultrow resultfields)
 	(match variants
 		(cons variant rest) (begin
 			/* This request may hold an older formula while another request prepends a
@@ -493,9 +491,13 @@ otherwise side-effect-free guard. */
 			rechecking its guard; preparation expressions are request-idempotent. */
 			(map (nth variant 2) (lambda (preparation)
 				(eval (sql_queryplan_preparation_expr preparation))))
-			(if (eval (car variant))
+			/* Guards are code, not expressions in this helper's lexical scope. Compile
+			them against the same explicit request boundary as the cached dispatcher;
+			naked eval would couple their symbols/NthLocalVars to this helper's frame. */
+			(if ((sql_queryplan_compile_formula (clone_optimizer_expression (car variant)))
+				session tx resultrow resultfields)
 				variant
-				(sql_queryplan_matching_variant rest session tx resultrow)))
+				(sql_queryplan_matching_variant rest session tx resultrow resultfields)))
 		_ nil)))
 
 /* Called only by the final else branch of a cached plan. Recheck after taking
@@ -508,7 +510,7 @@ the common guard-dispatch path. */
 			(begin
 				(define current_variants (entry "variants"))
 				(define matching (sql_queryplan_matching_variant current_variants
-					session tx resultrow))
+					session tx resultrow resultfields))
 				/* Return the chosen plan directly. Re-entering entry.formula would
 				re-evaluate the guard which just missed and can recurse indefinitely;
 				another request's freshly installed matching variant is already safe to
