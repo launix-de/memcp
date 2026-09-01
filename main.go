@@ -1221,6 +1221,7 @@ func main() {
 	// Without this, hasWriteOwner/enterMutationOwner silently no-op (goid==0),
 	// breaking reentrancy guards and causing deadlocks.
 	initDone := make(chan struct{})
+	scm.BeginMySQLInitialization()
 	gls.Go(func() {
 		defer close(initDone)
 		storage.LoadDatabases()
@@ -1276,6 +1277,7 @@ func main() {
 		}
 	})
 	<-initDone
+	scm.CompleteMySQLInitialization()
 	if initialize {
 		fmt.Println(storage.Clean())
 		exitroutine()
