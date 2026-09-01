@@ -603,9 +603,17 @@ partner. */
 		/* A bounded parent probe evaluates this subtree only for rows that survived
 		root braking. Compare those expected probe calls with the dependent stage's
 		input size; retain the group cache when repeated probes amortize its build. */
-		(define inline_presence_stages (if (number? (planner_literal_value decision_probe_work_rows))
+		(define cost_selected_presence_stages (if (number? (planner_literal_value decision_probe_work_rows))
 			(bounded_scalar_query_probe_inline_presence_stages closure_index probe_catalog direct_stages decision_probe_work_rows)
 			'()))
+		/* Cost selection may decline a direct probe, but it cannot turn a stage
+		with residual outer references into a closed initializer. Preserve that
+		logical dependency by evaluating presence in its enclosing row scope. */
+		(define residual_presence_stages (filter nested_stages (lambda (nested_stage)
+			(and (presence_probe_stage? nested_stage)
+				(stage_has_residual_outer_refs? nested_stage)))))
+		(define inline_presence_stages (unique_stages_by_id
+			(merge (list cost_selected_presence_stages residual_presence_stages))))
 		/* Once a parent is selected for direct probing, its complete dependency
 		closure is owned by that probe. Preparing children separately would pay
 		the carrier build cost in addition to the selected direct path. */
