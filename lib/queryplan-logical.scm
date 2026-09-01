@@ -259,7 +259,7 @@ query generation is the scope that releases them after execution. */
 		(list (quote tx_query) (quote tx))
 		"__memcp_queryplan_observations"
 		(quote tx)
-		(list (quote lambda) '() (list (quote newsession))))))
+		(list (quote lambda) (list (quote tx)) (list (quote newsession))))))
 
 (define planner_queryplan_observation_read_expr (lambda (key)
 	(list
@@ -269,7 +269,7 @@ query generation is the scope that releases them after execution. */
 			(physical_query_scope_symbol)
 			"__memcp_queryplan_observations"
 			(quote tx)
-			(list (quote lambda) '() (list (quote newsession))))
+			(list (quote lambda) (list (quote tx)) (list (quote newsession))))
 		key)))
 
 (define planner_queryplan_observation_current_read_expr (lambda (key)

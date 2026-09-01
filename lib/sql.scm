@@ -174,7 +174,7 @@ functional planner return value. */
 			(tx_query tx)
 			"__memcp_queryplan_observations"
 			tx
-			(lambda () (newsession))))
+			(lambda (_tx) (newsession))))
 		(reduce (source_session) (lambda (_ key)
 			(if (match key (regex "^v[0-9]+$" _) true false)
 				(begin
@@ -413,11 +413,16 @@ otherwise side-effect-free guard. */
 		_ miss_expr)))
 
 (define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
-	(list (quote sql_queryplan_variant_miss)
-		queryplan_cache cache_key entry
-		(if (list? parse_fn) (list (quote quote) parse_fn) parse_fn)
-		schema parse_query policy
-		(quote session) (quote tx) (quote resultrow) (quote resultfields))))
+	/* The miss arm invokes the Scheme compiler, not query work. Keep that cold
+	boundary behind apply so optimizing the hot dispatcher cannot specialize and
+	re-optimize the compiler procedure against cache/session literal arguments. */
+	(list (quote apply)
+		(quote sql_queryplan_variant_miss)
+		(cons (quote list) (list
+			queryplan_cache cache_key entry
+			(if (list? parse_fn) (list (quote quote) parse_fn) parse_fn)
+			schema parse_query policy
+			(quote session) (quote tx) (quote resultrow) (quote resultfields))))))
 
 (define sql_queryplan_formula (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
 	(begin
@@ -461,20 +466,24 @@ variant. New variants are prepended so the most recent statistics regime wins
 the common guard-dispatch path. */
 (define sql_queryplan_variant_miss (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy session tx resultrow resultfields)
 	(begin
-		(define formula ((entry "compile_lock") tx (lambda ()
+		(define plan ((entry "compile_lock") tx (lambda ()
 			(begin
 				(define current_variants (entry "variants"))
 				(define matching (sql_queryplan_matching_variant current_variants
 					session tx resultrow))
+				/* Return the chosen plan directly. Re-entering entry.formula would
+				re-evaluate the guard which just missed and can recurse indefinitely;
+				another request's freshly installed matching variant is already safe to
+				execute under the current explicit request arguments. */
 				(if (not (nil? matching))
-					(entry "formula")
+					(cadr matching)
 					(begin
 						(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx))
 						(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
 							(cons variant current_variants)))
 						(queryplan_cache cache_key (list entry formula))
-						formula))))))
-		(formula session tx resultrow resultfields))))
+						(cadr variant)))))))
+		(plan session tx resultrow resultfields))))
 
 /* cached_parse: wraps SELECT planning with a lazy polymorphic Scheme plan
 cache. DDL, DML and transaction-control formulas retain the original exact

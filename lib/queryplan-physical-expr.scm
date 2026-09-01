@@ -1176,7 +1176,7 @@ both names therefore bind to the same parameter. */
 						(concat (scalar_query_probe_recipe_key stage requested_col) ":")
 						(list (quote serialize) (cons (quote list) params)))
 					(quote tx)
-					(list (quote lambda) '() probe_expr))
+					(list (quote lambda) (list (quote tx)) probe_expr))
 				probe_expr))
 			(list
 				(quote define)
@@ -1491,7 +1491,7 @@ membership set. */
 		(physical_query_scope_symbol)
 		(stage_prepare_key stage)
 		(quote tx)
-		(list (quote lambda) '()
+		(list (quote lambda) (list (quote tx))
 			(list (quote !begin)
 				(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
 				true)))))
@@ -1698,7 +1698,7 @@ the emitter and failing after the ordinary carrier has been discarded. */
 				(physical_query_scope_symbol)
 				(concat "__direct_boolean_recset_" (fnv_hash (gs_id stage)))
 				(quote tx)
-				(list (quote lambda) '() producer))
+				(list (quote lambda) (list (quote tx)) producer))
 			producer))))
 
 (define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col share_result allow_direct_presence planning_session)
@@ -1772,7 +1772,7 @@ the emitter and failing after the ordinary carrier has been discarded. */
 				(physical_query_scope_symbol)
 				lookup_key
 				(quote tx)
-				(list (quote lambda) '()
+				(list (quote lambda) (list (quote tx))
 					(list (quote recset_key_index)
 						(physical_query_tx_symbol)
 						(cadr source_parts)
@@ -1877,7 +1877,7 @@ would still have to project that value over the segment. */
 		(physical_query_scope_symbol)
 		(query_invariant_scalar_first_probe_key stage requested_col)
 		(quote tx)
-		(list (quote lambda) '() expr))))
+		(list (quote lambda) (list (quote tx)) expr))))
 
 (define lower_table_scalar_first_probe_expr (lambda (sources default_alias src stage value_expr keys lookup_keys order_exprs dirs offset_value partition_limit tx_expr)
 	(begin
@@ -2013,7 +2013,7 @@ would still have to project that value over the segment. */
 					(concat (query_invariant_scalar_first_probe_key stage requested_col) ":bound:")
 					(list (quote serialize) (cons (quote list) lowered_lookup_keys)))
 				(quote tx)
-				(list (quote lambda) '() lowered))
+				(list (quote lambda) (list (quote tx)) lowered))
 			lowered))
 		(if (scalar_first_probe_query_invariant? stage requested_col)
 			(lower_query_invariant_scalar_first_probe_expr stage requested_col memoized_lowered)
@@ -3519,7 +3519,7 @@ still rechecks current data and autoindex statistics. */
 			(list (quote tx_query) (quote tx))
 			key
 			(quote tx)
-			(list (quote lambda) '() estimate_expr)))))
+			(list (quote lambda) (list (quote tx)) estimate_expr)))))
 
 /* Recreate only the source-local statistic read used for carrier costing. The
 expression is emitted into the cache guard and evaluated against the current
@@ -5323,7 +5323,7 @@ ever-larger subtrees. */
 						(physical_query_scope_symbol)
 						(concat "__group_count_recset_" (stable_structural_hash membership_expr true))
 						(quote tx)
-						(list (quote lambda) '() membership_expr)))
+						(list (quote lambda) (list (quote tx)) membership_expr)))
 				(list (quote scan)
 					/* Computed group columns outlive the request which creates them.
 					applyWithTx rebinds this captured physical slot to the transaction of
