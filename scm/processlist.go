@@ -267,7 +267,7 @@ func formatKillLog(s *SessionState, action string) string {
 }
 
 func logKill(s *SessionState, action string) {
-	TracePrintFunc(formatKillLog(s, action))
+	EmitTracePrint(formatKillLog(s, action))
 }
 
 // Kill marks the session as killed and fires the cancel function if set.
