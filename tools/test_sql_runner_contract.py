@@ -112,6 +112,10 @@ class PerformanceScaleContractTest(unittest.TestCase):
         self.assertEqual(performance_ab_threshold_ms(100, 20, 2, 2), 120)
         self.assertAlmostEqual(performance_ab_threshold_ms(100, 20, 2, 0), 220)
 
+    def test_ab_jitter_budget_is_amortized_over_repetitions(self) -> None:
+        self.assertEqual(performance_ab_threshold_ms(100, 20, 2, 2, 1, 50), 170)
+        self.assertEqual(performance_ab_threshold_ms(100, 20, 2, 2, 100, 50), 120.5)
+
     def test_regression_limit_is_bounded_and_case_overrides_suite(self) -> None:
         self.assertEqual(performance_regression_pct({}, {}), 20)
         self.assertEqual(
