@@ -9480,9 +9480,9 @@ opaque implementation detail in EXPLAIN PHYSICAL. */
 (define physical_calibration_input (lambda (decision name)
 	(qassoc_get (qassoc_get decision "inputs" '()) name nil)))
 
-/* Execute one forced plan while shadowing resultrow with a bounded digest
-sink. The outer protocol callback receives only the calibration row, never the
-potentially large calibrated SELECT result. */
+/* Execute one forced plan with explicit result callbacks. The measured plan
+receives a bounded digest sink and a silent field sink, while the outer
+protocol callback receives only the calibration row. */
 (define physical_calibration_runtime_plan (lambda (plan decision variant estimated_ns operator_family suite_var)
 	(begin
 		(define decision_id (qassoc_get decision "decision_id" "unknown"))
@@ -9501,7 +9501,7 @@ potentially large calibrated SELECT result. */
 					(list (quote define) (quote __calibration_capture) (list (quote newsession)))
 					(list (quote __calibration_capture) "count" 0)
 					(list (quote __calibration_capture) "hash" "")
-					(list (quote define) (quote resultrow)
+					(list (quote define) (quote __calibration_resultrow)
 						(list (quote lambda) (list (quote __calibration_row))
 							(list (quote !begin)
 								(list (quote __calibration_capture) "count"
@@ -9512,7 +9512,10 @@ potentially large calibrated SELECT result. */
 										(list (quote serialize) (quote __calibration_row)))))
 								nil)))
 					(list (quote define) (quote __calibration_started_ns) (list (quote nanotime)))
-					plan
+					(list
+						(list (quote lambda) (list (quote resultrow) (quote resultfields)) plan)
+						(quote __calibration_resultrow)
+						(list (quote lambda) (list (quote __calibration_fields)) nil))
 					(list (quote define) (quote __calibration_whole_query_execution_ns)
 						(list (quote -) (list (quote nanotime)) (quote __calibration_started_ns)))
 					(list (quote define) (quote __calibration_rows) (list (quote __calibration_capture) "count"))
