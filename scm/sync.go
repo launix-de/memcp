@@ -808,8 +808,8 @@ func init_sync() {
 					ctx.FreeDesc(&d27)
 					d28 = d14
 					_ = d28
-					ctx.EnsureDesc(&d28)
-					if d28.Loc == LocRegPair {
+					ctx.SyncDesc(&d28)
+					if d28.Loc == LocRegPair || d28.Loc == LocStackPair || d28.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d28, &result)
 						result.Type = d28.Type
 					} else {
@@ -1475,8 +1475,8 @@ func init_sync() {
 					ctx.FreeDesc(&d81)
 					d82 = d67
 					_ = d82
-					ctx.EnsureDesc(&d82)
-					if d82.Loc == LocRegPair {
+					ctx.SyncDesc(&d82)
+					if d82.Loc == LocRegPair || d82.Loc == LocStackPair || d82.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d82, &result)
 						result.Type = d82.Type
 					} else {
@@ -1630,6 +1630,7 @@ func init_sync() {
 				ctx.SyncDesc(&d0)
 				ctx.SyncDesc(&d1)
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr(WithSession), []JITValueDesc{d0, d1}, 2)
+				d2.NoHeapPointer = false
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.BindReg(d2.Reg2, &d2)
 				ctx.FreeDesc(&d0)
@@ -1644,8 +1645,8 @@ func init_sync() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d2)
-				if d2.Loc == LocRegPair {
+				ctx.SyncDesc(&d2)
+				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d2, &result)
 					result.Type = d2.Type
 				} else {
@@ -1828,6 +1829,7 @@ func init_sync() {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				d0 := ctx.EmitGoCallScalar(GoFuncAddr(runtime.NumCPU), []JITValueDesc{}, 1)
+				d0.NoHeapPointer = true
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d0)
@@ -1878,6 +1880,7 @@ func init_sync() {
 				d0 := ctx.EmitGoCallScalar(GoFuncAddr(func() *runtime.MemStats { return new(runtime.MemStats) }), nil, 1)
 				ctx.BindReg(d0.Reg, &d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((func() *runtime.MemStats { value := CachedMemStats(); return &value })), []JITValueDesc{}, 1)
+				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.EnsureDesc(&d1)
 				ctx.EmitGoCallVoid(GoFuncAddr(func(dst, src *runtime.MemStats) { *dst = *src }), []JITValueDesc{d0, d1})
@@ -2044,6 +2047,7 @@ func init_sync() {
 				d23 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 				ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{d3, d20, d22, d23})
 				var d24 JITValueDesc
+				ctx.EnsureDesc(&d3)
 				if d3.Loc == LocImm {
 					panic("NewFastDict: LocImm not expected at JIT compile time")
 				} else {
@@ -2068,8 +2072,8 @@ func init_sync() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d24)
-				if d24.Loc == LocRegPair {
+				ctx.SyncDesc(&d24)
+				if d24.Loc == LocRegPair || d24.Loc == LocStackPair || d24.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d24, &result)
 					result.Type = d24.Type
 				} else {

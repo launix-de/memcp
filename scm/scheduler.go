@@ -532,6 +532,7 @@ func init_scheduler() {
 					ctx.SyncDesc(&d16)
 					ctx.SyncDesc(&d15)
 					d17 = ctx.EmitGoCallScalar(GoFuncAddr((*Scheduler).Clear), []JITValueDesc{d16, d15}, 1)
+					d17.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d17.Reg, 1)
 					d17.Type = tagBool
 					ctx.BindReg(d17.Reg, &d17)

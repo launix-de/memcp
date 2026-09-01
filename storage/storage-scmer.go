@@ -141,8 +141,8 @@ func (s *StorageSCMER) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.EnsureDesc(&d1)
-	if d1.Loc == scm.LocRegPair {
+	ctx.SyncDesc(&d1)
+	if d1.Loc == scm.LocRegPair || d1.Loc == scm.LocStackPair || d1.Loc == scm.LocInputPair {
 		ctx.EmitMovPairToResult(&d1, &result)
 		result.Type = d1.Type
 	} else {

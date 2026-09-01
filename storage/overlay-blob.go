@@ -154,6 +154,7 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx
 	ctx.SyncDesc(&thisptr)
 	ctx.SyncDesc(&d1)
 	d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*OverlayBlob).resolveBlob), []scm.JITValueDesc{thisptr, d1}, 2)
+	d2.NoHeapPointer = false
 	ctx.BindReg(d2.Reg, &d2)
 	ctx.BindReg(d2.Reg2, &d2)
 	ctx.FreeDesc(&d1)
@@ -167,8 +168,8 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.EnsureDesc(&d2)
-	if d2.Loc == scm.LocRegPair {
+	ctx.SyncDesc(&d2)
+	if d2.Loc == scm.LocRegPair || d2.Loc == scm.LocStackPair || d2.Loc == scm.LocInputPair {
 		ctx.EmitMovPairToResult(&d2, &result)
 		result.Type = d2.Type
 	} else {

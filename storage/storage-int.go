@@ -161,6 +161,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		ctx.SyncDesc(&thisptr)
 		ctx.SyncDesc(&idxInt)
 		d0 = ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageInt).GetValueUInt), []scm.JITValueDesc{thisptr, idxInt}, 1)
+		d0.NoHeapPointer = true
 		ctx.BindReg(d0.Reg, &d0)
 		ctx.StabilizeDescForControlFlow(&d0)
 		ctx.FreeDesc(&idxInt)

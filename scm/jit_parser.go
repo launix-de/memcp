@@ -73,16 +73,23 @@ type jitParserRule struct {
 }
 
 type jitParserProgram struct {
-	rules      []jitParserRule
-	parserRule map[*ScmParser]int
-	pool       sync.Pool
+	rules         []jitParserRule
+	parserRule    map[*ScmParser]int
+	inlineActions bool
+	pool          sync.Pool
 }
 
 type jitParserBuilder struct {
 	program       *jitParserProgram
-	templates     map[*JITParserTemplate]int
+	templates     map[jitParserTemplateKey]int
+	active        map[*JITParserTemplate]int
 	inlineActions bool
 	compileEnv    *JITEnv
+}
+
+type jitParserTemplateKey struct {
+	template      *JITParserTemplate
+	lexicalParent int
 }
 
 // JITParserTemplate is a compile-time parser closure. Syntax and generator are
@@ -120,8 +127,11 @@ func jitBuildParserProgram(parser *ScmParser) *jitParserProgram {
 }
 
 func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
-	program := &jitParserProgram{parserRule: make(map[*ScmParser]int)}
-	builder := &jitParserBuilder{program: program, templates: make(map[*JITParserTemplate]int)}
+	program := &jitParserProgram{parserRule: make(map[*ScmParser]int), inlineActions: true}
+	builder := &jitParserBuilder{
+		program: program, templates: make(map[jitParserTemplateKey]int),
+		active: make(map[*JITParserTemplate]int), inlineActions: true,
+	}
 	for _, parser := range parsers {
 		if parser == nil {
 			panic("jit: nil parser")
@@ -133,8 +143,11 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 }
 
 func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgram, int) {
-	program := &jitParserProgram{parserRule: make(map[*ScmParser]int)}
-	builder := &jitParserBuilder{program: program, templates: make(map[*JITParserTemplate]int), inlineActions: true, compileEnv: template.Outer}
+	program := &jitParserProgram{parserRule: make(map[*ScmParser]int), inlineActions: true}
+	builder := &jitParserBuilder{
+		program: program, templates: make(map[jitParserTemplateKey]int),
+		active: make(map[*JITParserTemplate]int), inlineActions: true, compileEnv: template.Outer,
+	}
 	rule := builder.addTemplate(template, -1)
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
@@ -144,15 +157,27 @@ func (builder *jitParserBuilder) addTemplate(template *JITParserTemplate, lexica
 	if template == nil {
 		panic("jit: nil parser template")
 	}
-	if rule, exists := builder.templates[template]; exists {
+	lexicalParent = builder.templateLexicalParent(template, lexicalParent)
+	key := jitParserTemplateKey{template: template, lexicalParent: lexicalParent}
+	if rule, exists := builder.templates[key]; exists {
+		return rule
+	}
+	// A recursive reference belongs to the rule currently being assembled. It
+	// must not create a second context-specialized copy whose parent is itself.
+	// This also closes mutually recursive template groups while still allowing
+	// the same reusable template to be specialized for independent callers.
+	if rule, recursive := builder.active[template]; recursive {
 		return rule
 	}
 	ruleID := len(builder.program.rules)
-	builder.templates[template] = ruleID
+	builder.templates[key] = ruleID
+	builder.active[template] = ruleID
+	defer delete(builder.active, template)
 	builder.program.rules = append(builder.program.rules, jitParserRule{
 		generator: template.Generator, bindingLookup: make(map[Symbol]int), jitOuter: template.Outer, outer: template.RuntimeOuter,
 		lexicalParent: lexicalParent,
 	})
+	builder.predeclareBindings(ruleID, template.Syntax)
 	var skipper *jitRegexProgram
 	if template.Whitespace.IsNil() {
 		skipper = jitCompileRegexProgram(packratDefaultSkipper())
@@ -163,6 +188,65 @@ func (builder *jitParserBuilder) addTemplate(template *JITParserTemplate, lexica
 	builder.program.rules[ruleID].root = root
 	builder.program.rules[ruleID].skipper = skipper
 	return ruleID
+}
+
+// templateLexicalParent keeps a caller specialization only when the template's
+// generator can actually read a capture declared by that caller chain. Most
+// grammar rules are closed over their Scheme environment and can therefore be
+// shared globally; cloning those rules per call edge makes recursive SQL
+// grammars grow combinatorially.
+func (builder *jitParserBuilder) templateLexicalParent(template *JITParserTemplate, candidate int) int {
+	if candidate < 0 || template.Generator.IsNil() {
+		return -1
+	}
+	free := jitLambdaFreeSymbols(NewSlice(nil), template.Generator)
+	if len(free) == 0 {
+		return -1
+	}
+	used := make(map[Symbol]struct{}, len(free))
+	for _, symbol := range free {
+		used[symbol] = struct{}{}
+	}
+	for ruleID := candidate; ruleID >= 0; ruleID = builder.program.rules[ruleID].lexicalParent {
+		for _, binding := range builder.program.rules[ruleID].bindings {
+			if _, needed := used[binding]; needed {
+				return candidate
+			}
+		}
+	}
+	return -1
+}
+
+func (builder *jitParserBuilder) predeclareBindings(ruleID int, syntax Scmer) {
+	var visit func(Scmer)
+	visit = func(value Scmer) {
+		value = jitUnwrapParserSyntax(value)
+		if !value.IsSlice() {
+			return
+		}
+		items := value.Slice()
+		if len(items) == 0 {
+			return
+		}
+		if head, ok := scmerSymbol(jitUnwrapParserSyntax(items[0])); ok {
+			switch head {
+			case "parser":
+				return
+			case "define":
+				if len(items) == 3 {
+					if symbol, valid := scmerSymbol(jitUnwrapParserSyntax(items[1])); valid {
+						builder.binding(ruleID, symbol)
+					}
+					visit(items[2])
+				}
+				return
+			}
+		}
+		for _, item := range items {
+			visit(item)
+		}
+	}
+	visit(syntax)
 }
 
 func jitCompileEnvironmentParsers(environment *Env) {
@@ -229,6 +313,7 @@ func (builder *jitParserBuilder) addScmParser(parser *ScmParser) int {
 		jitOuter:      jitCapturedEnv(parser.Outer),
 		lexicalParent: -1,
 	})
+	builder.predeclareBindings(ruleID, parser.Syntax)
 	var skipper *jitRegexProgram
 	if parser.Skipper != nil {
 		skipper = jitCompileRegexProgram(parser.Skipper)
@@ -261,6 +346,7 @@ func (builder *jitParserBuilder) addNestedRule(syntax, generator, whitespace Scm
 		outer:         outer,
 		lexicalParent: lexicalParent,
 	})
+	builder.predeclareBindings(ruleID, syntax)
 	var skipper *jitRegexProgram
 	if whitespace.IsNil() {
 		skipper = jitCompileRegexProgram(packratDefaultSkipper())

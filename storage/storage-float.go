@@ -178,6 +178,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		}
 		ctx.SyncDesc(&d1)
 		d3 = ctx.EmitGoCallScalar(scm.GoFuncAddr(math.IsNaN), []scm.JITValueDesc{d1}, 1)
+		d3.NoHeapPointer = true
 		ctx.EmitAndRegImm32(d3.Reg, 1)
 		d3.Type = scm.TagBool
 		ctx.BindReg(d3.Reg, &d3)

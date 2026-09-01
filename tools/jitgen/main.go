@@ -229,6 +229,9 @@ func main() {
 		if onlyOp != "" && op.name != onlyOp {
 			continue
 		}
+		if operatorHasCustomJITEmit(op) {
+			continue
+		}
 		generation := generated[opIndex]
 		ssaFn := generation.ssaFn
 		if ssaFn == nil {
@@ -429,6 +432,9 @@ func generateOperators(ops []operatorInfo, ssaFuncs map[token.Pos]*ssa.Function,
 				if onlyOp != "" && op.name != onlyOp {
 					continue
 				}
+				if operatorHasCustomJITEmit(op) {
+					continue
+				}
 				var fn *ssa.Function
 				if op.funcLit != nil {
 					fn = ssaFuncs[op.funcLit.Pos()]
@@ -547,6 +553,17 @@ func operatorJITEmitMissing(op operatorInfo) bool {
 	}
 	ident, ok := op.jitExpr.(*ast.Ident)
 	return ok && ident.Name == "nil"
+}
+
+func operatorHasCustomJITEmit(op operatorInfo) bool {
+	if op.jitExpr == nil {
+		return false
+	}
+	if _, generated := op.jitExpr.(*ast.FuncLit); generated {
+		return false
+	}
+	ident, ok := op.jitExpr.(*ast.Ident)
+	return !ok || ident.Name != "nil"
 }
 
 func dynamicSSACalls(fn *ssa.Function) []*ssa.Call {
@@ -1845,6 +1862,7 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 	retType := results.At(0).Type()
 	dv := g.allocDesc()
 	g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(%s), []JITValueDesc{%s}, %d)", dv, funcExpr, argList, retWords)
+	g.emit("%s.NoHeapPointer = %t", dv, resultPointerMasks[0] == 0)
 	if basic, ok := retType.Underlying().(*types.Basic); ok && basic.Kind() == types.Bool {
 		// Go's internal ABI only defines the low byte of a bool result. Clear
 		// unspecified upper bits before generated CFG conditions consume it as
@@ -2213,8 +2231,8 @@ func (g *codeGen) phiSlotOffExpr(bbIdx int, phiIdx int) string {
 }
 
 // directPhiTarget returns the stack slot and shape for a producer feeding one
-// phi node. Other local consumers are allowed: the producer can write the phi
-// destination immediately and retain its descriptor for those local uses.
+// phi node on its block's sole outgoing edge. A producer before a branch must
+// not write early: another edge may retain the phi's previous value.
 func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool) {
 	refs := value.Referrers()
 	if refs == nil {
@@ -2232,6 +2250,27 @@ func (g *codeGen) directPhiTarget(value ssa.Value) (string, JITTargetShape, bool
 		phi = candidate
 	}
 	if phi == nil {
+		return "", phiTargetScalar, false
+	}
+	producer, ok := value.(ssa.Instruction)
+	if !ok {
+		return "", phiTargetScalar, false
+	}
+	producerBlock := producer.Block()
+	if producerBlock == nil || len(producerBlock.Succs) != 1 || producerBlock.Succs[0] != phi.Block() {
+		return "", phiTargetScalar, false
+	}
+	directEdge := false
+	for edgeIndex, edge := range phi.Edges {
+		if edge != value {
+			continue
+		}
+		if edgeIndex >= len(phi.Block().Preds) || phi.Block().Preds[edgeIndex] != producerBlock {
+			return "", phiTargetScalar, false
+		}
+		directEdge = true
+	}
+	if !directEdge {
 		return "", phiTargetScalar, false
 	}
 	shape := phiTargetScalar
@@ -3999,11 +4038,11 @@ func addScmPrefix(code string) string {
 		"JITValueDesc": true, "JITTypeUnknown": true, "JITContext": true,
 		"BBDescriptor": true, "PhiState": true,
 		"LocNone": true, "LocReg": true, "LocRegPair": true, "LocRegTriple": true,
-		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocMem": true, "LocImm": true, "LocAny": true,
+		"LocStack": true, "LocStackPair": true, "LocStackTriple": true, "LocInputPair": true, "LocMem": true, "LocImm": true, "LocAny": true,
 		"NewInt": true, "NewFloat": true, "NewBool": true, "NewNil": true, "NewString": true,
 		"NewFastDict": true, "NewFastDictValue": true,
 		"Scmer": true, "GoFuncAddr": true, "JITBuildMergeClosure": true,
-		"JITIntDiv": true, "JITEmitGoCallResults": true, "JITCloneScmerSlice": true, "JITAppendScmerSlice": true, "JITNewSliceCopy": true,
+		"JITIntDiv": true, "JITEmitGoCallResults": true, "JITCloneScmerSlice": true, "JITAppendScmerSlice": true, "JITAppendScmerSliceCopy": true, "JITNewSliceCopy": true,
 		"JITPanic":                     true,
 		"EnsureDesc":                   true,
 		"ConcatStrings":                true,
@@ -5642,7 +5681,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("ctx.EmitMovRegImm64(%s.Reg3, uint64(%d))", stackSlice, slice.stackLen)
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, stackSlice, elements.goVar)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSliceCopy), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, stackSlice, elements.goVar)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -5666,7 +5705,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					right := makeStackHeader(elements)
 					callResults := g.allocTemp("callResults")
 					dv := g.allocDesc()
-					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSlice), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, left, right)
+					g.emit("%s := JITEmitGoCallResults(ctx, GoFuncAddr(JITAppendScmerSliceCopy), []JITValueDesc{%s, %s}, []uint8{3}, []uint8{1})", callResults, left, right)
 					g.emit("%s := %s[0]", dv, callResults)
 					g.recordSliceResult(name, v, dv)
 					break
@@ -5674,11 +5713,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				if slice.marker != "_slice" || elements.stackBase == "" {
 					panic(fmt.Sprintf("append requires a descriptor slice and local Scmer elements: %s (slice=%q elements=%q/%d)", v, slice.marker, elements.marker, elements.stackLen))
 				}
-				_, boundedSingleAppend := v.Call.Args[0].(*ssa.Phi)
-				boundedSingleAppend = boundedSingleAppend && elements.stackLen == 1
-				if boundedSingleAppend {
-					boundedSingleAppend = phiStartsWithBoundedEmptySlice(v.Call.Args[0].(*ssa.Phi))
-				}
+				// A statically bounded initial capacity does not prove that a loop's
+				// phi reaches this append at most that many times. Keep Go's growth
+				// semantics unless a future range proof covers the complete loop.
+				boundedSingleAppend := false
 				if !boundedSingleAppend {
 					added := g.allocDesc()
 					addedPtr := g.allocReg()
@@ -6257,6 +6295,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			src := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
 			g.emit("var %s JITValueDesc", dv)
+			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 			g.emit("if %s.Loc == LocImm {", src.goVar)
 			g.emit("\tpanic(\"NewFastDict: LocImm not expected at JIT compile time\")")
 			g.emit("} else {")
@@ -6323,9 +6362,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// shape is known. Preserve the lambda template so the generated Call
 			// instruction below recursively invokes its emitter at the loop site.
 			// Known lambda templates remain compile-time values and can be inlined by
-			// the generated caller. Dynamic callbacks are optimized once at the JIT
-			// entry point and passed in as a hidden, GC-rooted function Scmer. Do not
-			// emit the optimizer call into a hot loop.
+			// the generated caller. A dynamic callback may be hoisted into a hidden
+			// entry argument only when it is an actual input of the enclosing JIT Proc.
+			// Nested builtin arguments otherwise have no valid entry-point provenance;
+			// preserve their callable Scmer so callback dispatch can select Proc.JIT or
+			// the interpreter at the loop site.
 			arg := g.vals[v.Call.Args[0].Name()]
 			dv := g.allocDesc()
 			if arg.marker == "_knownimm" {
@@ -6345,10 +6386,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			g.emit("\tctx.TrackImm(%s)", optimizedVar)
 			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFunc, Imm: %s, Rooted: true}", dv, optimizedVar)
 			g.emit("} else {")
-			if !arg.hasSourceInput {
-				panic(fmt.Sprintf("OptimizeProcToSerialFunction argument has no input provenance: %s", v))
-			}
-			g.emit("\t%s = ctx.RequestOptimizedCallback(%d)", dv, arg.sourceInput)
+			g.emit("\tif %s.Loc == LocInputPair && int(%s.StackOff) < ctx.InputArgCount {", arg.goVar, arg.goVar)
+			g.emit("\t\t%s = ctx.RequestOptimizedCallback(int(%s.StackOff))", dv, arg.goVar)
+			g.emit("\t} else {")
+			g.emit("\t\t%s = jitCopyScmerToPair(ctx, %s)", dv, arg.goVar)
+			g.emit("\t}")
 			g.emit("}")
 			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_serial_callable"}
 		case "FastDict":
@@ -8446,38 +8488,10 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		ptrDesc := g.allocDesc()
 		g.emit("var %s JITValueDesc", ptrDesc)
 		if x.isDesc {
-			// x is a string/slice descriptor: Reg=dataPtr (or LocImm for const fold)
-			g.emit("if %s.Loc == LocImm && %s.Loc == LocImm {", x.goVar, low.goVar)
-			g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() + %s.Imm.Int()*%d)}", ptrDesc, x.goVar, low.goVar, elemSize)
-			g.emit("} else {")
 			ptrReg := g.allocReg()
-			g.emit("\t%s := ctx.AllocReg()", ptrReg)
-			g.emit("\tif %s.Loc == LocImm {", x.goVar)
-			g.emit("\t\tctx.EmitMovRegImm64(%s, uint64(%s.Imm.Int()))", ptrReg, x.goVar)
-			g.emit("\t} else {")
-			g.emit("\t\tctx.EmitMovRegReg(%s, %s.Reg)", ptrReg, x.goVar)
-			g.emit("\t}")
-			g.emit("\tif %s.Loc == LocImm {", low.goVar)
-			g.emit("\t\tctx.EmitMovRegImm64(RegR11, uint64(%s.Imm.Int()*%d))", low.goVar, elemSize)
-			g.emit("\t\tctx.EmitAddInt64(%s, RegR11)", ptrReg)
-			g.emit("\t} else {")
-			if elemSize == 1 {
-				g.emit("\t\tctx.EmitAddInt64(%s, %s.Reg)", ptrReg, low.goVar)
-			} else {
-				g.emit("\t\toffsetReg := ctx.AllocRegExcept(%s, %s.Reg)", ptrReg, low.goVar)
-				g.emit("\t\tctx.EmitMovRegReg(offsetReg, %s.Reg)", low.goVar)
-				if elemSize > 0 && elemSize&(elemSize-1) == 0 {
-					g.emit("\t\tctx.EmitShlRegImm8(offsetReg, %d)", uint8(math.Log2(float64(elemSize))))
-				} else {
-					g.emit("\t\tctx.EmitMovRegImm64(RegR11, %d)", elemSize)
-					g.emit("\t\tctx.EmitImulInt64(offsetReg, RegR11)")
-				}
-				g.emit("\t\tctx.EmitAddInt64(%s, offsetReg)", ptrReg)
-				g.emit("\t\tctx.FreeReg(offsetReg)")
-			}
-			g.emit("\t}")
-			g.emit("\t%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", ptrDesc, ptrReg)
-			g.emit("}")
+			g.emit("%s := ctx.EmitSliceDataAfterLow(&%s, &%s, %d)", ptrReg, x.goVar, low.goVar, elemSize)
+			g.emit("%s = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: %s}", ptrDesc, ptrReg)
+			g.emit("ctx.BindReg(%s, &%s)", ptrReg, ptrDesc)
 		} else {
 			panic(fmt.Sprintf("Slice on non-desc: %s", v))
 		}
@@ -8810,7 +8824,6 @@ func (g *codeGen) emitReturnMultiBlock(v *ssa.Return) {
 	}
 	g.emit("ctx.EmitJmp(%s)", g.endLabel)
 }
-
 func (g *codeGen) emitScalarReturnIntoResult(res genVal, constructor, tag string) {
 	payload := g.allocDesc()
 	g.emit("if %s.Loc == LocImm {", res.goVar)

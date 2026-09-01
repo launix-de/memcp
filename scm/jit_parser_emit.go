@@ -510,7 +510,7 @@ func jitEmitParserProgram(ctx *JITContext, _ []Scmer, descs []JITValueDesc, resu
 	if !ok || program == nil || len(program.rules) == 0 {
 		panic("jit: invalid parser program")
 	}
-	return jitEmitParserProgramCore(ctx, program, descs[1], descs[2], descs[3], result, false, 0)
+	return jitEmitParserProgramCore(ctx, program, descs[1], descs[2], descs[3], result, program.inlineActions, 0)
 }
 
 func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input, state, entry JITValueDesc, result JITValueDesc, inlineActions bool, skipperRule int) JITValueDesc {
@@ -626,12 +626,15 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 				lexicalRule := &emitter.program.rules[lexicalRuleID]
 				args := make([]JITValueDesc, len(lexicalRule.bindings))
 				for index := range args {
-					binding := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserBindingValueForRuleNative), []JITValueDesc{
+					callArgs := []JITValueDesc{
 						emitter.state, jitParserScalar(int64(lexicalRuleID)), jitParserScalar(int64(index)),
-					}, 2)
-					binding.Type = JITTypeUnknown
-					args[index] = emitter.ctx.stabilizeForNested(binding)
-					args[index].Rooted = true
+					}
+					var wordsBuf [16]goCallArgWord
+					words := emitter.ctx.flattenArgs(callArgs, &wordsBuf)
+					off := emitter.ctx.AllocSpill(16)
+					emitter.ctx.setStackPointer(jitStackRootFrameBP, off, true)
+					emitter.ctx.EmitGoCallToFrame(GoFuncAddr(jitParserBindingValueForRuleNative), words, []int32{off, off + 8})
+					args[index] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: off, Rooted: true}
 				}
 				frameEnv := &JITEnv{Vars: make(map[Symbol]JITValueDesc, len(lexicalRule.bindings)), Numbered: args, Outer: bindingEnv}
 				for index, symbol := range lexicalRule.bindings {

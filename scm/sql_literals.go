@@ -223,8 +223,8 @@ func declareSQLLiteralParameterizer() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d12)
-				if d12.Loc == LocRegPair {
+				ctx.SyncDesc(&d12)
+				if d12.Loc == LocRegPair || d12.Loc == LocStackPair || d12.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d12, &result)
 					result.Type = d12.Type
 				} else {

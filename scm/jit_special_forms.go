@@ -66,7 +66,7 @@ func jitEmitSpecialEval(ctx *JITContext, args []Scmer, _ []JITValueDesc, result 
 	callArgs := make([]Scmer, 0, 1+2*ctx.LocalSlotCount)
 	callArgs = append(callArgs, args[0])
 	callArgs = append(callArgs, jitRuntimeCaptureArgExprs(ctx)...)
-	return jitEmitGoVariadicCallFromExprs(ctx, jitEvalSpecial, callArgs, ctx.SliceBase, result)
+	return jitEmitGoVariadicCallFromExprs(ctx, jitEvalSpecial, callArgs, ctx.SliceBase, result, false)
 }
 
 func jitEmitSpecialTime(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -135,19 +135,11 @@ func jitEmitSpecialSetN(ctx *JITContext, args []Scmer, _ []JITValueDesc, result 
 		panic("jit: setN target is not a numbered local")
 	}
 	idx := int(targetVar.NthLocalVar())
-	if idx < 0 || idx >= ctx.LocalSlotCount || !ctx.SliceBaseTracksRSP {
-		panic("jit: setN target outside invocation frame")
+	if idx < 0 || ctx.Env == nil || idx >= len(ctx.Env.Numbered) {
+		panic("jit: setN target outside lexical frame")
 	}
 	value := jitCompileExpr(ctx, args[1], ctx.SliceBase, result)
 	if value.Loc == LocParserTemplate && value.Parser != nil {
-		if ctx.Env == nil {
-			ctx.Env = &JITEnv{}
-		}
-		if len(ctx.Env.Numbered) < ctx.LocalSlotCount {
-			numbered := make([]JITValueDesc, ctx.LocalSlotCount)
-			copy(numbered, ctx.Env.Numbered)
-			ctx.Env.Numbered = numbered
-		}
 		ctx.Env.Numbered[idx] = value
 		return value
 	}
@@ -156,7 +148,12 @@ func jitEmitSpecialSetN(ctx *JITContext, args []Scmer, _ []JITValueDesc, result 
 		pair := jitAllocTrackedPair(ctx, value.Type)
 		value = jitPlaceIntoPair(ctx, &value, pair)
 	}
-	ctx.EmitStoreScmerToStack(value, int32(idx*16))
+	target := ctx.Env.Numbered[idx]
+	ctx.EmitCopyScmerToDesc(&target, &value)
+	target.Type = value.Type
+	target.NoHeapPointer = value.NoHeapPointer
+	target.Rooted = true
+	ctx.Env.Numbered[idx] = target
 	return value
 }
 
@@ -219,7 +216,11 @@ func jitEmitSpecialBegin(scoped bool, reserve bool) func(*JITContext, []Scmer, [
 		}
 		outerEnv := ctx.Env
 		if scoped {
-			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc), Outer: outerEnv}
+			var numbered []JITValueDesc
+			if outerEnv != nil {
+				numbered = outerEnv.Numbered
+			}
+			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc), Numbered: numbered, Outer: outerEnv}
 			defer func() { ctx.Env = outerEnv }()
 		}
 		for _, form := range body[:len(body)-1] {
@@ -253,7 +254,6 @@ func jitEmitSpecialReservedList(ctx *JITContext, args []Scmer, _ []JITValueDesc,
 		panic("jit: malformed !!list")
 	}
 	capacity := jitCompileExpr(ctx, capacityExpr, ctx.SliceBase, JITValueDesc{Loc: LocAny})
-	ctx.AutoImportSafe = false
 	target := jitEnsureResultPair(ctx, result)
 	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitMakeReservedList), []JITValueDesc{capacity}, target)
 	out.Type = tagSlice
@@ -584,5 +584,5 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	if ctx.RecursiveLambdas {
 		builder = jitBuildCompiledLambdaClosure
 	}
-	return jitEmitGoVariadicCallFromExprs(ctx, builder, argExprs, ctx.SliceBase, result)
+	return jitEmitGoVariadicCallFromExprs(ctx, builder, argExprs, ctx.SliceBase, result, false)
 }

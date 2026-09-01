@@ -106,6 +106,10 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 	}
 	if compileProcedures && jitEnabled {
 		target := en.definitionTarget()
+		// Parser-bearing procedures may refer to grammars declared later in the
+		// module. Assemble those grammars first so the retry can fuse both the
+		// parser machine and its generator expressions into the procedure body.
+		jitCompileEnvironmentParsers(en)
 		for sym := range deferredProcs {
 			value, exists := target.Vars[sym]
 			if !exists || value.GetTag() != tagProc || value.Proc() == nil || value.Proc().Compiled != nil {
@@ -116,7 +120,6 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 				target.Vars[sym] = compiled
 			}
 		}
-		jitCompileEnvironmentParsers(en)
 	}
 	return
 }
@@ -146,17 +149,16 @@ func jitExpressionContainsParser(expression Scmer) bool {
 }
 
 func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool) {
-	compiled := jitCompile(value)
+	compiled := jitCompileProbe(value)
 	var entry *JITEntryPoint
 	if compiled.GetTag() == tagProc && compiled.Proc() != nil {
 		entry = compiled.Proc().Compiled
 	}
-	parserProc := value.GetTag() == tagProc && value.Proc() != nil && jitExpressionContainsParser(value.Proc().Body)
-	// Parser fusion roots every capture, generated list and parser workspace in
-	// the emitted frame. Older builtin-level AutoImportSafe markers remain
-	// conservative for ordinary small procedures, but must not discard a fully
-	// compiled parser merely because one of its inlined generators allocates.
-	selected := entry != nil && (entry.AutoImportSafe || parserProc) && jitAutoImportCoverageWorthwhile(entry.Coverage)
+	selected := entry != nil && jitAutoImportCoverageWorthwhile(entry.Coverage)
+	if selected {
+		value.Proc().Compiled = entry
+		compiled = value
+	}
 	if entry != nil {
 		entry.DebugName = string(sym)
 		maybeLogJITCodeName(entry)

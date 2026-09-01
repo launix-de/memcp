@@ -87,6 +87,7 @@ func init_streams() {
 				}
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Stream), []JITValueDesc{d0}, 2)
+				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
 				ctx.FreeDesc(&d0)
@@ -132,6 +133,7 @@ func init_streams() {
 				}
 				ctx.SyncDesc(&d2)
 				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewAny), []JITValueDesc{d2}, 2)
+				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
 				if d3.Loc == LocImm {
@@ -144,8 +146,8 @@ func init_streams() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d3)
-				if d3.Loc == LocRegPair {
+				ctx.SyncDesc(&d3)
+				if d3.Loc == LocRegPair || d3.Loc == LocStackPair || d3.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d3, &result)
 					result.Type = d3.Type
 				} else {
@@ -366,6 +368,7 @@ func init_streams() {
 					}
 					ctx.SyncDesc(&d0)
 					d1 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Any), []JITValueDesc{d0}, 2)
+					d1.NoHeapPointer = false
 					ctx.BindReg(d1.Reg, &d1)
 					ctx.BindReg(d1.Reg2, &d1)
 					ctx.FreeDesc(&d0)
@@ -834,10 +837,11 @@ func init_streams() {
 					}
 					ctx.SyncDesc(&d35)
 					d36 = ctx.EmitGoCallScalar(GoFuncAddr(NewAny), []JITValueDesc{d35}, 2)
+					d36.NoHeapPointer = false
 					ctx.BindReg(d36.Reg, &d36)
 					ctx.BindReg(d36.Reg2, &d36)
-					ctx.EnsureDesc(&d36)
-					if d36.Loc == LocRegPair {
+					ctx.SyncDesc(&d36)
+					if d36.Loc == LocRegPair || d36.Loc == LocStackPair || d36.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d36, &result)
 						result.Type = d36.Type
 					} else {
@@ -1003,6 +1007,7 @@ func init_streams() {
 					}
 					ctx.SyncDesc(&d0)
 					d1 = ctx.EmitGoCallScalar(GoFuncAddr((Scmer).Any), []JITValueDesc{d0}, 2)
+					d1.NoHeapPointer = false
 					ctx.BindReg(d1.Reg, &d1)
 					ctx.BindReg(d1.Reg2, &d1)
 					ctx.FreeDesc(&d0)
@@ -1471,10 +1476,11 @@ func init_streams() {
 					}
 					ctx.SyncDesc(&d35)
 					d36 = ctx.EmitGoCallScalar(GoFuncAddr(NewAny), []JITValueDesc{d35}, 2)
+					d36.NoHeapPointer = false
 					ctx.BindReg(d36.Reg, &d36)
 					ctx.BindReg(d36.Reg2, &d36)
-					ctx.EnsureDesc(&d36)
-					if d36.Loc == LocRegPair {
+					ctx.SyncDesc(&d36)
+					if d36.Loc == LocRegPair || d36.Loc == LocStackPair || d36.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d36, &result)
 						result.Type = d36.Type
 					} else {

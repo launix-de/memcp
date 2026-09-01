@@ -37,9 +37,44 @@ func TestJITParserGrammarMatchesPackrat(t *testing.T) {
 	if parser.Compiled == nil {
 		t.Fatal("parser grammar was not compiled")
 	}
+	if parser.JITProgram == nil || !parser.JITProgram.inlineActions {
+		t.Fatal("parser grammar did not inline generator actions")
+	}
+	if action := parser.JITProgram.rules[parser.JITRule].action; !action.IsNil() {
+		t.Fatalf("compiled parser retained an Apply action: %s", String(action))
+	}
 	got := parser.Execute(" select alpha,beta,gamma ", environment)
 	if !Equal(got, want) {
 		t.Fatalf("compiled parser returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITParserGrammarSpillsWideGeneratorCaptures(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	environment := &Env{Vars: make(Vars), Outer: &Globalenv}
+	parserValue := Eval(Read("wide jit parser grammar", `(parser '(
+		(define a (regex "[a-z]+" false false)) ","
+		(define b (regex "[a-z]+" false false)) ","
+		(define c (regex "[a-z]+" false false)) ","
+		(define d (regex "[a-z]+" false false)) ","
+		(define e (regex "[a-z]+" false false)) ","
+		(define f (regex "[a-z]+" false false)) ","
+		(define g (regex "[a-z]+" false false)) ","
+		(define h (regex "[a-z]+" false false)) $)
+		(list a b c d e f g h) "")`), environment)
+	environment.Vars[Symbol("wide_parser")] = parserValue
+	parser := parserValue.Parser()
+	want := parser.Execute("a,b,c,d,e,f,g,h", environment)
+
+	jitCompileEnvironmentParsers(environment)
+	if parser.Compiled == nil {
+		t.Fatal("wide parser grammar was not compiled")
+	}
+	got := parser.Execute("a,b,c,d,e,f,g,h", environment)
+	if !Equal(got, want) {
+		t.Fatalf("compiled wide parser returned %s, want %s", String(got), String(want))
 	}
 }
 

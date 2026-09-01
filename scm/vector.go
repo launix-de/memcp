@@ -754,6 +754,7 @@ func init_vector() {
 					}
 					ctx.SyncDesc(&d41)
 					d43 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d41}, 2)
+					d43.NoHeapPointer = false
 					ctx.BindReg(d43.Reg, &d43)
 					ctx.BindReg(d43.Reg2, &d43)
 					ctx.StabilizeDescForControlFlow(&d43)

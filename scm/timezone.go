@@ -379,6 +379,7 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d11 = ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+					d11.NoHeapPointer = false
 					ctx.BindReg(d11.Reg, &d11)
 					ctx.BindReg(d11.Reg2, &d11)
 					ctx.BindReg(d11.Reg3, &d11)
@@ -390,6 +391,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d11)
 					d12 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d11}, 1)
+					d12.NoHeapPointer = true
 					ctx.BindReg(d12.Reg, &d12)
 					ctx.FreeDesc(&d11)
 					ctx.EnsureDesc(&d12)
@@ -610,8 +612,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d33 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d33)
-					if d33.Loc == LocRegPair {
+					ctx.SyncDesc(&d33)
+					if d33.Loc == LocRegPair || d33.Loc == LocStackPair || d33.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d33, &result)
 						result.Type = d33.Type
 					} else {
@@ -940,8 +942,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d59 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d59)
-					if d59.Loc == LocRegPair {
+					ctx.SyncDesc(&d59)
+					if d59.Loc == LocRegPair || d59.Loc == LocStackPair || d59.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d59, &result)
 						result.Type = d59.Type
 					} else {
@@ -1042,6 +1044,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d36)
 					d60 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d36}, 1)
+					d60.NoHeapPointer = true
 					ctx.BindReg(d60.Reg, &d60)
 					ctx.FreeDesc(&d36)
 					ctx.EnsureDesc(&d60)
@@ -1552,8 +1555,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d16 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d16)
-					if d16.Loc == LocRegPair {
+					ctx.SyncDesc(&d16)
+					if d16.Loc == LocRegPair || d16.Loc == LocStackPair || d16.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d16, &result)
 						result.Type = d16.Type
 					} else {
@@ -2409,8 +2412,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d99 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d99)
-					if d99.Loc == LocRegPair {
+					ctx.SyncDesc(&d99)
+					if d99.Loc == LocRegPair || d99.Loc == LocStackPair || d99.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d99, &result)
 						result.Type = d99.Type
 					} else {
@@ -2966,8 +2969,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d142 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d142)
-					if d142.Loc == LocRegPair {
+					ctx.SyncDesc(&d142)
+					if d142.Loc == LocRegPair || d142.Loc == LocStackPair || d142.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d142, &result)
 						result.Type = d142.Type
 					} else {
@@ -3519,6 +3522,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d1)
 					ctx.SyncDesc(&d104)
 					d187 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).In), []JITValueDesc{d1, d104}, 3)
+					d187.NoHeapPointer = false
 					ctx.BindReg(d187.Reg, &d187)
 					ctx.BindReg(d187.Reg2, &d187)
 					ctx.BindReg(d187.Reg3, &d187)
@@ -3532,6 +3536,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d187)
 					d188 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d187}, 1)
+					d188.NoHeapPointer = true
 					ctx.BindReg(d188.Reg, &d188)
 					ctx.EnsureDesc(&d187)
 					ctx.EnsureDesc(&d187)
@@ -3541,6 +3546,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d187)
 					d189 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d187}, 1)
+					d189.NoHeapPointer = true
 					ctx.BindReg(d189.Reg, &d189)
 					ctx.EnsureDesc(&d187)
 					ctx.EnsureDesc(&d187)
@@ -3550,6 +3556,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d187)
 					d190 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d187}, 1)
+					d190.NoHeapPointer = true
 					ctx.BindReg(d190.Reg, &d190)
 					ctx.EnsureDesc(&d187)
 					ctx.EnsureDesc(&d187)
@@ -3559,6 +3566,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d187)
 					d191 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d187}, 1)
+					d191.NoHeapPointer = true
 					ctx.BindReg(d191.Reg, &d191)
 					ctx.EnsureDesc(&d187)
 					ctx.EnsureDesc(&d187)
@@ -3568,6 +3576,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d187)
 					d192 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d187}, 1)
+					d192.NoHeapPointer = true
 					ctx.BindReg(d192.Reg, &d192)
 					ctx.EnsureDesc(&d187)
 					ctx.EnsureDesc(&d187)
@@ -3577,6 +3586,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d187)
 					d193 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d187}, 1)
+					d193.NoHeapPointer = true
 					ctx.BindReg(d193.Reg, &d193)
 					ctx.FreeDesc(&d187)
 					d194 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
@@ -3628,6 +3638,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d195)
 					ctx.SyncDesc(&d194)
 					d196 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d188, d189, d190, d191, d192, d193, d195, d194}, 3)
+					d196.NoHeapPointer = false
 					ctx.BindReg(d196.Reg, &d196)
 					ctx.BindReg(d196.Reg2, &d196)
 					ctx.BindReg(d196.Reg3, &d196)
@@ -3647,6 +3658,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d196)
 					d197 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d196}, 1)
+					d197.NoHeapPointer = true
 					ctx.BindReg(d197.Reg, &d197)
 					ctx.FreeDesc(&d196)
 					ctx.EnsureDesc(&d197)
@@ -3656,11 +3668,12 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d197)
 					d198 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d197}, 2)
+					d198.NoHeapPointer = false
 					ctx.BindReg(d198.Reg, &d198)
 					ctx.BindReg(d198.Reg2, &d198)
 					ctx.FreeDesc(&d197)
-					ctx.EnsureDesc(&d198)
-					if d198.Loc == LocRegPair {
+					ctx.SyncDesc(&d198)
+					if d198.Loc == LocRegPair || d198.Loc == LocStackPair || d198.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d198, &result)
 						result.Type = d198.Type
 					} else {
@@ -3879,6 +3892,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d200)
 					ctx.SyncDesc(&d201)
 					d202 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d200, d201}, 3)
+					d202.NoHeapPointer = false
 					ctx.BindReg(d202.Reg, &d202)
 					ctx.BindReg(d202.Reg2, &d202)
 					ctx.BindReg(d202.Reg3, &d202)
@@ -3892,6 +3906,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d202)
 					d203 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d202}, 3)
+					d203.NoHeapPointer = false
 					ctx.BindReg(d203.Reg, &d203)
 					ctx.BindReg(d203.Reg2, &d203)
 					ctx.BindReg(d203.Reg3, &d203)
@@ -3904,6 +3919,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d203)
 					d204 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d203}, 1)
+					d204.NoHeapPointer = true
 					ctx.BindReg(d204.Reg, &d204)
 					ctx.EnsureDesc(&d203)
 					ctx.EnsureDesc(&d203)
@@ -3913,6 +3929,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d203)
 					d205 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d203}, 1)
+					d205.NoHeapPointer = true
 					ctx.BindReg(d205.Reg, &d205)
 					ctx.EnsureDesc(&d203)
 					ctx.EnsureDesc(&d203)
@@ -3922,6 +3939,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d203)
 					d206 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d203}, 1)
+					d206.NoHeapPointer = true
 					ctx.BindReg(d206.Reg, &d206)
 					ctx.EnsureDesc(&d203)
 					ctx.EnsureDesc(&d203)
@@ -3931,6 +3949,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d203)
 					d207 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d203}, 1)
+					d207.NoHeapPointer = true
 					ctx.BindReg(d207.Reg, &d207)
 					ctx.EnsureDesc(&d203)
 					ctx.EnsureDesc(&d203)
@@ -3940,6 +3959,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d203)
 					d208 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d203}, 1)
+					d208.NoHeapPointer = true
 					ctx.BindReg(d208.Reg, &d208)
 					ctx.EnsureDesc(&d203)
 					ctx.EnsureDesc(&d203)
@@ -3949,6 +3969,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d203)
 					d209 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d203}, 1)
+					d209.NoHeapPointer = true
 					ctx.BindReg(d209.Reg, &d209)
 					ctx.FreeDesc(&d203)
 					ctx.EnsureDesc(&d204)
@@ -3999,6 +4020,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d210)
 					ctx.SyncDesc(&d21)
 					d211 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d204, d205, d206, d207, d208, d209, d210, d21}, 3)
+					d211.NoHeapPointer = false
 					ctx.BindReg(d211.Reg, &d211)
 					ctx.BindReg(d211.Reg2, &d211)
 					ctx.BindReg(d211.Reg3, &d211)
@@ -5108,8 +5130,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d295 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d295)
-					if d295.Loc == LocRegPair {
+					ctx.SyncDesc(&d295)
+					if d295.Loc == LocRegPair || d295.Loc == LocStackPair || d295.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d295, &result)
 						result.Type = d295.Type
 					} else {
@@ -5374,6 +5396,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d219)
 					ctx.SyncDesc(&d296)
 					d297 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d219, d296}, 3)
+					d297.NoHeapPointer = false
 					ctx.BindReg(d297.Reg, &d297)
 					ctx.BindReg(d297.Reg2, &d297)
 					ctx.BindReg(d297.Reg3, &d297)
@@ -6111,8 +6134,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d18 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d18)
-					if d18.Loc == LocRegPair {
+					ctx.SyncDesc(&d18)
+					if d18.Loc == LocRegPair || d18.Loc == LocStackPair || d18.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d18, &result)
 						result.Type = d18.Type
 					} else {
@@ -7675,6 +7698,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d20)
 					ctx.SyncDesc(&d147)
 					d148 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d20, d147}, 3)
+					d148.NoHeapPointer = false
 					ctx.BindReg(d148.Reg, &d148)
 					ctx.BindReg(d148.Reg2, &d148)
 					ctx.BindReg(d148.Reg3, &d148)
@@ -7693,6 +7717,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d148)
 					ctx.SyncDesc(&d2)
 					d149 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).In), []JITValueDesc{d148, d2}, 3)
+					d149.NoHeapPointer = false
 					ctx.BindReg(d149.Reg, &d149)
 					ctx.BindReg(d149.Reg2, &d149)
 					ctx.BindReg(d149.Reg3, &d149)
@@ -8095,6 +8120,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d158)
 					ctx.SyncDesc(&d169)
 					d170 = ctx.EmitGoCallScalar(GoFuncAddr((*strings.Builder).WriteByte), []JITValueDesc{d158, d169}, 2)
+					d170.NoHeapPointer = false
 					ctx.BindReg(d170.Reg, &d170)
 					ctx.BindReg(d170.Reg2, &d170)
 					ctx.FreeDesc(&d169)
@@ -8718,6 +8744,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d158)
 					ctx.SyncDesc(&d198)
 					d199 = ctx.EmitGoCallScalar(GoFuncAddr((*strings.Builder).WriteByte), []JITValueDesc{d158, d198}, 2)
+					d199.NoHeapPointer = false
 					ctx.BindReg(d199.Reg, &d199)
 					ctx.BindReg(d199.Reg2, &d199)
 					ctx.FreeDesc(&d198)
@@ -8765,6 +8792,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d158)
 					ctx.SyncDesc(&d202)
 					d203 = ctx.EmitGoCallScalar(GoFuncAddr((*strings.Builder).WriteByte), []JITValueDesc{d158, d202}, 2)
+					d203.NoHeapPointer = false
 					ctx.BindReg(d203.Reg, &d203)
 					ctx.BindReg(d203.Reg2, &d203)
 					ctx.FreeDesc(&d202)
@@ -8810,6 +8838,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d205 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d153}, 1)
+					d205.NoHeapPointer = true
 					ctx.BindReg(d205.Reg, &d205)
 					ctx.ReclaimUntrackedRegs()
 					d206 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]any { return new([1]any) }), nil, 1)
@@ -8862,6 +8891,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d211)
 					ctx.SyncDesc(&d210)
 					d212 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d211, d210}, 2)
+					d212.NoHeapPointer = false
 					ctx.BindReg(d212.Reg, &d212)
 					ctx.BindReg(d212.Reg2, &d212)
 					ctx.FreeDesc(&d211)
@@ -8923,6 +8953,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d216 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d153}, 1)
+					d216.NoHeapPointer = true
 					ctx.BindReg(d216.Reg, &d216)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d216)
@@ -8990,6 +9021,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d223)
 					ctx.SyncDesc(&d222)
 					d224 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d223, d222}, 2)
+					d224.NoHeapPointer = false
 					ctx.BindReg(d224.Reg, &d224)
 					ctx.BindReg(d224.Reg2, &d224)
 					ctx.FreeDesc(&d223)
@@ -9051,6 +9083,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d228 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d153}, 1)
+					d228.NoHeapPointer = true
 					ctx.BindReg(d228.Reg, &d228)
 					ctx.ReclaimUntrackedRegs()
 					d229 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]any { return new([1]any) }), nil, 1)
@@ -9103,6 +9136,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d234)
 					ctx.SyncDesc(&d233)
 					d235 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d234, d233}, 2)
+					d235.NoHeapPointer = false
 					ctx.BindReg(d235.Reg, &d235)
 					ctx.BindReg(d235.Reg2, &d235)
 					ctx.FreeDesc(&d234)
@@ -9164,6 +9198,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d239 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d153}, 1)
+					d239.NoHeapPointer = true
 					ctx.BindReg(d239.Reg, &d239)
 					ctx.ReclaimUntrackedRegs()
 					d240 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]any { return new([1]any) }), nil, 1)
@@ -9216,6 +9251,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d245)
 					ctx.SyncDesc(&d244)
 					d246 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d245, d244}, 2)
+					d246.NoHeapPointer = false
 					ctx.BindReg(d246.Reg, &d246)
 					ctx.BindReg(d246.Reg2, &d246)
 					ctx.FreeDesc(&d245)
@@ -9277,6 +9313,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d250 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d153}, 1)
+					d250.NoHeapPointer = true
 					ctx.BindReg(d250.Reg, &d250)
 					ctx.ReclaimUntrackedRegs()
 					d251 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]any { return new([1]any) }), nil, 1)
@@ -9329,6 +9366,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d256)
 					ctx.SyncDesc(&d255)
 					d257 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d256, d255}, 2)
+					d257.NoHeapPointer = false
 					ctx.BindReg(d257.Reg, &d257)
 					ctx.BindReg(d257.Reg2, &d257)
 					ctx.FreeDesc(&d256)
@@ -9390,6 +9428,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d261 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d153}, 1)
+					d261.NoHeapPointer = true
 					ctx.BindReg(d261.Reg, &d261)
 					ctx.ReclaimUntrackedRegs()
 					d262 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]any { return new([1]any) }), nil, 1)
@@ -9442,6 +9481,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d267)
 					ctx.SyncDesc(&d266)
 					d268 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d267, d266}, 2)
+					d268.NoHeapPointer = false
 					ctx.BindReg(d268.Reg, &d268)
 					ctx.BindReg(d268.Reg2, &d268)
 					ctx.FreeDesc(&d267)
@@ -9503,6 +9543,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d272 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d153}, 1)
+					d272.NoHeapPointer = true
 					ctx.BindReg(d272.Reg, &d272)
 					ctx.ReclaimUntrackedRegs()
 					d273 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[1]any { return new([1]any) }), nil, 1)
@@ -9555,6 +9596,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d278)
 					ctx.SyncDesc(&d277)
 					d279 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d278, d277}, 2)
+					d279.NoHeapPointer = false
 					ctx.BindReg(d279.Reg, &d279)
 					ctx.BindReg(d279.Reg2, &d279)
 					ctx.FreeDesc(&d278)
@@ -9616,6 +9658,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d283 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d153}, 1)
+					d283.NoHeapPointer = true
 					ctx.BindReg(d283.Reg, &d283)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d153)
@@ -9626,6 +9669,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d284 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d153}, 1)
+					d284.NoHeapPointer = true
 					ctx.BindReg(d284.Reg, &d284)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d153)
@@ -9636,6 +9680,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d153)
 					d285 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d153}, 1)
+					d285.NoHeapPointer = true
 					ctx.BindReg(d285.Reg, &d285)
 					ctx.ReclaimUntrackedRegs()
 					d286 = ctx.EmitGoCallScalar(GoFuncAddr(func() *[3]any { return new([3]any) }), nil, 1)
@@ -9706,6 +9751,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d295)
 					ctx.SyncDesc(&d294)
 					d296 = ctx.EmitGoCallScalar(GoFuncAddr(fmt.Sprintf), []JITValueDesc{d295, d294}, 2)
+					d296.NoHeapPointer = false
 					ctx.BindReg(d296.Reg, &d296)
 					ctx.BindReg(d296.Reg2, &d296)
 					ctx.FreeDesc(&d295)
@@ -9771,6 +9817,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d158)
 					ctx.SyncDesc(&d300)
 					d301 = ctx.EmitGoCallScalar(GoFuncAddr((*strings.Builder).WriteByte), []JITValueDesc{d158, d300}, 2)
+					d301.NoHeapPointer = false
 					ctx.BindReg(d301.Reg, &d301)
 					ctx.BindReg(d301.Reg2, &d301)
 					ctx.FreeDesc(&d300)
@@ -10348,11 +10395,12 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d20)
 					d304 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d20}, 2)
+					d304.NoHeapPointer = false
 					ctx.BindReg(d304.Reg, &d304)
 					ctx.BindReg(d304.Reg2, &d304)
 					ctx.FreeDesc(&d20)
-					ctx.EnsureDesc(&d304)
-					if d304.Loc == LocRegPair {
+					ctx.SyncDesc(&d304)
+					if d304.Loc == LocRegPair || d304.Loc == LocStackPair || d304.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d304, &result)
 						result.Type = d304.Type
 					} else {
@@ -12112,6 +12160,7 @@ func init_timezone() {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
 				ctx.BindReg(d0.Reg3, &d0)
@@ -12123,6 +12172,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d0}, 3)
+				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
 				ctx.BindReg(d1.Reg3, &d1)
@@ -12135,6 +12185,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d1}, 1)
+				d2.NoHeapPointer = true
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.FreeDesc(&d1)
 				ctx.EnsureDesc(&d2)
@@ -12144,6 +12195,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d2)
 				d3 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d2}, 2)
+				d3.NoHeapPointer = false
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.BindReg(d3.Reg2, &d3)
 				ctx.FreeDesc(&d2)
@@ -12157,8 +12209,8 @@ func init_timezone() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d3)
-				if d3.Loc == LocRegPair {
+				ctx.SyncDesc(&d3)
+				if d3.Loc == LocRegPair || d3.Loc == LocStackPair || d3.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d3, &result)
 					result.Type = d3.Type
 				} else {
@@ -12207,6 +12259,7 @@ func init_timezone() {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
 				ctx.BindReg(d0.Reg3, &d0)
@@ -12218,6 +12271,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d0}, 3)
+				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
 				ctx.BindReg(d1.Reg3, &d1)
@@ -12230,6 +12284,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d1}, 1)
+				d2.NoHeapPointer = true
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
@@ -12239,6 +12294,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d3 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d1}, 1)
+				d3.NoHeapPointer = true
 				ctx.BindReg(d3.Reg, &d3)
 				ctx.EnsureDesc(&d1)
 				ctx.EnsureDesc(&d1)
@@ -12248,6 +12304,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d4 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d1}, 1)
+				d4.NoHeapPointer = true
 				ctx.BindReg(d4.Reg, &d4)
 				ctx.FreeDesc(&d1)
 				d5 := ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
@@ -12296,6 +12353,7 @@ func init_timezone() {
 				ctx.SyncDesc(&d9)
 				ctx.SyncDesc(&d5)
 				d10 := ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d2, d3, d4, d6, d7, d8, d9, d5}, 3)
+				d10.NoHeapPointer = false
 				ctx.BindReg(d10.Reg, &d10)
 				ctx.BindReg(d10.Reg2, &d10)
 				ctx.BindReg(d10.Reg3, &d10)
@@ -12315,6 +12373,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d10)
 				d11 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d10}, 1)
+				d11.NoHeapPointer = true
 				ctx.BindReg(d11.Reg, &d11)
 				ctx.FreeDesc(&d10)
 				ctx.EnsureDesc(&d11)
@@ -12324,6 +12383,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d11)
 				d12 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d11}, 2)
+				d12.NoHeapPointer = false
 				ctx.BindReg(d12.Reg, &d12)
 				ctx.BindReg(d12.Reg2, &d12)
 				ctx.FreeDesc(&d11)
@@ -12337,8 +12397,8 @@ func init_timezone() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d12)
-				if d12.Loc == LocRegPair {
+				ctx.SyncDesc(&d12)
+				if d12.Loc == LocRegPair || d12.Loc == LocStackPair || d12.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d12, &result)
 					result.Type = d12.Type
 				} else {
@@ -12388,6 +12448,7 @@ func init_timezone() {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
 				ctx.BindReg(d0.Reg3, &d0)
@@ -12399,6 +12460,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d0}, 3)
+				d1.NoHeapPointer = false
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.BindReg(d1.Reg2, &d1)
 				ctx.BindReg(d1.Reg3, &d1)
@@ -12411,6 +12473,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d1}, 1)
+				d2.NoHeapPointer = true
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.EnsureDesc(&d2)
 				ctx.EnsureDesc(&d2)
@@ -12435,6 +12498,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d4 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d1}, 1)
+				d4.NoHeapPointer = true
 				ctx.BindReg(d4.Reg, &d4)
 				ctx.EnsureDesc(&d4)
 				ctx.EnsureDesc(&d4)
@@ -12506,6 +12570,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d7 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d1}, 1)
+				d7.NoHeapPointer = true
 				ctx.BindReg(d7.Reg, &d7)
 				ctx.FreeDesc(&d1)
 				ctx.EnsureDesc(&d6)
@@ -12564,6 +12629,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d8)
 				d10 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d8}, 2)
+				d10.NoHeapPointer = false
 				ctx.BindReg(d10.Reg, &d10)
 				ctx.BindReg(d10.Reg2, &d10)
 				ctx.FreeDesc(&d8)
@@ -12577,8 +12643,8 @@ func init_timezone() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d10)
-				if d10.Loc == LocRegPair {
+				ctx.SyncDesc(&d10)
+				if d10.Loc == LocRegPair || d10.Loc == LocStackPair || d10.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d10, &result)
 					result.Type = d10.Type
 				} else {
@@ -12625,6 +12691,7 @@ func init_timezone() {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
 				d0 := ctx.EmitGoCallScalar(GoFuncAddr(time.Now), []JITValueDesc{}, 3)
+				d0.NoHeapPointer = false
 				ctx.BindReg(d0.Reg, &d0)
 				ctx.BindReg(d0.Reg2, &d0)
 				ctx.BindReg(d0.Reg3, &d0)
@@ -12636,6 +12703,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d0)
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d0}, 1)
+				d1.NoHeapPointer = true
 				ctx.BindReg(d1.Reg, &d1)
 				ctx.FreeDesc(&d0)
 				ctx.EnsureDesc(&d1)
@@ -12645,6 +12713,7 @@ func init_timezone() {
 				}
 				ctx.SyncDesc(&d1)
 				d2 := ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d1}, 2)
+				d2.NoHeapPointer = false
 				ctx.BindReg(d2.Reg, &d2)
 				ctx.BindReg(d2.Reg2, &d2)
 				ctx.FreeDesc(&d1)
@@ -12658,8 +12727,8 @@ func init_timezone() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d2)
-				if d2.Loc == LocRegPair {
+				ctx.SyncDesc(&d2)
+				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d2, &result)
 					result.Type = d2.Type
 				} else {
@@ -13100,8 +13169,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d18 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d18)
-					if d18.Loc == LocRegPair {
+					ctx.SyncDesc(&d18)
+					if d18.Loc == LocRegPair || d18.Loc == LocStackPair || d18.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d18, &result)
 						result.Type = d18.Type
 					} else {
@@ -13717,8 +13786,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d73 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d73)
-					if d73.Loc == LocRegPair {
+					ctx.SyncDesc(&d73)
+					if d73.Loc == LocRegPair || d73.Loc == LocStackPair || d73.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d73, &result)
 						result.Type = d73.Type
 					} else {
@@ -15449,6 +15518,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d1)
 					ctx.SyncDesc(&d195)
 					d196 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d1, d195}, 3)
+					d196.NoHeapPointer = false
 					ctx.BindReg(d196.Reg, &d196)
 					ctx.BindReg(d196.Reg2, &d196)
 					ctx.BindReg(d196.Reg3, &d196)
@@ -15461,6 +15531,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d196)
 					d197 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d196}, 3)
+					d197.NoHeapPointer = false
 					ctx.BindReg(d197.Reg, &d197)
 					ctx.BindReg(d197.Reg2, &d197)
 					ctx.BindReg(d197.Reg3, &d197)
@@ -15473,6 +15544,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d197)
 					d198 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d197}, 1)
+					d198.NoHeapPointer = true
 					ctx.BindReg(d198.Reg, &d198)
 					ctx.EnsureDesc(&d197)
 					ctx.EnsureDesc(&d197)
@@ -15482,6 +15554,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d197)
 					d199 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d197}, 1)
+					d199.NoHeapPointer = true
 					ctx.BindReg(d199.Reg, &d199)
 					ctx.EnsureDesc(&d197)
 					ctx.EnsureDesc(&d197)
@@ -15491,6 +15564,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d197)
 					d200 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d197}, 1)
+					d200.NoHeapPointer = true
 					ctx.BindReg(d200.Reg, &d200)
 					ctx.EnsureDesc(&d197)
 					ctx.EnsureDesc(&d197)
@@ -15500,6 +15574,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d197)
 					d201 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d197}, 1)
+					d201.NoHeapPointer = true
 					ctx.BindReg(d201.Reg, &d201)
 					ctx.EnsureDesc(&d197)
 					ctx.EnsureDesc(&d197)
@@ -15509,6 +15584,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d197)
 					d202 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d197}, 1)
+					d202.NoHeapPointer = true
 					ctx.BindReg(d202.Reg, &d202)
 					ctx.EnsureDesc(&d197)
 					ctx.EnsureDesc(&d197)
@@ -15518,6 +15594,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d197)
 					d203 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d197}, 1)
+					d203.NoHeapPointer = true
 					ctx.BindReg(d203.Reg, &d203)
 					ctx.FreeDesc(&d197)
 					ctx.EnsureDesc(&d198)
@@ -15568,6 +15645,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d204)
 					ctx.SyncDesc(&d23)
 					d205 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d198, d199, d200, d201, d202, d203, d204, d23}, 3)
+					d205.NoHeapPointer = false
 					ctx.BindReg(d205.Reg, &d205)
 					ctx.BindReg(d205.Reg2, &d205)
 					ctx.BindReg(d205.Reg3, &d205)
@@ -15586,6 +15664,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d205)
 					d206 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).UTC), []JITValueDesc{d205}, 3)
+					d206.NoHeapPointer = false
 					ctx.BindReg(d206.Reg, &d206)
 					ctx.BindReg(d206.Reg2, &d206)
 					ctx.BindReg(d206.Reg3, &d206)
@@ -15598,6 +15677,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d206)
 					d207 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d206}, 1)
+					d207.NoHeapPointer = true
 					ctx.BindReg(d207.Reg, &d207)
 					ctx.FreeDesc(&d206)
 					ctx.EnsureDesc(&d207)
@@ -15607,11 +15687,12 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d207)
 					d208 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d207}, 2)
+					d208.NoHeapPointer = false
 					ctx.BindReg(d208.Reg, &d208)
 					ctx.BindReg(d208.Reg2, &d208)
 					ctx.FreeDesc(&d207)
-					ctx.EnsureDesc(&d208)
-					if d208.Loc == LocRegPair {
+					ctx.SyncDesc(&d208)
+					if d208.Loc == LocRegPair || d208.Loc == LocStackPair || d208.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d208, &result)
 						result.Type = d208.Type
 					} else {
@@ -15877,6 +15958,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d1)
 					ctx.SyncDesc(&d209)
 					d210 = ctx.EmitGoCallScalar(GoFuncAddr(time.Unix), []JITValueDesc{d1, d209}, 3)
+					d210.NoHeapPointer = false
 					ctx.BindReg(d210.Reg, &d210)
 					ctx.BindReg(d210.Reg2, &d210)
 					ctx.BindReg(d210.Reg3, &d210)
@@ -15896,6 +15978,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d210)
 					ctx.SyncDesc(&d23)
 					d211 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).In), []JITValueDesc{d210, d23}, 3)
+					d211.NoHeapPointer = false
 					ctx.BindReg(d211.Reg, &d211)
 					ctx.BindReg(d211.Reg2, &d211)
 					ctx.BindReg(d211.Reg3, &d211)
@@ -15909,6 +15992,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d211)
 					d212 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Year), []JITValueDesc{d211}, 1)
+					d212.NoHeapPointer = true
 					ctx.BindReg(d212.Reg, &d212)
 					ctx.EnsureDesc(&d211)
 					ctx.EnsureDesc(&d211)
@@ -15918,6 +16002,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d211)
 					d213 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Month), []JITValueDesc{d211}, 1)
+					d213.NoHeapPointer = true
 					ctx.BindReg(d213.Reg, &d213)
 					ctx.EnsureDesc(&d211)
 					ctx.EnsureDesc(&d211)
@@ -15927,6 +16012,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d211)
 					d214 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Day), []JITValueDesc{d211}, 1)
+					d214.NoHeapPointer = true
 					ctx.BindReg(d214.Reg, &d214)
 					ctx.EnsureDesc(&d211)
 					ctx.EnsureDesc(&d211)
@@ -15936,6 +16022,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d211)
 					d215 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Hour), []JITValueDesc{d211}, 1)
+					d215.NoHeapPointer = true
 					ctx.BindReg(d215.Reg, &d215)
 					ctx.EnsureDesc(&d211)
 					ctx.EnsureDesc(&d211)
@@ -15945,6 +16032,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d211)
 					d216 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Minute), []JITValueDesc{d211}, 1)
+					d216.NoHeapPointer = true
 					ctx.BindReg(d216.Reg, &d216)
 					ctx.EnsureDesc(&d211)
 					ctx.EnsureDesc(&d211)
@@ -15954,6 +16042,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d211)
 					d217 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Second), []JITValueDesc{d211}, 1)
+					d217.NoHeapPointer = true
 					ctx.BindReg(d217.Reg, &d217)
 					ctx.FreeDesc(&d211)
 					d218 = ctx.EmitGoCallScalar(GoFuncAddr(func() *time.Location { return time.UTC }), nil, 1)
@@ -16005,6 +16094,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d219)
 					ctx.SyncDesc(&d218)
 					d220 = ctx.EmitGoCallScalar(GoFuncAddr(time.Date), []JITValueDesc{d212, d213, d214, d215, d216, d217, d219, d218}, 3)
+					d220.NoHeapPointer = false
 					ctx.BindReg(d220.Reg, &d220)
 					ctx.BindReg(d220.Reg2, &d220)
 					ctx.BindReg(d220.Reg3, &d220)
@@ -16024,6 +16114,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d220)
 					d221 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Unix), []JITValueDesc{d220}, 1)
+					d221.NoHeapPointer = true
 					ctx.BindReg(d221.Reg, &d221)
 					ctx.FreeDesc(&d220)
 					ctx.EnsureDesc(&d221)
@@ -16033,11 +16124,12 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d221)
 					d222 = ctx.EmitGoCallScalar(GoFuncAddr(NewDate), []JITValueDesc{d221}, 2)
+					d222.NoHeapPointer = false
 					ctx.BindReg(d222.Reg, &d222)
 					ctx.BindReg(d222.Reg2, &d222)
 					ctx.FreeDesc(&d221)
-					ctx.EnsureDesc(&d222)
-					if d222.Loc == LocRegPair {
+					ctx.SyncDesc(&d222)
+					if d222.Loc == LocRegPair || d222.Loc == LocStackPair || d222.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d222, &result)
 						result.Type = d222.Type
 					} else {
@@ -16555,8 +16647,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d13 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d13)
-					if d13.Loc == LocRegPair {
+					ctx.SyncDesc(&d13)
+					if d13.Loc == LocRegPair || d13.Loc == LocStackPair || d13.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d13, &result)
 						result.Type = d13.Type
 					} else {
@@ -17106,8 +17198,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d65 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d65)
-					if d65.Loc == LocRegPair {
+					ctx.SyncDesc(&d65)
+					if d65.Loc == LocRegPair || d65.Loc == LocStackPair || d65.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d65, &result)
 						result.Type = d65.Type
 					} else {
@@ -17295,6 +17387,7 @@ func init_timezone() {
 					}
 					ctx.SyncDesc(&d67)
 					d69 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d67}, 2)
+					d69.NoHeapPointer = false
 					ctx.BindReg(d69.Reg, &d69)
 					ctx.BindReg(d69.Reg2, &d69)
 					ctx.StabilizeDescForControlFlow(&d69)
@@ -17313,6 +17406,7 @@ func init_timezone() {
 					ctx.SyncDesc(&d20)
 					ctx.SyncDesc(&d16)
 					d70 = ctx.EmitGoCallScalar(GoFuncAddr((time.Time).Sub), []JITValueDesc{d20, d16}, 1)
+					d70.NoHeapPointer = true
 					ctx.BindReg(d70.Reg, &d70)
 					ctx.StabilizeDescForControlFlow(&d70)
 					ctx.EnsureDesc(&d69)
@@ -25497,8 +25591,8 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					d738 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-					ctx.EnsureDesc(&d738)
-					if d738.Loc == LocRegPair {
+					ctx.SyncDesc(&d738)
+					if d738.Loc == LocRegPair || d738.Loc == LocStackPair || d738.Loc == LocInputPair {
 						ctx.EmitMovPairToResult(&d738, &result)
 						result.Type = d738.Type
 					} else {

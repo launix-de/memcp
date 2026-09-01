@@ -62,7 +62,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
 	ptr, arena, reservation := globalJITPool.Alloc(defaultCodeBufSize)
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize, arena: arena, reservation: reservation}
-	codeLen, roots, _, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
+	codeLen, roots, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
 	arena.complete(reservation, buf.stackMaps)
 	if codeLen == 0 {
 		return nil, nil
@@ -75,7 +75,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 // jitCompileProcToExec compiles a Proc body directly into writable executable memory.
 // Returns code length, GC roots, an overflow flag, and whether the call boundary
 // must provide a fresh variadic array that becomes the owned list result.
-func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, bool, JITCoverage) {
+func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, JITCoverage) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		si := body.SourceInfo()
@@ -94,7 +94,7 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int,
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
 // executable buffer using Declaration.JITEmit callbacks.
-func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, autoImportSafe bool, needsStableArgs bool, coverage JITCoverage) {
+func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, needsStableArgs bool, coverage JITCoverage) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r == jitCodeOverflowPanic {
@@ -107,7 +107,6 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			roots = nil
 			transferInputArgs = false
 			hiddenArgs = nil
-			autoImportSafe = false
 			needsStableArgs = false
 			coverage = JITCoverage{}
 		}
@@ -140,7 +139,6 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		LastIntReg:       RegR15,
 		InputArgCount:    inputArgCount,
 		LocalSlotCount:   numVars,
-		AutoImportSafe:   true,
 		RecursiveLambdas: recursiveLambdas,
 		StackPhiTargets:  jitExpressionContainsParser(body),
 		SelfSymbols:      selfSymbols,
@@ -207,16 +205,25 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	if proc != nil {
 		captured := jitCapturedEnv(proc.En)
 		var vars map[Symbol]JITValueDesc
+		var numbered []JITValueDesc
+		if numVars > 0 {
+			numbered = make([]JITValueDesc, numVars)
+			for index := range numbered {
+				desc := JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(index)}
+				if !useInputFrame {
+					desc.Loc = LocStackPair
+					desc.StackOff = int32(index * 16)
+				}
+				numbered[index] = desc
+			}
+		}
 		putVar := func(sym Symbol, index int) {
 			if vars == nil {
 				vars = make(map[Symbol]JITValueDesc, inputArgCount)
 			}
-			desc := JITValueDesc{
-				Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(index),
-			}
-			if !useInputFrame && index < numVars {
-				desc.Loc = LocStackPair
-				desc.StackOff = int32(index * 16)
+			desc := JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(index)}
+			if index < len(numbered) {
+				desc = numbered[index]
 			}
 			vars[sym] = desc
 		}
@@ -234,8 +241,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 				putVar(proc.Params.Symbol(), 0)
 			}
 		}
-		if len(vars) > 0 || captured != nil {
-			ctx.Env = &JITEnv{Vars: vars, Outer: captured}
+		if len(vars) > 0 || len(numbered) > 0 || captured != nil {
+			ctx.Env = &JITEnv{Vars: vars, Numbered: numbered, Outer: captured}
 		}
 	}
 	if ctx.HasSelfLoop {
@@ -273,10 +280,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			case tagFloat:
 				ctx.EmitMakeFloat(ret, desc)
 			default:
-				return 0, nil, false, false, nil, false, false, JITCoverage{}
+				return 0, nil, false, false, nil, false, JITCoverage{}
 			}
 		default:
-			return 0, nil, false, false, nil, false, false, JITCoverage{}
+			return 0, nil, false, false, nil, false, JITCoverage{}
 		}
 	}
 	// Unified epilog: patch SUB RSP with max frame size, then leave; ret.
@@ -293,7 +300,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs, ctx.AutoImportSafe, ctx.NeedsStableArgs, ctx.Coverage
+	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs, ctx.NeedsStableArgs, ctx.Coverage
 }
 
 const (
