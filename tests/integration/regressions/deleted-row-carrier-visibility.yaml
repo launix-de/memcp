@@ -19,6 +19,7 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS drcv_idlist"
+  - sql: "DROP TABLE IF EXISTS drcv_warm_index"
   - sql: "DROP TABLE IF EXISTS drcv_access"
   - sql: "DROP TABLE IF EXISTS drcv_item"
   - sql: "DROP TABLE IF EXISTS drcv_domain"
@@ -28,10 +29,16 @@ setup:
   - sql: "CREATE TABLE drcv_item (id INT PRIMARY KEY, domain_id INT, bucket_id INT, sort_key INT)"
   - sql: "CREATE TABLE drcv_access (id INT PRIMARY KEY, actor_id INT, tenant_id INT, domain_id INT, allowed BOOL)"
   - sql: "CREATE TABLE drcv_idlist (list_id INT, item_id INT)"
+  - sql: "CREATE TABLE drcv_warm_index (id INT PRIMARY KEY, acl_visible BOOL, sort_key INT)"
   - sql: "INSERT INTO drcv_tenant (id, direct_flag, label) VALUES (1, FALSE, 'tenant-one'), (2, FALSE, 'tenant-two')"
   - sql: "INSERT INTO drcv_domain (id, tenant_id, direct_flag, label) VALUES (1, 1, FALSE, 'one'), (2, 2, FALSE, 'two'), (3, 1, TRUE, 'three')"
   - sql: "INSERT INTO drcv_item (id, domain_id, bucket_id, sort_key) VALUES (11, 1, 7, 40), (12, 1, 7, 30), (21, 2, 7, 20), (31, 3, 7, 10)"
   - sql: "INSERT INTO drcv_access (id, actor_id, tenant_id, domain_id, allowed) VALUES (1, 101, NULL, NULL, TRUE), (2, 202, 2, 2, TRUE)"
+  - scm: |
+      (begin
+      (define rows (produceN 4096 (lambda (i) (list (+ i 1) true i))))
+      (insert (table "memcp-tests" "drcv_warm_index") '("id" "acl_visible" "sort_key") rows '() (lambda () true) false)
+      (rebuild (table "memcp-tests" "drcv_warm_index") true false))
   - scm: |
       (begin
       (rebuild (table "memcp-tests" "drcv_domain") true false)
@@ -40,6 +47,40 @@ setup:
       (rebuild (table "memcp-tests" "drcv_access") true false))
 
 test_cases:
+  - name: "A warm longer base index cannot consume a request-local RecSet boundary"
+    scm: |
+      (begin
+      (define tbl (table "memcp-tests" "drcv_warm_index"))
+      (define warm (lambda ()
+        (scan_order nil tbl
+          '("acl_visible")
+          (lambda (acl_visible) (equal? acl_visible true))
+          '("sort_key")
+          '(<)
+          0 0 16
+          '("id")
+          (lambda (id) id)
+          +
+          0
+          false)))
+      (warm)
+      (warm)
+      (define selected
+        (scan_recset nil tbl
+          '("acl_visible")
+          (lambda (acl_visible) (equal? acl_visible true))))
+      (define counted
+        (scan nil selected
+          '("acl_visible")
+          (lambda (acl_visible) (equal? acl_visible true))
+          '("id")
+          (lambda (id) 1)
+          +
+          0))
+      (if (equal? counted 4096)
+        "ok"
+        (error "a query-local RecSet boundary was aligned with a longer base-index column")))
+
   - name: "Build a RecSet before deleting one of its rows"
     scm: |
       (begin
@@ -353,6 +394,7 @@ test_cases:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS drcv_idlist"
+  - sql: "DROP TABLE IF EXISTS drcv_warm_index"
   - sql: "DROP TABLE IF EXISTS drcv_access"
   - sql: "DROP TABLE IF EXISTS drcv_item"
   - sql: "DROP TABLE IF EXISTS drcv_domain"
