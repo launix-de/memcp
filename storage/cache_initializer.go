@@ -26,9 +26,11 @@ type cacheInitializerRun struct {
 
 // initializeCache runs initialize exactly once for the lifetime of a canonical
 // planner cache. Concurrent callers share both completion and failure. A later
-// call retries after a failed run. The caller must pass the owning query session
-// explicitly because initialization may begin inside a shard worker.
-func (t *table) initializeCache(ss *scm.SessionState, initialize func()) (initialized bool) {
+// call retries after a failed run. A SQL query passes its owning query session.
+// Internal cache builders deliberately run outside a client query; for those,
+// use one unregistered SessionState solely as the table-lock owner for the
+// lifetime of this initialization. It is not process-list or cancellation state.
+func (t *table) initializeCache(ss *scm.SessionState, initialize func(*scm.SessionState)) (initialized bool) {
 	if !strings.HasPrefix(t.Name, ".") {
 		panic("cache initialization requires a dot-prefixed cache table")
 	}
@@ -50,8 +52,7 @@ func (t *table) initializeCache(ss *scm.SessionState, initialize func()) (initia
 		done: make(chan struct{}),
 	}
 	if ss == nil {
-		t.cacheInitMu.Unlock()
-		panic("cache initialization requires a query session")
+		ss = &scm.SessionState{}
 	}
 	t.cacheInitializerRun = run
 	t.cacheInitMu.Unlock()
@@ -72,6 +73,6 @@ func (t *table) initializeCache(ss *scm.SessionState, initialize func()) (initia
 		}
 	}()
 
-	initialize()
+	initialize(ss)
 	return true
 }

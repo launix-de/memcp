@@ -59,3 +59,15 @@ test_cases:
             rows: 1
             data:
               - ok: 1
+
+  - name: "MySQL connection survives cold user count cache setup"
+    mysql:
+      statements:
+        - sql: "SELECT COUNT(*) AS user_count FROM system.user"
+          expect:
+            rows: 1
+        - sql: "SELECT 1 AS ok"
+          expect:
+            rows: 1
+            data:
+              - ok: 1
