@@ -51,7 +51,17 @@ wait_for_mysql
 mysql --protocol=socket --socket="$SOCKET" -uroot -p"$PASSWORD" -e \
 	'CREATE DATABASE IF NOT EXISTS `memcp-tests`'
 mysql --protocol=socket --socket="$SOCKET" -uroot -p"$PASSWORD" memcp-tests -e \
-	'DROP TABLE IF EXISTS package_integrity; CREATE TABLE package_integrity (id INT, amount INT, label TEXT) ENGINE=SAFE; INSERT INTO package_integrity VALUES (1,10,"alpha"),(2,20,"beta"),(3,30,"gamma")'
+	'DROP TABLE IF EXISTS package_integrity'
+mysql --protocol=socket --socket="$SOCKET" -uroot -p"$PASSWORD" memcp-tests -e \
+	'CREATE TABLE package_integrity (id INT, amount INT, label TEXT) ENGINE=SAFE'
+columns=$(mysql --protocol=socket --socket="$SOCKET" -uroot -p"$PASSWORD" \
+	-N -B memcp-tests -e 'SHOW COLUMNS FROM package_integrity' | cut -f1 | tr '\n' ',')
+[ "$columns" = 'id,amount,label,' ] || {
+	printf 'unexpected package lifecycle columns: %s\n' "$columns" >&2
+	exit 1
+}
+mysql --protocol=socket --socket="$SOCKET" -uroot -p"$PASSWORD" memcp-tests -e \
+	'INSERT INTO package_integrity VALUES (1,10,"alpha"),(2,20,"beta"),(3,30,"gamma")'
 assert_integrity
 
 # Upgrade/reinstall must restart gracefully without changing data or credentials.
