@@ -695,6 +695,31 @@ test_cases:
     expect:
       data: [true]
 
+  - name: "Cached SQL join recompiles after cardinality guard miss"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define resultrow (lambda (_row) nil))
+        (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
+        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
+        (define entry (car (cache (car (cache)))))
+        (define variants_after_first (count (entry "variants")))
+        (insert (table "memcp-tests" "ps_guard_right") '("id")
+          (map (produceN 500) (lambda (i) (list (+ i 2)))))
+        (rebuild (table "memcp-tests" "ps_guard_right") true false)
+        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
+        (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
+          "ok"
+          (error (concat "unexpected statistics variants: first=" variants_after_first
+            " final=" (count (entry "variants"))))))
+    expect:
+      data: ["ok"]
+
   - name: "Cached SQL join survives a rebuild with unchanged statistics"
     scm: |
       (begin
