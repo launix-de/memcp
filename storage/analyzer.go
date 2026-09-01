@@ -254,7 +254,7 @@ func (c *indexAnalyzeContext) ExtractConstant(v scm.Scmer) (scm.Scmer, bool) {
 		}
 	}
 	if isIndependent(c.params, v) {
-		if value, ok := evalIndependentScmer(v, c.proc.En); ok {
+		if value, ok := evalIndependentProcBodyScmer(v, c.proc); ok {
 			if value.IsInt() || value.IsFloat() || value.IsString() || value.IsBool() || value.IsNil() || value.IsCustom(TagRecSet) {
 				return value, true
 			}

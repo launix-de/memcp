@@ -329,6 +329,18 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 		((car parse_fn) schema parse_query policy planning_session tx)
 		(parse_fn schema parse_query policy))))
 
+/* Query plans are closed procedures rather than code evaluated in whichever
+execution environment happens to call them. Keep every request-local input in
+the parameter list: this prevents a cached plan from retaining the compiling
+request and makes the complete dispatcher eligible for native compilation.
+The Proc retains its optimized Scheme body, so cachemap memory accounting and
+serialization still see the complete plan. */
+(define sql_queryplan_compile_formula (lambda (formula)
+	(jit (close_procedure (eval (optimize (list
+		(quote lambda)
+		(list (quote session) (quote tx) (quote resultrow) (quote resultfields))
+		(source "SQL Query" 1 1 formula))))))))
+
 (define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
 	(begin
 		(tx_check tx)
@@ -339,7 +351,8 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 		/* Parsing includes logical and physical planning. Never spend optimizer
 		work or install a variant after its requesting context was cancelled. */
 		(tx_check tx)
-		(define plan (optimize raw_plan))
+		(define plan (sql_queryplan_compile_formula
+			(sql_queryplan_bind_execution_session raw_plan)))
 		(tx_check tx)
 		(list
 			(sql_queryplan_guard_from_session planning_session)
@@ -385,7 +398,8 @@ otherwise side-effect-free guard. */
 					false
 					(begin (prepared_catalog (car preparation) true) true)))))
 			(define tail_expr (sql_queryplan_formula_dispatch rest prepared_catalog miss_expr))
-			(define bound_plan (sql_queryplan_bind_execution_session (cadr variant)))
+			(define bound_plan (list (cadr variant)
+				(quote session) (quote tx) (quote resultrow) (quote resultfields)))
 			(define dispatch (if (equal? (car variant) true)
 				bound_plan
 				(list (quote if)
@@ -399,12 +413,11 @@ otherwise side-effect-free guard. */
 		_ miss_expr)))
 
 (define sql_queryplan_miss_expr (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy)
-	(list (quote eval)
-		(list (quote sql_queryplan_variant_miss)
-			queryplan_cache cache_key entry
-			(if (list? parse_fn) (list (quote quote) parse_fn) parse_fn)
-			schema parse_query policy
-			(quote session) (quote tx) (quote resultrow)))))
+	(list (quote sql_queryplan_variant_miss)
+		queryplan_cache cache_key entry
+		(if (list? parse_fn) (list (quote quote) parse_fn) parse_fn)
+		schema parse_query policy
+		(quote session) (quote tx) (quote resultrow) (quote resultfields))))
 
 (define sql_queryplan_formula (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy variants)
 	(begin
@@ -417,7 +430,8 @@ otherwise side-effect-free guard. */
 	(begin
 		(define recent_variants (sql_queryplan_recent_variants variants))
 		(entry "variants" recent_variants)
-		(entry "formula" (sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants))
+		(entry "formula" (sql_queryplan_compile_formula
+			(sql_queryplan_formula queryplan_cache cache_key entry parse_fn schema parse_query policy recent_variants)))
 		(entry "formula"))))
 
 (define sql_queryplan_new_entry (lambda (queryplan_cache cache_key parse_fn schema parse_query policy source_session tx)
@@ -445,27 +459,30 @@ otherwise side-effect-free guard. */
 the entry lock because another request may already have installed a matching
 variant. New variants are prepended so the most recent statistics regime wins
 the common guard-dispatch path. */
-(define sql_queryplan_variant_miss (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy session tx resultrow)
-	((entry "compile_lock") tx (lambda ()
-		(begin
-			(define current_variants (entry "variants"))
-			(define matching (sql_queryplan_matching_variant current_variants
-				session tx resultrow))
-			(if (not (nil? matching))
-				(cadr matching)
-				(begin
-					(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx))
-					(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
-						(cons variant current_variants)))
-					(queryplan_cache cache_key (list entry formula))
-					(cadr variant))))))))
+(define sql_queryplan_variant_miss (lambda (queryplan_cache cache_key entry parse_fn schema parse_query policy session tx resultrow resultfields)
+	(begin
+		(define formula ((entry "compile_lock") tx (lambda ()
+			(begin
+				(define current_variants (entry "variants"))
+				(define matching (sql_queryplan_matching_variant current_variants
+					session tx resultrow))
+				(if (not (nil? matching))
+					(entry "formula")
+					(begin
+						(define variant (sql_compile_queryplan_variant parse_fn schema parse_query policy session tx))
+						(define formula (sql_queryplan_install_variants queryplan_cache cache_key entry parse_fn schema parse_query policy
+							(cons variant current_variants)))
+						(queryplan_cache cache_key (list entry formula))
+						formula))))))
+		(formula session tx resultrow resultfields))))
 
 /* cached_parse: wraps SELECT planning with a lazy polymorphic Scheme plan
 cache. DDL, DML and transaction-control formulas retain the original exact
 cache path because their AST may intentionally operate on session state.
 cache_key = username:schema:view-generation:hash(query-shape), retaining policy
 isolation while sharing safe SELECT plans across literal variants. Each entry
-is a variadic if chain of guarded specialized plans plus one compile miss arm.
+is a compiled callable whose dispatcher contains guarded specialized plans and
+one compile-miss arm.
 On parse error the result is not cached. */
 /* Frontends defer the system.user lookup until a cache producer actually
 runs. A warm plan already owns its compiled policy and must not rescan the
@@ -509,7 +526,7 @@ user table merely to discard a newly constructed policy closure. */
 				(begin
 					(define resolved_policy (sql_policy_spec_resolve policy))
 					(define compile_policy (sql_compile_table_policy resolved_policy))
-					(optimize (sql_queryplan_bind_tx_calls
+					(sql_queryplan_compile_formula (sql_queryplan_bind_tx_calls
 						(sql_queryplan_bind_execution_session
 							(with_session session (lambda ()
 								(sql_invoke_parse_fn parse_fn schema parse_query compile_policy session compile_tx)))))))))
@@ -525,7 +542,7 @@ user table merely to discard a newly constructed policy closure. */
 			formula)))))
 
 (define sql_execute_formula (lambda (session tx formula resultrow resultfields)
-	(eval (source "SQL Query" 1 1 formula))))
+	(formula session tx resultrow resultfields)))
 
 /* helper: build a policy function for table-level access checks
 usage: create a policy by (set policy (sql_policy "username")),

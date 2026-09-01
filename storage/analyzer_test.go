@@ -41,6 +41,37 @@ func TestSortedBoundariesCoverCondition(t *testing.T) {
 	}
 }
 
+func TestBoundaryConstantThroughCapturedCallable(t *testing.T) {
+	dictionary := scm.NewFastDictValue(1)
+	dictionary.Set(scm.NewString("id"), scm.NewInt(424), nil)
+	lookup := scm.NewFastDict(dictionary)
+	outerEnv := &scm.Env{VarsNumbered: []scm.Scmer{lookup}, Outer: &scm.Globalenv}
+	body := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("equal??"),
+		scm.NewNthLocalVar(0),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{
+				scm.NewSymbol("outer"),
+				scm.NewInt(1),
+				scm.NewNthLocalVar(0),
+			}),
+			scm.NewString("id"),
+		}),
+	})
+	condition := scm.NewProcStruct(scm.Proc{
+		Params:       scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")}),
+		Body:         body,
+		En:           outerEnv,
+		NumVars:      1,
+		NumberedOnly: true,
+	})
+
+	bounds := extractBoundaries([]string{"ID"}, condition)
+	if len(bounds) != 1 || bounds[0].col != "ID" || bounds[0].matcher != EqualMatcher || bounds[0].lower.Int() != 424 {
+		t.Fatalf("captured callable boundary = %#v, want ID = 424", bounds)
+	}
+}
+
 func BenchmarkExtractBoundariesEqual(b *testing.B) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal?"),

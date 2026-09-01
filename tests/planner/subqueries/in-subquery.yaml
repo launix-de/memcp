@@ -1056,12 +1056,13 @@ test_cases:
               (cached_parse cache (list parse_sql) "memcp-tests" query
                 (sql_policy "root") "root" session true tx)) sess nil))
             (define eval_guard (lambda (guard guard_session guard_tx)
-              (eval (list
-                (list (quote lambda) (list (quote session) (quote tx) (quote resultrow)) guard)
-                guard_session guard_tx (lambda (_row) nil)))))
-            (define cold_guard (eval_guard (nth formula 1) sess nil))
+              ((sql_queryplan_compile_formula guard)
+                guard_session guard_tx (lambda (_row) nil) (lambda (_fields) nil))))
+            (define entry (car (cache (car (cache)))))
+            (define guard (car (car (entry "variants"))))
+            (define cold_guard (eval_guard guard sess nil))
             (rebuild (table "memcp-tests" "in_dv_file") true false)
-            (define rebuilt_guard (eval_guard (nth formula 1) sess nil))
+            (define rebuilt_guard (eval_guard guard sess nil))
             (if (and cold_guard (not rebuilt_guard))
               "ok"
               (error (concat "membership carrier guard did not follow refined statistics: "

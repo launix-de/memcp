@@ -1109,6 +1109,20 @@ func init() {
 		"callback_clones":   {Kind: "int"},
 	}}
 	Declare(&Globalenv, &Declaration{
+		Name: "close_procedure",
+
+		Fn: func(a ...Scmer) Scmer {
+			return CloseProcedure(a[0])
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "closes a procedure over explicit captures without retaining its creation environment",
+			Params: []*TypeDescriptor{
+				{Kind: "func", Label: "procedure", Description: "procedure to close"},
+			},
+			Return: &TypeDescriptor{Kind: "func"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "optimize",
 
 		Fn: func(a ...Scmer) Scmer {
