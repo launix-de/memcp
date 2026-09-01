@@ -1960,38 +1960,6 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	}
 	headSym, headOk := scmerSymbol(v[0])
 
-	if headOk && headSym == Symbol("outer") && len(v) == 3 {
-		depthValue, validDepth := outerDepthLiteral(v[1])
-		if !validDepth {
-			return NewSlice(v), tiZero
-		}
-		depth := int(depthValue)
-		if depth == 0 {
-			return OptimizeEx(v[2], env, ome, useResult)
-		}
-		outerOme := optimizerMetainfo{
-			variableReplacement: make(map[Symbol]optimizerReplacement),
-			setBlacklist:        ome.setBlacklist,
-		}
-		for k, repl := range ome.variableReplacement {
-			if repl.outerDepth >= depth {
-				repl.outerDepth -= depth
-				outerOme.variableReplacement[k] = repl
-			}
-		}
-		inner, transferOwnership, isConstant := optimizeExCompat(v[2], env, &outerOme, useResult)
-		if isConstant {
-			return inner, tiConstTransfer
-		}
-		if nested, ok := scmerSlice(inner); ok && len(nested) == 3 && scmerIsSymbol(nested[0], "outer") {
-			if nestedDepth, validNestedDepth := outerDepthLiteral(nested[1]); validNestedDepth && nestedDepth <= int64(^uint64(0)>>1)-depthValue {
-				return NewSlice([]Scmer{v[0], NewInt(depthValue + nestedDepth), nested[2]}), MakeTypeInfo(transferOwnership, false)
-			}
-		}
-		v[2] = inner
-		return NewSlice(v), MakeTypeInfo(transferOwnership, false)
-	}
-
 	if headOk && (headSym == Symbol("begin") || headSym == Symbol("begin_mut")) {
 		bodyStart := 1
 		reserve := 0
@@ -2599,6 +2567,43 @@ func optimizeList(v []Scmer, env *Env, ome *optimizerMetainfo, useResult bool) (
 	}
 
 	return NewSlice(v), MakeTypeInfo(transferOwnership, false)
+}
+
+// optimizeOuter resolves the operand in the explicitly selected parent scope.
+// The call head has already been resolved to its registered special form, so
+// this hook must preserve the same scope accounting as symbolic input.
+func optimizeOuter(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor) {
+	if len(v) != 3 {
+		return NewSlice(v), tiZero.ToTypeDescriptor()
+	}
+	depthValue, validDepth := outerDepthLiteral(v[1])
+	if !validDepth {
+		return NewSlice(v), tiZero.ToTypeDescriptor()
+	}
+	depth := int(depthValue)
+	if depth == 0 {
+		return oc.OptimizeSub(v[2], useResult)
+	}
+	outerOme := optimizerMetainfo{
+		variableReplacement: make(map[Symbol]optimizerReplacement),
+		setBlacklist:        oc.Ome.setBlacklist,
+	}
+	for symbol, replacement := range oc.Ome.variableReplacement {
+		if replacement.outerDepth >= depth {
+			replacement.outerDepth -= depth
+			outerOme.variableReplacement[symbol] = replacement
+		}
+	}
+	inner, transferOwnership, isConstant := optimizeExCompat(v[2], oc.Env, &outerOme, useResult)
+	if isConstant {
+		return inner, tiConstTransfer.ToTypeDescriptor()
+	}
+	if nested, ok := scmerSlice(inner); ok && len(nested) == 3 && scmerIsSymbol(nested[0], "outer") {
+		if nestedDepth, validNestedDepth := outerDepthLiteral(nested[1]); validNestedDepth && nestedDepth <= int64(^uint64(0)>>1)-depthValue {
+			return NewSlice([]Scmer{v[0], NewInt(depthValue + nestedDepth), nested[2]}), MakeTypeInfo(transferOwnership, false).ToTypeDescriptor()
+		}
+	}
+	return NewSlice([]Scmer{v[0], v[1], inner}), MakeTypeInfo(transferOwnership, false).ToTypeDescriptor()
 }
 
 // OptimizeSub optimizes a sub-expression and returns its result TypeDescriptor.

@@ -90,7 +90,16 @@ func registerSpecialForms() {
 			},
 		}, fn, jitEmit)
 	}
-	register("outer", nil, jitEmitSpecialOuter)
+	DeclareSpecialForm(&Globalenv, &Declaration{
+		Name: "outer",
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params:    []*TypeDescriptor{{Kind: "any", Variadic: true}},
+			Return:    &TypeDescriptor{Kind: "any"},
+		},
+		Optimize: optimizeOuter,
+	}, nil, jitEmitSpecialOuter)
 	register("setN", specialSetN, jitEmitSpecialSetN)
 	register("parser", specialParser, jitEmitSpecialParser)
 	register("optimizer_proc_return", specialOptimizerProcReturn, jitEmitSpecialOptimizerProcReturn)

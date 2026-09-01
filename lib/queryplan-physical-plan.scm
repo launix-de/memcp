@@ -2898,6 +2898,17 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 				(define direct_group_join_stages
 					(qassoc_get (qb_facts raw_prepared_block)
 						(quote direct_group_join_stages) '()))
+				/* The selected direct stages carry compile-local physical context.
+				Publish those exact stage values into the lowering catalog so the
+				leaf emitter sees the same selection made above. */
+				(define physical_stage_catalog (if (empty_list? direct_group_join_stages)
+					stage_catalog
+					(make_lowering_catalog
+						(map (lowering_catalog_stages stage_catalog) (lambda (stage)
+							(begin
+								(define selected (if (group_stage? stage)
+									(stage_by_id direct_group_join_stages (gs_id stage)) nil))
+								(if (nil? selected) stage selected)))))))
 				(define eager_stages (filter candidate_eager_stages (lambda (stage)
 					(and (not (has_assoc? probe_marker_stage_ids (gs_id stage)))
 						(not (contains? direct_group_join_stage_ids (gs_id stage)))))))
@@ -2925,7 +2936,7 @@ tools/costgen; this lowering adds no hand-tuned crossover. */
 					(stages_without_prepare_backbones stage_catalog eager_stages)
 					direct_group_join_stage_ids))
 				(define core_block (query_block_without_stages
-					(query_block_with_stage_catalog prepared_block stage_catalog)))
+					(query_block_with_stage_catalog prepared_block physical_stage_catalog)))
 				(define lazy_stages (group_cache_stages_from_sources lazy_catalog (qb_sources core_block)))
 				(list
 					(merge (list
@@ -4646,7 +4657,7 @@ carrier into thousands of fictional downstream probes. */
 							driver_input_rows cost_work)
 						lookup_condition lookup_estimate exact batch_cost order_partitioning)))))))
 
-(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit)
+(define choose_ordered_join_projected_candidate (lambda (sources default_alias src remaining_sources condition order_items offset limit planning_session)
 	(begin
 		(define candidate (ordered_join_projected_candidate
 			sources default_alias src remaining_sources condition order_items offset limit))
@@ -4663,8 +4674,9 @@ carrier into thousands of fictional downstream probes. */
 							alternative best))
 					(list "projected_candidate_keyset" (nth candidate 1)))))
 				(define chosen (planner_physical_choice decision_id normal_choice
-					(list "projected_candidate_keyset" "ordered_postfilter" "ordered_batch_accept")))
-				(define forced (planner_physical_override decision_id))
+					(list "projected_candidate_keyset" "ordered_postfilter" "ordered_batch_accept")
+					planning_session))
+				(define forced (planner_physical_override decision_id planning_session))
 				(define lookup (car remaining_sources))
 				(define lookup_input_rows (planner_source_row_count lookup))
 				/* Cache guards execute outside the optimized query lambda. Sampling a
@@ -4682,7 +4694,7 @@ carrier into thousands of fictional downstream probes. */
 						(planner_record_guard_condition (list (quote equal?)
 							(list (quote planner_estimated_matching_rows)
 								runtime_rows lookup_input_rows lookup_input_rows)
-							(nth candidate 3))))
+							(nth candidate 3)) planning_session))
 					nil)
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
@@ -4706,13 +4718,14 @@ carrier into thousands of fictional downstream probes. */
 						(list (list "plan" "ordered_postfilter")
 							(list "cost" (planner_cost_explain (nth candidate 2))))
 						(list (list "plan" "ordered_batch_accept")
-							(list "cost" (planner_cost_explain (nth candidate 8))))))))
+							(list "cost" (planner_cost_explain (nth candidate 8)))))))
+					planning_session)
 				(if (nil? (nth candidate 9)) true
 					(planner_record_guard_condition (list (quote equal?)
 						(list (quote table_order_partitioned?)
 							(list (quote table) (source_schema src) (source_relation src))
 							(car (nth candidate 9)))
-						(cadr (nth candidate 9)))))
+						(cadr (nth candidate 9))) planning_session))
 				(if (equal? chosen "projected_candidate_keyset")
 					(list (car candidate) (nth candidate 7)) nil))))))
 
@@ -5032,11 +5045,15 @@ until the caller has selected this physical alternative. */
 		(define src (car ordered_sources))
 		(define remaining_sources (cdr ordered_sources))
 		(define alias (source_alias src))
-		(define offset (coalesceNil (planner_literal_value offset_value) 0))
-		(define limit (coalesceNil (planner_literal_value limit_value) -1))
+		(define planning_session
+			(qassoc_get facts (quote physical_planning_session) nil))
+		(define offset (coalesceNil
+			(planner_literal_value offset_value planning_session) 0))
+		(define limit (coalesceNil
+			(planner_literal_value limit_value planning_session) -1))
 		(define target (if (< limit 0) -1 (+ offset limit)))
 		(define acceptance_probe_work_rows (coalesceNil
-			(probe_limit_work_rows limit_value)
+			(probe_limit_work_rows limit)
 			(if (< target 0) nil target)))
 		/* The ordered driver is consumed here. Preserve the optimizer's remaining
 		subtree instead of rebuilding a left-deep tree from the source catalog. */
@@ -5056,7 +5073,8 @@ until the caller has selected this physical alternative. */
 			(downstream_sources_at_most_one_driver_row?
 				ordered_sources default_alias final_condition stages))
 			(choose_ordered_join_projected_candidate all_sources default_alias src
-				remaining_sources final_condition driver_order_items offset_value limit_value)
+				remaining_sources final_condition driver_order_items offset_value limit_value
+				planning_session)
 			nil))
 		(define projected_join_carrier (if (nil? projected_join_choice)
 			nil (car projected_join_choice)))
@@ -5470,8 +5488,11 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 				(define decision_id (concat "scan_join_order:reduce:"
 					(stable_structural_hash (join_optimizer_tree_aliases plan) true)))
 				(define alternatives (list "legacy_join_tree" "scan_join_order"))
-				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-				(define forced (planner_physical_override decision_id))
+				(define physical_planning_session
+					(qassoc_get facts (quote physical_planning_session) nil))
+				(define chosen (planner_physical_choice decision_id normal_choice alternatives
+					physical_planning_session))
+				(define forced (planner_physical_override decision_id physical_planning_session))
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
 					(list "decision" "scan_join_order")
@@ -5495,7 +5516,8 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 						(list (list "plan" "legacy_join_tree")
 							(list "cost" (planner_cost_explain legacy_cost)))
 						(list (list "plan" "scan_join_order")
-							(list "cost" (planner_cost_explain scan_cost)))))))
+							(list "cost" (planner_cost_explain scan_cost))))))
+					physical_planning_session)
 				(if (equal? chosen "scan_join_order")
 					(scan_join_order_emit_plan spec default_alias value_builder
 						reduce_expr neutral_expr shard_reduce_expr stages false)
@@ -6187,6 +6209,16 @@ only the structural work counts are specific to this operator. */
 					0 group_rows 0.7))
 				(list direct_cost carrier_cost input_rows group_rows rows_per_probe))))))
 
+(define group_stage_with_physical_planning_session (lambda (stage planning_session)
+	(if (nil? planning_session)
+		stage
+		(make_group_stage
+			(gs_id stage) (gs_input stage) (gs_domain stage) (gs_keys stage)
+			(gs_aggregates stage) (gs_having stage) (gs_output stage)
+			(gs_order stage) (gs_limit stage) (gs_offset stage)
+			(qassoc_set (gs_facts stage) (quote physical_planning_session)
+				planning_session)))))
+
 (define direct_group_join_source_selection (lambda (stages sources tree consumers src planning_session)
 	(begin
 		(define stage (direct_group_probe_stage_for_block_source
@@ -6222,7 +6254,9 @@ only the structural work counts are specific to this operator. */
 						(list (list "plan" "group_carrier") (list "cost" (planner_cost_explain (cadr costs))))
 						(list (list "plan" "direct_group_join") (list "cost" (planner_cost_explain (car costs))))))))
 					planning_session)
-				(if (equal? chosen "direct_group_join") (list src stage) nil))))))
+				(if (equal? chosen "direct_group_join")
+					(list src (group_stage_with_physical_planning_session stage planning_session))
+					nil))))))
 
 (define direct_group_join_selections_for_block (lambda (stages block)
 	(begin
@@ -6242,6 +6276,14 @@ only the structural work counts are specific to this operator. */
 (define direct_group_join_calibration_active? (lambda (planning_session)
 	(and (not (nil? planning_session))
 		(not (nil? (planning_session "__memcp_physical_overrides"))))))
+
+(define direct_group_join_stage_planning_session (lambda (stage)
+	(qassoc_get (gs_facts stage) (quote physical_planning_session) nil)))
+
+(define direct_group_join_stages_calibration_active? (lambda (stages)
+	(reduce (coalesceNil stages '()) (lambda (active stage)
+		(or active (direct_group_join_calibration_active?
+			(direct_group_join_stage_planning_session stage)))) false)))
 
 (define direct_group_join_raw_scan_expr (lambda (all_sources default_alias stage tx_depth)
 	(begin
@@ -6326,10 +6368,12 @@ Costgen alternatives remain uninstrumented so their timings contain only the
 operator being calibrated. */
 (define direct_group_join_scan_expr (lambda (all_sources default_alias stage scope_depth)
 	(begin
+		(define calibration_active (direct_group_join_calibration_active?
+			(direct_group_join_stage_planning_session stage)))
 		(define direct_values
 			(direct_group_join_raw_scan_expr all_sources default_alias stage
-				(if (direct_group_join_calibration_active?) scope_depth (+ scope_depth 1))))
-		(if (direct_group_join_calibration_active?)
+				(if calibration_active scope_depth (+ scope_depth 1))))
+		(if calibration_active
 			direct_values
 			(begin
 				(define canonical_name (direct_group_join_canonical_name stage))
@@ -6433,7 +6477,7 @@ the costgen threshold. */
 			(list (quote quote) prepare_expr)))))
 
 (define direct_group_join_prepare_recipe_exprs (lambda (stages)
-	(if (direct_group_join_calibration_active?)
+	(if (direct_group_join_stages_calibration_active? stages)
 		'()
 		(begin
 			(define unique_stages (extract_assoc
@@ -6496,7 +6540,7 @@ the costgen threshold. */
 			(list (quote group_cache_candidate_delete) (physical_query_tx_symbol) canonical_name)))))
 
 (define direct_group_join_usage_flush_exprs (lambda (stages)
-	(if (direct_group_join_calibration_active?)
+	(if (direct_group_join_stages_calibration_active? stages)
 		'()
 		(begin
 			(define unique_stages (extract_assoc
@@ -6531,7 +6575,7 @@ carrier remains on the measured direct path and is never built eagerly. */
 				(list (quote append_mut) (list (symbol "!!list") 2) nil nil))))))
 
 (define direct_group_join_warm_prepare_exprs (lambda (stages)
-	(if (direct_group_join_calibration_active?)
+	(if (direct_group_join_stages_calibration_active? stages)
 		'()
 		(begin
 			(define unique_stages (extract_assoc
@@ -8721,8 +8765,12 @@ build_queryplan contract. */
 	(match expr
 		'(((symbol context) "session") key ((symbol once) ((symbol lambda) _params true))) nil
 		'(((quote context) "session") key ((quote once) ((quote lambda) _params true))) nil
+		'((symbol session) key ((symbol once) ((symbol lambda) _params true))) nil
+		'((quote session) key ((quote once) ((quote lambda) _params true))) nil
 		'(((symbol context) "session") key ((symbol once) _initializer)) key
 		'(((quote context) "session") key ((quote once) _initializer)) key
+		'((symbol session) key ((symbol once) _initializer)) key
+		'((quote session) key ((quote once) _initializer)) key
 		_ nil)))
 
 (define emitted_prepare_binding_keys (lambda (expr keys)
@@ -8747,13 +8795,15 @@ build_queryplan contract. */
 				(equal? (count target) 2))
 				(begin
 					(define session_call (nth target 0))
-					(if (and
-						(list? session_call)
-						(equal? (count session_call) 2)
-						(or
-							(equal? (nth session_call 0) (quote context))
-							(equal? (nth session_call 0) (symbol "context")))
-						(equal? (nth session_call 1) "session"))
+					(if (or
+						(equal? session_call (physical_query_session_symbol))
+						(and
+							(list? session_call)
+							(equal? (count session_call) 2)
+							(or
+								(equal? (nth session_call 0) (quote context))
+								(equal? (nth session_call 0) (symbol "context")))
+							(equal? (nth session_call 1) "session")))
 						(nth target 1)
 						nil))
 				nil))

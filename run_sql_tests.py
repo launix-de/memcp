@@ -1616,7 +1616,8 @@ class SQLTestRunner:
                     repeat = resolve_timing_samples(test_case, False)
                 except ValueError as exc:
                     return self._record_fail(name, str(exc), query, None, None, is_noncritical)
-            if ("timing_samples" in test_case or "repetitions" in test_case) and not query.lstrip().upper().startswith("SELECT"):
+            repeatable_query = query.lstrip().upper().startswith("SELECT")
+            if ("timing_samples" in test_case or "repetitions" in test_case) and not repeatable_query:
                 return self._record_fail(
                     name, "timing_samples/repetitions is only supported for SELECT queries",
                     query, None, None, is_noncritical,
@@ -1632,9 +1633,12 @@ class SQLTestRunner:
                 response = None
                 adaptive_repetitions = (
                     is_perf_test
+                    and repeatable_query
                     and "repetitions" not in test_case
                     and "timing_samples" not in test_case
                 )
+                if not repeatable_query:
+                    repeat = 1
                 measured_total_ns = 0
                 for _ in range(repeat):
                     start_ns = time.monotonic_ns()

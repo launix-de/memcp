@@ -1149,6 +1149,8 @@ instead of capturing whichever session populated the cache first. */
 		((quote session) "__memcp_tx") '()
 		((symbol session) key) (list (list (quote session) key))
 		((quote session) key) (list (list (quote session) key))
+		((symbol session_globalvar) key) (list (list (quote session_globalvar) key))
+		((quote session_globalvar) key) (list (list (quote session_globalvar) key))
 		(cons head tail) (merge_unique (cons
 			(query_expr_session_reads head)
 			(map tail query_expr_session_reads)))
@@ -1160,6 +1162,8 @@ instead of capturing whichever session populated the cache first. */
 		((quote session) "__memcp_tx") false
 		((symbol session) _key) true
 		((quote session) _key) true
+		((symbol session_globalvar) _key) true
+		((quote session_globalvar) _key) true
 		_ false)))
 
 (define session_domain_pairs (lambda (node)

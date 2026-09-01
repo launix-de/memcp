@@ -839,16 +839,27 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "DATABASE" true) "(" ")") schema)
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" ")") '('unix_timestamp))
 		(parser '((atom "UNIX_TIMESTAMP" true) "(" (define p sql_expression) ")") '('unix_timestamp p))
+		/* Runtime helpers no longer consult goroutine-local state. Inject the
+		request session values while the SQL call is generated. */
+		(parser '((atom "FROM_UNIXTIME" true) "(" (define p sql_expression) ")")
+			'('from_unixtime p nil '('session_globalvar "time_zone")))
+		(parser '((atom "FROM_UNIXTIME" true) "(" (define p sql_expression) "," (define format sql_expression) ")")
+			'('from_unixtime p format '('session_globalvar "time_zone")))
+		(parser '((atom "DATE_FORMAT" true) "(" (define p sql_expression) "," (define format sql_expression) ")")
+			'('format_date p format '('session_globalvar "time_zone")))
+		(parser '((atom "CURRENT_USER" true) "(" ")") '('sql_concat '('session "username") "@%"))
+		(parser '((atom "USER" true) "(" ")") '('sql_concat '('session "username") "@%"))
+		(parser '((atom "SESSION_USER" true) "(" ")") '('sql_concat '('session "username") "@%"))
 
 		/* DATE literal: DATE 'yyyy-mm-dd' */
 		(parser '((atom "DATE" true) (define s sql_string)) '('date_trunc_day '('parse_date s)))
 
 		/* CURRENT_DATE / CURRENT_DATE() */
-		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date))
-		(parser (atom "CURRENT_DATE" true) '('current_date))
+		(parser '((atom "CURRENT_DATE" true) "(" ")") '('current_date '('session_globalvar "time_zone")))
+		(parser (atom "CURRENT_DATE" true) '('current_date '('session_globalvar "time_zone")))
 
 		/* EXTRACT(field FROM expr) */
-		(parser '((atom "EXTRACT" true) "(" (define field sql_identifier_unquoted) (atom "FROM" true) (define e sql_expression) ")") '('extract_date e field))
+		(parser '((atom "EXTRACT" true) "(" (define field sql_identifier_unquoted) (atom "FROM" true) (define e sql_expression) ")") '('extract_date e field '('session_globalvar "time_zone")))
 
 		/* TIMESTAMPDIFF(unit, dt1, dt2) — unit is a keyword, not a column */
 		(parser '((atom "TIMESTAMPDIFF" true) "(" (define unit sql_identifier_unquoted) "," (define dt1 sql_expression) "," (define dt2 sql_expression) ")") '('timestampdiff unit dt1 dt2))
@@ -1147,7 +1158,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 				(if (and ignoreexists (nil? updaterows))
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-				'('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))
+				nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))
 			(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
 		)
 	)))

@@ -4233,6 +4233,8 @@ working on the original values. */
 		((quote utc_timestamp)) "TIMESTAMP"
 		((symbol from_unixtime) _value) "DATETIME"
 		((quote from_unixtime) _value) "DATETIME"
+		((symbol from_unixtime) _value nil _timezone) "DATETIME"
+		((quote from_unixtime) _value nil _timezone) "DATETIME"
 		((symbol sql_temporal_output) _value sql_type) sql_type
 		((quote sql_temporal_output) _value sql_type) sql_type
 		_ nil)))
@@ -4242,7 +4244,7 @@ working on the original values. */
 		(begin
 			(define sql_type (temporal_expr_type sources expr))
 			(if (nil? sql_type) expr (list (quote sql_temporal_output) expr sql_type
-				(list (quote session) "time_zone"))))))))
+				(list (quote session_globalvar) "time_zone"))))))))
 
 (define sanitize_temporal_outputs (lambda (query)
 	(begin
@@ -6391,49 +6393,51 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 			(define stage (stage_by_id stages (stage_output_relation_id (source_relation src))))
 			(if (not (group_stage? stage))
 				nil
-				(begin
-					(define input (direct_group_probe_input stage))
-					(define lookups (if (nil? input) nil (direct_group_probe_lookup_keys stage src)))
-					(if (reduce (list
-						(not (nil? (qassoc_get (gs_facts stage) (quote purpose) nil)))
-						(nil? input)
-						(nil? lookups)
-						(not (equal? (coalesceNil (gs_having stage) true) true))
-						(stage_has_residual_outer_refs? stage)
-						(not (direct_group_probe_aggregates_safe? stage))
-						(not (direct_group_probe_consumers_safe? stage src consumers)))
-						(lambda (blocked item) (or blocked item)) false)
-						nil
-						(begin
-							(define input_src (car (qb_sources input)))
-							(define condition (combine_where (qb_where input) (source_join_expr input_src)))
-							(define facts (qassoc_set
-								(qassoc_set
+				(if (qassoc_get (gs_facts stage) (quote direct_group_probe) false)
+					stage
+					(begin
+						(define input (direct_group_probe_input stage))
+						(define lookups (if (nil? input) nil (direct_group_probe_lookup_keys stage src)))
+						(if (reduce (list
+							(not (nil? (qassoc_get (gs_facts stage) (quote purpose) nil)))
+							(nil? input)
+							(nil? lookups)
+							(not (equal? (coalesceNil (gs_having stage) true) true))
+							(stage_has_residual_outer_refs? stage)
+							(not (direct_group_probe_aggregates_safe? stage))
+							(not (direct_group_probe_consumers_safe? stage src consumers)))
+							(lambda (blocked item) (or blocked item)) false)
+							nil
+							(begin
+								(define input_src (car (qb_sources input)))
+								(define condition (combine_where (qb_where input) (source_join_expr input_src)))
+								(define facts (qassoc_set
 									(qassoc_set
 										(qassoc_set
 											(qassoc_set
-												(gs_facts stage)
-												(quote null_semantics)
-												(quote aggregate))
-											(quote partition_by) (gs_keys stage))
-										(quote result_max_rows_per_partition) 1)
-									(quote lookup-keys) lookups)
-								(quote direct_group_probe) true))
-							(make_group_stage
-								(gs_id stage)
-								input_src
-								(gs_domain stage)
-								(map (gs_keys stage) (lambda (key)
-									(direct_group_probe_rebind_input_expr input_src key)))
-								(map (direct_group_probe_aggregates_with_presence stage) (lambda (ag)
-									(direct_group_probe_rebind_input_expr input_src ag)))
-								(gs_having stage)
-								(gs_output stage)
-								(gs_order stage)
-								(gs_limit stage)
-								(gs_offset stage)
-								(qassoc_set facts (quote condition)
-									(direct_group_probe_rebind_input_expr input_src condition)))))))))))
+												(qassoc_set
+													(gs_facts stage)
+													(quote null_semantics)
+													(quote aggregate))
+												(quote partition_by) (gs_keys stage))
+											(quote result_max_rows_per_partition) 1)
+										(quote lookup-keys) lookups)
+									(quote direct_group_probe) true))
+								(make_group_stage
+									(gs_id stage)
+									input_src
+									(gs_domain stage)
+									(map (gs_keys stage) (lambda (key)
+										(direct_group_probe_rebind_input_expr input_src key)))
+									(map (direct_group_probe_aggregates_with_presence stage) (lambda (ag)
+										(direct_group_probe_rebind_input_expr input_src ag)))
+									(gs_having stage)
+									(gs_output stage)
+									(gs_order stage)
+									(gs_limit stage)
+									(gs_offset stage)
+									(qassoc_set facts (quote condition)
+										(direct_group_probe_rebind_input_expr input_src condition))))))))))))
 
 (define presence_stage_output_source? (lambda (stages src)
 	(and (stage_output_relation? (source_relation src))

@@ -2648,6 +2648,11 @@ the lowerer can cost it. */
 						(if (nil? compile_bindings) nil (compile_bindings key)))))
 				(lambda (_e) nil))
 			((quote session) key) (planner_literal_value (list (quote session) key) planning_session)
+			((symbol session_globalvar) key) (coalesceNil
+				(planner_literal_value (list (quote session) key) planning_session)
+				(globalvars key))
+			((quote session_globalvar) key) (planner_literal_value
+				(list (quote session_globalvar) key) planning_session)
 			_ expr))))
 
 /* Sampling callbacks run outside the generated query closure. Replace only
@@ -2660,6 +2665,10 @@ runtime guards keep the cached choice valid for those exact values. */
 			((symbol session) _key)
 			(planner_quoted_value (planner_literal_value expr planning_session))
 			((quote session) _key)
+			(planner_quoted_value (planner_literal_value expr planning_session))
+			((symbol session_globalvar) _key)
+			(planner_quoted_value (planner_literal_value expr planning_session))
+			((quote session_globalvar) _key)
 			(planner_quoted_value (planner_literal_value expr planning_session))
 			(cons head tail) (cons
 				(planner_bind_session_values head planning_session)

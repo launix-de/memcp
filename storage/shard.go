@@ -1474,7 +1474,11 @@ func (t *storageShard) propagateDeleteToNext(next *storageShard, oldRecid uint32
 }
 
 func (t *storageShard) ColumnReaderTx(tx *TxContext, col string) func(uint32) scm.Scmer {
-	cstorage := t.getColumnStorageOrPanic(col, false, tx)
+	// Computed readers recursively bind their input columns. A mutation scan
+	// initializes them while holding this shard's write lock, recorded explicitly
+	// on the transaction, so re-entering the RWMutex here would self-deadlock.
+	alreadyLocked := tx != nil && tx.HasShardWrite(t)
+	cstorage := t.getColumnStorageOrPanic(col, alreadyLocked, tx)
 	reader := newCachedColumnReaderTx(cstorage, tx)
 	_, computed := cstorage.(*StorageComputeProxy)
 	return func(idx uint32) scm.Scmer {
