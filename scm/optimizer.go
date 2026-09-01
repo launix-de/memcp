@@ -2754,6 +2754,15 @@ func (oc *OptimizerContext) OptimizeReducerCallback(callback Scmer, accumulator 
 		optimized, result := oc.OptimizeSub(callback, true)
 		return optimized, normalizeOptimizerType(result)
 	}
+	// Re-analyzing a large fused callback with progressively weakened ownership
+	// clones its complete AST on every fixed-point iteration. Stay conservative
+	// for these uncommon shapes so compile cost remains bounded.
+	if optimizerNodeCount(callback) > 256 {
+		params[0] = &TypeDescriptor{Kind: "any", Length: UnknownLength}
+		oc.SetCallbackParamTypes(params)
+		optimized, result := oc.OptimizeSub(callback, true)
+		return optimized, normalizeOptimizerType(result)
+	}
 	loopType := accumulator
 	for iteration := 0; iteration < 16; iteration++ {
 		params[0] = loopType

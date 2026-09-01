@@ -1033,7 +1033,10 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 
 // scan_order delegates to scanOrderMulti with a single-element table spec.
 func (t *table) scan_order(currentTx *TxContext, conditionCols []string, condition scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer, postOrderCols []string, postOrderFilter scm.Scmer) scm.Scmer {
-	if postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
+	// The general path owns per-scan debugging and telemetry. Debugging is
+	// explicitly allowed to add overhead, so keep it visible instead of letting
+	// the LIMIT 1 fast path silently omit this scan from system statistics.
+	if !Settings.ScanDebugging && postOrderFilter.IsNil() && len(sortcols) == 0 && limitPartitionCols == 0 && offset == 0 && limit == 1 && !isOuter {
 		return t.scanOrderFirst(currentTx, conditionCols, condition, callbackCols, mapReduce, neutral, notFoundValue)
 	}
 	return scanOrderMulti(currentTx, []scanOrderTableSpec{{

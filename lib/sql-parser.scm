@@ -1153,14 +1153,33 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		)
 	))
 	(define sql_insert_select_plan (lambda (schema2 tbl coldesc inner ignoreexists updaterows updaterows2 updatecols) (begin
-		'('begin
-			'('set 'resultrow '('lambda '('item) '('insert '('table schema2 tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
+		(define count_var (symbol "__insert_select_count"))
+		(define inserted_var (symbol "__insert_select_inserted"))
+		(define insert_expr '('insert '('table schema2 tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
 				(if (and ignoreexists (nil? updaterows))
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-				nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))
-			(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
-		)
+				nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
+		(define plan (build_queryplan_term (sql_expand_views inner policy) planning_session tx))
+		(define ordered (or
+			(and (query_block? inner) (not (empty_list? (coalesceNil (qb_order inner) '()))))
+			(and (union_block? inner) (not (empty_list? (coalesceNil (union_order inner) '()))))))
+		(if ordered
+			(list (quote begin)
+				(list (quote set) count_var (list (quote newsession)))
+				(list count_var "count" 0)
+				(list (quote set) (quote resultrow)
+					(list (quote lambda) (list (quote item))
+						(list (quote begin)
+							(list (quote set) inserted_var insert_expr)
+							(list count_var "count" (list (quote +) (list count_var "count") inserted_var))
+							inserted_var)))
+				plan
+				(list count_var "count"))
+			(list (quote begin)
+				(list (quote set) (quote resultrow)
+					(list (quote lambda) (list (quote item)) insert_expr))
+				plan))
 	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
