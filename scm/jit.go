@@ -1352,6 +1352,37 @@ func jitLambdaFreeSymbols(params, body Scmer) []Symbol {
 	return out
 }
 
+// jitExpressionConsumesRuntimeEnv reports whether delayed syntax can resolve
+// bindings which are not statically visible in its enclosing lambda body.
+// Such lambdas must retain the complete lexical frame rather than only the
+// symbols found by ordinary free-variable analysis.
+func jitExpressionConsumesRuntimeEnv(expr Scmer) bool {
+	for expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	if !expr.IsSlice() {
+		return false
+	}
+	items := expr.Slice()
+	if len(items) == 0 {
+		return false
+	}
+	if head, ok := scmerSymbol(items[0]); ok {
+		switch string(head) {
+		case "quote":
+			return false
+		case "eval", "parser":
+			return true
+		}
+	}
+	for _, item := range items {
+		if jitExpressionConsumesRuntimeEnv(item) {
+			return true
+		}
+	}
+	return false
+}
+
 func jitCollectLambdaOuterVarIndices(expr Scmer, seen map[NthLocalVar]struct{}, out *[]NthLocalVar) {
 	if expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
@@ -2135,19 +2166,21 @@ func (ctx *JITContext) EmitGoCallScalar(funcAddr uint64, args []JITValueDesc, nu
 	var resultsBuf [16]Reg
 	words := ctx.flattenArgs(args, &wordsBuf)
 	results := ctx.EmitGoCall(funcAddr, words, numResultWords, &resultsBuf, nil)
-	// Result registers are already allocated by EmitGoCall (removed from FreeRegs).
-	// Set RegOwners to nil — the caller MUST BindReg to a long-lived descriptor.
-	// The nil ownership prevents AllocReg's spill path from evicting the result.
-	for i := 0; i < numResultWords && i < len(results); i++ {
-		ctx.RegOwners[results[i]] = nil
-	}
+	var result JITValueDesc
 	if numResultWords == 1 {
-		return JITValueDesc{Loc: LocReg, Reg: results[0]}
+		result = JITValueDesc{Loc: LocReg, Reg: results[0]}
+	} else if numResultWords == 3 {
+		result = JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1], Reg3: results[2]}
+	} else {
+		result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
 	}
-	if numResultWords == 3 {
-		return JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1], Reg3: results[2]}
+	// A result becomes spillable immediately. Generated emitters may call
+	// ReclaimUntrackedRegs before its next use, so leaving ABI result registers
+	// ownerless would silently release a still-live slice or Scmer value.
+	for _, reg := range jitDescRegs(result) {
+		ctx.BindReg(reg, &result)
 	}
-	return JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: results[0], Reg2: results[1]}
+	return result
 }
 
 // EmitGoCallScalarInto emits a scalar Go call directly into a fixed result
@@ -8425,7 +8458,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication bool, a ...
 					Arena:             arena,
 					ConstRoots:        roots,
 					Proc:              sourceProc,
-					AutoImportSafe:    autoImportSafe && jitAutoImportSyntaxSafe(sourceProc.Body),
+					AutoImportSafe:    autoImportSafe,
 					RecursiveLambdas:  recursiveLambdas,
 					NeedsStableArgs:   needsStableArgs,
 					Coverage:          coverage,
@@ -8452,38 +8485,6 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication bool, a ...
 	default:
 		panic(fmt.Sprintf("jit: cannot compile %v (tag %d)", v, tag))
 	}
-}
-
-// jitAutoImportSyntaxSafe rejects procedures which manufacture callbacks. A
-// compiled top-level procedure may otherwise use every expression the emitter
-// accepted; unsupported expressions already abort compilation atomically.
-// Callback closure compilation remains opt-in until its generated slice paths
-// carry the same complete lifetime contract as the enclosing entry point.
-func jitAutoImportSyntaxSafe(expr Scmer) bool {
-	for expr.IsSourceInfo() {
-		expr = expr.SourceInfo().value
-	}
-	if !expr.IsSlice() {
-		return true
-	}
-	items := expr.Slice()
-	if len(items) == 0 {
-		return true
-	}
-	if head, ok := scmerSymbol(items[0]); ok {
-		switch string(head) {
-		case "quote":
-			return true
-		case "lambda", "optimizer_proc_return":
-			return false
-		}
-	}
-	for _, item := range items {
-		if !jitAutoImportSyntaxSafe(item) {
-			return false
-		}
-	}
-	return true
 }
 
 // execBuf is a small wrapper for writable memory (arena-backed or standalone)
