@@ -1096,6 +1096,40 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 	}
 }
 
+// EnsureDescsTogether materializes a set of operands without allowing a later
+// reload to evict an earlier one. Generated binary operations use this at the
+// final consumption point; otherwise two spilled values can repeatedly evict
+// each other and leave both aliased descriptors naming the same register.
+func (ctx *JITContext) EnsureDescsTogether(descs ...*JITValueDesc) {
+	var protected [16]Reg
+	protectedCount := 0
+	for _, desc := range descs {
+		ctx.EnsureDesc(desc)
+		switch desc.Loc {
+		case LocReg:
+			ctx.ProtectReg(desc.Reg)
+			protected[protectedCount] = desc.Reg
+			protectedCount++
+		case LocRegPair:
+			ctx.ProtectReg(desc.Reg)
+			protected[protectedCount] = desc.Reg
+			protectedCount++
+			ctx.ProtectReg(desc.Reg2)
+			protected[protectedCount] = desc.Reg2
+			protectedCount++
+		case LocRegTriple:
+			for _, reg := range [...]Reg{desc.Reg, desc.Reg2, desc.Reg3} {
+				ctx.ProtectReg(reg)
+				protected[protectedCount] = reg
+				protectedCount++
+			}
+		}
+	}
+	for i := protectedCount - 1; i >= 0; i-- {
+		ctx.UnprotectReg(protected[i])
+	}
+}
+
 // FreeReg returns a register to the free pool.
 func (ctx *JITContext) FreeReg(r Reg) {
 	owner := ctx.RegOwners[r]

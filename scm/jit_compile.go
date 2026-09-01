@@ -208,6 +208,23 @@ func jitCopyScmerToPair(ctx *JITContext, src JITValueDesc) JITValueDesc {
 	return target
 }
 
+// JITPrepareScmerGoArg restores the two-word Scmer representation required by
+// Go's ABI after the JIT type system has folded a value to an unboxed scalar.
+// Already boxed register, input, and spill values stay in place so native call
+// boundaries do not introduce copies when both words are already available.
+func JITPrepareScmerGoArg(ctx *JITContext, src JITValueDesc) JITValueDesc {
+	ctx.SyncDesc(&src)
+	switch src.Loc {
+	case LocRegPair, LocStackPair, LocInputPair:
+		return src
+	case LocImm, LocReg, LocStack:
+		target := jitAllocTrackedPair(ctx, src.Type)
+		return jitPlaceIntoPair(ctx, &src, target)
+	default:
+		panic("jit: Go call expects a Scmer argument")
+	}
+}
+
 func jitPlaceScmerIntoTarget(ctx *JITContext, src JITValueDesc, target JITValueDesc) JITValueDesc {
 	if target.Loc == LocAny {
 		return src
@@ -705,7 +722,11 @@ func (ctx *JITContext) EmitCopyDescWords(dst, src *JITValueDesc, words int) {
 			srcBase = ctx.FrameReg
 		}
 		scratch := ctx.AllocReg()
-		for i := 0; i < words; i++ {
+		start, end, step := 0, words, 1
+		if srcBase == dstBase && dst.StackOff > src.StackOff && dst.StackOff < src.StackOff+int32(words*8) {
+			start, end, step = words-1, -1, -1
+		}
+		for i := start; i != end; i += step {
 			off := int32(i * 8)
 			ctx.EmitMovRegMem(scratch, srcBase, src.StackOff+off)
 			ctx.EmitStoreRegMem(scratch, dstBase, dst.StackOff+off)
