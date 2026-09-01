@@ -327,7 +327,7 @@ current request bindings. Quoted planner/catalog payloads remain data. */
 (define sql_invoke_parse_fn (lambda (parse_fn schema parse_query policy planning_session tx)
 	(if (list? parse_fn)
 		((car parse_fn) schema parse_query policy planning_session tx)
-		(parse_fn schema parse_query policy))))
+		(parse_fn schema parse_query policy planning_session tx))))
 
 (define sql_compile_queryplan_variant (lambda (parse_fn schema parse_query policy source_session tx)
 	(begin

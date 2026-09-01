@@ -898,6 +898,13 @@ func (t *storageShard) runWithWriteLockReleased(currentTx *TxContext, fn func())
 	fn()
 }
 
+// hasWriteOwnerForTx identifies nested storage work which carries the same
+// explicit transaction as the surrounding mutation. Such work already runs
+// under the shard write lock and must not try to acquire its read side again.
+func (t *storageShard) hasWriteOwnerForTx(currentTx *TxContext) bool {
+	return currentTx != nil && currentTx.HasShardWrite(t)
+}
+
 // rowValueByRecidLocked reads a column value for a recid. Caller must hold t.mu.
 func (t *storageShard) rowValueByRecidLocked(recid uint32, col string) scm.Scmer {
 	if recid < t.main_count {

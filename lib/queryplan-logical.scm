@@ -100,6 +100,15 @@ PostgreSQL parsers should both lower to the same combined operators.
 (define planner_effective_session (lambda (planning_session)
 	planning_session))
 
+/* Physical lowering carries the compile-only request handles in query-block
+facts. They are native values and disappear with the logical IR when the
+runtime recipe is emitted. */
+(define planner_context_session (lambda (facts)
+	(qassoc_get facts (quote physical_planning_session) nil)))
+
+(define planner_context_tx (lambda (facts)
+	(qassoc_get facts (quote physical_planning_tx) nil)))
+
 /* Cost-model decisions register the condition which keeps their chosen branch
 valid in a compile-local newsession. cached_parse installs the accumulator;
 direct planner users deliberately remain unaffected. The structural catalogs

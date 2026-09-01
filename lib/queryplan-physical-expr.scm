@@ -1400,7 +1400,7 @@ RecSet's per-driving-row cost is folded entirely into its one-pass build --
 unlike the keytable carrier, there is no separate per-row read term because
 recset_project_join already visits every driving row once while building the
 membership set. */
-(define scalar_first_probe_recset_cost_preferred? (lambda (stage probe_work_rows carrier_work_rows)
+(define scalar_first_probe_recset_cost_preferred? (lambda (stage probe_work_rows carrier_work_rows planning_session)
 	(and (number? (planner_literal_value probe_work_rows))
 		(and (number? (planner_literal_value carrier_work_rows))
 			(begin
@@ -1440,12 +1440,12 @@ membership set. */
 											(list "plan" (string (car candidate)))
 											(list "status" (if (equal? (car candidate) chosen) "chosen" "rejected"))
 											(list "reason" (if (equal? (car candidate) chosen) "lowest_total_ns" "higher_total_ns_or_memory_tiebreak"))
-											(list "cost" (planner_cost_explain (cadr candidate)))))))))
+											(list "cost" (planner_cost_explain (cadr candidate)))))))) planning_session)
 						(and
 							(planner_cost_better? recset_cost (planner_direct_presence_probe_cost probe_rows))
 							(planner_cost_better? recset_cost (planner_presence_carrier_cost input_rows probe_rows))))))))))
 
-(define scalar_first_probe_recset_eligible? (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col)
+(define scalar_first_probe_recset_eligible? (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session)
 	(and (single_real_source? (qb_sources src))
 		(and (source_is_base_table? (single_real_source (qb_sources src)))
 			(and (empty_list? (qb_group src))
@@ -1455,12 +1455,13 @@ membership set. */
 							(and (not (nil? (scalar_first_probe_keytable_key_index stage (single_real_source (qb_sources src)) keys)))
 								(and (stage_boolean_shaped? graph stage requested_col)
 									(and (direct_boolean_recset_input_ownership_closed? stages stage)
-										(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows))))))))))))
+										(scalar_first_probe_recset_cost_preferred?
+											stage probe_work_rows carrier_work_rows planning_session))))))))))))
 
-(define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col)
+(define scalar_first_probe_recset_eligible_base? (lambda (graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session)
 	(and (not (nil? (scalar_first_probe_keytable_key_index stage src keys)))
 		(and (stage_boolean_shaped? graph stage requested_col)
-			(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows)))))
+			(scalar_first_probe_recset_cost_preferred? stage probe_work_rows carrier_work_rows planning_session)))))
 
 (define recset_scalar_first_probe_lookup_key (lambda (stage)
 	(concat "__recset_probe_" (fnv_hash (gs_id stage)))))
@@ -1469,7 +1470,7 @@ membership set. */
 	(quote session)))
 
 (define physical_query_scope_symbol (lambda ()
-	(quote tx)))
+	(list (quote tx_query) (quote tx))))
 
 (define physical_query_tx_symbol (lambda ()
 	(quote tx)))
@@ -1553,25 +1554,107 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 			(or found (not (direct_boolean_recset_query_scope_dependency? dependency)))) false))
 		(not (and has_invariant has_correlated)))))
 
+(define direct_boolean_recset_input_stages_supported? (lambda (stage_catalog stage)
+	(reduce (direct_boolean_recset_input_stages stage_catalog stage)
+		(lambda (supported dependency)
+			(and supported
+				(and (not (scalar_aggregate_probe_stage? dependency))
+					(not (scalar_cardinality_probe_stage? dependency)))))
+		true)))
+
+/* Keep operator selection and emission on the same capability boundary. A
+direct boolean RecSet can compose scalar-first leaves and ordinary domain
+predicates, but other physical probes still require their relational carrier.
+Reject those trees while alternatives are being selected instead of entering
+the emitter and failing after the ordinary carrier has been discarded. */
+(define boolean_recset_stage_value_supported? (lambda (graph stage requested_col)
+	(begin
+		(define aggregate (if (nil? requested_col)
+			(if (empty_list? (gs_aggregates stage)) nil (car (gs_aggregates stage)))
+			(scalar_first_probe_aggregate stage requested_col)))
+		(and (not (nil? aggregate))
+			(boolean_recset_expr_supported? graph stage
+				(car (scalar_first_probe_parts aggregate)))))))
+
+(define boolean_recset_expr_supported? (lambda (graph owner_stage expr)
+	(match expr
+		((symbol scalar_first_probe) stage requested_col)
+		(boolean_recset_stage_value_supported? graph stage requested_col)
+		((quote scalar_first_probe) stage requested_col)
+		(boolean_recset_stage_value_supported? graph stage requested_col)
+		((symbol scalar_first_probe) stage requested_col _dependencies)
+		(boolean_recset_stage_value_supported? graph stage requested_col)
+		((quote scalar_first_probe) stage requested_col _dependencies)
+		(boolean_recset_stage_value_supported? graph stage requested_col)
+		((symbol scalar_aggregate_probe) _stage _requested_col) false
+		((quote scalar_aggregate_probe) _stage _requested_col) false
+		((symbol scalar_cardinality_probe) _stage _requested_col) false
+		((quote scalar_cardinality_probe) _stage _requested_col) false
+		((symbol sql_not) inner) (boolean_recset_expr_supported? graph owner_stage inner)
+		((quote sql_not) inner) (boolean_recset_expr_supported? graph owner_stage inner)
+		((symbol not) inner) (boolean_recset_expr_supported? graph owner_stage inner)
+		((quote not) inner) (boolean_recset_expr_supported? graph owner_stage inner)
+		((symbol equal??) inner true) (boolean_recset_expr_supported? graph owner_stage inner)
+		((quote equal??) inner true) (boolean_recset_expr_supported? graph owner_stage inner)
+		((symbol coalesceNil) inner false) (boolean_recset_expr_supported? graph owner_stage inner)
+		((quote coalesceNil) inner false) (boolean_recset_expr_supported? graph owner_stage inner)
+		((symbol coalesceNil) inner 0) (boolean_recset_expr_supported? graph owner_stage inner)
+		((quote coalesceNil) inner 0) (boolean_recset_expr_supported? graph owner_stage inner)
+		((symbol coalesceNil) inner nil) (boolean_recset_expr_supported? graph owner_stage inner)
+		((quote coalesceNil) inner nil) (boolean_recset_expr_supported? graph owner_stage inner)
+		((symbol >) inner 0) (boolean_recset_expr_supported? graph owner_stage inner)
+		((quote >) inner 0) (boolean_recset_expr_supported? graph owner_stage inner)
+		((symbol if) condition then_expr else_expr)
+		(and (boolean_recset_expr_supported? graph owner_stage condition)
+			(and (boolean_recset_expr_supported? graph owner_stage then_expr)
+				(boolean_recset_expr_supported? graph owner_stage else_expr)))
+		((quote if) condition then_expr else_expr)
+		(boolean_recset_expr_supported? graph owner_stage
+			(list (symbol "if") condition then_expr else_expr))
+		((symbol get_column) tblvar _ignorecase col _col_ignorecase)
+		(begin
+			(define dependency (stage_dependency_for_output_alias graph owner_stage tblvar))
+			(if (nil? dependency)
+				true
+				(boolean_recset_stage_value_supported? graph dependency col)))
+		((quote get_column) tblvar ignorecase col col_ignorecase)
+		(boolean_recset_expr_supported? graph owner_stage
+			(list (symbol "get_column") tblvar ignorecase col col_ignorecase))
+		(cons head items) (if (or
+			(or (equal? head (quote and)) (equal? head (symbol "and")))
+			(or (equal? head (quote or)) (equal? head (symbol "or"))))
+			(reduce items (lambda (supported item)
+				(and supported (boolean_recset_expr_supported? graph owner_stage item))) true)
+			(empty_list? (expr_probe_stages expr)))
+		_ true)))
+
 (define direct_boolean_recset_stage_eligible? (lambda (stage_catalog graph stage requested_col)
 	(and (query_block? (gs_input stage))
 		(and (scalar_value_stage? stage)
 			(and (equal? (count (gs_aggregates stage)) 1)
-				(and (stage_boolean_shaped? graph stage requested_col)
-					(begin
-						/* Correlated child stages are closed by this producer; invariant child
-						stages belong to the enclosing query scope. Either ownership model is
-						exact alone, including transitive mixtures already closed by a child.
-						Direct siblings using both models would cross a lexical boundary, so
-						leave that operator-infeasible shape on the ordinary exact carrier.
-						This is a scope proof, never a SQL-shape or cardinality heuristic. */
-						(define carrier_src (scalar_first_probe_carrier_source (gs_input stage)))
-						(and (direct_boolean_recset_input_ownership_closed? stage_catalog stage)
-							(not (nil? (boolean_recset_domain_source
-								(gs_input stage)
-								(scalar_first_probe_recset_row_keys stage carrier_src))))))))))))
+				(begin
+					(define aggregate (if (nil? requested_col)
+						(car (gs_aggregates stage))
+						(scalar_first_probe_aggregate stage requested_col)))
+					(and (not (nil? aggregate))
+						(and (boolean_recset_expr_supported? graph stage
+							(car (scalar_first_probe_parts aggregate)))
+							(and (stage_boolean_shaped? graph stage requested_col)
+								(begin
+									/* Correlated child stages are closed by this producer; invariant child
+									stages belong to the enclosing query scope. Either ownership model is
+									exact alone, including transitive mixtures already closed by a child.
+									Direct siblings using both models would cross a lexical boundary, so
+									leave that operator-infeasible shape on the ordinary exact carrier.
+									This is a scope proof, never a SQL-shape or cardinality heuristic. */
+									(define carrier_src (scalar_first_probe_carrier_source (gs_input stage)))
+									(and (direct_boolean_recset_input_stages_supported? stage_catalog stage)
+										(and (direct_boolean_recset_input_ownership_closed? stage_catalog stage)
+											(not (nil? (boolean_recset_domain_source
+												(gs_input stage)
+												(scalar_first_probe_recset_row_keys stage carrier_src))))))))))))))))
 
-(define lower_direct_boolean_stage_recset_expr (lambda (stage_catalog stage share_result allow_direct_presence)
+(define lower_direct_boolean_stage_recset_expr (lambda (stage_catalog stage share_result allow_direct_presence planning_session)
 	(begin
 		/* A projected outer carrier closes its complete boolean tree before any
 		driver callback. Overlay only the presence leaves so they can use their direct
@@ -1602,7 +1685,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 			(list "alternatives" (list
 				(list (list "plan" "direct_recset") (list "status" "chosen"))
 				(list (list "plan" "group_cache_recset") (list "status" "rejected")
-					(list "reason" "redundant_mutable_materialization"))))))
+					(list "reason" "redundant_mutable_materialization"))))) planning_session)
 		/* RecSet algebra closes every nested stage producer before the domain scan.
 		The resulting expression has no lexical outer-row dependency and is therefore
 		safe to share between filters and projections in this query generation. */
@@ -1618,7 +1701,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 				(list (quote lambda) '() producer))
 			producer))))
 
-(define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col share_result allow_direct_presence)
+(define scalar_first_probe_recset_source_parts (lambda (all_stages stage requested_col share_result allow_direct_presence planning_session)
 	(begin
 		(define probe_catalog (qassoc_get (gs_facts stage) (quote probe_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
@@ -1643,7 +1726,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 						(gs_input physical_stage) row_keys))
 					(list true
 						(lower_direct_boolean_stage_recset_expr
-							stage_catalog physical_stage share_result allow_direct_presence)
+							stage_catalog physical_stage share_result allow_direct_presence planning_session)
 						(map row_keys (lambda (key)
 							(direct_column_name_for_alias domain_src key)))))
 				(begin
@@ -1678,7 +1761,7 @@ lexical outer row. Projection and key-index consumers can both reuse the same
 (define lower_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col resolved_lookup_key)
 	(begin
 		(define source_parts
-			(scalar_first_probe_recset_source_parts all_stages stage requested_col true false))
+			(scalar_first_probe_recset_source_parts all_stages stage requested_col true false nil))
 		(define lookup_key (recset_scalar_first_probe_lookup_key stage))
 		(define lookup_value (symbol (concat "__recset_lookup_value_"
 			(fnv_hash (gs_id stage)))))
@@ -1713,11 +1796,11 @@ true group keys directly onto that scan's base-table record positions. This
 is the carrier itself, not another membership decision: the group-stage
 preparation, truth RecSet, and key projection all belong to the same physical
 choice at the consuming join edge. */
-(define lower_projected_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col target_src target_col share_result)
+(define lower_projected_recset_scalar_first_probe_expr (lambda (all_stages stage requested_col target_src target_col share_result planning_session)
 	(begin
 		(define source_parts
 			(scalar_first_probe_recset_source_parts
-				all_stages stage requested_col share_result true))
+				all_stages stage requested_col share_result true planning_session))
 		(define source_key_cols (nth source_parts 2))
 		(if (not (equal? (count source_key_cols) 1))
 			(neumann_fail "build_queryplan" "projected scalar RecSet has no resolved row-domain key")
@@ -1744,7 +1827,7 @@ growth belongs in the calibrated comparison above and must retain the planner's
 recompile gate. A segment-invariant scalar is the proof case here: one cached
 scalar value replaces the same value for every segment row, while a carrier
 would still have to project that value over the segment. */
-(define scalar_first_probe_physical_operator (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics)
+(define scalar_first_probe_physical_operator (lambda (stages graph stage src keys probe_work_rows carrier_work_rows requested_col probe_semantics planning_session)
 	(if (union_block? src)
 		(quote union-probe)
 		(if (query_block? src)
@@ -1752,7 +1835,7 @@ would still have to project that value over the segment. */
 				(quote query-scan)
 				(if (and (equal? probe_semantics (quote truth))
 					(scalar_first_probe_recset_eligible?
-						stages graph stage src keys probe_work_rows carrier_work_rows requested_col))
+						stages graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session))
 					(quote recset)
 					(if (scalar_first_probe_keytable_eligible? stage src keys probe_work_rows)
 						(quote keytable)
@@ -1762,7 +1845,7 @@ would still have to project that value over the segment. */
 					(quote table-scan)
 					(if (and (equal? probe_semantics (quote truth))
 						(scalar_first_probe_recset_eligible_base?
-							graph stage src keys probe_work_rows carrier_work_rows requested_col))
+							graph stage src keys probe_work_rows carrier_work_rows requested_col planning_session))
 						(quote recset)
 						(if (scalar_first_probe_keytable_eligible_base? stage src keys probe_work_rows)
 							(quote keytable)
@@ -1867,7 +1950,7 @@ would still have to project that value over the segment. */
 		(define lowered_lookup_keys (map lookup_keys (lambda (key)
 			(lower_column_expr_for_join sources default_alias key))))
 		(define operator (scalar_first_probe_physical_operator
-			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics))
+			probe_stages graph stage src keys effective_probe_work_rows effective_probe_work_rows requested_col probe_semantics nil))
 		(define lowered (match operator
 			(symbol union-probe)
 			(list (quote if)
@@ -3478,10 +3561,10 @@ candidate RecSet. */
 					rows_expr))
 			nil))))
 
-(define membership_record_stage_source_row_guards (lambda (input)
+(define membership_record_stage_source_row_guards (lambda (input planning_session)
 	(if (union_block? input)
 		(reduce (union_branches input) (lambda (_ branch)
-			(membership_record_stage_source_row_guards branch)) nil)
+			(membership_record_stage_source_row_guards branch planning_session)) nil)
 		(if (query_block? input)
 			(reduce (filter (qb_sources input) source_is_base_table?) (lambda (_ src)
 				(begin
@@ -3493,14 +3576,14 @@ candidate RecSet. */
 									(list (quote table_planner_statistics)
 										(list (quote table) (source_schema src) (source_relation src)))
 									"row_count")
-								rows))
+								rows) planning_session)
 						nil))) nil)
 			nil))))
 
 /* Cost one physical tree edge once and return (strategy RecSet-expression).
 Consumers decide whether that RecSet is their scan carrier or a membership
 filter; they must not reconstruct the choice from enclosing block facts. */
-(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe driver_order_partitioning decision_scope)
+(define recset_project_join_plan_for_membership_using (lambda (src membership consumer driver_rows_override allow_ordered_batch prefiltered_driver_expr downstream_probe_branches allow_driver_probe driver_order_partitioning decision_scope planning_session tx)
 	(begin
 		(define stage (nth membership 0))
 		(define driver_order_partitioned (if (nil? driver_order_partitioning)
@@ -3510,14 +3593,16 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(list (quote table_order_partitioned?)
 					(list (quote table) (source_schema src) (source_relation src))
 					(car driver_order_partitioning))
-				driver_order_partitioned)))
+				driver_order_partitioned) planning_session))
 		/* Some late RecSet consumers are introduced after reorder telemetry was
 		attached. Reconstruct only the candidate's scalar work from the existing
 		logical stage; this is one formula walk, never an alternative plan build. */
 		/* merge is right-biased. Reorder telemetry owns statistics-sensitive
 		physical work, so place it after the late-consumer fallback; otherwise the
 		fallback replaces index-reduced row and byte counts. */
-		(define facts (merge (list (membership_candidate_work_facts stage) (gs_facts stage))))
+		(define facts (merge (list
+			(membership_candidate_work_facts stage planning_session)
+			(gs_facts stage))))
 		(define consumer_facts (qassoc_set
 			(if (equal? consumer (quote aggregate))
 				(qassoc_set facts (quote membership_consumer) (quote aggregate))
@@ -3551,8 +3636,8 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				(define measured_estimate (if (nil? (qassoc_get facts (quote membership_candidate_estimated_rows) nil))
 					(if (source_is_base_table? stage_input)
 						(planner_source_filter_estimate stage_input
-							(coalesceNil (qassoc_get facts (quote condition) true) true) 512)
-						(planner_stage_filter_estimate stage_input 512))
+							(coalesceNil (qassoc_get facts (quote condition) true) true) 512 tx planning_session)
+						(planner_stage_filter_estimate stage_input 512 tx planning_session))
 					nil))
 				(define estimate_population (coalesceNil
 					(qassoc_get facts (quote membership_candidate_estimate_population) nil)
@@ -3601,7 +3686,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 								(list (quote table_planner_statistics)
 									(list (quote table) (source_schema src) (source_relation src)))
 								"row_count")
-							source_rows))
+							source_rows) planning_session)
 					nil)
 				/* Ordered LIMIT consumes only its local window before downstream
 				operators. Cost this edge with that workload instead of a global
@@ -3743,7 +3828,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 					(> interval_worst_ns planner_adaptive_observation_budget_ns)))
 				(define observation_keys (if observe_projection
 					(planner_register_queryplan_observation decision_id raw_expr
-						(list (quote recset_count) (symbol "__queryplan_observed_value")))
+						(list (quote recset_count) (symbol "__queryplan_observed_value")) planning_session)
 					nil))
 				(define crossover (if (not observe_projection)
 					nil
@@ -3751,7 +3836,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 						candidate_input_rows driver_rows batch_cost_facts 0 source_rows 32)))
 				(define observed_rows (if (nil? observation_keys)
 					nil
-					(planner_queryplan_observed_metric decision_id)))
+					(planner_queryplan_observed_metric decision_id planning_session)))
 				/* Once the exact projected RecSet has been prepared, candidate consumption
 				dominates rebuilding successive ordered prefixes around that same value.
 				scan_order already chooses adaptively between inverse-position sorting and
@@ -3767,7 +3852,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 				it protects genuinely different physical trees. */
 				(define runtime_candidate_rows_expr
 					(membership_runtime_stage_rows_expr stage_input candidate_input_rows))
-				(membership_record_stage_source_row_guards stage_input)
+				(membership_record_stage_source_row_guards stage_input planning_session)
 				(define estimate_sampled_rows (coalesceNil
 					(qassoc_get facts (quote membership_candidate_estimate_sampled) nil)
 					(qassoc_get measured_estimate (quote sampled) nil)))
@@ -3823,15 +3908,15 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 							(list (quote >=) runtime_candidate_rows_expr
 								(car runtime_candidate_interval))
 							(list (quote <) runtime_candidate_rows_expr
-								(cadr runtime_candidate_interval))))
+								(cadr runtime_candidate_interval))) planning_session)
 					nil)
 				(define alternatives (merge (list
 					(cons "candidate_keyset"
 						(if driver_probe_supported (list driver_strategy) '()))
 					(if allow_ordered_batch (list "ordered_batch_accept") '())
 					(if prefiltered_supported (list "prefiltered_candidate_keyset") '()))))
-				(define chosen (planner_physical_choice decision_id normal_choice alternatives))
-				(define forced (planner_physical_override decision_id))
+				(define chosen (planner_physical_choice decision_id normal_choice alternatives planning_session))
+				(define forced (planner_physical_override decision_id planning_session))
 				(planner_record_physical_decision
 					(list
 						(list "decision_id" decision_id)
@@ -3926,7 +4011,7 @@ filter; they must not reconstruct the choice from enclosing block facts. */
 									(list "status" (if (equal? chosen "prefiltered_candidate_keyset") "chosen" "rejected"))
 									(list "reason" (if (equal? chosen "prefiltered_candidate_keyset") "selected" "higher_total_ns_or_forced_alternative"))
 									(list "cost" (planner_cost_explain prefiltered_cost)))
-								nil)) (lambda (alternative) (not (nil? alternative)))))))
+								nil)) (lambda (alternative) (not (nil? alternative)))))) planning_session)
 				(list chosen (if (not (nil? observation_keys))
 					(planner_queryplan_observation_read_expr (car observation_keys))
 					(if (equal? chosen "prefiltered_candidate_keyset")
@@ -3938,7 +4023,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 	(begin
 		(define plan (recset_project_join_plan_for_membership_using
 			src membership consumer driver_rows_override allow_ordered_batch nil 0 true nil
-			(quote expression)))
+			(quote expression) nil nil))
 		(if (and (not (nil? plan)) (equal? (car plan) "candidate_keyset"))
 			(cadr plan)
 			nil))))
@@ -6699,15 +6784,15 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define rows (probe_context_row_count sources))
 		(or (nil? rows) (< rows 1000)))))
 
-(define probe_limit_work_rows (lambda (limit_value)
+(define probe_limit_work_rows (lambda (limit_value planning_session)
 	(begin
-		(define planning_limit (planner_literal_value limit_value))
+		(define planning_limit (planner_literal_value limit_value planning_session))
 		(if (and (number? planning_limit) (> planning_limit 0))
 			planning_limit
 			nil))))
 
-(define probe_limit_bounded? (lambda (limit_value)
-	(not (nil? (probe_limit_work_rows limit_value)))))
+(define probe_limit_bounded? (lambda (limit_value planning_session)
+	(not (nil? (probe_limit_work_rows limit_value planning_session)))))
 
 /* BEGIN GENERATED COST CONSTANTS. DO NEVER MANUALLY EDIT THIS SECTION. RUN make costgen TO UPDATE.
 Calibrated by tools/costgen from tests/**/*.yaml workloads tagged with

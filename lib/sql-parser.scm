@@ -331,10 +331,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	/*        body from sql_trigger_body */
 	/*   - (!begin stmt1 stmt2 ...) for BEGIN...END blocks */
 	/*   - (list (col1 expr1) (col2 expr2) ...) for SET statements */
-	/* Output: (lambda (OLD NEW session) ...) that can be applied by ExecuteTriggers */
+	/* Output: (lambda (OLD NEW session tx) ...) that can be applied by ExecuteTriggers */
 	/* Uses set_assoc approach: (set changed_rows (set_assoc changed_rows key value)) */
 	(define compile_trigger_body (lambda (schema timing body) (begin
-		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session")))
+		(define params (list (symbol "OLD") (symbol "NEW") (symbol "session") (symbol "tx")))
 		(define is_after (or (equal? timing "after_insert") (equal? timing "after_update") (equal? timing "after_delete")))
 		(define changed_rows_sym (symbol "changed_rows"))
 

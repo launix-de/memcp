@@ -567,7 +567,7 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset, tx
 					return
 				}
 				defer tr.releaseTarget()
-				scm.Apply(trFunc, oldDict, newDict, session)
+				scm.Apply(trFunc, oldDict, newDict, session, scm.NewNil())
 			}()
 			continue
 		}
@@ -591,7 +591,7 @@ func (t *table) ExecuteTriggers(timing TriggerTiming, oldRow, newRow dataset, tx
 					panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
 				}
 			}()
-			scm.Apply(tr.Func, oldDict, newDict, session)
+			scm.Apply(tr.Func, oldDict, newDict, session, txContextScmer(tx))
 		}()
 	}
 }
@@ -635,7 +635,7 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 						return
 					}
 					defer tr.releaseTarget()
-					scm.Apply(tr.Func, oldDict, newDict, session)
+					scm.Apply(tr.Func, oldDict, newDict, session, scm.NewNil())
 				}()
 			}
 			continue
@@ -669,14 +669,14 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 								} else {
 									newDict = t.rowToDict(row)
 								}
-								scm.Apply(tr.Func, oldDict, newDict, session)
+								scm.Apply(tr.Func, oldDict, newDict, session, txContextScmer(tx))
 							}
 						}
 					}()
 					if isOld {
-						scm.Apply(tr.VectorFunc, colBatch, scm.NewNil(), session)
+						scm.Apply(tr.VectorFunc, colBatch, scm.NewNil(), session, txContextScmer(tx))
 					} else {
-						scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch, session)
+						scm.Apply(tr.VectorFunc, scm.NewNil(), colBatch, session, txContextScmer(tx))
 					}
 				}()
 				return
@@ -704,7 +704,7 @@ func (t *table) ExecuteTriggersBatch(timing TriggerTiming, rows []dataset, isOld
 							panic(fmt.Sprintf("trigger %s (%s) on %s failed: %v", tr.Name, timing, t.Name, r))
 						}
 					}()
-					scm.Apply(tr.Func, oldDict, newDict, session)
+					scm.Apply(tr.Func, oldDict, newDict, session, txContextScmer(tx))
 				}()
 			}
 		}()
@@ -765,7 +765,7 @@ func (t *table) ExecuteTableLifecycleTriggers(timing TriggerTiming, tx *TxContex
 					// lifecycle triggers are best-effort; log but don't propagate
 				}
 			}()
-			scm.Apply(tr.Func, scm.NewNil(), scm.NewNil(), session)
+			scm.Apply(tr.Func, scm.NewNil(), scm.NewNil(), session, txContextScmer(tx))
 		}()
 	}
 }
@@ -782,7 +782,7 @@ func executeRegisteredCreateTableTriggers(t *table, tx *TxContext) {
 		if triggerScmerMissing(trigger.Func) {
 			continue
 		}
-		scm.Apply(trigger.Func, scm.NewNil(), scm.NewNil(), session)
+		scm.Apply(trigger.Func, scm.NewNil(), scm.NewNil(), session, txContextScmer(tx))
 	}
 }
 
@@ -822,7 +822,7 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isI
 						triggerOk = false
 					}
 				}()
-				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(tx))
+				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(tx), txContextScmer(tx))
 				if !returned.IsNil() && returned.IsFastDict() {
 					newDict = returned
 				}
@@ -847,7 +847,7 @@ func (t *table) executeBeforeInsertTriggerRow(columns []string, row dataset, isI
 						panic(fmt.Sprintf("trigger %s (BEFORE INSERT) on %s failed: %v", tr.Name, t.Name, r))
 					}
 				}()
-				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(tx))
+				returned := scm.Apply(tr.Func, scm.NewNil(), newDict, txSessionScmer(tx), txContextScmer(tx))
 				if !returned.IsNil() && returned.IsFastDict() {
 					newDict = returned
 				}
@@ -938,7 +938,7 @@ func (t *table) ExecuteBeforeUpdateTriggers(oldRow, newRow dataset, tx *TxContex
 					panic(fmt.Sprintf("trigger %s (BEFORE UPDATE) on %s failed: %v", tr.Name, t.Name, r))
 				}
 			}()
-			returned := scm.Apply(tr.Func, oldDict, newDict, txSessionScmer(tx))
+			returned := scm.Apply(tr.Func, oldDict, newDict, txSessionScmer(tx), txContextScmer(tx))
 			if !returned.IsNil() && (returned.IsFastDict() || returned.IsSlice()) {
 				newDict = returned
 			}
@@ -988,7 +988,7 @@ func (t *table) ExecuteBeforeDeleteTriggers(oldRow dataset, tx *TxContext) bool 
 					panic(fmt.Sprintf("trigger %s (BEFORE DELETE) on %s failed: %v", tr.Name, t.Name, r))
 				}
 			}()
-			returned = scm.Apply(tr.Func, oldDict, scm.NewNil(), txSessionScmer(tx))
+			returned = scm.Apply(tr.Func, oldDict, scm.NewNil(), txSessionScmer(tx), txContextScmer(tx))
 		}()
 		// If trigger explicitly returns false, abort delete.
 		// nil return (side-effect-only triggers) does NOT abort.

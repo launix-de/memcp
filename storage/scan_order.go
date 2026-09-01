@@ -1238,7 +1238,7 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	adjustedSortdirs := sortdirs
 
-	skipShardReadLock := false
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	if t.t.hasTableLock() {
 		t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 	}

@@ -501,7 +501,7 @@ func (t *storageShard) collectRecSet(boundaries boundaries, lower []scm.Scmer, u
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
-	skipShardReadLock := false
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(boundaries, lower, t.t, conditionCols, condition)
 
@@ -851,7 +851,7 @@ func (r *recSet) collectProjectJoinKeys(currentTx *TxContext, sourceKeyCols []st
 
 func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols []string, currentTx *TxContext, ss *scm.SessionState, dst []scm.Scmer) int {
 	t.ensureLoaded()
-	skipShardReadLock := false
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 
 	cols := make([]ColumnStorage, len(sourceKeyCols))
@@ -1049,7 +1049,7 @@ func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []strin
 
 func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols []string, keys recSetProjectKeys, ss *scm.SessionState, numeric bool) recSetShard {
 	t.ensureLoaded()
-	skipShardReadLock := false
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
 	targetReaders := make([]ColumnReader, len(targetKeyCols))
@@ -1220,7 +1220,7 @@ func (r *recSet) scanExists(currentTx *TxContext, conditionCols []string, condit
 
 func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []string, conditionFn func(...scm.Scmer) scm.Scmer, currentTx *TxContext, ss *scm.SessionState, stop *atomic.Bool) bool {
 	t.ensureLoaded()
-	skipShardReadLock := false
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -1307,7 +1307,7 @@ func (t *storageShard) recSetPartExists(part *recSetShard, conditionCols []strin
 func (t *storageShard) scanRecSetPart(part *recSetShard, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64) {
 	conditionFn := scm.OptimizeProcToSerialFunction(condition)
 	t.ensureLoaded()
-	skipShardReadLock := false
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 
 	ccols := make([]ColumnStorage, len(conditionCols))
@@ -1469,7 +1469,7 @@ func (t *storageShard) filterRecSetPart(owner *recSet, part *recSetShard, condit
 	conditionProgram := scm.PrepareSerialProc(condition)
 	conditionAlwaysTrue := conditionProgram.Kind == scm.SerialProcConstant && scm.ToBool(conditionProgram.Value)
 	t.ensureLoaded()
-	skipShardReadLock := false
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	// Keep RecSet narrowing on the ordinary index-boundary path. The exact
 	// RecSet matcher and approximate hooks such as Bigram LIKE then prune the

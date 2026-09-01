@@ -2240,7 +2240,8 @@ source catalog. join_plan remains the single owner of physical join order. */
 							(quote order_limit)
 							(quote filter))))
 					(define local_driver_rows (if (equal? physical_consumer (quote order_limit))
-						(probe_limit_work_rows (qb_limit physical_planned)) nil))
+						(probe_limit_work_rows (qb_limit physical_planned)
+							(planner_context_session (qb_facts physical_planned))) nil))
 					(define physical_facts (merge (list
 						(list
 							(list (quote membership_consumer) physical_consumer)
@@ -2954,7 +2955,7 @@ source itself has no known row count (not a base table). */
 		(define column_stats (if (nil? columns) nil (columns column)))
 		(planner_column_average_value_bytes_from_statistics column_stats))))
 
-(define planner_column_average_value_bytes (lambda (src column)
+(define planner_column_average_value_bytes (lambda (src column planning_session)
 	(begin
 		(define measured (planner_column_average_value_bytes_from_statistics
 			(planner_column_statistics src column)))
@@ -2966,7 +2967,7 @@ source itself has no known row count (not a base table). */
 				(list (quote equal?)
 					(list (quote planner_runtime_column_average_value_bytes)
 						(source_schema src) (source_relation src) column)
-					measured))
+					measured) planning_session)
 			nil)
 		measured)))
 
@@ -3310,7 +3311,7 @@ once; get_column is a leaf because column reads are costed independently. */
 REBUILD already walks every base value, so its exact average byte width lets
 costing distinguish short labels from large text documents without building
 either physical alternative or sampling the table again. */
-(define physical_expression_work_profile (lambda (src expr)
+(define physical_expression_work_profile (lambda (src expr planning_session)
 	(match expr
 		((symbol get_column) _tblvar _tbl_ignorecase _col _col_ignorecase)
 		(list (list (quote operations) 0) (list (quote depth) 0)
@@ -3319,7 +3320,8 @@ either physical alternative or sampling the table again. */
 		(list (list (quote operations) 0) (list (quote depth) 0)
 			(list (quote broad_text_matches) 0) (list (quote broad_text_average_bytes) 0))
 		(cons head tail) (begin
-			(define children (map tail (lambda (child) (physical_expression_work_profile src child))))
+			(define children (map tail (lambda (child)
+				(physical_expression_work_profile src child planning_session))))
 			(define own (if (symbol? head) 1 0))
 			(list
 				(list (quote operations) (+ own (reduce children (lambda (total child)
@@ -3333,19 +3335,20 @@ either physical alternative or sampling the table again. */
 				(list (quote broad_text_average_bytes) (+
 					(if (physical_text_scan_operation? expr)
 						(reduce (extract_columns_for_alias src (car tail)) (lambda (total column)
-							(+ total (coalesceNil (planner_column_average_value_bytes src column) 0))) 0)
+							(+ total (coalesceNil
+								(planner_column_average_value_bytes src column planning_session) 0))) 0)
 						0)
 					(reduce children (lambda (total child)
 						(+ total (qassoc_get child (quote broad_text_average_bytes) 0))) 0)))))
 		_ (list (list (quote operations) 0) (list (quote depth) 0)
 			(list (quote broad_text_matches) 0) (list (quote broad_text_average_bytes) 0)))))
 
-(define membership_source_work_profile (lambda (src condition map_expr)
+(define membership_source_work_profile (lambda (src condition map_expr planning_session)
 	(begin
 		(define input_rows (planner_source_row_count src))
 		(define filter_columns (extract_columns_for_alias src condition))
 		(define map_columns (extract_columns_for_alias src map_expr))
-		(define expression_work (physical_expression_work_profile src condition))
+		(define expression_work (physical_expression_work_profile src condition planning_session))
 		(define broad_text_average_bytes (qassoc_get expression_work (quote broad_text_average_bytes) 0))
 		(list
 			(list (quote scan_invocations) 1)
@@ -3365,7 +3368,7 @@ either physical alternative or sampling the table again. */
 				(if (number? input_rows)
 					(* input_rows (qassoc_get expression_work (quote operations) 0)) nil))))))
 
-(define membership_candidate_branch_work_profile (lambda (branch)
+(define membership_candidate_branch_work_profile (lambda (branch planning_session)
 	(if (and (query_block? branch) (candidate_recset_branch_supported? branch))
 		(begin
 			(define sources (qb_sources branch))
@@ -3391,7 +3394,7 @@ either physical alternative or sampling the table again. */
 						/* Join-key columns are map work: they feed the next RecSet
 						projection even though they are not visible SQL output. */
 						(membership_source_work_profile src local_condition
-							(list terms (query_block_first_expr branch))))))))
+							(list terms (query_block_first_expr branch)) planning_session))))))
 		nil)))
 
 (define membership_merge_candidate_work_profiles (lambda (profiles)
@@ -3431,23 +3434,24 @@ either physical alternative or sampling the table again. */
 					(coalesceNil (qassoc_get profile (quote expression_operation_rows) nil) 0))))))
 		'())))
 
-(define membership_candidate_work_profile (lambda (stage)
+(define membership_candidate_work_profile (lambda (stage planning_session)
 	(begin
 		(define input (gs_input stage))
 		(if (union_block? input)
 			(membership_merge_candidate_work_profiles
-				(map (union_branches input) membership_candidate_branch_work_profile))
+				(map (union_branches input) (lambda (branch)
+					(membership_candidate_branch_work_profile branch planning_session))))
 			(if (query_block? input)
-				(membership_candidate_branch_work_profile input)
+				(membership_candidate_branch_work_profile input planning_session)
 				(if (source_is_base_table? input)
 					(membership_source_work_profile input
 						(coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true)
-						(gs_keys stage))
+						(gs_keys stage) planning_session)
 					'()))))))
 
-(define membership_candidate_work_facts (lambda (stage)
+(define membership_candidate_work_facts (lambda (stage planning_session)
 	(begin
-		(define work (membership_candidate_work_profile stage))
+		(define work (membership_candidate_work_profile stage planning_session))
 		(list
 			/* UNION candidates project RecSets directly from their branches. Every
 			other supported candidate carrier reads a prepared group-stage cache. */
@@ -3464,14 +3468,14 @@ either physical alternative or sampling the table again. */
 			(list (quote membership_candidate_filter_value_rows) (qassoc_get work (quote filter_value_rows) nil))
 			(list (quote membership_candidate_expression_operation_rows) (qassoc_get work (quote expression_operation_rows) nil))))))
 
-(define membership_driver_work_profile (lambda (driver sources block)
+(define membership_driver_work_profile (lambda (driver sources block planning_session)
 	(if (nil? driver)
 		'()
 		(begin
 			(define condition (membership_driver_local_filter driver sources block))
 			(define profile (membership_source_work_profile driver condition
 				(list (qb_fields block) (qb_group block) (qb_having block)
-					(qb_order block) (qb_hidden block))))
+					(qb_order block) (qb_hidden block)) planning_session))
 			/* Stage rebinding may replace base get_column leaves before this point.
 			The output arity is still a cheap lower bound for values the scan mapper
 			must produce, and preserves the distinction between narrow and wide
@@ -3567,7 +3571,7 @@ carrier crossover. */
 				(source_row_number_limit_driver? (qb_stages block) driver))))
 		(define consumer (if (query_block_has_aggregates? block) (quote aggregate)
 			(if ordered_driver (quote order_limit) (quote filter))))
-		(define candidate_work (membership_candidate_work_profile stage))
+		(define candidate_work (membership_candidate_work_profile stage planning_session))
 		/* Index hooks narrow the rows which reach the residual predicate but do not
 		replace it. Cost filter callbacks and text bytes over that conservative
 		candidate bound, not over the complete source. Keep the logical cardinality
@@ -3580,7 +3584,7 @@ carrier crossover. */
 			candidate_rows))
 		(define index_filter_fraction (if (and (number? candidate_rows) (> candidate_rows 0))
 			(min 1 (/ index_filter_rows candidate_rows)) 1))
-		(define driver_work (membership_driver_work_profile driver sources block))
+		(define driver_work (membership_driver_work_profile driver sources block planning_session))
 		(list
 			(list (quote membership_stage_id) (gs_id stage))
 			(list (quote membership_selectivity_class) class)
@@ -4117,7 +4121,7 @@ calibrated components used by the other membership carriers. */
 					(membership_driver_probe_cost driver_rows probe_branches
 						(membership_work_value work (quote membership_downstream_probe_branches) 0))))))))
 
-(define membership_cost_options_for_telemetry (lambda (telemetry)
+(define membership_cost_options_for_telemetry (lambda (telemetry planning_session)
 	(begin
 		/* candidate_estimated_rows is the shared cardinality result. Reapplying
 		planner_estimated_matching_rows here would treat a UNION's merged raw
@@ -4129,7 +4133,7 @@ calibrated components used by the other membership carriers. */
 		(define driver_rows (qassoc_get telemetry (quote membership_driver_rows) nil))
 		(define costed_driver_rows (if (equal? driver_strategy (quote driver_order_membership_probe))
 			(coalesceNil (probe_limit_work_rows
-				(qassoc_get telemetry (quote membership_order_limit) nil)) driver_rows)
+				(qassoc_get telemetry (quote membership_order_limit) nil) planning_session) driver_rows)
 			driver_rows))
 		(membership_cost_options
 			(qassoc_get telemetry (quote membership_candidate_input_rows) nil)
@@ -4149,7 +4153,8 @@ ordered batch is executable and what its actual driver workload is. */
 		(if (nil? requirement)
 			block
 			(begin
-				(define candidates (membership_cost_options_for_telemetry requirement))
+				(define candidates (membership_cost_options_for_telemetry requirement
+					(planner_context_session (qb_facts block))))
 				(define physical_facts (merge (list
 					(list
 						(list (quote membership_plan_strategy)
@@ -4189,12 +4194,14 @@ ordered batch is executable and what its actual driver workload is. */
 
 (define membership_truth_cost_facts (lambda (block stage)
 	(begin
+		(define planning_session (planner_context_session (qb_facts block)))
+		(define tx (planner_context_tx (qb_facts block)))
 		(define input (gs_input stage))
 		(define sources (filter (qb_sources block) source_is_base_table?))
 		(define driver (if (empty_list? sources) nil (car sources)))
 		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
 		(define candidate_estimate (if (source_is_base_table? input)
-			(planner_source_filter_estimate input condition 512) nil))
+			(planner_source_filter_estimate input condition 512 tx planning_session) nil))
 		(define candidate_input_rows (if (source_is_base_table? input)
 			(planner_source_row_count input) nil))
 		(define candidate_rows (planner_estimated_matching_rows
@@ -4203,7 +4210,7 @@ ordered batch is executable and what its actual driver workload is. */
 		(define driver_condition (membership_driver_filter (qb_where block)))
 		(define driver_estimate (if (nil? driver) nil
 			(planner_source_filter_estimate driver
-				driver_condition 512)))
+				driver_condition 512 tx planning_session)))
 		(define driver_rows (membership_estimated_work_rows driver_estimate driver_input_rows))
 		(merge (list
 			(list
@@ -4224,7 +4231,7 @@ ordered batch is executable and what its actual driver workload is. */
 				(list (quote membership_driver_input_rows) driver_input_rows)
 				(list (quote membership_driver_condition) driver_condition)
 				(list (quote membership_driver_rows) driver_rows))
-			(membership_candidate_work_facts stage)
+			(membership_candidate_work_facts stage planning_session)
 			/* merge is right-biased: stage telemetry is authoritative over
 			the reconstructed late-consumer fallback. */
 			(gs_facts stage))))))

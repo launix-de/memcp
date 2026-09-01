@@ -1050,13 +1050,18 @@ test_cases:
       - scm: |
           (begin
             (define cache (newcachemap))
-            (define sess (context "session"))
+            (define sess session)
             (define query "SELECT d.ID FROM in_dv_doc d WHERE d.file_id IN (SELECT f.ID FROM in_dv_file f WHERE f.filename LIKE '%hit%' UNION SELECT f.ID FROM in_dv_file f WHERE f.search LIKE '%needle%') ORDER BY d.sort_key LIMIT 10")
-            (define formula (cached_parse cache parse_sql "memcp-tests" query
-              (sql_policy "root") "root" sess true))
-            (define cold_guard (eval (nth formula 1)))
+            (define formula ((lambda (session tx)
+              (cached_parse cache (list parse_sql) "memcp-tests" query
+                (sql_policy "root") "root" session true tx)) sess nil))
+            (define eval_guard (lambda (guard guard_session guard_tx)
+              (eval (list
+                (list (quote lambda) (list (quote session) (quote tx) (quote resultrow)) guard)
+                guard_session guard_tx (lambda (_row) nil)))))
+            (define cold_guard (eval_guard (nth formula 1) sess nil))
             (rebuild (table "memcp-tests" "in_dv_file") true false)
-            (define rebuilt_guard (eval (nth formula 1)))
+            (define rebuilt_guard (eval_guard (nth formula 1) sess nil))
             (if (and cold_guard (not rebuilt_guard))
               "ok"
               (error (concat "membership carrier guard did not follow refined statistics: "

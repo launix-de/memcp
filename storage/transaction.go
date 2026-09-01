@@ -246,6 +246,13 @@ func txSessionScmer(tx *TxContext) scm.Scmer {
 	return tx.Session
 }
 
+func txContextScmer(tx *TxContext) scm.Scmer {
+	if tx == nil {
+		return scm.NewNil()
+	}
+	return scm.NewAny(tx)
+}
+
 func bindExecutionEnv(env *scm.Env, session, tx scm.Scmer) *scm.Env {
 	if env == nil {
 		env = &scm.Globalenv
