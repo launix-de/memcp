@@ -163,7 +163,7 @@ func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool)
 	// discarding it here would route all of its control flow back through Eval.
 	selected := entry != nil
 	if selected {
-		value.Proc().Compiled = entry
+		attachProcJIT(value.Proc(), entry)
 		compiled = value
 	}
 	if entry != nil {

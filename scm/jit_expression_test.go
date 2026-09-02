@@ -58,6 +58,16 @@ func TestJITExpressionListResultOwnsBackingStorage(t *testing.T) {
 	}
 }
 
+func TestJITDynamicListCallOwnsBackingStorage(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (callback value) (callback value 2 3))`)
+	first := Apply(compiled, NewFunc(List), NewInt(1))
+	_ = Apply(compiled, NewFunc(List), NewInt(99))
+	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
+	if !Equal(first, want) {
+		t.Fatalf("dynamic list result changed after frame reuse: got %s, want %s", String(first), String(want))
+	}
+}
+
 func TestJITExpressionBeginDefine(t *testing.T) {
 	proc := &Proc{
 		Params: NewSlice([]Scmer{NewSymbol("x")}),

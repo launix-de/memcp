@@ -403,6 +403,7 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 		Outer:        outer.Outer,
 		Nodefine:     outer.Nodefine,
 	}
+	proc.JIT = nil
 	proc.Compiled = nil
 	return Apply(NewProcStruct(proc))
 }
@@ -1687,16 +1688,19 @@ func init_sync() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name:            "once",
-		RetainsCallArgs: true,
+		Name: "once",
 
 		Fn: func(a ...Scmer) Scmer {
+			callable := a[0]
 			var params []Scmer
+			var paramsOnce sync.Once
 			once := sync.OnceValue[Scmer](func() Scmer {
-				return Apply(a[0], params...)
+				return Apply(callable, params...)
 			})
 			return NewFunc(func(a ...Scmer) Scmer {
-				params = a
+				paramsOnce.Do(func() {
+					params = append([]Scmer(nil), a...)
+				})
 				return once()
 			})
 		},

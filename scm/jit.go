@@ -141,18 +141,17 @@ type JITEntryPoint struct {
 	StackFrameSize int32
 	// BoundArgs are lexical closure values appended to the public arguments.
 	// Owner keeps the entry point which owns the shared machine code alive.
-	BoundArgs []Scmer
-	Owner     *JITEntryPoint
-	// TransferInputArgs means the native body returns its complete variadic
-	// argument array as an owned list. Call must make that array fresh because
-	// apply may otherwise pass caller-owned list backing directly.
-	TransferInputArgs bool
-	HiddenArgs        []JITHiddenArg
-	CodePtr           unsafe.Pointer   // start of code in arena
-	CodeLen           int              // bytes used
-	Arena             *jitArena        // owning arena (for free on GC)
-	ConstRoots        []unsafe.Pointer // GC roots for constants embedded into machine code
-	Proc              Proc             // original Proc for serialization
+	BoundArgs  []Scmer
+	Owner      *JITEntryPoint
+	HiddenArgs []JITHiddenArg
+	CodePtr    unsafe.Pointer   // start of code in arena
+	CodeLen    int              // bytes used
+	Arena      *jitArena        // owning arena (for free on GC)
+	ConstRoots []unsafe.Pointer // GC roots for constants embedded into machine code
+	// Dependencies keep directly called JIT entry points and their executable
+	// arenas alive for as long as this machine code can branch to them.
+	Dependencies []*JITEntryPoint
+	Proc         Proc // original Proc for serialization
 	// NeedsStableArgs records that emitted code crosses into Go. Precise JIT
 	// stack maps now relocate the saved variadic data pointer during stack growth;
 	// the flag remains diagnostic metadata for compiled entry points.
@@ -169,6 +168,7 @@ type JITEntryPoint struct {
 type JITCoverage struct {
 	Expressions  int
 	DynamicCalls int
+	DirectProcs  int
 	NativeCalls  int
 	InlinedCalls int
 }
@@ -184,10 +184,10 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if JITLog && jep.DebugName != "" {
 		fmt.Printf("JIT: call %s argc=%d\n", jep.DebugName, len(args))
 	}
-	// A transferred list must own fresh backing, and appending hidden inputs must
-	// not reuse caller-owned capacity. Stack maps make an extra copy unnecessary
-	// merely because native code calls back into Go.
-	stableArgs := jep.TransferInputArgs || len(jep.BoundArgs) != 0 || len(jep.HiddenArgs) != 0
+	// Appending closure or specialization inputs must not reuse caller-owned
+	// capacity. A plain Proc call borrows its argument slice for the duration of
+	// the call; builtins which retain it, notably list, own that decision.
+	stableArgs := len(jep.BoundArgs) != 0 || len(jep.HiddenArgs) != 0
 	if stableArgs {
 		args = append([]Scmer(nil), args...)
 	}
@@ -231,6 +231,51 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	runtime.KeepAlive(jep)
 	runtime.KeepAlive(jep.Owner)
 	return result
+}
+
+func (proc *Proc) callJIT(args []Scmer) Scmer {
+	if proc == nil || proc.JIT == nil || proc.Compiled == nil {
+		panic("JIT: procedure has no native implementation")
+	}
+	entry := proc.Compiled
+	if proc.JITDirect != 0 && (proc.JITArity < 0 || proc.JITArity == len(args)) {
+		result := proc.JIT(args...)
+		runtime.KeepAlive(args)
+		runtime.KeepAlive(proc)
+		runtime.KeepAlive(entry)
+		return result
+	}
+	// Bound captures, hidden specialization arguments, and arity padding are
+	// uncommon metadata paths and remain centralized in the entry point.
+	return proc.Compiled.Call(args...)
+}
+
+func attachProcJIT(proc *Proc, entry *JITEntryPoint) {
+	proc.JIT = entry.Native
+	proc.Compiled = entry
+	proc.JITArity = 0
+	proc.JITDirect = 0
+	if len(entry.BoundArgs) != 0 || len(entry.HiddenArgs) != 0 {
+		return
+	}
+	params := proc.Params
+	for params.GetTag() == tagSourceInfo {
+		params = params.SourceInfo().value
+	}
+	switch params.GetTag() {
+	case tagSlice:
+		proc.JITArity = len(params.Slice())
+	case tagNil:
+		proc.JITArity = 0
+	case tagSymbol:
+		// A Scheme variadic parameter is one list binding, not the raw Go
+		// variadic slice. Keep it on the metadata path until the native prolog
+		// materializes that binding explicitly.
+		return
+	default:
+		return
+	}
+	proc.JITDirect = 1
 }
 
 type jitHiddenArgKind uint8
@@ -494,10 +539,7 @@ type JITContext struct {
 	// LocalSlotCount is the number of 16-byte Scmer slots reserved in the
 	// invocation frame. Optimizer-internal !list values may borrow a bounded
 	// subrange while their NoEscape consumer is emitted inline.
-	LocalSlotCount int
-	// TransferInputArgs is set when emission proves that the native result is
-	// exactly the complete variadic input array re-tagged as an owned list.
-	TransferInputArgs     bool
+	LocalSlotCount        int
 	HiddenArgs            []JITHiddenArg
 	RuntimeEnv            Scmer
 	RecursiveLambdas      bool
@@ -541,6 +583,8 @@ type JITContext struct {
 	// referenced heap data while JIT code may still dereference it.
 	ConstRoots []unsafe.Pointer
 	rootSet    map[unsafe.Pointer]struct{}
+	EntryRoots []*JITEntryPoint
+	entrySet   map[*JITEntryPoint]struct{}
 	Arena      *jitArena // owning arena for source map entries
 }
 
@@ -563,11 +607,22 @@ type jitAllocStateSnapshot struct {
 	protectedRegs      uint64
 	protectedRegCounts [16]int
 	regOwnerIDs        [16]uint32
-	ownerValues        map[uint32]JITValueDesc
+	ownerValues        []jitOwnerSnapshot
+	firstNewDescID     uint32
 	spillOffset        int32
-	descSpills         map[uint32]descSpillMeta
-	stackRoots         map[jitStackRoot]struct{}
+	descSpills         []jitDescSpillSnapshot
+	stackRoots         []jitStackRoot
 	dynamicSP          int32
+}
+
+type jitOwnerSnapshot struct {
+	id    uint32
+	value JITValueDesc
+}
+
+type jitDescSpillSnapshot struct {
+	id    uint32
+	value descSpillMeta
 }
 
 func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
@@ -575,16 +630,17 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		freeRegs:           ctx.FreeRegs,
 		protectedRegs:      ctx.ProtectedRegs,
 		protectedRegCounts: ctx.ProtectedRegCounts,
+		firstNewDescID:     ctx.nextDescID + 1,
 		spillOffset:        ctx.SpillOffset,
 		dynamicSP:          ctx.DynamicSP,
 	}
 	if len(ctx.descOwners) != 0 {
-		s.ownerValues = make(map[uint32]JITValueDesc, len(ctx.descOwners))
 		for id, owner := range ctx.descOwners {
-			if owner == nil {
+			if owner == nil || owner.Loc == LocNone {
+				delete(ctx.descOwners, id)
 				continue
 			}
-			s.ownerValues[id] = *owner
+			s.ownerValues = append(s.ownerValues, jitOwnerSnapshot{id: id, value: *owner})
 		}
 	}
 	for r := Reg(0); r <= RegR15; r++ {
@@ -593,15 +649,13 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		}
 	}
 	if len(ctx.descSpills) != 0 {
-		s.descSpills = make(map[uint32]descSpillMeta, len(ctx.descSpills))
 		for k, v := range ctx.descSpills {
-			s.descSpills[k] = v
+			s.descSpills = append(s.descSpills, jitDescSpillSnapshot{id: k, value: v})
 		}
 	}
 	if len(ctx.StackRoots) != 0 {
-		s.stackRoots = make(map[jitStackRoot]struct{}, len(ctx.StackRoots))
 		for root := range ctx.StackRoots {
-			s.stackRoots[root] = struct{}{}
+			s.stackRoots = append(s.stackRoots, root)
 		}
 	}
 	return s
@@ -617,37 +671,43 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	// spill metadata was already emitted on a sibling path.
 	ctx.DynamicSP = s.dynamicSP
 
-	if s.ownerValues == nil {
-		ctx.descOwners = nil
-	} else {
-		ctx.descOwners = make(map[uint32]*JITValueDesc, len(s.ownerValues))
-		for id, owner := range s.ownerValues {
-			copyOwner := owner
-			ctx.descOwners[id] = &copyOwner
+	for id := range ctx.descOwners {
+		if id >= s.firstNewDescID {
+			delete(ctx.descOwners, id)
 		}
+	}
+	for _, saved := range s.ownerValues {
+		owner := ctx.descOwners[saved.id]
+		if owner == nil {
+			owner = &JITValueDesc{}
+			ctx.descOwners[saved.id] = owner
+		}
+		*owner = saved.value
 	}
 	for r := Reg(0); r <= RegR15; r++ {
 		id := s.regOwnerIDs[r]
-		if id == 0 || ctx.descOwners == nil {
+		if id == 0 {
 			ctx.RegOwners[r] = nil
 			continue
 		}
 		ctx.RegOwners[r] = ctx.descOwners[id]
 	}
 
-	if s.descSpills == nil {
-		ctx.descSpills = nil
-	} else {
-		ctx.descSpills = make(map[uint32]descSpillMeta, len(s.descSpills))
-		for k, v := range s.descSpills {
-			ctx.descSpills[k] = v
+	clear(ctx.descSpills)
+	if len(s.descSpills) != 0 {
+		if ctx.descSpills == nil {
+			ctx.descSpills = make(map[uint32]descSpillMeta, len(s.descSpills))
+		}
+		for _, saved := range s.descSpills {
+			ctx.descSpills[saved.id] = saved.value
 		}
 	}
-	if s.stackRoots == nil {
-		ctx.StackRoots = nil
-	} else {
-		ctx.StackRoots = make(map[jitStackRoot]struct{}, len(s.stackRoots))
-		for root := range s.stackRoots {
+	clear(ctx.StackRoots)
+	if len(s.stackRoots) != 0 {
+		if ctx.StackRoots == nil {
+			ctx.StackRoots = make(map[jitStackRoot]struct{}, len(s.stackRoots))
+		}
+		for _, root := range s.stackRoots {
 			ctx.StackRoots[root] = struct{}{}
 		}
 	}
@@ -769,6 +829,22 @@ func (ctx *JITContext) TrackPointer(p unsafe.Pointer) {
 	}
 	ctx.rootSet[p] = struct{}{}
 	ctx.ConstRoots = append(ctx.ConstRoots, p)
+}
+
+// TrackEntry retains a JIT entry point whose native address is embedded into
+// this code. This typed edge is also the ownership edge for its arena cleanup.
+func (ctx *JITContext) TrackEntry(entry *JITEntryPoint) {
+	if ctx == nil || entry == nil {
+		return
+	}
+	if ctx.entrySet == nil {
+		ctx.entrySet = make(map[*JITEntryPoint]struct{}, 8)
+	}
+	if _, exists := ctx.entrySet[entry]; exists {
+		return
+	}
+	ctx.entrySet[entry] = struct{}{}
+	ctx.EntryRoots = append(ctx.EntryRoots, entry)
 }
 
 // ProtectReg marks a register as non-spillable by AllocReg.
@@ -1340,8 +1416,14 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	}
 	desc.Loc = LocNone
 	desc.MemPtr = 0
-	if desc.ID != 0 && ctx.descSpills != nil {
-		delete(ctx.descSpills, desc.ID)
+	if desc.ID != 0 {
+		if owner := ctx.descOwners[desc.ID]; owner != nil {
+			owner.Loc = LocNone
+			owner.MemPtr = 0
+		}
+		if ctx.descSpills != nil {
+			delete(ctx.descSpills, desc.ID)
+		}
 	}
 }
 
@@ -1686,7 +1768,7 @@ func jitBindCompiledLambdaEntry(template Scmer, closure Scmer, captureArgs []Scm
 	entry.BoundArgs = bound
 	entry.Owner = template.Proc().Compiled
 	entry.Arena = nil
-	proc.Compiled = &entry
+	attachProcJIT(proc, &entry)
 	return closure
 }
 
@@ -1921,16 +2003,16 @@ func jitCallSpecialThunk(thunk Scmer) Scmer {
 	if thunk.GetTag() == tagAny {
 		if value, ok := thunk.Any().(*jitSpecialThunkValue); ok && value != nil {
 			if value.callable.GetTag() == tagProc {
-				if proc := value.callable.Proc(); proc != nil && proc.Compiled != nil {
-					return proc.Compiled.Call(value.args...)
+				if proc := value.callable.Proc(); proc != nil && proc.JIT != nil {
+					return proc.callJIT(value.args)
 				}
 			}
 			return Apply(value.callable, value.args...)
 		}
 	}
 	if thunk.GetTag() == tagProc {
-		if proc := thunk.Proc(); proc != nil && proc.Compiled != nil {
-			return proc.Compiled.Call()
+		if proc := thunk.Proc(); proc != nil && proc.JIT != nil {
+			return proc.callJIT(nil)
 		}
 	}
 	return Apply(thunk)
@@ -3461,7 +3543,7 @@ func init_jit() {
 		Name: "jit?",
 
 		Fn: func(a ...Scmer) Scmer {
-			return NewBool(a[0].GetTag() == tagJIT || (a[0].GetTag() == tagProc && a[0].Proc() != nil && a[0].Proc().Compiled != nil))
+			return NewBool(a[0].GetTag() == tagJIT || (a[0].GetTag() == tagProc && a[0].Proc() != nil && a[0].Proc().JIT != nil))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "tells whether a value is a JIT-compiled function descriptor",
 			Params: []*TypeDescriptor{
@@ -4086,13 +4168,13 @@ func init_jit() {
 					var d51 JITValueDesc
 					ctx.EnsureDesc(&d50)
 					if d50.Loc == LocImm {
-						fieldAddr := uintptr(d50.Imm.Int()) + 56
+						fieldAddr := uintptr(d50.Imm.Int()) + 72
 						r2 := ctx.AllocReg()
 						ctx.EmitMovRegMem64(r2, fieldAddr)
 						d51 = JITValueDesc{Loc: LocReg, Reg: r2}
 						ctx.BindReg(r2, &d51)
 					} else {
-						off := int32(56)
+						off := int32(72)
 						baseReg := d50.Reg
 						r3 := ctx.AllocRegExcept(baseReg)
 						ctx.EmitMovRegMem(r3, baseReg, off)
@@ -4662,7 +4744,7 @@ func init_jit() {
 
 		Fn: func(a ...Scmer) Scmer {
 			value := a[0]
-			compiled := value.GetTag() == tagJIT || (value.GetTag() == tagProc && value.Proc() != nil && value.Proc().Compiled != nil)
+			compiled := value.GetTag() == tagJIT || (value.GetTag() == tagProc && value.Proc() != nil && value.Proc().JIT != nil)
 			if jitEnabled && !compiled {
 				label := SerializeToString(value, &Globalenv)
 				if len(a) > 1 {
@@ -5372,13 +5454,13 @@ func init_jit() {
 					var d51 JITValueDesc
 					ctx.EnsureDesc(&d50)
 					if d50.Loc == LocImm {
-						fieldAddr := uintptr(d50.Imm.Int()) + 56
+						fieldAddr := uintptr(d50.Imm.Int()) + 72
 						r2 := ctx.AllocReg()
 						ctx.EmitMovRegMem64(r2, fieldAddr)
 						d51 = JITValueDesc{Loc: LocReg, Reg: r2}
 						ctx.BindReg(r2, &d51)
 					} else {
-						off := int32(56)
+						off := int32(72)
 						baseReg := d50.Reg
 						r3 := ctx.AllocRegExcept(baseReg)
 						ctx.EmitMovRegMem(r3, baseReg, off)
@@ -7494,11 +7576,15 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 		if proc != nil && proc.Compiled != nil {
 			return v
 		}
+		if proc == nil || !atomic.CompareAndSwapUint32(&proc.jitCompiling, 0, 1) {
+			return v
+		}
+		defer atomic.StoreUint32(&proc.jitCompiling, 0)
 		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024} {
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
-			codeLen, roots, overflow, transferInputArgs, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
+			codeLen, roots, dependencies, overflow, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
 			if waitForPublication {
 				arena.complete(reservation, buf.stackMaps)
 			} else {
@@ -7513,31 +7599,33 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 				fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
 				nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
 				sourceProc := *proc
+				sourceProc.JIT = nil
 				sourceProc.Compiled = nil
+				sourceProc.jitCompiling = 0
 				jep := &JITEntryPoint{
-					Native:            nativeFn,
-					StackFrameSize:    buf.stackFrameSize,
-					TransferInputArgs: transferInputArgs,
-					HiddenArgs:        hiddenArgs,
-					CodePtr:           ptr,
-					CodeLen:           codeLen,
-					Arena:             arena,
-					ConstRoots:        roots,
-					Proc:              sourceProc,
-					RecursiveLambdas:  recursiveLambdas,
-					NeedsStableArgs:   needsStableArgs,
-					Coverage:          coverage,
+					Native:           nativeFn,
+					StackFrameSize:   buf.stackFrameSize,
+					HiddenArgs:       hiddenArgs,
+					CodePtr:          ptr,
+					CodeLen:          codeLen,
+					Arena:            arena,
+					ConstRoots:       roots,
+					Dependencies:     dependencies,
+					Proc:             sourceProc,
+					RecursiveLambdas: recursiveLambdas,
+					NeedsStableArgs:  needsStableArgs,
+					Coverage:         coverage,
 				}
 				runtime.AddCleanup(jep, releaseJITEntryPoint, jitCodeLease{
 					pool:  &globalJITPool,
 					arena: arena,
 				})
 				if install {
-					proc.Compiled = jep
+					attachProcJIT(proc, jep)
 					return v
 				}
 				compiledProc := sourceProc
-				compiledProc.Compiled = jep
+				attachProcJIT(&compiledProc, jep)
 				return NewProcStruct(compiledProc)
 			}
 			globalJITPool.Free(arena)
@@ -7599,7 +7687,7 @@ func maybeLogJITImportCandidate(name Symbol, entry *JITEntryPoint, selected bool
 		fmt.Printf("jitdump: import=%s compiled=false\n", name)
 		return
 	}
-	fmt.Printf("jitdump: import=%s selected=%t expressions=%d dynamic-calls=%d native-calls=%d inlined-calls=%d\n",
+	fmt.Printf("jitdump: import=%s selected=%t expressions=%d dynamic-calls=%d direct-procs=%d native-calls=%d inlined-calls=%d\n",
 		name, selected, entry.Coverage.Expressions, entry.Coverage.DynamicCalls,
-		entry.Coverage.NativeCalls, entry.Coverage.InlinedCalls)
+		entry.Coverage.DirectProcs, entry.Coverage.NativeCalls, entry.Coverage.InlinedCalls)
 }

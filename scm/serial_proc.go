@@ -207,9 +207,12 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	// classifying that body could silently bypass code generation semantics.
 	if proc.Compiled != nil {
 		params, fixedArity := scmerSlice(proc.Params)
-		if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 && !proc.Compiled.TransferInputArgs {
+		if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 {
 			prepared.Kind = SerialProcJIT
-			prepared.Function = proc.Compiled.Native
+			prepared.Function = proc.JIT
+			if prepared.Function == nil {
+				prepared.Function = proc.Compiled.Native
+			}
 			prepared.jitEntry = proc.Compiled
 			prepared.jitArity = len(params)
 			return prepared

@@ -84,8 +84,8 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 		if maps[i].entry {
 			runtimeMaps[i] = jit.StackMap{
 				PCOffset:       maps[i].pcOffset,
-				FrameWords:     4,
-				PointerMask:    []byte{0b00000010},
+				FrameWords:     1,
+				PointerMask:    []byte{0},
 				HasUnwind:      true,
 				CallerPCOffset: 0,
 				CallerSPOffset: unsafe.Sizeof(uintptr(0)),
