@@ -125,6 +125,15 @@ func BenchmarkSerialProcJITMapReducerDispatch(b *testing.B) {
 			args[0] = adapter.Call(args)
 		}
 	})
+	b.Run("jit_trampoline", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(1)}
+		jitFn := direct.Function
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			args[0] = callJIT(jitFn, args...)
+		}
+		runtime.KeepAlive(&direct)
+	})
 	b.Run("direct_jit_entry", func(b *testing.B) {
 		args := []Scmer{NewInt(1), NewInt(1)}
 		jitFn := direct.Function
