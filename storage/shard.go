@@ -1602,6 +1602,17 @@ func prepareReadMapReducerStorage(mr *ShardMapReducer, workspace *shardMapReduce
 	}
 }
 
+func prepareMapReducerCallFrame(mr *ShardMapReducer) {
+	required := mr.mapReduceProgram.CallFrameSize(len(mr.args))
+	if required <= cap(mr.args) {
+		mr.args = mr.args[:required]
+		return
+	}
+	args := make([]scm.Scmer, required)
+	copy(args, mr.args)
+	mr.args = args
+}
+
 // initReadMapReducer initializes an ordinary read-only mapper without the
 // per-column closures required by pseudo-column and mutation scans.
 func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, mapReduceFn scm.Scmer, alreadyLocked bool, currentTx *TxContext) {
@@ -1610,6 +1621,7 @@ func (t *storageShard) initReadMapReducer(mr *ShardMapReducer, cols []string, ma
 	mr.acidMode = currentTx != nil && currentTx.Mode == TxACID
 	mr.colNames = cols
 	mr.mapReduceProgram = scm.PrepareSerialProc(mapReduceFn)
+	prepareMapReducerCallFrame(mr)
 	mr.mapReduceScmer = mapReduceFn
 	mr.mainCount = t.main_count
 	mr.shardWriteLocked = alreadyLocked
@@ -1658,6 +1670,7 @@ func (t *storageShard) initMapReducer(mr *ShardMapReducer, cols []string, mapRed
 		mainCount:        t.main_count,
 		shardWriteLocked: alreadyLocked,
 	}
+	prepareMapReducerCallFrame(mr)
 	needsMutationMetadata := false
 	for _, col := range cols {
 		if col == "$update" || col == "$break" || len(col) >= 4 && col[:4] == "NEW." ||
@@ -2023,6 +2036,25 @@ func (m *ShardMapReducer) processDirectReadBlock(acc scm.Scmer, recids []uint32)
 			m.args[0] = acc
 			acc = m.mapReduceProgram.Function(m.args...)
 		}
+		return acc
+	}
+	if m.mapReduceProgram.Kind == scm.SerialProcJIT {
+		jitFn := m.mapReduceProgram.Function
+		if recids[0] < m.mainCount && len(m.mainBulkReaders) == 1 {
+			for _, value := range m.mainBulkValues {
+				m.args[0] = acc
+				m.args[1] = value
+				acc = jitFn(m.args...)
+			}
+			runtime.KeepAlive(&m.mapReduceProgram)
+			return acc
+		}
+		for rowOffset, id := range recids {
+			m.loadDirectReadArgs(id, rowOffset, true)
+			m.args[0] = acc
+			acc = jitFn(m.args...)
+		}
+		runtime.KeepAlive(&m.mapReduceProgram)
 		return acc
 	}
 	for rowOffset, id := range recids {

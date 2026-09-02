@@ -16,9 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+import "runtime"
 import "testing"
 
-func preparedTestProc(t *testing.T, source string) Scmer {
+func preparedTestProc(t testing.TB, source string) Scmer {
 	t.Helper()
 	return Eval(Optimize(Read("serial proc test", source), &Globalenv, nil), &Globalenv)
 }
@@ -71,9 +72,77 @@ func TestPrepareSerialProcKeepsCompiledEntryPointAuthoritative(t *testing.T) {
 	source := preparedTestProc(t, "(lambda () 7)")
 	source.Proc().Compiled = &JITEntryPoint{Native: func(...Scmer) Scmer { return NewInt(99) }}
 	prepared := PrepareSerialProc(source)
-	if prepared.Kind != SerialProcGeneral {
-		t.Fatalf("compiled procedure shape = %d, want general entry-point dispatch", prepared.Kind)
+	if !jitEnabled {
+		if prepared.Kind != SerialProcGeneral {
+			t.Fatalf("compiled procedure shape = %d, want general without JIT runtime", prepared.Kind)
+		}
+		return
 	}
+	if prepared.Kind != SerialProcJIT {
+		t.Fatalf("compiled procedure shape = %d, want direct JIT dispatch", prepared.Kind)
+	}
+	if got := prepared.Call(nil); !Equal(got, NewInt(99)) {
+		t.Fatalf("direct JIT result = %s, want 99", String(got))
+	}
+}
+
+func TestPrepareSerialProcUsesCompiledJITDirectly(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	source := preparedTestProc(t, "(lambda (acc value) (+ acc value))")
+	compiled := jitCompile(source)
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("map-reducer did not compile")
+	}
+	prepared := PrepareSerialProc(compiled)
+	if prepared.Kind != SerialProcJIT {
+		t.Fatalf("compiled map-reducer shape = %d, want direct JIT dispatch", prepared.Kind)
+	}
+	if got := prepared.Call([]Scmer{NewInt(40), NewInt(2)}); !Equal(got, NewInt(42)) {
+		t.Fatalf("direct JIT map-reducer result = %s, want 42", String(got))
+	}
+}
+
+func BenchmarkSerialProcJITMapReducerDispatch(b *testing.B) {
+	if !jitEnabled {
+		b.Skip("requires GOEXPERIMENT=jit")
+	}
+	source := preparedTestProc(b, "(lambda (acc value) (+ acc value))")
+	compiled := jitCompile(source)
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		b.Fatal("map-reducer did not compile")
+	}
+	direct := PrepareSerialProc(compiled)
+	adapter := SerialProc{
+		Kind:     SerialProcGeneral,
+		borrowed: optimizeProcToSerialBorrowed(compiled),
+	}
+	b.Run("general_adapter", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(1)}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			args[0] = adapter.Call(args)
+		}
+	})
+	b.Run("jit_trampoline", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(1)}
+		jitFn := direct.Function
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			args[0] = callJIT(jitFn, args...)
+		}
+		runtime.KeepAlive(&direct)
+	})
+	b.Run("direct_jit_entry", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(1)}
+		jitFn := direct.Function
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			args[0] = jitFn(args...)
+		}
+		runtime.KeepAlive(&direct)
+	})
 }
 
 func TestPrepareSerialProcNativeForwardMatchesInterpreterAdapter(t *testing.T) {

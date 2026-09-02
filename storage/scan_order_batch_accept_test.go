@@ -31,6 +31,48 @@ func setupBatchAcceptTable(t *testing.T, database string, rows int) *table {
 	return table
 }
 
+func TestJITScanOrderPreservesAdjacentMapColumnNames(t *testing.T) {
+	Init(scm.Globalenv)
+	const database = "tjit_scan_order_column_names"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	table, _ := CreateTable(database, "posts", Memory, true)
+	for _, column := range []string{"ID", "post_title", "post_status", "post_type"} {
+		table.CreateColumn(column, "TEXT", nil, nil)
+	}
+	table.Insert([]string{"ID", "post_title", "post_status", "post_type"}, [][]scm.Scmer{{
+		scm.NewString("1"), scm.NewString("title"), scm.NewString("publish"), scm.NewString("post"),
+	}}, nil, scm.NewNil(), false, nil)
+
+	source := `(lambda (session tx resultrow resultfields)
+		(!begin
+			(resultfields (quote ("ID" "post_status" "post_type")))
+			(scan_order tx (table "tjit_scan_order_column_names" "posts")
+				(quote ()) (lambda () true) (quote ("post_title")) (list <) 0 0 (session "v1")
+				(list "ID" "post_status" "post_type")
+				(lambda (__scan_acc ID post_status post_type)
+					(resultrow (list "ID" ID "post_status" post_status "post_type" post_type)))
+				1 nil false)))`
+	proc := scm.Eval(scm.Optimize(scm.Read(t.Name(), source), &scm.Globalenv, nil), &scm.Globalenv)
+	compiled := scm.Apply(scm.Globalenv.Vars[scm.Symbol("jit")], proc)
+	if !compiled.IsProc() || compiled.Proc().Compiled == nil {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	session := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewInt(5) })
+	resultrow := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[0] })
+	resultfields := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	got := scm.Apply(compiled, session, scm.NewNil(), resultrow, resultfields)
+	want := scm.NewSlice([]scm.Scmer{
+		scm.NewString("ID"), scm.NewString("1"),
+		scm.NewString("post_status"), scm.NewString("publish"),
+		scm.NewString("post_type"), scm.NewString("post"),
+	})
+	if !scm.Equal(got, want) {
+		t.Fatalf("JIT scan_order result = %s, want %s", scm.String(got), scm.String(want))
+	}
+}
+
 func integerOrder(descending bool) (scm.Scmer, func(...scm.Scmer) scm.Scmer) {
 	relation := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		if descending {
@@ -298,5 +340,34 @@ func TestShardMapReducerBulkReadsFinalMapColumns(t *testing.T) {
 	}
 	if want := []int64{344, 122, 233}; !equalInt64s(got, want) {
 		t.Fatalf("mapped values = %v, want %v", got, want)
+	}
+}
+
+func TestShardMapReducerUsesDirectJITLoop(t *testing.T) {
+	source := scm.Eval(scm.Optimize(
+		scm.Read(t.Name(), `(lambda (acc value) (+ acc value))`),
+		&scm.Globalenv, nil), &scm.Globalenv)
+	compiled := scm.Apply(scm.Globalenv.Vars[scm.Symbol("jit")], source)
+	if !compiled.IsProc() || compiled.Proc().Compiled == nil {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	reader := &countingColumnReader{values: []scm.Scmer{
+		scm.NewInt(10), scm.NewInt(20), scm.NewInt(30),
+	}}
+	mapper := &ShardMapReducer{
+		mainBulkReaders:  []ColumnReader{reader},
+		args:             make([]scm.Scmer, 2),
+		mapReduceProgram: scm.PrepareSerialProc(compiled),
+		mainCount:        3,
+		directRead:       true,
+	}
+	if mapper.mapReduceProgram.Kind != scm.SerialProcJIT {
+		t.Fatalf("map-reducer kind = %d, want direct JIT", mapper.mapReduceProgram.Kind)
+	}
+	if got := mapper.Stream(scm.NewInt(0), []uint32{0, 1, 2}, nil); !scm.Equal(got, scm.NewInt(60)) {
+		t.Fatalf("direct JIT reduction = %s, want 60", scm.String(got))
+	}
+	if reader.multiRead != 1 || reader.singleRead != 0 {
+		t.Fatalf("direct JIT reads: multi=%d single=%d, want one bulk read", reader.multiRead, reader.singleRead)
 	}
 }
