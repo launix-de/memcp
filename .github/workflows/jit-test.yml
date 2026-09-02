@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  JIT_GO_REVISION: 49b59d77378309a6dcf1235d538459142cdabb47
+  JIT_GO_REF: jit-foreign-frames-go1.27.0
 
 jobs:
   jit-test:
@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: launix-de/go
-          ref: ${{ env.JIT_GO_REVISION }}
+          ref: ${{ env.JIT_GO_REF }}
           path: go-jit
 
       - name: Read patched Go version
@@ -82,6 +82,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(go env GOROOT)" = "$GITHUB_WORKSPACE/go-jit"
+          jit_go_revision=$(git -C "$GITHUB_WORKSPACE/go-jit" rev-parse HEAD)
+          printf 'Patched Go revision: `%s`\n' "$jit_go_revision" >> "$GITHUB_STEP_SUMMARY"
           go version
           go env GOEXPERIMENT
 
