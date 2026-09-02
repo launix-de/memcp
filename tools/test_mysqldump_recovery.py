@@ -80,6 +80,31 @@ CREATE TABLE `recovery_unique` (
   UNIQUE KEY `recovery_value_unique` (`value`)
 ) ENGINE=INNODB;
 
+CREATE TABLE `recovery_keyword_columns` (
+  `method` TEXT,
+  `parameter` TEXT,
+  `user` BIGINT,
+  `lock` BIGINT,
+  `start` BIGINT,
+  `ID` INT PRIMARY KEY AUTO_INCREMENT
+) ENGINE=INNODB;
+
+CREATE TABLE `recovery_statement_columns` (
+  `database` TEXT,
+  `name` TEXT,
+  `dialect` TEXT,
+  `sql` TEXT,
+  `ir` TEXT
+) ENGINE=INNODB;
+
+CREATE TABLE `recovery_error_columns` (
+  `datetime` TEXT,
+  `database` TEXT,
+  `user` TEXT,
+  `query` TEXT,
+  `error` TEXT
+) ENGINE=INNODB;
+
 INSERT INTO `fop_files` (`filename`, `data`, `uploaded_at`) VALUES
   ('Pruefung-Mueller.pdf', FROM_BASE64('AP8BgD8='), 1788172496),
   ('leer.txt', FROM_BASE64(''), 1788172497);
@@ -91,6 +116,13 @@ INSERT INTO `dokument` (`file`, `kommentar`) VALUES
 INSERT INTO `recovery_parent` VALUES (1);
 INSERT INTO `recovery_child` VALUES (1, 1);
 INSERT INTO `recovery_unique` VALUES ('only-once');
+INSERT INTO `recovery_keyword_columns`
+  (`method`, `parameter`, `user`, `lock`, `start`) VALUES
+  ('dispatch', '[1]', 7, NULL, 1788260000);
+INSERT INTO `recovery_statement_columns` VALUES
+  ('fixture', 'sample_view', 'mysql', 'SELECT 1', '(resultrow 1)');
+INSERT INTO `recovery_error_columns` VALUES
+  ('2026-09-02 10:00:00', 'fixture', 'backup', 'SELECT 1', 'synthetic');
 
 CREATE TRIGGER `recovery_fop_files_ai` AFTER INSERT ON `fop_files`
   FOR EACH ROW INSERT INTO `recovery_audit` (`file_id`, `event_name`)
@@ -103,6 +135,9 @@ SELECT COUNT(*), SUM(`kommentar` IS NULL) FROM `dokument`;
 SELECT TO_BASE64(`data`) FROM `fop_files` WHERE `ID` = 1;
 SELECT COUNT(*) FROM `fop_notification`;
 SELECT COUNT(*) FROM `recovery_audit`;
+SELECT COUNT(*), SUM(`user`), SUM(`lock` IS NULL) FROM `recovery_keyword_columns`;
+SELECT COUNT(*), MIN(`database`), MIN(`sql`) FROM `recovery_statement_columns`;
+SELECT COUNT(*), MIN(`database`), MIN(`query`) FROM `recovery_error_columns`;
 """
 
 EXPECTED_VERIFY_LINES = [
@@ -111,6 +146,9 @@ EXPECTED_VERIFY_LINES = [
     "AP8BgD8=",
     "0",
     "0",
+    "1\t7\t1",
+    "1\tfixture\tSELECT 1",
+    "1\tfixture\tSELECT 1",
 ]
 
 FIXTURE_COLUMNS = {
@@ -121,6 +159,9 @@ FIXTURE_COLUMNS = {
     "recovery_parent": ["id"],
     "recovery_child": ["id", "parent_id"],
     "recovery_unique": ["value"],
+    "recovery_keyword_columns": ["method", "parameter", "user", "lock", "start", "ID"],
+    "recovery_statement_columns": ["database", "name", "dialect", "sql", "ir"],
+    "recovery_error_columns": ["datetime", "database", "user", "query", "error"],
 }
 
 
@@ -132,8 +173,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Start a disposable MemCP instance, dump an application-shaped fixture "
-            "with mysqldump, restore it into MariaDB and a fresh MemCP instance, "
-            "and verify both results."
+            "and MemCP system databases as a restricted user with mysqldump, restore "
+            "the application dump into MariaDB and a fresh MemCP instance, and verify "
+            "both results."
         )
     )
     parser.add_argument("--memcp-binary", default="./memcp")
@@ -361,17 +403,19 @@ def mysql_lines(client: str, auth_file: Path, sql: str,
 
 
 def dump_command(dump_tool: str, auth_file: Path, dump_path: Path,
+                 database: str = SOURCE_DATABASE,
                  password_option: str | None = None) -> list[str]:
     command = [
         dump_tool,
-        f"--defaults-file={auth_file}",
-        "--skip-comments",
+        f"--defaults-extra-file={auth_file}",
         "--lock-tables",
-        "--hex-blob",
-        "--default-character-set=utf8mb4",
+        "--complete-insert",
+        "--add-drop-table",
+        "--quick",
+        "--quote-names",
         "--result-file",
         str(dump_path),
-        SOURCE_DATABASE,
+        database,
     ]
     if password_option:
         command.insert(2, password_option)
@@ -509,14 +553,19 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="memcp-mysqldump-recovery-") as temp_name:
         temp = Path(temp_name)
+        dump_env = os.environ.copy()
+        dump_env["HOME"] = str(temp)
         source_data_dir = temp / "source-data"
         source_data_dir.mkdir()
         restore_data_dir = temp / "restore-data"
         restore_data_dir.mkdir()
         source_auth = temp / "source.cnf"
+        source_dump_auth = temp / "source-dump.cnf"
         destination_auth = temp / "destination.cnf"
         restore_auth = temp / "restore.cnf"
         memcp_dump_path = temp / "memcp-recovery.sql"
+        memcp_system_dump_path = temp / "memcp-system.sql"
+        memcp_statistics_dump_path = temp / "memcp-system-statistic.sql"
         mariadb_dump_path = temp / "mariadb-recovery.sql"
         source_log = temp / "memcp-source.log"
         restore_log = temp / "memcp-restore.log"
@@ -527,6 +576,16 @@ def main() -> int:
             socket_path=None,
             user="root",
             password="admin",
+        )
+        dump_username = f"recovery_dump_{run_id}"
+        dump_password = secrets.token_urlsafe(18)
+        client_auth_file(
+            source_dump_auth,
+            host="127.0.0.1",
+            port=source_mysql_port,
+            socket_path=None,
+            user=dump_username,
+            password=dump_password,
         )
         client_auth_file(
             destination_auth,
@@ -573,6 +632,22 @@ def main() -> int:
                 fixture_sql,
                 password_option="--password=admin",
             )
+            mysql_lines(
+                args.mariadb_client,
+                source_auth,
+                (
+                    f"CREATE USER {quote_identifier(dump_username)} "
+                    f"IDENTIFIED BY '{dump_password}'; "
+                    "GRANT SELECT, LOCK TABLES, SHOW VIEW, TRIGGER ON "
+                    f"{quote_identifier(SOURCE_DATABASE)}.* TO "
+                    f"{quote_identifier(dump_username)}; "
+                    "GRANT SELECT, LOCK TABLES, SHOW VIEW, TRIGGER ON "
+                    f"system.* TO {quote_identifier(dump_username)}; "
+                    "GRANT SELECT, LOCK TABLES, SHOW VIEW, TRIGGER ON "
+                    f"system_statistic.* TO {quote_identifier(dump_username)}"
+                ),
+                password_option="--password=admin",
+            )
             source_values = mysql_lines(
                 args.mariadb_client,
                 source_auth,
@@ -582,6 +657,41 @@ def main() -> int:
             )
             if source_values != EXPECTED_VERIFY_LINES:
                 raise RecoveryError(f"MemCP fixture verification failed: {source_values}")
+
+            dump_identity = mysql_lines(
+                args.mariadb_client,
+                source_dump_auth,
+                "SELECT CURRENT_USER()",
+                SOURCE_DATABASE,
+            )
+            if dump_identity != [f"{dump_username}@%"]:
+                raise RecoveryError(
+                    f"dump connection used unexpected identity: {dump_identity}"
+                )
+
+            try:
+                run(dump_command(
+                    args.mysqldump,
+                    source_dump_auth,
+                    memcp_dump_path,
+                ), env=dump_env)
+                run(dump_command(
+                    args.mysqldump,
+                    source_dump_auth,
+                    memcp_system_dump_path,
+                    "system",
+                ), env=dump_env)
+                run(dump_command(
+                    args.mysqldump,
+                    source_dump_auth,
+                    memcp_statistics_dump_path,
+                    "system_statistic",
+                ), env=dump_env)
+            except RecoveryError as error:
+                log_tail = source_log.read_text(errors="replace")[-4000:]
+                raise RecoveryError(
+                    f"{error}\nMemCP log tail:\n{log_tail}"
+                ) from error
 
             mariadb_client = mysql_client_args(args.mariadb_client, destination_auth)
             run(
@@ -600,24 +710,15 @@ def main() -> int:
                     f"MariaDB fixture verification failed: {mariadb_source_values}"
                 )
 
-            try:
-                run(dump_command(
-                    args.mysqldump,
-                    source_auth,
-                    memcp_dump_path,
-                    "--password=admin",
-                ))
-            except RecoveryError as error:
-                log_tail = source_log.read_text(errors="replace")[-4000:]
-                raise RecoveryError(
-                    f"{error}\nMemCP log tail:\n{log_tail}"
-                ) from error
             run(dump_command(
                 args.mysqldump,
                 destination_auth,
                 mariadb_dump_path,
-            ))
-            print("plain dumps from MemCP and MariaDB completed successfully")
+            ), env=dump_env)
+            print(
+                "plain dumps from MemCP application/system databases and MariaDB "
+                "completed successfully"
+            )
 
             memcp_to_mariadb = target_databases["memcp_to_mariadb"]
             restore_and_verify(
