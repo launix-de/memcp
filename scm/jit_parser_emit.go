@@ -735,12 +735,25 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 				bindingEnv = frameEnv
 				allArgs[depth] = args
 			}
-			emitter.ctx.ReclaimUntrackedRegs()
-			outerRegs := emitter.ctx.PreserveOuterRegs()
-			proc := Proc{Body: rule.generator, NumVars: len(rule.bindings), NumberedOnly: true}
 			valueTarget := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: emitter.generatorValueOff, Rooted: true}
-			value = JITEmitProcInlineWithEnv(emitter.ctx, &proc, bindingEnv, emitter.ctx.SliceBase, valueTarget)
-			emitter.ctx.RestoreOuterRegs(outerRegs)
+			if action := rule.compiledAction; action != nil {
+				entryValue := NewAny(action)
+				emitter.ctx.TrackImm(entryValue)
+				entry := emitter.immPair(entryValue)
+				args := jitMaterializeVirtualGoSlice(emitter.ctx, allArgs[0])
+				value = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCallCompiledAction), []JITValueDesc{entry, args}, 2)
+				value.Type = JITTypeUnknown
+				value.Rooted = true
+				value = jitPlaceScmerIntoTarget(emitter.ctx, value, valueTarget)
+				emitter.ctx.FreeDesc(&entry)
+				emitter.ctx.FreeDesc(&args)
+			} else {
+				emitter.ctx.ReclaimUntrackedRegs()
+				outerRegs := emitter.ctx.PreserveOuterRegs()
+				proc := Proc{Body: rule.generator, NumVars: len(rule.bindings), NumberedOnly: true}
+				value = JITEmitProcInlineWithEnv(emitter.ctx, &proc, bindingEnv, emitter.ctx.SliceBase, valueTarget)
+				emitter.ctx.RestoreOuterRegs(outerRegs)
+			}
 			for _, args := range allArgs {
 				for index := range args {
 					emitter.ctx.FreeDesc(&args[index])

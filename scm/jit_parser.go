@@ -61,15 +61,16 @@ type jitParserNode struct {
 }
 
 type jitParserRule struct {
-	root          *jitParserNode
-	generator     Scmer
-	action        Scmer
-	bindings      []Symbol
-	bindingLookup map[Symbol]int
-	skipper       *jitRegexProgram
-	outer         *Env
-	jitOuter      *JITEnv
-	lexicalParent int
+	root           *jitParserNode
+	generator      Scmer
+	action         Scmer
+	bindings       []Symbol
+	bindingLookup  map[Symbol]int
+	skipper        *jitRegexProgram
+	outer          *Env
+	jitOuter       *JITEnv
+	lexicalParent  int
+	compiledAction *JITEntryPoint
 }
 
 type jitParserProgram struct {
@@ -187,6 +188,9 @@ func (builder *jitParserBuilder) addTemplate(template *JITParserTemplate, lexica
 	root := builder.buildNode(jitUnwrapParserSyntax(template.Syntax), template.RuntimeOuter, template.Outer, ruleID, template.IgnoreResult)
 	builder.program.rules[ruleID].root = root
 	builder.program.rules[ruleID].skipper = skipper
+	if lexicalParent < 0 {
+		builder.finishRule(ruleID)
+	}
 	return ruleID
 }
 
@@ -328,7 +332,7 @@ func (builder *jitParserBuilder) addScmParser(parser *ScmParser) int {
 	root := builder.buildNode(jitUnwrapParserSyntax(parser.Syntax), parser.Outer, jitOuter, ruleID, ignoreResult)
 	builder.program.rules[ruleID].root = root
 	builder.program.rules[ruleID].skipper = skipper
-	if !builder.inlineActions {
+	if !builder.inlineActions || builder.program.rules[ruleID].lexicalParent < 0 {
 		builder.finishRule(ruleID)
 	}
 	return ruleID
@@ -356,7 +360,7 @@ func (builder *jitParserBuilder) addNestedRule(syntax, generator, whitespace Scm
 	root := builder.buildNode(jitUnwrapParserSyntax(syntax), outer, nil, ruleID, !generator.IsNil())
 	builder.program.rules[ruleID].root = root
 	builder.program.rules[ruleID].skipper = skipper
-	if !builder.inlineActions {
+	if !builder.inlineActions || builder.program.rules[ruleID].lexicalParent < 0 {
 		builder.finishRule(ruleID)
 	}
 	return ruleID
@@ -371,18 +375,30 @@ func (builder *jitParserBuilder) finishRule(ruleID int) {
 	for index, binding := range rule.bindings {
 		params[index] = NewSymbol(string(binding))
 	}
-	action := NewProcStruct(Proc{
-		Params:  NewSlice(params),
-		Body:    rule.generator,
-		En:      rule.outer,
-		NumVars: len(params),
-	})
-	if jitEnabled {
-		if compiled := jitCompile(action); compiled.IsProc() && compiled.Proc() != nil && compiled.Proc().Compiled != nil {
+	outer := rule.outer
+	if outer == nil {
+		outer = &Globalenv
+	}
+	lambda := CloneOptimizerExpression(NewSlice([]Scmer{NewSymbol("lambda"), NewSlice(params), rule.generator}))
+	action := Eval(Optimize(lambda, outer, nil), outer)
+	if jitEnabled && jitRequiredLocalSlots(rule.generator, len(params)) <= len(params) {
+		if compiled := jitCompileModeDeferred(true, action); compiled.IsProc() && compiled.Proc() != nil && compiled.Proc().Compiled != nil {
 			action = compiled
+			rule.compiledAction = compiled.Proc().Compiled
+			rule.compiledAction.DebugName = fmt.Sprintf("parser action %d", ruleID)
 		}
 	}
-	rule.action = action
+	if !builder.inlineActions {
+		rule.action = action
+	}
+}
+
+func jitParserCallCompiledAction(entryValue Scmer, args []Scmer) Scmer {
+	entry, ok := entryValue.Any().(*JITEntryPoint)
+	if !ok || entry == nil {
+		panic("jit: invalid compiled parser action")
+	}
+	return entry.Call(args...)
 }
 
 func (builder *jitParserBuilder) binding(ruleID int, symbol Symbol) int {
@@ -854,7 +870,15 @@ func jitParserCompleteRule(state *jitParserState, position int, value Scmer, suc
 		position = frame.position
 		value = NewNil()
 	}
-	if frame.transient || !frame.memoize {
+	if frame.transient {
+		key := jitParserMemoKey{rule: frame.rule, position: frame.position}
+		memo := state.memo[key]
+		memo.value, memo.position, memo.success = value, position, success
+		memo.active = false
+		state.memo[key] = memo
+		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
+	}
+	if !frame.memoize {
 		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
 	}
 	key := jitParserMemoKey{rule: frame.rule, position: frame.position}
