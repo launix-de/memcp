@@ -393,7 +393,8 @@ func jitInvokeMergeCallback(callback func(Scmer, Scmer) Scmer, oldValue, newValu
 	return callback(oldValue, newValue)
 }
 
-func jitMakeReservedList(capacity int) Scmer {
+func jitMakeReservedList(capacityValue Scmer) Scmer {
+	capacity := int(capacityValue.Int())
 	if capacity < 0 {
 		capacity = 0
 	}

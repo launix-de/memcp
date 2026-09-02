@@ -261,8 +261,11 @@ func jitEmitSpecialReservedList(ctx *JITContext, args []Scmer, _ []JITValueDesc,
 		panic("jit: malformed !!list")
 	}
 	capacity := jitCompileExpr(ctx, capacityExpr, ctx.SliceBase, JITValueDesc{Loc: LocAny})
+	capacityPair := jitAllocTrackedPair(ctx, tagInt)
+	capacity = jitPlaceScmerIntoTarget(ctx, capacity, capacityPair)
 	target := jitEnsureResultPair(ctx, result)
 	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitMakeReservedList), []JITValueDesc{capacity}, target)
+	ctx.FreeDesc(&capacity)
 	out.Type = tagSlice
 	out.KnownSliceLen = 0
 	if capacityExpr.IsInt() {
