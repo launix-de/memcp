@@ -333,6 +333,14 @@ func StrLikeCollation(str, pattern, collation string) bool {
 
 func TransformFromJSON(a_ any) Scmer {
 	switch a := a_.(type) {
+	case json.Number:
+		if value, err := a.Int64(); err == nil {
+			return NewInt(value)
+		}
+		if value, err := a.Float64(); err == nil {
+			return NewFloat(value)
+		}
+		return NewString(string(a))
 	case map[string]any:
 		// decode binary strings encoded by MarshalJSON
 		if b64, ok := a["bytes"]; ok && len(a) == 1 {

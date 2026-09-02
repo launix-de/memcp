@@ -3667,10 +3667,12 @@ func (s *StorageSparse) Deserialize(f io.Reader) uint {
 		if !scanner.Scan() {
 			break
 		}
-		var v any
-		json.Unmarshal(scanner.Bytes(), &v)
+		var v scm.Scmer
+		if err := json.Unmarshal(scanner.Bytes(), &v); err != nil {
+			panic(err)
+		}
 		s.recids.build(uint32(i), scm.NewInt(int64(k)))
-		s.values[i] = scm.TransformFromJSON(v)
+		s.values[i] = v
 		i++
 	}
 	s.recids.finish()

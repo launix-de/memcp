@@ -16,6 +16,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 */
 package storage
 
+import "bytes"
 import "io"
 import "math"
 import "bufio"
@@ -202,14 +203,18 @@ func (s *StorageSCMER) Deserialize(f io.Reader) uint {
 	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
 	for i := uint64(0); i < l; i++ {
 		if scanner.Scan() {
+			decoder := json.NewDecoder(bytes.NewReader(scanner.Bytes()))
+			decoder.UseNumber()
 			var v any
-			json.Unmarshal(scanner.Bytes(), &v)
+			if err := decoder.Decode(&v); err != nil {
+				panic(err)
+			}
 			if envelope, ok := v.(map[string]any); ok && len(envelope) == 3 && envelope["$memcp.scmer"] == "bson-v1" {
-				typ, typeOK := envelope["type"].(float64)
+				typ := scm.TransformFromJSON(envelope["type"])
 				payload, payloadOK := envelope["payload"].(string)
 				decoded, err := base64.RawStdEncoding.DecodeString(payload)
-				if typeOK && typ >= 0 && typ <= 255 && typ == math.Trunc(typ) && payloadOK && err == nil {
-					s.values[i] = scm.NewBSONRaw(byte(typ), decoded)
+				if typ.IsInt() && typ.Int() >= 0 && typ.Int() <= 255 && payloadOK && err == nil {
+					s.values[i] = scm.NewBSONRaw(byte(typ.Int()), decoded)
 					continue
 				}
 				panic("invalid BSON envelope in StorageSCMER")
