@@ -16,6 +16,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+import "runtime"
+
 // SerialProcKind describes callback shapes whose semantics can be consumed by
 // a physical operator without entering Eval. Operators must dispatch on Kind
 // outside their row loops; Call is the compatibility path for code which does
@@ -28,6 +30,7 @@ const (
 	SerialProcArgument
 	SerialProcNative
 	SerialProcNativeArgConstant
+	SerialProcJIT
 )
 
 // SerialProc exposes trivial executable shapes to physical operators. Callers
@@ -44,6 +47,8 @@ type SerialProc struct {
 	ConstantFirst bool
 	Function      func(...Scmer) Scmer
 	borrowed      func([]Scmer) Scmer
+	jitEntry      *JITEntryPoint
+	jitArity      int
 }
 
 func serialProcBody(v Scmer) Scmer {
@@ -203,6 +208,14 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	// source body is diagnostic input, not necessarily an executable equivalent;
 	// classifying that body could silently bypass code generation semantics.
 	if proc.Compiled != nil {
+		params, fixedArity := scmerSlice(proc.Params)
+		if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 && !proc.Compiled.TransferInputArgs {
+			prepared.Kind = SerialProcJIT
+			prepared.Function = proc.Compiled.Native
+			prepared.jitEntry = proc.Compiled
+			prepared.jitArity = len(params)
+			return prepared
+		}
 		prepared.Kind = SerialProcGeneral
 		prepared.borrowed = optimizeProcToSerialBorrowed(source)
 		return prepared
@@ -254,6 +267,20 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	return prepared
 }
 
+// CallFrameSize validates an operator-provided prefix and returns the exact
+// fixed JIT arity. Extra procedure parameters are initialized as nil once when
+// the physical callback buffer is prepared, matching JITEntryPoint.Call
+// without padding or branching in the row loop.
+func (p *SerialProc) CallFrameSize(provided int) int {
+	if p.Kind != SerialProcJIT {
+		return provided
+	}
+	if provided > p.jitArity {
+		panic("JIT map-reducer received more arguments than declared parameters")
+	}
+	return p.jitArity
+}
+
 // Call evaluates a prepared callback with a caller-owned argument frame. Hot
 // physical loops should dispatch dominant simple Kinds once; compound programs
 // use Call so the prepared expression can reuse its nested native-call frames.
@@ -265,6 +292,8 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 		return args[int(p.Argument)]
 	case SerialProcNative:
 		return p.Function(args...)
+	case SerialProcJIT:
+		return p.jitEntry.Call(args...)
 	case SerialProcNativeArgConstant:
 		var call [2]Scmer
 		if p.ConstantFirst {
@@ -276,6 +305,16 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 	default:
 		return p.borrowed(args)
 	}
+}
+
+// CallJIT enters an already classified compiled procedure with an exact
+// argument frame. The physical operator dispatches to this method outside its
+// row loop, so the trampoline contains no shape or arity checks.
+func (p *SerialProc) CallJIT(args []Scmer) Scmer {
+	result := callJIT(p.jitEntry.Native, args...)
+	runtime.KeepAlive(args)
+	runtime.KeepAlive(p.jitEntry)
+	return result
 }
 
 // IsNative reports whether the prepared callback is exactly the named global

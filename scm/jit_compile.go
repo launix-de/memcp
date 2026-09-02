@@ -272,16 +272,6 @@ func jitEmitKnownDeclaration(ctx *JITContext, callable JITValueDesc, args []JITV
 	return jitPlaceScmerIntoTarget(ctx, emitted, result), true
 }
 
-func jitList0() Scmer                             { return List() }
-func jitList1(a Scmer) Scmer                      { return List(a) }
-func jitList2(a, b Scmer) Scmer                   { return List(a, b) }
-func jitList3(a, b, c Scmer) Scmer                { return List(a, b, c) }
-func jitList4(a, b, c, d Scmer) Scmer             { return List(a, b, c, d) }
-func jitList5(a, b, c, d, e Scmer) Scmer          { return List(a, b, c, d, e) }
-func jitList6(a, b, c, d, e, f Scmer) Scmer       { return List(a, b, c, d, e, f) }
-func jitList7(a, b, c, d, e, f, g Scmer) Scmer    { return List(a, b, c, d, e, f, g) }
-func jitList8(a, b, c, d, e, f, g, h Scmer) Scmer { return List(a, b, c, d, e, f, g, h) }
-
 func jitMakeScmerSlice(length, capacity int) []Scmer {
 	return make([]Scmer, length, capacity)
 }
@@ -1040,61 +1030,34 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 			continue
 		}
 		ctx.EnsureDesc(&src)
-		target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		ptrReg := ctx.AllocReg()
+		target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: ctx.AllocRegExcept(ptrReg)}
 		pairs[i] = jitPlaceIntoPair(ctx, &src, target)
 		ctx.BindReg(pairs[i].Reg, &pairs[i])
 		ctx.BindReg(pairs[i].Reg2, &pairs[i])
 	}
-	if len(pairs) > 4 {
-		length := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(pairs))), NoHeapPointer: true}
-		header := ctx.EmitGoCallScalar(GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{length, length}, 3)
-		header.Type = tagSlice
-		ctx.BindReg(header.Reg, &header)
-		ctx.BindReg(header.Reg2, &header)
-		ctx.BindReg(header.Reg3, &header)
-		for i := range pairs {
-			index := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(i)), NoHeapPointer: true}
-			address := ctx.EmitSliceElementAddress(&header, &index, 16)
-			ctx.EmitStoreScmerAt(&address, &pairs[i])
-			ctx.FreeDesc(&address)
-			ctx.FreeDesc(&pairs[i])
-		}
-		materialized := ctx.EmitNewSliceFromGoSlice(&header)
-		if result.Loc == LocRegPair {
-			return jitPlaceIntoPair(ctx, &materialized, result)
-		}
-		return materialized
+	backingOff := ctx.AllocStack(int32(len(pairs) * 16))
+	for i := range pairs {
+		ctx.EmitStoreScmerToStack(pairs[i], backingOff+int32(i*16))
+		ctx.FreeDesc(&pairs[i])
 	}
-	var addr uint64
-	switch len(pairs) {
-	case 0:
-		addr = GoFuncAddr(jitList0)
-	case 1:
-		addr = GoFuncAddr(jitList1)
-	case 2:
-		addr = GoFuncAddr(jitList2)
-	case 3:
-		addr = GoFuncAddr(jitList3)
-	case 4:
-		addr = GoFuncAddr(jitList4)
-	case 5:
-		addr = GoFuncAddr(jitList5)
-	case 6:
-		addr = GoFuncAddr(jitList6)
-	case 7:
-		addr = GoFuncAddr(jitList7)
-	case 8:
-		addr = GoFuncAddr(jitList8)
-	}
-	if result.Loc == LocRegPair {
-		materialized := ctx.EmitGoCallScalarInto(addr, pairs, result)
-		materialized.Type = tagSlice
-		return materialized
-	}
-	materialized := ctx.EmitGoCallScalar(addr, pairs, 2)
+	ptrReg := ctx.AllocReg()
+	lenReg := ctx.AllocRegExcept(ptrReg)
+	capReg := ctx.AllocRegExcept(ptrReg, lenReg)
+	ctx.EmitLeaRegMem(ptrReg, ctx.StackReg, backingOff)
+	ctx.EmitMovRegImm64(lenReg, uint64(len(pairs)))
+	ctx.EmitMovRegImm64(capReg, uint64(len(pairs)))
+	header := JITValueDesc{Loc: LocRegTriple, Type: tagSlice, Reg: ptrReg, Reg2: lenReg, Reg3: capReg, Rooted: true}
+	ctx.BindReg(ptrReg, &header)
+	ctx.BindReg(lenReg, &header)
+	ctx.BindReg(capReg, &header)
+	materialized := ctx.EmitGoCallScalar(GoFuncAddr(JITNewSliceCopy), []JITValueDesc{header}, 2)
+	ctx.FreeDesc(&header)
 	materialized.Type = tagSlice
-	ctx.BindReg(materialized.Reg, &materialized)
-	ctx.BindReg(materialized.Reg2, &materialized)
+	materialized.Rooted = true
+	if result.Loc == LocRegPair {
+		return jitPlaceIntoPair(ctx, &materialized, result)
+	}
 	return materialized
 }
 
@@ -1169,7 +1132,8 @@ func jitCompileStackList(ctx *JITContext, list []Scmer, sliceBase Reg, result JI
 		value := jitCompileExpr(ctx, list[i+3], sliceBase, JITValueDesc{Loc: LocAny})
 		ctx.EnsureDesc(&value)
 		if value.Loc != LocRegPair && value.Loc != LocImm {
-			target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			ptrReg := ctx.AllocReg()
+			target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: ctx.AllocRegExcept(ptrReg)}
 			value = jitPlaceIntoPair(ctx, &value, target)
 		}
 		ctx.EmitStoreScmerToStack(value, int32((start+i)*16))
