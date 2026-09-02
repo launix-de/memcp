@@ -23230,6 +23230,39 @@ func init_alu() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "intdiv",
+
+		Fn: func(a ...Scmer) Scmer {
+			if a[0].IsNil() || a[1].IsNil() {
+				return NewNil()
+			}
+			if a[0].IsInt() && a[1].IsInt() {
+				divisor := a[1].Int()
+				if divisor == 0 || a[0].Int() == math.MinInt64 && divisor == -1 {
+					return NewNil()
+				}
+				return NewInt(a[0].Int() / divisor)
+			}
+			divisor := a[1].Float()
+			if divisor == 0 {
+				return NewNil()
+			}
+			quotient := math.Trunc(a[0].Float() / divisor)
+			if math.IsNaN(quotient) || quotient < math.MinInt64 || quotient >= -float64(math.MinInt64) {
+				return NewNil()
+			}
+			return NewInt(int64(quotient))
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "divides two numbers and truncates the quotient toward zero",
+			Params: []*TypeDescriptor{
+				{Kind: "number", Label: "dividend", Description: "value to divide"},
+				{Kind: "number", Label: "divisor", Description: "value to divide by"},
+			},
+			Return: &TypeDescriptor{Kind: "int"},
+			Const:  true,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "mod",
 
 		Fn: func(a ...Scmer) Scmer {

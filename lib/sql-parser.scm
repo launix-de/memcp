@@ -95,6 +95,7 @@ row, avoiding a copy of the complete prefix for each input value. */
 	(atom "RTRIM" true)
 	(atom "REGEXP" true)
 	(atom "RLIKE" true)
+	(atom "DIV" true)
 )))
 (define sql_identifier_quoted (parser '("`" (define id (regex "(?:[^`]|``)+" false false)) "`") (replace id "``" "`"))) /* with backtick */
 (define sql_identifier (parser (define x (or sql_identifier_unquoted sql_identifier_quoted)) x))
@@ -159,6 +160,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		'("sub" value) (sql_sub_expr acc value)
 		'("date_add" value unit) '('date_add acc value unit)
 		'("date_sub" value unit) '('date_sub acc value unit))))
+
+(define sql_fold_multiplicative_term (lambda (acc term)
+	(match term
+		'("multiply" value) '((quote *) acc value)
+		'("divide" value) '((quote /) acc value)
+		'("intdiv" value) '((quote intdiv) acc value)
+		'("modulo" value) (sql_mod_expr acc value))))
 
 (define sql_comparison_expr (lambda (op a b)
 	(match op
@@ -762,12 +770,18 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		)) empty true))
 	) (reduce terms sql_fold_additive_term a)))
 
-	(define sql_expression4 (parser (or
-		(parser '((define a sql_expression5) "*" (define b sql_expression4)) '((quote *) a b))
-		(parser '((define a sql_expression5) "/" (define b sql_expression4)) '((quote /) a b))
-		(parser '((define a sql_expression5) "%" (define b sql_expression4)) (sql_mod_expr a b))
-		sql_expression5
-	)))
+	(define sql_expression4 (parser '(
+		(define a sql_expression5)
+		(define terms (* (parser '(
+			(define op (or
+				(parser "*" "multiply")
+				(parser "/" "divide")
+				(parser (atom "DIV" true) "intdiv")
+				(parser "%" "modulo")
+			))
+			(define value sql_expression5)
+		) (list op value)) empty true))
+	) (reduce terms sql_fold_multiplicative_term a)))
 
 	(define sql_expression5 (parser (or
 		/* unary minus: -(expr) */
