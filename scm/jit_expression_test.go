@@ -164,6 +164,52 @@ func TestJITExpressionFusedMapReducerArithmetic(t *testing.T) {
 	}
 }
 
+func TestJITExpressionKeepsAdjacentStringLengths(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda () (list "ID" "post_status" "post_type"))`)
+	requireNoDynamicJITCalls(t, compiled)
+	got := Apply(compiled)
+	want := NewSlice([]Scmer{
+		NewString("ID"),
+		NewString("post_status"),
+		NewString("post_type"),
+	})
+	if !Equal(got, want) {
+		t.Fatalf("adjacent string metadata was corrupted: got %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionKeepsQueryPlanColumnNames(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	testEnv := &Env{Vars: Vars{
+		Symbol("test_scan_order"): NewFunc(func(args ...Scmer) Scmer { return args[9] }),
+		Symbol("test_table"):      NewFunc(func(...Scmer) Scmer { return NewString("table") }),
+	}, Outer: &Globalenv}
+	expression := Optimize(Read(t.Name(), `(lambda (session tx resultrow resultfields)
+		(!begin
+			(resultfields (quote ("ID" "post_status" "post_type")))
+			(test_scan_order tx (test_table "wpbench" "wp_posts") (quote ()) (lambda () true)
+				(quote ("post_title")) (quote ((collate "utf8mb4" false)))
+				0 0 (session "v1") (list "ID" "post_status" "post_type")
+				(lambda (__scan_acc wp_posts.ID wp_posts.post_status wp_posts.post_type)
+					(resultrow (list "ID" wp_posts.ID "post_status" wp_posts.post_status "post_type" wp_posts.post_type)))
+				4 nil false)))`), testEnv, nil)
+	compiled := jitCompile(Eval(expression, testEnv))
+	if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("query-plan expression did not compile")
+	}
+	session := NewFunc(func(...Scmer) Scmer { return NewInt(5) })
+	resultrow := NewFunc(func(args ...Scmer) Scmer { return args[0] })
+	resultfields := NewFunc(func(...Scmer) Scmer { return NewNil() })
+	got := Apply(compiled, session, NewNil(), resultrow, resultfields)
+	want := NewSlice([]Scmer{NewString("ID"), NewString("post_status"), NewString("post_type")})
+	if !Equal(got, want) {
+		t.Fatalf("query-plan column names were corrupted: got %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITExpressionHigherOrderClosureCapture(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (values blocked) (begin
 		(define blocked_set (reduce blocked (lambda (acc item) (set_assoc acc item true)) '()))

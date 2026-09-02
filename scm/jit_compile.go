@@ -342,20 +342,6 @@ func jitEmitKnownDeclaration(ctx *JITContext, callable JITValueDesc, args []JITV
 	return jitPlaceScmerIntoTarget(ctx, emitted, result), true
 }
 
-func jitList0() Scmer                             { return jitListCopy() }
-func jitList1(a Scmer) Scmer                      { return jitListCopy(a) }
-func jitList2(a, b Scmer) Scmer                   { return jitListCopy(a, b) }
-func jitList3(a, b, c Scmer) Scmer                { return jitListCopy(a, b, c) }
-func jitList4(a, b, c, d Scmer) Scmer             { return jitListCopy(a, b, c, d) }
-func jitList5(a, b, c, d, e Scmer) Scmer          { return jitListCopy(a, b, c, d, e) }
-func jitList6(a, b, c, d, e, f Scmer) Scmer       { return jitListCopy(a, b, c, d, e, f) }
-func jitList7(a, b, c, d, e, f, g Scmer) Scmer    { return jitListCopy(a, b, c, d, e, f, g) }
-func jitList8(a, b, c, d, e, f, g, h Scmer) Scmer { return jitListCopy(a, b, c, d, e, f, g, h) }
-
-func jitListCopy(values ...Scmer) Scmer {
-	return NewSlice(append([]Scmer(nil), values...))
-}
-
 func jitMakeScmerSlice(length, capacity int) []Scmer {
 	return make([]Scmer, length, capacity)
 }
@@ -1250,8 +1236,25 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 		// independent of the virtual list length.
 		stable[i] = ctx.stabilizeForNested(src)
 	}
-	materialized := jitEmitGoVariadicCallFromDescs(ctx, jitListCopy, stable, JITValueDesc{Loc: LocAny})
+	backingOff := ctx.AllocStack(int32(len(stable) * 16))
+	for i := range stable {
+		ctx.EmitStoreScmerToStack(stable[i], backingOff+int32(i*16))
+		ctx.FreeDesc(&stable[i])
+	}
+	ptrReg := ctx.AllocReg()
+	lenReg := ctx.AllocRegExcept(ptrReg)
+	capReg := ctx.AllocRegExcept(ptrReg, lenReg)
+	ctx.EmitLeaRegMem(ptrReg, ctx.StackReg, backingOff)
+	ctx.EmitMovRegImm64(lenReg, uint64(len(stable)))
+	ctx.EmitMovRegImm64(capReg, uint64(len(stable)))
+	header := JITValueDesc{Loc: LocRegTriple, Type: tagSlice, Reg: ptrReg, Reg2: lenReg, Reg3: capReg, Rooted: true}
+	ctx.BindReg(ptrReg, &header)
+	ctx.BindReg(lenReg, &header)
+	ctx.BindReg(capReg, &header)
+	materialized := ctx.EmitGoCallScalar(GoFuncAddr(JITNewSliceCopy), []JITValueDesc{header}, 2)
+	ctx.FreeDesc(&header)
 	materialized.Type = tagSlice
+	materialized.Rooted = true
 	return jitPlaceScmerIntoTarget(ctx, materialized, result)
 }
 
@@ -1319,7 +1322,8 @@ func jitCompileStackList(ctx *JITContext, list []Scmer, sliceBase Reg, result JI
 		value := jitCompileExpr(ctx, list[i+3], sliceBase, JITValueDesc{Loc: LocAny})
 		ctx.EnsureDesc(&value)
 		if value.Loc != LocRegPair && value.Loc != LocImm {
-			target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+			ptrReg := ctx.AllocReg()
+			target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: ctx.AllocRegExcept(ptrReg)}
 			value = jitPlaceIntoPair(ctx, &value, target)
 		}
 		ctx.EmitStoreScmerToStack(value, int32((start+i)*16))
