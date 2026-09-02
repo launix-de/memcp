@@ -426,9 +426,6 @@ func generateOperators(ops []operatorInfo, ssaFuncs map[token.Pos]*ssa.Function,
 			defer workers.Done()
 			for index := range work {
 				op := ops[index]
-				if onlyOp != "" && op.name != onlyOp {
-					continue
-				}
 				var fn *ssa.Function
 				if op.funcLit != nil {
 					fn = ssaFuncs[op.funcLit.Pos()]
@@ -1696,7 +1693,16 @@ func (g *codeGen) emitGenericStaticCall(name string, callee *ssa.Function, args 
 			g.emit("\tpanic(\"jit: generic call arg expects 1-word value\")")
 			g.emit("}")
 		case 2:
-			// Pair args must be materialized to avoid LocImm flattening to one word.
+			// Scmer values may be folded to one-word scalars by the JIT type
+			// system, but every native Go boundary still requires ptr+aux.
+			if isScmerType(paramType) {
+				prepare := "JITPrepareScmerGoArg"
+				if g.storageMode {
+					prepare = "scm." + prepare
+				}
+				g.emit("%s = %s(ctx, %s)", resolved[i].goVar, prepare, resolved[i].goVar)
+				break
+			}
 			g.emit("ctx.EnsureDesc(&%s)", resolved[i].goVar)
 			g.emit("if %s.Loc == LocImm {", resolved[i].goVar)
 			g.emit("\ttmpPair := JITValueDesc{Loc: LocRegPair, Type: %s.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}", resolved[i].goVar)
@@ -2986,7 +2992,9 @@ func (g *codeGen) allocPhiRegs() {
 	}
 	g.phiStackSize = offset
 
-	// Allocate phi space from the unified frame via AllocStack/FreeStack.
+	// Allocate phi space from the unified frame. Generated CFGs may reserve
+	// additional callback and spill homes after these slots, so the bump
+	// allocator cannot release only this prefix at the emitter epilogue.
 	// No SUB RSP here — the outer compiler owns the frame.
 	if g.phiStackSize > 0 {
 		phiBaseVar := g.allocTemp("phiBase")
@@ -3715,6 +3723,15 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 		g.emit("\tctx.BindReg(result.Reg, &result)")
 		g.emit("\tctx.BindReg(result.Reg2, &result)")
 		g.emit("}")
+		// A multi-block emitter writes every return arm into the caller-selected
+		// pair. Reserve that pair for the complete CFG render: path-local register
+		// reclamation must never recycle an output register before the arm which
+		// actually produces the runtime result has been emitted.
+		g.emit("resultRegsProtected := result.Loc == LocRegPair")
+		g.emit("if resultRegsProtected {")
+		g.emit("\tctx.ProtectReg(result.Reg)")
+		g.emit("\tctx.ProtectReg(result.Reg2)")
+		g.emit("}")
 		if cfg.useReturnPhiRegs {
 			g.returnPhiReg = g.allocReg()
 			g.returnPhiReg2 = g.allocReg()
@@ -3746,8 +3763,11 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	if g.hasStorageIdx {
 		g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
 	}
-	if g.phiStackSize > 0 {
-		g.emit("ctx.FreeStack(int32(%d))", g.phiStackSize)
+	if g.multiBlock {
+		g.emit("if resultRegsProtected {")
+		g.emit("\tctx.UnprotectReg(result.Reg2)")
+		g.emit("\tctx.UnprotectReg(result.Reg)")
+		g.emit("}")
 	}
 	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
 	g.emit("return result")
@@ -6346,6 +6366,8 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			key := g.vals[v.Call.Args[1].Name()]      // Scmer (2 words)
 			val := g.vals[v.Call.Args[2].Name()]      // Scmer (2 words)
 			mergeFn := g.resolveValue(v.Call.Args[3]) // func (1 word)
+			g.emit("%s = JITPrepareScmerGoArg(ctx, %s)", key.goVar, key.goVar)
+			g.emit("%s = JITPrepareScmerGoArg(ctx, %s)", val.goVar, val.goVar)
 			g.emit("ctx.EmitGoCallVoid(GoFuncAddr((*FastDict).Set), []JITValueDesc{%s, %s, %s, %s})", recv.goVar, key.goVar, val.goVar, mergeFn.goVar)
 		case "Sqrt":
 			// math.Sqrt(float64) float64 via bit-helper (Go ABI float args are not marshaled directly).
@@ -6675,12 +6697,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
-				if xVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
-				}
-				if yVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
-				}
+				g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(%s.Imm.Float() %s %s.Imm.Float())}", dv, xVal.goVar, goOp, yVal.goVar)
@@ -6805,12 +6822,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 					g.emit("}")
 				} else {
 					yVal := g.resolveValue(v.Y)
-					if xVal.isDesc {
-						g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
-					}
-					if yVal.isDesc {
-						g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
-					}
+					g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
 					g.emit("var %s JITValueDesc", dv)
 					g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 					g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(%s.Imm.Float() %s %s.Imm.Float())}", dv, xVal.goVar, goOp, yVal.goVar)
@@ -6867,20 +6879,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
-				// Conservative spill safety: EnsureDesc(y) may spill x when register
-				// pressure is high. Re-ensure both operands before emitting compare code.
-				if xVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
-				}
-				if yVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
-				}
-				if xVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
-				}
-				if yVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
-				}
+				g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				if unsignedCompare {
@@ -6984,18 +6983,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("}")
 			} else {
 				yVal := g.resolveValue(v.Y)
-				// Ensure both operands are in registers, protecting each from
-				// eviction while the other is loaded.
-				if xVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", xVal.goVar)
-					g.emit("ctx.ProtectReg(%s.Reg)", xVal.goVar)
-				}
-				if yVal.isDesc {
-					g.emit("ctx.EnsureDesc(&%s)", yVal.goVar)
-				}
-				if xVal.isDesc {
-					g.emit("ctx.UnprotectReg(%s.Reg)", xVal.goVar)
-				}
+				g.emit("ctx.EnsureDescsTogether(&%s, &%s)", xVal.goVar, yVal.goVar)
 				g.emit("var %s JITValueDesc", dv)
 				g.emit("if %s {", bothImmCond(xVal.goVar, yVal.goVar))
 				g.emit("\t%s = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(%s.Imm.Int() %s %s.Imm.Int())}", dv, xVal.goVar, goOpStr(v.Op), yVal.goVar)
@@ -7877,17 +7865,28 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				g.emit("ctx.EmitMovToReg(%s.Reg2, %s)", base, src.goVar)
 			}
 		} else if strings.HasPrefix(dst.marker, "_stackaddr:") {
-			src := g.resolveValue(v.Val)
+			rewritten := g.rewriteSSAValue(v.Val)
+			src, ok := g.vals[rewritten.Name()]
+			if !ok {
+				src = g.resolveValue(rewritten)
+			} else if src.isDesc {
+				// A full Scmer stack store accepts resident and stack-backed pairs.
+				// Keep cross-block values in their stable homes instead of loading
+				// them into registers that an inlined callback may subsequently use.
+				g.emit("ctx.SyncDesc(&%s)", src.goVar)
+			}
 			if !isScmerType(v.Val.Type()) {
 				panic(fmt.Sprintf("unsupported non-Scmer stack array Store: %s", v))
 			}
-			g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 			switch src.marker {
 			case "_newbool":
+				g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagBool, %s)", src.goVar, dst.offsetExpr)
 			case "_newint":
+				g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagInt, %s)", src.goVar, dst.offsetExpr)
 			case "_newfloat":
+				g.emit("ctx.EnsureDesc(&%s)", src.goVar)
 				g.emit("ctx.EmitStoreTypedScmerToStack(%s, tagFloat, %s)", src.goVar, dst.offsetExpr)
 			default:
 				if src.marker == "_newargslice" {
@@ -7982,12 +7981,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				panic(fmt.Sprintf("MakeClosure unresolved binding %s", binding.Name()))
 			}
 			bindings[i] = closureBinding{outerName: binding.Name(), value: captured, scope: g.bbScope}
-		}
-		if len(bindings) == 1 && isForwardingMergeClosure(closureFn) && bindings[0].value.marker == "_serial_callable" {
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{%s}, 1)", dv, bindings[0].value.goVar)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gofunc", pinAcrossBlock: true}
-			break
 		}
 		if len(bindings) == 1 && closureFn.Signature.Params().Len() == 1 && closureFn.Signature.Results().Len() == 0 && closureHasStaticCall(closureFn, "Apply") && bindings[0].value.isDesc {
 			dv := g.allocDesc()

@@ -898,6 +898,11 @@ func init_alu() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
+				}
 				lbl0 := ctx.ReserveLabel()
 				bbpos_0_0 := int32(-1)
 				_ = bbpos_0_0
@@ -1329,10 +1334,7 @@ func init_alu() {
 					d30 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d30)
-					ctx.EnsureDesc(&d2)
-					ctx.EnsureDesc(&d30)
-					ctx.EnsureDesc(&d2)
-					ctx.EnsureDesc(&d30)
+					ctx.EnsureDescsTogether(&d2, &d30)
 					var d31 JITValueDesc
 					if d2.Loc == LocImm && d30.Loc == LocImm {
 						d31 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d2.Imm.Int() == d30.Imm.Int())}
@@ -1587,10 +1589,7 @@ func init_alu() {
 					d54 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d54)
-					ctx.EnsureDesc(&d2)
-					ctx.EnsureDesc(&d54)
-					ctx.EnsureDesc(&d2)
-					ctx.EnsureDesc(&d54)
+					ctx.EnsureDescsTogether(&d2, &d54)
 					var d55 JITValueDesc
 					if d2.Loc == LocImm && d54.Loc == LocImm {
 						d55 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d2.Imm.Int() < d54.Imm.Int())}
@@ -1924,10 +1923,7 @@ func init_alu() {
 					ctx.FreeDesc(&d8)
 					ctx.EnsureDesc(&d1)
 					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d1)
-					ctx.ProtectReg(d1.Reg)
-					ctx.EnsureDesc(&d88)
-					ctx.UnprotectReg(d1.Reg)
+					ctx.EnsureDescsTogether(&d1, &d88)
 					var d89 JITValueDesc
 					if d1.Loc == LocImm && d88.Loc == LocImm {
 						d89 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d1.Imm.Int() + d88.Imm.Int())}
@@ -3124,10 +3120,7 @@ func init_alu() {
 					d148 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d148)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d148)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d148)
+					ctx.EnsureDescsTogether(&d3, &d148)
 					var d149 JITValueDesc
 					if d3.Loc == LocImm && d148.Loc == LocImm {
 						d149 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d3.Imm.Int() < d148.Imm.Int())}
@@ -3842,8 +3835,7 @@ func init_alu() {
 					ctx.FreeDesc(&d99)
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d205)
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d205)
+					ctx.EnsureDescsTogether(&d4, &d205)
 					var d206 JITValueDesc
 					if d4.Loc == LocImm && d205.Loc == LocImm {
 						d206 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d4.Imm.Float() + d205.Imm.Float())}
@@ -3962,7 +3954,10 @@ func init_alu() {
 				_ = bbs[0].RenderPS(ps209)
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
-				ctx.FreeStack(int32(64))
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
 				return result
 			},
 			JITInlineCost: 38,
@@ -4062,6 +4057,11 @@ func init_alu() {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
+				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
 				}
 				lbl0 := ctx.ReserveLabel()
 				bbpos_0_0 := int32(-1)
@@ -4756,10 +4756,7 @@ func init_alu() {
 					ctx.FreeDesc(&d58)
 					ctx.EnsureDesc(&d57)
 					ctx.EnsureDesc(&d59)
-					ctx.EnsureDesc(&d57)
-					ctx.ProtectReg(d57.Reg)
-					ctx.EnsureDesc(&d59)
-					ctx.UnprotectReg(d57.Reg)
+					ctx.EnsureDescsTogether(&d57, &d59)
 					var d60 JITValueDesc
 					if d57.Loc == LocImm && d59.Loc == LocImm {
 						d60 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d57.Imm.Int() + d59.Imm.Int())}
@@ -4938,8 +4935,7 @@ func init_alu() {
 					ctx.FreeDesc(&d64)
 					ctx.EnsureDesc(&d63)
 					ctx.EnsureDesc(&d65)
-					ctx.EnsureDesc(&d63)
-					ctx.EnsureDesc(&d65)
+					ctx.EnsureDescsTogether(&d63, &d65)
 					var d66 JITValueDesc
 					if d63.Loc == LocImm && d65.Loc == LocImm {
 						d66 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d63.Imm.Float() + d65.Imm.Float())}
@@ -5325,6 +5321,10 @@ func init_alu() {
 				_ = bbs[0].RenderPS(ps107)
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
 				return result
 			},
 			JITInlineCost: 40,
@@ -14395,6 +14395,11 @@ func init_alu() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
+				}
 				lbl0 := ctx.ReserveLabel()
 				bbpos_0_0 := int32(-1)
 				_ = bbpos_0_0
@@ -14601,10 +14606,7 @@ func init_alu() {
 					ctx.FreeDesc(&d1)
 					ctx.EnsureDesc(&d11)
 					ctx.EnsureDesc(&d7)
-					ctx.EnsureDesc(&d11)
-					ctx.EnsureDesc(&d7)
-					ctx.EnsureDesc(&d11)
-					ctx.EnsureDesc(&d7)
+					ctx.EnsureDescsTogether(&d11, &d7)
 					var d12 JITValueDesc
 					if d11.Loc == LocImm && d7.Loc == LocImm {
 						d12 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d11.Imm.Int() < d7.Imm.Int())}
@@ -15850,10 +15852,7 @@ func init_alu() {
 					d102 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d102)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d102)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d102)
+					ctx.EnsureDescsTogether(&d3, &d102)
 					var d103 JITValueDesc
 					if d3.Loc == LocImm && d102.Loc == LocImm {
 						d103 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d3.Imm.Int() == d102.Imm.Int())}
@@ -16245,10 +16244,7 @@ func init_alu() {
 					d141 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d141)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d141)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d141)
+					ctx.EnsureDescsTogether(&d3, &d141)
 					var d142 JITValueDesc
 					if d3.Loc == LocImm && d141.Loc == LocImm {
 						d142 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d3.Imm.Int() < d141.Imm.Int())}
@@ -16967,10 +16963,7 @@ func init_alu() {
 					}
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d195)
-					ctx.EnsureDesc(&d2)
-					ctx.ProtectReg(d2.Reg)
-					ctx.EnsureDesc(&d195)
-					ctx.UnprotectReg(d2.Reg)
+					ctx.EnsureDescsTogether(&d2, &d195)
 					var d196 JITValueDesc
 					if d2.Loc == LocImm && d195.Loc == LocImm {
 						d196 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d2.Imm.Int() * d195.Imm.Int())}
@@ -17769,8 +17762,7 @@ func init_alu() {
 					}
 					ctx.EnsureDesc(&d257)
 					ctx.EnsureDesc(&d258)
-					ctx.EnsureDesc(&d257)
-					ctx.EnsureDesc(&d258)
+					ctx.EnsureDescsTogether(&d257, &d258)
 					var d259 JITValueDesc
 					if d257.Loc == LocImm && d258.Loc == LocImm {
 						d259 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d257.Imm.Float() == d258.Imm.Float())}
@@ -18324,10 +18316,7 @@ func init_alu() {
 					ctx.FreeDesc(&d257)
 					ctx.EnsureDesc(&d2)
 					ctx.EnsureDesc(&d315)
-					ctx.EnsureDesc(&d2)
-					ctx.ProtectReg(d2.Reg)
-					ctx.EnsureDesc(&d315)
-					ctx.UnprotectReg(d2.Reg)
+					ctx.EnsureDescsTogether(&d2, &d315)
 					var d316 JITValueDesc
 					if d2.Loc == LocImm && d315.Loc == LocImm {
 						d316 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d2.Imm.Int() * d315.Imm.Int())}
@@ -19250,8 +19239,7 @@ func init_alu() {
 					}
 					ctx.EnsureDesc(&d6)
 					ctx.EnsureDesc(&d327)
-					ctx.EnsureDesc(&d6)
-					ctx.EnsureDesc(&d327)
+					ctx.EnsureDescsTogether(&d6, &d327)
 					var d328 JITValueDesc
 					if d6.Loc == LocImm && d327.Loc == LocImm {
 						d328 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d6.Imm.Float() * d327.Imm.Float())}
@@ -19847,10 +19835,7 @@ func init_alu() {
 					d334 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
 					ctx.EnsureDesc(&d5)
 					ctx.EnsureDesc(&d334)
-					ctx.EnsureDesc(&d5)
-					ctx.EnsureDesc(&d334)
-					ctx.EnsureDesc(&d5)
-					ctx.EnsureDesc(&d334)
+					ctx.EnsureDescsTogether(&d5, &d334)
 					var d335 JITValueDesc
 					if d5.Loc == LocImm && d334.Loc == LocImm {
 						d335 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d5.Imm.Int() < d334.Imm.Int())}
@@ -20361,7 +20346,10 @@ func init_alu() {
 				_ = bbs[0].RenderPS(ps414)
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
-				ctx.FreeStack(int32(96))
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
 				return result
 			},
 			JITInlineCost: 57,

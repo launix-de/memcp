@@ -1816,16 +1816,19 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 		panic(fmt.Sprintf("jit: variadic argslice must be LocRegPair/LocStackPair (got %d)", arg.Loc))
 	}
 
-	target := result
-	targetHasRegs := target.Loc == LocRegPair
+	requestedTarget := result
+	targetHasRegs := requestedTarget.Loc == LocRegPair
+	target := requestedTarget
 	if targetHasRegs {
+		targetOff := ctx.AllocSpill(16)
+		target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: targetOff, Rooted: true}
+		ctx.setStackPointer(jitStackRootFrameBP, targetOff, true)
+	} else if target.Loc == LocStackPair {
 		target.Type = JITTypeUnknown
 	} else {
-		targetReg := ctx.AllocRegExcept(arg.Reg, arg.Reg2)
-		target = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: targetReg, Reg2: ctx.AllocRegExcept(arg.Reg, arg.Reg2, targetReg)}
-		ctx.BindReg(target.Reg, &target)
-		ctx.BindReg(target.Reg2, &target)
-		targetHasRegs = true
+		targetOff := ctx.AllocSpill(16)
+		target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: targetOff, Rooted: true}
+		ctx.setStackPointer(jitStackRootFrameBP, targetOff, true)
 	}
 
 	ctx.ReclaimUntrackedRegs()
@@ -1863,7 +1866,7 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 			continue
 		}
 		if targetHasRegs {
-			if r == target.Reg || r == target.Reg2 {
+			if r == requestedTarget.Reg || r == requestedTarget.Reg2 {
 				continue
 			}
 		}
@@ -1926,15 +1929,26 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 
 	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
-	ctx.EmitMovPairToResult(&callResult, &target)
+	base := ctx.StackReg
+	if target.StackOff < 0 {
+		base = ctx.FrameReg
+	}
+	ctx.EmitStoreRegMem(callResult.Reg, base, target.StackOff)
+	ctx.EmitStoreRegMem(callResult.Reg2, base, target.StackOff+8)
 	for i, r := range liveRegs {
 		ctx.EmitMovRegMem(r, RegRSP, int32(i*8))
 	}
 	if frameBytes != 0 {
 		ctx.EmitAddRSP32(frameBytes)
 	}
-	ctx.BindReg(target.Reg, &target)
-	ctx.BindReg(target.Reg2, &target)
+	if targetHasRegs {
+		ctx.EmitMovRegMem(requestedTarget.Reg, base, target.StackOff)
+		ctx.EmitMovRegMem(requestedTarget.Reg2, base, target.StackOff+8)
+		requestedTarget.Type = JITTypeUnknown
+		ctx.BindReg(requestedTarget.Reg, &requestedTarget)
+		ctx.BindReg(requestedTarget.Reg2, &requestedTarget)
+		target = requestedTarget
+	}
 
 	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
 		ctx.emitMovRegReg(ctx.SliceBase, RegRSP)
@@ -2116,6 +2130,19 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 		base := RegRSP
 		if desc.StackOff < 0 {
 			base = RegRBP
+		}
+		if base == RegRSP && desc.StackOff == disp {
+			return
+		}
+		// Stack allocation and phi placement may give the source and destination
+		// overlapping 16-byte ranges. Copy backwards when the destination starts
+		// inside the source; all other layouts are safe in forward order.
+		if base == RegRSP && disp > desc.StackOff && disp < desc.StackOff+16 {
+			ctx.EmitMovRegMem(RegR11, base, desc.StackOff+8)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
+			ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
+			return
 		}
 		ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
