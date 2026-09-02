@@ -2054,6 +2054,7 @@ func (g *codeGen) emitSerialCallableCall(name string, producer ssa.Value, callab
 	} else {
 		callbackResultOff := g.allocTemp("callbackResultOff")
 		g.emit("%s := ctx.AllocStack(16)", callbackResultOff)
+		g.emit("ctx.PrepareScmerStackTarget(int32(%s))", callbackResultOff)
 		callbackTargetOff = "int32(" + callbackResultOff + ")"
 	}
 	callbackTarget := fmt.Sprintf("JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: %s, ID: 0}", callbackTargetOff)
@@ -3249,8 +3250,10 @@ func (g *codeGen) initAllPhiDescs() {
 			}
 			if g.phiTriple[name] {
 				g.emit("%s := JITValueDesc{Loc: LocStackTriple, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+				g.emit("ctx.PreparePointerStackTarget(%sint32(%s), 3)", phiBaseExpr, phiOff)
 			} else if g.phiPair[name] {
 				g.emit("%s := JITValueDesc{Loc: LocStackPair, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
+				g.emit("ctx.PrepareScmerStackTarget(%sint32(%s))", phiBaseExpr, phiOff)
 			} else {
 				g.emit("%s := JITValueDesc{Loc: LocStack, Type: %s, StackOff: %sint32(%s)}", dv, phiTag, phiBaseExpr, phiOff)
 			}

@@ -36371,6 +36371,7 @@ func init() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(24))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				var bbs [6]BBDescriptor
 				bbs[3].PhiBase = int32(phiBase0) + int32(0)
@@ -37550,6 +37551,7 @@ func init() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(24))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				var bbs [6]BBDescriptor
 				bbs[3].PhiBase = int32(phiBase0) + int32(0)
@@ -43442,6 +43444,7 @@ Patterns can be any of:
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				var bbs [3]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
@@ -43882,12 +43885,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d32)
 					phiBase33 = ctx.AllocStack(int32(80))
 					d34 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase33) + int32(0))
 					_ = d34
 					d35 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase33)+int32(16), 3)
 					_ = d35
 					d36 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase33) + int32(40))
 					_ = d36
 					d37 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase33)+int32(56), 3)
 					_ = d37
 					lbl7 := ctx.ReserveLabel()
 					bbpos_2_0 := int32(-1)
@@ -44768,12 +44775,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d32)
 					phiBase92 = ctx.AllocStack(int32(80))
 					d93 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase92) + int32(0))
 					_ = d93
 					d94 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase92)+int32(16), 3)
 					_ = d94
 					d95 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase92) + int32(40))
 					_ = d95
 					d96 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase92)+int32(56), 3)
 					_ = d96
 					lbl55 := ctx.ReserveLabel()
 					bbpos_3_0 := int32(-1)
@@ -45654,12 +45665,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d91)
 					phiBase151 = ctx.AllocStack(int32(80))
 					d152 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase151) + int32(0))
 					_ = d152
 					d153 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase151)+int32(16), 3)
 					_ = d153
 					d154 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase151) + int32(40))
 					_ = d154
 					d155 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase151)+int32(56), 3)
 					_ = d155
 					lbl103 := ctx.ReserveLabel()
 					bbpos_4_0 := int32(-1)
@@ -46540,12 +46555,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d150)
 					phiBase210 = ctx.AllocStack(int32(80))
 					d211 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase210) + int32(0))
 					_ = d211
 					d212 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase210)+int32(16), 3)
 					_ = d212
 					d213 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase210) + int32(40))
 					_ = d213
 					d214 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase210)+int32(56), 3)
 					_ = d214
 					lbl151 := ctx.ReserveLabel()
 					bbpos_5_0 := int32(-1)
@@ -47426,12 +47445,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d209)
 					phiBase269 = ctx.AllocStack(int32(80))
 					d270 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase269) + int32(0))
 					_ = d270
 					d271 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase269)+int32(16), 3)
 					_ = d271
 					d272 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase269) + int32(40))
 					_ = d272
 					d273 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase269)+int32(56), 3)
 					_ = d273
 					lbl199 := ctx.ReserveLabel()
 					bbpos_6_0 := int32(-1)
@@ -48312,12 +48335,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d268)
 					phiBase328 = ctx.AllocStack(int32(80))
 					d329 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase328) + int32(0))
 					_ = d329
 					d330 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase328)+int32(16), 3)
 					_ = d330
 					d331 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase328) + int32(40))
 					_ = d331
 					d332 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase328)+int32(56), 3)
 					_ = d332
 					lbl247 := ctx.ReserveLabel()
 					bbpos_7_0 := int32(-1)
@@ -49198,12 +49225,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d327)
 					phiBase387 = ctx.AllocStack(int32(80))
 					d388 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase387) + int32(0))
 					_ = d388
 					d389 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase387)+int32(16), 3)
 					_ = d389
 					d390 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase387) + int32(40))
 					_ = d390
 					d391 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase387)+int32(56), 3)
 					_ = d391
 					lbl295 := ctx.ReserveLabel()
 					bbpos_8_0 := int32(-1)
@@ -50084,12 +50115,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d386)
 					phiBase446 = ctx.AllocStack(int32(80))
 					d447 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase446) + int32(0))
 					_ = d447
 					d448 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase446)+int32(16), 3)
 					_ = d448
 					d449 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase446) + int32(40))
 					_ = d449
 					d450 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase446)+int32(56), 3)
 					_ = d450
 					lbl343 := ctx.ReserveLabel()
 					bbpos_9_0 := int32(-1)
@@ -50970,12 +51005,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d445)
 					phiBase505 = ctx.AllocStack(int32(80))
 					d506 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase505) + int32(0))
 					_ = d506
 					d507 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase505)+int32(16), 3)
 					_ = d507
 					d508 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase505) + int32(40))
 					_ = d508
 					d509 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase505)+int32(56), 3)
 					_ = d509
 					lbl391 := ctx.ReserveLabel()
 					bbpos_10_0 := int32(-1)
@@ -51856,12 +51895,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d504)
 					phiBase564 = ctx.AllocStack(int32(80))
 					d565 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase564) + int32(0))
 					_ = d565
 					d566 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase564)+int32(16), 3)
 					_ = d566
 					d567 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase564) + int32(40))
 					_ = d567
 					d568 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase564)+int32(56), 3)
 					_ = d568
 					lbl439 := ctx.ReserveLabel()
 					bbpos_11_0 := int32(-1)
@@ -52742,12 +52785,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d563)
 					phiBase623 = ctx.AllocStack(int32(80))
 					d624 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase623) + int32(0))
 					_ = d624
 					d625 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase623)+int32(16), 3)
 					_ = d625
 					d626 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase623) + int32(40))
 					_ = d626
 					d627 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase623)+int32(56), 3)
 					_ = d627
 					lbl487 := ctx.ReserveLabel()
 					bbpos_12_0 := int32(-1)
@@ -53628,12 +53675,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d622)
 					phiBase682 = ctx.AllocStack(int32(80))
 					d683 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase682) + int32(0))
 					_ = d683
 					d684 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase682)+int32(16), 3)
 					_ = d684
 					d685 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase682) + int32(40))
 					_ = d685
 					d686 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase682)+int32(56), 3)
 					_ = d686
 					lbl535 := ctx.ReserveLabel()
 					bbpos_13_0 := int32(-1)
@@ -54514,12 +54565,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d681)
 					phiBase741 = ctx.AllocStack(int32(80))
 					d742 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase741) + int32(0))
 					_ = d742
 					d743 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase741)+int32(16), 3)
 					_ = d743
 					d744 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase741) + int32(40))
 					_ = d744
 					d745 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase741)+int32(56), 3)
 					_ = d745
 					lbl583 := ctx.ReserveLabel()
 					bbpos_14_0 := int32(-1)

@@ -1078,6 +1078,7 @@ func init_date() {
 				ctx.StabilizeDescForControlFlow(&d68)
 				phiBase69 := ctx.AllocStack(int32(24))
 				d70 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase69) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase69)+int32(0), 3)
 				_ = d70
 				inlineResultOff71 := ctx.AllocStack(int32(16))
 				d72 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: inlineResultOff71}
@@ -1398,6 +1399,7 @@ func init_date() {
 				ctx.StabilizeDescForControlFlow(&d96)
 				phiBase97 := ctx.AllocStack(int32(24))
 				d98 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase97) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase97)+int32(0), 3)
 				_ = d98
 				inlineResultOff99 := ctx.AllocStack(int32(16))
 				d100 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: inlineResultOff99}
@@ -1981,6 +1983,7 @@ func init_date() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
@@ -4890,6 +4893,7 @@ func init_date() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
@@ -6918,6 +6922,7 @@ func init_date() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
@@ -20162,6 +20167,7 @@ func init_date() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				var bbs [20]BBDescriptor
 				bbs[5].PhiBase = int32(phiBase0) + int32(0)
@@ -27572,6 +27578,7 @@ func init_date() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				var bbs [20]BBDescriptor
 				bbs[5].PhiBase = int32(phiBase0) + int32(0)

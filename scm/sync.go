@@ -1687,7 +1687,8 @@ func init_sync() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name: "once",
+		Name:            "once",
+		RetainsCallArgs: true,
 
 		Fn: func(a ...Scmer) Scmer {
 			var params []Scmer

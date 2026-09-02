@@ -180,6 +180,7 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 	// fact lets downstream generated SSA eliminate checks and write barriers.
 	target.Type = src.Type
 	target.NoHeapPointer = src.NoHeapPointer
+	target.RelocatablePointer = src.RelocatablePointer
 	target.Rooted = src.Rooted
 	// A producer that spills directly into a phi/callback slot should also be
 	// consumed from that slot directly. Loading through a temporary pair defeats
@@ -303,6 +304,7 @@ func jitPlaceScmerIntoTarget(ctx *JITContext, src JITValueDesc, target JITValueD
 	}
 	target.Type = src.Type
 	target.NoHeapPointer = src.NoHeapPointer
+	target.RelocatablePointer = src.RelocatablePointer
 	target.Rooted = src.Rooted
 	if target.Loc == LocStackPair {
 		ctx.EmitCopyScmerToDesc(&target, &src)
@@ -533,16 +535,19 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 		} else {
 			ctx.UnprotectReg(slicePtr)
 		}
+		// Reserve the surviving result before snapshotting allocator state. A
+		// slot created inside PreserveOuterRegs would be made reusable again by
+		// RestoreOuterRegs even though the returned descriptor still names it.
+		off := ctx.AllocStack(8)
+		ctx.EmitMovRegImm64(ctx.ScratchReg, 0)
+		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, off)
+		ctx.setStackPointer(jitStackRootFrameSP, off-ctx.DynamicSP, true)
 		outer := ctx.PreserveOuterRegs()
 		address := ctx.EmitSliceElementAddress(&stableSlice, &stableIndex, elementSize)
-		// The address outlives RestoreOuterRegs. Use a frame slot rather than a
-		// nested spill slot, because restoring the caller allocator deliberately
-		// makes nested spills reusable.
-		off := ctx.AllocStack(8)
 		ctx.EmitStoreRegMem(address.Reg, ctx.StackReg, off)
 		ctx.FreeDesc(&address)
 		ctx.RestoreOuterRegs(outer)
-		return JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: off, NoHeapPointer: true}
+		return JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: off, Rooted: true, RelocatablePointer: true}
 	}
 	address := ctx.AllocRegExcept(excluded...)
 	if index.Loc == LocImm {
@@ -569,7 +574,7 @@ func (ctx *JITContext) EmitSliceElementAddress(slice, index *JITValueDesc, eleme
 	} else {
 		ctx.UnprotectReg(slicePtr)
 	}
-	result := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: address}
+	result := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: address, RelocatablePointer: true}
 	ctx.BindReg(address, &result)
 	return result
 }
@@ -929,6 +934,20 @@ func (ctx *JITContext) EmitZeroDescWords(dst *JITValueDesc, words int) {
 	}
 }
 
+// PrepareScmerStackTarget reserves a pointer-bearing result slot in every
+// subsequent safepoint map before nested emission snapshots allocator state.
+// The nil initialization makes the slot safe to scan on paths where its
+// producer has not run yet.
+func (ctx *JITContext) PrepareScmerStackTarget(off int32) {
+	ctx.PreparePointerStackTarget(off, 2)
+}
+
+func (ctx *JITContext) PreparePointerStackTarget(off int32, words int) {
+	target := JITValueDesc{Loc: LocStack, Type: tagNil, StackOff: off, NoHeapPointer: true}
+	ctx.EmitZeroDescWords(&target, words)
+	ctx.setStackPointer(jitStackRootFrameSP, off-ctx.DynamicSP, true)
+}
+
 // StabilizeDescForControlFlow gives a register-backed SSA value a fixed stack
 // home at its producer. Machine code in successor blocks can then be entered
 // repeatedly without depending on the allocator state used while those blocks
@@ -1100,11 +1119,12 @@ func (ctx *JITContext) stabilizeJITEnvValue(value JITValueDesc) JITValueDesc {
 	}
 	off := ctx.AllocSpill(int32(words * 8))
 	stable := JITValueDesc{
-		Loc:           stableLoc,
-		Type:          value.Type,
-		StackOff:      off,
-		NoHeapPointer: value.NoHeapPointer,
-		Rooted:        value.Rooted,
+		Loc:                stableLoc,
+		Type:               value.Type,
+		StackOff:           off,
+		NoHeapPointer:      value.NoHeapPointer,
+		RelocatablePointer: value.RelocatablePointer,
+		Rooted:             value.Rooted,
 	}
 	ctx.EmitCopyDescWords(&stable, &value, words)
 	if !value.NoHeapPointer {

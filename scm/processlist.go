@@ -582,6 +582,7 @@ func init_processlist() {
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				var bbs [9]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)

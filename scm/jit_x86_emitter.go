@@ -64,6 +64,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize, arena: arena, reservation: reservation}
 	codeLen, roots, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
 	arena.complete(reservation, buf.stackMaps)
+	defer globalJITPool.Free(arena)
 	if codeLen == 0 {
 		return nil, nil
 	}
@@ -325,7 +326,10 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.PatchInt32(frameFixup, frameSize)
 	ctx.PatchInt32(frameWordsFixup, frameSize/8)
 	if hasStackCheck {
-		checkedFrame := frameSize - int32(stackSmall)
+		// Account for the frame record and the deepest temporary call area below
+		// the fixed frame. Like Go's outgoing-argument area, DynamicSP is part of
+		// the maximum stack demand even though it is reserved only at call sites.
+		checkedFrame := frameSize + ctx.MaxDynamicSP + 8 - int32(stackSmall)
 		if checkedFrame < 0 {
 			checkedFrame = 0
 		}
@@ -339,19 +343,22 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.emitByte(0xC3) // ret
 	if hasStackCheck {
 		ctx.MarkLabel(stackGrowLabel)
-		// runtime.morestack preserves DX as the closure-context register. Use it
-		// to retain the incoming variadic slice pointer while the stack moves.
-		ctx.emitMovRegReg(RegRDX, RegRAX)
+		// Match the Go prologue ABI: the caller reserves spill space for register
+		// arguments. The entry stack map keeps the slice data pointer live and
+		// relocatable while runtime.morestack moves the goroutine stack.
+		ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
+		ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
+		ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
+		ctx.EmitMovRegImm64(RegRDX, 0)
 		ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
 		ctx.emitBytes(0x41, 0xFF, 0xD3) // call r11
 		ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
 			pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
 			entry:    true,
 		})
-		ctx.emitMovRegReg(RegRAX, RegRDX)
-		inputLength := uint64(inputArgCount + len(ctx.HiddenArgs))
-		ctx.EmitMovRegImm64(RegRBX, inputLength)
-		ctx.EmitMovRegImm64(RegRCX, inputLength)
+		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
+		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
+		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
 		ctx.EmitJmp(stackRetryLabel)
 	}
 	buf.stackMaps = ctx.finalizeStackMaps(frameSize, arenaOffset)
@@ -1799,7 +1806,7 @@ func (ctx *JITContext) EmitPushReg(r Reg) {
 	} else {
 		ctx.emitByte(0x50 | byte(r))
 	}
-	ctx.DynamicSP += 8
+	ctx.addDynamicStack(8)
 }
 
 // EmitPopReg emits POP r64
@@ -1815,7 +1822,7 @@ func (ctx *JITContext) EmitPopReg(r Reg) {
 	}
 }
 
-// EmitCallIndirect emits an unwind marker followed by MOV R11, imm64; CALL R11.
+// EmitCallIndirect emits an unwind marker followed by MOV R12, imm64; CALL R12.
 func (ctx *JITContext) EmitCallIndirect(addr uint64) {
 	ctx.emitCallIndirectWithSetup(addr, nil, nil)
 }
@@ -1829,8 +1836,8 @@ func (ctx *JITContext) emitCallIndirectWithSetup(addr uint64, setup func(callFra
 	if setup != nil {
 		setup(int32(jitGoSpillBytes + 16))
 	}
-	ctx.EmitMovRegImm64(RegR11, addr)
-	ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
+	ctx.EmitMovRegImm64(RegR12, addr)
+	ctx.emitBytes(0x41, 0xFF, 0xD4) // CALL R12
 	ctx.recordSafepoint(roots)
 	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 }
@@ -1841,6 +1848,8 @@ func (ctx *JITContext) regHoldsPointer(r Reg) bool {
 		return false
 	}
 	switch owner.Loc {
+	case LocReg:
+		return owner.Reg == r && owner.RelocatablePointer
 	case LocRegPair:
 		return owner.Reg == r && !owner.NoHeapPointer
 	case LocRegTriple:
@@ -2151,7 +2160,7 @@ func (ctx *JITContext) EmitStoreRegMem(src, base Reg, disp int32) {
 // EmitSubRSP emits SUB RSP, imm8 to reserve stack space.
 func (ctx *JITContext) EmitSubRSP(n uint8) {
 	ctx.emitBytes(0x48, 0x83, 0xEC, n)
-	ctx.DynamicSP += int32(n)
+	ctx.addDynamicStack(int32(n))
 }
 
 // EmitAddRSP emits ADD RSP, imm8 to release stack space.
@@ -2263,7 +2272,7 @@ func (ctx *JITContext) EmitAddRSP32(val int32) {
 func (ctx *JITContext) EmitSubRSP32(val int32) {
 	ctx.emitBytes(0x48, 0x81, 0xEC)
 	ctx.emitU32(uint32(val))
-	ctx.DynamicSP += val
+	ctx.addDynamicStack(val)
 }
 
 // EmitReserveStackBytes implements the common dynamic-stack reservation API.

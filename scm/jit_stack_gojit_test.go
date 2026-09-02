@@ -20,15 +20,20 @@ Copyright (C) 2026  MemCP Contributors
 package scm
 
 import (
+	"runtime"
 	"testing"
 	"time"
 )
 
 func TestJITEntryGrowsStackInPrologue(t *testing.T) {
 	value := NewSymbol("value")
+	gcEcho := NewFunc(func(args ...Scmer) Scmer {
+		runtime.GC()
+		return args[0]
+	})
 	proc := NewProcStruct(Proc{
 		Params:  NewSlice([]Scmer{value}),
-		Body:    NewNthLocalVar(0),
+		Body:    NewSlice([]Scmer{gcEcho, NewNthLocalVar(0)}),
 		En:      &Globalenv,
 		NumVars: 4096,
 	})
@@ -38,12 +43,13 @@ func TestJITEntryGrowsStackInPrologue(t *testing.T) {
 	}
 
 	done := make(chan Scmer, 1)
+	want := "pointer-bearing input survives stack relocation"
 	go func() {
-		done <- Apply(compiled, NewInt(42))
+		done <- Apply(compiled, NewString(want))
 	}()
 	select {
 	case result := <-done:
-		if !result.IsInt() || result.Int() != 42 {
+		if !result.IsString() || result.String() != want {
 			t.Fatalf("unexpected result after JIT stack growth: %s", result.String())
 		}
 	case <-time.After(5 * time.Second):

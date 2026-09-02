@@ -282,6 +282,9 @@ type JITValueDesc struct {
 	// of Type so unions such as int|float|nil retain the fact without claiming an
 	// exact tag.
 	NoHeapPointer bool
+	// RelocatablePointer distinguishes an unboxed address from ordinary scalar
+	// integers. Such values need stack-map coverage while live across a Go call.
+	RelocatablePointer bool
 	// Rooted means a pointer-bearing runtime value has an independently live Go
 	// owner or an invocation-local slot covered by every later safepoint map.
 	Rooted bool
@@ -510,7 +513,8 @@ type JITContext struct {
 	RegOwners             [16]*JITValueDesc // register → owner descriptor (nil = untracked)
 	// DynamicSP is the temporary distance below the static frame bottom. It
 	// covers pushed live registers, variadic arrays, and the Go call area.
-	DynamicSP int32
+	DynamicSP    int32
+	MaxDynamicSP int32
 	// StackRoots contains pointer words that are live in the static frame at the
 	// current emission point. Safepoints copy this set before sibling control
 	// flow can restore a different allocator state.
@@ -684,6 +688,13 @@ func (ctx *JITContext) AllocStack(size int32) int32 {
 	return start
 }
 
+func (ctx *JITContext) addDynamicStack(size int32) {
+	ctx.DynamicSP += size
+	if ctx.DynamicSP > ctx.MaxDynamicSP {
+		ctx.MaxDynamicSP = ctx.DynamicSP
+	}
+}
+
 // FreeStack releases size bytes from the stack frame.
 func (ctx *JITContext) FreeStack(size int32) {
 	newOffset := ctx.BPOffset - size
@@ -829,12 +840,9 @@ func (ctx *JITContext) PreserveOuterRegs() jitNestedPreservation {
 		if (ctx.AllRegs&(1<<uint(r))) == 0 || (ctx.FreeRegs&(1<<uint(r))) != 0 {
 			continue
 		}
-		owner := ctx.RegOwners[r]
 		off := ctx.AllocSpill(8)
 		ctx.EmitStoreRegMem(r, RegRBP, off)
-		if owner != nil && !owner.NoHeapPointer &&
-			((owner.Loc == LocRegPair && owner.Reg == r) ||
-				(owner.Loc == LocRegTriple && owner.Reg == r)) {
+		if ctx.regHoldsPointer(r) {
 			ctx.setStackPointer(jitStackRootFrameBP, off, true)
 		}
 		p.regs = append(p.regs, r)
@@ -1452,7 +1460,12 @@ func jitExpressionConsumesRuntimeEnv(expr Scmer) bool {
 	return false
 }
 
-func jitCollectLambdaOuterVarIndices(expr Scmer, seen map[NthLocalVar]struct{}, out *[]NthLocalVar) {
+type jitLambdaOuterCapture struct {
+	depth int
+	index NthLocalVar
+}
+
+func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, seen map[jitLambdaOuterCapture]struct{}, out *[]jitLambdaOuterCapture) {
 	if expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
 	}
@@ -1467,31 +1480,37 @@ func jitCollectLambdaOuterVarIndices(expr Scmer, seen map[NthLocalVar]struct{}, 
 		switch string(head) {
 		case "quote":
 			return
+		case "lambda":
+			if len(list) >= 3 {
+				jitCollectLambdaOuterCaptures(list[2], lambdaDepth+1, seen, out)
+			}
+			return
 		case "outer":
 			if len(list) == 3 {
+				depth, validDepth := outerDepthLiteral(list[1])
 				arg := list[2]
 				if arg.IsSourceInfo() {
 					arg = arg.SourceInfo().value
 				}
-				if arg.GetTag() == tagNthLocalVar {
-					idx := arg.NthLocalVar()
-					if _, ok := seen[idx]; !ok {
-						seen[idx] = struct{}{}
-						*out = append(*out, idx)
+				if validDepth && int(depth) > lambdaDepth && arg.GetTag() == tagNthLocalVar {
+					capture := jitLambdaOuterCapture{depth: int(depth) - lambdaDepth - 1, index: arg.NthLocalVar()}
+					if _, ok := seen[capture]; !ok {
+						seen[capture] = struct{}{}
+						*out = append(*out, capture)
 					}
 				}
 			}
 		}
 	}
 	for _, item := range list {
-		jitCollectLambdaOuterVarIndices(item, seen, out)
+		jitCollectLambdaOuterCaptures(item, lambdaDepth, seen, out)
 	}
 }
 
-func jitLambdaOuterVarIndices(body Scmer) []NthLocalVar {
-	seen := make(map[NthLocalVar]struct{}, 4)
-	out := make([]NthLocalVar, 0, 4)
-	jitCollectLambdaOuterVarIndices(body, seen, &out)
+func jitLambdaOuterCaptures(body Scmer) []jitLambdaOuterCapture {
+	seen := make(map[jitLambdaOuterCapture]struct{}, 4)
+	out := make([]jitLambdaOuterCapture, 0, 4)
+	jitCollectLambdaOuterCaptures(body, 0, seen, &out)
 	return out
 }
 
@@ -1507,7 +1526,7 @@ func jitLambdaCaptureReference(index NthLocalVar, depth int) Scmer {
 	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), local})
 }
 
-func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[NthLocalVar]NthLocalVar) Scmer {
+func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar) Scmer {
 	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, 0)
 }
 
@@ -1567,7 +1586,7 @@ func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, 
 	return NewSlice(bound)
 }
 
-func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[NthLocalVar]NthLocalVar, depth int) Scmer {
+func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, depth int) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
 		source.value = jitBindLambdaCapturesAtDepth(source.value, symbols, outerVars, depth)
@@ -1592,8 +1611,10 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 		}
 		if string(head) == "outer" && len(items) == 3 {
 			key := items[2].WithoutSourceInfo()
-			if key.IsNthLocalVar() {
-				if param, exists := outerVars[key.NthLocalVar()]; exists {
+			outerDepth, validDepth := outerDepthLiteral(items[1])
+			if validDepth && int(outerDepth) > depth && key.IsNthLocalVar() {
+				capture := jitLambdaOuterCapture{depth: int(outerDepth) - depth - 1, index: key.NthLocalVar()}
+				if param, exists := outerVars[capture]; exists {
 					return jitLambdaCaptureReference(param, depth)
 				}
 			}
@@ -1765,10 +1786,11 @@ func jitBuildCompiledLambdaClosureWithRuntimeEnv(args ...Scmer) Scmer {
 	if len(args) < 4 {
 		panic("jit: runtime-bound lambda builder expects params, body, numVars and environment")
 	}
+	env := jitRuntimeEnvFromCaptures(args[3:])
 	value := NewProcStruct(Proc{
 		Params:  args[0],
 		Body:    args[1],
-		En:      jitRuntimeEnvFromCaptures(args[3:]),
+		En:      env,
 		NumVars: int(ToInt(args[2])),
 	})
 	return jitCompile(value)
@@ -2051,10 +2073,10 @@ func JITPanic(v Scmer) {
 	jitPanic(v)
 }
 
-// GoABIIntRegs lists integer argument/result registers in Go ABIInternal order.
-// R11 is reserved as scratch/closure context and is not an argument register;
-// words after R10 are passed in the caller's stack argument area.
-var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10}
+// GoABIIntRegs lists integer argument/result registers in Go's amd64
+// ABIInternal order. R11 is the ninth argument register, so indirect static
+// calls use the otherwise reserved R12 register as their call target.
+var GoABIIntRegs = []Reg{RegRAX, RegRBX, RegRCX, RegRDI, RegRSI, RegR8, RegR9, RegR10, RegR11}
 
 type goCallArgWord struct {
 	loc      JITLoc
@@ -2321,7 +2343,7 @@ func (ctx *JITContext) emitGoCall(funcAddr uint64, argWords []goCallArgWord, num
 			ctx.emitBytes(0x48, 0x81, 0xEC)
 			ctx.emitU32(uint32(resultBytes)) // SUB RSP, imm32
 		}
-		ctx.DynamicSP += int32(resultBytes)
+		ctx.addDynamicStack(int32(resultBytes))
 	}
 
 	// Save live registers (PUSH)
@@ -2602,10 +2624,17 @@ type jitSourceMap struct {
 // jitArena is a large mmap'd buffer, optionally registered with
 // runtime/jit for unwinding (when built with GOEXPERIMENT=jit).
 type jitArena struct {
-	base   unsafe.Pointer // start of mmap'd region
-	size   int            // total bytes
-	offset int            // bump pointer (next free byte), guarded by jitPool.mu
-	handle interface{}    // opaque registration handle (nil = unregistered)
+	base    unsafe.Pointer // start of mmap'd region
+	mapping []byte         // original mmap slice, retained for munmap
+	size    int            // total bytes
+	offset  int            // bump pointer (next free byte), guarded by jitPool.mu
+	handle  interface{}    // opaque registration handle (nil = unregistered)
+	// live counts code reservations which can still become reachable or are
+	// owned by a reachable JITEntryPoint. A sealed arena accepts no new code and
+	// is unmapped as soon as live reaches zero. These fields use jitPool.mu.
+	live     int
+	sealed   bool
+	unmapped bool
 
 	sourceMu      sync.Mutex
 	sourceEntries []jitSourceEntry
@@ -2691,6 +2720,7 @@ func (a *jitArena) loadSourceEntries() []jitSourceEntry {
 type jitPool struct {
 	mu     sync.Mutex
 	arenas []*jitArena
+	closed bool
 }
 
 const jitArenaSize = 1 << 20 // 1 MB per arena
@@ -2702,7 +2732,10 @@ var globalJITPool jitPool
 func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservation *jitCodeReservation) {
 	size = (size + 15) & ^15 // align to 16 bytes
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	if p.closed {
+		p.mu.Unlock()
+		panic("jit: allocation after pool shutdown")
+	}
 
 	// Try current arena
 	if len(p.arenas) > 0 {
@@ -2714,7 +2747,17 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservat
 			a.reservations = append(a.reservations, reservation)
 			a.metaMu.Unlock()
 			a.offset += size
+			a.live++
+			p.mu.Unlock()
 			return ptr, a, reservation
+		}
+		a.sealed = true
+		if a.live == 0 {
+			p.arenas = p.arenas[:len(p.arenas)-1]
+			a.unmapped = true
+			p.mu.Unlock()
+			unmapJITArena(a)
+			p.mu.Lock()
 		}
 	}
 
@@ -2730,8 +2773,10 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservat
 		panic("jit: mmap arena failed: " + err.Error())
 	}
 	a := &jitArena{
-		base: unsafe.Pointer(&b[0]),
-		size: arenaBytes,
+		base:    unsafe.Pointer(&b[0]),
+		mapping: b,
+		size:    arenaBytes,
+		live:    1,
 	}
 	a.metaCond = sync.NewCond(&a.metaMu)
 	a.handle = registerJITArena(a)
@@ -2740,13 +2785,82 @@ func (p *jitPool) Alloc(size int) (ptr unsafe.Pointer, arena *jitArena, reservat
 	a.reservations = append(a.reservations, reservation)
 	a.offset = size
 	p.arenas = append(p.arenas, a)
+	p.mu.Unlock()
 	return ptr, a, reservation
 }
 
-// Free returns a code region to the arena. Currently a no-op placeholder;
-// future: maintain a freelist and coalesce adjacent free blocks.
-func (p *jitPool) Free(ptr unsafe.Pointer, size int) {
-	// no-op for now — arenas are long-lived
+// Free releases one code reservation. Bump-allocated holes are not reused;
+// sealing an arena and releasing its last owner reclaims the entire mapping.
+func (p *jitPool) Free(a *jitArena) {
+	if a == nil {
+		return
+	}
+	p.mu.Lock()
+	if a.live <= 0 {
+		p.mu.Unlock()
+		return
+	}
+	a.live--
+	shouldUnmap := a.sealed && a.live == 0 && !a.unmapped
+	if shouldUnmap {
+		a.unmapped = true
+		for i, candidate := range p.arenas {
+			if candidate == a {
+				p.arenas = append(p.arenas[:i], p.arenas[i+1:]...)
+				break
+			}
+		}
+	}
+	p.mu.Unlock()
+	if shouldUnmap {
+		unmapJITArena(a)
+	}
+}
+
+// ShutdownJIT retires all executable mappings after callers and background
+// work have drained. It is deliberately terminal: compiling after shutdown is
+// a programming error.
+func ShutdownJIT() {
+	globalJITPool.shutdown()
+}
+
+func (p *jitPool) shutdown() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	arenas := append([]*jitArena(nil), p.arenas...)
+	p.arenas = nil
+	for _, a := range arenas {
+		a.sealed = true
+		a.unmapped = true
+	}
+	p.mu.Unlock()
+	for _, a := range arenas {
+		unmapJITArena(a)
+	}
+}
+
+func unmapJITArena(a *jitArena) {
+	unregisterJITArena(a)
+	if len(a.mapping) != 0 {
+		if err := syscall.Munmap(a.mapping); err != nil {
+			panic("jit: munmap arena failed: " + err.Error())
+		}
+		a.mapping = nil
+		a.base = nil
+	}
+}
+
+type jitCodeLease struct {
+	pool  *jitPool
+	arena *jitArena
+}
+
+func releaseJITEntryPoint(lease jitCodeLease) {
+	lease.pool.Free(lease.arena)
 }
 
 // ReserveLabel allocates a label ID for later placement via MarkLabel.
@@ -3340,7 +3454,7 @@ func init_jit() {
 				return result
 			},
 			JITVirtualArgs: true,
-			JITInlineCost:  202,
+			JITInlineCost:  211,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -4668,6 +4782,7 @@ func init_jit() {
 				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				var bbs [11]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
@@ -7413,10 +7528,9 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 					NeedsStableArgs:   needsStableArgs,
 					Coverage:          coverage,
 				}
-				runtime.SetFinalizer(jep, func(jep *JITEntryPoint) {
-					if jep.Arena != nil && jep.CodePtr != nil {
-						globalJITPool.Free(jep.CodePtr, jep.CodeLen)
-					}
+				runtime.AddCleanup(jep, releaseJITEntryPoint, jitCodeLease{
+					pool:  &globalJITPool,
+					arena: arena,
 				})
 				if install {
 					proc.Compiled = jep
@@ -7426,6 +7540,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 				compiledProc.Compiled = jep
 				return NewProcStruct(compiledProc)
 			}
+			globalJITPool.Free(arena)
 			if !overflow {
 				break
 			}

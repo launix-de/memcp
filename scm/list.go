@@ -6709,6 +6709,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(56))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -10158,6 +10159,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(56))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -13714,12 +13716,14 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(96))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(40)}
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(56)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(56), 3)
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 				_ = d5
@@ -16271,16 +16275,19 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(168))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(40)}
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(56)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(56), 3)
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(80)}
 				_ = d5
 				d6 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(96)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(96), 3)
 				_ = d6
 				d7 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(120)}
 				_ = d7
@@ -24756,6 +24763,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -25330,6 +25338,7 @@ func init_list() {
 					callbackArgs52[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray49) + 0}
 					var d51 JITValueDesc
 					callbackResultOff53 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff53))
 					ctx.FreeDesc(&d50)
 					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d11.Loc == LocLambdaTemplate && d11.Lambda != nil {
@@ -26551,6 +26560,7 @@ func init_list() {
 					callbackArgs37[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray34) + 0}
 					var d36 JITValueDesc
 					callbackResultOff38 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff38))
 					ctx.FreeDesc(&d35)
 					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -28115,6 +28125,7 @@ func init_list() {
 					callbackArgs42[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray39) + 0}
 					var d41 JITValueDesc
 					callbackResultOff43 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff43))
 					ctx.FreeDesc(&d40)
 					ctx.StabilizeDescAcrossNestedCall(&d14)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
@@ -29059,6 +29070,7 @@ func init_list() {
 					callbackArgs43[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray40) + 16}
 					var d42 JITValueDesc
 					callbackResultOff44 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff44))
 					ctx.FreeDesc(&d41)
 					ctx.StabilizeDescAcrossNestedCall(&d14)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
@@ -29419,6 +29431,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
@@ -31277,8 +31290,10 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(24)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(24))
 				_ = d2
 				var bbs [4]BBDescriptor
 				bbs[3].PhiBase = int32(phiBase0) + int32(0)
@@ -31850,6 +31865,7 @@ func init_list() {
 					callbackArgs39[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray36) + 0}
 					var d38 JITValueDesc
 					callbackResultOff40 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff40))
 					ctx.FreeDesc(&d37)
 					if d7.Loc == LocLambdaTemplate && d7.Lambda != nil {
 						stableCallbackArgs41 := ctx.StabilizeCallbackArgs(callbackArgs39)
@@ -34137,6 +34153,7 @@ func init_list() {
 					callbackArgs153[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray150) + 0}
 					var d152 JITValueDesc
 					callbackResultOff154 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff154))
 					ctx.FreeDesc(&d151)
 					ctx.StabilizeDescAcrossNestedCall(&d2)
 					ctx.StabilizeDescAcrossNestedCall(&d3)
@@ -37284,6 +37301,7 @@ func init_list() {
 					callbackArgs189[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray186) + 0}
 					var d188 JITValueDesc
 					callbackResultOff190 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff190))
 					ctx.FreeDesc(&d187)
 					ctx.StabilizeDescAcrossNestedCall(&d3)
 					if d34.Loc == LocLambdaTemplate && d34.Lambda != nil {
@@ -38723,6 +38741,7 @@ func init_list() {
 					callbackArgs270[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray267) + 0}
 					var d269 JITValueDesc
 					callbackResultOff271 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff271))
 					ctx.FreeDesc(&d268)
 					ctx.StabilizeDescAcrossNestedCall(&d3)
 					if d34.Loc == LocLambdaTemplate && d34.Lambda != nil {
@@ -49657,14 +49676,17 @@ func init_list() {
 				d1 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(0)}
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(16)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(16))
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(48)}
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(64)}
 				_ = d5
 				d6 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(80)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(80))
 				_ = d6
 				d7 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(96)}
 				_ = d7
@@ -55188,6 +55210,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -55806,6 +55829,7 @@ func init_list() {
 					callbackArgs57[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray54) + 0}
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff58))
 					ctx.FreeDesc(&d55)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -55842,6 +55866,7 @@ func init_list() {
 					callbackArgs67[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray64) + 0}
 					var d66 JITValueDesc
 					callbackResultOff68 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff68))
 					ctx.FreeDesc(&d65)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
@@ -56715,6 +56740,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -57289,6 +57315,7 @@ func init_list() {
 					callbackArgs52[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray49) + 0}
 					var d51 JITValueDesc
 					callbackResultOff53 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff53))
 					ctx.FreeDesc(&d50)
 					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -58115,6 +58142,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
@@ -58697,6 +58725,7 @@ func init_list() {
 					callbackArgs49[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray46) + 16}
 					var d48 JITValueDesc
 					callbackResultOff50 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff50))
 					ctx.FreeDesc(&d47)
 					ctx.StabilizeDescAcrossNestedCall(&d16)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -61218,6 +61247,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
@@ -61745,6 +61775,7 @@ func init_list() {
 					callbackArgs47[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray44) + 16}
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff48))
 					ctx.FreeDesc(&d45)
 					ctx.StabilizeDescAcrossNestedCall(&d15)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -65991,6 +66022,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(32))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
@@ -66518,6 +66550,7 @@ func init_list() {
 					callbackArgs47[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray44) + 16}
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff48))
 					ctx.FreeDesc(&d45)
 					ctx.StabilizeDescAcrossNestedCall(&d15)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -68239,6 +68272,7 @@ func init_list() {
 					callbackArgs38[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray35) + 16}
 					var d37 JITValueDesc
 					callbackResultOff39 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff39))
 					ctx.FreeDesc(&d36)
 					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -68905,6 +68939,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -69523,6 +69558,7 @@ func init_list() {
 					callbackArgs57[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray54) + 0}
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff58))
 					ctx.FreeDesc(&d55)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -70130,6 +70166,7 @@ func init_list() {
 					callbackArgs114[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray111) + 0}
 					var d113 JITValueDesc
 					callbackResultOff115 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff115))
 					ctx.FreeDesc(&d112)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
@@ -70898,6 +70935,7 @@ func init_list() {
 					callbackArgs47[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray44) + 0}
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff48))
 					ctx.FreeDesc(&d45)
 					ctx.StabilizeDescAcrossNestedCall(&d17)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -70934,6 +70972,7 @@ func init_list() {
 					callbackArgs57[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray54) + 0}
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff58))
 					ctx.FreeDesc(&d55)
 					ctx.StabilizeDescAcrossNestedCall(&d17)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
@@ -71813,6 +71852,7 @@ func init_list() {
 					callbackArgs47[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray44) + 16}
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff48))
 					ctx.FreeDesc(&d45)
 					ctx.StabilizeDescAcrossNestedCall(&d16)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -71853,6 +71893,7 @@ func init_list() {
 					callbackArgs57[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray54) + 16}
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff58))
 					ctx.FreeDesc(&d55)
 					ctx.StabilizeDescAcrossNestedCall(&d16)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
@@ -72272,10 +72313,12 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(48)}
 				_ = d4
@@ -73754,6 +73797,7 @@ func init_list() {
 					callbackArgs125[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray122) + 0}
 					var d124 JITValueDesc
 					callbackResultOff126 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff126))
 					ctx.FreeDesc(&d123)
 					ctx.StabilizeDescAcrossNestedCall(&d67)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
@@ -75115,10 +75159,12 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(48)}
 				_ = d4
@@ -76601,6 +76647,7 @@ func init_list() {
 					callbackArgs125[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray122) + 0}
 					var d124 JITValueDesc
 					callbackResultOff126 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff126))
 					ctx.FreeDesc(&d123)
 					ctx.StabilizeDescAcrossNestedCall(&d67)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
@@ -78733,16 +78780,19 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(128))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(48)}
 				_ = d4
 				d5 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(64)}
 				_ = d5
 				d6 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(80)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(80))
 				_ = d6
 				d7 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(96)}
 				_ = d7
@@ -85015,10 +85065,12 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(48)}
 				_ = d4
@@ -86571,6 +86623,7 @@ func init_list() {
 					callbackArgs132[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray129) + 0}
 					var d131 JITValueDesc
 					callbackResultOff133 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff133))
 					ctx.FreeDesc(&d130)
 					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
@@ -86607,6 +86660,7 @@ func init_list() {
 					callbackArgs142[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray139) + 0}
 					var d141 JITValueDesc
 					callbackResultOff143 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff143))
 					ctx.FreeDesc(&d140)
 					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d12.Loc == LocLambdaTemplate && d12.Lambda != nil {
@@ -88863,10 +88917,12 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(80))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(16)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(32)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(32))
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(48)}
 				_ = d4
@@ -90419,6 +90475,7 @@ func init_list() {
 					callbackArgs132[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray129) + 0}
 					var d131 JITValueDesc
 					callbackResultOff133 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff133))
 					ctx.FreeDesc(&d130)
 					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
@@ -91302,6 +91359,7 @@ func init_list() {
 					callbackArgs211[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray208) + 0}
 					var d210 JITValueDesc
 					callbackResultOff212 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff212))
 					ctx.FreeDesc(&d209)
 					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d12.Loc == LocLambdaTemplate && d12.Lambda != nil {
@@ -92612,6 +92670,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -93234,6 +93293,7 @@ func init_list() {
 					callbackArgs57[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray54) + 0}
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff58))
 					ctx.FreeDesc(&d55)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -94085,6 +94145,7 @@ func init_list() {
 					callbackArgs123[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray120) + 0}
 					var d122 JITValueDesc
 					callbackResultOff124 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff124))
 					ctx.FreeDesc(&d121)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
@@ -95228,6 +95289,7 @@ func init_list() {
 					callbackArgs55[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray52) + 0}
 					var d54 JITValueDesc
 					callbackResultOff56 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff56))
 					ctx.FreeDesc(&d53)
 					ctx.StabilizeDescAcrossNestedCall(&d20)
 					ctx.StabilizeDescAcrossNestedCall(&d51)
@@ -95593,6 +95655,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(40))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -96299,6 +96362,7 @@ func init_list() {
 					callbackArgs62[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray59) + 0}
 					var d61 JITValueDesc
 					callbackResultOff63 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff63))
 					ctx.FreeDesc(&d60)
 					ctx.StabilizeDescAcrossNestedCall(&d23)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
@@ -97232,6 +97296,7 @@ func init_list() {
 					callbackArgs37[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray34) + 0}
 					var d36 JITValueDesc
 					callbackResultOff38 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff38))
 					ctx.FreeDesc(&d35)
 					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -97963,6 +98028,7 @@ func init_list() {
 					callbackArgs38[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray35) + 16}
 					var d37 JITValueDesc
 					callbackResultOff39 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff39))
 					ctx.FreeDesc(&d36)
 					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -98844,6 +98910,7 @@ func init_list() {
 					callbackArgs45[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray42) + 0}
 					var d44 JITValueDesc
 					callbackResultOff46 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff46))
 					ctx.FreeDesc(&d43)
 					ctx.StabilizeDescAcrossNestedCall(&d1)
 					ctx.StabilizeDescAcrossNestedCall(&d14)
@@ -100668,6 +100735,7 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(56))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
@@ -102905,10 +102973,12 @@ func init_list() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(296))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				d2 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(24)}
 				_ = d2
 				d3 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(40)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(40), 3)
 				_ = d3
 				d4 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(64)}
 				_ = d4
@@ -102917,6 +102987,7 @@ func init_list() {
 				d6 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(96)}
 				_ = d6
 				d7 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(112)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(112), 3)
 				_ = d7
 				d8 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(136)}
 				_ = d8
@@ -102925,10 +102996,12 @@ func init_list() {
 				d10 := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: int32(phiBase0) + int32(168)}
 				_ = d10
 				d11 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(184)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(184), 3)
 				_ = d11
 				d12 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(208)}
 				_ = d12
 				d13 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(224)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(224), 3)
 				_ = d13
 				d14 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase0) + int32(248)}
 				_ = d14

@@ -526,6 +526,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	if len(args) > 2 {
 		numVars = int(ToInt(args[2]))
 	}
+	numVars = jitRequiredLocalSlots(body, numVars)
 	argExprs := make([]Scmer, 0, 16)
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), params}))
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), body}))
@@ -557,26 +558,37 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 			continue
 		}
 	}
-	outerIndices := jitLambdaOuterVarIndices(body)
+	outerCaptures := jitLambdaOuterCaptures(body)
 	if jitExpressionConsumesRuntimeEnv(body) {
-		seen := make(map[NthLocalVar]struct{}, len(outerIndices))
-		for _, index := range outerIndices {
-			seen[index] = struct{}{}
+		seen := make(map[jitLambdaOuterCapture]struct{}, len(outerCaptures))
+		for _, capture := range outerCaptures {
+			seen[capture] = struct{}{}
 		}
 		for index := 0; index < ctx.LocalSlotCount; index++ {
-			local := NthLocalVar(index)
-			if _, exists := seen[local]; !exists {
-				outerIndices = append(outerIndices, local)
+			capture := jitLambdaOuterCapture{index: NthLocalVar(index)}
+			if _, exists := seen[capture]; !exists {
+				outerCaptures = append(outerCaptures, capture)
 			}
 		}
 	}
-	for _, index := range outerIndices {
-		key := NewNthLocalVar(index)
+	for _, capture := range outerCaptures {
+		key := NewNthLocalVar(capture.index)
 		argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), key}))
-		argExprs = append(argExprs, key)
+		argExprs = append(argExprs, jitLambdaCaptureReference(capture.index, capture.depth))
 	}
-	if ctx.RecursiveLambdas && ctx.DefiningSymbol != "" && len(capturedSymbols)+len(outerIndices) != 0 &&
-		len(argExprs) == 3+2*(len(capturedSymbols)+len(outerIndices)) && !jitExpressionConsumesRuntimeEnv(body) {
+	needsBoundTemplate := false
+	for _, capture := range outerCaptures {
+		env := ctx.Env
+		for depth := capture.depth; depth > 0 && env != nil; depth-- {
+			env = env.Outer
+		}
+		if env == nil || int(capture.index) >= len(env.Numbered) {
+			needsBoundTemplate = true
+			break
+		}
+	}
+	if ctx.RecursiveLambdas && (ctx.DefiningSymbol != "" || needsBoundTemplate) && len(capturedSymbols)+len(outerCaptures) != 0 &&
+		len(argExprs) == 3+2*(len(capturedSymbols)+len(outerCaptures)) && !jitExpressionConsumesRuntimeEnv(body) {
 		plainParams := params.WithoutSourceInfo()
 		if plainParams.IsSlice() {
 			publicParams := plainParams.Slice()
@@ -589,12 +601,19 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 				symbolBindings[symbol] = NthLocalVar(len(templateParams))
 				templateParams = append(templateParams, NewSymbol("\x00jit-bound-symbol"))
 			}
-			outerBindings := make(map[NthLocalVar]NthLocalVar, len(outerIndices))
-			for _, index := range outerIndices {
-				outerBindings[index] = NthLocalVar(len(templateParams))
+			outerBindings := make(map[jitLambdaOuterCapture]NthLocalVar, len(outerCaptures))
+			for _, capture := range outerCaptures {
+				outerBindings[capture] = NthLocalVar(len(templateParams))
 				templateParams = append(templateParams, NewSymbol("\x00jit-bound-outer"))
 			}
 			boundBody := jitBindLambdaCaptures(body, symbolBindings, outerBindings)
+			if ctx.DefiningSymbol == "" {
+				template := jitBuildLambdaClosure(NewSlice(templateParams), boundBody, NewInt(int64(len(templateParams))))
+				template = jitCompileModeDeferred(true, template)
+				ctx.TrackImm(template)
+				builderArgs := append([]Scmer{template}, argExprs...)
+				return jitEmitGoVariadicCallFromExprs(ctx, jitBuildBoundCompiledLambdaClosure, builderArgs, ctx.SliceBase, result, false)
+			}
 			selfParam := NthLocalVar(len(templateParams))
 			templateParams = append(templateParams, NewSymbol("\x00jit-bound-self"))
 			boundBody = jitBindLambdaSelfValues(boundBody, ctx.DefiningSymbol, selfParam)

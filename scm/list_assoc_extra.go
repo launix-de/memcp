@@ -789,6 +789,7 @@ func init_list_assoc_extra() {
 					callbackArgs56[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray53) + 0}
 					var d55 JITValueDesc
 					callbackResultOff57 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff57))
 					ctx.FreeDesc(&d54)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -1851,6 +1852,7 @@ func init_list_assoc_extra() {
 					callbackArgs56[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray53) + 0}
 					var d55 JITValueDesc
 					callbackResultOff57 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff57))
 					ctx.FreeDesc(&d54)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -1892,6 +1894,7 @@ func init_list_assoc_extra() {
 					callbackArgs67[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray64) + 16}
 					var d66 JITValueDesc
 					callbackResultOff68 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff68))
 					ctx.FreeDesc(&d65)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
@@ -2963,6 +2966,7 @@ func init_list_assoc_extra() {
 					callbackArgs57[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray54) + 16}
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff58))
 					ctx.FreeDesc(&d55)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -3004,6 +3008,7 @@ func init_list_assoc_extra() {
 					callbackArgs68[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray65) + 16}
 					var d67 JITValueDesc
 					callbackResultOff69 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff69))
 					ctx.FreeDesc(&d66)
 					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
@@ -4011,6 +4016,7 @@ func init_list_assoc_extra() {
 					callbackArgs51[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray48) + 0}
 					var d50 JITValueDesc
 					callbackResultOff52 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff52))
 					ctx.FreeDesc(&d49)
 					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
@@ -4988,6 +4994,7 @@ func init_list_assoc_extra() {
 					callbackArgs52[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray49) + 16}
 					var d51 JITValueDesc
 					callbackResultOff53 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff53))
 					ctx.FreeDesc(&d50)
 					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
