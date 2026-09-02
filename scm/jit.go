@@ -225,12 +225,10 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 			panic("JIT: invalid hidden argument kind")
 		}
 	}
-	defer func() {
-		runtime.KeepAlive(args)
-		runtime.KeepAlive(jep)
-		runtime.KeepAlive(jep.Owner)
-	}()
-	result = callJIT(jep.Native, args...)
+	result = jep.Native(args...)
+	runtime.KeepAlive(args)
+	runtime.KeepAlive(jep)
+	runtime.KeepAlive(jep.Owner)
 	return result
 }
 

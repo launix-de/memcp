@@ -20,7 +20,6 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 package scm
 
 import (
-	"runtime"
 	"runtime/jit"
 	"unsafe"
 )
@@ -86,23 +85,4 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 		}
 	}
 	handle.AddStackMaps(runtimeMaps...)
-}
-
-// jitWrapCallTarget returns fn unchanged — runtime/jit handles unwinding
-// natively, so no trampoline is needed. Zero overhead.
-func jitWrapCallTarget(fn func(...Scmer) Scmer) func(...Scmer) Scmer {
-	return fn
-}
-
-// callJIT invokes a JIT-compiled function directly. With runtime/jit,
-// panics propagate naturally through the unwinder.
-//
-//go:noinline
-func callJIT(native func(...Scmer) Scmer, args ...Scmer) Scmer {
-	result := native(args...)
-	// Keep an ordinary Go frame between independently compiled JIT entries.
-	// The runtime currently resolves one registered foreign frame at a time;
-	// retaining this bridge also gives nested calls an unambiguous Go caller PC.
-	runtime.KeepAlive(native)
-	return result
 }
