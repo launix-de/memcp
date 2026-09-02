@@ -469,14 +469,7 @@ func jitApplyCallableSlice(callable, envValue Scmer, args []Scmer) Scmer {
 	return ApplyEx(callable, args, envValue.Any().(*Env))
 }
 
-// jitCallSelfCode preserves a Go unwind frame around a non-tail recursive JIT
-// call. Tail recursion stays inside the generated entry point as a direct jump.
-func jitCallSelfCode(code uintptr, args []Scmer) Scmer {
-	fnData := unsafe.Pointer(&struct{ *byte }{(*byte)(unsafe.Pointer(code))})
-	native := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fnData))
-	return callJIT(native, args...)
-}
-
+//go:noinline
 func jitInvokeCallback1(callback, arg0 Scmer) Scmer {
 	return Apply(callback, arg0)
 }
@@ -2003,17 +1996,16 @@ func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result
 
 	argsPtr := ctx.AllocReg()
 	argsLen := ctx.AllocRegExcept(argsPtr)
-	argsCap := ctx.AllocRegExcept(argsPtr, argsLen)
-	argsSlice := JITValueDesc{Loc: LocRegTriple, Type: JITTypeUnknown, Reg: argsPtr, Reg2: argsLen, Reg3: argsCap}
+	argsSlice := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: argsPtr, Reg2: argsLen}
 	ctx.BindReg(argsPtr, &argsSlice)
 	ctx.BindReg(argsLen, &argsSlice)
-	ctx.BindReg(argsCap, &argsSlice)
 	ctx.EmitLeaRegMem(argsPtr, ctx.StackReg, argsOff)
 	ctx.EmitMovRegImm64(argsLen, uint64(ctx.SelfParamCount))
-	ctx.EmitMovRegImm64(argsCap, uint64(ctx.SelfParamCount))
-	code := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(ctx.Start)))}
+	fnData := unsafe.Pointer(&struct{ *byte }{(*byte)(ctx.Start)})
+	native := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fnData))
+	ctx.ConstRoots = append(ctx.ConstRoots, fnData)
 	target := jitEnsureResultPair(ctx, result)
-	target = ctx.EmitGoCallScalarInto(GoFuncAddr(jitCallSelfCode), []JITValueDesc{code, argsSlice}, target)
+	target = ctx.EmitGoCallVariadic(native, argsSlice, target)
 	ctx.FreeDesc(&argsSlice)
 	target.Type = JITTypeUnknown
 	ctx.BindReg(target.Reg, &target)
