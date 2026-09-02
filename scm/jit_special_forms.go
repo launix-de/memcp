@@ -623,7 +623,9 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 			}
 		} else {
 			if !jitExpressionConsumesRuntimeEnv(body) {
-				builder = jitBuildCompiledLambdaClosure
+				builder = jitBuildCompiledLambdaClosureWithRuntimeEnv
+				argExprs = argExprs[:3]
+				argExprs = append(argExprs, jitRuntimeCaptureArgExprs(ctx)...)
 			}
 		}
 	}

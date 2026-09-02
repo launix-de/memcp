@@ -1496,15 +1496,27 @@ func jitLambdaOuterVarIndices(body Scmer) []NthLocalVar {
 // native parameters. The closure builder binds those parameters once when the
 // lambda value is created, so its machine code can be compiled with its
 // enclosing procedure instead of invoking the compiler from the hot path.
+func jitLambdaCaptureReference(index NthLocalVar, depth int) Scmer {
+	local := NewNthLocalVar(index)
+	if depth == 0 {
+		return local
+	}
+	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), local})
+}
+
 func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[NthLocalVar]NthLocalVar) Scmer {
+	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, 0)
+}
+
+func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[NthLocalVar]NthLocalVar, depth int) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = jitBindLambdaCaptures(source.value, symbols, outerVars)
+		source.value = jitBindLambdaCapturesAtDepth(source.value, symbols, outerVars, depth)
 		return NewSourceInfo(source)
 	}
 	if expr.IsSymbol() {
 		if param, exists := symbols[expr.Symbol()]; exists {
-			return NewNthLocalVar(param)
+			return jitLambdaCaptureReference(param, depth)
 		}
 		return expr
 	}
@@ -1529,19 +1541,31 @@ func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars
 		}
 		if string(head) == "lambda" && len(items) >= 3 {
 			bound := append([]Scmer(nil), items...)
-			bound[2] = jitBindLambdaCaptures(items[2], symbols, outerVars)
+			innerSymbols := symbols
+			if len(symbols) != 0 {
+				innerSymbols = make(map[Symbol]NthLocalVar, len(symbols))
+				for symbol, index := range symbols {
+					innerSymbols[symbol] = index
+				}
+				params := make(map[Symbol]struct{})
+				jitAddLambdaBoundParams(items[1], params)
+				for symbol := range params {
+					delete(innerSymbols, symbol)
+				}
+			}
+			bound[2] = jitBindLambdaCapturesAtDepth(items[2], innerSymbols, outerVars, depth+1)
 			return NewSlice(bound)
 		}
 		if (string(head) == "define" || string(head) == "set" || string(head) == "setN") && len(items) == 3 {
 			bound := append([]Scmer(nil), items...)
-			bound[2] = jitBindLambdaCaptures(items[2], symbols, outerVars)
+			bound[2] = jitBindLambdaCapturesAtDepth(items[2], symbols, outerVars, depth)
 			return NewSlice(bound)
 		}
 	}
 	changed := false
 	bound := make([]Scmer, len(items))
 	for index, item := range items {
-		bound[index] = jitBindLambdaCaptures(item, symbols, outerVars)
+		bound[index] = jitBindLambdaCapturesAtDepth(item, symbols, outerVars, depth)
 		changed = changed || bound[index] != item
 	}
 	if !changed {
@@ -1666,6 +1690,23 @@ func jitBuildLambdaClosure(args ...Scmer) Scmer {
 
 func jitBuildCompiledLambdaClosure(args ...Scmer) Scmer {
 	return jitCompile(jitBuildLambdaClosure(args...))
+}
+
+// jitBuildCompiledLambdaClosureWithRuntimeEnv preserves the exact lexical
+// frame chain for the uncommon case where recursive compilation cannot lower
+// an inner lambda. Compiled closures read their inputs directly; an interpreter
+// fallback still needs the original outer depths to remain meaningful.
+func jitBuildCompiledLambdaClosureWithRuntimeEnv(args ...Scmer) Scmer {
+	if len(args) < 4 {
+		panic("jit: runtime-bound lambda builder expects params, body, numVars and environment")
+	}
+	value := NewProcStruct(Proc{
+		Params:  args[0],
+		Body:    args[1],
+		En:      jitRuntimeEnvFromCaptures(args[3:]),
+		NumVars: int(ToInt(args[2])),
+	})
+	return jitCompile(value)
 }
 
 // jitBuildNamedCompiledLambdaClosure makes a define-bound lambda visible in
