@@ -46,6 +46,36 @@ setup:
         5000)
 
 test_cases:
+  - name: "PostgreSQL parser division of native integers returns a fractional value"
+    sql: "SELECT LENGTH('abcde') / LENGTH('ab') AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 2.5
+
+  - name: "PostgreSQL parser exact native integer division remains floating-point"
+    sql: "SELECT JSON_TYPE(JSON_EXTRACT(JSON_ARRAY(LENGTH('abcd') / LENGTH('ab')), '$[0]')) AS result_type"
+    expect:
+      rows: 1
+      data:
+        - result_type: "DOUBLE"
+
+  - name: "PostgreSQL parser multiplicative operators are left associative"
+    sql: "SELECT 20 / 5 / 2 AS divided, 20 / 5 * 2 AS mixed"
+    expect:
+      rows: 1
+      data:
+        - divided: 2
+          mixed: 8
+
+  - name: "PostgreSQL parser supports left-associative DIV"
+    sql: "SELECT 20 DIV 3 DIV 2 AS result, JSON_TYPE(JSON_EXTRACT(JSON_ARRAY(5 DIV 2), '$[0]')) AS result_type"
+    expect:
+      rows: 1
+      data:
+        - result: 3
+          result_type: "INTEGER"
+
   - name: "Unaliased aggregates use PostgreSQL result column names"
     sql: "SELECT COUNT(val), SUM(val), AVG(val), MIN(val), MAX(val) FROM psql_data"
     expect:

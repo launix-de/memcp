@@ -48,6 +48,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(atom "RTRIM" true)
 	(atom "BETWEEN" true)
 	(atom "INTERVAL" true)
+	(atom "DIV" true)
 )))
 (define psql_identifier_quoted (parser '("\"" (define id (regex "(?:[^\"])+" false false)) "\"") (sql_unescape id))) /* with double quote */
 (define psql_identifier (parser (define x (or psql_identifier_unquoted psql_identifier_quoted)) x))
@@ -106,6 +107,13 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		'("sub" value) (psql_sub_expr acc value)
 		'("date_add" value unit) '('date_add acc value unit)
 		'("date_sub" value unit) '('date_sub acc value unit))))
+
+(define psql_fold_multiplicative_term (lambda (acc term)
+	(match term
+		'("multiply" value) '((quote *) acc value)
+		'("divide" value) '((quote /) acc value)
+		'("intdiv" value) '((quote intdiv) acc value)
+		'("modulo" value) (psql_mod_expr acc value))))
 
 (define psql_comparison_expr (lambda (op a b)
 	(match op
@@ -256,12 +264,18 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		)) empty true))
 	) (reduce terms psql_fold_additive_term a)))
 
-	(define psql_expression4 (parser (or
-		(parser '((define a psql_expression5) "*" (define b psql_expression4)) '((quote *) a b))
-		(parser '((define a psql_expression5) "/" (define b psql_expression4)) '((quote /) a b))
-		(parser '((define a psql_expression5) "%" (define b psql_expression4)) (psql_mod_expr a b))
-		psql_expression5
-	)))
+	(define psql_expression4 (parser '(
+		(define a psql_expression5)
+		(define terms (* (parser '(
+			(define op (or
+				(parser "*" "multiply")
+				(parser "/" "divide")
+				(parser (atom "DIV" true) "intdiv")
+				(parser "%" "modulo")
+			))
+			(define value psql_expression5)
+		) (list op value)) empty true))
+	) (reduce terms psql_fold_multiplicative_term a)))
 
 	(define psql_expression5 (parser (or
 		/* unary minus: -(expr) */

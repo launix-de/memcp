@@ -1,3 +1,10 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
 # Basic SQL Operations Test Suite
 # Fundamental SQL functionality: arithmetic, comparisons, literals, basic expressions
 
@@ -45,6 +52,52 @@ test_cases:
       rows: 1
       data:
         - result: 5
+
+  - name: "Division of native integers returns a fractional value"
+    sql: "SELECT LENGTH('abcde') / LENGTH('ab') AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 2.5
+
+  - name: "Exact division of native integers retains floating-point type"
+    sql: "SELECT JSON_TYPE(JSON_EXTRACT(JSON_ARRAY(LENGTH('abcd') / LENGTH('ab')), '$[0]')) AS result_type"
+    expect:
+      rows: 1
+      data:
+        - result_type: "DOUBLE"
+
+  - name: "Multiplicative operators are left associative"
+    sql: "SELECT 20 / 5 / 2 AS divided, 20 / 5 * 2 AS mixed"
+    expect:
+      rows: 1
+      data:
+        - divided: 2
+          mixed: 8
+
+  - name: "DIV truncates native integer division toward zero"
+    sql: "SELECT LENGTH('abcde') DIV LENGTH('ab') AS positive_result, (0 - LENGTH('abcde')) DIV LENGTH('ab') AS negative_result, JSON_TYPE(JSON_EXTRACT(JSON_ARRAY(LENGTH('abcde') DIV LENGTH('ab')), '$[0]')) AS result_type"
+    expect:
+      rows: 1
+      data:
+        - positive_result: 2
+          negative_result: -2
+          result_type: "INTEGER"
+
+  - name: "DIV is left associative"
+    sql: "SELECT 20 DIV 3 DIV 2 AS result"
+    expect:
+      rows: 1
+      data:
+        - result: 3
+
+  - name: "DIV by zero and NULL return NULL"
+    sql: "SELECT 5 DIV 0 AS zero_result, 5 DIV NULL AS null_result"
+    expect:
+      rows: 1
+      data:
+        - zero_result: null
+          null_result: null
 
   - name: "Basic modulo"
     sql: "SELECT 17 % 5 AS result"
