@@ -380,10 +380,16 @@ func (emitter *jitParserEmitter) emitBind(node *jitParserNode, rule int, success
 
 func (emitter *jitParserEmitter) emitCapture(node *jitParserNode, rule int, success, failure JITLabel) {
 	emitter.pushCheckpoint()
+	skipped := emitter.ctx.ReserveLabel()
+	emitter.emitSkip(rule, skipped)
+	emitter.ctx.MarkLabel(skipped)
+	start := emitter.loadPosition()
+	emitter.emitVoid(jitParserPushPositionNative, emitter.state, start)
+	emitter.ctx.FreeDesc(&start)
 	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[0], rule, accepted, rejected)
 	emitter.ctx.MarkLabel(accepted)
-	start := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCheckpointPositionNative), []JITValueDesc{emitter.state}, 1)
+	start = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserPopPositionNative), []JITValueDesc{emitter.state}, 1)
 	end := emitter.loadPosition()
 	emitter.emitVoid(jitParserCaptureValueNative, emitter.state, emitter.input, start, end)
 	emitter.ctx.FreeDesc(&start)
