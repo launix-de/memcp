@@ -108,18 +108,26 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
+	resultRegsProtected := result.Loc == scm.LocRegPair
+	if resultRegsProtected {
+		ctx.ProtectReg(result.Reg)
+		ctx.ProtectReg(result.Reg2)
+	}
 	r0 := ctx.AllocReg()
 	r1 := ctx.AllocRegExcept(r0)
 	lbl0 := ctx.ReserveLabel()
 	bbpos_0_0 := int32(-1)
 	_ = bbpos_0_0
 	lbl1 := ctx.ReserveLabel()
+	_ = lbl1
 	bbpos_0_1 := int32(-1)
 	_ = bbpos_0_1
 	lbl2 := ctx.ReserveLabel()
+	_ = lbl2
 	bbpos_0_2 := int32(-1)
 	_ = bbpos_0_2
 	lbl3 := ctx.ReserveLabel()
+	_ = lbl3
 	bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 		if !ps.General {
 			if bbs[0].VisitCount >= 0 {
@@ -391,6 +399,10 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 	ctx.ResolveFixups()
 	if idxPinned {
 		ctx.UnprotectReg(idxPinnedReg)
+	}
+	if resultRegsProtected {
+		ctx.UnprotectReg(result.Reg2)
+		ctx.UnprotectReg(result.Reg)
 	}
 	return result
 }

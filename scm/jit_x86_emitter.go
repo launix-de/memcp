@@ -165,6 +165,18 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	frameFixup := ctx.EmitSubRSP32Fixup() // sub rsp, <patched>
 
 	ctx.emitMovRegReg(RegR12, RegRAX) // save incoming args slice
+	// Safepoint maps are path-sensitive, but a shared block may name a stack
+	// home whose producer belongs to a branch that was not taken. Clear the
+	// reusable goroutine-stack frame before entering the body so such a slot is
+	// nil instead of retaining a pointer from an older invocation. REP STOSQ is
+	// the x86-specific compact form; future architectures provide their own
+	// prolog sequence while common lowering remains register-bank based.
+	ctx.emitMovRegReg(RegRDI, RegRSP)
+	ctx.emitBytes(0x31, 0xC0) // xor eax, eax
+	ctx.emitByte(0xB9)        // mov ecx, <frame words>
+	frameWordsFixup := ctx.Ptr
+	ctx.emitU32(0)
+	ctx.emitBytes(0xF3, 0x48, 0xAB) // rep stosq
 	useInputFrame := proc != nil && proc.NumberedOnly && numVars == inputArgCount && !ctx.HasSelfLoop
 	// Allocate local vars via AllocStack.
 	if numVars > 0 && !useInputFrame {
@@ -290,6 +302,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	frameSize := ctx.MaxBPOffset + ctx.MaxSpillOffset
 	frameSize = (frameSize + 15) &^ 15
 	ctx.PatchInt32(frameFixup, frameSize)
+	ctx.PatchInt32(frameWordsFixup, frameSize/8)
 	arenaOffset := 0
 	if buf.reservation != nil {
 		arenaOffset = buf.reservation.offset
@@ -1776,6 +1789,9 @@ func (ctx *JITContext) regHoldsPointer(r Reg) bool {
 func (ctx *JITContext) recordSafepoint(transientRoots []int32) {
 	roots := make([]jitStackRoot, 0, len(ctx.StackRoots)+len(transientRoots))
 	for root := range ctx.StackRoots {
+		if root.base == jitStackRootFrameSP && root.offset < -ctx.DynamicSP {
+			panic(fmt.Sprintf("jit: stale dynamic stack root raw=%d dynamic=%d", root.offset, ctx.DynamicSP))
+		}
 		roots = append(roots, root)
 	}
 	for _, offset := range transientRoots {
@@ -1803,9 +1819,9 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 		}
 		frameWords := uintptr(frameBytes/8 + 1) // include saved RBP
 		pointerMap := make([]byte, (frameWords+7)/8)
-		mark := func(offset int32) {
+		mark := func(offset int32, root jitStackRoot) {
 			if offset < 0 || offset%8 != 0 || offset > frameBytes {
-				panic("jit: pointer root outside safepoint frame")
+				panic(fmt.Sprintf("jit: pointer root %d outside safepoint frame %d (dynamic=%d, base=%d, raw=%d)", offset, frameBytes, safepoint.dynamicSP, root.base, root.offset))
 			}
 			word := uintptr(offset / 8)
 			pointerMap[word/8] |= 1 << (word % 8)
@@ -1813,16 +1829,16 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 		for _, root := range safepoint.roots {
 			switch root.base {
 			case jitStackRootFrameSP:
-				mark(safepoint.dynamicSP + root.offset)
+				mark(safepoint.dynamicSP+root.offset, root)
 			case jitStackRootFrameBP:
-				mark(safepoint.dynamicSP + frameSize + root.offset)
+				mark(safepoint.dynamicSP+frameSize+root.offset, root)
 			case jitStackRootCallSP:
-				mark(root.offset)
+				mark(root.offset, root)
 			default:
 				panic("jit: invalid stack root base")
 			}
 		}
-		mark(frameBytes) // saved Go RBP must move with a growing goroutine stack
+		mark(frameBytes, jitStackRoot{}) // saved Go RBP must move with a growing goroutine stack
 		maps[i] = jitStackMap{
 			pcOffset:   uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
 			frameWords: frameWords,
@@ -1865,10 +1881,13 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 		panic(fmt.Sprintf("jit: variadic argslice must be LocRegPair/LocStackPair (got %d)", arg.Loc))
 	}
 
-	target := result
-	targetHasRegs := target.Loc == LocRegPair
+	requestedTarget := result
+	targetHasRegs := requestedTarget.Loc == LocRegPair
+	target := requestedTarget
 	if targetHasRegs {
-		target.Type = JITTypeUnknown
+		targetOff := ctx.AllocSpill(16)
+		target = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: targetOff, Rooted: true}
+		ctx.setStackPointer(jitStackRootFrameBP, targetOff, true)
 	} else if target.Loc == LocStackPair {
 		target.Type = JITTypeUnknown
 	} else {
@@ -1912,7 +1931,7 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 			continue
 		}
 		if targetHasRegs {
-			if r == target.Reg || r == target.Reg2 {
+			if r == requestedTarget.Reg || r == requestedTarget.Reg2 {
 				continue
 			}
 		}
@@ -1975,16 +1994,12 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	ctx.EmitAddRSP32(int32(jitGoSpillBytes + 16))
 
 	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
-	if targetHasRegs {
-		ctx.EmitMovPairToResult(&callResult, &target)
-	} else {
-		base := ctx.StackReg
-		if target.StackOff < 0 {
-			base = ctx.FrameReg
-		}
-		ctx.EmitStoreRegMem(RegRAX, base, target.StackOff)
-		ctx.EmitStoreRegMem(RegRBX, base, target.StackOff+8)
+	base := ctx.StackReg
+	if target.StackOff < 0 {
+		base = ctx.FrameReg
 	}
+	ctx.EmitStoreRegMem(callResult.Reg, base, target.StackOff)
+	ctx.EmitStoreRegMem(callResult.Reg2, base, target.StackOff+8)
 	for i, r := range liveRegs {
 		ctx.EmitMovRegMem(r, RegRSP, int32(i*8))
 	}
@@ -1992,8 +2007,12 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 		ctx.EmitAddRSP32(frameBytes)
 	}
 	if targetHasRegs {
-		ctx.BindReg(target.Reg, &target)
-		ctx.BindReg(target.Reg2, &target)
+		ctx.EmitMovRegMem(requestedTarget.Reg, base, target.StackOff)
+		ctx.EmitMovRegMem(requestedTarget.Reg2, base, target.StackOff+8)
+		requestedTarget.Type = JITTypeUnknown
+		ctx.BindReg(requestedTarget.Reg, &requestedTarget)
+		ctx.BindReg(requestedTarget.Reg2, &requestedTarget)
+		target = requestedTarget
 	}
 
 	if ctx.SliceBaseTracksRSP && ctx.SliceBase != RegRSP {
@@ -2176,6 +2195,19 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 		base := RegRSP
 		if desc.StackOff < 0 {
 			base = RegRBP
+		}
+		if base == RegRSP && desc.StackOff == disp {
+			return
+		}
+		// Stack allocation and phi placement may give the source and destination
+		// overlapping 16-byte ranges. Copy backwards when the destination starts
+		// inside the source; all other layouts are safe in forward order.
+		if base == RegRSP && disp > desc.StackOff && disp < desc.StackOff+16 {
+			ctx.EmitMovRegMem(RegR11, base, desc.StackOff+8)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, disp+8)
+			ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, disp)
+			return
 		}
 		ctx.EmitMovRegMem(RegR11, base, desc.StackOff)
 		ctx.EmitStoreRegMem(RegR11, RegRSP, disp)

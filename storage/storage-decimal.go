@@ -354,27 +354,38 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
+	resultRegsProtected := result.Loc == scm.LocRegPair
+	if resultRegsProtected {
+		ctx.ProtectReg(result.Reg)
+		ctx.ProtectReg(result.Reg2)
+	}
 	r0 := ctx.AllocReg()
 	r1 := ctx.AllocRegExcept(r0)
 	lbl0 := ctx.ReserveLabel()
 	bbpos_0_0 := int32(-1)
 	_ = bbpos_0_0
 	lbl1 := ctx.ReserveLabel()
+	_ = lbl1
 	bbpos_0_1 := int32(-1)
 	_ = bbpos_0_1
 	lbl2 := ctx.ReserveLabel()
+	_ = lbl2
 	bbpos_0_2 := int32(-1)
 	_ = bbpos_0_2
 	lbl3 := ctx.ReserveLabel()
+	_ = lbl3
 	bbpos_0_3 := int32(-1)
 	_ = bbpos_0_3
 	lbl4 := ctx.ReserveLabel()
+	_ = lbl4
 	bbpos_0_4 := int32(-1)
 	_ = bbpos_0_4
 	lbl5 := ctx.ReserveLabel()
+	_ = lbl5
 	bbpos_0_5 := int32(-1)
 	_ = bbpos_0_5
 	lbl6 := ctx.ReserveLabel()
+	_ = lbl6
 	bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 		if !ps.General {
 			if bbs[0].VisitCount >= 0 {
@@ -405,11 +416,19 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		lbl7 := ctx.ReserveLabel()
 		bbpos_1_0 := int32(-1)
 		_ = bbpos_1_0
+		lbl8 := ctx.ReserveLabel()
+		_ = lbl8
 		bbpos_1_1 := int32(-1)
 		_ = bbpos_1_1
+		lbl9 := ctx.ReserveLabel()
+		_ = lbl9
 		bbpos_1_2 := int32(-1)
 		_ = bbpos_1_2
+		lbl10 := ctx.ReserveLabel()
+		_ = lbl10
 		bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl8)
+		ctx.ResolveFixups()
 		d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 		ctx.ReclaimUntrackedRegs()
 		ctx.ReclaimUntrackedRegs()
@@ -459,10 +478,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d3)
 		ctx.EnsureDesc(&d5)
-		ctx.EnsureDesc(&d3)
-		ctx.ProtectReg(d3.Reg)
-		ctx.EnsureDesc(&d5)
-		ctx.UnprotectReg(d3.Reg)
+		ctx.EnsureDescsTogether(&d3, &d5)
 		var d6 scm.JITValueDesc
 		if d3.Loc == scm.LocImm && d5.Loc == scm.LocImm {
 			d6 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d3.Imm.Int() * d5.Imm.Int())}
@@ -640,10 +656,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d13)
 		ctx.EnsureDesc(&d14)
-		ctx.EnsureDesc(&d13)
-		ctx.ProtectReg(d13.Reg)
-		ctx.EnsureDesc(&d14)
-		ctx.UnprotectReg(d13.Reg)
+		ctx.EnsureDescsTogether(&d13, &d14)
 		var d15 scm.JITValueDesc
 		if d13.Loc == scm.LocImm && d14.Loc == scm.LocImm {
 			d15 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d13.Imm.Int() + d14.Imm.Int())}
@@ -704,16 +717,14 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		if d17.Loc != scm.LocImm && d17.Loc != scm.LocReg {
 			panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
 		}
-		lbl8 := ctx.ReserveLabel()
-		lbl9 := ctx.ReserveLabel()
-		lbl10 := ctx.ReserveLabel()
 		lbl11 := ctx.ReserveLabel()
+		lbl12 := ctx.ReserveLabel()
 		if d17.Loc == scm.LocImm {
 			if d17.Imm.Bool() {
-				ctx.MarkLabel(lbl10)
-				ctx.EmitJmp(lbl8)
-			} else {
 				ctx.MarkLabel(lbl11)
+				ctx.EmitJmp(lbl9)
+			} else {
+				ctx.MarkLabel(lbl12)
 				ctx.SyncDesc(&d12)
 				if d12.Loc == scm.LocReg {
 					ctx.ProtectReg(d12.Reg)
@@ -733,15 +744,15 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 					ctx.UnprotectReg(d12.Reg)
 					ctx.UnprotectReg(d12.Reg2)
 				}
-				ctx.EmitJmp(lbl9)
+				ctx.EmitJmp(lbl10)
 			}
 		} else {
 			ctx.EmitCmpRegImm32(d17.Reg, 0)
-			ctx.EmitJump(scm.CondNotEqual, lbl10)
-			ctx.EmitJmp(lbl11)
-			ctx.MarkLabel(lbl10)
-			ctx.EmitJmp(lbl8)
+			ctx.EmitJump(scm.CondNotEqual, lbl11)
+			ctx.EmitJmp(lbl12)
 			ctx.MarkLabel(lbl11)
+			ctx.EmitJmp(lbl9)
+			ctx.MarkLabel(lbl12)
 			ctx.SyncDesc(&d12)
 			if d12.Loc == scm.LocReg {
 				ctx.ProtectReg(d12.Reg)
@@ -761,11 +772,11 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 				ctx.UnprotectReg(d12.Reg)
 				ctx.UnprotectReg(d12.Reg2)
 			}
-			ctx.EmitJmp(lbl9)
+			ctx.EmitJmp(lbl10)
 		}
 		ctx.FreeDesc(&d16)
 		bbpos_1_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-		ctx.MarkLabel(lbl9)
+		ctx.MarkLabel(lbl10)
 		ctx.ResolveFixups()
 		d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 		ctx.ReclaimUntrackedRegs()
@@ -789,10 +800,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.ReclaimUntrackedRegs()
 		d21 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 		ctx.EnsureDesc(&d20)
-		ctx.EnsureDesc(&d21)
-		ctx.ProtectReg(d21.Reg)
-		ctx.EnsureDesc(&d20)
-		ctx.UnprotectReg(d21.Reg)
+		ctx.EnsureDescsTogether(&d21, &d20)
 		var d22 scm.JITValueDesc
 		if d21.Loc == scm.LocImm && d20.Loc == scm.LocImm {
 			d22 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d21.Imm.Int() - d20.Imm.Int())}
@@ -880,7 +888,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		}
 		ctx.EmitJmp(lbl7)
 		bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-		ctx.MarkLabel(lbl8)
+		ctx.MarkLabel(lbl9)
 		ctx.ResolveFixups()
 		d2 = scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(0)}
 		ctx.ReclaimUntrackedRegs()
@@ -948,10 +956,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.ReclaimUntrackedRegs()
 		d29 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(64)}
 		ctx.EnsureDesc(&d28)
-		ctx.EnsureDesc(&d29)
-		ctx.ProtectReg(d29.Reg)
-		ctx.EnsureDesc(&d28)
-		ctx.UnprotectReg(d29.Reg)
+		ctx.EnsureDescsTogether(&d29, &d28)
 		var d30 scm.JITValueDesc
 		if d29.Loc == scm.LocImm && d28.Loc == scm.LocImm {
 			d30 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d29.Imm.Int() - d28.Imm.Int())}
@@ -1075,7 +1080,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.StabilizeDescForControlFlow(&d32)
 		ctx.FreeDesc(&d31)
 		ctx.ReclaimUntrackedRegs()
-		ctx.EmitJmp(lbl9)
+		ctx.EmitJmp(lbl10)
 		ctx.MarkLabel(lbl7)
 		d33 = scm.JITValueDesc{Loc: scm.LocReg, Reg: r27}
 		ctx.BindReg(r27, &d33)
@@ -1189,14 +1194,14 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ps.General = true
 			return bbs[0].RenderPS(ps)
 		}
-		lbl12 := ctx.ReserveLabel()
 		lbl13 := ctx.ReserveLabel()
+		lbl14 := ctx.ReserveLabel()
 		ctx.EmitCmpRegImm32(d35.Reg, 0)
-		ctx.EmitJump(scm.CondNotEqual, lbl12)
-		ctx.EmitJmp(lbl13)
-		ctx.MarkLabel(lbl12)
-		ctx.EmitJmp(lbl4)
+		ctx.EmitJump(scm.CondNotEqual, lbl13)
+		ctx.EmitJmp(lbl14)
 		ctx.MarkLabel(lbl13)
+		ctx.EmitJmp(lbl4)
+		ctx.MarkLabel(lbl14)
 		ctx.EmitJmp(lbl3)
 		ps38 := scm.PhiState{General: true}
 		ps38.OverlayValues = make([]scm.JITValueDesc, 36)
@@ -1660,10 +1665,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		}
 		ctx.EnsureDesc(&d78)
 		ctx.EnsureDesc(&d79)
-		ctx.EnsureDesc(&d78)
-		ctx.ProtectReg(d78.Reg)
-		ctx.EnsureDesc(&d79)
-		ctx.UnprotectReg(d78.Reg)
+		ctx.EnsureDescsTogether(&d78, &d79)
 		var d80 scm.JITValueDesc
 		if d78.Loc == scm.LocImm && d79.Loc == scm.LocImm {
 			d80 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d78.Imm.Int() + d79.Imm.Int())}
@@ -1839,14 +1841,14 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ps.General = true
 			return bbs[2].RenderPS(ps)
 		}
-		lbl14 := ctx.ReserveLabel()
 		lbl15 := ctx.ReserveLabel()
+		lbl16 := ctx.ReserveLabel()
 		ctx.EmitCmpRegImm32(d83.Reg, 0)
-		ctx.EmitJump(scm.CondNotEqual, lbl14)
-		ctx.EmitJmp(lbl15)
-		ctx.MarkLabel(lbl14)
-		ctx.EmitJmp(lbl5)
+		ctx.EmitJump(scm.CondNotEqual, lbl15)
+		ctx.EmitJmp(lbl16)
 		ctx.MarkLabel(lbl15)
+		ctx.EmitJmp(lbl5)
+		ctx.MarkLabel(lbl16)
 		ctx.EmitJmp(lbl6)
 		ps86 := scm.PhiState{General: true}
 		ps86.OverlayValues = make([]scm.JITValueDesc, 84)
@@ -2201,10 +2203,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		}
 		ctx.EnsureDesc(&d33)
 		ctx.EnsureDesc(&d132)
-		ctx.EnsureDesc(&d33)
-		ctx.EnsureDesc(&d132)
-		ctx.EnsureDesc(&d33)
-		ctx.EnsureDesc(&d132)
+		ctx.EnsureDescsTogether(&d33, &d132)
 		var d133 scm.JITValueDesc
 		if d33.Loc == scm.LocImm && d132.Loc == scm.LocImm {
 			d133 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(uint64(d33.Imm.Int()) == uint64(d132.Imm.Int()))}
@@ -2349,14 +2348,14 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 			ps.General = true
 			return bbs[3].RenderPS(ps)
 		}
-		lbl16 := ctx.ReserveLabel()
 		lbl17 := ctx.ReserveLabel()
+		lbl18 := ctx.ReserveLabel()
 		ctx.EmitCmpRegImm32(d134.Reg, 0)
-		ctx.EmitJump(scm.CondNotEqual, lbl16)
-		ctx.EmitJmp(lbl17)
-		ctx.MarkLabel(lbl16)
-		ctx.EmitJmp(lbl2)
+		ctx.EmitJump(scm.CondNotEqual, lbl17)
+		ctx.EmitJmp(lbl18)
 		ctx.MarkLabel(lbl17)
+		ctx.EmitJmp(lbl2)
+		ctx.MarkLabel(lbl18)
 		ctx.EmitJmp(lbl3)
 		ps137 := scm.PhiState{General: true}
 		ps137.OverlayValues = make([]scm.JITValueDesc, 135)
@@ -2735,10 +2734,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.BindReg(r54, &d186)
 		ctx.EnsureDesc(&d80)
 		ctx.EnsureDesc(&d186)
-		ctx.EnsureDesc(&d80)
-		ctx.ProtectReg(d80.Reg)
-		ctx.EnsureDesc(&d186)
-		ctx.UnprotectReg(d80.Reg)
+		ctx.EnsureDescsTogether(&d80, &d186)
 		var d187 scm.JITValueDesc
 		if d80.Loc == scm.LocImm && d186.Loc == scm.LocImm {
 			d187 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d80.Imm.Int() * d186.Imm.Int())}
@@ -3011,8 +3007,7 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 		ctx.FreeDesc(&d191)
 		ctx.EnsureDesc(&d189)
 		ctx.EnsureDesc(&d192)
-		ctx.EnsureDesc(&d189)
-		ctx.EnsureDesc(&d192)
+		ctx.EnsureDescsTogether(&d189, &d192)
 		var d193 scm.JITValueDesc
 		if d189.Loc == scm.LocImm && d192.Loc == scm.LocImm {
 			d193 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagFloat, Imm: scm.NewFloat(d189.Imm.Float() * d192.Imm.Float())}
@@ -3068,6 +3063,10 @@ func (s *StorageDecimal) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, 
 	ctx.ResolveFixups()
 	if idxPinned {
 		ctx.UnprotectReg(idxPinnedReg)
+	}
+	if resultRegsProtected {
+		ctx.UnprotectReg(result.Reg2)
+		ctx.UnprotectReg(result.Reg)
 	}
 	return result
 }

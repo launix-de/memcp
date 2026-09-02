@@ -83,15 +83,15 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 	deferredProcs := make(map[Symbol]struct{})
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
+		definitionSymbol, hasDefinition := topLevelDefinitionSymbol(code)
 		Validate(code, "any")
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
 		if compileProcedures && expression.GetTag() == tagProc {
-			sym, definition := topLevelDefinitionSymbol(code)
-			if definition {
-				compiled, entry, selected := jitCompileImportProc(sym, expression)
+			if hasDefinition {
+				compiled, entry, selected := jitCompileImportProc(definitionSymbol, expression)
 				if entry == nil && jitExpressionContainsParser(expression.Proc().Body) {
-					deferredProcs[sym] = struct{}{}
+					deferredProcs[definitionSymbol] = struct{}{}
 				}
 				if selected {
 					expression = compiled
@@ -99,7 +99,7 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 					if target.Vars == nil {
 						target.Vars = make(Vars)
 					}
-					target.Vars[sym] = compiled
+					target.Vars[definitionSymbol] = compiled
 				}
 			}
 		}
@@ -192,6 +192,11 @@ func topLevelDefinitionSymbol(code Scmer) (Symbol, bool) {
 		return "", false
 	}
 	head, headOK := scmerSymbol(items[0])
+	if !headOK {
+		if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.IsSpecialForm {
+			head, headOK = Symbol(declaration.Name), true
+		}
+	}
 	symbol, symbolOK := scmerSymbol(items[1])
 	if !headOK || (head != "define" && head != "set") || !symbolOK {
 		return "", false

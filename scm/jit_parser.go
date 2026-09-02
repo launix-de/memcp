@@ -589,6 +589,18 @@ type jitParserCallFrame struct {
 	valueBase    int
 	bindingBase  int
 	mutationBase int
+	memoize      bool
+}
+
+type jitParserMemoKey struct {
+	rule     int
+	position int
+}
+
+type jitParserMemoEntry struct {
+	value    Scmer
+	position int
+	success  bool
 }
 
 type jitParserMutation struct {
@@ -616,6 +628,7 @@ type jitParserState struct {
 	checkpoints []jitParserCheckpoint
 	marks       []int
 	positions   []int
+	memo        map[jitParserMemoKey]jitParserMemoEntry
 	farthest    int
 	expected    []string
 }
@@ -632,6 +645,11 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 	state.positions = state.positions[:0]
 	state.farthest = -1
 	state.expected = state.expected[:0]
+	if state.memo == nil {
+		state.memo = make(map[jitParserMemoKey]jitParserMemoEntry)
+	} else {
+		clear(state.memo)
+	}
 	if cap(state.frames) < inputLength+8 {
 		state.frames = make([]jitParserCallFrame, 0, inputLength+8)
 	}
@@ -648,6 +666,7 @@ func (program *jitParserProgram) releaseState(state *jitParserState) {
 	for index := range state.mutations {
 		state.mutations[index].old = NewNil()
 	}
+	clear(state.memo)
 	state.program = nil
 	program.pool.Put(state)
 }
@@ -704,13 +723,22 @@ func jitParserEnterRule(stateValue, ruleValue, successValue, failureValue, posit
 	frame := jitParserCallFrame{
 		rule: ruleID, success: int(successValue.Int()), failure: int(failureValue.Int()),
 		position: int(positionValue.Int()), valueBase: len(state.values), bindingBase: len(state.bindings),
-		mutationBase: len(state.mutations),
+		mutationBase: len(state.mutations), memoize: rule.lexicalParent < 0,
 	}
 	state.frames = append(state.frames, frame)
 	for range rule.bindings {
 		state.bindings = append(state.bindings, NewNil())
 	}
 	return NewNil()
+}
+
+func jitParserMemoizeReturn(state *jitParserState, frame jitParserCallFrame, position int, value Scmer, success bool) {
+	if !frame.memoize {
+		return
+	}
+	state.memo[jitParserMemoKey{rule: frame.rule, position: frame.position}] = jitParserMemoEntry{
+		value: value, position: position, success: success,
+	}
 }
 
 func jitParserPackReturn(continuation, position int) Scmer {
@@ -726,6 +754,7 @@ func jitParserReturnRule(stateValue, positionValue, successValue Scmer) Scmer {
 	rule := &state.program.rules[frame.rule]
 	position := int(positionValue.Int())
 	if !successValue.Bool() {
+		jitParserMemoizeReturn(state, frame, frame.position, NewNil(), false)
 		state.values = state.values[:frame.valueBase]
 		state.bindings = state.bindings[:frame.bindingBase]
 		state.mutations = state.mutations[:frame.mutationBase]
@@ -741,6 +770,7 @@ func jitParserReturnRule(stateValue, positionValue, successValue Scmer) Scmer {
 		args := state.bindings[frame.bindingBase : frame.bindingBase+len(rule.bindings)]
 		result = Apply(rule.action, args...)
 	}
+	jitParserMemoizeReturn(state, frame, position, result, true)
 	state.values = state.values[:frame.valueBase]
 	state.values = append(state.values, result)
 	state.bindings = state.bindings[:frame.bindingBase]
@@ -803,6 +833,7 @@ func jitParserReturnRuleValueNative(stateValue Scmer, position int64, value Scme
 	if value.GetTag() == tagSlice {
 		value = NewSlice(append([]Scmer(nil), value.Slice()...))
 	}
+	jitParserMemoizeReturn(state, frame, int(position), value, true)
 	state.values = state.values[:frame.valueBase]
 	state.values = append(state.values, value)
 	state.bindings = state.bindings[:frame.bindingBase]
@@ -975,8 +1006,23 @@ func jitParserPanic(stateValue, input Scmer) Scmer {
 // Native wrappers use scalar Go ABI words for parser indices and positions.
 // Scmer arguments remain pairs. Keeping this boundary explicit avoids boxing
 // control data merely to cross an emitted helper call.
-func jitParserEnterRuleNative(state Scmer, rule, success, failure, position int64) {
-	jitParserEnterRule(state, NewInt(rule), NewInt(success), NewInt(failure), NewInt(position))
+func jitParserEnterRuleNative(stateValue Scmer, ruleValue, success, failure, position int64) (int64, int64, bool) {
+	state := jitParserStateValue(stateValue)
+	rule := int(ruleValue)
+	if rule < 0 || rule >= len(state.program.rules) {
+		panic("jit: parser rule index out of range")
+	}
+	if state.program.rules[rule].lexicalParent < 0 {
+		if memo, exists := state.memo[jitParserMemoKey{rule: rule, position: int(position)}]; exists {
+			if memo.success {
+				state.values = append(state.values, memo.value)
+				return success, int64(memo.position), true
+			}
+			return failure, position, true
+		}
+	}
+	jitParserEnterRule(stateValue, NewInt(ruleValue), NewInt(success), NewInt(failure), NewInt(position))
+	return 0, position, false
 }
 
 func jitParserReturnRuleNative(state Scmer, position int64, success bool) (int64, int64) {

@@ -113,21 +113,30 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
+	resultRegsProtected := result.Loc == scm.LocRegPair
+	if resultRegsProtected {
+		ctx.ProtectReg(result.Reg)
+		ctx.ProtectReg(result.Reg2)
+	}
 	r0 := ctx.AllocReg()
 	r1 := ctx.AllocRegExcept(r0)
 	lbl0 := ctx.ReserveLabel()
 	bbpos_0_0 := int32(-1)
 	_ = bbpos_0_0
 	lbl1 := ctx.ReserveLabel()
+	_ = lbl1
 	bbpos_0_1 := int32(-1)
 	_ = bbpos_0_1
 	lbl2 := ctx.ReserveLabel()
+	_ = lbl2
 	bbpos_0_2 := int32(-1)
 	_ = bbpos_0_2
 	lbl3 := ctx.ReserveLabel()
+	_ = lbl3
 	bbpos_0_3 := int32(-1)
 	_ = bbpos_0_3
 	lbl4 := ctx.ReserveLabel()
+	_ = lbl4
 	bbs[0].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
 		if !ps.General {
 			if bbs[0].VisitCount >= 0 {
@@ -359,10 +368,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		}
 		ctx.EnsureDesc(&d13)
 		ctx.EnsureDesc(&d14)
-		ctx.EnsureDesc(&d13)
-		ctx.ProtectReg(d13.Reg)
-		ctx.EnsureDesc(&d14)
-		ctx.UnprotectReg(d13.Reg)
+		ctx.EnsureDescsTogether(&d13, &d14)
 		var d15 scm.JITValueDesc
 		if d13.Loc == scm.LocImm && d14.Loc == scm.LocImm {
 			d15 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(d13.Imm.Int() + d14.Imm.Int())}
@@ -478,10 +484,7 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		}
 		ctx.EnsureDesc(&d0)
 		ctx.EnsureDesc(&d17)
-		ctx.EnsureDesc(&d0)
-		ctx.EnsureDesc(&d17)
-		ctx.EnsureDesc(&d0)
-		ctx.EnsureDesc(&d17)
+		ctx.EnsureDescsTogether(&d0, &d17)
 		var d18 scm.JITValueDesc
 		if d0.Loc == scm.LocImm && d17.Loc == scm.LocImm {
 			d18 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(uint64(d0.Imm.Int()) == uint64(d17.Imm.Int()))}
@@ -643,6 +646,10 @@ func (s *StorageInt) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 	ctx.ResolveFixups()
 	if idxPinned {
 		ctx.UnprotectReg(idxPinnedReg)
+	}
+	if resultRegsProtected {
+		ctx.UnprotectReg(result.Reg2)
+		ctx.UnprotectReg(result.Reg)
 	}
 	return result
 }

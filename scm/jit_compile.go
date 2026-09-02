@@ -255,7 +255,13 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 func jitCopyScmerToPair(ctx *JITContext, src JITValueDesc) JITValueDesc {
 	ctx.EnsureDesc(&src)
 	if src.Loc != LocRegPair {
+		if src.Loc == LocReg {
+			ctx.ProtectReg(src.Reg)
+		}
 		target := jitAllocTrackedPair(ctx, src.Type)
+		if src.Loc == LocReg {
+			ctx.UnprotectReg(src.Reg)
+		}
 		return jitPlaceIntoPair(ctx, &src, target)
 	}
 	ctx.ProtectReg(src.Reg)
@@ -266,6 +272,25 @@ func jitCopyScmerToPair(ctx *JITContext, src JITValueDesc) JITValueDesc {
 	ctx.UnprotectReg(src.Reg2)
 	ctx.UnprotectReg(src.Reg)
 	return target
+}
+
+// JITPrepareScmerGoArg restores the two-word Scmer representation required by
+// Go's ABI after the JIT type system has folded a value to an unboxed scalar.
+// Already boxed register, input, and spill values stay in place so native call
+// boundaries do not introduce copies when both words are already available.
+func JITPrepareScmerGoArg(ctx *JITContext, src JITValueDesc) JITValueDesc {
+	ctx.SyncDesc(&src)
+	switch src.Loc {
+	case LocRegPair, LocInputPair:
+		return src
+	case LocStackPair:
+		ctx.EnsureDesc(&src)
+		return src
+	case LocImm, LocReg, LocStack:
+		return jitCopyScmerToPair(ctx, src)
+	default:
+		panic("jit: Go call expects a Scmer argument")
+	}
 }
 
 func jitPlaceScmerIntoTarget(ctx *JITContext, src JITValueDesc, target JITValueDesc) JITValueDesc {
@@ -283,7 +308,12 @@ func jitPlaceScmerIntoTarget(ctx *JITContext, src JITValueDesc, target JITValueD
 	target.NoHeapPointer = src.NoHeapPointer
 	target.Rooted = src.Rooted
 	if target.Loc == LocStackPair {
-		ctx.EmitStoreScmerToStack(src, target.StackOff)
+		ctx.EmitCopyScmerToDesc(&target, &src)
+		if target.StackOff < 0 {
+			ctx.setStackPointer(jitStackRootFrameBP, target.StackOff, !target.NoHeapPointer)
+		} else {
+			ctx.setStackPointer(jitStackRootFrameSP, target.StackOff-ctx.DynamicSP, !target.NoHeapPointer)
+		}
 		ctx.FreeDesc(&src)
 		target.Rooted = true
 		return target
@@ -695,8 +725,11 @@ func (ctx *JITContext) EmitSliceDataAfterLow(slice, low *JITValueDesc, elementSi
 // through the generic trampoline.
 func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
 	if address.Loc == LocStack {
-		ctx.SyncDesc(value)
-		ctx.EmitGoCallVoid(GoFuncAddr(jitStoreScmerAt), []JITValueDesc{*address, *value})
+		stored := JITPrepareScmerGoArg(ctx, *value)
+		ctx.EmitGoCallVoid(GoFuncAddr(jitStoreScmerAt), []JITValueDesc{*address, stored})
+		if stored.ID != value.ID || stored.Loc != value.Loc {
+			ctx.FreeDesc(&stored)
+		}
 		return
 	}
 	ctx.EnsureDesc(address)
@@ -723,12 +756,43 @@ func (ctx *JITContext) EmitStoreScmerAt(address, value *JITValueDesc) {
 			ctx.EmitStoreRegMem(value.Reg2, address.Reg, 8)
 			return
 		}
+		if value.Loc == LocReg {
+			ctx.ProtectReg(address.Reg)
+			ctx.ProtectReg(value.Reg)
+			pair := jitAllocTrackedPair(ctx, value.Type)
+			switch value.Type {
+			case tagInt:
+				ctx.EmitMakeInt(pair, *value)
+			case tagFloat:
+				ctx.EmitMakeFloat(pair, *value)
+			case tagBool:
+				ctx.EmitMakeBool(pair, *value)
+			case tagNil:
+				ctx.EmitMakeNil(pair)
+			default:
+				ctx.UnprotectReg(value.Reg)
+				ctx.UnprotectReg(address.Reg)
+				ctx.FreeDesc(&pair)
+				panic("jit: unsupported unboxed Scmer slice store")
+			}
+			ctx.UnprotectReg(value.Reg)
+			ctx.UnprotectReg(address.Reg)
+			ctx.EmitStoreRegMem(pair.Reg, address.Reg, 0)
+			ctx.EmitStoreRegMem(pair.Reg2, address.Reg, 8)
+			ctx.FreeDesc(&pair)
+			return
+		}
 	}
 
-	ctx.ProtectReg(address.Reg)
-	ctx.EnsureDesc(value)
-	ctx.UnprotectReg(address.Reg)
-	ctx.EmitGoCallVoid(GoFuncAddr(jitStoreScmerAt), []JITValueDesc{*address, *value})
+	ctx.SyncDesc(value)
+	stored := *value
+	if stored.Loc != LocRegPair && stored.Loc != LocStackPair && stored.Loc != LocInputPair {
+		stored = JITPrepareScmerGoArg(ctx, stored)
+	}
+	ctx.EmitGoCallVoid(GoFuncAddr(jitStoreScmerAt), []JITValueDesc{*address, stored})
+	if stored.ID != value.ID || stored.Loc != value.Loc {
+		ctx.FreeDesc(&stored)
+	}
 }
 
 // EmitLoadScmerToStack lets a slice-element producer write directly into a
@@ -842,7 +906,11 @@ func (ctx *JITContext) EmitCopyDescWords(dst, src *JITValueDesc, words int) {
 			srcBase = ctx.FrameReg
 		}
 		scratch := ctx.AllocReg()
-		for i := 0; i < words; i++ {
+		start, end, step := 0, words, 1
+		if srcBase == dstBase && dst.StackOff > src.StackOff && dst.StackOff < src.StackOff+int32(words*8) {
+			start, end, step = words-1, -1, -1
+		}
+		for i := start; i != end; i += step {
 			off := int32(i * 8)
 			ctx.EmitMovRegMem(scratch, srcBase, src.StackOff+off)
 			ctx.EmitStoreRegMem(scratch, dstBase, dst.StackOff+off)
@@ -1068,10 +1136,10 @@ func JITEmitGoCallResults(ctx *JITContext, funcAddr uint64, args []JITValueDesc,
 	resultOffs := make([]int32, totalWords)
 	word := 0
 	for i, count := range wordCounts {
-		off := ctx.AllocStack(int32(count) * 8)
+		off := ctx.AllocSpill(int32(count) * 8)
 		for part := 0; part < int(count); part++ {
 			resultOffs[word] = off + int32(part*8)
-			ctx.setStackPointer(jitStackRootFrameSP, resultOffs[word], pointerMasks[i]&(1<<part) != 0)
+			ctx.setStackPointer(jitStackRootFrameBP, resultOffs[word], pointerMasks[i]&(1<<part) != 0)
 			word++
 		}
 		switch count {
@@ -1083,7 +1151,7 @@ func JITEmitGoCallResults(ctx *JITContext, funcAddr uint64, args []JITValueDesc,
 			results[i] = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: off}
 		}
 	}
-	ctx.EmitGoCallToStack(funcAddr, words, resultOffs)
+	ctx.EmitGoCallToFrame(funcAddr, words, resultOffs)
 	return results
 }
 
@@ -1122,52 +1190,25 @@ func jitReturnHasNoHeapPointer(td *TypeDescriptor) bool {
 
 func (ctx *JITContext) EmitNewSliceFromGoSlice(slice *JITValueDesc) JITValueDesc {
 	ctx.SyncDesc(slice)
-	if slice.Loc == LocStackTriple {
-		base := ctx.StackReg
-		if slice.StackOff < 0 {
-			base = ctx.FrameReg
-		}
-		resultOff := ctx.AllocSpill(16)
-		ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff)
-		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.FrameReg, resultOff)
-		ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff+8)
-		ctx.EmitShlRegImm8(ctx.ScratchReg, sliceCapBits)
-		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.FrameReg, resultOff+8)
-		ctx.EmitMovRegMem(ctx.ScratchReg, base, slice.StackOff+16)
-		ctx.EmitOrRegMem(ctx.ScratchReg, ctx.FrameReg, resultOff+8)
-		ctx.EmitShlRegImm8(ctx.ScratchReg, 8)
-		ctx.EmitOrRegImm32(ctx.ScratchReg, int32(tagSlice))
-		ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.FrameReg, resultOff+8)
-		ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
-		return JITValueDesc{Loc: LocStackPair, Type: tagSlice, StackOff: resultOff, Rooted: true}
+	// A Go slice assembled by generated code may still use an invocation-frame
+	// array (for example after a transferred produce/filter pipeline). NewSlice
+	// is an escaping Scheme value, so materialize independent backing here.
+	// Under nested parser/callback pressure, return directly into a spill slot.
+	// The consumer can copy that Scmer into its final target without reserving a
+	// transient register pair merely to cross this helper-call boundary.
+	if bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 2 {
+		off := ctx.AllocSpill(16)
+		var wordsBuf [16]goCallArgWord
+		words := ctx.flattenArgs([]JITValueDesc{*slice}, &wordsBuf)
+		ctx.EmitGoCallToFrame(GoFuncAddr(JITNewSliceCopy), words, []int32{off, off + 8})
+		ctx.setStackPointer(jitStackRootFrameBP, off, true)
+		ctx.FreeDesc(slice)
+		return JITValueDesc{Loc: LocStackPair, Type: tagSlice, StackOff: off, Rooted: true}
 	}
-	ctx.EnsureDesc(slice)
-	if slice.Loc != LocRegTriple {
-		panic(fmt.Sprintf("jit: NewSlice requires a Go slice header (location %d)", slice.Loc))
-	}
-	ptrReg, lenReg, capReg := slice.Reg, slice.Reg2, slice.Reg3
-	// The Go slice header is consumed here. Reuse its capacity register for the
-	// Scmer aux word instead of reserving a fourth register under pressure.
-	auxReg := capReg
-	ctx.EmitMovRegReg(ctx.ScratchReg, capReg)
-	ctx.EmitMovRegReg(auxReg, lenReg)
-	ctx.EmitShlRegImm8(auxReg, sliceCapBits)
-	ctx.EmitOrInt64(auxReg, ctx.ScratchReg)
-	ctx.EmitShlRegImm8(auxReg, 8)
-	ctx.EmitOrRegImm32(auxReg, int32(tagSlice))
-	oldID := slice.ID
-	for _, r := range [...]Reg{ptrReg, lenReg, capReg} {
-		if owner := ctx.RegOwners[r]; owner != nil && (oldID == 0 || owner.ID == oldID) {
-			ctx.RegOwners[r] = nil
-		}
-	}
-	ctx.FreeRegs |= 1 << uint(lenReg)
-	ctx.FreeRegs &^= 1 << uint(ptrReg)
-	ctx.FreeRegs &^= 1 << uint(auxReg)
-	slice.Loc = LocNone
-	result := JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: ptrReg, Reg2: auxReg}
-	ctx.BindReg(ptrReg, &result)
-	ctx.BindReg(auxReg, &result)
+	result := ctx.EmitGoCallScalar(GoFuncAddr(JITNewSliceCopy), []JITValueDesc{*slice}, 2)
+	ctx.FreeDesc(slice)
+	result.Type = tagSlice
+	result.Rooted = true
 	return result
 }
 
@@ -1225,9 +1266,6 @@ func jitMaterializeVirtualGoSlice(ctx *JITContext, elements []JITValueDesc) JITV
 	results := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeScmerSlice), []JITValueDesc{length, length}, []uint8{3}, []uint8{1})
 	header := results[0]
 	header.Type = tagSlice
-	ctx.BindReg(header.Reg, &header)
-	ctx.BindReg(header.Reg2, &header)
-	ctx.BindReg(header.Reg3, &header)
 	for i := range elements {
 		index := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(i)), NoHeapPointer: true}
 		address := ctx.EmitSliceElementAddress(&header, &index, 16)
@@ -1502,6 +1540,10 @@ func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, ar
 		for i := range argExprs {
 			jitCompileRootedCallValueAt(ctx, argExprs[i], sliceBase, argsOff+int32(i*16))
 		}
+		// Every argument is stable in the frame now. Argument emitters may have
+		// consumed temporary registers without descriptor ownership; none remain
+		// live across the variadic call boundary.
+		ctx.ReclaimUntrackedRegs()
 	}
 	var argsSlice, heapArgs JITValueDesc
 	stackBytes := int32(argc * 16)
@@ -1696,6 +1738,13 @@ func jitCompileSpecialThunk(ctx *JITContext, body Scmer, sliceBase Reg, result J
 }
 
 func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	if parser, ok := jitStaticParserForExpr(ctx, callableExpr); ok {
+		if len(operands) != 1 {
+			panic("jit: parser call expects one input")
+		}
+		input := jitCompileRootedCallValue(ctx, operands[0], sliceBase)
+		return jitEmitStaticParser(ctx, parser, input, result)
+	}
 	if parser, ok := jitParserTemplateForExpr(ctx, callableExpr); ok {
 		if len(operands) != 1 {
 			panic("jit: parser call expects one input")
@@ -1849,12 +1898,14 @@ func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueD
 		return true
 	}
 	knownTypes, knownShapes, knownArgs := 0, 0, 0
+	hasVirtualArgs := false
 	knownCallback, hasCallback := false, false
 	for index, arg := range args {
 		if arg.Type != JITTypeUnknown {
 			knownTypes++
 		}
 		hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
+		hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
 		if hasKnownShape {
 			knownShapes++
 		}
@@ -1879,14 +1930,20 @@ func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueD
 		}
 	} else {
 		cost := int(decl.Type.JITInlineCost)
+		if decl.Type.JITVirtualArgs && !hasVirtualArgs && knownShapes != len(args) {
+			return false
+		}
+		if decl.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
+			return false
+		}
 		switch {
-		case decl.Type.JITVirtualArgs:
+		case decl.Type.JITVirtualArgs && hasVirtualArgs && decl.Type.JITInlineCost <= 32:
 			// Virtual-list producers and consumers preserve fusion opportunities
 			// which a native Go call would force us to materialize.
 		case len(args) > 0 && knownTypes == len(args) && cost <= 256:
 			// Full type knowledge lets generated emitters discard dynamic type
 			// switches. Partial knowledge did not amortize emitted code in A/B.
-		case knownShapes > 0 && knownArgs == len(args) && cost <= 32:
+		case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
 			// Small shape-specialized emitters can eliminate list allocation and
 			// length/tag checks even when element types remain dynamic.
 		default:
@@ -2257,9 +2314,6 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			if !ok {
 				return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
 			}
-		}
-		if name == "strlike" {
-			panic("jit: strlike emitter is not supported")
 		}
 		if decl.Type != nil && decl.Type.JITEmit != nil {
 			policyArgs := make([]JITValueDesc, len(list)-1)

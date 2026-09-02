@@ -17,6 +17,29 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
+func jitStaticParserForExpr(ctx *JITContext, expr Scmer) (*ScmParser, bool) {
+	for expr.IsSourceInfo() {
+		expr = expr.SourceInfo().value
+	}
+	if expr.IsParser() && expr.Parser() != nil {
+		return expr.Parser(), true
+	}
+	var desc JITValueDesc
+	var found bool
+	if expr.IsNthLocalVar() && ctx.Env != nil {
+		index := int(expr.NthLocalVar())
+		if index >= 0 && index < len(ctx.Env.Numbered) {
+			desc, found = ctx.Env.Numbered[index], true
+		}
+	} else if expr.IsSymbol() && ctx.Env != nil {
+		desc, found = ctx.Env.Lookup(expr.Symbol())
+	}
+	if found && desc.Loc == LocImm && desc.Imm.IsParser() && desc.Imm.Parser() != nil {
+		return desc.Imm.Parser(), true
+	}
+	return nil, false
+}
+
 func jitParserTemplateForExpr(ctx *JITContext, expr Scmer) (*JITParserTemplate, bool) {
 	for expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
@@ -49,6 +72,33 @@ func jitParserTemplateForExpr(ctx *JITContext, expr Scmer) (*JITParserTemplate, 
 	}, true
 }
 
+func jitEmitStaticParser(ctx *JITContext, parser *ScmParser, input JITValueDesc, result JITValueDesc) JITValueDesc {
+	program, entryRule := parser.JITProgram, parser.JITRule
+	if program == nil {
+		program = jitBuildParserProgram(parser)
+		entryRule = program.parserRule[parser]
+	}
+	programValue := NewAny(program)
+	ctx.TrackImm(programValue)
+	input = jitRootScmer(ctx, input)
+	resultOff := ctx.AllocSpill(16)
+	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+	parserResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	programPair := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagAny, Imm: programValue})
+	state := JITEmitGoCallResults(ctx, GoFuncAddr(jitParserAcquireStateNative), []JITValueDesc{programPair, input}, []uint8{2}, []uint8{1})[0]
+	state.Type = tagAny
+	state.Rooted = true
+	ctx.FreeDesc(&programPair)
+	outerRegs := ctx.PreserveOuterRegs()
+	entry := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(entryRule)), NoHeapPointer: true})
+	jitEmitParserProgramCore(ctx, program, input, state, entry, parserResult, true, entryRule)
+	ctx.RestoreOuterRegs(outerRegs)
+	programPair = jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagAny, Imm: programValue})
+	ctx.EmitGoCallVoid(GoFuncAddr(jitParserReleaseStateNative), []JITValueDesc{programPair, state})
+	ctx.FreeDesc(&programPair)
+	return jitPlaceScmerIntoTarget(ctx, parserResult, result)
+}
+
 func jitEmitParserTemplate(ctx *JITContext, template *JITParserTemplate, input JITValueDesc, result JITValueDesc) JITValueDesc {
 	previousStackPhiTargets := ctx.StackPhiTargets
 	ctx.StackPhiTargets = true
@@ -56,19 +106,24 @@ func jitEmitParserTemplate(ctx *JITContext, template *JITParserTemplate, input J
 	program, entryRule := jitBuildParserTemplateProgram(template)
 	programValue := NewAny(program)
 	ctx.TrackImm(programValue)
+	input = jitRootScmer(ctx, input)
+	resultOff := ctx.AllocSpill(16)
+	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+	parserResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	programPair := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagAny, Imm: programValue})
 	state := ctx.EmitGoCallScalar(GoFuncAddr(jitParserAcquireStateNative), []JITValueDesc{programPair, input}, 2)
-	ctx.FreeDesc(&programPair)
 	state.Type = tagAny
+	ctx.FreeDesc(&programPair)
 	state = jitRootScmer(ctx, state)
+	outerRegs := ctx.PreserveOuterRegs()
 	entry := jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(entryRule)), NoHeapPointer: true})
-	out := jitEmitParserProgramCore(ctx, program, input, state, entry, JITValueDesc{Loc: LocAny}, true, entryRule)
-	out = jitRootScmer(ctx, out)
+	jitEmitParserProgramCore(ctx, program, input, state, entry, parserResult, true, entryRule)
+	ctx.RestoreOuterRegs(outerRegs)
 	programPair = jitCopyScmerToPair(ctx, JITValueDesc{Loc: LocImm, Type: tagAny, Imm: programValue})
 	ctx.EmitGoCallVoid(GoFuncAddr(jitParserReleaseStateNative), []JITValueDesc{programPair, state})
 	ctx.FreeDesc(&programPair)
 	ctx.FreeDesc(&state)
-	return jitPlaceScmerIntoTarget(ctx, out, result)
+	return jitPlaceScmerIntoTarget(ctx, parserResult, result)
 }
 
 type jitParserEmitter struct {
@@ -83,6 +138,7 @@ type jitParserEmitter struct {
 	ruleLabels        []JITLabel
 	continuations     []JITLabel
 	dispatchLabel     JITLabel
+	skipLabel         JITLabel
 	inlineActions     bool
 	skipperRule       int
 }
@@ -200,7 +256,13 @@ func (emitter *jitParserEmitter) atBreak(fail JITLabel) {
 	emitter.ctx.EmitJump(CondEqual, fail)
 }
 
-func (emitter *jitParserEmitter) emitSkip(rule int, done JITLabel) {
+func (emitter *jitParserEmitter) emitSkip(_ int, done JITLabel) {
+	emitter.ctx.EmitMovRegImm64(emitter.ctx.ScratchReg, uint64(emitter.continuation(done)))
+	emitter.ctx.EmitStoreRegMem(emitter.ctx.ScratchReg, emitter.ctx.StackReg, emitter.continuationOff)
+	emitter.ctx.EmitJmp(emitter.skipLabel)
+}
+
+func (emitter *jitParserEmitter) emitSkipBody(done JITLabel) {
 	program := emitter.program.rules[emitter.skipperRule].skipper
 	if program == nil {
 		emitter.ctx.EmitJmp(done)
@@ -345,10 +407,23 @@ func (emitter *jitParserEmitter) continuation(label JITLabel) int64 {
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
 	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	position := emitter.loadPosition()
-	emitter.emitVoid(jitParserEnterRuleNative, emitter.state,
-		jitParserScalar(int64(node.rule)), jitParserScalar(emitter.continuation(accepted)),
-		jitParserScalar(emitter.continuation(rejected)), position)
+	enterArgs := []JITValueDesc{emitter.state, jitParserScalar(int64(node.rule)), jitParserScalar(emitter.continuation(accepted)),
+		jitParserScalar(emitter.continuation(rejected)), position}
+	var wordsBuf [16]goCallArgWord
+	words := emitter.ctx.flattenArgs(enterArgs, &wordsBuf)
+	var resultsBuf [16]Reg
+	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserEnterRuleNative), words, 3, &resultsBuf, nil)
 	emitter.ctx.FreeDesc(&position)
+	emitter.ctx.EmitCmpRegImm32(results[2], 0)
+	for _, reg := range results {
+		emitter.ctx.FreeReg(reg)
+	}
+	cacheMiss := emitter.ctx.ReserveLabel()
+	emitter.ctx.EmitJump(CondEqual, cacheMiss)
+	emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
+	emitter.ctx.EmitStoreRegMem(results[1], emitter.ctx.StackReg, emitter.positionOff)
+	emitter.ctx.EmitJmp(emitter.dispatchLabel)
+	emitter.ctx.MarkLabel(cacheMiss)
 	emitter.ctx.EmitJmp(emitter.ruleLabels[node.rule])
 	emitter.ctx.MarkLabel(accepted)
 	if node.ignoreResult {
@@ -529,6 +604,7 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 		emitter.ruleLabels[index] = ctx.ReserveLabel()
 	}
 	emitter.dispatchLabel = ctx.ReserveLabel()
+	emitter.skipLabel = ctx.ReserveLabel()
 	finished, failed := ctx.ReserveLabel(), ctx.ReserveLabel()
 	finishedID, failedID := emitter.continuation(finished), emitter.continuation(failed)
 
@@ -543,9 +619,22 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 		panic("jit: parser entry has no integer representation")
 	}
 	position := emitter.loadPosition()
-	emitter.emitVoid(jitParserEnterRuleNative, emitter.state, entryScalar,
-		jitParserScalar(finishedID), jitParserScalar(failedID), position)
+	enterArgs := []JITValueDesc{emitter.state, entryScalar, jitParserScalar(finishedID), jitParserScalar(failedID), position}
+	var wordsBuf [16]goCallArgWord
+	words := ctx.flattenArgs(enterArgs, &wordsBuf)
+	var resultsBuf [16]Reg
+	results := ctx.EmitGoCall(GoFuncAddr(jitParserEnterRuleNative), words, 3, &resultsBuf, nil)
 	ctx.FreeDesc(&position)
+	ctx.EmitCmpRegImm32(results[2], 0)
+	for _, reg := range results {
+		ctx.FreeReg(reg)
+	}
+	entryMiss := ctx.ReserveLabel()
+	ctx.EmitJump(CondEqual, entryMiss)
+	ctx.EmitStoreRegMem(results[0], ctx.StackReg, emitter.continuationOff)
+	ctx.EmitStoreRegMem(results[1], ctx.StackReg, emitter.positionOff)
+	ctx.EmitJmp(emitter.dispatchLabel)
+	ctx.MarkLabel(entryMiss)
 	invalidEntry := ctx.ReserveLabel()
 	ctx.EmitJumpTable(entryScalar.Reg, emitter.ruleLabels, invalidEntry)
 	ctx.FreeDesc(&entryDesc)
@@ -561,16 +650,6 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 		ctx.MarkLabel(rejected)
 		emitter.emitRuleReturn(ruleID, false)
 	}
-
-	ctx.MarkLabel(emitter.dispatchLabel)
-	continuation := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: ctx.AllocReg(), NoHeapPointer: true}
-	ctx.BindReg(continuation.Reg, &continuation)
-	ctx.EmitMovRegMem(continuation.Reg, ctx.StackReg, emitter.continuationOff)
-	invalidContinuation := ctx.ReserveLabel()
-	ctx.EmitJumpTable(continuation.Reg, emitter.continuations, invalidContinuation)
-	ctx.FreeDesc(&continuation)
-	ctx.MarkLabel(invalidContinuation)
-	ctx.EmitJmp(failed)
 
 	ctx.MarkLabel(finished)
 	skipped := ctx.ReserveLabel()
@@ -591,6 +670,19 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 	ctx.EmitStoreScmerToStack(out, resultOff)
 	ctx.FreeDesc(&out)
 	ctx.EmitJmp(done)
+
+	ctx.MarkLabel(emitter.skipLabel)
+	emitter.emitSkipBody(emitter.dispatchLabel)
+
+	ctx.MarkLabel(emitter.dispatchLabel)
+	continuation := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: ctx.AllocReg(), NoHeapPointer: true}
+	ctx.BindReg(continuation.Reg, &continuation)
+	ctx.EmitMovRegMem(continuation.Reg, ctx.StackReg, emitter.continuationOff)
+	invalidContinuation := ctx.ReserveLabel()
+	ctx.EmitJumpTable(continuation.Reg, emitter.continuations, invalidContinuation)
+	ctx.FreeDesc(&continuation)
+	ctx.MarkLabel(invalidContinuation)
+	ctx.EmitJmp(failed)
 
 	ctx.MarkLabel(failed)
 	panicResult := ctx.EmitGoCallScalar(GoFuncAddr(jitParserPanic), []JITValueDesc{emitter.state, emitter.input}, 2)
