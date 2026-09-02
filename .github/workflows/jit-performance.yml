@@ -1,0 +1,138 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: JIT Performance A/B
+
+# Kept manual until the JIT correctness workflow is a stable required check.
+# Add the pull_request trigger only after jit-test is enabled and reliable.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jit-performance-ab-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JIT_GO_REF: jit-foreign-frames-go1.27.0
+
+jobs:
+  jit-performance-ab:
+    name: jit-performance-ab
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out JIT merge candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          path: candidate
+
+      - name: Check out exact base revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'master' }}
+          path: base
+
+      - name: Check out patched Go compiler
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: launix-de/go
+          ref: ${{ env.JIT_GO_REF }}
+          path: go-jit
+
+      - name: Read patched Go version
+        id: jit-go-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^go\([0-9].*\)$/\1/p' go-jit/VERSION | head -n 1)
+          test -n "$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up matching bootstrap Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ steps.jit-go-version.outputs.version }}
+          cache: false
+
+      - name: Build patched Go compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          bootstrap_goroot=$(go env GOROOT)
+          (cd go-jit/src && GOROOT_BOOTSTRAP="$bootstrap_goroot" ./make.bash)
+
+      - name: Select patched Go compiler
+        shell: bash
+        run: |
+          printf '%s\n' "$GITHUB_WORKSPACE/go-jit/bin" >> "$GITHUB_PATH"
+          printf 'GOROOT=%s\n' "$GITHUB_WORKSPACE/go-jit" >> "$GITHUB_ENV"
+          printf 'GOEXPERIMENT=jit\n' >> "$GITHUB_ENV"
+
+      - name: Verify compiler identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go env GOROOT)" = "$GITHUB_WORKSPACE/go-jit"
+          jit_go_revision=$(git -C "$GITHUB_WORKSPACE/go-jit" rev-parse HEAD)
+          printf 'Patched Go revision: `%s`\n' "$jit_go_revision" >> "$GITHUB_STEP_SUMMARY"
+          go version
+          go env GOEXPERIMENT
+
+      - name: Install test dependencies
+        run: pip install requests PyYAML
+
+      - name: Build JIT base and candidate
+        shell: bash
+        run: |
+          (cd base && go build -o memcp)
+          (cd candidate && go build -o memcp)
+
+      - name: Measure JIT base and candidate with the SQL test runner
+        shell: bash
+        run: |
+          runner="$GITHUB_WORKSPACE/candidate/run_sql_tests.py"
+          baseline="$GITHUB_WORKSPACE/jit-perf-baseline.json"
+          seed="$GITHUB_WORKSPACE/base/tests/performance/ci-workloads.json"
+          if [ ! -f "$seed" ]; then
+            seed="$GITHUB_WORKSPACE/candidate/tests/performance/ci-workloads.json"
+          fi
+
+          # Both sides use the same checked-out JIT compiler. MEMCP_TEST_WORKTREE
+          # selects both the binary and Scheme library of the measured side.
+          (cd candidate && env \
+            PERF_AB_MODE=record \
+            PERF_BASELINE_FILE="$baseline" \
+            PERF_BASELINE_SEED="$seed" \
+            PERF_REPEAT=1000 \
+            PERF_MIN_MEASURE_MS=1000 \
+            PERF_AB_JITTER_MS=50 \
+            PERF_SETUP_MAX_TIME_SEC=120 \
+            MEMCP_TEST_JOBS=4 \
+            MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/base" \
+            MEMCP_TEST_DATA_DIR=/tmp/memcp-jit-perf-base \
+            python3 -u "$runner" --perf-ci --jobs 4 --log-times)
+
+          (cd candidate && env \
+            PERF_AB_MODE=compare \
+            PERF_BASELINE_FILE="$baseline" \
+            PERF_REPEAT=1000 \
+            PERF_MIN_MEASURE_MS=1000 \
+            PERF_AB_JITTER_MS=50 \
+            PERF_SETUP_MAX_TIME_SEC=120 \
+            MEMCP_TEST_JOBS=4 \
+            MEMCP_TEST_WORKTREE="$GITHUB_WORKSPACE/candidate" \
+            MEMCP_TEST_DATA_DIR=/tmp/memcp-jit-perf-candidate \
+            python3 -u "$runner" --perf-ci --jobs 4 --log-times)
+
+      - name: Upload measured JIT base
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jit-performance-ab-baseline
+          path: jit-perf-baseline.json
+          if-no-files-found: warn

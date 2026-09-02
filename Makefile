@@ -83,7 +83,7 @@ perf:
 
 test:
 	# run `cp git-pre-commit .git/hooks/pre-commit` to activate the trigger
-	MEMCP_FAIL_FAST=0 MEMCP_COVERAGE=1 MEMCP_COVERDIR=/tmp/memcp-coverage MEMCP_TEST_DATA_DIR=$$(mktemp -d /tmp/memcp-make-test-data.XXXXXX) ./git-pre-commit
+	MEMCP_FAIL_FAST=0 MEMCP_COVERAGE=1 MEMCP_COVERDIR=$${MEMCP_COVERDIR:-/tmp/memcp-coverage} MEMCP_TEST_DATA_DIR=$${MEMCP_TEST_DATA_DIR:-$$(mktemp -d /tmp/memcp-make-test-data.XXXXXX)} ./git-pre-commit
 
 memcp.sif: all
 	@if command -v apptainer >/dev/null 2>&1; then \

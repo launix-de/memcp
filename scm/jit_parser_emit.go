@@ -380,10 +380,16 @@ func (emitter *jitParserEmitter) emitBind(node *jitParserNode, rule int, success
 
 func (emitter *jitParserEmitter) emitCapture(node *jitParserNode, rule int, success, failure JITLabel) {
 	emitter.pushCheckpoint()
+	skipped := emitter.ctx.ReserveLabel()
+	emitter.emitSkip(rule, skipped)
+	emitter.ctx.MarkLabel(skipped)
+	start := emitter.loadPosition()
+	emitter.emitVoid(jitParserPushPositionNative, emitter.state, start)
+	emitter.ctx.FreeDesc(&start)
 	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	emitter.emitNode(node.children[0], rule, accepted, rejected)
 	emitter.ctx.MarkLabel(accepted)
-	start := emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCheckpointPositionNative), []JITValueDesc{emitter.state}, 1)
+	start = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserPopPositionNative), []JITValueDesc{emitter.state}, 1)
 	end := emitter.loadPosition()
 	emitter.emitVoid(jitParserCaptureValueNative, emitter.state, emitter.input, start, end)
 	emitter.ctx.FreeDesc(&start)
@@ -735,12 +741,33 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 				bindingEnv = frameEnv
 				allArgs[depth] = args
 			}
-			emitter.ctx.ReclaimUntrackedRegs()
-			outerRegs := emitter.ctx.PreserveOuterRegs()
-			proc := Proc{Body: rule.generator, NumVars: len(rule.bindings), NumberedOnly: true}
 			valueTarget := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: emitter.generatorValueOff, Rooted: true}
-			value = JITEmitProcInlineWithEnv(emitter.ctx, &proc, bindingEnv, emitter.ctx.SliceBase, valueTarget)
-			emitter.ctx.RestoreOuterRegs(outerRegs)
+			if action := rule.compiledAction; action != nil {
+				actionArgs := append([]JITValueDesc(nil), allArgs[0]...)
+				for _, symbol := range rule.actionCaptures {
+					capture, exists := bindingEnv.Lookup(symbol)
+					if !exists {
+						panic("jit: parser action capture " + string(symbol) + " is unavailable")
+					}
+					actionArgs = append(actionArgs, capture)
+				}
+				entryValue := NewAny(action)
+				emitter.ctx.TrackImm(entryValue)
+				entry := emitter.immPair(entryValue)
+				args := jitMaterializeVirtualGoSlice(emitter.ctx, actionArgs)
+				value = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCallCompiledAction), []JITValueDesc{entry, args}, 2)
+				value.Type = JITTypeUnknown
+				value.Rooted = true
+				value = jitPlaceScmerIntoTarget(emitter.ctx, value, valueTarget)
+				emitter.ctx.FreeDesc(&entry)
+				emitter.ctx.FreeDesc(&args)
+			} else {
+				emitter.ctx.ReclaimUntrackedRegs()
+				outerRegs := emitter.ctx.PreserveOuterRegs()
+				proc := Proc{Body: rule.generator, NumVars: len(rule.bindings), NumberedOnly: true}
+				value = JITEmitProcInlineWithEnv(emitter.ctx, &proc, bindingEnv, emitter.ctx.SliceBase, valueTarget)
+				emitter.ctx.RestoreOuterRegs(outerRegs)
+			}
 			for _, args := range allArgs {
 				for index := range args {
 					emitter.ctx.FreeDesc(&args[index])
@@ -756,24 +783,30 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 		var argsBuf [16]goCallArgWord
 		args := emitter.ctx.flattenArgs([]JITValueDesc{emitter.state, position, value}, &argsBuf)
 		var resultsBuf [16]Reg
-		results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleValueNative), args, 2, &resultsBuf, nil)
+		results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleValueNative), args, 3, &resultsBuf, nil)
 		emitter.ctx.FreeDesc(&value)
 		emitter.ctx.FreeDesc(&position)
 		emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
 		emitter.ctx.EmitStoreRegMem(results[1], emitter.ctx.StackReg, emitter.positionOff)
-		emitter.ctx.FreeReg(results[0])
-		emitter.ctx.FreeReg(results[1])
-		emitter.ctx.EmitJmp(emitter.dispatchLabel)
+		emitter.ctx.EmitCmpRegImm32(results[2], 0)
+		for _, reg := range results {
+			emitter.ctx.FreeReg(reg)
+		}
+		emitter.ctx.EmitJump(CondEqual, emitter.dispatchLabel)
+		emitter.ctx.EmitJmp(emitter.ruleLabels[ruleID])
 		return
 	}
 	var argsBuf [16]goCallArgWord
 	args := emitter.ctx.flattenArgs([]JITValueDesc{emitter.state, position, jitParserBoolScalar(success)}, &argsBuf)
 	var resultsBuf [16]Reg
-	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleNative), args, 2, &resultsBuf, nil)
+	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleNative), args, 3, &resultsBuf, nil)
 	emitter.ctx.FreeDesc(&position)
 	emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
 	emitter.ctx.EmitStoreRegMem(results[1], emitter.ctx.StackReg, emitter.positionOff)
-	emitter.ctx.FreeReg(results[0])
-	emitter.ctx.FreeReg(results[1])
-	emitter.ctx.EmitJmp(emitter.dispatchLabel)
+	emitter.ctx.EmitCmpRegImm32(results[2], 0)
+	for _, reg := range results {
+		emitter.ctx.FreeReg(reg)
+	}
+	emitter.ctx.EmitJump(CondEqual, emitter.dispatchLabel)
+	emitter.ctx.EmitJmp(emitter.ruleLabels[ruleID])
 }

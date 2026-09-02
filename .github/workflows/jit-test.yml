@@ -1,0 +1,106 @@
+# Copyright (C) 2026  Carl-Philip Hänsch
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+name: JIT Test
+
+# Kept manual until the complete suite is stable with the JIT compiler.
+# Add the pull_request trigger when this becomes a required PR check.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jit-test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JIT_GO_REF: jit-foreign-frames-go1.27.0
+
+jobs:
+  jit-test:
+    name: jit-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: recovery-test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: Check out MemCP
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check out patched Go compiler
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: launix-de/go
+          ref: ${{ env.JIT_GO_REF }}
+          path: go-jit
+
+      - name: Read patched Go version
+        id: jit-go-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^go\([0-9].*\)$/\1/p' go-jit/VERSION | head -n 1)
+          test -n "$version"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up matching bootstrap Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ steps.jit-go-version.outputs.version }}
+          cache: false
+
+      - name: Build patched Go compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          bootstrap_goroot=$(go env GOROOT)
+          (cd go-jit/src && GOROOT_BOOTSTRAP="$bootstrap_goroot" ./make.bash)
+
+      - name: Select patched Go compiler
+        shell: bash
+        run: |
+          printf '%s\n' "$GITHUB_WORKSPACE/go-jit/bin" >> "$GITHUB_PATH"
+          printf 'GOROOT=%s\n' "$GITHUB_WORKSPACE/go-jit" >> "$GITHUB_ENV"
+          printf 'GOEXPERIMENT=jit\n' >> "$GITHUB_ENV"
+
+      - name: Verify compiler identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go env GOROOT)" = "$GITHUB_WORKSPACE/go-jit"
+          jit_go_revision=$(git -C "$GITHUB_WORKSPACE/go-jit" rev-parse HEAD)
+          printf 'Patched Go revision: `%s`\n' "$jit_go_revision" >> "$GITHUB_STEP_SUMMARY"
+          go version
+          go env GOEXPERIMENT
+
+      - name: Install test dependencies
+        run: |
+          pip install requests PyYAML
+          sudo apt-get update
+          sudo apt-get install -y mariadb-client
+
+      - name: Run tests with JIT enabled
+        run: bash git-pre-commit
+
+      - name: Verify dump and restore compatibility with JIT enabled
+        env:
+          MEMCP_RECOVERY_MARIADB_PASSWORD: recovery-test
+        run: >-
+          python3 tools/test_mysqldump_recovery.py
+          --mariadb-host=127.0.0.1
+          --mariadb-port=3306
+          --mysqldump=mariadb-dump

@@ -1393,6 +1393,7 @@ func exitroutine() {
 		}()
 		fmt.Println("finalizing memory...")
 		runtime.GC() // this will call the finalizers on shards
+		scm.ShutdownJIT()
 		fmt.Println("Exit procedure finished")
 	})
 }

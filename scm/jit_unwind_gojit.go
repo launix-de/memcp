@@ -24,6 +24,11 @@ import (
 	"unsafe"
 )
 
+func jitRuntimeStackCheck() (guardOffset, stackSmall, moreStackPC uintptr) {
+	config := jit.StackCheckConfig()
+	return config.StackGuardOffset, config.StackSmall, config.MoreStackPC
+}
+
 // registerJITArena registers a JIT arena with the Go runtime so the
 // unwinder, GC, and panic/recover can walk through JIT frames.
 // The Describe callback resolves PCs to Scheme source locations
@@ -56,6 +61,13 @@ func registerJITArena(a *jitArena) interface{} {
 	})
 }
 
+func unregisterJITArena(a *jitArena) {
+	if handle, ok := a.handle.(jit.Handle); ok {
+		handle.Unregister()
+		a.handle = nil
+	}
+}
+
 func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 	if len(maps) == 0 {
 		return
@@ -68,6 +80,18 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 	for i := range maps {
 		if maps[i].frameWords == 0 {
 			panic("jit: invalid empty unwind frame")
+		}
+		if maps[i].entry {
+			runtimeMaps[i] = jit.StackMap{
+				PCOffset:       maps[i].pcOffset,
+				FrameWords:     4,
+				PointerMask:    []byte{0b00000010},
+				HasUnwind:      true,
+				CallerPCOffset: 0,
+				CallerSPOffset: unsafe.Sizeof(uintptr(0)),
+				CallerBPOffset: 0,
+			}
+			continue
 		}
 		frameBaseOffset := (maps[i].frameWords - 1) * unsafe.Sizeof(uintptr(0))
 		runtimeMaps[i] = jit.StackMap{

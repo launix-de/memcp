@@ -16,7 +16,10 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func compileJITExpressionTestProc(t *testing.T, source string) Scmer {
 	t.Helper()
@@ -220,6 +223,78 @@ func TestJITExpressionHigherOrderClosureCapture(t *testing.T) {
 	want := NewSlice([]Scmer{NewString("a"), NewString("c")})
 	if !Equal(got, want) {
 		t.Fatalf("unexpected captured higher-order result: got %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionNestedClosureKeepsDeepCallableCapture(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (callback)
+		(lambda (level_one)
+			(lambda (level_two)
+				(lambda (value) (callback value)))))`)
+	callback := NewFunc(func(args ...Scmer) Scmer { return args[0] })
+	levelOne := Apply(compiled, callback)
+	levelTwo := Apply(levelOne, NewNil())
+	inner := Apply(levelTwo, NewNil())
+	want := NewString("deep capture")
+	if got := Apply(inner, want); !Equal(got, want) {
+		t.Fatalf("nested JIT closure returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionCapturesNumberedValueAtExactOuterDepth(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	callback := NewFunc(func(args ...Scmer) Scmer { return args[0] })
+	params := make([]Scmer, 14)
+	args := make([]Scmer, 14)
+	for index := range params {
+		params[index] = NewSymbol(fmt.Sprintf("arg-%d", index))
+		args[index] = NewNil()
+	}
+	args[13] = callback
+	outerCall := NewSlice([]Scmer{NewSymbol("outer"), NewInt(1), NewNthLocalVar(13)})
+	innerCall := NewSlice([]Scmer{outerCall, NewNthLocalVar(0)})
+	lambda := NewSlice([]Scmer{
+		NewSymbol("lambda"),
+		NewSlice([]Scmer{NewSymbol("value")}),
+		innerCall,
+		NewInt(1),
+	})
+	root := NewProcStruct(Proc{
+		Params:  NewSlice(params),
+		Body:    lambda,
+		En:      &Globalenv,
+		NumVars: 14,
+	})
+	compiled := jitCompile(root)
+	inner := Apply(compiled, args...)
+	want := NewString("exact outer frame")
+	if got := Apply(inner, want); !Equal(got, want) {
+		t.Fatalf("deep numbered capture returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionNestedAnonymousLambdasPreserveOuterDepth(t *testing.T) {
+	param := func(name string) Scmer { return NewSlice([]Scmer{NewSymbol(name)}) }
+	call := func(lambda Scmer, value int64) Scmer {
+		return NewSlice([]Scmer{lambda, NewInt(value)})
+	}
+	lambda := func(name string, body Scmer) Scmer {
+		return NewSlice([]Scmer{NewSymbol("lambda"), param(name), body, NewInt(1)})
+	}
+	outer := NewSlice([]Scmer{NewSymbol("outer"), NewInt(3), NewNthLocalVar(0)})
+	body := call(lambda("b", call(lambda("c", call(lambda("d", outer), 3)), 2)), 1)
+	root := NewProcStruct(Proc{
+		Params:  param("root"),
+		Body:    body,
+		En:      &Globalenv,
+		NumVars: 1,
+	})
+	compiled := jitCompile(root)
+	want := NewString("root value")
+	if got := Apply(compiled, want); !Equal(got, want) {
+		t.Fatalf("nested outer reference returned %s", SerializeToString(got, &Globalenv))
 	}
 }
 

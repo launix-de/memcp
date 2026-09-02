@@ -182,7 +182,6 @@ func jitMatchSliceTail(ctx *JITContext, slice *JITValueDesc) JITValueDesc {
 	ctx.ProtectReg(slice.Reg3)
 	ptrReg := ctx.AllocRegExcept(slice.Reg, slice.Reg2, slice.Reg3)
 	auxReg := ctx.AllocRegExcept(slice.Reg, slice.Reg2, slice.Reg3, ptrReg)
-	tmpReg := ctx.AllocRegExcept(slice.Reg, slice.Reg2, slice.Reg3, ptrReg, auxReg)
 	ctx.UnprotectReg(slice.Reg3)
 	ctx.UnprotectReg(slice.Reg2)
 	ctx.UnprotectReg(slice.Reg)
@@ -199,12 +198,11 @@ func jitMatchSliceTail(ctx *JITContext, slice *JITValueDesc) JITValueDesc {
 	ctx.EmitMovRegReg(auxReg, slice.Reg2)
 	ctx.EmitSubRegImm32(auxReg, 1)
 	ctx.EmitShlRegImm8(auxReg, sliceCapBits)
-	ctx.EmitMovRegReg(tmpReg, slice.Reg3)
-	ctx.EmitSubRegImm32(tmpReg, 1)
-	ctx.EmitOrInt64(auxReg, tmpReg)
+	ctx.EmitMovRegReg(ctx.ScratchReg, slice.Reg3)
+	ctx.EmitSubRegImm32(ctx.ScratchReg, 1)
+	ctx.EmitOrInt64(auxReg, ctx.ScratchReg)
 	ctx.EmitShlRegImm8(auxReg, 8)
 	ctx.EmitOrRegImm32(auxReg, int32(tagSlice))
-	ctx.FreeReg(tmpReg)
 	result := JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: ptrReg, Reg2: auxReg}
 	if slice.SliceSizeKnown {
 		result.KnownSliceLen = slice.KnownSliceLen - 1
@@ -492,6 +490,7 @@ func jitMatchCons(ctx *JITContext, value JITValueDesc, patterns []Scmer, env *JI
 		listOutcome.always = false
 	}
 	head := jitMatchLoadElement(ctx, &header, 0)
+	head = ctx.stabilizeForNested(head)
 	tail := jitMatchSliceTail(ctx, &header)
 	first := jitCompileMatchPattern(ctx, head, patterns[0], env, failLabel)
 	second := jitCompileMatchPattern(ctx, tail, patterns[1], env, failLabel)

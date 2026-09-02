@@ -780,18 +780,18 @@ func (t *table) collectStatisticsFromShards(shards []*storageShard) {
 		current := t.showColumnsSnapshot.Load()
 		if current == nil {
 			replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount))
-			replacement.statistics = stats
+			replacement.metadata.statistics = stats
 			if t.showColumnsSnapshot.CompareAndSwap(nil, replacement) {
-				t.columnNamesSnapshot.Store(replacement.columnNames)
+				t.columnNamesSnapshot.Store(replacement.metadata.columnNames)
 				t.publishPlannerStatsToken()
 				return
 			}
 			continue
 		}
 		replacement := t.buildShowColumnsSnapshot(uint(stats.rowCount))
-		replacement.statistics = stats
+		replacement.metadata.statistics = stats
 		if t.showColumnsSnapshot.CompareAndSwap(current, replacement) {
-			t.columnNamesSnapshot.Store(replacement.columnNames)
+			t.columnNamesSnapshot.Store(replacement.metadata.columnNames)
 			t.publishPlannerStatsToken()
 			return
 		}
@@ -864,8 +864,8 @@ func collectRebuiltColumnPlannerStatistics(shards []*storageShard, columnName st
 
 func (t *table) statistics() tableStatisticsSnapshot {
 	if snapshot := t.showColumnsSnapshot.Load(); snapshot != nil {
-		if snapshot.statistics != nil {
-			return *snapshot.statistics
+		if snapshot.metadata.statistics != nil {
+			return *snapshot.metadata.statistics
 		}
 		return tableStatisticsSnapshot{rowCount: int64(snapshot.rowEstimate)}
 	}
@@ -1262,7 +1262,7 @@ func (t *table) adjustPlannerRows(delta int64) {
 		replacement := *current
 		replacement.plannerValue = scm.NewFastDict(plannerRoot)
 		replacement.plannerFingerprint = plannerStatisticsFingerprint(
-			rowEstimate, replacement.plannerColumnsFingerprint)
+			rowEstimate, replacement.metadata.plannerColumnsFingerprint)
 		replacement.rowEstimate = uint(rowEstimate)
 		if t.showColumnsSnapshot.CompareAndSwap(current, &replacement) {
 			t.publishPlannerStatsToken()
@@ -1382,11 +1382,15 @@ func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
 }
 
 type tableShowColumnsSnapshot struct {
-	value                     scm.Scmer
-	plannerValue              scm.Scmer
-	plannerFingerprint        uint64
+	value              scm.Scmer
+	plannerValue       scm.Scmer
+	plannerFingerprint uint64
+	rowEstimate        uint
+	metadata           *tableShowColumnsSnapshotMetadata
+}
+
+type tableShowColumnsSnapshotMetadata struct {
 	plannerColumnsFingerprint uint64
-	rowEstimate               uint
 	columns                   *tableShowColumnsMetadata
 	columnNames               *tableColumnNamesSnapshot
 	statistics                *tableStatisticsSnapshot
@@ -1524,19 +1528,21 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 	plannerRoot.Set(scm.NewString("columns"), plannerColumnsValue, nil)
 	plannerValue := scm.NewFastDict(plannerRoot)
 	snapshot := &tableShowColumnsSnapshot{
-		value:                     scm.NewSlice(result),
-		plannerValue:              plannerValue,
-		plannerFingerprint:        plannerStatisticsFingerprint(uint64(rowEstimate), plannerColumnsFingerprint),
-		plannerColumnsFingerprint: plannerColumnsFingerprint,
-		rowEstimate:               rowEstimate,
-		columns: &tableShowColumnsMetadata{
-			distinctEstimates: distinctEstimates,
-			plannerStatistics: plannerStatistics,
+		value:              scm.NewSlice(result),
+		plannerValue:       plannerValue,
+		plannerFingerprint: plannerStatisticsFingerprint(uint64(rowEstimate), plannerColumnsFingerprint),
+		rowEstimate:        rowEstimate,
+		metadata: &tableShowColumnsSnapshotMetadata{
+			plannerColumnsFingerprint: plannerColumnsFingerprint,
+			columns: &tableShowColumnsMetadata{
+				distinctEstimates: distinctEstimates,
+				plannerStatistics: plannerStatistics,
+			},
+			columnNames: columnNames,
 		},
-		columnNames: columnNames,
 	}
 	if current := t.showColumnsSnapshot.Load(); current != nil {
-		snapshot.statistics = current.statistics
+		snapshot.metadata.statistics = current.metadata.statistics
 	}
 	return snapshot
 }
@@ -1562,7 +1568,7 @@ func (t *table) publishColumnNamesSnapshot() *tableColumnNamesSnapshot {
 
 func (t *table) publishShowColumnsSnapshot() scm.Scmer {
 	snapshot := t.buildShowColumnsSnapshot(t.CountEstimate())
-	t.columnNamesSnapshot.Store(snapshot.columnNames)
+	t.columnNamesSnapshot.Store(snapshot.metadata.columnNames)
 	t.showColumnsSnapshot.Store(snapshot)
 	t.publishPlannerStatsToken()
 	return snapshot.value

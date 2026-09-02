@@ -789,7 +789,9 @@ func init_list_assoc_extra() {
 					callbackArgs56[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray53) + 0}
 					var d55 JITValueDesc
 					callbackResultOff57 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff57))
 					ctx.FreeDesc(&d54)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs58 := ctx.StabilizeCallbackArgs(callbackArgs56)
 						ctx.ReclaimUntrackedRegs()
@@ -802,6 +804,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin61 {
 							d55 = d60
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d62 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d62)
@@ -1849,7 +1852,9 @@ func init_list_assoc_extra() {
 					callbackArgs56[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray53) + 0}
 					var d55 JITValueDesc
 					callbackResultOff57 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff57))
 					ctx.FreeDesc(&d54)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs58 := ctx.StabilizeCallbackArgs(callbackArgs56)
 						ctx.ReclaimUntrackedRegs()
@@ -1862,6 +1867,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin61 {
 							d55 = d60
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d62 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d62)
@@ -1888,7 +1894,9 @@ func init_list_assoc_extra() {
 					callbackArgs67[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray64) + 16}
 					var d66 JITValueDesc
 					callbackResultOff68 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff68))
 					ctx.FreeDesc(&d65)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs69 := ctx.StabilizeCallbackArgs(callbackArgs67)
 						ctx.ReclaimUntrackedRegs()
@@ -1901,6 +1909,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin72 {
 							d66 = d71
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d73 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d73)
@@ -2957,7 +2966,9 @@ func init_list_assoc_extra() {
 					callbackArgs57[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray54) + 16}
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff58))
 					ctx.FreeDesc(&d55)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
@@ -2970,6 +2981,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin62 {
 							d56 = d61
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d63)
@@ -2996,7 +3008,9 @@ func init_list_assoc_extra() {
 					callbackArgs68[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray65) + 16}
 					var d67 JITValueDesc
 					callbackResultOff69 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff69))
 					ctx.FreeDesc(&d66)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs70 := ctx.StabilizeCallbackArgs(callbackArgs68)
 						ctx.ReclaimUntrackedRegs()
@@ -3009,6 +3023,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin73 {
 							d67 = d72
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d74 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d74)
@@ -4001,7 +4016,9 @@ func init_list_assoc_extra() {
 					callbackArgs51[0] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray48) + 0}
 					var d50 JITValueDesc
 					callbackResultOff52 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff52))
 					ctx.FreeDesc(&d49)
+					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs53 := ctx.StabilizeCallbackArgs(callbackArgs51)
 						ctx.ReclaimUntrackedRegs()
@@ -4014,6 +4031,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin56 {
 							d50 = d55
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d57 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d57)
@@ -4976,7 +4994,9 @@ func init_list_assoc_extra() {
 					callbackArgs52[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray49) + 16}
 					var d51 JITValueDesc
 					callbackResultOff53 = ctx.AllocStack(16)
+					ctx.PrepareScmerStackTarget(int32(callbackResultOff53))
 					ctx.FreeDesc(&d50)
+					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs54 := ctx.StabilizeCallbackArgs(callbackArgs52)
 						ctx.ReclaimUntrackedRegs()
@@ -4989,6 +5009,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin57 {
 							d51 = d56
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d58 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d58)

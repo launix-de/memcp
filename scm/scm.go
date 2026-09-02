@@ -9746,6 +9746,7 @@ func init() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d475 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d476}, 2)
+				ctx.FreeDesc(&d468)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d475)
 				ctx.ReclaimUntrackedRegs()
@@ -10483,6 +10484,7 @@ func init() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d529 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d530}, 2)
+				ctx.FreeDesc(&d522)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d529)
 				ctx.ReclaimUntrackedRegs()
@@ -11220,6 +11222,7 @@ func init() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d583 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d584}, 2)
+				ctx.FreeDesc(&d576)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d583)
 				ctx.ReclaimUntrackedRegs()
@@ -11957,6 +11960,7 @@ func init() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d637 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d638}, 2)
+				ctx.FreeDesc(&d630)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d637)
 				ctx.ReclaimUntrackedRegs()
@@ -12694,6 +12698,7 @@ func init() {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d691 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d692}, 2)
+				ctx.FreeDesc(&d684)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d691)
 				ctx.ReclaimUntrackedRegs()
@@ -34277,8 +34282,7 @@ func init() {
 				_ = d24
 				var d40 JITValueDesc
 				_ = d40
-				var d41 JITValueDesc
-				_ = d41
+				var dynamicArgOff41 int32
 				var d42 JITValueDesc
 				_ = d42
 				var d43 JITValueDesc
@@ -34833,37 +34837,8 @@ func init() {
 						d40.ID = 0
 					} else {
 						ctx.EnsureDesc(&d19)
-						protected := make([]Reg, 0, len(args)*2+1)
-						seen := make(map[Reg]bool)
-						if !seen[d19.Reg] {
-							ctx.ProtectReg(d19.Reg)
-							seen[d19.Reg] = true
-							protected = append(protected, d19.Reg)
-						}
-						for _, ai := range args {
-							if ai.Loc == LocReg {
-								if !seen[ai.Reg] {
-									ctx.ProtectReg(ai.Reg)
-									seen[ai.Reg] = true
-									protected = append(protected, ai.Reg)
-								}
-							} else if ai.Loc == LocRegPair {
-								if !seen[ai.Reg] {
-									ctx.ProtectReg(ai.Reg)
-									seen[ai.Reg] = true
-									protected = append(protected, ai.Reg)
-								}
-								if !seen[ai.Reg2] {
-									ctx.ProtectReg(ai.Reg2)
-									seen[ai.Reg2] = true
-									protected = append(protected, ai.Reg2)
-								}
-							} else if ai.Loc == LocStackPair {
-								// no direct registers to protect
-							}
-						}
-						r4 := ctx.AllocReg()
-						r5 := ctx.AllocRegExcept(r4)
+						dynamicArgOff41 = ctx.AllocStack(16)
+						ctx.ProtectReg(d19.Reg)
 						lbl11 := ctx.ReserveLabel()
 						lbl12 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d19.Reg, int32(len(args)-0))
@@ -34874,65 +34849,15 @@ func init() {
 							ctx.EmitJump(CondNotEqual, nextLbl)
 							ai := args[i]
 							ai.ID = 0
-							switch ai.Loc {
-							case LocRegPair:
-								ctx.EmitMovRegReg(r4, ai.Reg)
-								ctx.EmitMovRegReg(r5, ai.Reg2)
-							case LocStackPair:
-								tmp := ai
-								ctx.EnsureDesc(&tmp)
-								if tmp.Loc != LocRegPair {
-									panic("jitgen: emitter args index expected Scmer pair")
-								}
-								ctx.EmitMovRegReg(r4, tmp.Reg)
-								ctx.EmitMovRegReg(r5, tmp.Reg2)
-								ctx.FreeDesc(&tmp)
-							case LocImm:
-								pair := JITValueDesc{Loc: LocRegPair, Reg: r4, Reg2: r5}
-								ctx.BindReg(r4, &pair)
-								ctx.BindReg(r5, &pair)
-								if ai.Imm.GetTag() == tagInt {
-									src := ai
-									src.Type = tagInt
-									src.Imm = NewInt(ai.Imm.Int())
-									ctx.EmitMakeInt(pair, src)
-								} else if ai.Imm.GetTag() == tagFloat {
-									src := ai
-									src.Type = tagFloat
-									src.Imm = NewFloat(ai.Imm.Float())
-									ctx.EmitMakeFloat(pair, src)
-								} else if ai.Imm.GetTag() == tagBool {
-									src := ai
-									src.Type = tagBool
-									src.Imm = NewBool(ai.Imm.Bool())
-									ctx.EmitMakeBool(pair, src)
-								} else if ai.Imm.GetTag() == tagNil {
-									ctx.EmitMakeNil(pair)
-								} else {
-									ptrWord, auxWord := ai.Imm.RawWords()
-									ctx.EmitMovRegImm64(r4, uint64(ptrWord))
-									ctx.EmitMovRegImm64(r5, auxWord)
-								}
-							default:
-								panic("jitgen: emitter args index expected Scmer pair")
-							}
+							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff41))
 							ctx.EmitJmp(lbl11)
 							ctx.MarkLabel(nextLbl)
 						}
 						ctx.MarkLabel(lbl12)
-						d41 := JITValueDesc{Loc: LocRegPair, Reg: r4, Reg2: r5}
-						ctx.BindReg(r4, &d41)
-						ctx.BindReg(r5, &d41)
-						ctx.BindReg(r4, &d41)
-						ctx.BindReg(r5, &d41)
-						ctx.EmitMakeNil(d41)
+						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff41))
 						ctx.MarkLabel(lbl11)
-						for _, r := range protected {
-							ctx.UnprotectReg(r)
-						}
-						d40 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r4, Reg2: r5}
-						ctx.BindReg(r4, &d40)
-						ctx.BindReg(r5, &d40)
+						ctx.UnprotectReg(d19.Reg)
+						d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff41), Rooted: true}
 					}
 					d43 = d40
 					ctx.SyncDesc(&d43)
@@ -35026,7 +34951,6 @@ func init() {
 					ps48.OverlayValues[21] = d21
 					ps48.OverlayValues[24] = d24
 					ps48.OverlayValues[40] = d40
-					ps48.OverlayValues[41] = d41
 					ps48.OverlayValues[42] = d42
 					ps48.OverlayValues[43] = d43
 					ps48.OverlayValues[45] = d45
@@ -35100,9 +35024,6 @@ func init() {
 					}
 					if len(ps.OverlayValues) > 40 && ps.OverlayValues[40].Loc != LocNone {
 						d40 = ps.OverlayValues[40]
-					}
-					if len(ps.OverlayValues) > 41 && ps.OverlayValues[41].Loc != LocNone {
-						d41 = ps.OverlayValues[41]
 					}
 					if len(ps.OverlayValues) > 42 && ps.OverlayValues[42].Loc != LocNone {
 						d42 = ps.OverlayValues[42]
@@ -36175,22 +36096,28 @@ func init() {
 				ctx.EnsureDesc(&d24)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d55)
-				d57 := ctx.EmitSliceElementAddress(&d21, &d24, int32(16))
-				ctx.EmitStoreScmerAt(&d57, &d55)
-				ctx.FreeDesc(&d57)
+				ctx.StabilizeDescAcrossNestedCall(&d24)
+				d57 := d21
+				d57.ID = 0
+				d58 := d24
+				d58.ID = 0
+				d59 := ctx.EmitSliceElementAddress(&d57, &d58, int32(16))
+				ctx.FreeDesc(&d58)
+				ctx.EmitStoreScmerAt(&d59, &d55)
+				ctx.FreeDesc(&d59)
 				ctx.FreeDesc(&d55)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl14)
 				ctx.MarkLabel(lbl0)
-				d58 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
-				ctx.BindReg(r13, &d58)
-				ctx.BindReg(r14, &d58)
-				ctx.BindReg(r13, &d58)
-				ctx.BindReg(r14, &d58)
+				d60 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
+				ctx.BindReg(r13, &d60)
+				ctx.BindReg(r14, &d60)
+				ctx.BindReg(r13, &d60)
+				ctx.BindReg(r14, &d60)
 				ctx.FreeDesc(&d0)
-				if d58.Loc == LocImm {
+				if d60.Loc == LocImm {
 					if result.Loc == LocAny {
-						return d58
+						return d60
 					}
 				}
 				if result.Loc == LocAny {
@@ -36198,20 +36125,20 @@ func init() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.SyncDesc(&d58)
-				if d58.Loc == LocRegPair || d58.Loc == LocStackPair || d58.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d58, &result)
-					result.Type = d58.Type
+				ctx.SyncDesc(&d60)
+				if d60.Loc == LocRegPair || d60.Loc == LocStackPair || d60.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d60, &result)
+					result.Type = d60.Type
 				} else {
-					switch d58.Type {
+					switch d60.Type {
 					case tagBool:
-						ctx.EmitMakeBool(result, d58)
+						ctx.EmitMakeBool(result, d60)
 						result.Type = tagBool
 					case tagInt:
-						ctx.EmitMakeInt(result, d58)
+						ctx.EmitMakeInt(result, d60)
 						result.Type = tagInt
 					case tagFloat:
-						ctx.EmitMakeFloat(result, d58)
+						ctx.EmitMakeFloat(result, d60)
 						result.Type = tagFloat
 					case tagNil:
 						ctx.EmitMakeNil(result)
@@ -36444,6 +36371,7 @@ func init() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(24))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				var bbs [6]BBDescriptor
 				bbs[3].PhiBase = int32(phiBase0) + int32(0)
@@ -37623,6 +37551,7 @@ func init() {
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(24))
 				d1 := JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PreparePointerStackTarget(int32(phiBase0)+int32(0), 3)
 				_ = d1
 				var bbs [6]BBDescriptor
 				bbs[3].PhiBase = int32(phiBase0) + int32(0)
@@ -43515,6 +43444,7 @@ Patterns can be any of:
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
+				ctx.PrepareScmerStackTarget(int32(phiBase0) + int32(0))
 				_ = d1
 				var bbs [3]BBDescriptor
 				bbs[2].PhiBase = int32(phiBase0) + int32(0)
@@ -43955,12 +43885,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d32)
 					phiBase33 = ctx.AllocStack(int32(80))
 					d34 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase33) + int32(0))
 					_ = d34
 					d35 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase33)+int32(16), 3)
 					_ = d35
 					d36 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase33) + int32(40))
 					_ = d36
 					d37 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase33) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase33)+int32(56), 3)
 					_ = d37
 					lbl7 := ctx.ReserveLabel()
 					bbpos_2_0 := int32(-1)
@@ -44841,12 +44775,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d32)
 					phiBase92 = ctx.AllocStack(int32(80))
 					d93 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase92) + int32(0))
 					_ = d93
 					d94 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase92)+int32(16), 3)
 					_ = d94
 					d95 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase92) + int32(40))
 					_ = d95
 					d96 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase92) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase92)+int32(56), 3)
 					_ = d96
 					lbl55 := ctx.ReserveLabel()
 					bbpos_3_0 := int32(-1)
@@ -45727,12 +45665,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d91)
 					phiBase151 = ctx.AllocStack(int32(80))
 					d152 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase151) + int32(0))
 					_ = d152
 					d153 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase151)+int32(16), 3)
 					_ = d153
 					d154 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase151) + int32(40))
 					_ = d154
 					d155 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase151) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase151)+int32(56), 3)
 					_ = d155
 					lbl103 := ctx.ReserveLabel()
 					bbpos_4_0 := int32(-1)
@@ -46613,12 +46555,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d150)
 					phiBase210 = ctx.AllocStack(int32(80))
 					d211 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase210) + int32(0))
 					_ = d211
 					d212 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase210)+int32(16), 3)
 					_ = d212
 					d213 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase210) + int32(40))
 					_ = d213
 					d214 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase210) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase210)+int32(56), 3)
 					_ = d214
 					lbl151 := ctx.ReserveLabel()
 					bbpos_5_0 := int32(-1)
@@ -47499,12 +47445,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d209)
 					phiBase269 = ctx.AllocStack(int32(80))
 					d270 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase269) + int32(0))
 					_ = d270
 					d271 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase269)+int32(16), 3)
 					_ = d271
 					d272 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase269) + int32(40))
 					_ = d272
 					d273 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase269) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase269)+int32(56), 3)
 					_ = d273
 					lbl199 := ctx.ReserveLabel()
 					bbpos_6_0 := int32(-1)
@@ -48385,12 +48335,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d268)
 					phiBase328 = ctx.AllocStack(int32(80))
 					d329 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase328) + int32(0))
 					_ = d329
 					d330 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase328)+int32(16), 3)
 					_ = d330
 					d331 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase328) + int32(40))
 					_ = d331
 					d332 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase328) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase328)+int32(56), 3)
 					_ = d332
 					lbl247 := ctx.ReserveLabel()
 					bbpos_7_0 := int32(-1)
@@ -49271,12 +49225,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d327)
 					phiBase387 = ctx.AllocStack(int32(80))
 					d388 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase387) + int32(0))
 					_ = d388
 					d389 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase387)+int32(16), 3)
 					_ = d389
 					d390 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase387) + int32(40))
 					_ = d390
 					d391 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase387) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase387)+int32(56), 3)
 					_ = d391
 					lbl295 := ctx.ReserveLabel()
 					bbpos_8_0 := int32(-1)
@@ -50157,12 +50115,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d386)
 					phiBase446 = ctx.AllocStack(int32(80))
 					d447 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase446) + int32(0))
 					_ = d447
 					d448 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase446)+int32(16), 3)
 					_ = d448
 					d449 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase446) + int32(40))
 					_ = d449
 					d450 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase446) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase446)+int32(56), 3)
 					_ = d450
 					lbl343 := ctx.ReserveLabel()
 					bbpos_9_0 := int32(-1)
@@ -51043,12 +51005,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d445)
 					phiBase505 = ctx.AllocStack(int32(80))
 					d506 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase505) + int32(0))
 					_ = d506
 					d507 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase505)+int32(16), 3)
 					_ = d507
 					d508 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase505) + int32(40))
 					_ = d508
 					d509 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase505) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase505)+int32(56), 3)
 					_ = d509
 					lbl391 := ctx.ReserveLabel()
 					bbpos_10_0 := int32(-1)
@@ -51929,12 +51895,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d504)
 					phiBase564 = ctx.AllocStack(int32(80))
 					d565 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase564) + int32(0))
 					_ = d565
 					d566 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase564)+int32(16), 3)
 					_ = d566
 					d567 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase564) + int32(40))
 					_ = d567
 					d568 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase564) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase564)+int32(56), 3)
 					_ = d568
 					lbl439 := ctx.ReserveLabel()
 					bbpos_11_0 := int32(-1)
@@ -52815,12 +52785,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d563)
 					phiBase623 = ctx.AllocStack(int32(80))
 					d624 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase623) + int32(0))
 					_ = d624
 					d625 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase623)+int32(16), 3)
 					_ = d625
 					d626 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase623) + int32(40))
 					_ = d626
 					d627 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase623) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase623)+int32(56), 3)
 					_ = d627
 					lbl487 := ctx.ReserveLabel()
 					bbpos_12_0 := int32(-1)
@@ -53701,12 +53675,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d622)
 					phiBase682 = ctx.AllocStack(int32(80))
 					d683 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase682) + int32(0))
 					_ = d683
 					d684 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase682)+int32(16), 3)
 					_ = d684
 					d685 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase682) + int32(40))
 					_ = d685
 					d686 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase682) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase682)+int32(56), 3)
 					_ = d686
 					lbl535 := ctx.ReserveLabel()
 					bbpos_13_0 := int32(-1)
@@ -54587,12 +54565,16 @@ Patterns can be any of:
 					ctx.StabilizeDescForControlFlow(&d681)
 					phiBase741 = ctx.AllocStack(int32(80))
 					d742 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(0)}
+					ctx.PrepareScmerStackTarget(int32(phiBase741) + int32(0))
 					_ = d742
 					d743 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(16)}
+					ctx.PreparePointerStackTarget(int32(phiBase741)+int32(16), 3)
 					_ = d743
 					d744 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(40)}
+					ctx.PrepareScmerStackTarget(int32(phiBase741) + int32(40))
 					_ = d744
 					d745 = JITValueDesc{Loc: LocStackTriple, Type: JITTypeUnknown, StackOff: int32(phiBase741) + int32(56)}
+					ctx.PreparePointerStackTarget(int32(phiBase741)+int32(56), 3)
 					_ = d745
 					lbl583 := ctx.ReserveLabel()
 					bbpos_14_0 := int32(-1)
