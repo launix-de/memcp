@@ -71,6 +71,7 @@ type jitParserRule struct {
 	jitOuter       *JITEnv
 	lexicalParent  int
 	compiledAction *JITEntryPoint
+	actionCaptures []Symbol
 }
 
 type jitParserProgram struct {
@@ -374,6 +375,14 @@ func (builder *jitParserBuilder) finishRule(ruleID int) {
 	params := make([]Scmer, len(rule.bindings))
 	for index, binding := range rule.bindings {
 		params[index] = NewSymbol(string(binding))
+	}
+	if rule.jitOuter != nil {
+		for _, symbol := range jitLambdaFreeSymbols(NewSlice(params), rule.generator) {
+			if _, exists := rule.jitOuter.Lookup(symbol); exists {
+				rule.actionCaptures = append(rule.actionCaptures, symbol)
+				params = append(params, NewSymbol(string(symbol)))
+			}
+		}
 	}
 	outer := rule.outer
 	if outer == nil {

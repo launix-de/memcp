@@ -737,10 +737,18 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 			}
 			valueTarget := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: emitter.generatorValueOff, Rooted: true}
 			if action := rule.compiledAction; action != nil {
+				actionArgs := append([]JITValueDesc(nil), allArgs[0]...)
+				for _, symbol := range rule.actionCaptures {
+					capture, exists := bindingEnv.Lookup(symbol)
+					if !exists {
+						panic("jit: parser action capture " + string(symbol) + " is unavailable")
+					}
+					actionArgs = append(actionArgs, capture)
+				}
 				entryValue := NewAny(action)
 				emitter.ctx.TrackImm(entryValue)
 				entry := emitter.immPair(entryValue)
-				args := jitMaterializeVirtualGoSlice(emitter.ctx, allArgs[0])
+				args := jitMaterializeVirtualGoSlice(emitter.ctx, actionArgs)
 				value = emitter.ctx.EmitGoCallScalar(GoFuncAddr(jitParserCallCompiledAction), []JITValueDesc{entry, args}, 2)
 				value.Type = JITTypeUnknown
 				value.Rooted = true
