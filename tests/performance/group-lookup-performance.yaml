@@ -103,6 +103,7 @@ setup:
 cleanup:
   - sql: "DROP TABLE IF EXISTS group_expression_items"
   - sql: "DROP TABLE IF EXISTS lookup_group_items"
+  - sql: "DROP TABLE IF EXISTS ungrouped_aggregate_perf"
 
 test_cases:
   - name: "nested projection preserves every grouped key"
@@ -209,6 +210,52 @@ test_cases:
         - "assoc_keys_as_dataset_rows"
         - "assoc_keys_values_as_dataset_rows"
         - "resultrow (cons"
+
+  - name: "ungrouped SUM uses its reducer as scalar accumulator"
+    sql: "EXPLAIN SELECT SUM(id) AS total FROM lookup_group_items"
+    expect:
+      rows: 1
+      result_contains:
+        - "sql_sum_reduce"
+      result_not_contains:
+        - "set_assoc_mut"
+        - "merge_assoc_mut"
+
+  - name: "ungrouped COUNT DISTINCT uses a generic scalar accumulator"
+    sql: "EXPLAIN SELECT COUNT(DISTINCT bucket) AS total FROM lookup_group_items"
+    expect:
+      rows: 1
+      result_contains:
+        - "merge_unique"
+      result_not_contains:
+        - "set_assoc_mut"
+        - "merge_assoc_mut"
+
+  - name: "ungrouped COUNT DISTINCT scalar result"
+    sql: "SELECT COUNT(DISTINCT bucket) AS total FROM lookup_group_items"
+    expect:
+      rows: 1
+      data:
+        - total: 4
+
+  - name: "cold ungrouped SUM scalar reduction"
+    performance_rows: 1000000
+    warmup: 0
+    timing_samples: 1
+    threshold_ms: 10000
+    timeout: 30
+    setup:
+      - sql: "DROP TABLE IF EXISTS ungrouped_aggregate_perf"
+      - sql: "CREATE TABLE ungrouped_aggregate_perf (id INT PRIMARY KEY, value INT)"
+      - scm: |
+          (begin
+            (insert (table "memcp-tests" "ungrouped_aggregate_perf") '("id" "value")
+              (map (produceN {rows}) (lambda (i) (list i i))))
+            (rebuild (table "memcp-tests" "ungrouped_aggregate_perf") true false)
+            {rows})
+    sql: "SELECT SUM(value) AS total FROM ungrouped_aggregate_perf"
+    expect:
+      rows: 1
 
   - name: "cold low-cardinality group initializes the reusable keytable"
     sql: |
