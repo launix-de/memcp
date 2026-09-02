@@ -16,6 +16,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+import "runtime"
+
 // SerialProcKind describes callback shapes whose semantics can be consumed by
 // a physical operator without entering Eval. Operators must dispatch on Kind
 // outside their row loops; Call is the compatibility path for code which does
@@ -47,6 +49,8 @@ type SerialProc struct {
 	borrowed      func([]Scmer) Scmer
 	jitEntry      *JITEntryPoint
 	jitArity      int
+	jitPublicArgs int
+	jitBoundArgs  []Scmer
 }
 
 func serialProcBody(v Scmer) Scmer {
@@ -207,14 +211,21 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	// classifying that body could silently bypass code generation semantics.
 	if proc.Compiled != nil {
 		params, fixedArity := scmerSlice(proc.Params)
-		if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 {
+		compiledParams, compiledFixedArity := params, fixedArity
+		if len(proc.Compiled.BoundArgs) != 0 {
+			compiledParams, compiledFixedArity = scmerSlice(proc.Compiled.Proc.Params)
+		}
+		if jitEnabled && fixedArity && compiledFixedArity && len(proc.Compiled.HiddenArgs) == 0 &&
+			len(compiledParams)-len(proc.Compiled.BoundArgs) == len(params) {
 			prepared.Kind = SerialProcJIT
 			prepared.Function = proc.JIT
 			if prepared.Function == nil {
 				prepared.Function = proc.Compiled.Native
 			}
 			prepared.jitEntry = proc.Compiled
-			prepared.jitArity = len(params)
+			prepared.jitArity = len(compiledParams)
+			prepared.jitPublicArgs = len(params)
+			prepared.jitBoundArgs = proc.Compiled.BoundArgs
 			return prepared
 		}
 		prepared.Kind = SerialProcGeneral
@@ -268,18 +279,46 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	return prepared
 }
 
-// CallFrameSize validates an operator-provided prefix and returns the exact
-// fixed JIT arity. Extra procedure parameters are initialized as nil once when
-// the physical callback buffer is prepared, matching JITEntryPoint.Call
-// without padding or branching in the row loop.
-func (p *SerialProc) CallFrameSize(provided int) int {
+// PrepareCallFrame extends an operator-owned public argument prefix to the
+// exact native arity. Missing public parameters and bound lexical captures are
+// installed once during physical callback setup, keeping the row loop direct
+// and allocation-free.
+func (p *SerialProc) PrepareCallFrame(args []Scmer) []Scmer {
 	if p.Kind != SerialProcJIT {
-		return provided
+		return args
 	}
-	if provided > p.jitArity {
+	provided := len(args)
+	if provided > p.jitPublicArgs {
 		panic("JIT map-reducer received more arguments than declared parameters")
 	}
-	return p.jitArity
+	if p.jitArity > cap(args) {
+		frame := make([]Scmer, p.jitArity)
+		copy(frame, args)
+		args = frame
+	} else {
+		args = args[:p.jitArity]
+	}
+	for index := provided; index < p.jitPublicArgs; index++ {
+		args[index] = NewNil()
+	}
+	copy(args[p.jitPublicArgs:], p.jitBoundArgs)
+	return args
+}
+
+// CallPrepared executes a frame returned by PrepareCallFrame. Physical loops
+// use Function directly after dispatching on Kind; this method covers their
+// shared slow path without appending the already installed bound arguments a
+// second time.
+func (p *SerialProc) CallPrepared(args []Scmer) Scmer {
+	if p.Kind != SerialProcJIT {
+		return p.Call(args)
+	}
+	if len(args) != p.jitArity {
+		panic("JIT map-reducer received an unprepared call frame")
+	}
+	result := p.Function(args...)
+	runtime.KeepAlive(p.jitEntry)
+	return result
 }
 
 // Call evaluates a prepared callback with a caller-owned argument frame. Hot

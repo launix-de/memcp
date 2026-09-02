@@ -236,6 +236,25 @@ func TestJITExpressionHigherOrderClosureCapture(t *testing.T) {
 	}
 }
 
+func TestJITExpressionReusesCompiledClosureTemplate(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda (captured) (lambda (value) (+ captured value)))`)
+	first := Apply(compiled, NewInt(40))
+	second := Apply(compiled, NewInt(41))
+	if first.Proc() == nil || first.Proc().Compiled == nil || second.Proc() == nil || second.Proc().Compiled == nil {
+		t.Fatal("captured closures did not receive native entry points")
+	}
+	if first.Proc().Compiled.CodePtr != second.Proc().Compiled.CodePtr {
+		t.Fatal("captured closures recompiled an identical lambda body")
+	}
+	if got := Apply(first, NewInt(2)); !Equal(got, NewInt(42)) {
+		t.Fatalf("first captured closure returned %s, want 42", String(got))
+	}
+	if got := Apply(second, NewInt(2)); !Equal(got, NewInt(43)) {
+		t.Fatalf("second captured closure returned %s, want 43", String(got))
+	}
+}
+
 func TestJITExpressionNestedClosureKeepsDeepCallableCapture(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (callback)
 		(lambda (level_one)

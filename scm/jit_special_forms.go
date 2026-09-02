@@ -594,18 +594,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), key}))
 		argExprs = append(argExprs, jitLambdaCaptureReference(capture.index, capture.depth))
 	}
-	needsBoundTemplate := false
-	for _, capture := range outerCaptures {
-		env := ctx.Env
-		for depth := capture.depth; depth > 0 && env != nil; depth-- {
-			env = env.Outer
-		}
-		if env == nil || int(capture.index) >= len(env.Numbered) {
-			needsBoundTemplate = true
-			break
-		}
-	}
-	if ctx.RecursiveLambdas && (ctx.DefiningSymbol != "" || needsBoundTemplate) && len(capturedSymbols)+len(outerCaptures) != 0 &&
+	if ctx.RecursiveLambdas && len(capturedSymbols)+len(outerCaptures) != 0 &&
 		len(argExprs) == 3+2*(len(capturedSymbols)+len(outerCaptures)) && !jitExpressionConsumesRuntimeEnv(body) {
 		plainParams := params.WithoutSourceInfo()
 		if plainParams.IsSlice() {
@@ -654,6 +643,12 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		closure := jitBuildNamedLambdaClosure(
 			NewSymbol(string(ctx.DefiningSymbol)), params, body, NewInt(int64(numVars)),
 		)
+		compiled := jitCompileModeDeferred(true, closure)
+		ctx.TrackImm(compiled)
+		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
+	}
+	if ctx.RecursiveLambdas && ctx.DefiningSymbol == "" && len(argExprs) == 3 && !jitExpressionConsumesRuntimeEnv(body) {
+		closure := jitBuildLambdaClosure(params, body, NewInt(int64(numVars)))
 		compiled := jitCompileModeDeferred(true, closure)
 		ctx.TrackImm(compiled)
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
