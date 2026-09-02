@@ -36096,22 +36096,28 @@ func init() {
 				ctx.EnsureDesc(&d24)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d55)
-				d57 := ctx.EmitSliceElementAddress(&d21, &d24, int32(16))
-				ctx.EmitStoreScmerAt(&d57, &d55)
-				ctx.FreeDesc(&d57)
+				ctx.StabilizeDescForControlFlow(&d24)
+				d57 := d21
+				d57.ID = 0
+				d58 := d24
+				d58.ID = 0
+				d59 := ctx.EmitSliceElementAddress(&d57, &d58, int32(16))
+				ctx.FreeDesc(&d58)
+				ctx.EmitStoreScmerAt(&d59, &d55)
+				ctx.FreeDesc(&d59)
 				ctx.FreeDesc(&d55)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EmitJmp(lbl14)
 				ctx.MarkLabel(lbl0)
-				d58 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
-				ctx.BindReg(r13, &d58)
-				ctx.BindReg(r14, &d58)
-				ctx.BindReg(r13, &d58)
-				ctx.BindReg(r14, &d58)
+				d60 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r13, Reg2: r14}
+				ctx.BindReg(r13, &d60)
+				ctx.BindReg(r14, &d60)
+				ctx.BindReg(r13, &d60)
+				ctx.BindReg(r14, &d60)
 				ctx.FreeDesc(&d0)
-				if d58.Loc == LocImm {
+				if d60.Loc == LocImm {
 					if result.Loc == LocAny {
-						return d58
+						return d60
 					}
 				}
 				if result.Loc == LocAny {
@@ -36119,20 +36125,20 @@ func init() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.SyncDesc(&d58)
-				if d58.Loc == LocRegPair || d58.Loc == LocStackPair || d58.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d58, &result)
-					result.Type = d58.Type
+				ctx.SyncDesc(&d60)
+				if d60.Loc == LocRegPair || d60.Loc == LocStackPair || d60.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d60, &result)
+					result.Type = d60.Type
 				} else {
-					switch d58.Type {
+					switch d60.Type {
 					case tagBool:
-						ctx.EmitMakeBool(result, d58)
+						ctx.EmitMakeBool(result, d60)
 						result.Type = tagBool
 					case tagInt:
-						ctx.EmitMakeInt(result, d58)
+						ctx.EmitMakeInt(result, d60)
 						result.Type = tagInt
 					case tagFloat:
-						ctx.EmitMakeFloat(result, d58)
+						ctx.EmitMakeFloat(result, d60)
 						result.Type = tagFloat
 					case tagNil:
 						ctx.EmitMakeNil(result)

@@ -928,10 +928,12 @@ func (ctx *JITContext) EmitZeroDescWords(dst *JITValueDesc, words int) {
 	}
 }
 
-// StabilizeDescForControlFlow gives a register-backed SSA value a fixed stack
+// StabilizeDescForControlFlow gives a register-backed SSA value a fixed spill
 // home at its producer. Machine code in successor blocks can then be entered
 // repeatedly without depending on the allocator state used while those blocks
-// were emitted once.
+// were emitted once. The frame-pointer-relative spill zone is intentional:
+// nested emitters may release and reuse ordinary stack allocations while this
+// value remains live across their control flow.
 func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	ctx.SyncDesc(desc)
 	words := int32(0)
@@ -946,11 +948,11 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	default:
 		return
 	}
-	off := ctx.AllocStack(words * 8)
+	off := ctx.AllocSpill(words * 8)
 	regs := [...]Reg{desc.Reg, desc.Reg2, desc.Reg3}
 	for i := int32(0); i < words; i++ {
-		ctx.EmitStoreRegMem(regs[i], ctx.StackReg, off+i*8)
-		ctx.setStackPointer(jitStackRootFrameSP, off+i*8-ctx.DynamicSP, !desc.NoHeapPointer && i == 0)
+		ctx.EmitStoreRegMem(regs[i], ctx.FrameReg, off+i*8)
+		ctx.setStackPointer(jitStackRootFrameBP, off+i*8, !desc.NoHeapPointer && i == 0)
 		owner := ctx.RegOwners[regs[i]]
 		ownsReg := owner == desc || (owner != nil && desc.ID != 0 && owner.ID == desc.ID)
 		if ownsReg {

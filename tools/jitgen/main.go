@@ -1972,6 +1972,46 @@ func (g *codeGen) recordSliceResult(name string, producer ssa.Value, desc string
 	g.vals[name] = genVal{goVar: desc, isDesc: true, marker: "_slice", pinAcrossBlock: true}
 }
 
+// stabilizeLiveSliceIndicesAcrossCallback gives loop indices reused by a
+// post-callback slice access a fixed frame home. Their register descriptor is
+// otherwise vulnerable to speculative CFG rendering of the callback while all
+// ordinary caller values remain covered by the register-save protocol.
+func (g *codeGen) stabilizeLiveSliceIndicesAcrossCallback() {
+	byDescriptor := make(map[string]struct{})
+	for _, block := range g.fn.Blocks {
+		for _, instruction := range block.Instrs {
+			indexAddress, ok := instruction.(*ssa.IndexAddr)
+			if !ok {
+				continue
+			}
+			name := indexAddress.Index.Name()
+			if alias, exists := g.ssaAliases[name]; exists {
+				name = alias
+			}
+			value, exists := g.vals[name]
+			if !exists || !value.isDesc || value.goVar == "" || g.ssaValueUsesRemaining(name) <= 0 {
+				continue
+			}
+			byDescriptor[value.goVar] = struct{}{}
+		}
+	}
+	descriptors := make([]string, 0, len(byDescriptor))
+	for descriptor := range byDescriptor {
+		descriptors = append(descriptors, descriptor)
+	}
+	sort.Slice(descriptors, func(i, j int) bool {
+		left, leftErr := parseDescNum(descriptors[i])
+		right, rightErr := parseDescNum(descriptors[j])
+		if leftErr == nil && rightErr == nil {
+			return left < right
+		}
+		return descriptors[i] < descriptors[j]
+	})
+	for _, descriptor := range descriptors {
+		g.emit("ctx.StabilizeDescForControlFlow(&%s)", descriptor)
+	}
+}
+
 // emitSerialCallableCall lowers a call through a callback prepared by
 // PrepareSerialProc or OptimizeProcToSerialFunction. SSA represents these calls
 // either as an indirect function call or as a statically resolved
@@ -2018,6 +2058,7 @@ func (g *codeGen) emitSerialCallableCall(name string, producer ssa.Value, callab
 	}
 	callbackTarget := fmt.Sprintf("JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: %s, ID: 0}", callbackTargetOff)
 	g.emit("ctx.FreeDesc(&%s)", callArgs.goVar)
+	g.stabilizeLiveSliceIndicesAcrossCallback()
 	g.emit("if %s.Loc == LocLambdaTemplate && %s.Lambda != nil {", callable.goVar, callable.goVar)
 	stableArgs := g.allocTemp("stableCallbackArgs")
 	g.emit("\t%s := ctx.StabilizeCallbackArgs(%s)", stableArgs, argsVar)
@@ -7992,8 +8033,21 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 				// stack home here so address generation cannot spill a stale copy.
 				g.emit("ctx.SyncDesc(&%s)", src.goVar)
 			}
+			// Address formation may materialize stack-backed operands. Give that
+			// consumer non-owning descriptor copies so a subsequent write-barrier
+			// call cannot disconnect a loop-carried source from its stable home.
+			if dst.deferredIndexSSA != "" {
+				g.emit("ctx.StabilizeDescForControlFlow(&%s)", idxDescVar)
+			}
+			sliceUse := g.allocDesc()
+			indexUse := g.allocDesc()
+			g.emit("%s := %s", sliceUse, sliceDescVar)
+			g.emit("%s.ID = 0", sliceUse)
+			g.emit("%s := %s", indexUse, idxDescVar)
+			g.emit("%s.ID = 0", indexUse)
 			address := g.allocDesc()
-			g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, int32(%s))", address, sliceDescVar, idxDescVar, elemSize)
+			g.emit("%s := ctx.EmitSliceElementAddress(&%s, &%s, int32(%s))", address, sliceUse, indexUse, elemSize)
+			g.emit("ctx.FreeDesc(&%s)", indexUse)
 			g.emit("ctx.EmitStoreScmerAt(&%s, &%s)", address, src.goVar)
 			g.emit("ctx.FreeDesc(&%s)", address)
 			if dst.deferredIndexSSA != "" {
