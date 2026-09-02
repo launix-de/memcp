@@ -2033,6 +2033,7 @@ func (g *codeGen) emitSerialCallableCall(name string, producer ssa.Value, callab
 	g.emit("\tif %s {", knownFlag)
 	g.emit("\t\t%s = %s", dv, knownResult)
 	g.emit("\t} else {")
+	g.emit("\t\tctx.Coverage.DynamicCalls++")
 	callbackCallable := g.allocDesc()
 	g.emit("\t\t%s := jitCopyScmerToPair(ctx, %s)", callbackCallable, callable.goVar)
 	callbackHelper := ""

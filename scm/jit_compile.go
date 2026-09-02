@@ -2646,8 +2646,14 @@ func jitDeclarationHasCallback(decl *Declaration) bool {
 func jitCompileCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer, sliceBase Reg) JITValueDesc {
 	param := jitDeclarationParam(decl, index)
 	if param != nil && param.Kind == "func" {
-		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
-			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+		transfersInput := false
+		for _, callbackParam := range param.Params {
+			transfersInput = transfersInput || callbackParam != nil && callbackParam.Transfer
+		}
+		if !transfersInput {
+			if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
+				return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
+			}
 		}
 	}
 	hasCallback := false

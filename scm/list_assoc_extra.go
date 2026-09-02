@@ -802,6 +802,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin61 {
 							d55 = d60
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d62 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d62)
@@ -1862,6 +1863,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin61 {
 							d55 = d60
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d62 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d62)
@@ -1901,6 +1903,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin72 {
 							d66 = d71
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d73 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d73)
@@ -2970,6 +2973,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin62 {
 							d56 = d61
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d63)
@@ -3009,6 +3013,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin73 {
 							d67 = d72
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d74 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d74)
@@ -4014,6 +4019,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin56 {
 							d50 = d55
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d57 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d57)
@@ -4989,6 +4995,7 @@ func init_list_assoc_extra() {
 						if knownBuiltin57 {
 							d51 = d56
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d58 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d58)

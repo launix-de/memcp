@@ -25259,6 +25259,7 @@ func init_list() {
 						if knownBuiltin57 {
 							d51 = d56
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d58 := jitCopyScmerToPair(ctx, d11)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d58)
@@ -26478,6 +26479,7 @@ func init_list() {
 						if knownBuiltin42 {
 							d36 = d41
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d43 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d43)
@@ -28036,6 +28038,7 @@ func init_list() {
 						if knownBuiltin47 {
 							d41 = d46
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d48 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d48)
@@ -28960,6 +28963,7 @@ func init_list() {
 						if knownBuiltin48 {
 							d42 = d47
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d49 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d49)
@@ -30283,6 +30287,7 @@ func init_list() {
 						if knownBuiltin85 {
 							d80 = d84
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d86 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d86)
@@ -31443,6 +31448,7 @@ func init_list() {
 						if knownBuiltin30 {
 							d25 = d29
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d31 := jitCopyScmerToPair(ctx, d10)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d31)
@@ -31732,6 +31738,7 @@ func init_list() {
 						if knownBuiltin44 {
 							d38 = d43
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d45 := jitCopyScmerToPair(ctx, d7)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d45)
@@ -34010,6 +34017,7 @@ func init_list() {
 						if knownBuiltin158 {
 							d152 = d157
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d159 := jitCopyScmerToPair(ctx, d64)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d159)
@@ -37108,6 +37116,7 @@ func init_list() {
 						if knownBuiltin194 {
 							d188 = d193
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d195 := jitCopyScmerToPair(ctx, d34)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d195)
@@ -38545,6 +38554,7 @@ func init_list() {
 						if knownBuiltin275 {
 							d269 = d274
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d276 := jitCopyScmerToPair(ctx, d34)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d276)
@@ -54698,6 +54708,7 @@ func init_list() {
 						if knownBuiltin394 {
 							d389 = d393
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d395 := jitCopyScmerToPair(ctx, d48)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d395)
@@ -55608,6 +55619,7 @@ func init_list() {
 						if knownBuiltin62 {
 							d56 = d61
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d63)
@@ -55642,6 +55654,7 @@ func init_list() {
 						if knownBuiltin72 {
 							d66 = d71
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d73 := jitCopyScmerToPair(ctx, d9)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d73)
@@ -57087,6 +57100,7 @@ func init_list() {
 						if knownBuiltin57 {
 							d51 = d56
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d58 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d58)
@@ -58493,6 +58507,7 @@ func init_list() {
 						if knownBuiltin54 {
 							d48 = d53
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d55 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d55)
@@ -61539,6 +61554,7 @@ func init_list() {
 						if knownBuiltin52 {
 							d46 = d51
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d53 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d53)
@@ -66310,6 +66326,7 @@ func init_list() {
 						if knownBuiltin52 {
 							d46 = d51
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d53 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d53)
@@ -68029,6 +68046,7 @@ func init_list() {
 						if knownBuiltin43 {
 							d37 = d42
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d44 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d44)
@@ -69311,6 +69329,7 @@ func init_list() {
 						if knownBuiltin62 {
 							d56 = d61
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d63)
@@ -69916,6 +69935,7 @@ func init_list() {
 						if knownBuiltin119 {
 							d113 = d118
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d120 := jitCopyScmerToPair(ctx, d9)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d120)
@@ -70678,6 +70698,7 @@ func init_list() {
 						if knownBuiltin52 {
 							d46 = d51
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d53 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d53)
@@ -70712,6 +70733,7 @@ func init_list() {
 						if knownBuiltin62 {
 							d56 = d61
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d63)
@@ -71575,6 +71597,7 @@ func init_list() {
 						if knownBuiltin52 {
 							d46 = d51
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d53 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d53)
@@ -71613,6 +71636,7 @@ func init_list() {
 						if knownBuiltin62 {
 							d56 = d61
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d8)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d63)
@@ -73512,6 +73536,7 @@ func init_list() {
 						if knownBuiltin130 {
 							d124 = d129
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d131 := jitCopyScmerToPair(ctx, d9)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d131)
@@ -74565,6 +74590,7 @@ func init_list() {
 						if knownBuiltin200 {
 							d195 = d199
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d201 := jitCopyScmerToPair(ctx, d12)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d201)
@@ -76355,6 +76381,7 @@ func init_list() {
 						if knownBuiltin130 {
 							d124 = d129
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d131 := jitCopyScmerToPair(ctx, d9)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d131)
@@ -78123,6 +78150,7 @@ func init_list() {
 						if knownBuiltin274 {
 							d269 = d273
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d275 := jitCopyScmerToPair(ctx, d12)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d275)
@@ -81645,6 +81673,7 @@ func init_list() {
 						if knownBuiltin232 {
 							d227 = d231
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d233 := jitCopyScmerToPair(ctx, d33)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d233)
@@ -84408,6 +84437,7 @@ func init_list() {
 						if knownBuiltin429 {
 							d424 = d428
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d430 := jitCopyScmerToPair(ctx, d33)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d430)
@@ -86316,6 +86346,7 @@ func init_list() {
 						if knownBuiltin137 {
 							d131 = d136
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d138 := jitCopyScmerToPair(ctx, d9)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d138)
@@ -86350,6 +86381,7 @@ func init_list() {
 						if knownBuiltin147 {
 							d141 = d146
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d148 := jitCopyScmerToPair(ctx, d12)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d148)
@@ -88268,6 +88300,7 @@ func init_list() {
 						if knownBuiltin303 {
 							d298 = d302
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d304 := jitCopyScmerToPair(ctx, d15)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d304)
@@ -90158,6 +90191,7 @@ func init_list() {
 						if knownBuiltin137 {
 							d131 = d136
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d138 := jitCopyScmerToPair(ctx, d9)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d138)
@@ -91039,6 +91073,7 @@ func init_list() {
 						if knownBuiltin216 {
 							d210 = d215
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d217 := jitCopyScmerToPair(ctx, d12)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d217)
@@ -92063,6 +92098,7 @@ func init_list() {
 						if knownBuiltin299 {
 							d294 = d298
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d300 := jitCopyScmerToPair(ctx, d15)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d300)
@@ -92967,6 +93003,7 @@ func init_list() {
 						if knownBuiltin62 {
 							d56 = d61
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d63 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d63)
@@ -93816,6 +93853,7 @@ func init_list() {
 						if knownBuiltin128 {
 							d122 = d127
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d129 := jitCopyScmerToPair(ctx, d9)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d129)
@@ -94918,6 +94956,7 @@ func init_list() {
 						if knownBuiltin56 {
 							d50 = d55
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d57 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d57)
@@ -95964,6 +96003,7 @@ func init_list() {
 						if knownBuiltin67 {
 							d61 = d66
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d68 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d68)
@@ -96891,6 +96931,7 @@ func init_list() {
 						if knownBuiltin42 {
 							d36 = d41
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d43 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d43)
@@ -97602,6 +97643,7 @@ func init_list() {
 						if knownBuiltin43 {
 							d37 = d42
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d44 := jitCopyScmerToPair(ctx, d5)
 							callbackCallArgs := make([]JITValueDesc, 0, 3)
 							callbackCallArgs = append(callbackCallArgs, d44)
@@ -98463,6 +98505,7 @@ func init_list() {
 						if knownBuiltin50 {
 							d44 = d49
 						} else {
+							ctx.Coverage.DynamicCalls++
 							d51 := jitCopyScmerToPair(ctx, d6)
 							callbackCallArgs := make([]JITValueDesc, 0, 2)
 							callbackCallArgs = append(callbackCallArgs, d51)
