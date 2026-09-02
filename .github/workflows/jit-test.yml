@@ -3,8 +3,9 @@
 
 name: JIT Test
 
+# Kept manual until the complete suite is stable with the JIT compiler.
+# Add the pull_request trigger when this becomes a required PR check.
 on:
-  pull_request:
   workflow_dispatch:
 
 permissions:
