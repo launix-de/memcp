@@ -3576,7 +3576,7 @@ func init_list() {
 					d19.ID = 0
 					ctx.EnsureDesc(&d3)
 					ctx.SyncDesc(&d19)
-					ctx.StabilizeDescForControlFlow(&d3)
+					ctx.StabilizeDescAcrossNestedCall(&d3)
 					d20 = d1
 					d20.ID = 0
 					d21 = d3
@@ -6323,7 +6323,7 @@ func init_list() {
 					ctx.FreeDesc(&d29)
 					ctx.EnsureDesc(&d1)
 					ctx.SyncDesc(&d30)
-					ctx.StabilizeDescForControlFlow(&d1)
+					ctx.StabilizeDescAcrossNestedCall(&d1)
 					d32 = d6
 					d32.ID = 0
 					d33 = d1
@@ -13001,7 +13001,7 @@ func init_list() {
 					d224 = ctx.EmitNewSliceFromGoSlice(&d110)
 					ctx.EnsureDesc(&d2)
 					ctx.SyncDesc(&d224)
-					ctx.StabilizeDescForControlFlow(&d2)
+					ctx.StabilizeDescAcrossNestedCall(&d2)
 					d225 = d65
 					d225.ID = 0
 					d226 = d2
@@ -13469,7 +13469,7 @@ func init_list() {
 					ctx.FreeDesc(&d2)
 					ctx.EnsureDesc(&d116)
 					ctx.SyncDesc(&d230)
-					ctx.StabilizeDescForControlFlow(&d116)
+					ctx.StabilizeDescAcrossNestedCall(&d116)
 					d232 = d110
 					d232.ID = 0
 					d233 = d116
@@ -25331,7 +25331,7 @@ func init_list() {
 					var d51 JITValueDesc
 					callbackResultOff53 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d50)
-					ctx.StabilizeDescForControlFlow(&d18)
+					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d11.Loc == LocLambdaTemplate && d11.Lambda != nil {
 						stableCallbackArgs54 := ctx.StabilizeCallbackArgs(callbackArgs52)
 						ctx.ReclaimUntrackedRegs()
@@ -26552,7 +26552,7 @@ func init_list() {
 					var d36 JITValueDesc
 					callbackResultOff38 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d35)
-					ctx.StabilizeDescForControlFlow(&d11)
+					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs39 := ctx.StabilizeCallbackArgs(callbackArgs37)
 						ctx.ReclaimUntrackedRegs()
@@ -28116,7 +28116,7 @@ func init_list() {
 					var d41 JITValueDesc
 					callbackResultOff43 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d40)
-					ctx.StabilizeDescForControlFlow(&d14)
+					ctx.StabilizeDescAcrossNestedCall(&d14)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs44 := ctx.StabilizeCallbackArgs(callbackArgs42)
 						ctx.ReclaimUntrackedRegs()
@@ -28142,7 +28142,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d14)
 					ctx.SyncDesc(&d41)
-					ctx.StabilizeDescForControlFlow(&d14)
+					ctx.StabilizeDescAcrossNestedCall(&d14)
 					d49 = d6
 					d49.ID = 0
 					d50 = d14
@@ -29060,7 +29060,7 @@ func init_list() {
 					var d42 JITValueDesc
 					callbackResultOff44 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d41)
-					ctx.StabilizeDescForControlFlow(&d14)
+					ctx.StabilizeDescAcrossNestedCall(&d14)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs45 := ctx.StabilizeCallbackArgs(callbackArgs43)
 						ctx.ReclaimUntrackedRegs()
@@ -29086,7 +29086,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d14)
 					ctx.SyncDesc(&d42)
-					ctx.StabilizeDescForControlFlow(&d14)
+					ctx.StabilizeDescAcrossNestedCall(&d14)
 					d50 = d6
 					d50.ID = 0
 					d51 = d14
@@ -30399,7 +30399,7 @@ func init_list() {
 					callbackArgs81[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray78) + 16}
 					var d80 JITValueDesc
 					ctx.FreeDesc(&d79)
-					ctx.StabilizeDescForControlFlow(&d2)
+					ctx.StabilizeDescAcrossNestedCall(&d2)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs82 := ctx.StabilizeCallbackArgs(callbackArgs81)
 						ctx.ReclaimUntrackedRegs()
@@ -34138,8 +34138,8 @@ func init_list() {
 					var d152 JITValueDesc
 					callbackResultOff154 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d151)
-					ctx.StabilizeDescForControlFlow(&d2)
-					ctx.StabilizeDescForControlFlow(&d3)
+					ctx.StabilizeDescAcrossNestedCall(&d2)
+					ctx.StabilizeDescAcrossNestedCall(&d3)
 					if d64.Loc == LocLambdaTemplate && d64.Lambda != nil {
 						stableCallbackArgs155 := ctx.StabilizeCallbackArgs(callbackArgs153)
 						ctx.ReclaimUntrackedRegs()
@@ -34165,7 +34165,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d2)
 					ctx.SyncDesc(&d152)
-					ctx.StabilizeDescForControlFlow(&d2)
+					ctx.StabilizeDescAcrossNestedCall(&d2)
 					d160 = d34
 					d160.ID = 0
 					d161 = d2
@@ -34922,7 +34922,7 @@ func init_list() {
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d3)
 					ctx.SyncDesc(&d3)
-					ctx.StabilizeDescForControlFlow(&d3)
+					ctx.StabilizeDescAcrossNestedCall(&d3)
 					d220 = d34
 					d220.ID = 0
 					d221 = d3
@@ -37285,7 +37285,7 @@ func init_list() {
 					var d188 JITValueDesc
 					callbackResultOff190 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d187)
-					ctx.StabilizeDescForControlFlow(&d3)
+					ctx.StabilizeDescAcrossNestedCall(&d3)
 					if d34.Loc == LocLambdaTemplate && d34.Lambda != nil {
 						stableCallbackArgs191 := ctx.StabilizeCallbackArgs(callbackArgs189)
 						ctx.ReclaimUntrackedRegs()
@@ -38724,7 +38724,7 @@ func init_list() {
 					var d269 JITValueDesc
 					callbackResultOff271 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d268)
-					ctx.StabilizeDescForControlFlow(&d3)
+					ctx.StabilizeDescAcrossNestedCall(&d3)
 					if d34.Loc == LocLambdaTemplate && d34.Lambda != nil {
 						stableCallbackArgs272 := ctx.StabilizeCallbackArgs(callbackArgs270)
 						ctx.ReclaimUntrackedRegs()
@@ -38750,7 +38750,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d3)
 					ctx.SyncDesc(&d269)
-					ctx.StabilizeDescForControlFlow(&d3)
+					ctx.StabilizeDescAcrossNestedCall(&d3)
 					d277 = d203
 					d277.ID = 0
 					d278 = d3
@@ -54893,9 +54893,9 @@ func init_list() {
 					callbackArgs390[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray387) + 16}
 					var d389 JITValueDesc
 					ctx.FreeDesc(&d388)
-					ctx.StabilizeDescForControlFlow(&d15)
-					ctx.StabilizeDescForControlFlow(&d110)
-					ctx.StabilizeDescForControlFlow(&d185)
+					ctx.StabilizeDescAcrossNestedCall(&d15)
+					ctx.StabilizeDescAcrossNestedCall(&d110)
+					ctx.StabilizeDescAcrossNestedCall(&d185)
 					if d48.Loc == LocLambdaTemplate && d48.Lambda != nil {
 						stableCallbackArgs391 := ctx.StabilizeCallbackArgs(callbackArgs390)
 						ctx.ReclaimUntrackedRegs()
@@ -55807,7 +55807,7 @@ func init_list() {
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
@@ -55843,7 +55843,7 @@ func init_list() {
 					var d66 JITValueDesc
 					callbackResultOff68 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d65)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
 						stableCallbackArgs69 := ctx.StabilizeCallbackArgs(callbackArgs67)
 						ctx.ReclaimUntrackedRegs()
@@ -57290,7 +57290,7 @@ func init_list() {
 					var d51 JITValueDesc
 					callbackResultOff53 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d50)
-					ctx.StabilizeDescForControlFlow(&d18)
+					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs54 := ctx.StabilizeCallbackArgs(callbackArgs52)
 						ctx.ReclaimUntrackedRegs()
@@ -58698,7 +58698,7 @@ func init_list() {
 					var d48 JITValueDesc
 					callbackResultOff50 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d47)
-					ctx.StabilizeDescForControlFlow(&d16)
+					ctx.StabilizeDescAcrossNestedCall(&d16)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs51 := ctx.StabilizeCallbackArgs(callbackArgs49)
 						ctx.ReclaimUntrackedRegs()
@@ -61746,7 +61746,7 @@ func init_list() {
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d45)
-					ctx.StabilizeDescForControlFlow(&d15)
+					ctx.StabilizeDescAcrossNestedCall(&d15)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs49 := ctx.StabilizeCallbackArgs(callbackArgs47)
 						ctx.ReclaimUntrackedRegs()
@@ -66519,7 +66519,7 @@ func init_list() {
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d45)
-					ctx.StabilizeDescForControlFlow(&d15)
+					ctx.StabilizeDescAcrossNestedCall(&d15)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs49 := ctx.StabilizeCallbackArgs(callbackArgs47)
 						ctx.ReclaimUntrackedRegs()
@@ -68240,7 +68240,7 @@ func init_list() {
 					var d37 JITValueDesc
 					callbackResultOff39 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d36)
-					ctx.StabilizeDescForControlFlow(&d11)
+					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs40 := ctx.StabilizeCallbackArgs(callbackArgs38)
 						ctx.ReclaimUntrackedRegs()
@@ -69524,7 +69524,7 @@ func init_list() {
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
@@ -70131,7 +70131,7 @@ func init_list() {
 					var d113 JITValueDesc
 					callbackResultOff115 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d112)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
 						stableCallbackArgs116 := ctx.StabilizeCallbackArgs(callbackArgs114)
 						ctx.ReclaimUntrackedRegs()
@@ -70899,7 +70899,7 @@ func init_list() {
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d45)
-					ctx.StabilizeDescForControlFlow(&d17)
+					ctx.StabilizeDescAcrossNestedCall(&d17)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs49 := ctx.StabilizeCallbackArgs(callbackArgs47)
 						ctx.ReclaimUntrackedRegs()
@@ -70935,7 +70935,7 @@ func init_list() {
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d17)
+					ctx.StabilizeDescAcrossNestedCall(&d17)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
@@ -70961,7 +70961,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d17)
 					ctx.SyncDesc(&d56)
-					ctx.StabilizeDescForControlFlow(&d17)
+					ctx.StabilizeDescAcrossNestedCall(&d17)
 					d64 = d12
 					d64.ID = 0
 					d65 = d17
@@ -71814,7 +71814,7 @@ func init_list() {
 					var d46 JITValueDesc
 					callbackResultOff48 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d45)
-					ctx.StabilizeDescForControlFlow(&d16)
+					ctx.StabilizeDescAcrossNestedCall(&d16)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs49 := ctx.StabilizeCallbackArgs(callbackArgs47)
 						ctx.ReclaimUntrackedRegs()
@@ -71854,7 +71854,7 @@ func init_list() {
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d16)
+					ctx.StabilizeDescAcrossNestedCall(&d16)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
@@ -73755,7 +73755,7 @@ func init_list() {
 					var d124 JITValueDesc
 					callbackResultOff126 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d123)
-					ctx.StabilizeDescForControlFlow(&d67)
+					ctx.StabilizeDescAcrossNestedCall(&d67)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
 						stableCallbackArgs127 := ctx.StabilizeCallbackArgs(callbackArgs125)
 						ctx.ReclaimUntrackedRegs()
@@ -74810,7 +74810,7 @@ func init_list() {
 					callbackArgs196[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray193) + 16}
 					var d195 JITValueDesc
 					ctx.FreeDesc(&d194)
-					ctx.StabilizeDescForControlFlow(&d67)
+					ctx.StabilizeDescAcrossNestedCall(&d67)
 					if d12.Loc == LocLambdaTemplate && d12.Lambda != nil {
 						stableCallbackArgs197 := ctx.StabilizeCallbackArgs(callbackArgs196)
 						ctx.ReclaimUntrackedRegs()
@@ -76602,7 +76602,7 @@ func init_list() {
 					var d124 JITValueDesc
 					callbackResultOff126 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d123)
-					ctx.StabilizeDescForControlFlow(&d67)
+					ctx.StabilizeDescAcrossNestedCall(&d67)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
 						stableCallbackArgs127 := ctx.StabilizeCallbackArgs(callbackArgs125)
 						ctx.ReclaimUntrackedRegs()
@@ -78372,7 +78372,7 @@ func init_list() {
 					callbackArgs270[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray267) + 16}
 					var d269 JITValueDesc
 					ctx.FreeDesc(&d268)
-					ctx.StabilizeDescForControlFlow(&d67)
+					ctx.StabilizeDescAcrossNestedCall(&d67)
 					if d12.Loc == LocLambdaTemplate && d12.Lambda != nil {
 						stableCallbackArgs271 := ctx.StabilizeCallbackArgs(callbackArgs270)
 						ctx.ReclaimUntrackedRegs()
@@ -81896,7 +81896,7 @@ func init_list() {
 					callbackArgs228[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray225) + 16}
 					var d227 JITValueDesc
 					ctx.FreeDesc(&d226)
-					ctx.StabilizeDescForControlFlow(&d94)
+					ctx.StabilizeDescAcrossNestedCall(&d94)
 					if d33.Loc == LocLambdaTemplate && d33.Lambda != nil {
 						stableCallbackArgs229 := ctx.StabilizeCallbackArgs(callbackArgs228)
 						ctx.ReclaimUntrackedRegs()
@@ -84661,8 +84661,8 @@ func init_list() {
 					callbackArgs425[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray422) + 16}
 					var d424 JITValueDesc
 					ctx.FreeDesc(&d423)
-					ctx.StabilizeDescForControlFlow(&d94)
-					ctx.StabilizeDescForControlFlow(&d240)
+					ctx.StabilizeDescAcrossNestedCall(&d94)
+					ctx.StabilizeDescAcrossNestedCall(&d240)
 					if d33.Loc == LocLambdaTemplate && d33.Lambda != nil {
 						stableCallbackArgs426 := ctx.StabilizeCallbackArgs(callbackArgs425)
 						ctx.ReclaimUntrackedRegs()
@@ -86572,7 +86572,7 @@ func init_list() {
 					var d131 JITValueDesc
 					callbackResultOff133 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d130)
-					ctx.StabilizeDescForControlFlow(&d72)
+					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
 						stableCallbackArgs134 := ctx.StabilizeCallbackArgs(callbackArgs132)
 						ctx.ReclaimUntrackedRegs()
@@ -86608,7 +86608,7 @@ func init_list() {
 					var d141 JITValueDesc
 					callbackResultOff143 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d140)
-					ctx.StabilizeDescForControlFlow(&d72)
+					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d12.Loc == LocLambdaTemplate && d12.Lambda != nil {
 						stableCallbackArgs144 := ctx.StabilizeCallbackArgs(callbackArgs142)
 						ctx.ReclaimUntrackedRegs()
@@ -88528,7 +88528,7 @@ func init_list() {
 					callbackArgs299[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray296) + 16}
 					var d298 JITValueDesc
 					ctx.FreeDesc(&d297)
-					ctx.StabilizeDescForControlFlow(&d72)
+					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d15.Loc == LocLambdaTemplate && d15.Lambda != nil {
 						stableCallbackArgs300 := ctx.StabilizeCallbackArgs(callbackArgs299)
 						ctx.ReclaimUntrackedRegs()
@@ -90420,7 +90420,7 @@ func init_list() {
 					var d131 JITValueDesc
 					callbackResultOff133 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d130)
-					ctx.StabilizeDescForControlFlow(&d72)
+					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
 						stableCallbackArgs134 := ctx.StabilizeCallbackArgs(callbackArgs132)
 						ctx.ReclaimUntrackedRegs()
@@ -91303,7 +91303,7 @@ func init_list() {
 					var d210 JITValueDesc
 					callbackResultOff212 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d209)
-					ctx.StabilizeDescForControlFlow(&d72)
+					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d12.Loc == LocLambdaTemplate && d12.Lambda != nil {
 						stableCallbackArgs213 := ctx.StabilizeCallbackArgs(callbackArgs211)
 						ctx.ReclaimUntrackedRegs()
@@ -92329,7 +92329,7 @@ func init_list() {
 					callbackArgs295[1] = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(stackArray292) + 16}
 					var d294 JITValueDesc
 					ctx.FreeDesc(&d293)
-					ctx.StabilizeDescForControlFlow(&d72)
+					ctx.StabilizeDescAcrossNestedCall(&d72)
 					if d15.Loc == LocLambdaTemplate && d15.Lambda != nil {
 						stableCallbackArgs296 := ctx.StabilizeCallbackArgs(callbackArgs295)
 						ctx.ReclaimUntrackedRegs()
@@ -93235,7 +93235,7 @@ func init_list() {
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
@@ -94086,7 +94086,7 @@ func init_list() {
 					var d122 JITValueDesc
 					callbackResultOff124 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d121)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d9.Loc == LocLambdaTemplate && d9.Lambda != nil {
 						stableCallbackArgs125 := ctx.StabilizeCallbackArgs(callbackArgs123)
 						ctx.ReclaimUntrackedRegs()
@@ -95229,8 +95229,8 @@ func init_list() {
 					var d54 JITValueDesc
 					callbackResultOff56 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d53)
-					ctx.StabilizeDescForControlFlow(&d20)
-					ctx.StabilizeDescForControlFlow(&d51)
+					ctx.StabilizeDescAcrossNestedCall(&d20)
+					ctx.StabilizeDescAcrossNestedCall(&d51)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs57 := ctx.StabilizeCallbackArgs(callbackArgs55)
 						ctx.ReclaimUntrackedRegs()
@@ -95256,7 +95256,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d51)
 					ctx.SyncDesc(&d54)
-					ctx.StabilizeDescForControlFlow(&d51)
+					ctx.StabilizeDescAcrossNestedCall(&d51)
 					d62 = d10
 					d62.ID = 0
 					d63 = d51
@@ -96300,7 +96300,7 @@ func init_list() {
 					var d61 JITValueDesc
 					callbackResultOff63 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d60)
-					ctx.StabilizeDescForControlFlow(&d23)
+					ctx.StabilizeDescAcrossNestedCall(&d23)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs64 := ctx.StabilizeCallbackArgs(callbackArgs62)
 						ctx.ReclaimUntrackedRegs()
@@ -97233,7 +97233,7 @@ func init_list() {
 					var d36 JITValueDesc
 					callbackResultOff38 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d35)
-					ctx.StabilizeDescForControlFlow(&d11)
+					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs39 := ctx.StabilizeCallbackArgs(callbackArgs37)
 						ctx.ReclaimUntrackedRegs()
@@ -97259,7 +97259,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d11)
 					ctx.SyncDesc(&d36)
-					ctx.StabilizeDescForControlFlow(&d11)
+					ctx.StabilizeDescAcrossNestedCall(&d11)
 					d44 = d3
 					d44.ID = 0
 					d45 = d11
@@ -97964,7 +97964,7 @@ func init_list() {
 					var d37 JITValueDesc
 					callbackResultOff39 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d36)
-					ctx.StabilizeDescForControlFlow(&d11)
+					ctx.StabilizeDescAcrossNestedCall(&d11)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs40 := ctx.StabilizeCallbackArgs(callbackArgs38)
 						ctx.ReclaimUntrackedRegs()
@@ -97990,7 +97990,7 @@ func init_list() {
 					}
 					ctx.EnsureDesc(&d11)
 					ctx.SyncDesc(&d37)
-					ctx.StabilizeDescForControlFlow(&d11)
+					ctx.StabilizeDescAcrossNestedCall(&d11)
 					d45 = d3
 					d45.ID = 0
 					d46 = d11
@@ -98845,8 +98845,8 @@ func init_list() {
 					var d44 JITValueDesc
 					callbackResultOff46 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d43)
-					ctx.StabilizeDescForControlFlow(&d1)
-					ctx.StabilizeDescForControlFlow(&d14)
+					ctx.StabilizeDescAcrossNestedCall(&d1)
+					ctx.StabilizeDescAcrossNestedCall(&d14)
 					if d6.Loc == LocLambdaTemplate && d6.Lambda != nil {
 						stableCallbackArgs47 := ctx.StabilizeCallbackArgs(callbackArgs45)
 						ctx.ReclaimUntrackedRegs()
@@ -99456,7 +99456,7 @@ func init_list() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d1)
 					ctx.SyncDesc(&d40)
-					ctx.StabilizeDescForControlFlow(&d1)
+					ctx.StabilizeDescAcrossNestedCall(&d1)
 					d99 = d4
 					d99.ID = 0
 					d100 = d1
@@ -100084,7 +100084,7 @@ func init_list() {
 					ctx.BindReg(r4, &d35)
 					ctx.EnsureDesc(&d1)
 					ctx.SyncDesc(&d33)
-					ctx.StabilizeDescForControlFlow(&d1)
+					ctx.StabilizeDescAcrossNestedCall(&d1)
 					d37 = d4
 					d37.ID = 0
 					d38 = d1
@@ -100096,7 +100096,7 @@ func init_list() {
 					ctx.FreeDesc(&d33)
 					ctx.EnsureDesc(&d2)
 					ctx.SyncDesc(&d35)
-					ctx.StabilizeDescForControlFlow(&d2)
+					ctx.StabilizeDescAcrossNestedCall(&d2)
 					d40 = d4
 					d40.ID = 0
 					d41 = d2
@@ -132661,7 +132661,7 @@ func init_list() {
 				ctx.EnsureDesc(&d32)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d58)
-				ctx.StabilizeDescForControlFlow(&d32)
+				ctx.StabilizeDescAcrossNestedCall(&d32)
 				d62 := d21
 				d62.ID = 0
 				d63 := d32
@@ -132675,7 +132675,7 @@ func init_list() {
 				ctx.EnsureDesc(&d56)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d60)
-				ctx.StabilizeDescForControlFlow(&d56)
+				ctx.StabilizeDescAcrossNestedCall(&d56)
 				d65 := d21
 				d65.ID = 0
 				d66 := d56
@@ -133466,7 +133466,7 @@ func init_list() {
 				ctx.EnsureDesc(&d26)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d52)
-				ctx.StabilizeDescForControlFlow(&d26)
+				ctx.StabilizeDescAcrossNestedCall(&d26)
 				d56 := d15
 				d56.ID = 0
 				d57 := d26
@@ -133480,7 +133480,7 @@ func init_list() {
 				ctx.EnsureDesc(&d50)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d54)
-				ctx.StabilizeDescForControlFlow(&d50)
+				ctx.StabilizeDescAcrossNestedCall(&d50)
 				d59 := d15
 				d59.ID = 0
 				d60 := d50

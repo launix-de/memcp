@@ -5174,7 +5174,7 @@ func init_window() {
 					ctx.BindReg(r31, &d445)
 					ctx.EnsureDesc(&d224)
 					ctx.SyncDesc(&d445)
-					ctx.StabilizeDescForControlFlow(&d224)
+					ctx.StabilizeDescAcrossNestedCall(&d224)
 					d447 = d97
 					d447.ID = 0
 					d448 = d224
@@ -5548,7 +5548,7 @@ func init_window() {
 					d453 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 					ctx.EnsureDesc(&d224)
 					ctx.SyncDesc(&d453)
-					ctx.StabilizeDescForControlFlow(&d224)
+					ctx.StabilizeDescAcrossNestedCall(&d224)
 					d454 = d97
 					d454.ID = 0
 					d455 = d224
@@ -9868,7 +9868,7 @@ func init_window() {
 					d266 = JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
 					ctx.EnsureDesc(&d2)
 					ctx.SyncDesc(&d266)
-					ctx.StabilizeDescForControlFlow(&d2)
+					ctx.StabilizeDescAcrossNestedCall(&d2)
 					d267 = d38
 					d267.ID = 0
 					d268 = d2

@@ -2539,7 +2539,7 @@ func init_processlist() {
 					d146 = callResults145[0]
 					ctx.EnsureDesc(&d37)
 					ctx.SyncDesc(&d146)
-					ctx.StabilizeDescForControlFlow(&d37)
+					ctx.StabilizeDescAcrossNestedCall(&d37)
 					d147 = d32
 					d147.ID = 0
 					d148 = d37

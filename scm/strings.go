@@ -10573,7 +10573,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d73)
 					ctx.EnsureDesc(&d38)
 					ctx.SyncDesc(&d73)
-					ctx.StabilizeDescForControlFlow(&d38)
+					ctx.StabilizeDescAcrossNestedCall(&d38)
 					d75 = d33
 					d75.ID = 0
 					d76 = d38
@@ -16399,7 +16399,7 @@ func init_strings() {
 					ctx.FreeDesc(&d40)
 					ctx.EnsureDesc(&d37)
 					ctx.SyncDesc(&d43)
-					ctx.StabilizeDescForControlFlow(&d37)
+					ctx.StabilizeDescAcrossNestedCall(&d37)
 					d44 = d9
 					d44.ID = 0
 					d45 = d37
@@ -16502,7 +16502,7 @@ func init_strings() {
 					ctx.FreeDesc(&d52)
 					ctx.EnsureDesc(&d49)
 					ctx.SyncDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d49)
+					ctx.StabilizeDescAcrossNestedCall(&d49)
 					d56 = d9
 					d56.ID = 0
 					d57 = d49
@@ -17394,7 +17394,7 @@ func init_strings() {
 					ctx.FreeDesc(&d40)
 					ctx.EnsureDesc(&d37)
 					ctx.SyncDesc(&d43)
-					ctx.StabilizeDescForControlFlow(&d37)
+					ctx.StabilizeDescAcrossNestedCall(&d37)
 					d44 = d9
 					d44.ID = 0
 					d45 = d37
@@ -17497,7 +17497,7 @@ func init_strings() {
 					ctx.FreeDesc(&d52)
 					ctx.EnsureDesc(&d49)
 					ctx.SyncDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d49)
+					ctx.StabilizeDescAcrossNestedCall(&d49)
 					d56 = d9
 					d56.ID = 0
 					d57 = d49

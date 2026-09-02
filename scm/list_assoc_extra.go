@@ -790,7 +790,7 @@ func init_list_assoc_extra() {
 					var d55 JITValueDesc
 					callbackResultOff57 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d54)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs58 := ctx.StabilizeCallbackArgs(callbackArgs56)
 						ctx.ReclaimUntrackedRegs()
@@ -1852,7 +1852,7 @@ func init_list_assoc_extra() {
 					var d55 JITValueDesc
 					callbackResultOff57 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d54)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs58 := ctx.StabilizeCallbackArgs(callbackArgs56)
 						ctx.ReclaimUntrackedRegs()
@@ -1893,7 +1893,7 @@ func init_list_assoc_extra() {
 					var d66 JITValueDesc
 					callbackResultOff68 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d65)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs69 := ctx.StabilizeCallbackArgs(callbackArgs67)
 						ctx.ReclaimUntrackedRegs()
@@ -2964,7 +2964,7 @@ func init_list_assoc_extra() {
 					var d56 JITValueDesc
 					callbackResultOff58 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d55)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs59 := ctx.StabilizeCallbackArgs(callbackArgs57)
 						ctx.ReclaimUntrackedRegs()
@@ -3005,7 +3005,7 @@ func init_list_assoc_extra() {
 					var d67 JITValueDesc
 					callbackResultOff69 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d66)
-					ctx.StabilizeDescForControlFlow(&d21)
+					ctx.StabilizeDescAcrossNestedCall(&d21)
 					if d8.Loc == LocLambdaTemplate && d8.Lambda != nil {
 						stableCallbackArgs70 := ctx.StabilizeCallbackArgs(callbackArgs68)
 						ctx.ReclaimUntrackedRegs()
@@ -4012,7 +4012,7 @@ func init_list_assoc_extra() {
 					var d50 JITValueDesc
 					callbackResultOff52 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d49)
-					ctx.StabilizeDescForControlFlow(&d18)
+					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs53 := ctx.StabilizeCallbackArgs(callbackArgs51)
 						ctx.ReclaimUntrackedRegs()
@@ -4989,7 +4989,7 @@ func init_list_assoc_extra() {
 					var d51 JITValueDesc
 					callbackResultOff53 = ctx.AllocStack(16)
 					ctx.FreeDesc(&d50)
-					ctx.StabilizeDescForControlFlow(&d18)
+					ctx.StabilizeDescAcrossNestedCall(&d18)
 					if d5.Loc == LocLambdaTemplate && d5.Lambda != nil {
 						stableCallbackArgs54 := ctx.StabilizeCallbackArgs(callbackArgs52)
 						ctx.ReclaimUntrackedRegs()

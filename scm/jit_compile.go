@@ -928,12 +928,10 @@ func (ctx *JITContext) EmitZeroDescWords(dst *JITValueDesc, words int) {
 	}
 }
 
-// StabilizeDescForControlFlow gives a register-backed SSA value a fixed spill
+// StabilizeDescForControlFlow gives a register-backed SSA value a fixed stack
 // home at its producer. Machine code in successor blocks can then be entered
 // repeatedly without depending on the allocator state used while those blocks
-// were emitted once. The frame-pointer-relative spill zone is intentional:
-// nested emitters may release and reuse ordinary stack allocations while this
-// value remains live across their control flow.
+// were emitted once.
 func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	ctx.SyncDesc(desc)
 	words := int32(0)
@@ -948,11 +946,11 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	default:
 		return
 	}
-	off := ctx.AllocSpill(words * 8)
+	off := ctx.AllocStack(words * 8)
 	regs := [...]Reg{desc.Reg, desc.Reg2, desc.Reg3}
 	for i := int32(0); i < words; i++ {
-		ctx.EmitStoreRegMem(regs[i], ctx.FrameReg, off+i*8)
-		ctx.setStackPointer(jitStackRootFrameBP, off+i*8, !desc.NoHeapPointer && i == 0)
+		ctx.EmitStoreRegMem(regs[i], ctx.StackReg, off+i*8)
+		ctx.setStackPointer(jitStackRootFrameSP, off+i*8-ctx.DynamicSP, !desc.NoHeapPointer && i == 0)
 		owner := ctx.RegOwners[regs[i]]
 		ownsReg := owner == desc || (owner != nil && desc.ID != 0 && owner.ID == desc.ID)
 		if ownsReg {
@@ -972,6 +970,61 @@ func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	case LocRegPair:
 		desc.Loc = LocStackPair
 	case LocRegTriple:
+		desc.Loc = LocStackTriple
+	}
+}
+
+// StabilizeDescAcrossNestedCall moves a value into the non-reusable spill zone.
+// Ordinary control-flow homes may be released by a recursively emitted helper;
+// callback-live values must therefore not share their storage with its locals.
+func (ctx *JITContext) StabilizeDescAcrossNestedCall(desc *JITValueDesc) {
+	ctx.SyncDesc(desc)
+	if (desc.Loc == LocStack || desc.Loc == LocStackPair || desc.Loc == LocStackTriple) && desc.StackOff < 0 {
+		return
+	}
+	words := int32(0)
+	sourceLoc := desc.Loc
+	switch sourceLoc {
+	case LocReg, LocStack:
+		words = 1
+	case LocRegPair, LocStackPair:
+		words = 2
+	case LocRegTriple, LocStackTriple:
+		words = 3
+	default:
+		return
+	}
+	off := ctx.AllocSpill(words * 8)
+	if sourceLoc == LocStack || sourceLoc == LocStackPair || sourceLoc == LocStackTriple {
+		for i := int32(0); i < words; i++ {
+			ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, desc.StackOff+i*8)
+			ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.FrameReg, off+i*8)
+			ctx.setStackPointer(jitStackRootFrameBP, off+i*8, !desc.NoHeapPointer && i == 0)
+		}
+	} else {
+		regs := [...]Reg{desc.Reg, desc.Reg2, desc.Reg3}
+		for i := int32(0); i < words; i++ {
+			ctx.EmitStoreRegMem(regs[i], ctx.FrameReg, off+i*8)
+			ctx.setStackPointer(jitStackRootFrameBP, off+i*8, !desc.NoHeapPointer && i == 0)
+			owner := ctx.RegOwners[regs[i]]
+			if owner == desc || (owner != nil && desc.ID != 0 && owner.ID == desc.ID) {
+				ctx.RegOwners[regs[i]] = nil
+				ctx.FreeRegs |= 1 << uint(regs[i])
+			}
+		}
+	}
+	desc.Reg, desc.Reg2, desc.Reg3 = 0, 0, 0
+	desc.StackOff = off
+	if desc.ID != 0 && ctx.descSpills != nil {
+		delete(ctx.descSpills, desc.ID)
+	}
+	desc.ID = 0
+	switch words {
+	case 1:
+		desc.Loc = LocStack
+	case 2:
+		desc.Loc = LocStackPair
+	case 3:
 		desc.Loc = LocStackTriple
 	}
 }

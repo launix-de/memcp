@@ -2008,7 +2008,7 @@ func (g *codeGen) stabilizeLiveSliceIndicesAcrossCallback() {
 		return descriptors[i] < descriptors[j]
 	})
 	for _, descriptor := range descriptors {
-		g.emit("ctx.StabilizeDescForControlFlow(&%s)", descriptor)
+		g.emit("ctx.StabilizeDescAcrossNestedCall(&%s)", descriptor)
 	}
 }
 
@@ -8037,7 +8037,7 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			// consumer non-owning descriptor copies so a subsequent write-barrier
 			// call cannot disconnect a loop-carried source from its stable home.
 			if dst.deferredIndexSSA != "" {
-				g.emit("ctx.StabilizeDescForControlFlow(&%s)", idxDescVar)
+				g.emit("ctx.StabilizeDescAcrossNestedCall(&%s)", idxDescVar)
 			}
 			sliceUse := g.allocDesc()
 			indexUse := g.allocDesc()

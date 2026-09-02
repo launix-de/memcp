@@ -36096,7 +36096,7 @@ func init() {
 				ctx.EnsureDesc(&d24)
 				ctx.ReclaimUntrackedRegs()
 				ctx.SyncDesc(&d55)
-				ctx.StabilizeDescForControlFlow(&d24)
+				ctx.StabilizeDescAcrossNestedCall(&d24)
 				d57 := d21
 				d57.ID = 0
 				d58 := d24
