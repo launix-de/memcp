@@ -1,12 +1,17 @@
 <!-- Copyright (C) 2023 - 2026 Carl-Philip Haensch; GPL-3.0-or-later -->
 
-# MemCP — persistent columnar SQL database
+# MemCP — transactions, search, and analytics in one open-source database
 
-MemCP is a persistent, column-oriented database for mixed transactional and
-analytical workloads. It combines compact in-memory execution with durable
-storage, automatic indexing, cached intermediate results, and a cost-based SQL
-compiler. Persistent data may be evicted from RAM and loaded again on demand;
-MemCP does not require the complete database to remain resident in memory.
+MemCP is a persistent, column-oriented SQL database built for applications that
+must update data continuously while also searching, filtering, and analyzing
+large datasets. It brings an architecture best known from proprietary in-memory
+ERP systems to a self-hosted GPL-licensed database.
+
+MemCP keeps stable data in compact, read-optimized columns and accepts recent
+changes in a write-friendly delta. Background rebuilds fold those changes back
+into the compressed representation. Persistent data may be evicted from RAM and
+loaded again on demand, so the complete database does not have to remain memory
+resident.
 
 Applications can connect through the MySQL wire protocol or submit MySQL- and
 PostgreSQL-style SQL through separate HTTP endpoints. An RDF/SPARQL engine is
@@ -20,14 +25,30 @@ included as well.
 
 MemCP is licensed under GPL-3.0-or-later.
 
+Read the [MemCP 0.9 beta release overview](https://launix.de/launix/memcp-beta-release-0-9-one-database-for-transactions-search-and-analytics/)
+for the application story behind the current release.
+
+## Why this project exists
+
+During doctoral work at a university database chair, MemCP's initiator kept
+encountering the same gap: open-source databases offered either conventional
+transaction processing or columnar analytics, but no practical columnar
+main/delta in-memory database for an ERP application that needed both. SAP HANA
+demonstrated that the model could work at ERP scale, but the architecture
+remained tied to a proprietary platform.
+
+MemCP was started to make that database model available as ordinary free
+software: run it on your own Linux server, connect an existing SQL application,
+and use the same engine for transactions, full-text search, paged lists, and
+analytics.
+
 ## Why MemCP?
 
 - **Columnar execution:** scans and aggregates read only the columns they need.
 - **Automatic indexing:** MemCP derives useful compound indexes from real
   access, filter, and ordering patterns.
-- **Cost-based query planning:** the compiler decorrelates subqueries, reorders
-  joins, and chooses among scans, compact record sets, ordered limit scans, and
-  reusable group caches.
+- **Cost-based query planning:** the compiler rewrites correlated subqueries,
+  reorders joins, and chooses a physical strategy for each part of a query.
 - **Adaptive plans:** cached plans are retained while cardinalities remain in
   the same planning range and are reconsidered when relevant statistics cross
   a cost boundary.
@@ -85,10 +106,9 @@ SQL parser AST
     -> fused storage operators
 ```
 
-Logical planning follows the combined query-block/group-stage/union-block model.
-Correlated subqueries are decorrelated before physical lowering rather than
-executed through a per-row fallback. The physical lowerer can then choose a
-carrier and scan strategy independently at each relevant tree node.
+Correlated subqueries are converted into reorderable joins before physical
+planning rather than executed once per outer row. The physical planner can then
+choose an execution strategy independently for each relevant part of the query.
 
 The engine stores columns in compact representations, including bit-packed
 integers, dictionaries, ranges, and sparse forms. Hot indexes and cached query
@@ -105,9 +125,10 @@ mode, and hardware. MemCP is not universally faster than another database.
 
 Current application measurements include:
 
-- **approximately 10x–30x faster than PostgreSQL** on selected list, search,
-  filter, pagination, complex ACL, and full-text workloads over roughly one
-  million records;
+- **up to 30x faster than PostgreSQL** for selected real application searches
+  and paged lists over the same dataset of roughly 800,000 documents. These
+  queries combine full-text conditions, sorting, exact counts, pagination, and
+  user-specific access checks;
 - **from about 3% faster to 15x faster** on selected WordPress-oriented query
   workloads.
 
