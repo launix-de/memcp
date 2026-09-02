@@ -1234,6 +1234,51 @@ func JITNewSliceCopy(values []Scmer) Scmer {
 	return NewSlice(append([]Scmer(nil), values...))
 }
 
+func jitNewSliceResult(values []Scmer, length uint64) Scmer {
+	return Scmer{
+		(*byte)(unsafe.Pointer(unsafe.SliceData(values))),
+		makeAux(tagSlice, length<<sliceCapBits|length),
+	}
+}
+
+func jitNewSlice2(a, b Scmer) Scmer {
+	values := []Scmer{a, b}
+	return jitNewSliceResult(values, 2)
+}
+
+func jitNewSlice4(a, b, c, d Scmer) Scmer {
+	values := []Scmer{a, b, c, d}
+	return jitNewSliceResult(values, 4)
+}
+
+// Go's amd64 ABI has nine integer argument registers. Wider projection rows
+// keep their first four Scmers in those registers and pass the remaining
+// stack-backed values through the ninth register as a single pointer.
+func jitNewSlice6(a, b, c, d Scmer, tail *[2]Scmer) Scmer {
+	values := []Scmer{a, b, c, d, tail[0], tail[1]}
+	return jitNewSliceResult(values, 6)
+}
+
+func jitNewSlice8(a, b, c, d Scmer, tail *[4]Scmer) Scmer {
+	values := []Scmer{a, b, c, d, tail[0], tail[1], tail[2], tail[3]}
+	return jitNewSliceResult(values, 8)
+}
+
+func jitDirectSliceBuilder(length int) uint64 {
+	switch length {
+	case 2:
+		return GoFuncAddr(jitNewSlice2)
+	case 4:
+		return GoFuncAddr(jitNewSlice4)
+	case 6:
+		return GoFuncAddr(jitNewSlice6)
+	case 8:
+		return GoFuncAddr(jitNewSlice8)
+	default:
+		return 0
+	}
+}
+
 func jitReturnHasNoHeapPointer(td *TypeDescriptor) bool {
 	if td == nil {
 		return false
@@ -1292,6 +1337,38 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 		// preserves aliases used by later arguments while keeping register pressure
 		// independent of the virtual list length.
 		stable[i] = ctx.stabilizeForNested(src)
+	}
+	if builder := jitDirectSliceBuilder(len(stable)); builder != 0 {
+		callArgs := stable
+		tailBytes := int32(0)
+		var tail JITValueDesc
+		var wideCallArgs [5]JITValueDesc
+		if len(stable) > 4 {
+			tailBytes = int32((len(stable) - 4) * 16)
+			tailOff := ctx.AllocStack(tailBytes)
+			for i := 4; i < len(stable); i++ {
+				ctx.EmitStoreScmerToStack(stable[i], tailOff+int32((i-4)*16))
+				ctx.FreeDesc(&stable[i])
+			}
+			tailReg := ctx.AllocReg()
+			ctx.EmitLeaRegMem(tailReg, ctx.StackReg, tailOff)
+			tail = JITValueDesc{Loc: LocReg, Reg: tailReg, RelocatablePointer: true, Rooted: true}
+			ctx.BindReg(tailReg, &tail)
+			copy(wideCallArgs[:4], stable[:4])
+			wideCallArgs[4] = tail
+			callArgs = wideCallArgs[:]
+		}
+		materialized := ctx.EmitGoCallScalar(builder, callArgs, 2)
+		ctx.FreeDesc(&tail)
+		for i := range stable {
+			ctx.FreeDesc(&stable[i])
+		}
+		if tailBytes != 0 {
+			ctx.FreeStack(tailBytes)
+		}
+		materialized.Type = tagSlice
+		materialized.Rooted = true
+		return jitPlaceScmerIntoTarget(ctx, materialized, result)
 	}
 	backingOff := ctx.AllocStack(int32(len(stable) * 16))
 	for i := range stable {
@@ -2124,6 +2201,7 @@ func jitPreviewCallArgument(ctx *JITContext, decl *Declaration, index int, expr 
 }
 
 const jitBuiltinInlineBudget = 2048
+const jitTrivialVirtualInlineCost = 2
 
 func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueDesc) bool {
 	if decl == nil || decl.Type == nil || decl.Type.JITInlineCost == 0 {
@@ -2162,13 +2240,19 @@ func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueD
 		}
 	} else {
 		cost := int(decl.Type.JITInlineCost)
-		if decl.Type.JITVirtualArgs && !hasVirtualArgs && knownShapes != len(args) {
+		if decl.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
 			return false
 		}
 		if decl.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
 			return false
 		}
 		switch {
+		case decl.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
+			// Trivial aggregate constructors such as list only arrange their SSA
+			// inputs and perform one ownership materialization. Unknown element
+			// types do not add control flow, so routing them through the generic
+			// variadic Go-call builder would only allocate an argument slice and
+			// invoke a write-barrier helper once per element.
 		case decl.Type.JITVirtualArgs && hasVirtualArgs && decl.Type.JITInlineCost <= 32:
 			// Virtual-list producers and consumers preserve fusion opportunities
 			// which a native Go call would force us to materialize.

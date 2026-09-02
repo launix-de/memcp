@@ -59,6 +59,15 @@ func TestJITExpressionListResultOwnsBackingStorage(t *testing.T) {
 	if got := compiled.Proc().Compiled.Call(empty); !Equal(got, NewSlice([]Scmer{empty})) {
 		t.Fatalf("retained nested empty list changed: %s", String(got))
 	}
+
+	direct := compileJITExpressionTestProc(t, `(lambda (key value) (list key value))`)
+	first = direct.Proc().Compiled.Call(NewString("key"), NewString("value"))
+	_ = direct.Proc().Compiled.Call(NewString("other"), NewString("replacement"))
+	runtime.GC()
+	want = NewSlice([]Scmer{NewString("key"), NewString("value")})
+	if !Equal(first, want) {
+		t.Fatalf("retained direct list changed after a later invocation: %s", String(first))
+	}
 }
 
 func TestJITDynamicListCallOwnsBackingStorage(t *testing.T) {
@@ -99,12 +108,31 @@ func TestJITExpressionBeginDefine(t *testing.T) {
 
 func TestJITExpressionListForms(t *testing.T) {
 	t.Run("list", func(t *testing.T) {
-		compiled := compileJITExpressionTestProc(t, `(lambda (a b) (list a b))`)
-		requireNoDynamicJITCalls(t, compiled)
-		got := Apply(compiled, NewInt(1), NewInt(2))
-		want := NewSlice([]Scmer{NewInt(1), NewInt(2)})
-		if !Equal(got, want) {
-			t.Fatalf("unexpected list result: %s", String(got))
+		tests := []struct {
+			name   string
+			source string
+			args   []Scmer
+		}{
+			{"two", `(lambda (a b) (list a b))`, []Scmer{NewInt(1), NewInt(2)}},
+			{"four", `(lambda (a b c d) (list a b c d))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)}},
+			{"six", `(lambda (a b c d e f) (list a b c d e f))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5), NewInt(6)}},
+			{"eight", `(lambda (a b c d e f g h) (list a b c d e f g h))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5), NewInt(6), NewInt(7), NewInt(8)}},
+			{"ten", `(lambda (a b c d e f g h i j) (list a b c d e f g h i j))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5), NewInt(6), NewInt(7), NewInt(8), NewInt(9), NewInt(10)}},
+			{"sixteen", `(lambda (a b c d e f g h i j k l m n o p) (list a b c d e f g h i j k l m n o p))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5), NewInt(6), NewInt(7), NewInt(8), NewInt(9), NewInt(10), NewInt(11), NewInt(12), NewInt(13), NewInt(14), NewInt(15), NewInt(16)}},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				compiled := compileJITExpressionTestProc(t, test.source)
+				requireNoDynamicJITCalls(t, compiled)
+				coverage := compiled.Proc().Compiled.Coverage
+				if coverage.NativeCalls != 0 || coverage.InlinedCalls != 1 {
+					t.Fatalf("list did not use its virtual single-copy emitter: %+v", coverage)
+				}
+				got := Apply(compiled, test.args...)
+				if want := NewSlice(test.args); !Equal(got, want) {
+					t.Fatalf("unexpected list result: %s", String(got))
+				}
+			})
 		}
 	})
 
@@ -145,19 +173,34 @@ func BenchmarkJITListMaterialization(b *testing.B) {
 	if !jitEnabled {
 		b.Skip("requires GOEXPERIMENT=jit")
 	}
-	source := preparedTestProc(b, `(lambda (id value) (list "id" id "value" value))`)
-	compiled := jitCompile(source)
-	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
-		b.Fatal("list projection did not compile")
+	benchmarks := []struct {
+		name   string
+		source string
+		args   []Scmer
+	}{
+		{"one_column", `(lambda (a) (list "a" a))`, []Scmer{NewInt(1)}},
+		{"two_columns", `(lambda (a b) (list "a" a "b" b))`, []Scmer{NewInt(1), NewInt(2)}},
+		{"three_columns", `(lambda (a b c) (list "a" a "b" b "c" c))`, []Scmer{NewInt(1), NewInt(2), NewInt(3)}},
+		{"four_columns", `(lambda (a b c d) (list "a" a "b" b "c" c "d" d))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)}},
+		{"five_columns", `(lambda (a b c d e) (list "a" a "b" b "c" c "d" d "e" e))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5)}},
+		{"eight_columns", `(lambda (a b c d e f g h) (list "a" a "b" b "c" c "d" d "e" e "f" f "g" g "h" h))`, []Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4), NewInt(5), NewInt(6), NewInt(7), NewInt(8)}},
 	}
-	entry := compiled.Proc().Compiled
-	args := []Scmer{NewInt(1), NewInt(71)}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		jitListBenchmarkSink = entry.Native(args...)
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			source := preparedTestProc(b, benchmark.source)
+			compiled := jitCompile(source)
+			if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+				b.Fatal("list projection did not compile")
+			}
+			entry := compiled.Proc().Compiled
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				jitListBenchmarkSink = entry.Native(benchmark.args...)
+			}
+			runtime.KeepAlive(entry)
+		})
 	}
-	runtime.KeepAlive(entry)
 }
 
 func TestJITExpressionConditionalBorrowedListResult(t *testing.T) {
