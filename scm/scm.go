@@ -33033,7 +33033,6 @@ func init() {
 				ctx.EnsureDesc(&d7)
 				d2189 := d7
 				_ = d2189
-				ctx.StabilizeDescForControlFlow(&d2189)
 				bbpos_43_0 := int32(-1)
 				_ = bbpos_43_0
 				lbl1534 := ctx.ReserveLabel()
@@ -35130,10 +35129,8 @@ func init() {
 				ctx.EnsureDesc(&d2)
 				d3 := d0
 				_ = d3
-				ctx.StabilizeDescForControlFlow(&d3)
 				d4 := d2
 				_ = d4
-				ctx.StabilizeDescForControlFlow(&d4)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -35684,12 +35681,8 @@ func init() {
 				ctx.EnsureDesc(&d21)
 				d27 := d3
 				_ = d27
-				ctx.StabilizeDescForControlFlow(&d27)
 				d28 := d21
 				_ = d28
-				ctx.StabilizeDescForControlFlow(&d28)
-				ctx.StabilizeDescForControlFlow(&d3)
-				ctx.StabilizeDescForControlFlow(&d21)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl23 := ctx.ReserveLabel()
@@ -36883,7 +36876,6 @@ func init() {
 					ctx.EnsureDesc(&d44)
 					d45 = d44
 					_ = d45
-					ctx.StabilizeDescForControlFlow(&d45)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl9 := ctx.ReserveLabel()
@@ -38064,7 +38056,6 @@ func init() {
 					ctx.EnsureDesc(&d40)
 					d41 = d40
 					_ = d41
-					ctx.StabilizeDescForControlFlow(&d41)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl9 := ctx.ReserveLabel()
@@ -38806,7 +38797,6 @@ Patterns can be any of:
 				ctx.EnsureDesc(&d4)
 				d5 := d4
 				_ = d5
-				ctx.StabilizeDescForControlFlow(&d5)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -38844,7 +38834,6 @@ Patterns can be any of:
 				ctx.EnsureDesc(&d8)
 				d9 := d8
 				_ = d9
-				ctx.StabilizeDescForControlFlow(&d9)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl1 := ctx.ReserveLabel()
@@ -43782,10 +43771,8 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d26)
 					d28 = d1
 					_ = d28
-					ctx.StabilizeDescForControlFlow(&d28)
 					d29 = d26
 					_ = d29
-					ctx.StabilizeDescForControlFlow(&d29)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl6 := ctx.ReserveLabel()
@@ -74691,7 +74678,6 @@ Patterns can be any of:
 					ctx.EnsureDesc(&d18)
 					d19 = d18
 					_ = d19
-					ctx.StabilizeDescForControlFlow(&d19)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl6 := ctx.ReserveLabel()

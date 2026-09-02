@@ -666,7 +666,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d3)
 					d4 = d3
 					_ = d4
-					ctx.StabilizeDescForControlFlow(&d4)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl4 := ctx.ReserveLabel()
@@ -876,7 +875,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d25)
 					d26 = d25
 					_ = d26
-					ctx.StabilizeDescForControlFlow(&d26)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl7 := ctx.ReserveLabel()
@@ -1689,7 +1687,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d23)
 					d24 = d23
 					_ = d24
-					ctx.StabilizeDescForControlFlow(&d24)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl16 := ctx.ReserveLabel()
@@ -3033,7 +3030,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d141)
 					d142 = d141
 					_ = d142
-					ctx.StabilizeDescForControlFlow(&d142)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl23 := ctx.ReserveLabel()
@@ -6481,10 +6477,8 @@ func init_strings() {
 					d92 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("_ci")}
 					d93 = d91
 					_ = d93
-					ctx.StabilizeDescForControlFlow(&d93)
 					d94 = d92
 					_ = d94
-					ctx.StabilizeDescForControlFlow(&d94)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl21 := ctx.ReserveLabel()
@@ -6923,12 +6917,8 @@ func init_strings() {
 					ctx.EnsureDesc(&d89)
 					d106 = d88
 					_ = d106
-					ctx.StabilizeDescForControlFlow(&d106)
 					d107 = d89
 					_ = d107
-					ctx.StabilizeDescForControlFlow(&d107)
-					ctx.StabilizeDescForControlFlow(&d88)
-					ctx.StabilizeDescForControlFlow(&d89)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
 					lbl28 := ctx.ReserveLabel()
@@ -7998,13 +7988,10 @@ func init_strings() {
 				ctx.EnsureDesc(&d7)
 				d9 := d1
 				_ = d9
-				ctx.StabilizeDescForControlFlow(&d9)
 				d10 := d4
 				_ = d10
-				ctx.StabilizeDescForControlFlow(&d10)
 				d11 := d7
 				_ = d11
-				ctx.StabilizeDescForControlFlow(&d11)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -11084,7 +11071,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d14)
 					d15 = d14
 					_ = d15
-					ctx.StabilizeDescForControlFlow(&d15)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl8 := ctx.ReserveLabel()
@@ -13641,10 +13627,8 @@ func init_strings() {
 					d76 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("\n")}
 					d77 = d75
 					_ = d77
-					ctx.StabilizeDescForControlFlow(&d77)
 					d78 = d76
 					_ = d78
-					ctx.StabilizeDescForControlFlow(&d78)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl13 := ctx.ReserveLabel()
@@ -15215,35 +15199,105 @@ func init_strings() {
 				d4 := callResults5[0]
 				d4.Type = tagSlice
 				ctx.EnsureDesc(&d0)
+				ctx.EnsureDesc(&d4)
+				d6 := d4
+				_ = d6
+				bbpos_1_0 := int32(-1)
+				_ = bbpos_1_0
+				lbl0 := ctx.ReserveLabel()
+				_ = lbl0
+				bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+				ctx.MarkLabel(lbl0)
+				ctx.ResolveFixups()
+				ctx.ReclaimUntrackedRegs()
+				ctx.ReclaimUntrackedRegs()
+				var d7 JITValueDesc
+				if d6.SliceSizeKnown {
+					d7 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d6.KnownSliceLen))}
+				} else if d6.Loc == LocImm {
+					d7 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d6.StackOff))}
+				} else if d6.Loc == LocStackTriple {
+					d7 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: d6.StackOff + 8, NoHeapPointer: true}
+				} else {
+					ctx.EnsureDesc(&d6)
+					if d6.Loc == LocRegPair || d6.Loc == LocRegTriple {
+						d7 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d6.Reg2, ID: 0}
+					} else if d6.Loc == LocReg {
+						d7 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d6.Reg, ID: 0}
+					} else {
+						panic("len on unsupported descriptor location")
+					}
+				}
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d0)
 				ctx.EnsureDesc(&d0)
 				if d0.Loc == LocRegPair || d0.Loc == LocStackPair || d0.Loc == LocRegTriple || d0.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
-				if d4.Loc != LocRegTriple && d4.Loc != LocStackTriple {
-					panic("jit: generic call arg expects 3-word Go slice ((*base64.Encoding).EncodeToString arg1)")
+				ctx.EnsureDesc(&d7)
+				ctx.EnsureDesc(&d7)
+				if d7.Loc == LocRegPair || d7.Loc == LocStackPair || d7.Loc == LocRegTriple || d7.Loc == LocStackTriple {
+					panic("jit: generic call arg expects 1-word value")
 				}
 				ctx.SyncDesc(&d0)
-				ctx.SyncDesc(&d4)
-				d6 := ctx.EmitGoCallScalar(GoFuncAddr((*base64.Encoding).EncodeToString), []JITValueDesc{d0, d4}, 2)
-				d6.NoHeapPointer = false
-				ctx.BindReg(d6.Reg, &d6)
-				ctx.BindReg(d6.Reg2, &d6)
-				ctx.FreeDesc(&d0)
-				ctx.EnsureDesc(&d6)
-				d7 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d6}, 2)
-				if result.Loc == LocAny {
-					return d7
+				ctx.SyncDesc(&d7)
+				d8 := ctx.EmitGoCallScalar(GoFuncAddr((*base64.Encoding).EncodedLen), []JITValueDesc{d0, d7}, 1)
+				d8.NoHeapPointer = true
+				ctx.BindReg(d8.Reg, &d8)
+				ctx.FreeDesc(&d7)
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d8)
+				ctx.EnsureDesc(&d8)
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d8)
+				ctx.EnsureDesc(&d8)
+				callResults9 := JITEmitGoCallResults(ctx, GoFuncAddr(jitMakeByteSlice), []JITValueDesc{d8, d8}, []uint8{3}, []uint8{1})
+				d10 := callResults9[0]
+				d10.Type = tagSlice
+				ctx.FreeDesc(&d8)
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d0)
+				ctx.EnsureDesc(&d0)
+				if d0.Loc == LocRegPair || d0.Loc == LocStackPair || d0.Loc == LocRegTriple || d0.Loc == LocStackTriple {
+					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EmitMovPairToResult(&d7, &result)
+				ctx.EnsureDesc(&d10)
+				ctx.EnsureDesc(&d10)
+				ctx.EnsureDesc(&d10)
+				if d10.Loc != LocRegTriple && d10.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice ((*base64.Encoding).Encode arg1)")
+				}
+				ctx.EnsureDesc(&d6)
+				ctx.EnsureDesc(&d6)
+				ctx.EnsureDesc(&d6)
+				if d6.Loc != LocRegTriple && d6.Loc != LocStackTriple {
+					panic("jit: generic call arg expects 3-word Go slice ((*base64.Encoding).Encode arg2)")
+				}
+				ctx.SyncDesc(&d0)
+				ctx.SyncDesc(&d10)
+				ctx.SyncDesc(&d6)
+				ctx.EmitGoCallVoid(GoFuncAddr((*base64.Encoding).Encode), []JITValueDesc{d0, d10, d6})
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d10)
+				ctx.EnsureDesc(&d10)
+				ctx.EnsureDesc(&d10)
+				callResults12 := JITEmitGoCallResults(ctx, GoFuncAddr(jitBytesToString), []JITValueDesc{d10}, []uint8{2}, []uint8{1})
+				d11 := callResults12[0]
+				ctx.ReclaimUntrackedRegs()
+				ctx.EnsureDesc(&d11)
+				ctx.FreeDesc(&d0)
+				ctx.EnsureDesc(&d11)
+				d13 := ctx.EmitGoCallScalar(GoFuncAddr(NewString), []JITValueDesc{d11}, 2)
+				if result.Loc == LocAny {
+					return d13
+				}
+				ctx.EmitMovPairToResult(&d13, &result)
 				result.Type = tagString
 				return result
 				return result
 			},
 			JITVirtualArgs: true,
-			JITInlineCost:  8,
+			JITInlineCost:  14,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -18360,7 +18414,6 @@ func init_strings() {
 					ctx.EnsureDesc(&d0)
 					d1 = d0
 					_ = d1
-					ctx.StabilizeDescForControlFlow(&d1)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl7 := ctx.ReserveLabel()
@@ -21124,7 +21177,6 @@ func init_strings() {
 				ctx.EnsureDesc(&d8)
 				d9 := d8
 				_ = d9
-				ctx.StabilizeDescForControlFlow(&d9)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -21155,7 +21207,6 @@ func init_strings() {
 				ctx.EnsureDesc(&d10)
 				d11 := d10
 				_ = d11
-				ctx.StabilizeDescForControlFlow(&d11)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl1 := ctx.ReserveLabel()
@@ -21297,7 +21348,6 @@ func init_strings() {
 				ctx.EnsureDesc(&d8)
 				d9 := d8
 				_ = d9
-				ctx.StabilizeDescForControlFlow(&d9)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -21328,7 +21378,6 @@ func init_strings() {
 				ctx.EnsureDesc(&d10)
 				d11 := d10
 				_ = d11
-				ctx.StabilizeDescForControlFlow(&d11)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl1 := ctx.ReserveLabel()

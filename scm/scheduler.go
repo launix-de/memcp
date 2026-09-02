@@ -487,7 +487,6 @@ func init_scheduler() {
 					ctx.EnsureDesc(&d11)
 					d12 = d11
 					_ = d12
-					ctx.StabilizeDescForControlFlow(&d12)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl6 := ctx.ReserveLabel()

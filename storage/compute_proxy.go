@@ -1649,6 +1649,11 @@ func (s *StorageComputeProxy) DistinctCount() uint {
 // JITEmit preserves lazy compute semantics by calling the ordinary reader.
 func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	thisptrPinned := thisptr.Loc == scm.LocReg
+	thisptrPinnedReg := thisptr.Reg
+	if thisptrPinned {
+		ctx.ProtectReg(thisptrPinnedReg)
+	}
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -1726,5 +1731,8 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueD
 		}
 	}
 	return result
+	if thisptrPinned {
+		ctx.UnprotectReg(thisptrPinnedReg)
+	}
 	return result
 }

@@ -65,17 +65,24 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 	_ = d3
 	var d4 scm.JITValueDesc
 	_ = d4
-	var d15 scm.JITValueDesc
-	_ = d15
-	var d16 scm.JITValueDesc
-	_ = d16
+	var d5 scm.JITValueDesc
+	_ = d5
 	var d17 scm.JITValueDesc
 	_ = d17
 	var d18 scm.JITValueDesc
 	_ = d18
 	var d19 scm.JITValueDesc
 	_ = d19
+	var d20 scm.JITValueDesc
+	_ = d20
+	var d21 scm.JITValueDesc
+	_ = d21
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	thisptrPinned := thisptr.Loc == scm.LocReg
+	thisptrPinnedReg := thisptr.Reg
+	if thisptrPinned {
+		ctx.ProtectReg(thisptrPinnedReg)
+	}
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -180,93 +187,128 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		ctx.EmitMovRegMem(d2.Reg, d2.Reg, 0)
 		d1 = d2
 		ctx.EnsureDesc(&d1)
-		ctx.EnsureDesc(&d1)
-		if d1.Loc == scm.LocRegPair || d1.Loc == scm.LocStackPair || d1.Loc == scm.LocRegTriple || d1.Loc == scm.LocStackTriple {
-			panic("jit: generic call arg expects 1-word value")
+		d3 = d1
+		_ = d3
+		bbpos_1_0 := int32(-1)
+		_ = bbpos_1_0
+		lbl4 := ctx.ReserveLabel()
+		_ = lbl4
+		bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+		ctx.MarkLabel(lbl4)
+		ctx.ResolveFixups()
+		ctx.ReclaimUntrackedRegs()
+		ctx.ReclaimUntrackedRegs()
+		ctx.EnsureDesc(&d3)
+		ctx.EnsureDesc(&d3)
+		ctx.EnsureDescsTogether(&d3, &d3)
+		var d4 scm.JITValueDesc
+		if d3.Loc == scm.LocImm {
+			d4 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagBool, Imm: scm.NewBool(d3.Imm.Float() != d3.Imm.Float())}
+		} else if d3.Loc == scm.LocImm {
+			r8 := ctx.AllocRegExcept(d3.Reg)
+			_, yBits := d3.Imm.RawWords()
+			ctx.EmitMovRegImm64(scm.RegR11, yBits)
+			ctx.EmitCmpFloat64Setcc(r8, d3.Reg, scm.RegR11, scm.CondNotEqual)
+			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r8}
+			ctx.BindReg(r8, &d4)
+		} else if d3.Loc == scm.LocImm {
+			r9 := ctx.AllocRegExcept(d3.Reg)
+			_, xBits := d3.Imm.RawWords()
+			ctx.EmitMovRegImm64(scm.RegR11, xBits)
+			ctx.EmitCmpFloat64Setcc(r9, scm.RegR11, d3.Reg, scm.CondNotEqual)
+			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r9}
+			ctx.BindReg(r9, &d4)
+		} else {
+			r10 := ctx.AllocRegExcept(d3.Reg, d3.Reg)
+			ctx.EmitCmpFloat64Setcc(r10, d3.Reg, d3.Reg, scm.CondNotEqual)
+			d4 = scm.JITValueDesc{Loc: scm.LocReg, Type: scm.TagBool, Reg: r10}
+			ctx.BindReg(r10, &d4)
 		}
-		ctx.SyncDesc(&d1)
-		d3 = ctx.EmitGoCallScalar(scm.GoFuncAddr(math.IsNaN), []scm.JITValueDesc{d1}, 1)
-		d3.NoHeapPointer = true
-		ctx.EmitAndRegImm32(d3.Reg, 1)
-		d3.Type = scm.TagBool
-		ctx.BindReg(d3.Reg, &d3)
-		ctx.FreeDesc(&d1)
-		d4 = d3
+		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&d4)
-		if d4.Loc != scm.LocImm && d4.Loc != scm.LocReg {
+		ctx.FreeDesc(&d1)
+		d5 = d4
+		ctx.EnsureDesc(&d5)
+		if d5.Loc != scm.LocImm && d5.Loc != scm.LocReg {
 			panic("jit: If condition is neither scm.LocImm nor scm.LocReg")
 		}
-		if d4.Loc == scm.LocImm {
-			if d4.Imm.Bool() {
+		if d5.Loc == scm.LocImm {
+			if d5.Imm.Bool() {
 				if ps.General {
 				}
-				ps5 := scm.PhiState{General: ps.General}
-				ps5.OverlayValues = make([]scm.JITValueDesc, 5)
-				ps5.OverlayValues[0] = d0
-				ps5.OverlayValues[1] = d1
-				ps5.OverlayValues[2] = d2
-				ps5.OverlayValues[3] = d3
-				ps5.OverlayValues[4] = d4
-				return bbs[1].RenderPS(ps5)
+				ps6 := scm.PhiState{General: ps.General}
+				ps6.OverlayValues = make([]scm.JITValueDesc, 6)
+				ps6.OverlayValues[0] = d0
+				ps6.OverlayValues[1] = d1
+				ps6.OverlayValues[2] = d2
+				ps6.OverlayValues[3] = d3
+				ps6.OverlayValues[4] = d4
+				ps6.OverlayValues[5] = d5
+				return bbs[1].RenderPS(ps6)
 			}
 			if ps.General {
 			}
-			ps6 := scm.PhiState{General: ps.General}
-			ps6.OverlayValues = make([]scm.JITValueDesc, 5)
-			ps6.OverlayValues[0] = d0
-			ps6.OverlayValues[1] = d1
-			ps6.OverlayValues[2] = d2
-			ps6.OverlayValues[3] = d3
-			ps6.OverlayValues[4] = d4
-			return bbs[2].RenderPS(ps6)
+			ps7 := scm.PhiState{General: ps.General}
+			ps7.OverlayValues = make([]scm.JITValueDesc, 6)
+			ps7.OverlayValues[0] = d0
+			ps7.OverlayValues[1] = d1
+			ps7.OverlayValues[2] = d2
+			ps7.OverlayValues[3] = d3
+			ps7.OverlayValues[4] = d4
+			ps7.OverlayValues[5] = d5
+			return bbs[2].RenderPS(ps7)
 		}
 		if !ps.General {
 			ps.General = true
 			return bbs[0].RenderPS(ps)
 		}
-		lbl4 := ctx.ReserveLabel()
 		lbl5 := ctx.ReserveLabel()
-		ctx.EmitCmpRegImm32(d4.Reg, 0)
-		ctx.EmitJump(scm.CondNotEqual, lbl4)
-		ctx.EmitJmp(lbl5)
-		ctx.MarkLabel(lbl4)
-		ctx.EmitJmp(lbl2)
+		lbl6 := ctx.ReserveLabel()
+		ctx.EmitCmpRegImm32(d5.Reg, 0)
+		ctx.EmitJump(scm.CondNotEqual, lbl5)
+		ctx.EmitJmp(lbl6)
 		ctx.MarkLabel(lbl5)
+		ctx.EmitJmp(lbl2)
+		ctx.MarkLabel(lbl6)
 		ctx.EmitJmp(lbl3)
-		ps7 := scm.PhiState{General: true}
-		ps7.OverlayValues = make([]scm.JITValueDesc, 5)
-		ps7.OverlayValues[0] = d0
-		ps7.OverlayValues[1] = d1
-		ps7.OverlayValues[2] = d2
-		ps7.OverlayValues[3] = d3
-		ps7.OverlayValues[4] = d4
 		ps8 := scm.PhiState{General: true}
-		ps8.OverlayValues = make([]scm.JITValueDesc, 5)
+		ps8.OverlayValues = make([]scm.JITValueDesc, 6)
 		ps8.OverlayValues[0] = d0
 		ps8.OverlayValues[1] = d1
 		ps8.OverlayValues[2] = d2
 		ps8.OverlayValues[3] = d3
 		ps8.OverlayValues[4] = d4
-		snap9 := d0
-		snap10 := d1
-		snap11 := d2
-		snap12 := d3
-		snap13 := d4
-		alloc14 := ctx.SnapshotAllocState()
+		ps8.OverlayValues[5] = d5
+		ps9 := scm.PhiState{General: true}
+		ps9.OverlayValues = make([]scm.JITValueDesc, 6)
+		ps9.OverlayValues[0] = d0
+		ps9.OverlayValues[1] = d1
+		ps9.OverlayValues[2] = d2
+		ps9.OverlayValues[3] = d3
+		ps9.OverlayValues[4] = d4
+		ps9.OverlayValues[5] = d5
+		snap10 := d0
+		snap11 := d1
+		snap12 := d2
+		snap13 := d3
+		snap14 := d4
+		snap15 := d5
+		alloc16 := ctx.SnapshotAllocState()
 		if !bbs[2].Rendered {
-			bbs[2].RenderPS(ps8)
+			bbs[2].RenderPS(ps9)
 		}
-		ctx.RestoreAllocState(alloc14)
-		d0 = snap9
-		d1 = snap10
-		d2 = snap11
-		d3 = snap12
-		d4 = snap13
+		ctx.RestoreAllocState(alloc16)
+		d0 = snap10
+		d1 = snap11
+		d2 = snap12
+		d3 = snap13
+		d4 = snap14
+		d5 = snap15
 		if !bbs[1].Rendered {
-			return bbs[1].RenderPS(ps7)
+			return bbs[1].RenderPS(ps8)
 		}
 		return result
-		ctx.FreeDesc(&d3)
+		ctx.FreeDesc(&d4)
 		return result
 	}
 	bbs[1].RenderPS = func(ps scm.PhiState) scm.JITValueDesc {
@@ -303,26 +345,29 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != scm.LocNone {
 			d4 = ps.OverlayValues[4]
 		}
+		if len(ps.OverlayValues) > 5 && ps.OverlayValues[5].Loc != scm.LocNone {
+			d5 = ps.OverlayValues[5]
+		}
 		ctx.ReclaimUntrackedRegs()
-		d15 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
-		d16 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-		ctx.BindReg(r0, &d16)
-		ctx.BindReg(r1, &d16)
-		ctx.EnsureDesc(&d15)
-		if d15.Loc == scm.LocRegPair {
-			ctx.EmitMovPairToResult(&d15, &d16)
+		d17 = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagNil, Imm: scm.NewNil()}
+		d18 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+		ctx.BindReg(r0, &d18)
+		ctx.BindReg(r1, &d18)
+		ctx.EnsureDesc(&d17)
+		if d17.Loc == scm.LocRegPair {
+			ctx.EmitMovPairToResult(&d17, &d18)
 		} else {
-			switch d15.Type {
+			switch d17.Type {
 			case scm.TagBool:
-				ctx.EmitMakeBool(d16, d15)
+				ctx.EmitMakeBool(d18, d17)
 			case scm.TagInt:
-				ctx.EmitMakeInt(d16, d15)
+				ctx.EmitMakeInt(d18, d17)
 			case scm.TagFloat:
-				ctx.EmitMakeFloat(d16, d15)
+				ctx.EmitMakeFloat(d18, d17)
 			case scm.TagNil:
-				ctx.EmitMakeNil(d16)
+				ctx.EmitMakeNil(d18)
 			default:
-				ctx.EmitMovPairToResult(&d15, &d16)
+				ctx.EmitMovPairToResult(&d17, &d18)
 			}
 		}
 		ctx.EmitJmp(lbl0)
@@ -362,43 +407,49 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		if len(ps.OverlayValues) > 4 && ps.OverlayValues[4].Loc != scm.LocNone {
 			d4 = ps.OverlayValues[4]
 		}
-		if len(ps.OverlayValues) > 15 && ps.OverlayValues[15].Loc != scm.LocNone {
-			d15 = ps.OverlayValues[15]
+		if len(ps.OverlayValues) > 5 && ps.OverlayValues[5].Loc != scm.LocNone {
+			d5 = ps.OverlayValues[5]
 		}
-		if len(ps.OverlayValues) > 16 && ps.OverlayValues[16].Loc != scm.LocNone {
-			d16 = ps.OverlayValues[16]
+		if len(ps.OverlayValues) > 17 && ps.OverlayValues[17].Loc != scm.LocNone {
+			d17 = ps.OverlayValues[17]
+		}
+		if len(ps.OverlayValues) > 18 && ps.OverlayValues[18].Loc != scm.LocNone {
+			d18 = ps.OverlayValues[18]
 		}
 		ctx.ReclaimUntrackedRegs()
 		ctx.EnsureDesc(&idxInt)
-		d18 = ctx.EmitSliceElementAddress(&d0, &idxInt, 8)
-		ctx.EnsureDesc(&d18)
-		ctx.EmitMovRegMem(d18.Reg, d18.Reg, 0)
-		d17 = d18
+		d20 = ctx.EmitSliceElementAddress(&d0, &idxInt, 8)
+		ctx.EnsureDesc(&d20)
+		ctx.EmitMovRegMem(d20.Reg, d20.Reg, 0)
+		d19 = d20
 		ctx.FreeDesc(&idxInt)
-		ctx.EnsureDesc(&d17)
-		d19 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-		ctx.BindReg(r0, &d19)
-		ctx.BindReg(r1, &d19)
-		ctx.EnsureDesc(&d17)
-		ctx.EmitMakeFloat(d19, d17)
-		if d17.Loc == scm.LocReg {
-			ctx.FreeReg(d17.Reg)
+		ctx.EnsureDesc(&d19)
+		d21 = scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+		ctx.BindReg(r0, &d21)
+		ctx.BindReg(r1, &d21)
+		ctx.EnsureDesc(&d19)
+		ctx.EmitMakeFloat(d21, d19)
+		if d19.Loc == scm.LocReg {
+			ctx.FreeReg(d19.Reg)
 		}
 		ctx.EmitJmp(lbl0)
 		return result
 	}
-	ps20 := scm.PhiState{General: false}
-	_ = bbs[0].RenderPS(ps20)
+	ps22 := scm.PhiState{General: false}
+	_ = bbs[0].RenderPS(ps22)
 	ctx.MarkLabel(lbl0)
-	d21 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
-	ctx.BindReg(r0, &d21)
-	ctx.BindReg(r1, &d21)
-	ctx.EmitMovPairToResult(&d21, &result)
+	d23 := scm.JITValueDesc{Loc: scm.LocRegPair, Reg: r0, Reg2: r1}
+	ctx.BindReg(r0, &d23)
+	ctx.BindReg(r1, &d23)
+	ctx.EmitMovPairToResult(&d23, &result)
 	ctx.FreeReg(r0)
 	ctx.FreeReg(r1)
 	ctx.ResolveFixups()
 	if idxPinned {
 		ctx.UnprotectReg(idxPinnedReg)
+	}
+	if thisptrPinned {
+		ctx.UnprotectReg(thisptrPinnedReg)
 	}
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)

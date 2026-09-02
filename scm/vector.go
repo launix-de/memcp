@@ -2469,7 +2469,6 @@ func init_vector() {
 					ctx.EnsureDesc(&d164)
 					d166 = d164
 					_ = d166
-					ctx.StabilizeDescForControlFlow(&d166)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl22 := ctx.ReserveLabel()
@@ -2511,7 +2510,6 @@ func init_vector() {
 					ctx.EnsureDesc(&d168)
 					d170 = d168
 					_ = d170
-					ctx.StabilizeDescForControlFlow(&d170)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl23 := ctx.ReserveLabel()
@@ -5089,7 +5087,6 @@ func init_vector() {
 					ctx.EnsureDesc(&d354)
 					d356 = d354
 					_ = d356
-					ctx.StabilizeDescForControlFlow(&d356)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
 					lbl28 := ctx.ReserveLabel()
@@ -5131,7 +5128,6 @@ func init_vector() {
 					ctx.EnsureDesc(&d358)
 					d360 = d358
 					_ = d360
-					ctx.StabilizeDescForControlFlow(&d360)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
 					lbl29 := ctx.ReserveLabel()

@@ -3312,6 +3312,8 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.fieldCache = map[string]genVal{}
 	g.forceLegacyCFG = true
 
+	calleeMultiBlock := len(callee.Blocks) > 1
+
 	// Map callee params -> resolved caller args.
 	// Always use per-inline descriptor copies so callee-side FreeDesc/Loc
 	// rewrites cannot mutate caller descriptor variables by alias.
@@ -3322,7 +3324,9 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			pv := g.allocDesc()
 			g.emit("%s := %s", pv, arg.goVar)
 			g.emit("_ = %s", pv)
-			g.emit("ctx.StabilizeDescForControlFlow(&%s)", pv)
+			if calleeMultiBlock {
+				g.emit("ctx.StabilizeDescForControlFlow(&%s)", pv)
+			}
 			copied := arg
 			copied.goVar = pv
 			g.vals[param.Name()] = copied
@@ -3359,7 +3363,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			continue
 		}
 		resolved := resolvedArgs[i]
-		if resolved.isDesc {
+		if calleeMultiBlock && resolved.isDesc {
 			g.emit("ctx.StabilizeDescForControlFlow(&%s)", resolved.goVar)
 		}
 	}
@@ -3368,7 +3372,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.allocPhiRegs()
 	g.initAllPhiDescs()
 
-	isMultiBlock := len(callee.Blocks) > 1
+	isMultiBlock := calleeMultiBlock
 	g.multiBlock = isMultiBlock
 
 	// Detect if callee returns Scmer (2-word pair) or scalar (1 word).
@@ -3623,6 +3627,18 @@ func functionBuildsScmerStruct(fn *ssa.Function) bool {
 	return false
 }
 
+func functionWritesMemory(fn *ssa.Function) bool {
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			switch instruction.(type) {
+			case *ssa.Store, *ssa.MapUpdate, *ssa.Send, *ssa.Go, *ssa.Defer:
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func blockEndsInPanic(block *ssa.BasicBlock) bool {
 	return block != nil && len(block.Instrs) > 0 && func() bool {
 		_, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Panic)
@@ -3646,13 +3662,14 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 	if callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() != g.topLevelPkgPath && inlineInstructionCount(callee) > 32 {
 		return genVal{}, false
 	}
-	// Pointer-receiver methods preserve object identity and commonly combine
-	// field mutation with maps, slices, or write barriers. Keep that compact Go
-	// call boundary while still inlining the surrounding builtin loop and its
-	// Scheme callbacks. Value-receiver helpers remain normal inline candidates.
+	// Pointer-receiver helpers are eligible only when they are small, read-only,
+	// and have a single block. This exposes compact getter arithmetic without
+	// expanding mutation or control-flow machinery into the caller.
 	if receiver := callee.Signature.Recv(); receiver != nil {
 		if _, pointerReceiver := receiver.Type().Underlying().(*types.Pointer); pointerReceiver {
-			return genVal{}, false
+			if len(callee.Blocks) != 1 || functionWritesMemory(callee) {
+				return genVal{}, false
+			}
 		}
 	}
 	if callee.Signature.Results().Len() == 1 && goCallWordCount(callee.Signature.Results().At(0).Type()) == 0 {
@@ -3874,6 +3891,9 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 		if g.hasStorageIdx {
 			g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
 		}
+		if g.storageMode {
+			g.emit("if thisptrPinned { ctx.UnprotectReg(thisptrPinnedReg) }")
+		}
 		g.emit("return result")
 		return
 	}
@@ -3927,6 +3947,9 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 	}
 	if g.hasStorageIdx {
 		g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
+	}
+	if g.storageMode {
+		g.emit("if thisptrPinned { ctx.UnprotectReg(thisptrPinnedReg) }")
 	}
 	if g.multiBlock {
 		g.emit("if resultRegsProtected {")
@@ -4028,6 +4051,9 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	// Map receiver to thisptr (LocImm at JIT compile time)
 	if len(fn.Params) >= 1 {
 		g.vals[fn.Params[0].Name()] = genVal{goVar: "thisptr", isDesc: true, marker: "_storage_recv"}
+		g.emit("thisptrPinned := thisptr.Loc == LocReg")
+		g.emit("thisptrPinnedReg := thisptr.Reg")
+		g.emit("if thisptrPinned { ctx.ProtectReg(thisptrPinnedReg) }")
 	}
 	// Map index: idx is a Scmer (JITValueDesc), but GetValue's i is uint32.
 	// Extract the integer value from the Scmer.
@@ -6549,6 +6575,12 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 		default:
 			if g.storageMode {
+				if result, ok := g.tryInlineCall(callee, v.Call.Args); ok {
+					if name != "" {
+						g.vals[name] = result
+					}
+					break
+				}
 				if g.emitGenericStaticCall(name, callee, v.Call.Args) {
 					break
 				}

@@ -27245,10 +27245,8 @@ func init_alu() {
 					d78 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("_ci")}
 					d79 = d17
 					_ = d79
-					ctx.StabilizeDescForControlFlow(&d79)
 					d80 = d78
 					_ = d80
-					ctx.StabilizeDescForControlFlow(&d80)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl18 := ctx.ReserveLabel()
@@ -34804,7 +34802,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d14)
 					d15 = d14
 					_ = d15
-					ctx.StabilizeDescForControlFlow(&d15)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl12 := ctx.ReserveLabel()
@@ -35124,8 +35121,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d38)
 					d39 = d38
 					_ = d39
-					ctx.StabilizeDescForControlFlow(&d39)
-					ctx.StabilizeDescForControlFlow(&d38)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl15 := ctx.ReserveLabel()
@@ -35833,8 +35828,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d96)
 					d97 = d96
 					_ = d97
-					ctx.StabilizeDescForControlFlow(&d97)
-					ctx.StabilizeDescForControlFlow(&d96)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
 					lbl27 := ctx.ReserveLabel()
@@ -36314,7 +36307,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d122)
 					d125 = d122
 					_ = d125
-					ctx.StabilizeDescForControlFlow(&d125)
 					bbpos_7_0 := int32(-1)
 					_ = bbpos_7_0
 					lbl52 := ctx.ReserveLabel()
@@ -36436,8 +36428,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d131)
 					d136 = d131
 					_ = d136
-					ctx.StabilizeDescForControlFlow(&d136)
-					ctx.StabilizeDescForControlFlow(&d131)
 					bbpos_9_0 := int32(-1)
 					_ = bbpos_9_0
 					lbl66 := ctx.ReserveLabel()
@@ -36754,8 +36744,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d131)
 					d148 = d131
 					_ = d148
-					ctx.StabilizeDescForControlFlow(&d148)
-					ctx.StabilizeDescForControlFlow(&d131)
 					bbpos_10_0 := int32(-1)
 					_ = bbpos_10_0
 					lbl77 := ctx.ReserveLabel()
@@ -36802,7 +36790,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d153)
 					d154 = d153
 					_ = d154
-					ctx.StabilizeDescForControlFlow(&d154)
 					bbpos_11_0 := int32(-1)
 					_ = bbpos_11_0
 					lbl78 := ctx.ReserveLabel()
@@ -36876,8 +36863,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d132)
 					d160 = d132
 					_ = d160
-					ctx.StabilizeDescForControlFlow(&d160)
-					ctx.StabilizeDescForControlFlow(&d132)
 					bbpos_12_0 := int32(-1)
 					_ = bbpos_12_0
 					lbl79 := ctx.ReserveLabel()
@@ -36956,7 +36941,6 @@ func init_alu() {
 					d163 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(9221120237041090561)}
 					d164 = d163
 					_ = d164
-					ctx.StabilizeDescForControlFlow(&d164)
 					bbpos_14_0 := int32(-1)
 					_ = bbpos_14_0
 					lbl81 := ctx.ReserveLabel()
@@ -37043,7 +37027,6 @@ func init_alu() {
 					d171 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					d172 = d171
 					_ = d172
-					ctx.StabilizeDescForControlFlow(&d172)
 					bbpos_15_0 := int32(-1)
 					_ = bbpos_15_0
 					lbl82 := ctx.ReserveLabel()
@@ -37118,8 +37101,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d131)
 					d179 = d131
 					_ = d179
-					ctx.StabilizeDescForControlFlow(&d179)
-					ctx.StabilizeDescForControlFlow(&d131)
 					bbpos_16_0 := int32(-1)
 					_ = bbpos_16_0
 					lbl83 := ctx.ReserveLabel()
@@ -37166,7 +37147,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d184)
 					d185 = d184
 					_ = d185
-					ctx.StabilizeDescForControlFlow(&d185)
 					bbpos_17_0 := int32(-1)
 					_ = bbpos_17_0
 					lbl84 := ctx.ReserveLabel()
@@ -37362,7 +37342,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d198)
 					d201 = d198
 					_ = d201
-					ctx.StabilizeDescForControlFlow(&d201)
 					bbpos_19_0 := int32(-1)
 					_ = bbpos_19_0
 					lbl92 := ctx.ReserveLabel()
@@ -37484,8 +37463,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d207)
 					d212 = d207
 					_ = d212
-					ctx.StabilizeDescForControlFlow(&d212)
-					ctx.StabilizeDescForControlFlow(&d207)
 					bbpos_21_0 := int32(-1)
 					_ = bbpos_21_0
 					lbl106 := ctx.ReserveLabel()
@@ -37802,8 +37779,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d207)
 					d224 = d207
 					_ = d224
-					ctx.StabilizeDescForControlFlow(&d224)
-					ctx.StabilizeDescForControlFlow(&d207)
 					bbpos_22_0 := int32(-1)
 					_ = bbpos_22_0
 					lbl117 := ctx.ReserveLabel()
@@ -37850,7 +37825,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d229)
 					d230 = d229
 					_ = d230
-					ctx.StabilizeDescForControlFlow(&d230)
 					bbpos_23_0 := int32(-1)
 					_ = bbpos_23_0
 					lbl118 := ctx.ReserveLabel()
@@ -37924,8 +37898,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d208)
 					d236 = d208
 					_ = d236
-					ctx.StabilizeDescForControlFlow(&d236)
-					ctx.StabilizeDescForControlFlow(&d208)
 					bbpos_24_0 := int32(-1)
 					_ = bbpos_24_0
 					lbl119 := ctx.ReserveLabel()
@@ -38004,7 +37976,6 @@ func init_alu() {
 					d239 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(9221120237041090561)}
 					d240 = d239
 					_ = d240
-					ctx.StabilizeDescForControlFlow(&d240)
 					bbpos_26_0 := int32(-1)
 					_ = bbpos_26_0
 					lbl121 := ctx.ReserveLabel()
@@ -38091,7 +38062,6 @@ func init_alu() {
 					d247 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					d248 = d247
 					_ = d248
-					ctx.StabilizeDescForControlFlow(&d248)
 					bbpos_27_0 := int32(-1)
 					_ = bbpos_27_0
 					lbl122 := ctx.ReserveLabel()
@@ -38166,8 +38136,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d207)
 					d255 = d207
 					_ = d255
-					ctx.StabilizeDescForControlFlow(&d255)
-					ctx.StabilizeDescForControlFlow(&d207)
 					bbpos_28_0 := int32(-1)
 					_ = bbpos_28_0
 					lbl123 := ctx.ReserveLabel()
@@ -38214,7 +38182,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d260)
 					d261 = d260
 					_ = d261
-					ctx.StabilizeDescForControlFlow(&d261)
 					bbpos_29_0 := int32(-1)
 					_ = bbpos_29_0
 					lbl124 := ctx.ReserveLabel()
@@ -41718,7 +41685,6 @@ func init_alu() {
 					ctx.EnsureDesc(&d49)
 					d50 = d49
 					_ = d50
-					ctx.StabilizeDescForControlFlow(&d50)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl13 := ctx.ReserveLabel()

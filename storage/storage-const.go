@@ -72,6 +72,11 @@ func (s *StorageConst) GetCachedReader() ColumnReader { return s }
 
 func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx scm.JITValueDesc, result scm.JITValueDesc) scm.JITValueDesc {
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	thisptrPinned := thisptr.Loc == scm.LocReg
+	thisptrPinnedReg := thisptr.Reg
+	if thisptrPinned {
+		ctx.ProtectReg(thisptrPinnedReg)
+	}
 	ctx.FreeDesc(&idx)
 	var d0 scm.JITValueDesc
 	if thisptr.Loc == scm.LocImm {
@@ -124,6 +129,9 @@ func (s *StorageConst) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		}
 	}
 	return result
+	if thisptrPinned {
+		ctx.UnprotectReg(thisptrPinnedReg)
+	}
 	return result
 }
 

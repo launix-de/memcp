@@ -13892,7 +13892,6 @@ func init_timezone() {
 					ctx.EnsureDesc(&d107)
 					d108 = d107
 					_ = d108
-					ctx.StabilizeDescForControlFlow(&d108)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl20 := ctx.ReserveLabel()
@@ -13923,7 +13922,6 @@ func init_timezone() {
 					ctx.EnsureDesc(&d109)
 					d110 = d109
 					_ = d110
-					ctx.StabilizeDescForControlFlow(&d110)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl21 := ctx.ReserveLabel()
@@ -14015,7 +14013,6 @@ func init_timezone() {
 					ctx.EnsureDesc(&d116)
 					d117 = d116
 					_ = d117
-					ctx.StabilizeDescForControlFlow(&d117)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
 					lbl22 := ctx.ReserveLabel()
@@ -14046,7 +14043,6 @@ func init_timezone() {
 					ctx.EnsureDesc(&d118)
 					d119 = d118
 					_ = d119
-					ctx.StabilizeDescForControlFlow(&d119)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
 					lbl23 := ctx.ReserveLabel()
@@ -17664,7 +17660,6 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d70)
-					ctx.StabilizeDescForControlFlow(&d70)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl32 := ctx.ReserveLabel()
@@ -17935,7 +17930,6 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d70)
-					ctx.StabilizeDescForControlFlow(&d70)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl33 := ctx.ReserveLabel()
@@ -18739,7 +18733,6 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d70)
-					ctx.StabilizeDescForControlFlow(&d70)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
 					lbl36 := ctx.ReserveLabel()
@@ -19687,7 +19680,6 @@ func init_timezone() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d70)
-					ctx.StabilizeDescForControlFlow(&d70)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
 					lbl39 := ctx.ReserveLabel()

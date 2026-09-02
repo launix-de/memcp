@@ -2731,7 +2731,6 @@ func init_jit() {
 				d0 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
 				d1 := d0
 				_ = d1
-				ctx.StabilizeDescForControlFlow(&d1)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
