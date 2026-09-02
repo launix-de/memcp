@@ -87,7 +87,11 @@ func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scme
 		Validate(code, "any")
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
-		if compileProcedures && expression.GetTag() == tagProc {
+		// On a vanilla Go toolchain there is no native entry point to produce.
+		// Avoid walking every imported procedure for parser dependencies: besides
+		// doing useless work, that delays every test-suite restart before the HTTP
+		// listener becomes available.
+		if compileProcedures && jitEnabled && expression.GetTag() == tagProc {
 			if hasDefinition {
 				compiled, entry, selected := jitCompileImportProc(definitionSymbol, expression)
 				if entry == nil && jitExpressionContainsParser(expression.Proc().Body) {
