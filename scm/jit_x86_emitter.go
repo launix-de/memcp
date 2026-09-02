@@ -302,6 +302,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	// Unified epilog: patch SUB RSP with max frame size, then leave; ret.
 	frameSize := ctx.MaxBPOffset + ctx.MaxSpillOffset
 	frameSize = (frameSize + 15) &^ 15
+	buf.stackFrameSize = frameSize
 	ctx.PatchInt32(frameFixup, frameSize)
 	ctx.PatchInt32(frameWordsFixup, frameSize/8)
 	arenaOffset := 0

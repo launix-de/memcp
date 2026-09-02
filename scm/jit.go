@@ -136,8 +136,9 @@ Generated emitters (tools/jitgen):
 // JITEntryPoint holds a JIT-compiled function alongside its original
 // Scheme representation for serialization and fallback.
 type JITEntryPoint struct {
-	Native    func(...Scmer) Scmer // compiled native function pointer
-	DebugName string
+	Native         func(...Scmer) Scmer // compiled native function pointer
+	DebugName      string
+	StackFrameSize int32
 	// BoundArgs are lexical closure values appended to the public arguments.
 	// Owner keeps the entry point which owns the shared machine code alive.
 	BoundArgs []Scmer
@@ -225,11 +226,32 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 			panic("JIT: invalid hidden argument kind")
 		}
 	}
+	ensureJITStack(jep.StackFrameSize)
 	result = jep.Native(args...)
 	runtime.KeepAlive(args)
 	runtime.KeepAlive(jep)
 	runtime.KeepAlive(jep.Owner)
 	return result
+}
+
+const jitStackProbeSize = 4096
+
+// ensureJITStack grows the goroutine stack through ordinary Go frames before
+// entering generated code. JIT frames are registered with the runtime and can
+// be relocated at safepoints, but their generated prologue has no morestack
+// call of its own.
+//
+//go:noinline
+func ensureJITStack(frameSize int32) {
+	if frameSize <= 0 {
+		return
+	}
+	var probe [jitStackProbeSize]byte
+	probe[0] = byte(frameSize)
+	if frameSize > jitStackProbeSize {
+		ensureJITStack(frameSize - jitStackProbeSize)
+	}
+	runtime.KeepAlive(&probe)
 }
 
 type jitHiddenArgKind uint8
@@ -7336,6 +7358,7 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 				sourceProc.Compiled = nil
 				jep := &JITEntryPoint{
 					Native:            nativeFn,
+					StackFrameSize:    buf.stackFrameSize,
 					TransferInputArgs: transferInputArgs,
 					HiddenArgs:        hiddenArgs,
 					CodePtr:           ptr,
@@ -7377,11 +7400,12 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 
 // execBuf is a small wrapper for writable memory (arena-backed or standalone)
 type execBuf struct {
-	ptr         unsafe.Pointer
-	n           int       // size
-	arena       *jitArena // owning arena (nil for standalone buffers)
-	reservation *jitCodeReservation
-	stackMaps   []jitStackMap
+	ptr            unsafe.Pointer
+	n              int       // size
+	arena          *jitArena // owning arena (nil for standalone buffers)
+	reservation    *jitCodeReservation
+	stackMaps      []jitStackMap
+	stackFrameSize int32
 }
 
 func maybeDumpJITCode(base unsafe.Pointer, code []byte) {

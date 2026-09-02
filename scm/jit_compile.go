@@ -1761,11 +1761,13 @@ func jitRuntimeCaptureArgExprs(ctx *JITContext) []Scmer {
 			}
 			args = append(args, NewSlice([]Scmer{NewSymbol("quote"), key}), value)
 		}
-		if depth == 0 {
-			for index := 0; index < ctx.LocalSlotCount; index++ {
-				key := NewNthLocalVar(NthLocalVar(index))
-				args = append(args, NewSlice([]Scmer{NewSymbol("quote"), key}), key)
+		for index := range env.Numbered {
+			key := NewNthLocalVar(NthLocalVar(index))
+			value := Scmer(key)
+			if depth > 0 {
+				value = NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), value})
 			}
+			args = append(args, NewSlice([]Scmer{NewSymbol("quote"), key}), value)
 		}
 		depth++
 	}
