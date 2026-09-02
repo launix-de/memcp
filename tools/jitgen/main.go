@@ -390,6 +390,7 @@ func main() {
 			}
 			// Fallback: emit a Go call to GetValue (unbound method, receiver as first arg)
 			newText = "\n\t/* TODO: " + genErr + " */\n" +
+				"\tctx.TrackPointer(unsafe.Pointer(s))\n" +
 				"\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*" + si.typeName + ").GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n"
 		}
 
@@ -3312,8 +3313,6 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.fieldCache = map[string]genVal{}
 	g.forceLegacyCFG = true
 
-	calleeMultiBlock := len(callee.Blocks) > 1
-
 	// Map callee params -> resolved caller args.
 	// Always use per-inline descriptor copies so callee-side FreeDesc/Loc
 	// rewrites cannot mutate caller descriptor variables by alias.
@@ -3324,9 +3323,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			pv := g.allocDesc()
 			g.emit("%s := %s", pv, arg.goVar)
 			g.emit("_ = %s", pv)
-			if calleeMultiBlock {
-				g.emit("ctx.StabilizeDescForControlFlow(&%s)", pv)
-			}
+			g.emit("ctx.StabilizeDescForControlFlow(&%s)", pv)
 			copied := arg
 			copied.goVar = pv
 			g.vals[param.Name()] = copied
@@ -3345,6 +3342,13 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	// home. Recursive/multi-block emitters may then use the complete register
 	// bank without accumulating register protections across their CFG.
 	for i, arg := range callArgs {
+		// The outer storage emitter owns and pins its receiver for the whole
+		// generated function.  Turning that descriptor into a stack home here
+		// would discard the pinned register while nested field loads still use
+		// the receiver as their address base.
+		if callee.Signature.Recv() != nil && i == 0 {
+			continue
+		}
 		if _, isConst := arg.(*ssa.Const); isConst {
 			continue
 		}
@@ -3363,7 +3367,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 			continue
 		}
 		resolved := resolvedArgs[i]
-		if calleeMultiBlock && resolved.isDesc {
+		if resolved.isDesc {
 			g.emit("ctx.StabilizeDescForControlFlow(&%s)", resolved.goVar)
 		}
 	}
@@ -3372,7 +3376,7 @@ func (g *codeGen) inlineCallCaptured(callee *ssa.Function, callArgs []ssa.Value,
 	g.allocPhiRegs()
 	g.initAllPhiDescs()
 
-	isMultiBlock := calleeMultiBlock
+	isMultiBlock := len(callee.Blocks) > 1
 	g.multiBlock = isMultiBlock
 
 	// Detect if callee returns Scmer (2-word pair) or scalar (1 word).
@@ -3888,12 +3892,6 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 			}
 		}
 		g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
-		if g.hasStorageIdx {
-			g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
-		}
-		if g.storageMode {
-			g.emit("if thisptrPinned { ctx.UnprotectReg(thisptrPinnedReg) }")
-		}
 		g.emit("return result")
 		return
 	}
@@ -3945,12 +3943,6 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 		}
 		g.emit("ctx.ResolveFixups()")
 	}
-	if g.hasStorageIdx {
-		g.emit("if idxPinned { ctx.UnprotectReg(idxPinnedReg) }")
-	}
-	if g.storageMode {
-		g.emit("if thisptrPinned { ctx.UnprotectReg(thisptrPinnedReg) }")
-	}
 	if g.multiBlock {
 		g.emit("if resultRegsProtected {")
 		g.emit("\tctx.UnprotectReg(result.Reg2)")
@@ -3958,6 +3950,9 @@ func (g *codeGen) emitBody(cfg emitBodyConfig) {
 		g.emit("}")
 	}
 	g.emitUnprotectIncomingArgRegs(pinnedArgRegs)
+	if g.storageMode && g.multiBlock {
+		g.emit("ctx.EndStandaloneFrame(standaloneFrame)")
+	}
 	g.emit("return result")
 }
 
@@ -4050,10 +4045,17 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 	// GetValue has 2 params: receiver (s *StorageXxx) and index (i uint32)
 	// Map receiver to thisptr (LocImm at JIT compile time)
 	if len(fn.Params) >= 1 {
+		g.emit("ctx.TrackPointer(unsafe.Pointer(s))")
 		g.vals[fn.Params[0].Name()] = genVal{goVar: "thisptr", isDesc: true, marker: "_storage_recv"}
 		g.emit("thisptrPinned := thisptr.Loc == LocReg")
 		g.emit("thisptrPinnedReg := thisptr.Reg")
-		g.emit("if thisptrPinned { ctx.ProtectReg(thisptrPinnedReg) }")
+		g.emit("if thisptrPinned {")
+		g.emit("\tctx.ProtectReg(thisptrPinnedReg)")
+		g.emit("\tdefer ctx.UnprotectReg(thisptrPinnedReg)")
+		g.emit("}")
+	}
+	if g.multiBlock {
+		g.emit("standaloneFrame := ctx.BeginStandaloneFrame()")
 	}
 	// Map index: idx is a Scmer (JITValueDesc), but GetValue's i is uint32.
 	// Extract the integer value from the Scmer.
@@ -4084,7 +4086,10 @@ func generateStorageBody(typeName string, fn *ssa.Function, rewrite ssaValueRewr
 		if g.multiBlock {
 			g.emit("idxPinned := idxInt.Loc == LocReg")
 			g.emit("idxPinnedReg := idxInt.Reg")
-			g.emit("if idxPinned { ctx.ProtectReg(idxPinnedReg) }")
+			g.emit("if idxPinned {")
+			g.emit("\tctx.ProtectReg(idxPinnedReg)")
+			g.emit("\tdefer ctx.UnprotectReg(idxPinnedReg)")
+			g.emit("}")
 			g.hasStorageIdx = true
 		}
 		g.vals[fn.Params[1].Name()] = genVal{goVar: "idxInt", isDesc: true}
@@ -7212,11 +7217,11 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 		} else if v.Op == token.SHL || v.Op == token.SHR {
 			// Shift operations
 			dv := g.allocDesc()
-			emitFn := "EmitShlRegCl"
+			emitFn := "EmitShlRegClGo64"
 			immFn := "EmitShlRegImm8"
 			goShOp := "<<"
 			if v.Op == token.SHR {
-				emitFn = "EmitShrRegCl"
+				emitFn = "EmitShrRegClGo64"
 				immFn = "EmitShrRegImm8"
 				goShOp = ">>"
 			}
@@ -9518,7 +9523,7 @@ func wipeFiles(files []string) {
 			}
 
 			// Replace body with fallback
-			fallback := fmt.Sprintf("\n\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*%s).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n", typeName)
+			fallback := fmt.Sprintf("\n\tctx.TrackPointer(unsafe.Pointer(s))\n\treturn ctx.EmitGoCallScalar(scm.GoFuncAddr((*%s).GetValue), []scm.JITValueDesc{thisptr, idx}, 2)\n", typeName)
 			content = content[:braceIdx] + fallback + content[pos:]
 			fmt.Printf("  %s: wiped %s.JITEmit\n", path, typeName)
 			changed = true

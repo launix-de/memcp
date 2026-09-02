@@ -167,11 +167,14 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 	var d188 scm.JITValueDesc
 	_ = d188
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	ctx.TrackPointer(unsafe.Pointer(s))
 	thisptrPinned := thisptr.Loc == scm.LocReg
 	thisptrPinnedReg := thisptr.Reg
 	if thisptrPinned {
 		ctx.ProtectReg(thisptrPinnedReg)
+		defer ctx.UnprotectReg(thisptrPinnedReg)
 	}
+	standaloneFrame := ctx.BeginStandaloneFrame()
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -197,6 +200,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 	idxPinnedReg := idxInt.Reg
 	if idxPinned {
 		ctx.ProtectReg(idxPinnedReg)
+		defer ctx.UnprotectReg(idxPinnedReg)
 	}
 	phiBase0 := ctx.AllocStack(int32(32))
 	d1 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(0)}
@@ -827,6 +831,8 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 		ctx.EnsureDesc(&d38)
 		d39 = d38
 		_ = d39
+		ctx.StabilizeDescForControlFlow(&d39)
+		ctx.StabilizeDescForControlFlow(&d38)
 		bbpos_1_0 := int32(-1)
 		_ = bbpos_1_0
 		lbl11 := ctx.ReserveLabel()
@@ -1009,7 +1015,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				if d45.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d45.Reg)
 				}
-				ctx.EmitShlRegCl(shiftSrc)
+				ctx.EmitShlRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -1116,7 +1122,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				if d54.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d54.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -1256,7 +1262,7 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 				if d59.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d59.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -3076,16 +3082,11 @@ func (s *StorageSparse) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, i
 	ctx.FreeReg(r0)
 	ctx.FreeReg(r1)
 	ctx.ResolveFixups()
-	if idxPinned {
-		ctx.UnprotectReg(idxPinnedReg)
-	}
-	if thisptrPinned {
-		ctx.UnprotectReg(thisptrPinnedReg)
-	}
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)
 		ctx.UnprotectReg(result.Reg)
 	}
+	ctx.EndStandaloneFrame(standaloneFrame)
 	return result
 }
 

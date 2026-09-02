@@ -13892,6 +13892,7 @@ func init_timezone() {
 					ctx.EnsureDesc(&d107)
 					d108 = d107
 					_ = d108
+					ctx.StabilizeDescForControlFlow(&d108)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl20 := ctx.ReserveLabel()
@@ -13922,6 +13923,7 @@ func init_timezone() {
 					ctx.EnsureDesc(&d109)
 					d110 = d109
 					_ = d110
+					ctx.StabilizeDescForControlFlow(&d110)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl21 := ctx.ReserveLabel()
@@ -14013,6 +14015,7 @@ func init_timezone() {
 					ctx.EnsureDesc(&d116)
 					d117 = d116
 					_ = d117
+					ctx.StabilizeDescForControlFlow(&d117)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
 					lbl22 := ctx.ReserveLabel()
@@ -14043,6 +14046,7 @@ func init_timezone() {
 					ctx.EnsureDesc(&d118)
 					d119 = d118
 					_ = d119
+					ctx.StabilizeDescForControlFlow(&d119)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
 					lbl23 := ctx.ReserveLabel()
@@ -17690,16 +17694,15 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d140 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() % 1000000000)}
 					} else {
-						r1 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r1, d70.Reg)
-						ctx.EmitIremRegImm(r1, 1000000000)
-						d140 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r1}
-						ctx.BindReg(r1, &d140)
+						ctx.EmitIremRegImm(d70.Reg, 1000000000)
+						d140 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d70.Reg}
+						ctx.BindReg(d70.Reg, &d140)
 					}
 					if d140.Loc == LocReg && d70.Loc == LocReg && d140.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
 						d70.Loc = LocNone
 					}
+					ctx.FreeDesc(&d70)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d139)
 					ctx.EnsureDesc(&d139)
@@ -17763,11 +17766,11 @@ func init_timezone() {
 						d144 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d144)
 					} else {
-						r2 := ctx.AllocRegExcept(d141.Reg, d143.Reg)
-						ctx.EmitMovRegReg(r2, d141.Reg)
-						ctx.EmitAddFloat64(r2, d143.Reg)
-						d144 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r2}
-						ctx.BindReg(r2, &d144)
+						r1 := ctx.AllocRegExcept(d141.Reg, d143.Reg)
+						ctx.EmitMovRegReg(r1, d141.Reg)
+						ctx.EmitAddFloat64(r1, d143.Reg)
+						d144 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r1}
+						ctx.BindReg(r1, &d144)
 					}
 					if d144.Loc == LocReg && d141.Loc == LocReg && d144.Reg == d141.Reg {
 						ctx.TransferReg(d141.Reg)
@@ -17783,10 +17786,10 @@ func init_timezone() {
 					if d144.Loc == LocImm {
 						d145 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d144.Imm.Float()))}
 					} else {
-						r3 := ctx.AllocReg()
-						ctx.EmitCvtFloatBitsToInt64(r3, d144.Reg)
-						d145 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
-						ctx.BindReg(r3, &d145)
+						r2 := ctx.AllocReg()
+						ctx.EmitCvtFloatBitsToInt64(r2, d144.Reg)
+						d145 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r2}
+						ctx.BindReg(r2, &d145)
 					}
 					ctx.FreeDesc(&d144)
 					ctx.EnsureDesc(&d145)
@@ -17944,11 +17947,11 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d147 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() / 60000000000)}
 					} else {
-						r4 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r4, d70.Reg)
-						ctx.EmitIdivRegImm(r4, 60000000000)
-						d147 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r4}
-						ctx.BindReg(r4, &d147)
+						r3 := ctx.AllocRegExcept(d70.Reg)
+						ctx.EmitMovRegReg(r3, d70.Reg)
+						ctx.EmitIdivRegImm(r3, 60000000000)
+						d147 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r3}
+						ctx.BindReg(r3, &d147)
 					}
 					if d147.Loc == LocReg && d70.Loc == LocReg && d147.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
@@ -17960,16 +17963,15 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d148 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() % 60000000000)}
 					} else {
-						r5 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r5, d70.Reg)
-						ctx.EmitIremRegImm(r5, 60000000000)
-						d148 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
-						ctx.BindReg(r5, &d148)
+						ctx.EmitIremRegImm(d70.Reg, 60000000000)
+						d148 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d70.Reg}
+						ctx.BindReg(d70.Reg, &d148)
 					}
 					if d148.Loc == LocReg && d70.Loc == LocReg && d148.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
 						d70.Loc = LocNone
 					}
+					ctx.FreeDesc(&d70)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d147)
 					ctx.EnsureDesc(&d147)
@@ -18033,11 +18035,11 @@ func init_timezone() {
 						d152 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d152)
 					} else {
-						r6 := ctx.AllocRegExcept(d149.Reg, d151.Reg)
-						ctx.EmitMovRegReg(r6, d149.Reg)
-						ctx.EmitAddFloat64(r6, d151.Reg)
-						d152 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r6}
-						ctx.BindReg(r6, &d152)
+						r4 := ctx.AllocRegExcept(d149.Reg, d151.Reg)
+						ctx.EmitMovRegReg(r4, d149.Reg)
+						ctx.EmitAddFloat64(r4, d151.Reg)
+						d152 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r4}
+						ctx.BindReg(r4, &d152)
 					}
 					if d152.Loc == LocReg && d149.Loc == LocReg && d152.Reg == d149.Reg {
 						ctx.TransferReg(d149.Reg)
@@ -18053,10 +18055,10 @@ func init_timezone() {
 					if d152.Loc == LocImm {
 						d153 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d152.Imm.Float()))}
 					} else {
-						r7 := ctx.AllocReg()
-						ctx.EmitCvtFloatBitsToInt64(r7, d152.Reg)
-						d153 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r7}
-						ctx.BindReg(r7, &d153)
+						r5 := ctx.AllocReg()
+						ctx.EmitCvtFloatBitsToInt64(r5, d152.Reg)
+						d153 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r5}
+						ctx.BindReg(r5, &d153)
 					}
 					ctx.FreeDesc(&d152)
 					ctx.EnsureDesc(&d153)
@@ -18747,11 +18749,11 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d211 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() / 3600000000000)}
 					} else {
-						r8 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r8, d70.Reg)
-						ctx.EmitIdivRegImm(r8, 3600000000000)
-						d211 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r8}
-						ctx.BindReg(r8, &d211)
+						r6 := ctx.AllocRegExcept(d70.Reg)
+						ctx.EmitMovRegReg(r6, d70.Reg)
+						ctx.EmitIdivRegImm(r6, 3600000000000)
+						d211 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r6}
+						ctx.BindReg(r6, &d211)
 					}
 					if d211.Loc == LocReg && d70.Loc == LocReg && d211.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
@@ -18763,16 +18765,15 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d212 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() % 3600000000000)}
 					} else {
-						r9 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r9, d70.Reg)
-						ctx.EmitIremRegImm(r9, 3600000000000)
-						d212 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r9}
-						ctx.BindReg(r9, &d212)
+						ctx.EmitIremRegImm(d70.Reg, 3600000000000)
+						d212 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d70.Reg}
+						ctx.BindReg(d70.Reg, &d212)
 					}
 					if d212.Loc == LocReg && d70.Loc == LocReg && d212.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
 						d70.Loc = LocNone
 					}
+					ctx.FreeDesc(&d70)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d211)
 					ctx.EnsureDesc(&d211)
@@ -18836,11 +18837,11 @@ func init_timezone() {
 						d216 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d216)
 					} else {
-						r10 := ctx.AllocRegExcept(d213.Reg, d215.Reg)
-						ctx.EmitMovRegReg(r10, d213.Reg)
-						ctx.EmitAddFloat64(r10, d215.Reg)
-						d216 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r10}
-						ctx.BindReg(r10, &d216)
+						r7 := ctx.AllocRegExcept(d213.Reg, d215.Reg)
+						ctx.EmitMovRegReg(r7, d213.Reg)
+						ctx.EmitAddFloat64(r7, d215.Reg)
+						d216 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r7}
+						ctx.BindReg(r7, &d216)
 					}
 					if d216.Loc == LocReg && d213.Loc == LocReg && d216.Reg == d213.Reg {
 						ctx.TransferReg(d213.Reg)
@@ -18856,10 +18857,10 @@ func init_timezone() {
 					if d216.Loc == LocImm {
 						d217 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d216.Imm.Float()))}
 					} else {
-						r11 := ctx.AllocReg()
-						ctx.EmitCvtFloatBitsToInt64(r11, d216.Reg)
-						d217 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r11}
-						ctx.BindReg(r11, &d217)
+						r8 := ctx.AllocReg()
+						ctx.EmitCvtFloatBitsToInt64(r8, d216.Reg)
+						d217 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r8}
+						ctx.BindReg(r8, &d217)
 					}
 					ctx.FreeDesc(&d216)
 					ctx.EnsureDesc(&d217)
@@ -19694,11 +19695,11 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d287 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() / 3600000000000)}
 					} else {
-						r12 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r12, d70.Reg)
-						ctx.EmitIdivRegImm(r12, 3600000000000)
-						d287 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r12}
-						ctx.BindReg(r12, &d287)
+						r9 := ctx.AllocRegExcept(d70.Reg)
+						ctx.EmitMovRegReg(r9, d70.Reg)
+						ctx.EmitIdivRegImm(r9, 3600000000000)
+						d287 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r9}
+						ctx.BindReg(r9, &d287)
 					}
 					if d287.Loc == LocReg && d70.Loc == LocReg && d287.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
@@ -19710,16 +19711,15 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d288 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() % 3600000000000)}
 					} else {
-						r13 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r13, d70.Reg)
-						ctx.EmitIremRegImm(r13, 3600000000000)
-						d288 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r13}
-						ctx.BindReg(r13, &d288)
+						ctx.EmitIremRegImm(d70.Reg, 3600000000000)
+						d288 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d70.Reg}
+						ctx.BindReg(d70.Reg, &d288)
 					}
 					if d288.Loc == LocReg && d70.Loc == LocReg && d288.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
 						d70.Loc = LocNone
 					}
+					ctx.FreeDesc(&d70)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d287)
 					ctx.EnsureDesc(&d287)
@@ -19783,11 +19783,11 @@ func init_timezone() {
 						d292 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d292)
 					} else {
-						r14 := ctx.AllocRegExcept(d289.Reg, d291.Reg)
-						ctx.EmitMovRegReg(r14, d289.Reg)
-						ctx.EmitAddFloat64(r14, d291.Reg)
-						d292 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r14}
-						ctx.BindReg(r14, &d292)
+						r10 := ctx.AllocRegExcept(d289.Reg, d291.Reg)
+						ctx.EmitMovRegReg(r10, d289.Reg)
+						ctx.EmitAddFloat64(r10, d291.Reg)
+						d292 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r10}
+						ctx.BindReg(r10, &d292)
 					}
 					if d292.Loc == LocReg && d289.Loc == LocReg && d292.Reg == d289.Reg {
 						ctx.TransferReg(d289.Reg)
@@ -19818,10 +19818,10 @@ func init_timezone() {
 					if d293.Loc == LocImm {
 						d294 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d293.Imm.Float()))}
 					} else {
-						r15 := ctx.AllocReg()
-						ctx.EmitCvtFloatBitsToInt64(r15, d293.Reg)
-						d294 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r15}
-						ctx.BindReg(r15, &d294)
+						r11 := ctx.AllocReg()
+						ctx.EmitCvtFloatBitsToInt64(r11, d293.Reg)
+						d294 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r11}
+						ctx.BindReg(r11, &d294)
 					}
 					ctx.FreeDesc(&d293)
 					ctx.EnsureDesc(&d294)
@@ -20812,11 +20812,11 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d377 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() / 3600000000000)}
 					} else {
-						r16 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r16, d70.Reg)
-						ctx.EmitIdivRegImm(r16, 3600000000000)
-						d377 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r16}
-						ctx.BindReg(r16, &d377)
+						r12 := ctx.AllocRegExcept(d70.Reg)
+						ctx.EmitMovRegReg(r12, d70.Reg)
+						ctx.EmitIdivRegImm(r12, 3600000000000)
+						d377 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r12}
+						ctx.BindReg(r12, &d377)
 					}
 					if d377.Loc == LocReg && d70.Loc == LocReg && d377.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
@@ -20828,16 +20828,15 @@ func init_timezone() {
 					if d70.Loc == LocImm {
 						d378 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d70.Imm.Int() % 3600000000000)}
 					} else {
-						r17 := ctx.AllocRegExcept(d70.Reg)
-						ctx.EmitMovRegReg(r17, d70.Reg)
-						ctx.EmitIremRegImm(r17, 3600000000000)
-						d378 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r17}
-						ctx.BindReg(r17, &d378)
+						ctx.EmitIremRegImm(d70.Reg, 3600000000000)
+						d378 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d70.Reg}
+						ctx.BindReg(d70.Reg, &d378)
 					}
 					if d378.Loc == LocReg && d70.Loc == LocReg && d378.Reg == d70.Reg {
 						ctx.TransferReg(d70.Reg)
 						d70.Loc = LocNone
 					}
+					ctx.FreeDesc(&d70)
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d377)
 					ctx.EnsureDesc(&d377)
@@ -20901,11 +20900,11 @@ func init_timezone() {
 						d382 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: scratch}
 						ctx.BindReg(scratch, &d382)
 					} else {
-						r18 := ctx.AllocRegExcept(d379.Reg, d381.Reg)
-						ctx.EmitMovRegReg(r18, d379.Reg)
-						ctx.EmitAddFloat64(r18, d381.Reg)
-						d382 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r18}
-						ctx.BindReg(r18, &d382)
+						r13 := ctx.AllocRegExcept(d379.Reg, d381.Reg)
+						ctx.EmitMovRegReg(r13, d379.Reg)
+						ctx.EmitAddFloat64(r13, d381.Reg)
+						d382 = JITValueDesc{Loc: LocReg, Type: tagFloat, Reg: r13}
+						ctx.BindReg(r13, &d382)
 					}
 					if d382.Loc == LocReg && d379.Loc == LocReg && d382.Reg == d379.Reg {
 						ctx.TransferReg(d379.Reg)
@@ -20937,10 +20936,10 @@ func init_timezone() {
 					if d383.Loc == LocImm {
 						d384 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(d383.Imm.Float()))}
 					} else {
-						r19 := ctx.AllocReg()
-						ctx.EmitCvtFloatBitsToInt64(r19, d383.Reg)
-						d384 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r19}
-						ctx.BindReg(r19, &d384)
+						r14 := ctx.AllocReg()
+						ctx.EmitCvtFloatBitsToInt64(r14, d383.Reg)
+						d384 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r14}
+						ctx.BindReg(r14, &d384)
 					}
 					ctx.FreeDesc(&d383)
 					ctx.EnsureDesc(&d384)
@@ -22107,10 +22106,10 @@ func init_timezone() {
 					if d485.Loc == LocImm && d481.Loc == LocImm {
 						d488 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d485.Imm.Int() - d481.Imm.Int())}
 					} else if d481.Loc == LocImm && d481.Imm.Int() == 0 {
-						r20 := ctx.AllocRegExcept(d485.Reg)
-						ctx.EmitMovRegReg(r20, d485.Reg)
-						d488 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r20}
-						ctx.BindReg(r20, &d488)
+						r15 := ctx.AllocRegExcept(d485.Reg)
+						ctx.EmitMovRegReg(r15, d485.Reg)
+						d488 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r15}
+						ctx.BindReg(r15, &d488)
 					} else if d485.Loc == LocImm {
 						scratch := ctx.AllocRegExcept(d481.Reg)
 						ctx.EmitMovRegImm64(scratch, uint64(d485.Imm.Int()))
@@ -22129,11 +22128,11 @@ func init_timezone() {
 						d488 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d488)
 					} else {
-						r21 := ctx.AllocRegExcept(d485.Reg, d481.Reg)
-						ctx.EmitMovRegReg(r21, d485.Reg)
-						ctx.EmitSubInt64(r21, d481.Reg)
-						d488 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r21}
-						ctx.BindReg(r21, &d488)
+						r16 := ctx.AllocRegExcept(d485.Reg, d481.Reg)
+						ctx.EmitMovRegReg(r16, d485.Reg)
+						ctx.EmitSubInt64(r16, d481.Reg)
+						d488 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r16}
+						ctx.BindReg(r16, &d488)
 					}
 					if d488.Loc == LocReg && d485.Loc == LocReg && d488.Reg == d485.Reg {
 						ctx.TransferReg(d485.Reg)
@@ -22163,10 +22162,10 @@ func init_timezone() {
 					if d486.Loc == LocImm && d482.Loc == LocImm {
 						d490 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d486.Imm.Int() - d482.Imm.Int())}
 					} else if d482.Loc == LocImm && d482.Imm.Int() == 0 {
-						r22 := ctx.AllocRegExcept(d486.Reg)
-						ctx.EmitMovRegReg(r22, d486.Reg)
-						d490 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r22}
-						ctx.BindReg(r22, &d490)
+						r17 := ctx.AllocRegExcept(d486.Reg)
+						ctx.EmitMovRegReg(r17, d486.Reg)
+						d490 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r17}
+						ctx.BindReg(r17, &d490)
 					} else if d486.Loc == LocImm {
 						scratch := ctx.AllocRegExcept(d482.Reg)
 						ctx.EmitMovRegImm64(scratch, uint64(d486.Imm.Int()))
@@ -22185,11 +22184,11 @@ func init_timezone() {
 						d490 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d490)
 					} else {
-						r23 := ctx.AllocRegExcept(d486.Reg, d482.Reg)
-						ctx.EmitMovRegReg(r23, d486.Reg)
-						ctx.EmitSubInt64(r23, d482.Reg)
-						d490 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r23}
-						ctx.BindReg(r23, &d490)
+						r18 := ctx.AllocRegExcept(d486.Reg, d482.Reg)
+						ctx.EmitMovRegReg(r18, d486.Reg)
+						ctx.EmitSubInt64(r18, d482.Reg)
+						d490 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r18}
+						ctx.BindReg(r18, &d490)
 					}
 					if d490.Loc == LocReg && d486.Loc == LocReg && d490.Reg == d486.Reg {
 						ctx.TransferReg(d486.Reg)
@@ -22206,10 +22205,10 @@ func init_timezone() {
 					if d489.Loc == LocImm && d490.Loc == LocImm {
 						d491 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d489.Imm.Int() + d490.Imm.Int())}
 					} else if d490.Loc == LocImm && d490.Imm.Int() == 0 {
-						r24 := ctx.AllocRegExcept(d489.Reg)
-						ctx.EmitMovRegReg(r24, d489.Reg)
-						d491 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r24}
-						ctx.BindReg(r24, &d491)
+						r19 := ctx.AllocRegExcept(d489.Reg)
+						ctx.EmitMovRegReg(r19, d489.Reg)
+						d491 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r19}
+						ctx.BindReg(r19, &d491)
 					} else if d489.Loc == LocImm && d489.Imm.Int() == 0 {
 						d491 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: d490.Reg}
 						ctx.BindReg(d490.Reg, &d491)
@@ -22231,11 +22230,11 @@ func init_timezone() {
 						d491 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d491)
 					} else {
-						r25 := ctx.AllocRegExcept(d489.Reg, d490.Reg)
-						ctx.EmitMovRegReg(r25, d489.Reg)
-						ctx.EmitAddInt64(r25, d490.Reg)
-						d491 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r25}
-						ctx.BindReg(r25, &d491)
+						r20 := ctx.AllocRegExcept(d489.Reg, d490.Reg)
+						ctx.EmitMovRegReg(r20, d489.Reg)
+						ctx.EmitAddInt64(r20, d490.Reg)
+						d491 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r20}
+						ctx.BindReg(r20, &d491)
 					}
 					if d491.Loc == LocReg && d489.Loc == LocReg && d491.Reg == d489.Reg {
 						ctx.TransferReg(d489.Reg)
@@ -23603,10 +23602,10 @@ func init_timezone() {
 					if d609.Loc == LocImm && d605.Loc == LocImm {
 						d612 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(d609.Imm.Int() - d605.Imm.Int())}
 					} else if d605.Loc == LocImm && d605.Imm.Int() == 0 {
-						r26 := ctx.AllocRegExcept(d609.Reg)
-						ctx.EmitMovRegReg(r26, d609.Reg)
-						d612 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r26}
-						ctx.BindReg(r26, &d612)
+						r21 := ctx.AllocRegExcept(d609.Reg)
+						ctx.EmitMovRegReg(r21, d609.Reg)
+						d612 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r21}
+						ctx.BindReg(r21, &d612)
 					} else if d609.Loc == LocImm {
 						scratch := ctx.AllocRegExcept(d605.Reg)
 						ctx.EmitMovRegImm64(scratch, uint64(d609.Imm.Int()))
@@ -23625,11 +23624,11 @@ func init_timezone() {
 						d612 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: scratch}
 						ctx.BindReg(scratch, &d612)
 					} else {
-						r27 := ctx.AllocRegExcept(d609.Reg, d605.Reg)
-						ctx.EmitMovRegReg(r27, d609.Reg)
-						ctx.EmitSubInt64(r27, d605.Reg)
-						d612 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r27}
-						ctx.BindReg(r27, &d612)
+						r22 := ctx.AllocRegExcept(d609.Reg, d605.Reg)
+						ctx.EmitMovRegReg(r22, d609.Reg)
+						ctx.EmitSubInt64(r22, d605.Reg)
+						d612 = JITValueDesc{Loc: LocReg, Type: tagInt, Reg: r22}
+						ctx.BindReg(r22, &d612)
 					}
 					if d612.Loc == LocReg && d609.Loc == LocReg && d612.Reg == d609.Reg {
 						ctx.TransferReg(d609.Reg)

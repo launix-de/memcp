@@ -137,6 +137,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ResultPtrReg:     RegRAX,
 		ResultAuxReg:     RegRBX,
 		LastIntReg:       RegR15,
+		HasFrame:         true,
 		InputArgCount:    inputArgCount,
 		LocalSlotCount:   numVars,
 		RecursiveLambdas: recursiveLambdas,
@@ -1358,6 +1359,28 @@ func (ctx *JITContext) EmitShrRegCl(dst Reg) {
 	ctx.emitBytes(rex, 0xD3, modrm)
 }
 
+// EmitShlRegClGo64 implements Go's uint64 variable-shift semantics. x86 masks
+// CL to six bits, whereas Go requires a zero result for counts of 64 or more.
+func (ctx *JITContext) EmitShlRegClGo64(dst Reg) {
+	ctx.EmitShlRegCl(dst)
+	done := ctx.ReserveLabel()
+	ctx.EmitCmpRegImm32(RegRCX, 64)
+	ctx.EmitJcc(CondUnsignedBelow, done)
+	ctx.EmitXorInt64(dst, dst)
+	ctx.MarkLabel(done)
+}
+
+// EmitShrRegClGo64 implements Go's uint64 variable-shift semantics. See
+// EmitShlRegClGo64 for why the range check is required on x86.
+func (ctx *JITContext) EmitShrRegClGo64(dst Reg) {
+	ctx.EmitShrRegCl(dst)
+	done := ctx.ReserveLabel()
+	ctx.EmitCmpRegImm32(RegRCX, 64)
+	ctx.EmitJcc(CondUnsignedBelow, done)
+	ctx.EmitXorInt64(dst, dst)
+	ctx.MarkLabel(done)
+}
+
 // EmitAndRegImm32 emits AND r64, imm32 (sign-extended)
 func (ctx *JITContext) EmitAndRegImm32(dst Reg, imm int32) {
 	rex := byte(0x48)
@@ -2107,6 +2130,67 @@ func (ctx *JITContext) EmitSubRSP32Fixup() unsafe.Pointer {
 	ctx.emitBytes(0x48, 0x81, 0xEC)
 	ctx.emitU32(0)
 	return unsafe.Add(ctx.Ptr, -4)
+}
+
+// JITStandaloneFrame records compiler state while an emitter which is not
+// nested in a normal JIT procedure uses its own machine stack frame.
+type JITStandaloneFrame struct {
+	active                bool
+	fixup                 unsafe.Pointer
+	bpOffset, maxBPOffset int32
+	spillOffset, maxSpill int32
+	stackReg, frameReg    Reg
+	scratchReg            Reg
+}
+
+// BeginStandaloneFrame gives independently callable generated emitters a
+// spill frame. Emitters nested in a compiled procedure already share its frame
+// and take the no-op path, so production scan loops pay no extra prologue.
+func (ctx *JITContext) BeginStandaloneFrame() JITStandaloneFrame {
+	if ctx.HasFrame {
+		return JITStandaloneFrame{}
+	}
+	state := JITStandaloneFrame{
+		active:      true,
+		bpOffset:    ctx.BPOffset,
+		maxBPOffset: ctx.MaxBPOffset,
+		spillOffset: ctx.SpillOffset,
+		maxSpill:    ctx.MaxSpillOffset,
+		stackReg:    ctx.StackReg,
+		frameReg:    ctx.FrameReg,
+		scratchReg:  ctx.ScratchReg,
+	}
+	ctx.emitByte(0x55)              // push rbp
+	ctx.emitBytes(0x48, 0x89, 0xE5) // mov rbp, rsp
+	state.fixup = ctx.EmitSubRSP32Fixup()
+	ctx.StackReg = RegRSP
+	ctx.FrameReg = RegRBP
+	ctx.ScratchReg = RegR11
+	ctx.HasFrame = true
+	ctx.BPOffset = 0
+	ctx.MaxBPOffset = 0
+	ctx.SpillOffset = 0
+	ctx.MaxSpillOffset = 0
+	return state
+}
+
+// EndStandaloneFrame closes the frame opened by BeginStandaloneFrame and
+// restores the surrounding compiler's allocation coordinates.
+func (ctx *JITContext) EndStandaloneFrame(state JITStandaloneFrame) {
+	if !state.active {
+		return
+	}
+	frameSize := (ctx.MaxBPOffset + ctx.MaxSpillOffset + 15) &^ 15
+	ctx.PatchInt32(state.fixup, frameSize)
+	ctx.emitByte(0xC9) // leave
+	ctx.BPOffset = state.bpOffset
+	ctx.MaxBPOffset = state.maxBPOffset
+	ctx.SpillOffset = state.spillOffset
+	ctx.MaxSpillOffset = state.maxSpill
+	ctx.StackReg = state.stackReg
+	ctx.FrameReg = state.frameReg
+	ctx.ScratchReg = state.scratchReg
+	ctx.HasFrame = false
 }
 
 // PatchInt32 writes a 32-bit little-endian value at the given position.

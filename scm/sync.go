@@ -709,8 +709,10 @@ func init_sync() {
 					d21 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 					d22 = d20
 					_ = d22
+					ctx.StabilizeDescForControlFlow(&d22)
 					d23 = d21
 					_ = d23
+					ctx.StabilizeDescForControlFlow(&d23)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl8 := ctx.ReserveLabel()
@@ -1378,8 +1380,10 @@ func init_sync() {
 					d75 = JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1)}
 					d76 = d74
 					_ = d76
+					ctx.StabilizeDescForControlFlow(&d76)
 					d77 = d75
 					_ = d77
+					ctx.StabilizeDescForControlFlow(&d77)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl11 := ctx.ReserveLabel()

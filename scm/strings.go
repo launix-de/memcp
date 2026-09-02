@@ -666,6 +666,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d3)
 					d4 = d3
 					_ = d4
+					ctx.StabilizeDescForControlFlow(&d4)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl4 := ctx.ReserveLabel()
@@ -875,6 +876,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d25)
 					d26 = d25
 					_ = d26
+					ctx.StabilizeDescForControlFlow(&d26)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl7 := ctx.ReserveLabel()
@@ -1687,6 +1689,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d23)
 					d24 = d23
 					_ = d24
+					ctx.StabilizeDescForControlFlow(&d24)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl16 := ctx.ReserveLabel()
@@ -3030,6 +3033,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d141)
 					d142 = d141
 					_ = d142
+					ctx.StabilizeDescForControlFlow(&d142)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl23 := ctx.ReserveLabel()
@@ -6477,8 +6481,10 @@ func init_strings() {
 					d92 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("_ci")}
 					d93 = d91
 					_ = d93
+					ctx.StabilizeDescForControlFlow(&d93)
 					d94 = d92
 					_ = d94
+					ctx.StabilizeDescForControlFlow(&d94)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
 					lbl21 := ctx.ReserveLabel()
@@ -6917,8 +6923,12 @@ func init_strings() {
 					ctx.EnsureDesc(&d89)
 					d106 = d88
 					_ = d106
+					ctx.StabilizeDescForControlFlow(&d106)
 					d107 = d89
 					_ = d107
+					ctx.StabilizeDescForControlFlow(&d107)
+					ctx.StabilizeDescForControlFlow(&d88)
+					ctx.StabilizeDescForControlFlow(&d89)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
 					lbl28 := ctx.ReserveLabel()
@@ -7988,10 +7998,13 @@ func init_strings() {
 				ctx.EnsureDesc(&d7)
 				d9 := d1
 				_ = d9
+				ctx.StabilizeDescForControlFlow(&d9)
 				d10 := d4
 				_ = d10
+				ctx.StabilizeDescForControlFlow(&d10)
 				d11 := d7
 				_ = d11
+				ctx.StabilizeDescForControlFlow(&d11)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -11071,6 +11084,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d14)
 					d15 = d14
 					_ = d15
+					ctx.StabilizeDescForControlFlow(&d15)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl8 := ctx.ReserveLabel()
@@ -13627,8 +13641,10 @@ func init_strings() {
 					d76 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("\n")}
 					d77 = d75
 					_ = d77
+					ctx.StabilizeDescForControlFlow(&d77)
 					d78 = d76
 					_ = d78
+					ctx.StabilizeDescForControlFlow(&d78)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl13 := ctx.ReserveLabel()
@@ -15202,6 +15218,7 @@ func init_strings() {
 				ctx.EnsureDesc(&d4)
 				d6 := d4
 				_ = d6
+				ctx.StabilizeDescForControlFlow(&d6)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -15277,6 +15294,7 @@ func init_strings() {
 				ctx.SyncDesc(&d10)
 				ctx.SyncDesc(&d6)
 				ctx.EmitGoCallVoid(GoFuncAddr((*base64.Encoding).Encode), []JITValueDesc{d0, d10, d6})
+				ctx.FreeDesc(&d0)
 				ctx.ReclaimUntrackedRegs()
 				ctx.EnsureDesc(&d10)
 				ctx.EnsureDesc(&d10)
@@ -18414,6 +18432,7 @@ func init_strings() {
 					ctx.EnsureDesc(&d0)
 					d1 = d0
 					_ = d1
+					ctx.StabilizeDescForControlFlow(&d1)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl7 := ctx.ReserveLabel()
@@ -21177,6 +21196,7 @@ func init_strings() {
 				ctx.EnsureDesc(&d8)
 				d9 := d8
 				_ = d9
+				ctx.StabilizeDescForControlFlow(&d9)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -21207,6 +21227,7 @@ func init_strings() {
 				ctx.EnsureDesc(&d10)
 				d11 := d10
 				_ = d11
+				ctx.StabilizeDescForControlFlow(&d11)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl1 := ctx.ReserveLabel()
@@ -21348,6 +21369,7 @@ func init_strings() {
 				ctx.EnsureDesc(&d8)
 				d9 := d8
 				_ = d9
+				ctx.StabilizeDescForControlFlow(&d9)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -21378,6 +21400,7 @@ func init_strings() {
 				ctx.EnsureDesc(&d10)
 				d11 := d10
 				_ = d11
+				ctx.StabilizeDescForControlFlow(&d11)
 				bbpos_2_0 := int32(-1)
 				_ = bbpos_2_0
 				lbl1 := ctx.ReserveLabel()

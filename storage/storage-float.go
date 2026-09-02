@@ -78,11 +78,14 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 	var d21 scm.JITValueDesc
 	_ = d21
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	ctx.TrackPointer(unsafe.Pointer(s))
 	thisptrPinned := thisptr.Loc == scm.LocReg
 	thisptrPinnedReg := thisptr.Reg
 	if thisptrPinned {
 		ctx.ProtectReg(thisptrPinnedReg)
+		defer ctx.UnprotectReg(thisptrPinnedReg)
 	}
+	standaloneFrame := ctx.BeginStandaloneFrame()
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -108,6 +111,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 	idxPinnedReg := idxInt.Reg
 	if idxPinned {
 		ctx.ProtectReg(idxPinnedReg)
+		defer ctx.UnprotectReg(idxPinnedReg)
 	}
 	var bbs [3]scm.BBDescriptor
 	if result.Loc == scm.LocAny {
@@ -189,6 +193,7 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 		ctx.EnsureDesc(&d1)
 		d3 = d1
 		_ = d3
+		ctx.StabilizeDescForControlFlow(&d3)
 		bbpos_1_0 := int32(-1)
 		_ = bbpos_1_0
 		lbl4 := ctx.ReserveLabel()
@@ -445,16 +450,11 @@ func (s *StorageFloat) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, id
 	ctx.FreeReg(r0)
 	ctx.FreeReg(r1)
 	ctx.ResolveFixups()
-	if idxPinned {
-		ctx.UnprotectReg(idxPinnedReg)
-	}
-	if thisptrPinned {
-		ctx.UnprotectReg(thisptrPinnedReg)
-	}
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)
 		ctx.UnprotectReg(result.Reg)
 	}
+	ctx.EndStandaloneFrame(standaloneFrame)
 	return result
 }
 

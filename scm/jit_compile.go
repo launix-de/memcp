@@ -934,12 +934,6 @@ func (ctx *JITContext) EmitZeroDescWords(dst *JITValueDesc, words int) {
 // were emitted once.
 func (ctx *JITContext) StabilizeDescForControlFlow(desc *JITValueDesc) {
 	ctx.SyncDesc(desc)
-	// Standalone leaf emitters used by storage specializations intentionally
-	// have no frame. Keep their values resident; their small acyclic CFGs are
-	// rendered with descriptor overlays and therefore need no stack home.
-	if ctx.StackReg == 0 && ctx.FrameReg == 0 {
-		return
-	}
 	words := int32(0)
 	loc := desc.Loc
 	switch loc {

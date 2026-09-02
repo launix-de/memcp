@@ -501,11 +501,14 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 	var d772 scm.JITValueDesc
 	_ = d772
 	/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+	ctx.TrackPointer(unsafe.Pointer(s))
 	thisptrPinned := thisptr.Loc == scm.LocReg
 	thisptrPinnedReg := thisptr.Reg
 	if thisptrPinned {
 		ctx.ProtectReg(thisptrPinnedReg)
+		defer ctx.UnprotectReg(thisptrPinnedReg)
 	}
+	standaloneFrame := ctx.BeginStandaloneFrame()
 	var idxInt scm.JITValueDesc
 	if idx.Loc == scm.LocImm {
 		idxInt = scm.JITValueDesc{Loc: scm.LocImm, Type: scm.TagInt, Imm: scm.NewInt(idx.Imm.Int())}
@@ -531,6 +534,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 	idxPinnedReg := idxInt.Reg
 	if idxPinned {
 		ctx.ProtectReg(idxPinnedReg)
+		defer ctx.UnprotectReg(idxPinnedReg)
 	}
 	phiBase0 := ctx.AllocStack(int32(144))
 	d1 := scm.JITValueDesc{Loc: scm.LocStack, Type: scm.TagInt, StackOff: int32(phiBase0) + int32(0)}
@@ -926,6 +930,8 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		ctx.EnsureDesc(&d1)
 		d22 = d1
 		_ = d22
+		ctx.StabilizeDescForControlFlow(&d22)
+		ctx.StabilizeDescForControlFlow(&d1)
 		bbpos_1_0 := int32(-1)
 		_ = bbpos_1_0
 		lbl15 := ctx.ReserveLabel()
@@ -1108,7 +1114,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d28.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d28.Reg)
 				}
-				ctx.EmitShlRegCl(shiftSrc)
+				ctx.EmitShlRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -1215,7 +1221,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d37.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d37.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -1355,7 +1361,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d42.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d42.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -2084,6 +2090,8 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		ctx.EnsureDesc(&d4)
 		d111 = d4
 		_ = d111
+		ctx.StabilizeDescForControlFlow(&d111)
+		ctx.StabilizeDescForControlFlow(&d4)
 		bbpos_2_0 := int32(-1)
 		_ = bbpos_2_0
 		lbl18 := ctx.ReserveLabel()
@@ -2266,7 +2274,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d117.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d117.Reg)
 				}
-				ctx.EmitShlRegCl(shiftSrc)
+				ctx.EmitShlRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -2373,7 +2381,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d126.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d126.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -2513,7 +2521,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d131.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d131.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -5537,6 +5545,8 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		ctx.EnsureDesc(&d5)
 		d358 = d5
 		_ = d358
+		ctx.StabilizeDescForControlFlow(&d358)
+		ctx.StabilizeDescForControlFlow(&d5)
 		bbpos_3_0 := int32(-1)
 		_ = bbpos_3_0
 		lbl23 := ctx.ReserveLabel()
@@ -5719,7 +5729,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d364.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d364.Reg)
 				}
-				ctx.EmitShlRegCl(shiftSrc)
+				ctx.EmitShlRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -5826,7 +5836,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d373.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d373.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -5966,7 +5976,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d378.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d378.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -11646,6 +11656,8 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		ctx.EnsureDesc(&d4)
 		d714 = d4
 		_ = d714
+		ctx.StabilizeDescForControlFlow(&d714)
+		ctx.StabilizeDescForControlFlow(&d4)
 		bbpos_4_0 := int32(-1)
 		_ = bbpos_4_0
 		lbl28 := ctx.ReserveLabel()
@@ -11828,7 +11840,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d720.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d720.Reg)
 				}
-				ctx.EmitShlRegCl(shiftSrc)
+				ctx.EmitShlRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -11935,7 +11947,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d729.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d729.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -12075,7 +12087,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d734.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d734.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -12163,6 +12175,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 		ctx.EnsureDesc(&d4)
 		d739 = d4
 		_ = d739
+		ctx.StabilizeDescForControlFlow(&d739)
 		bbpos_5_0 := int32(-1)
 		_ = bbpos_5_0
 		lbl29 := ctx.ReserveLabel()
@@ -12345,7 +12358,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d745.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d745.Reg)
 				}
-				ctx.EmitShlRegCl(shiftSrc)
+				ctx.EmitShlRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -12452,7 +12465,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d754.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d754.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -12592,7 +12605,7 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 				if d759.Reg != scm.RegRCX {
 					ctx.EmitMovRegReg(scm.RegRCX, d759.Reg)
 				}
-				ctx.EmitShrRegCl(shiftSrc)
+				ctx.EmitShrRegClGo64(shiftSrc)
 				if rcxUsed {
 					ctx.EmitMovRegReg(scm.RegRCX, scm.RegR11)
 				}
@@ -14979,16 +14992,11 @@ func (s *StorageSeq) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx 
 	ctx.FreeReg(r0)
 	ctx.FreeReg(r1)
 	ctx.ResolveFixups()
-	if idxPinned {
-		ctx.UnprotectReg(idxPinnedReg)
-	}
-	if thisptrPinned {
-		ctx.UnprotectReg(thisptrPinnedReg)
-	}
 	if resultRegsProtected {
 		ctx.UnprotectReg(result.Reg2)
 		ctx.UnprotectReg(result.Reg)
 	}
+	ctx.EndStandaloneFrame(standaloneFrame)
 	return result
 }
 

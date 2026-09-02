@@ -472,6 +472,7 @@ type JITContext struct {
 	ResultPtrReg Reg
 	ResultAuxReg Reg
 	LastIntReg   Reg
+	HasFrame     bool
 	// OriginalArgsOff stores the incoming variadic slice data pointer in the
 	// invocation-local frame.
 	// Optimized local frames may repurpose SliceBase, while hidden GC roots still
@@ -726,6 +727,24 @@ func (ctx *JITContext) TrackImm(v Scmer) {
 	p := unsafe.Pointer(v.ptr)
 	// Sentinel pointers are static globals and don't need GC rooting.
 	if p == unsafe.Pointer(&scmerIntSentinel) || p == unsafe.Pointer(&scmerFloatSentinel) {
+		return
+	}
+	if ctx.rootSet == nil {
+		ctx.rootSet = make(map[unsafe.Pointer]struct{}, 16)
+	}
+	if _, exists := ctx.rootSet[p]; exists {
+		return
+	}
+	ctx.rootSet[p] = struct{}{}
+	ctx.ConstRoots = append(ctx.ConstRoots, p)
+}
+
+// TrackPointer retains a typed object whose address is embedded in generated
+// machine code as a scalar. Unlike TrackImm, it also covers pointers carried
+// through integer or register descriptors, whose Scmer representation cannot
+// expose the referenced heap object to the garbage collector.
+func (ctx *JITContext) TrackPointer(p unsafe.Pointer) {
+	if ctx == nil || p == nil {
 		return
 	}
 	if ctx.rootSet == nil {
@@ -2329,7 +2348,15 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 			n++
 		case LocImm:
 			var immWord uint64
-			switch a.Type {
+			valueType := a.Type
+			// A zero-value descriptor historically denotes an untyped immediate.
+			// Recover its scalar kind from the immutable Scmer payload instead of
+			// mistaking every such value (notably constant receiver pointers) for
+			// nil. Explicit non-nil type information still takes precedence.
+			if valueType == JITTypeUnknown || (valueType == tagNil && !a.Imm.IsNil()) {
+				valueType = a.Imm.GetTag()
+			}
+			switch valueType {
 			case tagInt:
 				immWord = uint64(a.Imm.Int())
 			case tagBool:
@@ -2343,7 +2370,7 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 			case tagNil:
 				immWord = 0
 			default:
-				panic(fmt.Sprintf("jit: LocImm scalar Go-call arg requires explicit materialization (type=%d, tag=%d)", a.Type, a.Imm.GetTag()))
+				panic(fmt.Sprintf("jit: LocImm scalar Go-call arg requires explicit materialization (type=%d, tag=%d)", valueType, a.Imm.GetTag()))
 			}
 			buf[n] = goCallArgWord{loc: LocImm, imm: immWord}
 			n++
@@ -2731,6 +2758,7 @@ func init_jit() {
 				d0 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
 				d1 := d0
 				_ = d1
+				ctx.StabilizeDescForControlFlow(&d1)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()

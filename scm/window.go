@@ -138,8 +138,10 @@ func init_window() {
 				ctx.EnsureDesc(&d3)
 				d4 := d0
 				_ = d4
+				ctx.StabilizeDescForControlFlow(&d4)
 				d5 := d3
 				_ = d5
+				ctx.StabilizeDescForControlFlow(&d5)
 				bbpos_1_0 := int32(-1)
 				_ = bbpos_1_0
 				lbl0 := ctx.ReserveLabel()
@@ -6174,8 +6176,10 @@ func init_window() {
 					ctx.EnsureDesc(&d44)
 					d457 = d4
 					_ = d457
+					ctx.StabilizeDescForControlFlow(&d457)
 					d458 = d44
 					_ = d458
+					ctx.StabilizeDescForControlFlow(&d458)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl29 := ctx.ReserveLabel()
@@ -10060,8 +10064,11 @@ func init_window() {
 					ctx.EnsureDesc(&d38)
 					d277 = d5
 					_ = d277
+					ctx.StabilizeDescForControlFlow(&d277)
 					d278 = d38
 					_ = d278
+					ctx.StabilizeDescForControlFlow(&d278)
+					ctx.StabilizeDescForControlFlow(&d38)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
 					lbl26 := ctx.ReserveLabel()
