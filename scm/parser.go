@@ -158,7 +158,10 @@ func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool)
 	if compiled.GetTag() == tagProc && compiled.Proc() != nil {
 		entry = compiled.Proc().Compiled
 	}
-	selected := entry != nil && jitAutoImportCoverageWorthwhile(entry.Coverage)
+	// Late-bound calls choose compiled Proc, native builtin, or interpreter
+	// dispatch independently. Keep every successfully emitted outer procedure;
+	// discarding it here would route all of its control flow back through Eval.
+	selected := entry != nil
 	if selected {
 		value.Proc().Compiled = entry
 		compiled = value
@@ -174,14 +177,6 @@ func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool)
 			entry.Coverage.Expressions, entry.Coverage.DynamicCalls, entry.Coverage.InlinedCalls)
 	}
 	return compiled, entry, selected
-}
-
-func jitAutoImportCoverageWorthwhile(coverage JITCoverage) bool {
-	// A generic Apply bridge costs more than a handful of straight-line emitter
-	// nodes. Keep probe compilation universal, but activate only native bodies
-	// whose static coverage can amortize every remaining bridge. This decision is
-	// deliberately independent of module paths and definition names.
-	return coverage.DynamicCalls == 0 || coverage.Expressions >= coverage.DynamicCalls*8
 }
 
 func topLevelDefinitionSymbol(code Scmer) (Symbol, bool) {

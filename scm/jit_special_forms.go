@@ -251,7 +251,7 @@ func jitEmitSpecialReservedList(ctx *JITContext, args []Scmer, _ []JITValueDesc,
 		if capacity < 0 {
 			capacity = 0
 		}
-		if start < 0 || start+capacity > ctx.LocalSlotCount {
+		if start < 0 || ctx.Env == nil || start+capacity > len(ctx.Env.Numbered) {
 			panic("jit: !!list slots outside invocation frame")
 		}
 		capacityExpr = NewInt(int64(capacity))
