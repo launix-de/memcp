@@ -125,12 +125,12 @@ func BenchmarkSerialProcJITMapReducerDispatch(b *testing.B) {
 			args[0] = adapter.Call(args)
 		}
 	})
-	b.Run("jit_trampoline", func(b *testing.B) {
+	b.Run("old_go_frame_bridge", func(b *testing.B) {
 		args := []Scmer{NewInt(1), NewInt(1)}
 		jitFn := direct.Function
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			args[0] = callJIT(jitFn, args...)
+			args[0] = benchmarkJITGoFrameBridge(jitFn, args)
 		}
 		runtime.KeepAlive(&direct)
 	})
@@ -143,6 +143,13 @@ func BenchmarkSerialProcJITMapReducerDispatch(b *testing.B) {
 		}
 		runtime.KeepAlive(&direct)
 	})
+}
+
+//go:noinline
+func benchmarkJITGoFrameBridge(native func(...Scmer) Scmer, args []Scmer) Scmer {
+	result := native(args...)
+	runtime.KeepAlive(native)
+	return result
 }
 
 func TestPrepareSerialProcNativeForwardMatchesInterpreterAdapter(t *testing.T) {

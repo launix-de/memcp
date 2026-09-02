@@ -308,3 +308,36 @@ func TestJITExpressionRecursiveNthResult(t *testing.T) {
 		t.Fatalf("unexpected recursive nth result: got ptr=%x aux=%x tag=%d, want %s", gotPtr, gotAux, got.GetTag(), String(want))
 	}
 }
+
+func TestJITExpressionRecursivePanicAcrossDirectFrames(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const name = Symbol("jit_test_direct_recursive_panic")
+	previous, existed := Globalenv.Vars[name]
+	defer func() {
+		if existed {
+			Globalenv.Vars[name] = previous
+		} else {
+			delete(Globalenv.Vars, name)
+		}
+	}()
+	EvalAll(t.Name(), `(define jit_test_direct_recursive_panic (lambda (depth)
+		(if (> depth 0)
+			(+ 1 (jit_test_direct_recursive_panic (- depth 1)))
+			(error "nested-jit-panic"))))`, &Globalenv)
+	compiled := jitCompile(Globalenv.Vars[name])
+	if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("recursive panic procedure was not JIT compiled")
+	}
+	Globalenv.Vars[name] = compiled
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		Apply(compiled, NewInt(4))
+	}()
+	if recovered == nil {
+		t.Fatal("panic did not unwind through consecutive JIT frames")
+	}
+}

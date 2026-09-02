@@ -221,11 +221,10 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 			panic("JIT: invalid hidden argument kind")
 		}
 	}
-	defer func() {
-		runtime.KeepAlive(args)
-		runtime.KeepAlive(jep)
-	}()
-	return callJIT(jep.Native, args...)
+	result = jep.Native(args...)
+	runtime.KeepAlive(args)
+	runtime.KeepAlive(jep)
+	return result
 }
 
 type jitHiddenArgKind uint8
