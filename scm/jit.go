@@ -1530,6 +1530,62 @@ func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars
 	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, 0)
 }
 
+// jitBindLambdaSelfValues routes a named recursive closure used as a value
+// through a hidden bound parameter. Direct calls in the procedure itself keep
+// their symbolic head so the emitter can lower them to a loop or native
+// recursion. A reference passed as a callback must instead name the concrete
+// closure, because the shared template's lexical environment has no per-
+// instance BoundArgs.
+func jitBindLambdaSelfValues(expr Scmer, self Symbol, param NthLocalVar) Scmer {
+	return jitBindLambdaSelfValuesAtDepth(expr, self, param, 0)
+}
+
+func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, depth int) Scmer {
+	if expr.IsSourceInfo() {
+		source := *expr.SourceInfo()
+		source.value = jitBindLambdaSelfValuesAtDepth(source.value, self, param, depth)
+		return NewSourceInfo(source)
+	}
+	if expr.IsSymbol() {
+		if expr.Symbol() == self {
+			return jitLambdaCaptureReference(param, depth)
+		}
+		return expr
+	}
+	if !expr.IsSlice() {
+		return expr
+	}
+	items := expr.Slice()
+	if len(items) == 0 {
+		return expr
+	}
+	head, hasHead := scmerSymbol(items[0])
+	if hasHead && string(head) == "quote" {
+		return expr
+	}
+	if hasHead && string(head) == "lambda" && len(items) >= 3 {
+		boundParams := make(map[Symbol]struct{})
+		jitAddLambdaBoundParams(items[1], boundParams)
+		if _, shadowed := boundParams[self]; shadowed {
+			return expr
+		}
+		bound := append([]Scmer(nil), items...)
+		bound[2] = jitBindLambdaSelfValuesAtDepth(items[2], self, param, depth+1)
+		return NewSlice(bound)
+	}
+	bound := make([]Scmer, len(items))
+	for index, item := range items {
+		// Only a direct call in the recursive procedure itself can use the
+		// native self-call lowering. Nested lambdas require the bound closure.
+		if index == 0 && depth == 0 && hasHead && head == self {
+			bound[index] = item
+			continue
+		}
+		bound[index] = jitBindLambdaSelfValuesAtDepth(item, self, param, depth)
+	}
+	return NewSlice(bound)
+}
+
 func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[NthLocalVar]NthLocalVar, depth int) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
@@ -1557,7 +1613,7 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 			key := items[2].WithoutSourceInfo()
 			if key.IsNthLocalVar() {
 				if param, exists := outerVars[key.NthLocalVar()]; exists {
-					return NewNthLocalVar(param)
+					return jitLambdaCaptureReference(param, depth)
 				}
 			}
 		}
@@ -1643,7 +1699,13 @@ func jitBuildNamedBoundCompiledLambdaClosure(args ...Scmer) Scmer {
 	if len(args) < 5 {
 		panic("jit: named bound lambda builder expects template and closure")
 	}
-	return jitBindCompiledLambdaEntry(args[0], jitBuildNamedLambdaClosure(args[1:]...), args[5:])
+	closure := jitBuildNamedLambdaClosure(args[1:]...)
+	captures := args[5:]
+	if len(captures) >= 2 && captures[len(captures)-2].SymbolEquals("\x00jit-bound-self") {
+		captures = append([]Scmer(nil), captures...)
+		captures[len(captures)-1] = closure
+	}
+	return jitBindCompiledLambdaEntry(args[0], closure, captures)
 }
 
 // jitBuildLambdaClosure constructs a closure Proc from a lambda form plus

@@ -594,9 +594,13 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 				outerBindings[index] = NthLocalVar(len(templateParams))
 				templateParams = append(templateParams, NewSymbol("\x00jit-bound-outer"))
 			}
+			boundBody := jitBindLambdaCaptures(body, symbolBindings, outerBindings)
+			selfParam := NthLocalVar(len(templateParams))
+			templateParams = append(templateParams, NewSymbol("\x00jit-bound-self"))
+			boundBody = jitBindLambdaSelfValues(boundBody, ctx.DefiningSymbol, selfParam)
 			template := jitBuildNamedLambdaClosure(
 				NewSymbol(string(ctx.DefiningSymbol)), NewSlice(templateParams),
-				jitBindLambdaCaptures(body, symbolBindings, outerBindings), NewInt(int64(len(templateParams))),
+				boundBody, NewInt(int64(len(templateParams))),
 			)
 			template = jitCompileModeDeferred(true, template)
 			ctx.TrackImm(template)
@@ -604,6 +608,8 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 			builderArgs = append(builderArgs, template)
 			builderArgs = append(builderArgs, NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(ctx.DefiningSymbol))}))
 			builderArgs = append(builderArgs, argExprs...)
+			builderArgs = append(builderArgs,
+				NewSlice([]Scmer{NewSymbol("quote"), NewSymbol("\x00jit-bound-self")}), NewNil())
 			return jitEmitGoVariadicCallFromExprs(ctx, jitBuildNamedBoundCompiledLambdaClosure, builderArgs, ctx.SliceBase, result, false)
 		}
 	}
