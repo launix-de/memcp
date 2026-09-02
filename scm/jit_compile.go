@@ -1244,6 +1244,16 @@ func jitMaterializeVirtualSlice(ctx *JITContext, virtual JITValueDesc, result JI
 	ctx.BindReg(ptrReg, &header)
 	ctx.BindReg(lenReg, &header)
 	ctx.BindReg(capReg, &header)
+	if bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 2 {
+		off := ctx.AllocSpill(16)
+		var wordsBuf [16]goCallArgWord
+		words := ctx.flattenArgs([]JITValueDesc{header}, &wordsBuf)
+		ctx.EmitGoCallToFrame(GoFuncAddr(JITNewSliceCopy), words, []int32{off, off + 8})
+		ctx.setStackPointer(jitStackRootFrameBP, off, true)
+		ctx.FreeDesc(&header)
+		materialized := JITValueDesc{Loc: LocStackPair, Type: tagSlice, StackOff: off, Rooted: true}
+		return jitPlaceScmerIntoTarget(ctx, materialized, result)
+	}
 	materialized := ctx.EmitGoCallScalar(GoFuncAddr(JITNewSliceCopy), []JITValueDesc{header}, 2)
 	ctx.FreeDesc(&header)
 	materialized.Type = tagSlice

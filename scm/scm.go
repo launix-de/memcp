@@ -34277,8 +34277,7 @@ func init() {
 				_ = d24
 				var d40 JITValueDesc
 				_ = d40
-				var d41 JITValueDesc
-				_ = d41
+				var dynamicArgOff41 int32
 				var d42 JITValueDesc
 				_ = d42
 				var d43 JITValueDesc
@@ -34833,37 +34832,8 @@ func init() {
 						d40.ID = 0
 					} else {
 						ctx.EnsureDesc(&d19)
-						protected := make([]Reg, 0, len(args)*2+1)
-						seen := make(map[Reg]bool)
-						if !seen[d19.Reg] {
-							ctx.ProtectReg(d19.Reg)
-							seen[d19.Reg] = true
-							protected = append(protected, d19.Reg)
-						}
-						for _, ai := range args {
-							if ai.Loc == LocReg {
-								if !seen[ai.Reg] {
-									ctx.ProtectReg(ai.Reg)
-									seen[ai.Reg] = true
-									protected = append(protected, ai.Reg)
-								}
-							} else if ai.Loc == LocRegPair {
-								if !seen[ai.Reg] {
-									ctx.ProtectReg(ai.Reg)
-									seen[ai.Reg] = true
-									protected = append(protected, ai.Reg)
-								}
-								if !seen[ai.Reg2] {
-									ctx.ProtectReg(ai.Reg2)
-									seen[ai.Reg2] = true
-									protected = append(protected, ai.Reg2)
-								}
-							} else if ai.Loc == LocStackPair {
-								// no direct registers to protect
-							}
-						}
-						r4 := ctx.AllocReg()
-						r5 := ctx.AllocRegExcept(r4)
+						dynamicArgOff41 = ctx.AllocStack(16)
+						ctx.ProtectReg(d19.Reg)
 						lbl11 := ctx.ReserveLabel()
 						lbl12 := ctx.ReserveLabel()
 						ctx.EmitCmpRegImm32(d19.Reg, int32(len(args)-0))
@@ -34874,65 +34844,15 @@ func init() {
 							ctx.EmitJump(CondNotEqual, nextLbl)
 							ai := args[i]
 							ai.ID = 0
-							switch ai.Loc {
-							case LocRegPair:
-								ctx.EmitMovRegReg(r4, ai.Reg)
-								ctx.EmitMovRegReg(r5, ai.Reg2)
-							case LocStackPair:
-								tmp := ai
-								ctx.EnsureDesc(&tmp)
-								if tmp.Loc != LocRegPair {
-									panic("jitgen: emitter args index expected Scmer pair")
-								}
-								ctx.EmitMovRegReg(r4, tmp.Reg)
-								ctx.EmitMovRegReg(r5, tmp.Reg2)
-								ctx.FreeDesc(&tmp)
-							case LocImm:
-								pair := JITValueDesc{Loc: LocRegPair, Reg: r4, Reg2: r5}
-								ctx.BindReg(r4, &pair)
-								ctx.BindReg(r5, &pair)
-								if ai.Imm.GetTag() == tagInt {
-									src := ai
-									src.Type = tagInt
-									src.Imm = NewInt(ai.Imm.Int())
-									ctx.EmitMakeInt(pair, src)
-								} else if ai.Imm.GetTag() == tagFloat {
-									src := ai
-									src.Type = tagFloat
-									src.Imm = NewFloat(ai.Imm.Float())
-									ctx.EmitMakeFloat(pair, src)
-								} else if ai.Imm.GetTag() == tagBool {
-									src := ai
-									src.Type = tagBool
-									src.Imm = NewBool(ai.Imm.Bool())
-									ctx.EmitMakeBool(pair, src)
-								} else if ai.Imm.GetTag() == tagNil {
-									ctx.EmitMakeNil(pair)
-								} else {
-									ptrWord, auxWord := ai.Imm.RawWords()
-									ctx.EmitMovRegImm64(r4, uint64(ptrWord))
-									ctx.EmitMovRegImm64(r5, auxWord)
-								}
-							default:
-								panic("jitgen: emitter args index expected Scmer pair")
-							}
+							ctx.EmitStoreScmerToStack(ai, int32(dynamicArgOff41))
 							ctx.EmitJmp(lbl11)
 							ctx.MarkLabel(nextLbl)
 						}
 						ctx.MarkLabel(lbl12)
-						d41 := JITValueDesc{Loc: LocRegPair, Reg: r4, Reg2: r5}
-						ctx.BindReg(r4, &d41)
-						ctx.BindReg(r5, &d41)
-						ctx.BindReg(r4, &d41)
-						ctx.BindReg(r5, &d41)
-						ctx.EmitMakeNil(d41)
+						ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(dynamicArgOff41))
 						ctx.MarkLabel(lbl11)
-						for _, r := range protected {
-							ctx.UnprotectReg(r)
-						}
-						d40 = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r4, Reg2: r5}
-						ctx.BindReg(r4, &d40)
-						ctx.BindReg(r5, &d40)
+						ctx.UnprotectReg(d19.Reg)
+						d40 = JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: int32(dynamicArgOff41), Rooted: true}
 					}
 					d43 = d40
 					ctx.SyncDesc(&d43)
@@ -35026,7 +34946,6 @@ func init() {
 					ps48.OverlayValues[21] = d21
 					ps48.OverlayValues[24] = d24
 					ps48.OverlayValues[40] = d40
-					ps48.OverlayValues[41] = d41
 					ps48.OverlayValues[42] = d42
 					ps48.OverlayValues[43] = d43
 					ps48.OverlayValues[45] = d45
@@ -35100,9 +35019,6 @@ func init() {
 					}
 					if len(ps.OverlayValues) > 40 && ps.OverlayValues[40].Loc != LocNone {
 						d40 = ps.OverlayValues[40]
-					}
-					if len(ps.OverlayValues) > 41 && ps.OverlayValues[41].Loc != LocNone {
-						d41 = ps.OverlayValues[41]
 					}
 					if len(ps.OverlayValues) > 42 && ps.OverlayValues[42].Loc != LocNone {
 						d42 = ps.OverlayValues[42]

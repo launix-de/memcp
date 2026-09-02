@@ -18,6 +18,7 @@ package scm
 
 import (
 	"fmt"
+	"math/bits"
 	"regexp"
 	"regexp/syntax"
 )
@@ -876,13 +877,36 @@ func jitEmitConstantRegexpPredicate(ctx *JITContext, pattern *regexp.Regexp, val
 func jitEmitConstantRegexpCaptures(ctx *JITContext, pattern *regexp.Regexp, value JITValueDesc, failLabel JITLabel) []JITValueDesc {
 	program := jitCompileRegexProgram(pattern)
 	captures := jitRegexCaptureTargets(ctx, program.captures)
+	// A capture match can sit below an if/match result and an inlined callback,
+	// leaving too few registers for the byte walker's cursor, end and scan
+	// state. The input and captures are stable stack values, so preserve the
+	// outer register bank only under pressure and restore it on every outgoing
+	// edge of this self-contained control-flow region.
+	value = ctx.stabilizeForNested(value)
+	if bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) >= 6 {
+		success := ctx.ReserveLabel()
+		invalid := ctx.ReserveLabel()
+		jitEmitNativeRegex(ctx, program, value, captures, success, failLabel, invalid, nil, false)
+		ctx.MarkLabel(invalid)
+		ctx.EmitGoPanic("regex expects string")
+		ctx.EmitJmp(failLabel)
+		ctx.MarkLabel(success)
+		return captures
+	}
+	outer := ctx.PreserveOuterRegs()
 	success := ctx.ReserveLabel()
+	failed := ctx.ReserveLabel()
 	invalid := ctx.ReserveLabel()
-	jitEmitNativeRegex(ctx, program, value, captures, success, failLabel, invalid, nil, false)
+	jitEmitNativeRegex(ctx, program, value, captures, success, failed, invalid, nil, false)
 	ctx.MarkLabel(invalid)
+	ctx.RestoreOuterRegs(outer)
 	ctx.EmitGoPanic("regex expects string")
 	ctx.EmitJmp(failLabel)
+	ctx.MarkLabel(failed)
+	ctx.RestoreOuterRegs(outer)
+	ctx.EmitJmp(failLabel)
 	ctx.MarkLabel(success)
+	ctx.RestoreOuterRegs(outer)
 	return captures
 }
 
