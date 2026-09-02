@@ -1312,11 +1312,19 @@ func jitCompileStackList(ctx *JITContext, list []Scmer, sliceBase Reg, result JI
 	}
 	start := int(list[1].NthLocalVar())
 	count := int(list[2].Int())
-	if count < 0 || len(list) != count+3 || start < 0 || start+count > ctx.LocalSlotCount {
+	if count < 0 || len(list) != count+3 || start < 0 || ctx.Env == nil || start+count > len(ctx.Env.Numbered) {
 		panic("jit: !list slots outside invocation frame")
 	}
-	if !ctx.SliceBaseTracksRSP {
-		panic("jit: !list requires an invocation-local stack frame")
+	backingOff := int32(0)
+	for i := 0; i < count; i++ {
+		slot := ctx.Env.Numbered[start+i]
+		ctx.SyncDesc(&slot)
+		if slot.Loc != LocStackPair || (i > 0 && slot.StackOff != backingOff+int32(i*16)) {
+			panic("jit: !list requires contiguous invocation-frame slots")
+		}
+		if i == 0 {
+			backingOff = slot.StackOff
+		}
 	}
 	for i := 0; i < count; i++ {
 		value := jitCompileExpr(ctx, list[i+3], sliceBase, JITValueDesc{Loc: LocAny})
@@ -1326,11 +1334,11 @@ func jitCompileStackList(ctx *JITContext, list []Scmer, sliceBase Reg, result JI
 			target := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ptrReg, Reg2: ctx.AllocRegExcept(ptrReg)}
 			value = jitPlaceIntoPair(ctx, &value, target)
 		}
-		ctx.EmitStoreScmerToStack(value, int32((start+i)*16))
+		ctx.EmitStoreScmerToStack(value, backingOff+int32(i*16))
 		ctx.FreeDesc(&value)
 	}
 	target := jitEnsureResultPair(ctx, result)
-	ctx.EmitLeaRegMem(target.Reg, ctx.StackReg, int32(start*16))
+	ctx.EmitLeaRegMem(target.Reg, ctx.StackReg, backingOff)
 	ctx.EmitMovRegImm64(target.Reg2, makeAux(tagSlice, makeSliceAux(count, count)))
 	target.Type = tagSlice
 	target.KnownSliceLen = int32(count)
