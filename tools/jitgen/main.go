@@ -3636,6 +3636,15 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 	if callee == nil || callee.Blocks == nil || callee.Signature.Results().Len() > 1 {
 		return genVal{}, false
 	}
+	// Inline package-local helpers because they expose the builtin's own type and
+	// callback flow to JITGen. Larger calls into other packages are already
+	// optimized Go entry points; expanding their implementation duplicates
+	// library machinery and crosses an implementation boundary which the emitter
+	// does not own. Tiny foreign helpers remain eligible when a native call cannot
+	// represent their receiver efficiently.
+	if callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() != g.topLevelPkgPath && inlineInstructionCount(callee) > 32 {
+		return genVal{}, false
+	}
 	// Pointer-receiver methods preserve object identity and commonly combine
 	// field mutation with maps, slices, or write barriers. Keep that compact Go
 	// call boundary while still inlining the surrounding builtin loop and its
