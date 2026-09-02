@@ -756,24 +756,30 @@ func (emitter *jitParserEmitter) emitRuleReturn(ruleID int, success bool) {
 		var argsBuf [16]goCallArgWord
 		args := emitter.ctx.flattenArgs([]JITValueDesc{emitter.state, position, value}, &argsBuf)
 		var resultsBuf [16]Reg
-		results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleValueNative), args, 2, &resultsBuf, nil)
+		results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleValueNative), args, 3, &resultsBuf, nil)
 		emitter.ctx.FreeDesc(&value)
 		emitter.ctx.FreeDesc(&position)
 		emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
 		emitter.ctx.EmitStoreRegMem(results[1], emitter.ctx.StackReg, emitter.positionOff)
-		emitter.ctx.FreeReg(results[0])
-		emitter.ctx.FreeReg(results[1])
-		emitter.ctx.EmitJmp(emitter.dispatchLabel)
+		emitter.ctx.EmitCmpRegImm32(results[2], 0)
+		for _, reg := range results {
+			emitter.ctx.FreeReg(reg)
+		}
+		emitter.ctx.EmitJump(CondEqual, emitter.dispatchLabel)
+		emitter.ctx.EmitJmp(emitter.ruleLabels[ruleID])
 		return
 	}
 	var argsBuf [16]goCallArgWord
 	args := emitter.ctx.flattenArgs([]JITValueDesc{emitter.state, position, jitParserBoolScalar(success)}, &argsBuf)
 	var resultsBuf [16]Reg
-	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleNative), args, 2, &resultsBuf, nil)
+	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserReturnRuleNative), args, 3, &resultsBuf, nil)
 	emitter.ctx.FreeDesc(&position)
 	emitter.ctx.EmitStoreRegMem(results[0], emitter.ctx.StackReg, emitter.continuationOff)
 	emitter.ctx.EmitStoreRegMem(results[1], emitter.ctx.StackReg, emitter.positionOff)
-	emitter.ctx.FreeReg(results[0])
-	emitter.ctx.FreeReg(results[1])
-	emitter.ctx.EmitJmp(emitter.dispatchLabel)
+	emitter.ctx.EmitCmpRegImm32(results[2], 0)
+	for _, reg := range results {
+		emitter.ctx.FreeReg(reg)
+	}
+	emitter.ctx.EmitJump(CondEqual, emitter.dispatchLabel)
+	emitter.ctx.EmitJmp(emitter.ruleLabels[ruleID])
 }

@@ -590,6 +590,9 @@ type jitParserCallFrame struct {
 	bindingBase  int
 	mutationBase int
 	memoize      bool
+	memoInitial  bool
+	transient    bool
+	growing      bool
 }
 
 type jitParserMemoKey struct {
@@ -601,6 +604,32 @@ type jitParserMemoEntry struct {
 	value    Scmer
 	position int
 	success  bool
+	active   bool
+	head     *jitParserLeftRecursionHead
+}
+
+type jitParserLeftRecursionHead struct {
+	rule     int
+	position int
+	involved []uint64
+	evaluate []uint64
+}
+
+func jitParserRuleSetHas(set []uint64, rule int) bool {
+	word := rule >> 6
+	return word < len(set) && set[word]&(uint64(1)<<uint(rule&63)) != 0
+}
+
+func jitParserRuleSetAdd(set []uint64, rule int) {
+	set[rule>>6] |= uint64(1) << uint(rule&63)
+}
+
+func jitParserRuleSetDelete(set []uint64, rule int) {
+	set[rule>>6] &^= uint64(1) << uint(rule&63)
+}
+
+func (head *jitParserLeftRecursionHead) resetEvaluation() {
+	copy(head.evaluate, head.involved)
 }
 
 type jitParserMutation struct {
@@ -629,6 +658,7 @@ type jitParserState struct {
 	marks       []int
 	positions   []int
 	memo        map[jitParserMemoKey]jitParserMemoEntry
+	heads       []*jitParserLeftRecursionHead
 	farthest    int
 	expected    []string
 }
@@ -645,6 +675,12 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 	state.positions = state.positions[:0]
 	state.farthest = -1
 	state.expected = state.expected[:0]
+	if cap(state.heads) < inputLength+1 {
+		state.heads = make([]*jitParserLeftRecursionHead, inputLength+1)
+	} else {
+		state.heads = state.heads[:inputLength+1]
+		clear(state.heads)
+	}
 	if state.memo == nil {
 		state.memo = make(map[jitParserMemoKey]jitParserMemoEntry)
 	} else {
@@ -732,51 +768,134 @@ func jitParserEnterRule(stateValue, ruleValue, successValue, failureValue, posit
 	return NewNil()
 }
 
-func jitParserMemoizeReturn(state *jitParserState, frame jitParserCallFrame, position int, value Scmer, success bool) {
-	if !frame.memoize {
-		return
-	}
-	state.memo[jitParserMemoKey{rule: frame.rule, position: frame.position}] = jitParserMemoEntry{
-		value: value, position: position, success: success,
+func jitParserPushRuleFrame(state *jitParserState, ruleID, success, failure, position int, memoInitial, transient bool) {
+	rule := &state.program.rules[ruleID]
+	state.frames = append(state.frames, jitParserCallFrame{
+		rule: ruleID, success: success, failure: failure, position: position,
+		valueBase: len(state.values), bindingBase: len(state.bindings), mutationBase: len(state.mutations),
+		memoize: rule.lexicalParent < 0, memoInitial: memoInitial, transient: transient,
+	})
+	for range rule.bindings {
+		state.bindings = append(state.bindings, NewNil())
 	}
 }
 
-func jitParserPackReturn(continuation, position int) Scmer {
-	return NewInt(int64(uint64(uint32(continuation))<<32 | uint64(uint32(position))))
+func jitParserSetupLeftRecursion(state *jitParserState, key jitParserMemoKey) jitParserMemoEntry {
+	memo := state.memo[key]
+	head := memo.head
+	if head == nil {
+		words := (len(state.program.rules) + 63) >> 6
+		head = &jitParserLeftRecursionHead{
+			rule: key.rule, position: key.position,
+			involved: make([]uint64, words), evaluate: make([]uint64, words),
+		}
+		memo.head = head
+		state.memo[key] = memo
+	}
+	for index := len(state.frames) - 1; index >= 0; index-- {
+		frame := state.frames[index]
+		if !frame.memoInitial {
+			continue
+		}
+		frameKey := jitParserMemoKey{rule: frame.rule, position: frame.position}
+		entry := state.memo[frameKey]
+		if entry.head == head {
+			break
+		}
+		entry.head = head
+		state.memo[frameKey] = entry
+		if frameKey != key {
+			jitParserRuleSetAdd(head.involved, frame.rule)
+		}
+	}
+	return state.memo[key]
 }
 
-func jitParserReturnRule(stateValue, positionValue, successValue Scmer) Scmer {
-	state := jitParserStateValue(stateValue)
+func jitParserResetRuleFrame(state *jitParserState, frame jitParserCallFrame, restoreMutations bool) {
+	if restoreMutations {
+		for index := len(state.mutations) - 1; index >= frame.mutationBase; index-- {
+			mutation := state.mutations[index]
+			state.bindings[mutation.index] = mutation.old
+		}
+	}
+	for index := frame.valueBase; index < len(state.values); index++ {
+		state.values[index] = NewNil()
+	}
+	for index := frame.bindingBase; index < len(state.bindings); index++ {
+		state.bindings[index] = NewNil()
+	}
+	for index := frame.mutationBase; index < len(state.mutations); index++ {
+		state.mutations[index].old = NewNil()
+	}
+	state.values = state.values[:frame.valueBase]
+	state.bindings = state.bindings[:frame.bindingBase]
+	state.mutations = state.mutations[:frame.mutationBase]
+}
+
+func jitParserDeliverRuleResult(state *jitParserState, frame jitParserCallFrame, position int, value Scmer, success bool, restoreMutations bool) (int64, int64, bool) {
+	jitParserResetRuleFrame(state, frame, restoreMutations)
+	state.frames = state.frames[:len(state.frames)-1]
+	if success {
+		state.values = append(state.values, value)
+		return int64(frame.success), int64(position), false
+	}
+	return int64(frame.failure), int64(frame.position), false
+}
+
+// jitParserCompleteRule implements the seed-growing packrat algorithm for
+// direct and indirect left recursion. The boolean result requests a direct
+// jump back to the returned rule rather than continuation dispatch.
+func jitParserCompleteRule(state *jitParserState, position int, value Scmer, success bool) (int64, int64, bool) {
 	if len(state.frames) == 0 {
 		panic("jit: parser rule stack underflow")
 	}
 	frame := state.frames[len(state.frames)-1]
-	rule := &state.program.rules[frame.rule]
-	position := int(positionValue.Int())
-	if !successValue.Bool() {
-		jitParserMemoizeReturn(state, frame, frame.position, NewNil(), false)
-		state.values = state.values[:frame.valueBase]
-		state.bindings = state.bindings[:frame.bindingBase]
-		state.mutations = state.mutations[:frame.mutationBase]
-		state.frames = state.frames[:len(state.frames)-1]
-		return jitParserPackReturn(frame.failure, frame.position)
+	if !success {
+		position = frame.position
+		value = NewNil()
 	}
-
-	result := NewNil()
-	if len(state.values) > frame.valueBase {
-		result = state.values[len(state.values)-1]
+	if frame.transient || !frame.memoize {
+		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
 	}
-	if !rule.generator.IsNil() {
-		args := state.bindings[frame.bindingBase : frame.bindingBase+len(rule.bindings)]
-		result = Apply(rule.action, args...)
+	key := jitParserMemoKey{rule: frame.rule, position: frame.position}
+	memo := state.memo[key]
+	if frame.growing {
+		if success && position > memo.position {
+			memo.value, memo.position, memo.success = value, position, true
+			state.memo[key] = memo
+			jitParserResetRuleFrame(state, frame, true)
+			for range state.program.rules[frame.rule].bindings {
+				state.bindings = append(state.bindings, NewNil())
+			}
+			memo.head.resetEvaluation()
+			return int64(frame.rule), int64(frame.position), true
+		}
+		state.heads[frame.position] = nil
+		return jitParserDeliverRuleResult(state, frame, memo.position, memo.value, memo.success, true)
 	}
-	jitParserMemoizeReturn(state, frame, position, result, true)
-	state.values = state.values[:frame.valueBase]
-	state.values = append(state.values, result)
-	state.bindings = state.bindings[:frame.bindingBase]
-	state.mutations = state.mutations[:frame.mutationBase]
-	state.frames = state.frames[:len(state.frames)-1]
-	return jitParserPackReturn(frame.success, position)
+	memo.value, memo.position, memo.success = value, position, success
+	if memo.head == nil {
+		memo.active = false
+		state.memo[key] = memo
+		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
+	}
+	state.memo[key] = memo
+	if memo.head.rule != frame.rule {
+		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
+	}
+	memo.active = false
+	state.memo[key] = memo
+	if !success {
+		return jitParserDeliverRuleResult(state, frame, position, value, false, true)
+	}
+	state.heads[frame.position] = memo.head
+	state.frames[len(state.frames)-1].growing = true
+	jitParserResetRuleFrame(state, frame, true)
+	for range state.program.rules[frame.rule].bindings {
+		state.bindings = append(state.bindings, NewNil())
+	}
+	memo.head.resetEvaluation()
+	return int64(frame.rule), int64(frame.position), true
 }
 
 func jitParserBindingValueNative(stateValue Scmer, binding int64) Scmer {
@@ -820,12 +939,8 @@ func jitParserRuleValueNative(stateValue Scmer) Scmer {
 	return state.values[len(state.values)-1]
 }
 
-func jitParserReturnRuleValueNative(stateValue Scmer, position int64, value Scmer) (int64, int64) {
+func jitParserReturnRuleValueNative(stateValue Scmer, position int64, value Scmer) (int64, int64, bool) {
 	state := jitParserStateValue(stateValue)
-	if len(state.frames) == 0 {
-		panic("jit: parser rule stack underflow")
-	}
-	frame := state.frames[len(state.frames)-1]
 	// Parser actions cross from the nested generated expression into the parser
 	// machine state. Lists must own Go-managed backing storage at that boundary;
 	// an inlined variadic producer may otherwise describe its transient call
@@ -833,13 +948,7 @@ func jitParserReturnRuleValueNative(stateValue Scmer, position int64, value Scme
 	if value.GetTag() == tagSlice {
 		value = NewSlice(append([]Scmer(nil), value.Slice()...))
 	}
-	jitParserMemoizeReturn(state, frame, int(position), value, true)
-	state.values = state.values[:frame.valueBase]
-	state.values = append(state.values, value)
-	state.bindings = state.bindings[:frame.bindingBase]
-	state.mutations = state.mutations[:frame.mutationBase]
-	state.frames = state.frames[:len(state.frames)-1]
-	return int64(frame.success), position
+	return jitParserCompleteRule(state, int(position), value, true)
 }
 
 func jitParserAcquireStateNative(programValue, input Scmer) Scmer {
@@ -1013,21 +1122,58 @@ func jitParserEnterRuleNative(stateValue Scmer, ruleValue, success, failure, pos
 		panic("jit: parser rule index out of range")
 	}
 	if state.program.rules[rule].lexicalParent < 0 {
-		if memo, exists := state.memo[jitParserMemoKey{rule: rule, position: int(position)}]; exists {
+		key := jitParserMemoKey{rule: rule, position: int(position)}
+		memo, exists := state.memo[key]
+		var head *jitParserLeftRecursionHead
+		if int(position) >= 0 && int(position) < len(state.heads) {
+			head = state.heads[int(position)]
+		}
+		if head != nil {
+			if jitParserRuleSetHas(head.evaluate, rule) {
+				jitParserRuleSetDelete(head.evaluate, rule)
+				jitParserPushRuleFrame(state, rule, int(success), int(failure), int(position), false, true)
+				return 0, position, false
+			}
+			if !exists && rule != head.rule && !jitParserRuleSetHas(head.involved, rule) {
+				return failure, position, true
+			}
+		}
+		if exists {
+			if memo.active {
+				memo = jitParserSetupLeftRecursion(state, key)
+			}
 			if memo.success {
 				state.values = append(state.values, memo.value)
 				return success, int64(memo.position), true
 			}
-			return failure, position, true
+			return failure, int64(memo.position), true
 		}
+		state.memo[key] = jitParserMemoEntry{position: int(position), active: true}
+		jitParserPushRuleFrame(state, rule, int(success), int(failure), int(position), true, false)
+		return 0, position, false
 	}
-	jitParserEnterRule(stateValue, NewInt(ruleValue), NewInt(success), NewInt(failure), NewInt(position))
+	jitParserPushRuleFrame(state, rule, int(success), int(failure), int(position), false, false)
 	return 0, position, false
 }
 
-func jitParserReturnRuleNative(state Scmer, position int64, success bool) (int64, int64) {
-	packed := uint64(jitParserReturnRule(state, NewInt(position), NewBool(success)).Int())
-	return int64(uint32(packed >> 32)), int64(uint32(packed))
+func jitParserReturnRuleNative(stateValue Scmer, position int64, success bool) (int64, int64, bool) {
+	state := jitParserStateValue(stateValue)
+	value := NewNil()
+	if success {
+		if len(state.frames) == 0 {
+			panic("jit: parser rule stack underflow")
+		}
+		frame := state.frames[len(state.frames)-1]
+		if len(state.values) > frame.valueBase {
+			value = state.values[len(state.values)-1]
+		}
+		rule := &state.program.rules[frame.rule]
+		if !rule.generator.IsNil() {
+			args := state.bindings[frame.bindingBase : frame.bindingBase+len(rule.bindings)]
+			value = Apply(rule.action, args...)
+		}
+	}
+	return jitParserCompleteRule(state, int(position), value, success)
 }
 
 func jitParserBindValueNative(state Scmer, binding int64) {
