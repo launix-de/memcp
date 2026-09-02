@@ -23,7 +23,32 @@ import (
 	"runtime"
 	"testing"
 	"time"
+	"unsafe"
 )
+
+func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
+	code := make([]byte, 128)
+	start := unsafe.Pointer(&code[0])
+	ctx := &JITContext{
+		Start:      start,
+		Ptr:        start,
+		End:        unsafe.Add(start, len(code)),
+		AllRegs:    1 << uint(RegRAX),
+		FrameReg:   RegRBP,
+		StackReg:   RegRSP,
+		ScratchReg: RegR11,
+	}
+	value := JITValueDesc{Loc: LocReg, Type: tagInt, Reg: RegRAX, RelocatablePointer: true}
+	ctx.BindReg(RegRAX, &value)
+
+	if got := ctx.AllocReg(); got != RegRAX {
+		t.Fatalf("spilled register %d, want %d", got, RegRAX)
+	}
+	root := jitStackRoot{base: jitStackRootFrameBP, offset: -8}
+	if _, ok := ctx.StackRoots[root]; !ok {
+		t.Fatal("relocatable scalar spill is missing from the stack map")
+	}
+}
 
 func TestJITEntryGrowsStackInPrologue(t *testing.T) {
 	value := NewSymbol("value")

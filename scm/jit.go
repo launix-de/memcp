@@ -1022,7 +1022,7 @@ func (ctx *JITContext) AllocReg() Reg {
 	// Scalar spill: reserve a call-local slot in the generated function's frame.
 	stackOff := ctx.AllocSpill(8)
 	ctx.EmitStoreRegMem(r, RegRBP, stackOff)
-	ctx.setStackPointer(jitStackRootFrameBP, stackOff, false)
+	ctx.setStackPointer(jitStackRootFrameBP, stackOff, owner.RelocatablePointer)
 
 	owner.Loc = LocStack
 	owner.MemPtr = 0
