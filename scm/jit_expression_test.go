@@ -18,8 +18,11 @@ package scm
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 )
+
+var jitListBenchmarkSink Scmer
 
 func compileJITExpressionTestProc(t *testing.T, source string) Scmer {
 	t.Helper()
@@ -136,6 +139,25 @@ func TestJITExpressionListForms(t *testing.T) {
 			t.Fatalf("unexpected !!list shape: len=%d cap=%d", len(got), cap(got))
 		}
 	})
+}
+
+func BenchmarkJITListMaterialization(b *testing.B) {
+	if !jitEnabled {
+		b.Skip("requires GOEXPERIMENT=jit")
+	}
+	source := preparedTestProc(b, `(lambda (id value) (list "id" id "value" value))`)
+	compiled := jitCompile(source)
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		b.Fatal("list projection did not compile")
+	}
+	entry := compiled.Proc().Compiled
+	args := []Scmer{NewInt(1), NewInt(71)}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		jitListBenchmarkSink = entry.Native(args...)
+	}
+	runtime.KeepAlive(entry)
 }
 
 func TestJITExpressionConditionalBorrowedListResult(t *testing.T) {
