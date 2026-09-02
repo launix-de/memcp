@@ -18,6 +18,7 @@ Copyright (C) 2023-2026  Carl-Philip Hänsch
 package scm
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -167,5 +168,37 @@ func TestPrepareMySQLResultFieldsPreservesCompilerOrderAndDuplicates(t *testing.
 	}
 	if colmap["id"] != 0 || colmap["value"] != 2 {
 		t.Fatalf("unexpected fallback column map: %+v", colmap)
+	}
+}
+
+func TestPrepareMySQLResultFieldsUsesCompilerTypes(t *testing.T) {
+	fields, _, _ := prepareMySQLResultFields([]Scmer{
+		NewSlice([]Scmer{NewString("id"), NewString("integer")}),
+		NewSlice([]Scmer{NewString("enabled"), NewString("boolean")}),
+		NewSlice([]Scmer{NewString("expression"), NewNil()}),
+	})
+
+	if fields[0].Name != "id" || fields[0].Type != querypb.Type_INT64 {
+		t.Fatalf("integer compiler field was not preserved: %+v", fields[0])
+	}
+	if fields[1].Name != "enabled" || fields[1].Type != querypb.Type_INT32 {
+		t.Fatalf("boolean compiler field was not preserved: %+v", fields[1])
+	}
+	if fields[2].Name != "expression" || fields[2].Type != querypb.Type_NULL_TYPE {
+		t.Fatalf("untyped compiler field was not left discoverable: %+v", fields[2])
+	}
+}
+
+func TestMySQLIntegralFloat(t *testing.T) {
+	for _, value := range []float64{0, -1, 1788172496, 1788260000} {
+		integer, ok := mysqlIntegralFloat(value)
+		if !ok || float64(integer) != value {
+			t.Fatalf("%v was not accepted as an exact integer", value)
+		}
+	}
+	for _, value := range []float64{1.5, math.Inf(1), math.NaN()} {
+		if _, ok := mysqlIntegralFloat(value); ok {
+			t.Fatalf("%v was accepted as an exact integer", value)
+		}
 	}
 }

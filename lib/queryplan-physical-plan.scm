@@ -8358,6 +8358,58 @@ stars through the same catalog-aware path used by physical lowering. */
 			_ '())
 		_ '())))
 
+/* Storage encodings may represent integral columns as float64 after a rebuild.
+Keep the declared SQL type at the protocol boundary so clients do not receive
+scientific notation for an INT merely because its physical encoding changed. */
+(define mysql_result_column_type (lambda (src col)
+	(if (not (source_is_base_table? src))
+		nil
+		(begin
+			(define info (find (get_schema (source_schema src) (source_relation src))
+				(lambda (candidate) (equal?? (candidate "Field") col)) nil))
+			(define raw_type (toLower
+				(if (nil? info) "" (coalesceNil (info "RawType") ""))))
+			(match raw_type
+				"tinyint" "integer"
+				"smallint" "integer"
+				"mediumint" "integer"
+				"int" "integer"
+				"integer" "integer"
+				"bigint" "integer"
+				"year" "integer"
+				"bool" "boolean"
+				"boolean" "boolean"
+				_ nil)))))
+
+(define mysql_result_expr_type (lambda (sources expr)
+	(match expr
+		((symbol get_column) tblvar tbl_ignorecase col col_ignorecase) (begin
+			(define src (if (nil? tblvar)
+				(source_for_unqualified_column sources nil col col_ignorecase)
+				(source_for_alias sources nil tblvar tbl_ignorecase)))
+			(if (nil? src) nil (mysql_result_column_type src col)))
+	((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+	(mysql_result_expr_type sources
+		(list (symbol "get_column") tblvar tbl_ignorecase col col_ignorecase))
+	_ nil)))
+
+(define mysql_projection_fields (lambda (sources fields)
+	(match (coalesceNil fields '())
+		(cons title (cons expr rest))
+		(cons (list title (mysql_result_expr_type sources expr))
+			(mysql_projection_fields sources rest))
+		_ '())))
+
+(define queryplan_mysql_result_fields (lambda (query)
+	(match query
+		((symbol query-block) _schema sources fields _where _group _having _order _limit _offset _hidden _stages _facts)
+		(mysql_projection_fields sources (expand_query_block_fields sources fields))
+		((symbol union-block) _mode branches _order _limit _offset _facts)
+		(match branches
+			(cons first_branch _rest) (queryplan_mysql_result_fields first_branch)
+			_ '())
+		_ '())))
+
 (define projection_exprs (lambda (fields)
 	(match (coalesceNil fields '())
 		(cons _title (cons expr rest)) (cons expr (projection_exprs rest))

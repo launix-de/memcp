@@ -21,6 +21,7 @@ import "context"
 import "os"
 import "fmt"
 import "net"
+import "math"
 import "sync"
 import "strings"
 import "github.com/launix-de/go-mysqlstack/sqldb"
@@ -347,12 +348,28 @@ func prepareMySQLResultRow(fields *[]*querypb.Field, colmap map[string]int, item
 	return row, unknownColumn
 }
 
-func appendScmerToMySQLRow(row *driver.RowWriter, val Scmer) {
+func mysqlIntegralFloat(value float64) (int64, bool) {
+	if math.Trunc(value) != value || value < -9223372036854775808.0 || value >= 9223372036854775808.0 {
+		return 0, false
+	}
+	return int64(value), true
+}
+
+func appendScmerToMySQLRow(row *driver.RowWriter, field *querypb.Field, val Scmer) {
 	switch val.GetTag() {
 	case tagNil:
 		row.Null()
 	case tagFloat:
-		row.Float64(val.Float())
+		value := val.Float()
+		if sqltypes.IsSigned(field.Type) {
+			integer, ok := mysqlIntegralFloat(value)
+			if !ok {
+				panic(fmt.Sprintf("non-integral value %v for integer result field %q", value, field.Name))
+			}
+			row.Int64(integer)
+		} else {
+			row.Float64(value)
+		}
 	case tagInt:
 		row.Int64(val.Int())
 	case tagBool:
@@ -373,12 +390,32 @@ func mysqlFieldsResolved(fields []*querypb.Field) bool {
 	return true
 }
 
-func prepareMySQLResultFields(titles []Scmer) ([]*querypb.Field, map[string]int, []Scmer) {
-	fields := make([]*querypb.Field, len(titles))
-	colmap := make(map[string]int, len(titles))
-	for i, title := range titles {
-		name := title.String()
-		fields[i] = &querypb.Field{Name: name, Type: querypb.Type_NULL_TYPE}
+func mysqlCompilerField(declaration Scmer) *querypb.Field {
+	name := declaration.String()
+	typ := querypb.Type_NULL_TYPE
+	if declaration.IsSlice() {
+		parts := declaration.Slice()
+		if len(parts) == 2 {
+			name = parts[0].String()
+			if !parts[1].IsNil() {
+				switch parts[1].String() {
+				case "integer":
+					typ = querypb.Type_INT64
+				case "boolean":
+					typ = querypb.Type_INT32
+				}
+			}
+		}
+	}
+	return &querypb.Field{Name: name, Type: typ}
+}
+
+func prepareMySQLResultFields(declarations []Scmer) ([]*querypb.Field, map[string]int, []Scmer) {
+	fields := make([]*querypb.Field, len(declarations))
+	colmap := make(map[string]int, len(declarations))
+	for i, declaration := range declarations {
+		fields[i] = mysqlCompilerField(declaration)
+		name := fields[i].Name
 		colmap[name] = i
 	}
 	return fields, colmap, make([]Scmer, len(fields))
@@ -450,8 +487,8 @@ func (m *MySQLWrapper) ComQuery(session *driver.Session, query string, bindVaria
 			panic(err)
 		}
 		defer row.Abort()
-		for _, val := range values {
-			appendScmerToMySQLRow(row, val)
+		for i, val := range values {
+			appendScmerToMySQLRow(row, fields[i], val)
 		}
 		status, err := row.End()
 		rowStatus |= status

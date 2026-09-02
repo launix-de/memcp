@@ -1068,7 +1068,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					actual_plan))
 			actual_plan))
 		(list (quote !begin)
-			(list (quote resultfields) (list (quote quote) (queryplan_result_titles expanded_query)))
+			(list (quote resultfields) (list (quote quote) (queryplan_mysql_result_fields expanded_query)))
 			execution_plan)
 	)))
 	(define sql_union_all_parts (lambda (query)
