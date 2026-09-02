@@ -2039,19 +2039,22 @@ func (m *ShardMapReducer) processDirectReadBlock(acc scm.Scmer, recids []uint32)
 		return acc
 	}
 	if m.mapReduceProgram.Kind == scm.SerialProcJIT {
+		jitFn := m.mapReduceProgram.Function
 		if recids[0] < m.mainCount && len(m.mainBulkReaders) == 1 {
 			for _, value := range m.mainBulkValues {
 				m.args[0] = acc
 				m.args[1] = value
-				acc = m.mapReduceProgram.CallJIT(m.args)
+				acc = jitFn(m.args...)
 			}
+			runtime.KeepAlive(&m.mapReduceProgram)
 			return acc
 		}
 		for rowOffset, id := range recids {
 			m.loadDirectReadArgs(id, rowOffset, true)
 			m.args[0] = acc
-			acc = m.mapReduceProgram.CallJIT(m.args)
+			acc = jitFn(m.args...)
 		}
+		runtime.KeepAlive(&m.mapReduceProgram)
 		return acc
 	}
 	for rowOffset, id := range recids {

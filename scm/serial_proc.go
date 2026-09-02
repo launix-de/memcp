@@ -16,8 +16,6 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
-import "runtime"
-
 // SerialProcKind describes callback shapes whose semantics can be consumed by
 // a physical operator without entering Eval. Operators must dispatch on Kind
 // outside their row loops; Call is the compatibility path for code which does
@@ -305,16 +303,6 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 	default:
 		return p.borrowed(args)
 	}
-}
-
-// CallJIT enters an already classified compiled procedure with an exact
-// argument frame. The physical operator dispatches to this method outside its
-// row loop, so the trampoline contains no shape or arity checks.
-func (p *SerialProc) CallJIT(args []Scmer) Scmer {
-	result := callJIT(p.jitEntry.Native, args...)
-	runtime.KeepAlive(args)
-	runtime.KeepAlive(p.jitEntry)
-	return result
 }
 
 // IsNative reports whether the prepared callback is exactly the named global

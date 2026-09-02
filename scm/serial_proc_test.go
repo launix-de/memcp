@@ -16,6 +16,7 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+import "runtime"
 import "testing"
 
 func preparedTestProc(t testing.TB, source string) Scmer {
@@ -117,21 +118,22 @@ func BenchmarkSerialProcJITMapReducerDispatch(b *testing.B) {
 		Kind:     SerialProcGeneral,
 		borrowed: optimizeProcToSerialBorrowed(compiled),
 	}
-	for _, benchmark := range []struct {
-		name string
-		call func([]Scmer) Scmer
-	}{
-		{name: "general_adapter", call: adapter.Call},
-		{name: "direct_jit", call: direct.CallJIT},
-	} {
-		b.Run(benchmark.name, func(b *testing.B) {
-			args := []Scmer{NewInt(1), NewInt(1)}
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				args[0] = benchmark.call(args)
-			}
-		})
-	}
+	b.Run("general_adapter", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(1)}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			args[0] = adapter.Call(args)
+		}
+	})
+	b.Run("direct_jit_entry", func(b *testing.B) {
+		args := []Scmer{NewInt(1), NewInt(1)}
+		jitFn := direct.Function
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			args[0] = jitFn(args...)
+		}
+		runtime.KeepAlive(&direct)
+	})
 }
 
 func TestPrepareSerialProcNativeForwardMatchesInterpreterAdapter(t *testing.T) {
