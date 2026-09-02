@@ -385,57 +385,75 @@ func jitEmitSpecialBoolFold(takeWhen bool) func(*JITContext, []Scmer, []JITValue
 			ctx.TrackImm(imm)
 			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
 		}
-		var takeLabel, endLabel JITLabel
-		hasDynamic := false
-		compileTimeTake := false
+		unknownOff := ctx.AllocStack(8)
+		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0), NoHeapPointer: true}, unknownOff)
+		decisiveLabel := ctx.ReserveLabel()
+		unknownLabel := ctx.ReserveLabel()
+		endLabel := ctx.ReserveLabel()
 		for _, expression := range args {
-			boolean := jitCompileCondition(ctx, expression, ctx.SliceBase)
-			if boolean.Loc == LocImm {
-				if boolean.Imm.Bool() == takeWhen {
-					compileTimeTake = true
-					break
-				}
+			value := jitCompileExpr(ctx, expression, ctx.SliceBase, JITValueDesc{Loc: LocAny})
+			nilValue := jitIsNilBorrowed(ctx, &value)
+			if nilValue.Loc == LocImm && nilValue.Imm.Bool() {
+				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1), NoHeapPointer: true}, unknownOff)
+				ctx.FreeDesc(&value)
 				continue
 			}
-			if !hasDynamic {
-				takeLabel = ctx.ReserveLabel()
-				endLabel = ctx.ReserveLabel()
-				hasDynamic = true
+
+			var nilLabel, nextLabel JITLabel
+			hasNilBranch := nilValue.Loc != LocImm
+			if hasNilBranch {
+				nilLabel = ctx.ReserveLabel()
+				nextLabel = ctx.ReserveLabel()
+				ctx.EmitCmpRegImm32(nilValue.Reg, 0)
+				ctx.EmitJcc(CcNE, nilLabel)
+				ctx.FreeDesc(&nilValue)
 			}
-			ctx.EmitCmpRegImm32(boolean.Reg, 0)
-			if takeWhen {
-				ctx.EmitJcc(CcNE, takeLabel)
+
+			boolean := jitCondToBoolBorrowed(ctx, &value)
+			ctx.FreeDesc(&value)
+			if boolean.Loc == LocImm {
+				if boolean.Imm.Bool() == takeWhen {
+					ctx.EmitJmp(decisiveLabel)
+					break
+				}
+				if hasNilBranch {
+					ctx.EmitJmp(nextLabel)
+				}
 			} else {
-				ctx.EmitJcc(CcE, takeLabel)
+				ctx.EmitCmpRegImm32(boolean.Reg, 0)
+				if takeWhen {
+					ctx.EmitJcc(CcNE, decisiveLabel)
+				} else {
+					ctx.EmitJcc(CcE, decisiveLabel)
+				}
+				ctx.FreeDesc(&boolean)
+				if hasNilBranch {
+					ctx.EmitJmp(nextLabel)
+				}
 			}
-			ctx.FreeDesc(&boolean)
-			// A completed condition has no values live into the next short-circuit
-			// operand. Drop path-local CFG temporaries before recursively emitting it.
 			ctx.ReclaimUntrackedRegs()
-		}
-		// Allocate the fold's output only after all child CFGs have been emitted.
-		// The result has no live value before this point, and reserving two
-		// registers for it needlessly raises pressure in nested map/reduce code.
-		target := jitEnsureResultPair(ctx, result)
-		if compileTimeTake {
-			if hasDynamic {
-				ctx.MarkLabel(takeLabel)
+			if hasNilBranch {
+				ctx.MarkLabel(nilLabel)
+				ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(1), NoHeapPointer: true}, unknownOff)
+				ctx.MarkLabel(nextLabel)
 			}
-			taken := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(takeWhen)}
-			_ = jitPlaceIntoPair(ctx, &taken, target)
-			ctx.BindReg(target.Reg, &target)
-			ctx.BindReg(target.Reg2, &target)
-			return target
 		}
+		unknown := ctx.AllocReg()
+		ctx.EmitLoadFromStack(unknown, unknownOff)
+		ctx.EmitCmpRegImm32(unknown, 0)
+		ctx.EmitJcc(CcNE, unknownLabel)
+		ctx.FreeReg(unknown)
+		target := jitEnsureResultPair(ctx, result)
 		identityValue := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(identity)}
 		_ = jitPlaceIntoPair(ctx, &identityValue, target)
-		if hasDynamic {
-			ctx.EmitJmp(endLabel)
-			ctx.MarkLabel(takeLabel)
-			taken := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(takeWhen)}
-			_ = jitPlaceIntoPair(ctx, &taken, target)
-			ctx.MarkLabel(endLabel)
-		}
+		ctx.EmitJmp(endLabel)
+		ctx.MarkLabel(decisiveLabel)
+		decisiveValue := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(takeWhen)}
+		_ = jitPlaceIntoPair(ctx, &decisiveValue, target)
+		ctx.EmitJmp(endLabel)
+		ctx.MarkLabel(unknownLabel)
+		ctx.EmitMakeNil(target)
+		ctx.MarkLabel(endLabel)
 		ctx.BindReg(target.Reg, &target)
 		ctx.BindReg(target.Reg2, &target)
 		return target
