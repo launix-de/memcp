@@ -226,32 +226,11 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 			panic("JIT: invalid hidden argument kind")
 		}
 	}
-	ensureJITStack(jep.StackFrameSize)
 	result = jep.Native(args...)
 	runtime.KeepAlive(args)
 	runtime.KeepAlive(jep)
 	runtime.KeepAlive(jep.Owner)
 	return result
-}
-
-const jitStackProbeSize = 4096
-
-// ensureJITStack grows the goroutine stack through ordinary Go frames before
-// entering generated code. JIT frames are registered with the runtime and can
-// be relocated at safepoints, but their generated prologue has no morestack
-// call of its own.
-//
-//go:noinline
-func ensureJITStack(frameSize int32) {
-	if frameSize <= 0 {
-		return
-	}
-	var probe [jitStackProbeSize]byte
-	probe[0] = byte(frameSize)
-	if frameSize > jitStackProbeSize {
-		ensureJITStack(frameSize - jitStackProbeSize)
-	}
-	runtime.KeepAlive(&probe)
 }
 
 type jitHiddenArgKind uint8
@@ -459,6 +438,7 @@ type jitSafepoint struct {
 	pcOffset  int32
 	dynamicSP int32
 	roots     []jitStackRoot
+	entry     bool
 }
 
 // jitStackMap is the runtime-independent form passed through the common JIT
@@ -468,6 +448,7 @@ type jitStackMap struct {
 	pcOffset   uintptr
 	frameWords uintptr
 	pointerMap []byte
+	entry      bool
 }
 
 // JITContext is the central structure for descriptor-based JIT compilation.

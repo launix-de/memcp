@@ -158,6 +158,25 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.TrackImm(ctx.RuntimeEnv)
 	ctx.W = ctx // self-reference for backward-compat ctx.W.Emit calls
 
+	guardOffset, stackSmall, moreStackPC := jitRuntimeStackCheck()
+	var stackCheckFrameFixup unsafe.Pointer
+	var stackRetryLabel, stackGrowLabel JITLabel
+	hasStackCheck := moreStackPC != 0 && inputArgCount >= 0
+	if hasStackCheck {
+		stackRetryLabel = ctx.ReserveLabel()
+		stackGrowLabel = ctx.ReserveLabel()
+		ctx.MarkLabel(stackRetryLabel)
+		ctx.emitMovRegReg(RegR11, RegRSP)
+		ctx.emitBytes(0x49, 0x81, 0xEB) // sub r11, frameSize-StackSmall
+		ctx.emitU32(0)
+		stackCheckFrameFixup = unsafe.Add(ctx.Ptr, -4)
+		ctx.EmitJcc(CondUnsignedBelow, stackGrowLabel)
+		// cmp r11, [r14+stackguard0]
+		ctx.emitBytes(0x4D, 0x3B, 0x9E)
+		ctx.emitU32(uint32(guardOffset))
+		ctx.EmitJcc(CondUnsignedBelowOrEqual, stackGrowLabel)
+	}
+
 	// Unified frame: push rbp; mov rbp, rsp; sub rsp, <fixup>
 	// All frame access via [RSP + offset]. MaxBPOffset patched at the end.
 	// Epilog: leave; ret.
@@ -305,13 +324,37 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	buf.stackFrameSize = frameSize
 	ctx.PatchInt32(frameFixup, frameSize)
 	ctx.PatchInt32(frameWordsFixup, frameSize/8)
+	if hasStackCheck {
+		checkedFrame := frameSize - int32(stackSmall)
+		if checkedFrame < 0 {
+			checkedFrame = 0
+		}
+		ctx.PatchInt32(stackCheckFrameFixup, checkedFrame)
+	}
 	arenaOffset := 0
 	if buf.reservation != nil {
 		arenaOffset = buf.reservation.offset
 	}
-	buf.stackMaps = ctx.finalizeStackMaps(frameSize, arenaOffset)
 	ctx.emitByte(0xC9) // leave
 	ctx.emitByte(0xC3) // ret
+	if hasStackCheck {
+		ctx.MarkLabel(stackGrowLabel)
+		// runtime.morestack preserves DX as the closure-context register. Use it
+		// to retain the incoming variadic slice pointer while the stack moves.
+		ctx.emitMovRegReg(RegRDX, RegRAX)
+		ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
+		ctx.emitBytes(0x41, 0xFF, 0xD3) // call r11
+		ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
+			pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
+			entry:    true,
+		})
+		ctx.emitMovRegReg(RegRAX, RegRDX)
+		inputLength := uint64(inputArgCount + len(ctx.HiddenArgs))
+		ctx.EmitMovRegImm64(RegRBX, inputLength)
+		ctx.EmitMovRegImm64(RegRCX, inputLength)
+		ctx.EmitJmp(stackRetryLabel)
+	}
+	buf.stackMaps = ctx.finalizeStackMaps(frameSize, arenaOffset)
 
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
@@ -1867,6 +1910,7 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 			pcOffset:   uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
 			frameWords: frameWords,
 			pointerMap: pointerMap,
+			entry:      safepoint.entry,
 		}
 	}
 	return maps

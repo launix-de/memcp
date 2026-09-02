@@ -19,6 +19,10 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 package scm
 
+func jitRuntimeStackCheck() (guardOffset, stackSmall, moreStackPC uintptr) {
+	return 0, 0, 0
+}
+
 // registerJITArena is a no-op on stock Go builds without runtime/jit.
 func registerJITArena(a *jitArena) interface{} {
 	return nil
