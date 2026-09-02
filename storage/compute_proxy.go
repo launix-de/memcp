@@ -1688,6 +1688,7 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueD
 	ctx.SyncDesc(&d0)
 	ctx.SyncDesc(&idxInt)
 	d1 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*StorageComputeProxy).getValueTx), []scm.JITValueDesc{thisptr, d0, idxInt}, 2)
+	d1.NoHeapPointer = false
 	ctx.BindReg(d1.Reg, &d1)
 	ctx.BindReg(d1.Reg2, &d1)
 	ctx.FreeDesc(&d0)
@@ -1702,8 +1703,8 @@ func (s *StorageComputeProxy) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueD
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.EnsureDesc(&d1)
-	if d1.Loc == scm.LocRegPair {
+	ctx.SyncDesc(&d1)
+	if d1.Loc == scm.LocRegPair || d1.Loc == scm.LocStackPair || d1.Loc == scm.LocInputPair {
 		ctx.EmitMovPairToResult(&d1, &result)
 		result.Type = d1.Type
 	} else {

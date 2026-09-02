@@ -62,7 +62,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 	const defaultCodeBufSize = 16 * 1024
 	ptr, arena, reservation := globalJITPool.Alloc(defaultCodeBufSize)
 	buf := &execBuf{ptr: ptr, n: defaultCodeBufSize, arena: arena, reservation: reservation}
-	codeLen, roots, _, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
+	codeLen, roots, _, _, _, _, _ := jitCompileProcToExec(proc, buf, true)
 	arena.complete(reservation, buf.stackMaps)
 	if codeLen == 0 {
 		return nil, nil
@@ -75,7 +75,7 @@ func jitCompileProcWithRoots(proc *Proc) ([]byte, []unsafe.Pointer) {
 // jitCompileProcToExec compiles a Proc body directly into writable executable memory.
 // Returns code length, GC roots, an overflow flag, and whether the call boundary
 // must provide a fresh variadic array that becomes the owned list result.
-func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, bool, JITCoverage) {
+func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int, []unsafe.Pointer, bool, bool, []JITHiddenArg, bool, JITCoverage) {
 	body := proc.Body
 	if body.GetTag() == tagSourceInfo {
 		si := body.SourceInfo()
@@ -94,7 +94,7 @@ func jitCompileProcToExec(proc *Proc, buf *execBuf, recursiveLambdas bool) (int,
 
 // jitCompileExprBodyToExec compiles a Scheme expression body into a writable
 // executable buffer using Declaration.JITEmit callbacks.
-func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, autoImportSafe bool, needsStableArgs bool, coverage JITCoverage) {
+func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf, recursiveLambdas bool) (codeLen int, roots []unsafe.Pointer, overflow bool, transferInputArgs bool, hiddenArgs []JITHiddenArg, needsStableArgs bool, coverage JITCoverage) {
 	defer func() {
 		if r := recover(); r != nil {
 			if r == jitCodeOverflowPanic {
@@ -107,7 +107,6 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			roots = nil
 			transferInputArgs = false
 			hiddenArgs = nil
-			autoImportSafe = false
 			needsStableArgs = false
 			coverage = JITCoverage{}
 		}
@@ -140,8 +139,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		LastIntReg:       RegR15,
 		InputArgCount:    inputArgCount,
 		LocalSlotCount:   numVars,
-		AutoImportSafe:   true,
 		RecursiveLambdas: recursiveLambdas,
+		StackPhiTargets:  jitExpressionContainsParser(body),
 		SelfSymbols:      selfSymbols,
 		SelfParamCount:   inputArgCount,
 		Arena:            buf.arena,
@@ -166,6 +165,18 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	frameFixup := ctx.EmitSubRSP32Fixup() // sub rsp, <patched>
 
 	ctx.emitMovRegReg(RegR12, RegRAX) // save incoming args slice
+	// Safepoint maps are path-sensitive, but a shared block may name a stack
+	// home whose producer belongs to a branch that was not taken. Clear the
+	// reusable goroutine-stack frame before entering the body so such a slot is
+	// nil instead of retaining a pointer from an older invocation. REP STOSQ is
+	// the x86-specific compact form; future architectures provide their own
+	// prolog sequence while common lowering remains register-bank based.
+	ctx.emitMovRegReg(RegRDI, RegRSP)
+	ctx.emitBytes(0x31, 0xC0) // xor eax, eax
+	ctx.emitByte(0xB9)        // mov ecx, <frame words>
+	frameWordsFixup := ctx.Ptr
+	ctx.emitU32(0)
+	ctx.emitBytes(0xF3, 0x48, 0xAB) // rep stosq
 	useInputFrame := proc != nil && proc.NumberedOnly && numVars == inputArgCount && !ctx.HasSelfLoop
 	// Allocate local vars via AllocStack.
 	if numVars > 0 && !useInputFrame {
@@ -206,16 +217,25 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	if proc != nil {
 		captured := jitCapturedEnv(proc.En)
 		var vars map[Symbol]JITValueDesc
+		var numbered []JITValueDesc
+		if numVars > 0 {
+			numbered = make([]JITValueDesc, numVars)
+			for index := range numbered {
+				desc := JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(index)}
+				if !useInputFrame {
+					desc.Loc = LocStackPair
+					desc.StackOff = int32(index * 16)
+				}
+				numbered[index] = desc
+			}
+		}
 		putVar := func(sym Symbol, index int) {
 			if vars == nil {
 				vars = make(map[Symbol]JITValueDesc, inputArgCount)
 			}
-			desc := JITValueDesc{
-				Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(index),
-			}
-			if !useInputFrame && index < numVars {
-				desc.Loc = LocStackPair
-				desc.StackOff = int32(index * 16)
+			desc := JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(index)}
+			if index < len(numbered) {
+				desc = numbered[index]
 			}
 			vars[sym] = desc
 		}
@@ -233,8 +253,8 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 				putVar(proc.Params.Symbol(), 0)
 			}
 		}
-		if len(vars) > 0 || captured != nil {
-			ctx.Env = &JITEnv{Vars: vars, Outer: captured}
+		if len(vars) > 0 || len(numbered) > 0 || captured != nil {
+			ctx.Env = &JITEnv{Vars: vars, Numbered: numbered, Outer: captured}
 		}
 	}
 	if ctx.HasSelfLoop {
@@ -272,16 +292,17 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 			case tagFloat:
 				ctx.EmitMakeFloat(ret, desc)
 			default:
-				return 0, nil, false, false, nil, false, false, JITCoverage{}
+				return 0, nil, false, false, nil, false, JITCoverage{}
 			}
 		default:
-			return 0, nil, false, false, nil, false, false, JITCoverage{}
+			return 0, nil, false, false, nil, false, JITCoverage{}
 		}
 	}
 	// Unified epilog: patch SUB RSP with max frame size, then leave; ret.
 	frameSize := ctx.MaxBPOffset + ctx.MaxSpillOffset
 	frameSize = (frameSize + 15) &^ 15
 	ctx.PatchInt32(frameFixup, frameSize)
+	ctx.PatchInt32(frameWordsFixup, frameSize/8)
 	arenaOffset := 0
 	if buf.reservation != nil {
 		arenaOffset = buf.reservation.offset
@@ -292,7 +313,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 
 	ctx.ResolveFixupsFinal()
 	codeLen = int(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs, ctx.AutoImportSafe, ctx.NeedsStableArgs, ctx.Coverage
+	return codeLen, ctx.ConstRoots, false, ctx.TransferInputArgs, ctx.HiddenArgs, ctx.NeedsStableArgs, ctx.Coverage
 }
 
 const (
@@ -692,19 +713,19 @@ func (ctx *JITContext) EmitCmpInt64(a, b Reg) {
 }
 
 // EmitJump emits a conditional branch through the x86 rel32 encoding.
-func (ctx *JITContext) EmitJump(cc JITCondition, labelID uint8) {
+func (ctx *JITContext) EmitJump(cc JITCondition, labelID JITLabel) {
 	ctx.emitBytes(0x0F, 0x80|x86ConditionCode(cc)) // Jcc rel32
 	ctx.AddFixup(labelID, 4, true)
 	ctx.emitU32(0) // placeholder
 }
 
 // EmitJcc keeps already-generated emitters source-compatible.
-func (ctx *JITContext) EmitJcc(cc JITCondition, labelID uint8) {
+func (ctx *JITContext) EmitJcc(cc JITCondition, labelID JITLabel) {
 	ctx.EmitJump(cc, labelID)
 }
 
 // EmitJmp emits an unconditional JMP rel32.
-func (ctx *JITContext) EmitJmp(labelID uint8) {
+func (ctx *JITContext) EmitJmp(labelID JITLabel) {
 	ctx.emitByte(0xE9) // JMP rel32
 	ctx.AddFixup(labelID, 4, true)
 	ctx.emitU32(0) // placeholder
@@ -716,6 +737,38 @@ func (ctx *JITContext) EmitJmpToPos(targetPos int32) {
 	off := targetPos - curPos
 	ctx.emitByte(0xE9) // JMP rel32
 	ctx.emitU32(uint32(off))
+}
+
+// EmitJumpTable dispatches an unsigned integer to one of labels. The table
+// stores offsets from the current JIT entry point, keeping it relocatable
+// inside an arena. Parser continuations use this instead of a native call
+// stack, so recursive grammars retain one runtime-visible JIT frame.
+func (ctx *JITContext) EmitJumpTable(index Reg, labels []JITLabel, invalid JITLabel) {
+	if len(labels) == 0 {
+		ctx.EmitJmp(invalid)
+		return
+	}
+	ctx.EmitCmpRegImm32(index, int32(len(labels)))
+	ctx.EmitJump(CondUnsignedAboveOrEqual, invalid)
+
+	// MOV R11, entry start
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uintptr(ctx.Start)))
+	// MOVSXD index, dword ptr [R11 + index*4 + tableOffset]. The table starts
+	// directly after ADD+JMP below (six bytes).
+	tableOffset := int32(uintptr(ctx.Ptr)-uintptr(ctx.Start)) + 8 + 6
+	rex := byte(0x49) // REX.W + REX.B for the R11 base
+	if index >= 8 {
+		rex |= 0x04 // REX.R: destination register
+		rex |= 0x02 // REX.X: SIB index register
+	}
+	ctx.emitBytes(rex, 0x63, 0x84|byte((index&7)<<3), 0x83|byte((index&7)<<3))
+	ctx.emitU32(uint32(tableOffset))
+	ctx.EmitAddInt64(ctx.ScratchReg, index)
+	ctx.emitBytes(0x41, 0xFF, 0xE3) // JMP R11
+	for _, label := range labels {
+		ctx.AddFixup(label, 4, false)
+		ctx.emitU32(0)
+	}
 }
 
 func x86ConditionCode(cc JITCondition) byte {
@@ -845,6 +898,12 @@ func (ctx *JITContext) emitMovRegMem(dst, base Reg, disp int32) {
 // EmitMovRegMem emits MOV dst, [base + disp32] (load 64-bit from memory) — exported wrapper.
 func (ctx *JITContext) EmitMovRegMem(dst, base Reg, disp int32) {
 	ctx.emitMovRegMem(dst, base, disp)
+}
+
+// EmitOrRegMem emits OR dst, [base+disp]. Common lowering uses this to combine
+// words directly from spill slots without reserving another general register.
+func (ctx *JITContext) EmitOrRegMem(dst, base Reg, disp int32) {
+	ctx.emitRegMemOp(0x0B, dst, base, disp)
 }
 
 // EmitMovRegMemB emits MOVZX dst, byte [base + disp32] (8-bit zero-extended load).
@@ -1333,7 +1392,7 @@ func (ctx *JITContext) EmitXorInt64(dst, src Reg) {
 // compile-time literal. mask selects significant bits; callers clear bit 5 in
 // ASCII letters for case-insensitive matching. The unaligned load and native
 // byte order intentionally remain in the architecture-specific emitter.
-func (ctx *JITContext) EmitMaskedLiteralCheck(base Reg, disp int32, literal, mask []byte, failLabel uint8) {
+func (ctx *JITContext) EmitMaskedLiteralCheck(base Reg, disp int32, literal, mask []byte, failLabel JITLabel) {
 	if len(literal) == 0 || len(literal) > 8 || len(mask) != len(literal) {
 		panic("jit: x86 masked literal check requires one to eight bytes")
 	}
@@ -1578,14 +1637,17 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 
 	// Unknown or complex known types (string/symbol/slice/vector/fastdict/default):
 	// materialize a Scmer pair and reuse the canonical runtime helper.
-	pair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-	pair = jitPlaceIntoPair(ctx, src, pair)
+	pair := *src
+	if pair.Loc != LocRegPair {
+		pair = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+		pair = jitPlaceIntoPair(ctx, src, pair)
+	}
 	out := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.Bool), []JITValueDesc{pair}, 1)
 	// Go bool returns may leave upper bits undefined; normalize to 0|1.
 	ctx.EmitAndRegImm32(out.Reg, 1)
 	out.Type = tagBool
 	ctx.FreeDesc(&pair)
-	ctx.FreeDesc(src)
+	src.Loc = LocNone
 	return emitResult(out)
 }
 
@@ -1727,6 +1789,9 @@ func (ctx *JITContext) regHoldsPointer(r Reg) bool {
 func (ctx *JITContext) recordSafepoint(transientRoots []int32) {
 	roots := make([]jitStackRoot, 0, len(ctx.StackRoots)+len(transientRoots))
 	for root := range ctx.StackRoots {
+		if root.base == jitStackRootFrameSP && root.offset < -ctx.DynamicSP {
+			panic(fmt.Sprintf("jit: stale dynamic stack root raw=%d dynamic=%d", root.offset, ctx.DynamicSP))
+		}
 		roots = append(roots, root)
 	}
 	for _, offset := range transientRoots {
@@ -1754,9 +1819,9 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 		}
 		frameWords := uintptr(frameBytes/8 + 1) // include saved RBP
 		pointerMap := make([]byte, (frameWords+7)/8)
-		mark := func(offset int32) {
+		mark := func(offset int32, root jitStackRoot) {
 			if offset < 0 || offset%8 != 0 || offset > frameBytes {
-				panic("jit: pointer root outside safepoint frame")
+				panic(fmt.Sprintf("jit: pointer root %d outside safepoint frame %d (dynamic=%d, base=%d, raw=%d)", offset, frameBytes, safepoint.dynamicSP, root.base, root.offset))
 			}
 			word := uintptr(offset / 8)
 			pointerMap[word/8] |= 1 << (word % 8)
@@ -1764,16 +1829,16 @@ func (ctx *JITContext) finalizeStackMaps(frameSize int32, arenaOffset int) []jit
 		for _, root := range safepoint.roots {
 			switch root.base {
 			case jitStackRootFrameSP:
-				mark(safepoint.dynamicSP + root.offset)
+				mark(safepoint.dynamicSP+root.offset, root)
 			case jitStackRootFrameBP:
-				mark(safepoint.dynamicSP + frameSize + root.offset)
+				mark(safepoint.dynamicSP+frameSize+root.offset, root)
 			case jitStackRootCallSP:
-				mark(root.offset)
+				mark(root.offset, root)
 			default:
 				panic("jit: invalid stack root base")
 			}
 		}
-		mark(frameBytes) // saved Go RBP must move with a growing goroutine stack
+		mark(frameBytes, jitStackRoot{}) // saved Go RBP must move with a growing goroutine stack
 		maps[i] = jitStackMap{
 			pcOffset:   uintptr(arenaOffset) + uintptr(safepoint.pcOffset),
 			frameWords: frameWords,

@@ -24,7 +24,7 @@ import "sort"
 import "strings"
 
 type JITEmitter func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
-type JITCondEmitter func(ctx *JITContext, args []Scmer, trueLabel, falseLabel uint8)
+type JITCondEmitter func(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel)
 
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {

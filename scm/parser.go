@@ -80,35 +80,100 @@ func EvalAllJIT(source, s string, en *Env) (expression Scmer) {
 
 func evalAll(source, s string, en *Env, compileProcedures bool) (expression Scmer) {
 	tokens := tokenize(source, s)
+	deferredProcs := make(map[Symbol]struct{})
 	for len(tokens) > 0 {
 		code := readFrom(&tokens)
+		definitionSymbol, hasDefinition := topLevelDefinitionSymbol(code)
 		Validate(code, "any")
 		code = Optimize(code, en, nil)
 		expression = Eval(code, en)
-		if compileProcedures && expression.GetTag() == tagProc {
-			compiled := jitCompile(expression)
-			sym, definition := topLevelDefinitionSymbol(code)
-			if compiled.GetTag() == tagProc && compiled.Proc() != nil && compiled.Proc().Compiled != nil &&
-				compiled.Proc().Compiled.AutoImportSafe &&
-				jitAutoImportCoverageWorthwhile(compiled.Proc().Compiled.Coverage) &&
-				definition {
-				expression = compiled
-				target := en.definitionTarget()
-				if target.Vars == nil {
-					target.Vars = make(Vars)
+		// On a vanilla Go toolchain there is no native entry point to produce.
+		// Avoid walking every imported procedure for parser dependencies: besides
+		// doing useless work, that delays every test-suite restart before the HTTP
+		// listener becomes available.
+		if compileProcedures && jitEnabled && expression.GetTag() == tagProc {
+			if hasDefinition {
+				compiled, entry, selected := jitCompileImportProc(definitionSymbol, expression)
+				if entry == nil && jitExpressionContainsParser(expression.Proc().Body) {
+					deferredProcs[definitionSymbol] = struct{}{}
 				}
-				target.Vars[sym] = compiled
-				compiled.Proc().Compiled.DebugName = string(sym)
-				if JITLog {
-					entry := compiled.Proc().Compiled
-					fmt.Printf("JIT: import %s code=%p bytes=%d hidden-args=%d expressions=%d dynamic-calls=%d inlined-calls=%d\n",
-						sym, entry.CodePtr, entry.CodeLen, len(entry.HiddenArgs),
-						entry.Coverage.Expressions, entry.Coverage.DynamicCalls, entry.Coverage.InlinedCalls)
+				if selected {
+					expression = compiled
+					target := en.definitionTarget()
+					if target.Vars == nil {
+						target.Vars = make(Vars)
+					}
+					target.Vars[definitionSymbol] = compiled
 				}
 			}
 		}
 	}
+	if compileProcedures && jitEnabled {
+		target := en.definitionTarget()
+		// Parser-bearing procedures may refer to grammars declared later in the
+		// module. Assemble those grammars first so the retry can fuse both the
+		// parser machine and its generator expressions into the procedure body.
+		jitCompileEnvironmentParsers(en)
+		for sym := range deferredProcs {
+			value, exists := target.Vars[sym]
+			if !exists || value.GetTag() != tagProc || value.Proc() == nil || value.Proc().Compiled != nil {
+				continue
+			}
+			compiled, _, selected := jitCompileImportProc(sym, value)
+			if selected {
+				target.Vars[sym] = compiled
+			}
+		}
+	}
 	return
+}
+
+func jitExpressionContainsParser(expression Scmer) bool {
+	for expression.IsSourceInfo() {
+		expression = expression.SourceInfo().value
+	}
+	items, ok := scmerSlice(expression)
+	if !ok {
+		return false
+	}
+	if len(items) != 0 {
+		if scmerIsSymbol(items[0], "parser") {
+			return true
+		}
+		if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.IsSpecialForm && declaration.Name == "parser" {
+			return true
+		}
+	}
+	for _, item := range items {
+		if jitExpressionContainsParser(item) {
+			return true
+		}
+	}
+	return false
+}
+
+func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool) {
+	compiled := jitCompileProbe(value)
+	var entry *JITEntryPoint
+	if compiled.GetTag() == tagProc && compiled.Proc() != nil {
+		entry = compiled.Proc().Compiled
+	}
+	selected := entry != nil && jitAutoImportCoverageWorthwhile(entry.Coverage)
+	if selected {
+		value.Proc().Compiled = entry
+		compiled = value
+	}
+	if entry != nil {
+		entry.DebugName = string(sym)
+		maybeLogJITCodeName(entry)
+	}
+	maybeLogJITImportCandidate(sym, entry, selected)
+	if selected && JITLog {
+		fmt.Printf("JIT: import %s code=%p bytes=%d hidden-args=%d expressions=%d dynamic-calls=%d inlined-calls=%d\n",
+			sym, entry.CodePtr, entry.CodeLen, len(entry.HiddenArgs),
+			entry.Coverage.Expressions, entry.Coverage.DynamicCalls, entry.Coverage.InlinedCalls)
+	}
+	return compiled, entry, selected
 }
 
 func jitAutoImportCoverageWorthwhile(coverage JITCoverage) bool {
@@ -131,6 +196,11 @@ func topLevelDefinitionSymbol(code Scmer) (Symbol, bool) {
 		return "", false
 	}
 	head, headOK := scmerSymbol(items[0])
+	if !headOK {
+		if declaration := DeclarationForValue(items[0]); declaration != nil && declaration.IsSpecialForm {
+			head, headOK = Symbol(declaration.Name), true
+		}
+	}
 	symbol, symbolOK := scmerSymbol(items[1])
 	if !headOK || (head != "define" && head != "set") || !symbolOK {
 		return "", false

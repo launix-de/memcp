@@ -294,52 +294,72 @@ func init_vector() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
+				}
 				lbl0 := ctx.ReserveLabel()
 				bbpos_0_0 := int32(-1)
 				_ = bbpos_0_0
 				lbl1 := ctx.ReserveLabel()
+				_ = lbl1
 				bbpos_0_1 := int32(-1)
 				_ = bbpos_0_1
 				lbl2 := ctx.ReserveLabel()
+				_ = lbl2
 				bbpos_0_2 := int32(-1)
 				_ = bbpos_0_2
 				lbl3 := ctx.ReserveLabel()
+				_ = lbl3
 				bbpos_0_3 := int32(-1)
 				_ = bbpos_0_3
 				lbl4 := ctx.ReserveLabel()
+				_ = lbl4
 				bbpos_0_4 := int32(-1)
 				_ = bbpos_0_4
 				lbl5 := ctx.ReserveLabel()
+				_ = lbl5
 				bbpos_0_5 := int32(-1)
 				_ = bbpos_0_5
 				lbl6 := ctx.ReserveLabel()
+				_ = lbl6
 				bbpos_0_6 := int32(-1)
 				_ = bbpos_0_6
 				lbl7 := ctx.ReserveLabel()
+				_ = lbl7
 				bbpos_0_7 := int32(-1)
 				_ = bbpos_0_7
 				lbl8 := ctx.ReserveLabel()
+				_ = lbl8
 				bbpos_0_8 := int32(-1)
 				_ = bbpos_0_8
 				lbl9 := ctx.ReserveLabel()
+				_ = lbl9
 				bbpos_0_9 := int32(-1)
 				_ = bbpos_0_9
 				lbl10 := ctx.ReserveLabel()
+				_ = lbl10
 				bbpos_0_10 := int32(-1)
 				_ = bbpos_0_10
 				lbl11 := ctx.ReserveLabel()
+				_ = lbl11
 				bbpos_0_11 := int32(-1)
 				_ = bbpos_0_11
 				lbl12 := ctx.ReserveLabel()
+				_ = lbl12
 				bbpos_0_12 := int32(-1)
 				_ = bbpos_0_12
 				lbl13 := ctx.ReserveLabel()
+				_ = lbl13
 				bbpos_0_13 := int32(-1)
 				_ = bbpos_0_13
 				lbl14 := ctx.ReserveLabel()
+				_ = lbl14
 				bbpos_0_14 := int32(-1)
 				_ = bbpos_0_14
 				lbl15 := ctx.ReserveLabel()
+				_ = lbl15
 				bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 					if !ps.General {
 						if bbs[0].VisitCount >= 0 {
@@ -665,61 +685,18 @@ func init_vector() {
 					d40 = args[2]
 					d40.ID = 0
 					d42 = d40
-					ctx.EnsureDesc(&d42)
-					if d42.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						tag := d42.Imm.GetTag()
-						switch tag {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d42)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d42)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d42)
-						case tagNil:
-							ctx.EmitMakeNil(tmpPair)
-						default:
-							ptrWord, auxWord := d42.Imm.RawWords()
-							ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-							ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
-						}
-						d42 = tmpPair
-					} else if d42.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d42.Reg), Reg2: ctx.AllocRegExcept(d42.Reg)}
-						switch d42.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d42)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d42)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d42)
-						default:
-							panic("jit: Scmer.String requires Scmer pair receiver")
-						}
-						ctx.FreeDesc(&d42)
-						d42 = tmpPair
-					} else if d42.Loc == LocMem {
+					ctx.SyncDesc(&d42)
+					if d42.Loc == LocMem {
 						tmpScalar := JITValueDesc{Loc: LocReg, Type: d42.Type, Reg: ctx.AllocReg()}
 						scratch := ctx.AllocRegExcept(tmpScalar.Reg)
 						ctx.EmitMovRegImm64(scratch, uint64(d42.MemPtr))
 						ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
 						ctx.FreeReg(scratch)
 						ctx.BindReg(tmpScalar.Reg, &tmpScalar)
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(tmpScalar.Reg), Reg2: ctx.AllocRegExcept(tmpScalar.Reg)}
-						switch tmpScalar.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, tmpScalar)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, tmpScalar)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, tmpScalar)
-						default:
-							panic("jit: Scmer.String requires Scmer pair receiver")
-						}
-						ctx.FreeDesc(&tmpScalar)
-						d42 = tmpPair
+						d42 = tmpScalar
 					}
-					if d42.Loc != LocRegPair && d42.Loc != LocStackPair {
+					d42 = JITPrepareScmerGoArg(ctx, d42)
+					if d42.Loc != LocRegPair && d42.Loc != LocStackPair && d42.Loc != LocInputPair {
 						panic("jit: Scmer.String receiver not materialized as pair")
 					}
 					d41 = ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d42}, 2)
@@ -749,11 +726,12 @@ func init_vector() {
 						ctx.FreeDesc(&d41)
 						d41 = tmpPair
 					}
-					if d41.Loc != LocRegPair && d41.Loc != LocStackPair {
+					if d41.Loc != LocRegPair && d41.Loc != LocStackPair && d41.Loc != LocInputPair {
 						panic("jit: generic call arg expects 2-word value (strings.ToUpper arg0)")
 					}
 					ctx.SyncDesc(&d41)
 					d43 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToUpper), []JITValueDesc{d41}, 2)
+					d43.NoHeapPointer = false
 					ctx.BindReg(d43.Reg, &d43)
 					ctx.BindReg(d43.Reg2, &d43)
 					ctx.StabilizeDescForControlFlow(&d43)
@@ -1920,10 +1898,7 @@ func init_vector() {
 					}
 					ctx.EnsureDesc(&d6)
 					ctx.EnsureDesc(&d103)
-					ctx.EnsureDesc(&d6)
-					ctx.EnsureDesc(&d103)
-					ctx.EnsureDesc(&d6)
-					ctx.EnsureDesc(&d103)
+					ctx.EnsureDescsTogether(&d6, &d103)
 					var d104 JITValueDesc
 					if d6.Loc == LocImm && d103.Loc == LocImm {
 						d104 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d6.Imm.Int() < d103.Imm.Int())}
@@ -2497,7 +2472,11 @@ func init_vector() {
 					ctx.StabilizeDescForControlFlow(&d166)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
+					lbl22 := ctx.ReserveLabel()
+					_ = lbl22
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl22)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					var d167 JITValueDesc
@@ -2535,7 +2514,11 @@ func init_vector() {
 					ctx.StabilizeDescForControlFlow(&d170)
 					bbpos_2_0 := int32(-1)
 					_ = bbpos_2_0
+					lbl23 := ctx.ReserveLabel()
+					_ = lbl23
 					bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl23)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					var d171 JITValueDesc
@@ -2560,8 +2543,7 @@ func init_vector() {
 					ctx.FreeDesc(&d168)
 					ctx.EnsureDesc(&d167)
 					ctx.EnsureDesc(&d167)
-					ctx.EnsureDesc(&d167)
-					ctx.EnsureDesc(&d167)
+					ctx.EnsureDescsTogether(&d167, &d167)
 					var d172 JITValueDesc
 					if d167.Loc == LocImm {
 						d172 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d167.Imm.Float() * d167.Imm.Float())}
@@ -2593,8 +2575,7 @@ func init_vector() {
 					}
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d172)
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d172)
+					ctx.EnsureDescsTogether(&d4, &d172)
 					var d173 JITValueDesc
 					if d4.Loc == LocImm && d172.Loc == LocImm {
 						d173 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d4.Imm.Float() + d172.Imm.Float())}
@@ -2630,8 +2611,7 @@ func init_vector() {
 					ctx.FreeDesc(&d172)
 					ctx.EnsureDesc(&d171)
 					ctx.EnsureDesc(&d171)
-					ctx.EnsureDesc(&d171)
-					ctx.EnsureDesc(&d171)
+					ctx.EnsureDescsTogether(&d171, &d171)
 					var d174 JITValueDesc
 					if d171.Loc == LocImm {
 						d174 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d171.Imm.Float() * d171.Imm.Float())}
@@ -2663,8 +2643,7 @@ func init_vector() {
 					}
 					ctx.EnsureDesc(&d5)
 					ctx.EnsureDesc(&d174)
-					ctx.EnsureDesc(&d5)
-					ctx.EnsureDesc(&d174)
+					ctx.EnsureDescsTogether(&d5, &d174)
 					var d175 JITValueDesc
 					if d5.Loc == LocImm && d174.Loc == LocImm {
 						d175 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d5.Imm.Float() + d174.Imm.Float())}
@@ -2700,8 +2679,7 @@ func init_vector() {
 					ctx.FreeDesc(&d174)
 					ctx.EnsureDesc(&d167)
 					ctx.EnsureDesc(&d171)
-					ctx.EnsureDesc(&d167)
-					ctx.EnsureDesc(&d171)
+					ctx.EnsureDescsTogether(&d167, &d171)
 					var d176 JITValueDesc
 					if d167.Loc == LocImm && d171.Loc == LocImm {
 						d176 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d167.Imm.Float() * d171.Imm.Float())}
@@ -2731,8 +2709,7 @@ func init_vector() {
 					ctx.FreeDesc(&d171)
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d176)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d176)
+					ctx.EnsureDescsTogether(&d3, &d176)
 					var d177 JITValueDesc
 					if d3.Loc == LocImm && d176.Loc == LocImm {
 						d177 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d3.Imm.Float() + d176.Imm.Float())}
@@ -3083,8 +3060,7 @@ func init_vector() {
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d4)
 					ctx.EnsureDesc(&d5)
-					ctx.EnsureDesc(&d4)
-					ctx.EnsureDesc(&d5)
+					ctx.EnsureDescsTogether(&d4, &d5)
 					var d180 JITValueDesc
 					if d4.Loc == LocImm && d5.Loc == LocImm {
 						d180 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d4.Imm.Float() * d5.Imm.Float())}
@@ -3136,8 +3112,7 @@ func init_vector() {
 					ctx.FreeDesc(&d180)
 					ctx.EnsureDesc(&d3)
 					ctx.EnsureDesc(&d181)
-					ctx.EnsureDesc(&d3)
-					ctx.EnsureDesc(&d181)
+					ctx.EnsureDescsTogether(&d3, &d181)
 					var d183 JITValueDesc
 					if d3.Loc == LocImm && d181.Loc == LocImm {
 						d183 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d3.Imm.Float() / d181.Imm.Float())}
@@ -3499,10 +3474,7 @@ func init_vector() {
 					}
 					ctx.EnsureDesc(&d6)
 					ctx.EnsureDesc(&d185)
-					ctx.EnsureDesc(&d6)
-					ctx.EnsureDesc(&d185)
-					ctx.EnsureDesc(&d6)
-					ctx.EnsureDesc(&d185)
+					ctx.EnsureDescsTogether(&d6, &d185)
 					var d186 JITValueDesc
 					if d6.Loc == LocImm && d185.Loc == LocImm {
 						d186 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d6.Imm.Int() < d185.Imm.Int())}
@@ -3698,14 +3670,14 @@ func init_vector() {
 						ps.General = true
 						return bbs[9].RenderPS(ps)
 					}
-					lbl22 := ctx.ReserveLabel()
-					lbl23 := ctx.ReserveLabel()
+					lbl24 := ctx.ReserveLabel()
+					lbl25 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d187.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl22)
-					ctx.EmitJmp(lbl23)
-					ctx.MarkLabel(lbl22)
+					ctx.EmitJump(CondNotEqual, lbl24)
+					ctx.EmitJmp(lbl25)
+					ctx.MarkLabel(lbl24)
 					ctx.EmitJmp(lbl8)
-					ctx.MarkLabel(lbl23)
+					ctx.MarkLabel(lbl25)
 					ctx.EmitJmp(lbl9)
 					ps190 := PhiState{General: true}
 					ps190.OverlayValues = make([]JITValueDesc, 188)
@@ -4291,10 +4263,7 @@ func init_vector() {
 					}
 					ctx.EnsureDesc(&d8)
 					ctx.EnsureDesc(&d266)
-					ctx.EnsureDesc(&d8)
-					ctx.EnsureDesc(&d266)
-					ctx.EnsureDesc(&d8)
-					ctx.EnsureDesc(&d266)
+					ctx.EnsureDescsTogether(&d8, &d266)
 					var d267 JITValueDesc
 					if d8.Loc == LocImm && d266.Loc == LocImm {
 						d267 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d8.Imm.Int() < d266.Imm.Int())}
@@ -4509,14 +4478,14 @@ func init_vector() {
 						ps.General = true
 						return bbs[10].RenderPS(ps)
 					}
-					lbl24 := ctx.ReserveLabel()
-					lbl25 := ctx.ReserveLabel()
+					lbl26 := ctx.ReserveLabel()
+					lbl27 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d268.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl24)
-					ctx.EmitJmp(lbl25)
-					ctx.MarkLabel(lbl24)
+					ctx.EmitJump(CondNotEqual, lbl26)
+					ctx.EmitJmp(lbl27)
+					ctx.MarkLabel(lbl26)
 					ctx.EmitJmp(lbl14)
-					ctx.MarkLabel(lbl25)
+					ctx.MarkLabel(lbl27)
 					ctx.EmitJmp(lbl13)
 					ps273 := PhiState{General: true}
 					ps273.OverlayValues = make([]JITValueDesc, 273)
@@ -5123,7 +5092,11 @@ func init_vector() {
 					ctx.StabilizeDescForControlFlow(&d356)
 					bbpos_3_0 := int32(-1)
 					_ = bbpos_3_0
+					lbl28 := ctx.ReserveLabel()
+					_ = lbl28
 					bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl28)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					var d357 JITValueDesc
@@ -5161,7 +5134,11 @@ func init_vector() {
 					ctx.StabilizeDescForControlFlow(&d360)
 					bbpos_4_0 := int32(-1)
 					_ = bbpos_4_0
+					lbl29 := ctx.ReserveLabel()
+					_ = lbl29
 					bbpos_4_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl29)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					var d361 JITValueDesc
@@ -5186,8 +5163,7 @@ func init_vector() {
 					ctx.FreeDesc(&d358)
 					ctx.EnsureDesc(&d357)
 					ctx.EnsureDesc(&d361)
-					ctx.EnsureDesc(&d357)
-					ctx.EnsureDesc(&d361)
+					ctx.EnsureDescsTogether(&d357, &d361)
 					var d362 JITValueDesc
 					if d357.Loc == LocImm && d361.Loc == LocImm {
 						d362 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d357.Imm.Float() * d361.Imm.Float())}
@@ -5217,8 +5193,7 @@ func init_vector() {
 					ctx.FreeDesc(&d361)
 					ctx.EnsureDesc(&d7)
 					ctx.EnsureDesc(&d362)
-					ctx.EnsureDesc(&d7)
-					ctx.EnsureDesc(&d362)
+					ctx.EnsureDescsTogether(&d7, &d362)
 					var d363 JITValueDesc
 					if d7.Loc == LocImm && d362.Loc == LocImm {
 						d363 = JITValueDesc{Loc: LocImm, Type: tagFloat, Imm: NewFloat(d7.Imm.Float() + d362.Imm.Float())}
@@ -5932,14 +5907,14 @@ func init_vector() {
 						ps.General = true
 						return bbs[12].RenderPS(ps)
 					}
-					lbl26 := ctx.ReserveLabel()
-					lbl27 := ctx.ReserveLabel()
+					lbl30 := ctx.ReserveLabel()
+					lbl31 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d370.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl26)
-					ctx.EmitJmp(lbl27)
-					ctx.MarkLabel(lbl26)
+					ctx.EmitJump(CondNotEqual, lbl30)
+					ctx.EmitJmp(lbl31)
+					ctx.MarkLabel(lbl30)
 					ctx.EmitJmp(lbl15)
-					ctx.MarkLabel(lbl27)
+					ctx.MarkLabel(lbl31)
 					ctx.SyncDesc(&d7)
 					if d7.Loc == LocReg {
 						ctx.ProtectReg(d7.Reg)
@@ -6710,10 +6685,7 @@ func init_vector() {
 					}
 					ctx.EnsureDesc(&d8)
 					ctx.EnsureDesc(&d478)
-					ctx.EnsureDesc(&d8)
-					ctx.EnsureDesc(&d478)
-					ctx.EnsureDesc(&d8)
-					ctx.EnsureDesc(&d478)
+					ctx.EnsureDescsTogether(&d8, &d478)
 					var d479 JITValueDesc
 					if d8.Loc == LocImm && d478.Loc == LocImm {
 						d479 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d8.Imm.Int() < d478.Imm.Int())}
@@ -6969,14 +6941,14 @@ func init_vector() {
 						ps.General = true
 						return bbs[13].RenderPS(ps)
 					}
-					lbl28 := ctx.ReserveLabel()
-					lbl29 := ctx.ReserveLabel()
+					lbl32 := ctx.ReserveLabel()
+					lbl33 := ctx.ReserveLabel()
 					ctx.EmitCmpRegImm32(d480.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl28)
-					ctx.EmitJmp(lbl29)
-					ctx.MarkLabel(lbl28)
+					ctx.EmitJump(CondNotEqual, lbl32)
+					ctx.EmitJmp(lbl33)
+					ctx.MarkLabel(lbl32)
 					ctx.EmitJmp(lbl12)
-					ctx.MarkLabel(lbl29)
+					ctx.MarkLabel(lbl33)
 					ctx.EmitJmp(lbl13)
 					ps483 := PhiState{General: true}
 					ps483.OverlayValues = make([]JITValueDesc, 481)
@@ -7895,7 +7867,10 @@ func init_vector() {
 				_ = bbs[0].RenderPS(ps592)
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
-				ctx.FreeStack(int32(128))
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
 				return result
 			},
 			JITVirtualArgs: true,

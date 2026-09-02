@@ -86,61 +86,18 @@ func declareSQLLiteralParameterizer() {
 				d0 := args[0]
 				d0.ID = 0
 				d2 := d0
-				ctx.EnsureDesc(&d2)
-				if d2.Loc == LocImm {
-					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					tag := d2.Imm.GetTag()
-					switch tag {
-					case tagBool:
-						ctx.EmitMakeBool(tmpPair, d2)
-					case tagInt:
-						ctx.EmitMakeInt(tmpPair, d2)
-					case tagFloat:
-						ctx.EmitMakeFloat(tmpPair, d2)
-					case tagNil:
-						ctx.EmitMakeNil(tmpPair)
-					default:
-						ptrWord, auxWord := d2.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
-					}
-					d2 = tmpPair
-				} else if d2.Loc == LocReg {
-					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(d2.Reg), Reg2: ctx.AllocRegExcept(d2.Reg)}
-					switch d2.Type {
-					case tagBool:
-						ctx.EmitMakeBool(tmpPair, d2)
-					case tagInt:
-						ctx.EmitMakeInt(tmpPair, d2)
-					case tagFloat:
-						ctx.EmitMakeFloat(tmpPair, d2)
-					default:
-						panic("jit: Scmer.String requires Scmer pair receiver")
-					}
-					ctx.FreeDesc(&d2)
-					d2 = tmpPair
-				} else if d2.Loc == LocMem {
+				ctx.SyncDesc(&d2)
+				if d2.Loc == LocMem {
 					tmpScalar := JITValueDesc{Loc: LocReg, Type: d2.Type, Reg: ctx.AllocReg()}
 					scratch := ctx.AllocRegExcept(tmpScalar.Reg)
 					ctx.EmitMovRegImm64(scratch, uint64(d2.MemPtr))
 					ctx.EmitMovRegMem(tmpScalar.Reg, scratch, 0)
 					ctx.FreeReg(scratch)
 					ctx.BindReg(tmpScalar.Reg, &tmpScalar)
-					tmpPair := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocRegExcept(tmpScalar.Reg), Reg2: ctx.AllocRegExcept(tmpScalar.Reg)}
-					switch tmpScalar.Type {
-					case tagBool:
-						ctx.EmitMakeBool(tmpPair, tmpScalar)
-					case tagInt:
-						ctx.EmitMakeInt(tmpPair, tmpScalar)
-					case tagFloat:
-						ctx.EmitMakeFloat(tmpPair, tmpScalar)
-					default:
-						panic("jit: Scmer.String requires Scmer pair receiver")
-					}
-					ctx.FreeDesc(&tmpScalar)
-					d2 = tmpPair
+					d2 = tmpScalar
 				}
-				if d2.Loc != LocRegPair && d2.Loc != LocStackPair {
+				d2 = JITPrepareScmerGoArg(ctx, d2)
+				if d2.Loc != LocRegPair && d2.Loc != LocStackPair && d2.Loc != LocInputPair {
 					panic("jit: Scmer.String receiver not materialized as pair")
 				}
 				d1 := ctx.EmitGoCallScalar(GoFuncAddr(Scmer.String), []JITValueDesc{d2}, 2)
@@ -170,7 +127,7 @@ func declareSQLLiteralParameterizer() {
 					ctx.FreeDesc(&d1)
 					d1 = tmpPair
 				}
-				if d1.Loc != LocRegPair && d1.Loc != LocStackPair {
+				if d1.Loc != LocRegPair && d1.Loc != LocStackPair && d1.Loc != LocInputPair {
 					panic("jit: generic call arg expects 2-word value (parameterizeSQLSelectLiterals arg0)")
 				}
 				ctx.SyncDesc(&d1)
@@ -184,17 +141,14 @@ func declareSQLLiteralParameterizer() {
 				stackArray7 := ctx.AllocStack(int32(48))
 				_ = stackArray7
 				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
+				ctx.SyncDesc(&d4)
 				ctx.EmitStoreScmerToStack(d4, int32(stackArray7)+int32(0))
 				d8 := ctx.EmitNewSliceFromGoSlice(&d5)
-				ctx.EnsureDesc(&d8)
-				ctx.EnsureDesc(&d8)
+				ctx.SyncDesc(&d8)
 				ctx.EmitStoreScmerToStack(d8, int32(stackArray7)+int32(16))
 				ctx.FreeDesc(&d8)
 				ctx.EnsureDesc(&d6)
-				ctx.EnsureDesc(&d6)
-				ctx.EnsureDesc(&d6)
+				ctx.SyncDesc(&d6)
 				ctx.EmitStoreScmerToStack(d6, int32(stackArray7)+int32(32))
 				d9 := JITValueDesc{Loc: LocVirtualSlice, Type: tagSlice, KnownSliceLen: int32(3), KnownSliceCap: int32(3), SliceSizeKnown: true}
 				_ = d9
@@ -223,8 +177,8 @@ func declareSQLLiteralParameterizer() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				ctx.EnsureDesc(&d12)
-				if d12.Loc == LocRegPair {
+				ctx.SyncDesc(&d12)
+				if d12.Loc == LocRegPair || d12.Loc == LocStackPair || d12.Loc == LocInputPair {
 					ctx.EmitMovPairToResult(&d12, &result)
 					result.Type = d12.Type
 				} else {

@@ -303,16 +303,24 @@ func init_scheduler() {
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
+				resultRegsProtected := result.Loc == LocRegPair
+				if resultRegsProtected {
+					ctx.ProtectReg(result.Reg)
+					ctx.ProtectReg(result.Reg2)
+				}
 				lbl0 := ctx.ReserveLabel()
 				bbpos_0_0 := int32(-1)
 				_ = bbpos_0_0
 				lbl1 := ctx.ReserveLabel()
+				_ = lbl1
 				bbpos_0_1 := int32(-1)
 				_ = bbpos_0_1
 				lbl2 := ctx.ReserveLabel()
+				_ = lbl2
 				bbpos_0_2 := int32(-1)
 				_ = bbpos_0_2
 				lbl3 := ctx.ReserveLabel()
+				_ = lbl3
 				bbs[0].RenderPS = func(ps PhiState) JITValueDesc {
 					if !ps.General {
 						if bbs[0].VisitCount >= 0 {
@@ -482,7 +490,11 @@ func init_scheduler() {
 					ctx.StabilizeDescForControlFlow(&d12)
 					bbpos_1_0 := int32(-1)
 					_ = bbpos_1_0
+					lbl6 := ctx.ReserveLabel()
+					_ = lbl6
 					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
+					ctx.MarkLabel(lbl6)
+					ctx.ResolveFixups()
 					ctx.ReclaimUntrackedRegs()
 					ctx.ReclaimUntrackedRegs()
 					var d13 JITValueDesc
@@ -532,6 +544,7 @@ func init_scheduler() {
 					ctx.SyncDesc(&d16)
 					ctx.SyncDesc(&d15)
 					d17 = ctx.EmitGoCallScalar(GoFuncAddr((*Scheduler).Clear), []JITValueDesc{d16, d15}, 1)
+					d17.NoHeapPointer = true
 					ctx.EmitAndRegImm32(d17.Reg, 1)
 					d17.Type = tagBool
 					ctx.BindReg(d17.Reg, &d17)
@@ -558,6 +571,10 @@ func init_scheduler() {
 				_ = bbs[0].RenderPS(ps19)
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
+				if resultRegsProtected {
+					ctx.UnprotectReg(result.Reg2)
+					ctx.UnprotectReg(result.Reg)
+				}
 				return result
 			},
 			JITVirtualArgs: true,

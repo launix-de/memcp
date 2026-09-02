@@ -126,9 +126,15 @@ type jitRegexEmitter struct {
 	inputStartOff int32
 	captureStarts []int32
 	captures      []JITValueDesc
+	stackStart    int32
 }
 
-func (emitter *jitRegexEmitter) reserveMachineState(input JITValueDesc, invalidLabel uint8, nilLabel *uint8, stringify bool) {
+func (emitter *jitRegexEmitter) reserveMachineState(input JITValueDesc, invalidLabel JITLabel, nilLabel *JITLabel, stringify bool) {
+	emitter.stackStart = emitter.ctx.BPOffset
+	// A regex is a self-contained control-flow region. Path-local temporaries
+	// from the producer are dead here unless they still own a descriptor; make
+	// those registers available before reserving cursor/end/scan.
+	emitter.ctx.ReclaimUntrackedRegs()
 	original := input
 	if stringify {
 		original = jitMatchStableValue(emitter.ctx, input)
@@ -228,6 +234,7 @@ func (emitter *jitRegexEmitter) releaseMachineState() {
 	emitter.ctx.FreeReg(emitter.scan)
 	emitter.ctx.FreeReg(emitter.end)
 	emitter.ctx.FreeReg(emitter.cursor)
+	emitter.ctx.FreeStack(emitter.ctx.BPOffset - emitter.stackStart)
 }
 
 func (emitter *jitRegexEmitter) emitCaptureEmpty(index int) {
@@ -303,7 +310,7 @@ func (emitter *jitRegexEmitter) emitResetCaptures(terms []jitRegexTerm) {
 	}
 }
 
-func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel JITLabel) {
 	attemptLabel := emitter.ctx.ReserveLabel()
 	attemptFailLabel := emitter.ctx.ReserveLabel()
 	emitter.ctx.MarkLabel(attemptLabel)
@@ -329,7 +336,7 @@ func (emitter *jitRegexEmitter) emitProgram(successLabel, failLabel uint8) {
 	emitter.ctx.EmitJmp(failLabel)
 }
 
-func (emitter *jitRegexEmitter) emitSequence(terms []jitRegexTerm, successLabel, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitSequence(terms []jitRegexTerm, successLabel, failLabel JITLabel) {
 	for len(terms) != 0 {
 		term := terms[0]
 		terms = terms[1:]
@@ -366,7 +373,7 @@ func (emitter *jitRegexEmitter) emitSequence(terms []jitRegexTerm, successLabel,
 	emitter.ctx.EmitJmp(successLabel)
 }
 
-func (emitter *jitRegexEmitter) emitAlternatives(branches []*syntax.Regexp, rest []jitRegexTerm, successLabel, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitAlternatives(branches []*syntax.Regexp, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
 	if len(branches) == 0 {
 		emitter.ctx.EmitJmp(failLabel)
 		return
@@ -387,7 +394,7 @@ func (emitter *jitRegexEmitter) emitAlternatives(branches []*syntax.Regexp, rest
 	}
 }
 
-func (emitter *jitRegexEmitter) emitOptional(node *syntax.Regexp, rest []jitRegexTerm, successLabel, failLabel uint8, greedy bool) {
+func (emitter *jitRegexEmitter) emitOptional(node *syntax.Regexp, rest []jitRegexTerm, successLabel, failLabel JITLabel, greedy bool) {
 	empty := &syntax.Regexp{Op: syntax.OpEmptyMatch}
 	branches := []*syntax.Regexp{node, empty}
 	if !greedy {
@@ -416,7 +423,7 @@ func jitRegexSimpleWidth(node *syntax.Regexp) (int, bool) {
 	return 0, false
 }
 
-func (emitter *jitRegexEmitter) emitSimple(node *syntax.Regexp, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitSimple(node *syntax.Regexp, failLabel JITLabel) {
 	if node.Op == syntax.OpConcat {
 		for _, child := range node.Sub {
 			emitter.emitSimple(child, failLabel)
@@ -426,7 +433,7 @@ func (emitter *jitRegexEmitter) emitSimple(node *syntax.Regexp, failLabel uint8)
 	emitter.emitAtom(node, failLabel)
 }
 
-func (emitter *jitRegexEmitter) emitRepeat(node *syntax.Regexp, min, max int, greedy bool, rest []jitRegexTerm, successLabel, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitRepeat(node *syntax.Regexp, min, max int, greedy bool, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
 	if max >= 0 {
 		if max < min {
 			panic("jit: invalid regex repetition")
@@ -487,7 +494,7 @@ func jitRegexTailOnly(terms []jitRegexTerm) bool {
 	return true
 }
 
-func (emitter *jitRegexEmitter) emitSimpleRepeat(node *syntax.Regexp, width, min int, greedy bool, rest []jitRegexTerm, successLabel, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitSimpleRepeat(node *syntax.Regexp, width, min int, greedy bool, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
 	for range min {
 		emitter.emitSimple(node, failLabel)
 	}
@@ -533,7 +540,7 @@ func (emitter *jitRegexEmitter) emitSimpleRepeat(node *syntax.Regexp, width, min
 	emitter.ctx.EmitJmp(retry)
 }
 
-func (emitter *jitRegexEmitter) emitComplexTailRepeat(node *syntax.Regexp, min int, rest []jitRegexTerm, successLabel, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitComplexTailRepeat(node *syntax.Regexp, min int, rest []jitRegexTerm, successLabel, failLabel JITLabel) {
 	for range min {
 		next := emitter.ctx.ReserveLabel()
 		emitter.emitSequence(jitRegexFlatten(node, len(emitter.captures) != 0), next, failLabel)
@@ -558,7 +565,7 @@ func (emitter *jitRegexEmitter) emitComplexTailRepeat(node *syntax.Regexp, min i
 	emitter.emitSequence(rest, successLabel, failLabel)
 }
 
-func (emitter *jitRegexEmitter) emitAtom(node *syntax.Regexp, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitAtom(node *syntax.Regexp, failLabel JITLabel) {
 	switch node.Op {
 	case syntax.OpNoMatch:
 		emitter.ctx.EmitJmp(failLabel)
@@ -590,7 +597,7 @@ func (emitter *jitRegexEmitter) emitAtom(node *syntax.Regexp, failLabel uint8) {
 	}
 }
 
-func (emitter *jitRegexEmitter) emitBounds(width int, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitBounds(width int, failLabel JITLabel) {
 	remaining := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
 	emitter.ctx.EmitMovRegReg(remaining, emitter.end)
 	emitter.ctx.EmitSubInt64(remaining, emitter.cursor)
@@ -599,7 +606,7 @@ func (emitter *jitRegexEmitter) emitBounds(width int, failLabel uint8) {
 	emitter.ctx.EmitJump(CondUnsignedBelow, failLabel)
 }
 
-func (emitter *jitRegexEmitter) emitLiteral(node *syntax.Regexp, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitLiteral(node *syntax.Regexp, failLabel JITLabel) {
 	literal := []byte(string(node.Rune))
 	if len(literal) == 0 {
 		return
@@ -678,7 +685,7 @@ func jitRegexByteRanges(node *syntax.Regexp) [][2]byte {
 	return ranges
 }
 
-func (emitter *jitRegexEmitter) emitByteClass(node *syntax.Regexp, failLabel uint8) {
+func (emitter *jitRegexEmitter) emitByteClass(node *syntax.Regexp, failLabel JITLabel) {
 	emitter.emitBounds(1, failLabel)
 	char := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
 	emitter.ctx.EmitMovRegMemB(char, emitter.cursor, 0)
@@ -708,7 +715,7 @@ func (emitter *jitRegexEmitter) emitByteClass(node *syntax.Regexp, failLabel uin
 	emitter.ctx.EmitAddRegImm32(emitter.cursor, 1)
 }
 
-func (emitter *jitRegexEmitter) emitBeginLine(failLabel uint8) {
+func (emitter *jitRegexEmitter) emitBeginLine(failLabel JITLabel) {
 	base := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
 	emitter.ctx.EmitMovRegMem(base, emitter.ctx.StackReg, emitter.inputStartOff)
 	done := emitter.ctx.ReserveLabel()
@@ -722,7 +729,7 @@ func (emitter *jitRegexEmitter) emitBeginLine(failLabel uint8) {
 	emitter.ctx.FreeReg(base)
 }
 
-func (emitter *jitRegexEmitter) emitEndLine(failLabel uint8) {
+func (emitter *jitRegexEmitter) emitEndLine(failLabel JITLabel) {
 	done := emitter.ctx.ReserveLabel()
 	emitter.ctx.EmitCmpInt64(emitter.cursor, emitter.end)
 	emitter.ctx.EmitJump(CondEqual, done)
@@ -753,7 +760,7 @@ func (emitter *jitRegexEmitter) emitWordClass(pointer Reg, offset int32) Reg {
 	return combined
 }
 
-func (emitter *jitRegexEmitter) emitWordBoundary(failLabel uint8, expected bool) {
+func (emitter *jitRegexEmitter) emitWordBoundary(failLabel JITLabel, expected bool) {
 	prev := emitter.ctx.AllocRegExcept(emitter.cursor, emitter.end, emitter.scan)
 	emitter.ctx.EmitMovRegImm64(prev, 0)
 	prevMissing := emitter.ctx.ReserveLabel()
@@ -802,7 +809,7 @@ func jitRegexCaptureTargets(ctx *JITContext, count int) []JITValueDesc {
 	return targets
 }
 
-func jitEmitNativeRegex(ctx *JITContext, program *jitRegexProgram, value JITValueDesc, captures []JITValueDesc, successLabel, failLabel, invalidLabel uint8, nilLabel *uint8, stringify bool) {
+func jitEmitNativeRegex(ctx *JITContext, program *jitRegexProgram, value JITValueDesc, captures []JITValueDesc, successLabel, failLabel, invalidLabel JITLabel, nilLabel *JITLabel, stringify bool) {
 	emitter := &jitRegexEmitter{ctx: ctx, program: program, captures: captures}
 	emitter.reserveMachineState(value, invalidLabel, nilLabel, stringify)
 	emitter.emitProgram(successLabel, failLabel)
@@ -866,7 +873,7 @@ func jitEmitConstantRegexpPredicate(ctx *JITContext, pattern *regexp.Regexp, val
 // jitEmitConstantRegexpCaptures emits captures directly into their final
 // JITValueDesc slots. No index slice or intermediate capture representation is
 // created at runtime.
-func jitEmitConstantRegexpCaptures(ctx *JITContext, pattern *regexp.Regexp, value JITValueDesc, failLabel uint8) []JITValueDesc {
+func jitEmitConstantRegexpCaptures(ctx *JITContext, pattern *regexp.Regexp, value JITValueDesc, failLabel JITLabel) []JITValueDesc {
 	program := jitCompileRegexProgram(pattern)
 	captures := jitRegexCaptureTargets(ctx, program.captures)
 	success := ctx.ReserveLabel()

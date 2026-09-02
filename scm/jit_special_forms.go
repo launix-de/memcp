@@ -66,7 +66,7 @@ func jitEmitSpecialEval(ctx *JITContext, args []Scmer, _ []JITValueDesc, result 
 	callArgs := make([]Scmer, 0, 1+2*ctx.LocalSlotCount)
 	callArgs = append(callArgs, args[0])
 	callArgs = append(callArgs, jitRuntimeCaptureArgExprs(ctx)...)
-	return jitEmitGoVariadicCallFromExprs(ctx, jitEvalSpecial, callArgs, ctx.SliceBase, result)
+	return jitEmitGoVariadicCallFromExprs(ctx, jitEvalSpecial, callArgs, ctx.SliceBase, result, false)
 }
 
 func jitEmitSpecialTime(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -94,7 +94,25 @@ func jitEmitSpecialDefine(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	if !binding.IsSymbol() {
 		panic("jit: define/set target is not a symbol")
 	}
-	value := jitCompileExpr(ctx, args[1], ctx.SliceBase, result)
+	valueTarget := jitAllocTrackedPair(ctx, JITTypeUnknown)
+	previousDefiningSymbol := ctx.DefiningSymbol
+	ctx.DefiningSymbol = binding.Symbol()
+	value := jitCompileExpr(ctx, args[1], ctx.SliceBase, valueTarget)
+	ctx.DefiningSymbol = previousDefiningSymbol
+	if value.Loc != LocRegPair || value.Reg != valueTarget.Reg || value.Reg2 != valueTarget.Reg2 {
+		ctx.FreeDesc(&valueTarget)
+	}
+	if value.Loc == LocParserTemplate && value.Parser != nil {
+		value.Parser.Name = binding.Symbol()
+		if ctx.Env == nil {
+			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc)}
+		}
+		if ctx.Env.Vars == nil {
+			ctx.Env.Vars = make(map[Symbol]JITValueDesc)
+		}
+		ctx.Env.Vars[binding.Symbol()] = value
+		return value
+	}
 	ctx.EnsureDesc(&value)
 	stored := value
 	if stored.Loc != LocRegPair && stored.Loc != LocImm && stored.Loc != LocStackPair && stored.Loc != LocInputPair {
@@ -124,17 +142,26 @@ func jitEmitSpecialSetN(ctx *JITContext, args []Scmer, _ []JITValueDesc, result 
 		panic("jit: setN target is not a numbered local")
 	}
 	idx := int(targetVar.NthLocalVar())
-	if idx < 0 || idx >= ctx.LocalSlotCount || !ctx.SliceBaseTracksRSP {
-		panic("jit: setN target outside invocation frame")
+	if idx < 0 || ctx.Env == nil || idx >= len(ctx.Env.Numbered) {
+		panic("jit: setN target outside lexical frame")
 	}
 	value := jitCompileExpr(ctx, args[1], ctx.SliceBase, result)
-	ctx.EnsureDesc(&value)
+	if value.Loc == LocParserTemplate && value.Parser != nil {
+		ctx.Env.Numbered[idx] = value
+		return value
+	}
 	if value.Loc != LocRegPair && value.Loc != LocImm && value.Loc != LocStackPair && value.Loc != LocInputPair {
+		ctx.EnsureDesc(&value)
 		pair := jitAllocTrackedPair(ctx, value.Type)
 		value = jitPlaceIntoPair(ctx, &value, pair)
 	}
-	ctx.EmitStoreScmerToStack(value, int32(idx*16))
-	return value
+	target := ctx.Env.Numbered[idx]
+	ctx.EmitCopyScmerToDesc(&target, &value)
+	target.Type = value.Type
+	target.NoHeapPointer = value.NoHeapPointer
+	target.Rooted = true
+	ctx.Env.Numbered[idx] = target
+	return jitPlaceScmerIntoTarget(ctx, value, result)
 }
 
 func jitEmitSpecialParser(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -150,14 +177,14 @@ func jitEmitSpecialParser(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	if len(args) > 2 {
 		whitespace = args[2]
 	}
-	callArgs := []Scmer{
-		NewSlice([]Scmer{NewSymbol("quote"), args[0]}),
-		NewSlice([]Scmer{NewSymbol("quote"), generator}),
-		NewSlice([]Scmer{NewSymbol("quote"), whitespace}),
-		NewBool(ignoreResult),
+	var runtimeOuter *Env
+	if ctx.RuntimeEnv.GetTag() == tagAny {
+		runtimeOuter, _ = ctx.RuntimeEnv.Any().(*Env)
 	}
-	callArgs = append(callArgs, jitRuntimeCaptureArgExprs(ctx)...)
-	return jitEmitGoVariadicCallFromExprs(ctx, jitParserSpecial, callArgs, ctx.SliceBase, result)
+	return JITValueDesc{Loc: LocParserTemplate, Type: tagParser, Parser: &JITParserTemplate{
+		Syntax: args[0], Generator: generator, Whitespace: whitespace,
+		IgnoreResult: ignoreResult, Outer: ctx.Env, RuntimeOuter: runtimeOuter,
+	}}
 }
 
 func jitEmitSpecialOptimizerProcReturn(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
@@ -196,7 +223,11 @@ func jitEmitSpecialBegin(scoped bool, reserve bool) func(*JITContext, []Scmer, [
 		}
 		outerEnv := ctx.Env
 		if scoped {
-			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc), Outer: outerEnv}
+			var numbered []JITValueDesc
+			if outerEnv != nil {
+				numbered = outerEnv.Numbered
+			}
+			ctx.Env = &JITEnv{Vars: make(map[Symbol]JITValueDesc), Numbered: numbered, Outer: outerEnv}
 			defer func() { ctx.Env = outerEnv }()
 		}
 		for _, form := range body[:len(body)-1] {
@@ -230,7 +261,6 @@ func jitEmitSpecialReservedList(ctx *JITContext, args []Scmer, _ []JITValueDesc,
 		panic("jit: malformed !!list")
 	}
 	capacity := jitCompileExpr(ctx, capacityExpr, ctx.SliceBase, JITValueDesc{Loc: LocAny})
-	ctx.AutoImportSafe = false
 	target := jitEnsureResultPair(ctx, result)
 	out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitMakeReservedList), []JITValueDesc{capacity}, target)
 	out.Type = tagSlice
@@ -265,62 +295,45 @@ func jitEmitSpecialIf(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JI
 		ctx.TrackImm(imm)
 		return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
 	}
-	target := jitEnsureResultPair(ctx, result)
-	ctx.ProtectReg(target.Reg)
-	ctx.ProtectReg(target.Reg2)
-	defer func() {
-		ctx.UnprotectReg(target.Reg2)
-		ctx.UnprotectReg(target.Reg)
-	}()
-	var endLabel uint8
-	hasDynamic := false
+	target := result
+	if target.Loc != LocStackPair {
+		target = jitEnsureResultPair(ctx, result)
+		ctx.ProtectReg(target.Reg)
+		ctx.ProtectReg(target.Reg2)
+		defer func() {
+			ctx.UnprotectReg(target.Reg2)
+			ctx.UnprotectReg(target.Reg)
+		}()
+	}
+	endLabel := ctx.ReserveLabel()
 	i := 0
 	for i+1 < len(args) {
-		boolean := jitCompileCondition(ctx, args[i], ctx.SliceBase)
-		if boolean.Loc == LocImm {
-			if boolean.Imm.Bool() {
-				value := jitCompileExpr(ctx, args[i+1], ctx.SliceBase, target)
-				_ = jitPlaceIntoPair(ctx, &value, target)
-				if hasDynamic {
-					ctx.MarkLabel(endLabel)
-				}
-				ctx.BindReg(target.Reg, &target)
-				ctx.BindReg(target.Reg2, &target)
-				return target
-			}
-			i += 2
-			continue
-		}
-		if !hasDynamic {
-			endLabel = ctx.ReserveLabel()
-			hasDynamic = true
-		}
+		thenLabel := ctx.ReserveLabel()
 		nextLabel := ctx.ReserveLabel()
-		ctx.EmitCmpRegImm32(boolean.Reg, 0)
-		ctx.EmitJcc(CcE, nextLabel)
-		ctx.FreeDesc(&boolean)
+		jitEmitCondJump(ctx, args[i], ctx.SliceBase, thenLabel, nextLabel)
+		ctx.MarkLabel(thenLabel)
 		value := jitCompileExpr(ctx, args[i+1], ctx.SliceBase, target)
-		_ = jitPlaceIntoPair(ctx, &value, target)
+		_ = jitPlaceScmerIntoTarget(ctx, value, target)
 		ctx.EmitJmp(endLabel)
 		ctx.MarkLabel(nextLabel)
 		i += 2
 	}
 	if i < len(args) {
 		value := jitCompileExpr(ctx, args[i], ctx.SliceBase, target)
-		_ = jitPlaceIntoPair(ctx, &value, target)
+		_ = jitPlaceScmerIntoTarget(ctx, value, target)
 	} else {
 		nilValue := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-		_ = jitPlaceIntoPair(ctx, &nilValue, target)
+		_ = jitPlaceScmerIntoTarget(ctx, nilValue, target)
 	}
-	if hasDynamic {
-		ctx.MarkLabel(endLabel)
+	ctx.MarkLabel(endLabel)
+	if target.Loc == LocRegPair {
+		ctx.BindReg(target.Reg, &target)
+		ctx.BindReg(target.Reg2, &target)
 	}
-	ctx.BindReg(target.Reg, &target)
-	ctx.BindReg(target.Reg2, &target)
 	return target
 }
 
-func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel uint8) {
+func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel) {
 	i := 0
 	for i+1 < len(args) {
 		thenLabel := ctx.ReserveLabel()
@@ -339,7 +352,7 @@ func jitEmitSpecialIfCond(ctx *JITContext, args []Scmer, trueLabel, falseLabel u
 }
 
 func jitEmitSpecialBoolFoldCond(takeWhen bool) JITCondEmitter {
-	return func(ctx *JITContext, args []Scmer, trueLabel, falseLabel uint8) {
+	return func(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel) {
 		if len(args) == 0 {
 			if takeWhen {
 				ctx.EmitJmp(falseLabel)
@@ -369,7 +382,7 @@ func jitEmitSpecialBoolFold(takeWhen bool) func(*JITContext, []Scmer, []JITValue
 			ctx.TrackImm(imm)
 			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
 		}
-		var takeLabel, endLabel uint8
+		var takeLabel, endLabel JITLabel
 		hasDynamic := false
 		compileTimeTake := false
 		for _, expression := range args {
@@ -515,6 +528,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), body}))
 	argExprs = append(argExprs, NewInt(int64(numVars)))
 	freeSymbols := jitLambdaFreeSymbols(params, body)
+	capturedSymbols := make([]Symbol, 0, len(freeSymbols))
 	if jitExpressionConsumesRuntimeEnv(body) {
 		seen := make(map[Symbol]struct{}, len(freeSymbols))
 		for _, symbol := range freeSymbols {
@@ -530,6 +544,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 	for _, symbol := range freeSymbols {
 		if ctx.Env != nil {
 			if _, ok := ctx.Env.Lookup(symbol); ok {
+				capturedSymbols = append(capturedSymbols, symbol)
 				argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(symbol))}))
 				argExprs = append(argExprs, NewSymbol(string(symbol)))
 				continue
@@ -557,9 +572,60 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), key}))
 		argExprs = append(argExprs, key)
 	}
+	if ctx.RecursiveLambdas && ctx.DefiningSymbol != "" && len(capturedSymbols)+len(outerIndices) != 0 &&
+		len(argExprs) == 3+2*(len(capturedSymbols)+len(outerIndices)) && !jitExpressionConsumesRuntimeEnv(body) {
+		plainParams := params.WithoutSourceInfo()
+		if plainParams.IsSlice() {
+			publicParams := plainParams.Slice()
+			templateParams := append([]Scmer(nil), publicParams...)
+			for len(templateParams) < numVars {
+				templateParams = append(templateParams, NewSymbol("\x00jit-bound-padding"))
+			}
+			symbolBindings := make(map[Symbol]NthLocalVar, len(capturedSymbols))
+			for _, symbol := range capturedSymbols {
+				symbolBindings[symbol] = NthLocalVar(len(templateParams))
+				templateParams = append(templateParams, NewSymbol("\x00jit-bound-symbol"))
+			}
+			outerBindings := make(map[NthLocalVar]NthLocalVar, len(outerIndices))
+			for _, index := range outerIndices {
+				outerBindings[index] = NthLocalVar(len(templateParams))
+				templateParams = append(templateParams, NewSymbol("\x00jit-bound-outer"))
+			}
+			template := jitBuildNamedLambdaClosure(
+				NewSymbol(string(ctx.DefiningSymbol)), NewSlice(templateParams),
+				jitBindLambdaCaptures(body, symbolBindings, outerBindings), NewInt(int64(len(templateParams))),
+			)
+			template = jitCompileModeDeferred(true, template)
+			ctx.TrackImm(template)
+			builderArgs := make([]Scmer, 0, len(argExprs)+2)
+			builderArgs = append(builderArgs, template)
+			builderArgs = append(builderArgs, NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(ctx.DefiningSymbol))}))
+			builderArgs = append(builderArgs, argExprs...)
+			return jitEmitGoVariadicCallFromExprs(ctx, jitBuildNamedBoundCompiledLambdaClosure, builderArgs, ctx.SliceBase, result, false)
+		}
+	}
+	if ctx.RecursiveLambdas && ctx.DefiningSymbol != "" && len(argExprs) == 3 {
+		closure := jitBuildNamedLambdaClosure(
+			NewSymbol(string(ctx.DefiningSymbol)), params, body, NewInt(int64(numVars)),
+		)
+		compiled := jitCompileModeDeferred(true, closure)
+		ctx.TrackImm(compiled)
+		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
+	}
 	builder := jitBuildLambdaClosure
 	if ctx.RecursiveLambdas {
-		builder = jitBuildCompiledLambdaClosure
+		if ctx.DefiningSymbol != "" {
+			argExprs = append([]Scmer{NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(ctx.DefiningSymbol))})}, argExprs...)
+			if !jitExpressionConsumesRuntimeEnv(body) {
+				builder = jitBuildNamedCompiledLambdaClosure
+			} else {
+				builder = jitBuildNamedLambdaClosure
+			}
+		} else {
+			if !jitExpressionConsumesRuntimeEnv(body) {
+				builder = jitBuildCompiledLambdaClosure
+			}
+		}
 	}
-	return jitEmitGoVariadicCallFromExprs(ctx, builder, argExprs, ctx.SliceBase, result)
+	return jitEmitGoVariadicCallFromExprs(ctx, builder, argExprs, ctx.SliceBase, result, false)
 }

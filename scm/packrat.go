@@ -73,11 +73,14 @@ func (r *parserResult) variables() map[Symbol]Scmer {
 }
 
 type ScmParser struct {
-	Root      packrat.Parser[*parserResult]
-	Syntax    Scmer
-	Generator Scmer
-	Outer     *Env
-	Skipper   *regexp.Regexp
+	Root       packrat.Parser[*parserResult]
+	Syntax     Scmer
+	Generator  Scmer
+	Outer      *Env
+	Skipper    *regexp.Regexp
+	Compiled   *JITEntryPoint
+	JITProgram *jitParserProgram
+	JITRule    int
 }
 
 type ScmParserVariable struct {
@@ -94,6 +97,16 @@ type UndefinedParser struct {
 
 // ScmCaptureParser wraps a parser to capture the matched text
 type ScmCaptureParser struct {
+	Parser packrat.Parser[*parserResult]
+}
+
+// optimizedParserSyntax keeps the architecture-independent grammar shape next
+// to the parser object produced by the optimizer. Runtime parsing unwraps
+// Parser immediately, so retaining Syntax adds no node or interface call to
+// the interpreted parser path. The JIT consumes Syntax after the complete
+// module environment is available and can therefore resolve recursive rules.
+type optimizedParserSyntax struct {
+	Syntax Scmer
 	Parser packrat.Parser[*parserResult]
 }
 
@@ -194,6 +207,14 @@ func mergeParserResultsNil(s string, r ...*parserResult) *parserResult {
 }
 
 func (b *ScmParser) Execute(str string, en *Env) Scmer {
+	if jitEnabled && b.Compiled != nil && b.JITProgram != nil {
+		state := b.JITProgram.acquireState(len(str))
+		defer b.JITProgram.releaseState(state)
+		return b.Compiled.Call(NewString(str), NewAny(state), NewInt(int64(b.JITRule)))
+	}
+	if jitEnabled && JITLog {
+		fmt.Printf("JIT: interpreted parser syntax=%s\n", b.Syntax.String())
+	}
 	var skipper *regexp.Regexp = b.Skipper
 	if skipper == nil {
 		skipper = packrat.SkipWhitespaceAndCommentsRegex // also skip C-style comments as whitespaces
@@ -234,6 +255,9 @@ func parseSyntax(syntax Scmer, en *Env, ome *optimizerMetainfo, ignoreResult boo
 	case tagParser:
 		return syntax.Parser()
 	case tagAny:
+		if optimized, ok := syntax.Any().(*optimizedParserSyntax); ok {
+			return optimized.Parser
+		}
 		if p, ok := syntax.Any().(packrat.Parser[*parserResult]); ok {
 			return p
 		}
@@ -477,4 +501,16 @@ func init_parser() {
 			},
 		},
 	}, specialParser, jitEmitSpecialParser)
+	Declare(&Globalenv, &Declaration{
+		Name: "jit-parser-program",
+		Fn: func(...Scmer) Scmer {
+			panic("jit-parser-program is native-only")
+		},
+		Type: &TypeDescriptor{
+			Kind: "func", Forbidden: true,
+			Params:  []*TypeDescriptor{{Kind: "any"}, {Kind: "string"}, {Kind: "any"}, {Kind: "int"}},
+			Return:  &TypeDescriptor{Kind: "any"},
+			JITEmit: jitEmitParserProgram,
+		},
+	})
 }

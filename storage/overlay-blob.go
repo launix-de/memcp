@@ -116,44 +116,11 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx
 	}
 	ctx.EnsureDesc(&d1)
 	ctx.EnsureDesc(&d1)
-	ctx.EnsureDesc(&d1)
-	if d1.Loc == scm.LocImm {
-		tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-		if d1.Imm.GetTag() == scm.TagBool {
-			ctx.EmitMakeBool(tmpPair, d1)
-		} else if d1.Imm.GetTag() == scm.TagInt {
-			ctx.EmitMakeInt(tmpPair, d1)
-		} else if d1.Imm.GetTag() == scm.TagFloat {
-			ctx.EmitMakeFloat(tmpPair, d1)
-		} else if d1.Imm.GetTag() == scm.TagNil {
-			ctx.EmitMakeNil(tmpPair)
-		} else {
-			ptrWord, auxWord := d1.Imm.RawWords()
-			ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-			ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
-		}
-		d1 = tmpPair
-	} else if d1.Loc == scm.LocReg {
-		tmpPair := scm.JITValueDesc{Loc: scm.LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
-		switch d1.Type {
-		case scm.TagBool:
-			ctx.EmitMakeBool(tmpPair, d1)
-		case scm.TagInt:
-			ctx.EmitMakeInt(tmpPair, d1)
-		case scm.TagFloat:
-			ctx.EmitMakeFloat(tmpPair, d1)
-		default:
-			panic("jit: generic call arg scalar type unknown for 2-word value")
-		}
-		ctx.FreeDesc(&d1)
-		d1 = tmpPair
-	}
-	if d1.Loc != scm.LocRegPair && d1.Loc != scm.LocStackPair {
-		panic("jit: generic call arg expects 2-word value ((*OverlayBlob).resolveBlob arg1)")
-	}
+	d1 = scm.JITPrepareScmerGoArg(ctx, d1)
 	ctx.SyncDesc(&thisptr)
 	ctx.SyncDesc(&d1)
 	d2 := ctx.EmitGoCallScalar(scm.GoFuncAddr((*OverlayBlob).resolveBlob), []scm.JITValueDesc{thisptr, d1}, 2)
+	d2.NoHeapPointer = false
 	ctx.BindReg(d2.Reg, &d2)
 	ctx.BindReg(d2.Reg2, &d2)
 	ctx.FreeDesc(&d1)
@@ -167,8 +134,8 @@ func (s *OverlayBlob) JITEmit(ctx *scm.JITContext, thisptr scm.JITValueDesc, idx
 		ctx.BindReg(result.Reg, &result)
 		ctx.BindReg(result.Reg2, &result)
 	}
-	ctx.EnsureDesc(&d2)
-	if d2.Loc == scm.LocRegPair {
+	ctx.SyncDesc(&d2)
+	if d2.Loc == scm.LocRegPair || d2.Loc == scm.LocStackPair || d2.Loc == scm.LocInputPair {
 		ctx.EmitMovPairToResult(&d2, &result)
 		result.Type = d2.Type
 	} else {
