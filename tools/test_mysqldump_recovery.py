@@ -105,6 +105,11 @@ CREATE TABLE `recovery_error_columns` (
   `error` TEXT
 ) ENGINE=INNODB;
 
+CREATE TABLE `recovery_integer_values` (
+  `id` INT PRIMARY KEY,
+  `event_timestamp` INT
+) ENGINE=INNODB;
+
 INSERT INTO `fop_files` (`filename`, `data`, `uploaded_at`) VALUES
   ('Pruefung-Mueller.pdf', FROM_BASE64('AP8BgD8='), 1788172496),
   ('leer.txt', FROM_BASE64(''), 1788172497);
@@ -123,6 +128,10 @@ INSERT INTO `recovery_statement_columns` VALUES
   ('fixture', 'sample_view', 'mysql', 'SELECT 1', '(resultrow 1)');
 INSERT INTO `recovery_error_columns` VALUES
   ('2026-09-02 10:00:00', 'fixture', 'backup', 'SELECT 1', 'synthetic');
+INSERT INTO `recovery_integer_values` VALUES
+  (1, NULL),
+  (2, 1788172496),
+  (3, 1788260000);
 
 CREATE TRIGGER `recovery_fop_files_ai` AFTER INSERT ON `fop_files`
   FOR EACH ROW INSERT INTO `recovery_audit` (`file_id`, `event_name`)
@@ -138,6 +147,7 @@ SELECT COUNT(*) FROM `recovery_audit`;
 SELECT COUNT(*), SUM(`user`), SUM(`lock` IS NULL) FROM `recovery_keyword_columns`;
 SELECT COUNT(*), MIN(`database`), MIN(`sql`) FROM `recovery_statement_columns`;
 SELECT COUNT(*), MIN(`database`), MIN(`query`) FROM `recovery_error_columns`;
+SELECT `event_timestamp` FROM `recovery_integer_values` ORDER BY `id`;
 """
 
 EXPECTED_VERIFY_LINES = [
@@ -149,6 +159,9 @@ EXPECTED_VERIFY_LINES = [
     "1\t7\t1",
     "1\tfixture\tSELECT 1",
     "1\tfixture\tSELECT 1",
+    "NULL",
+    "1788172496",
+    "1788260000",
 ]
 
 FIXTURE_COLUMNS = {
@@ -162,6 +175,7 @@ FIXTURE_COLUMNS = {
     "recovery_keyword_columns": ["method", "parameter", "user", "lock", "start", "ID"],
     "recovery_statement_columns": ["database", "name", "dialect", "sql", "ir"],
     "recovery_error_columns": ["datetime", "database", "user", "query", "error"],
+    "recovery_integer_values": ["id", "event_timestamp"],
 }
 
 
@@ -422,6 +436,16 @@ def dump_command(dump_tool: str, auth_file: Path, dump_path: Path,
     return command
 
 
+def verify_integer_dump_literals(dump_path: Path) -> None:
+    dump = dump_path.read_bytes()
+    for value in (b"1788172496", b"1788260000"):
+        if value not in dump:
+            raise RecoveryError(
+                "mariadb-dump did not preserve the exact decimal INT literal "
+                + value.decode("ascii")
+            )
+
+
 def mysql_client_args(client: str, auth_file: Path) -> list[str]:
     return [client, f"--defaults-file={auth_file}"]
 
@@ -604,18 +628,19 @@ def main() -> int:
             password="admin",
         )
 
+        source_command = [
+            args.memcp_binary,
+            "-data",
+            str(source_data_dir),
+            f"--api-port={source_api_port}",
+            f"--mysql-port={source_mysql_port}",
+            "--mysql-socket=",
+            "--no-repl",
+            args.app,
+        ]
         with source_log.open("w") as log:
             source_process = subprocess.Popen(
-                [
-                    args.memcp_binary,
-                    "-data",
-                    str(source_data_dir),
-                    f"--api-port={source_api_port}",
-                    f"--mysql-port={source_mysql_port}",
-                    "--mysql-socket=",
-                    "--no-repl",
-                    args.app,
-                ],
+                source_command,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -658,6 +683,31 @@ def main() -> int:
             if source_values != EXPECTED_VERIFY_LINES:
                 raise RecoveryError(f"MemCP fixture verification failed: {source_values}")
 
+            source_process.send_signal(signal.SIGTERM)
+            source_process.wait(timeout=30)
+            with source_log.open("a") as log:
+                source_process = subprocess.Popen(
+                    source_command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+            wait_for_memcp(
+                args.mariadb_client, source_auth, source_process, source_log
+            )
+            source_values = mysql_lines(
+                args.mariadb_client,
+                source_auth,
+                VERIFY_SQL,
+                SOURCE_DATABASE,
+                "--password=admin",
+            )
+            if source_values != EXPECTED_VERIFY_LINES:
+                raise RecoveryError(
+                    f"persisted MemCP fixture verification failed: {source_values}"
+                )
+
             dump_identity = mysql_lines(
                 args.mariadb_client,
                 source_dump_auth,
@@ -675,6 +725,7 @@ def main() -> int:
                     source_dump_auth,
                     memcp_dump_path,
                 ), env=dump_env)
+                verify_integer_dump_literals(memcp_dump_path)
                 run(dump_command(
                     args.mysqldump,
                     source_dump_auth,

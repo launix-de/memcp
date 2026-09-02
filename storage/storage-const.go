@@ -149,9 +149,9 @@ func (s *StorageConst) Deserialize(f io.Reader) uint {
 	binary.Read(f, binary.LittleEndian, &vlen)
 	buf := make([]byte, vlen)
 	io.ReadFull(f, buf)
-	var v any
-	json.Unmarshal(buf, &v)
-	s.value = scm.TransformFromJSON(v)
+	if err := json.Unmarshal(buf, &s.value); err != nil {
+		panic(err)
+	}
 	return uint(s.count)
 }
 

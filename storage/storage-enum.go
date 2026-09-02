@@ -626,9 +626,9 @@ func (s *StorageEnum) Deserialize(f io.Reader) uint {
 		binary.Read(f, binary.LittleEndian, &vlen)
 		buf := make([]byte, vlen)
 		io.ReadFull(f, buf)
-		var v any
-		json.Unmarshal(buf, &v)
-		s.values[j] = scm.TransformFromJSON(v)
+		if err := json.Unmarshal(buf, &s.values[j]); err != nil {
+			panic(err)
+		}
 	}
 
 	// Rebuild widths/thresholds from frequencies
