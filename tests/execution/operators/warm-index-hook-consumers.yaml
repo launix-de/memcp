@@ -39,12 +39,12 @@ test_cases:
           (scan_order nil tbl '("enabled")
             (lambda (enabled) (equal? enabled true))
             '("sort_key") '(<) 0 0 16 '("id")
-            (lambda (id) id) + 0 false)))
+            (lambda (acc id) (+ acc id)) 0 false)))
         (define warm_like (lambda ()
           (scan_order nil tbl '("label")
             (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
             '("sort_key") '(<) 0 0 16 '("id")
-            (lambda (id) id) + 0 false)))
+            (lambda (acc id) (+ acc id)) 0 false)))
         (warm_equal)
         (warm_equal)
         (warm_like)
@@ -60,7 +60,7 @@ test_cases:
         (define selected (scan_recset nil tbl '("id") (lambda (id) (<= id 32))))
         (define unordered (scan nil selected '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
-          '("id") (lambda (_id) 1) + 0))
+          '("id") (lambda (acc _id) (+ acc 1)) 0 +))
         (define exists_hit (scan_exists nil selected '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
         (define exists_miss (scan_exists nil selected '("label")
@@ -68,7 +68,7 @@ test_cases:
         (define ordered (scan_order nil selected '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("sort_key") '(<) 0 0 4 '("id")
-          (lambda (id) (list id)) (lambda (rows row) (append rows row)) '() false))
+          (lambda (rows id) (append rows (list id))) '() false))
         (define narrowed (scan_recset nil selected '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))))
         (if (and (equal? unordered 16) exists_hit (not exists_miss)
@@ -94,7 +94,7 @@ test_cases:
         (define ordered (scan_order nil selected '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("sort_key") '(<) 0 0 10 '("id")
-          (lambda (id) (list id)) (lambda (rows row) (append rows row)) '() false))
+          (lambda (rows id) (append rows (list id))) '() false))
         (if (and (>= like_indexes 1) (equal? (recset_count narrowed) 2)
           (equal? ordered (list (list 3) (list 1))))
           "ok"
@@ -125,7 +125,7 @@ test_cases:
         (define selected (scan_recset nil tbl '("id") (lambda (id) (>= id 4097))))
         (define count_like (scan nil selected '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
-          '("id") (lambda (_id) 1) + 0))
+          '("id") (lambda (acc _id) (+ acc 1)) 0 +))
         count_like)
     expect:
       data: [1]
@@ -148,7 +148,7 @@ test_cases:
         (scan_order nil selected '("label")
           (lambda (label) (strlike label "%needle%" "utf8mb4_general_ci"))
           '("sort_key") '(<) 0 0 4 '("id")
-          (lambda (id) (list id)) (lambda (rows row) (append rows row)) '() false))
+          (lambda (rows id) (append rows (list id))) '() false))
     expect:
       data: [[[4097]]]
 

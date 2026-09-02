@@ -220,7 +220,7 @@ func TestCountEstimateSumsUnevenShards(t *testing.T) {
 func benchmarkScanColumnMatrix(b *testing.B, name string, rows int, filterPasses bool, varyFilter bool) {
 	tbl, allCols := scanColumnCostTable(b, name, rows)
 	condition := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(filterPasses) })
-	callback := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() })
+	callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 	for _, count := range []int{0, 1, 2, 4, 8, 16} {
 		filterCols := []string(nil)
 		mapCols := []string(nil)
@@ -234,7 +234,7 @@ func benchmarkScanColumnMatrix(b *testing.B, name string, rows int, filterPasses
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				tbl.scan(nil, filterCols, condition, mapCols, callback,
-					scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+					scm.NewNil(), scm.NewNil(), false)
 			}
 		})
 	}
@@ -258,7 +258,7 @@ func BenchmarkScanMapColumnCost(b *testing.B) {
 
 func BenchmarkScanMapColumnCostBySelectivity(b *testing.B) {
 	tbl, allCols := scanColumnCostTable(b, "map_selectivity", scanColumnCostRows)
-	callback := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() })
+	callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 	for _, percent := range []int{1, 10, 50, 100} {
 		threshold := int64(scanColumnCostRows * percent / 100)
 		condition := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
@@ -271,7 +271,7 @@ func BenchmarkScanMapColumnCostBySelectivity(b *testing.B) {
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					tbl.scan(nil, allCols[:1], condition, mapCols, callback,
-						scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+						scm.NewNil(), scm.NewNil(), false)
 				}
 			})
 		}
@@ -340,7 +340,7 @@ func BenchmarkScanColumnCostByType(b *testing.B) {
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
 						tbl.scan(nil, filterCols, condition, mapCols, callback,
-							scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+							scm.NewNil(), scm.NewNil(), false)
 					}
 				})
 			}
@@ -373,7 +373,7 @@ func scanColumnCostPredicate(b *testing.B, terms int, distinctCols bool) scm.Scm
 
 func BenchmarkScanFilterExpressionCost(b *testing.B) {
 	tbl, cols := scanColumnCostTable(b, "filter_expression", scanColumnCostRows)
-	callback := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewNil() })
+	callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 	for _, shape := range []string{"same_column", "distinct_columns"} {
 		for _, terms := range []int{1, 2, 4, 8, 16} {
 			distinctCols := shape == "distinct_columns"
@@ -387,7 +387,7 @@ func BenchmarkScanFilterExpressionCost(b *testing.B) {
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					tbl.scan(nil, filterCols, condition, nil, callback,
-						scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+						scm.NewNil(), scm.NewNil(), false)
 				}
 			})
 		}

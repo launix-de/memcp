@@ -40,8 +40,8 @@ test_cases:
           (scan nil
             (table "memcp-tests" "lookup_cache_folder")
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
-            '("stamp") (lambda (stamp) stamp)
-            (lambda (old value) value) 0 nil false)))
+            '("stamp") (lambda (acc stamp) stamp)
+            0 (lambda (old value) value) false)))
 
   - name: "Create a fused lookup cache reading multiple source columns"
     scm: |
@@ -53,8 +53,8 @@ test_cases:
           (scan nil
             (table "memcp-tests" "lookup_cache_folder")
             '("id") (lambda (id) (equal? id (outer 1 folder_id)))
-            '("stamp" "label_code") (lambda (stamp label_code) (+ stamp label_code))
-            (lambda (old value) value) 0 nil false)))
+            '("stamp" "label_code") (lambda (acc stamp label_code) (+ stamp label_code))
+            0 (lambda (old value) value) false)))
 
   - name: "Create a lookup cache depending on another lookup cache"
     scm: |
@@ -66,8 +66,8 @@ test_cases:
           (scan nil
             (table "memcp-tests" "lookup_cache_file")
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
-            '(".lookup:folder_stamp") (lambda (folder_stamp) folder_stamp)
-            (lambda (old value) value) 0 nil false)))
+            '(".lookup:folder_stamp") (lambda (acc folder_stamp) folder_stamp)
+            0 (lambda (old value) value) false)))
 
   - name: "Create a nested cache from the fused lookup output"
     scm: |
@@ -79,8 +79,8 @@ test_cases:
           (scan nil
             (table "memcp-tests" "lookup_cache_file")
             '("id") (lambda (id) (equal? id (outer 1 file_id)))
-            '(".lookup:folder_pair") (lambda (folder_pair) folder_pair)
-            (lambda (old value) value) 0 nil false)))
+            '(".lookup:folder_pair") (lambda (acc folder_pair) folder_pair)
+            0 (lambda (old value) value) false)))
 
   - name: "Nested lookup caches expose their initial values"
     sql: |

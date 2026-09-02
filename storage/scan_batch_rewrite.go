@@ -21,7 +21,7 @@ import "github.com/launix-de/memcp/scm"
 
 const batchCapacityRows = 128
 
-// tryScanBatchRewrite detects a nested scan inside the mapfn of an outer scan
+// tryScanBatchRewrite detects a nested scan inside the mapreduce callback of an outer scan
 // and rewrites it into a batched version: the outer scan accumulates rows into
 // a buffer, and the inner scan becomes scan_batch consuming the buffer via #N
 // pseudo-columns. Returns the rewritten AST or nil if the pattern doesn't match.
@@ -34,37 +34,36 @@ func tryScanOrderBatchRewrite(v []scm.Scmer) scm.Scmer {
 }
 
 func tryScanBatchRewrite(v []scm.Scmer) scm.Scmer {
-	// scan: [fn, tx, tbl, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
+	// scan: [fn, tx, tbl, filtercols, filterfn, mapcols, mapreduce, neutral, combine, isOuter]
 	// v[2] (tbl) is always a table reference — shape-agnostic (TagTable at
 	// runtime, (table schema tbl) list or tbl:schema:name symbol at optimize
 	// time). We trust that and just pass it through unchanged.
 	if len(v) < 7 {
 		return scm.NewNil()
 	}
-	if len(v) > 10 && scm.ToBool(v[10]) {
+	if len(v) > 9 && scm.ToBool(v[9]) {
 		return scm.NewNil()
 	}
-	if len(v) > 7 && !v[7].IsNil() {
-		return scm.NewNil()
-	}
-	// scan tail after mapfn: reduce, neutral, reduce2, isOuter
-	return tryScanBatchRewriteMapfn(v, 5, 6, true)
+	return tryScanBatchRewriteMapReduce(v, 5, 6)
 }
 
-// tryScanBatchRewriteMapfn is the shared implementation for scan and scan_order batch rewrite.
-// mapcolsIdx and mapfnIdx point to the mapcols and mapfn positions in v.
-// tryScanBatchRewriteMapfn is the shared batch-rewrite logic. hasReduce2 indicates
-// whether the outer scan type has a reduce2 slot (scan does, scan_order doesn't).
-func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce2 bool) scm.Scmer {
+// tryScanBatchRewriteMapReduce rewrites a non-reducing fused callback. The
+// accumulator parameter must be unused; callbacks that carry query state keep
+// their original row-at-a-time semantics.
+func tryScanBatchRewriteMapReduce(v []scm.Scmer, mapcolsIdx, mapReduceIdx int) scm.Scmer {
 
-	// mapfn must be a lambda: (lambda (params...) body) or (quote lambda) etc.
-	mapParams, mapBody := extractLambdaParts(v[mapfnIdx])
-	if mapParams == nil {
+	mapReduceParams, mapBody := extractLambdaParts(v[mapReduceIdx])
+	if len(mapReduceParams) == 0 {
+		return scm.NewNil()
+	}
+	accumulator := scmerHeadString(mapReduceParams[0])
+	if accumulator == "" || astContainsSymbol(mapBody, map[string]bool{accumulator: true}) {
 		return scm.NewNil()
 	}
 
-	// Extract outer param symbol names
-	outerLabels := extractLabels(mapParams)
+	// The first callback parameter is the accumulator; only physical columns
+	// become fields in the batch buffer.
+	outerLabels := extractLabels(mapReduceParams[1:])
 	stride := len(outerLabels)
 	if stride == 0 {
 		return scm.NewNil()
@@ -88,7 +87,7 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 	if len(innerScanSlice) < 7 {
 		return scm.NewNil()
 	}
-	if len(innerScanSlice) > 10 && scm.ToBool(innerScanSlice[10]) {
+	if len(innerScanSlice) > 9 && scm.ToBool(innerScanSlice[9]) {
 		return scm.NewNil()
 	}
 	// Batch rewriting delays the inner mapper until a flush. Keep effectful
@@ -141,38 +140,25 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 		newBody,
 	})
 
-	// Build outer mapfn: (lambda (params...) (begin (define __record (list)) (append_mut __record params...)))
-	outerMapParams := make([]scm.Scmer, stride)
-	appendArgs := make([]scm.Scmer, stride+2)
-	appendArgs[0] = scm.NewSymbol("append_mut")
-	appendArgs[1] = scm.NewSymbol("__record")
+	// Build the fused outer callback directly as
+	// (lambda (batchdata cols...) ... __batchbuf). The scan supplies batchdata
+	// in args[0], so no intermediate mapped row or parameter copy is needed.
+	outerMapReduceParams := make([]scm.Scmer, stride+1)
+	outerMapReduceParams[0] = scm.NewSymbol("batchdata")
+	consValues := make([]scm.Scmer, stride+2)
+	consValues[0] = scm.NewSymbol("cons")
+	consValues[1] = scm.NewSymbol("__batchbuf0")
 	for i, name := range outerLabels {
-		outerMapParams[i] = scm.NewSymbol(name)
-		appendArgs[i+2] = scm.NewSymbol(name)
+		outerMapReduceParams[i+1] = scm.NewSymbol(name)
+		consValues[i+2] = scm.NewSymbol(name)
 	}
-	outerMapfn := scm.NewSlice([]scm.Scmer{
-		scm.NewSymbol("lambda"),
-		scm.NewSlice(outerMapParams),
-		scm.NewSlice([]scm.Scmer{
-			scm.NewSymbol("begin"),
-			scm.NewSlice([]scm.Scmer{scm.NewSymbol("define"), scm.NewSymbol("__record"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")})}),
-			scm.NewSlice(appendArgs),
-		}),
-	})
+	appendValues := []scm.Scmer{scm.NewSymbol("apply"), scm.NewSymbol("append_mut"), scm.NewSlice(consValues)}
 
 	batchCapacity := scm.NewInt(int64(stride * batchCapacityRows))
 
-	// Build outer reduce: (lambda (batchdata rowvals)
-	//   (begin
-	//     (define __batchbuf0 (if (nil? batchdata) (list) batchdata))
-	//     (define __batchbuf (apply append_mut (cons __batchbuf0 rowvals)))
-	//     (if (>= (count __batchbuf) batch_capacity)
-	//       (begin (__inner_flush __batchbuf) (reset_mut __batchbuf))
-	//       true)
-	//     __batchbuf))
-	outerReduce := scm.NewSlice([]scm.Scmer{
+	outerMapReduce := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("lambda"),
-		scm.NewSlice([]scm.Scmer{scm.NewSymbol("batchdata"), scm.NewSymbol("rowvals")}),
+		scm.NewSlice(outerMapReduceParams),
 		scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("begin"),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("define"), scm.NewSymbol("__batchbuf0"),
@@ -181,8 +167,7 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
 					scm.NewSymbol("batchdata")})}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("define"), scm.NewSymbol("__batchbuf"),
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("apply"), scm.NewSymbol("append_mut"),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("cons"), scm.NewSymbol("__batchbuf0"), scm.NewSymbol("rowvals")})})}),
+				scm.NewSlice(appendValues)}),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("if"),
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol(">="),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("count"), scm.NewSymbol("__batchbuf")}),
@@ -195,11 +180,11 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 		}),
 	})
 
-	// Build outer reduce2: (lambda (acc shardbuf)
+	// Build the shard combiner: (lambda (acc shardbuf)
 	//   (begin
 	//     (if (or (nil? shardbuf) (equal? (count shardbuf) 0)) true (__inner_flush shardbuf))
 	//     nil))
-	outerReduce2 := scm.NewSlice([]scm.Scmer{
+	outerCombine := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("lambda"),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("shardbuf")}),
 		scm.NewSlice([]scm.Scmer{
@@ -216,16 +201,12 @@ func tryScanBatchRewriteMapfn(v []scm.Scmer, mapcolsIdx, mapfnIdx int, hasReduce
 		}),
 	})
 
-	// Build the outer scan call: keep all args up to and including mapcols,
-	// then replace mapfn with batch-collecting lambda and append reduce/neutral/[reduce2]/isOuter.
-	outerArgs := make([]scm.Scmer, 0, mapfnIdx+6)
+	// Build the outer scan call with its fused callback and shard combiner.
+	outerArgs := make([]scm.Scmer, 0, mapReduceIdx+4)
 	for i := 0; i <= mapcolsIdx; i++ {
 		outerArgs = append(outerArgs, v[i]) // scan, tx, schema, tbl, ..., mapcols
 	}
-	outerArgs = append(outerArgs, outerMapfn, outerReduce, scm.NewNil()) // mapfn, reduce, neutral
-	if hasReduce2 {
-		outerArgs = append(outerArgs, outerReduce2) // reduce2 (scan only)
-	}
+	outerArgs = append(outerArgs, outerMapReduce, scm.NewNil(), outerCombine)
 	outerArgs = append(outerArgs, scm.NewBool(false)) // isOuter
 	outerScan := scm.NewSlice(outerArgs)
 
@@ -364,9 +345,9 @@ func astContainsSymbol(expr scm.Scmer, symbols map[string]bool) bool {
 // 2. Appending #N pseudo-columns to filtercols and mapcols
 // 3. Extending filterfn and mapfn lambdas with #N params
 // 4. Replacing outer param symbols in filter/map bodies with #N symbols
-// 5. Inserting stride and __batchbuf after mapfn
+// 5. Inserting stride and __batchbuf after mapreduce
 func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.Scmer, replaceMap map[string]string, stride int) []scm.Scmer {
-	// inner = [scan, tx, tbl, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
+	// inner = [scan, tx, tbl, filtercols, filterfn, mapcols, mapreduce, neutral, combine, isOuter]
 	result := make([]scm.Scmer, 0, len(inner)+2)
 
 	// [0] scan_batch
@@ -379,13 +360,13 @@ func rewriteInnerScanToBatch(inner []scm.Scmer, pseudocols, pseudoparams []scm.S
 	result = append(result, extendAndRewriteLambda(inner[4], pseudoparams, replaceMap))
 	// [5] mapcols: append #N
 	result = append(result, appendToScmerList(inner[5], pseudocols))
-	// [6] mapfn: extend params + replace body symbols
+	// [6] mapreduce: extend params + replace body symbols
 	result = append(result, extendAndRewriteLambda(inner[6], pseudoparams, replaceMap))
 	// [7] stride
 	result = append(result, scm.NewInt(int64(stride)))
 	// [8] batchdata (symbol __batchbuf from the flush lambda)
 	result = append(result, scm.NewSymbol("__batchbuf"))
-	// [9..] reduce, neutral, reduce2, isOuter from original
+	// [9..] neutral, combine, isOuter from original
 	for i := 7; i < len(inner); i++ {
 		result = append(result, inner[i])
 	}

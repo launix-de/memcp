@@ -1039,21 +1039,21 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(? (atom "WITH" true))
 			(atom "PASSWORD" true) (define password psql_expression))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier)
 			(atom "IDENTIFIED" true) (atom "BY" true) (define password psql_expression))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
 		))
 		/* ALTER USER SUPERUSER / NOSUPERUSER — PostgreSQL admin grant */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "SUPERUSER" true))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
 		))
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username psql_identifier) (atom "NOSUPERUSER" true))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" '('protected_sql_admin_revoke_value username)))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
 		))
 		/* DROP USER/ROLE [IF EXISTS] — cascade-deletes access entries then the user row */
 		(parser '((atom "DROP" true) (or (atom "USER" true) (atom "ROLE" true)) (? (atom "IF" true) (atom "EXISTS" true)) (define username psql_identifier))
@@ -1064,16 +1064,18 @@ arithmetic; leave expressions containing columns or functions untouched. */
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
+						0
 						(quote +)
-						0)
+						false)
 					'((quote scan) '(session "__memcp_tx") '('table "system" "user")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
+						0
 						(quote +)
-						0)
+						false)
 				))
 		))
 
@@ -1081,12 +1083,12 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
 		))
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username psql_identifier))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" '('protected_sql_admin_revoke_value username)))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
 		))
 		/* GRANT <any> ON DATABASE db TO user (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "DATABASE" true) (define db psql_identifier) (atom "TO" true) (define username psql_identifier))
@@ -1115,9 +1117,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
+					'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
 					0
+					(quote +)
+					false
 		)))
 		/* REVOKE <any> ON SCHEMA db FROM user */
 		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
@@ -1128,9 +1131,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
+					'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
 					0
+					(quote +)
+					false
 		)))
 		/* REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA db FROM user -> treat as db-level */
 		(parser '((atom "REVOKE" true) (+ (or psql_identifier "," (atom "ALL" true) (atom "PRIVILEGES" true) (atom "SELECT" true) (atom "CONNECT" true) (atom "USAGE" true))) (atom "ON" true) (atom "ALL" true) (atom "TABLES" true) (atom "IN" true) (atom "SCHEMA" true) (define db psql_identifier) (atom "FROM" true) (define username psql_identifier))
@@ -1141,9 +1145,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal?) (quote username) username) '((quote equal?) (quote database) db)))
 					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
+					'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
 					0
+					(quote +)
+					false
 		)))
 
 		(parser '((atom "CREATE" true) (define unique (? (atom "UNIQUE" true))) (atom "INDEX" true) (define id psql_identifier) (atom "ON" true) (define tbl (or (parser '(psql_identifier "." (define id psql_identifier)) id) psql_identifier)) (? (atom "USING" true) psql_identifier) "(" (define cols (+ psql_identifier ",")) ")") (if unique '('createkey '('table schema tbl) id unique (cons (quote list) cols)) true))

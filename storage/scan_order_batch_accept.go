@@ -71,7 +71,7 @@ func collectOrderedCandidateBatch(currentTx *TxContext, source scanOrderTableSpe
 	}
 
 	scanOrderMulti(currentTx, []scanOrderTableSpec{source}, sortdirs, 0, offset, limit,
-		scm.NewNil(), scm.NewNil(), false, scm.NewNil())
+		scm.NewNil(), false, scm.NewNil())
 
 	batch := &recSet{table: table, shards: make([]recSetShard, 0, len(partOrder))}
 	for _, part := range partOrder {
@@ -213,15 +213,13 @@ func validateAcceptedBatch(batch *recSet, acceptedValue scm.Scmer) *recSet {
 }
 
 func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
-	const mapEnd = 10
-	const reduceIdx = 11
-	const neutralIdx = 12
-	rawReduce := scm.NewNil()
-	if len(v) > reduceIdx {
-		rawReduce = v[reduceIdx]
-	}
-	for i := 1; i <= mapEnd && i < len(v); i++ {
-		v[i], _ = oc.OptimizeSub(v[i], true)
+	const mapReduceIdx = 10
+	const neutralIdx = 11
+	rawMapReduce := v[mapReduceIdx]
+	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
+		if i != mapReduceIdx {
+			v[i], _ = oc.OptimizeSub(v[i], true)
+		}
 	}
 	neutralType := unknownScanType()
 	if len(v) > neutralIdx {
@@ -229,10 +227,15 @@ func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useRe
 		neutralType = normalizeScanType(neutralType)
 	}
 	oc.Ome.IncrLoopDepth()
-	if !rawReduce.IsNil() {
-		v[reduceIdx], _ = oc.OptimizeReducerCallback(rawReduce, neutralType, unknownScanType())
+	columnTypes := []*scm.TypeDescriptor(nil)
+	if params, _, ok := scanLambdaParts(rawMapReduce); ok && len(params) > 1 {
+		columnTypes = make([]*scm.TypeDescriptor, len(params)-1)
+		for i := range columnTypes {
+			columnTypes[i] = unknownScanType()
+		}
 	}
-	for i := 13; i < len(v); i++ {
+	v[mapReduceIdx], _ = oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
+	for i := 12; i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	oc.Ome.DecrLoopDepth()
@@ -244,7 +247,7 @@ func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useRe
 // large. The filter sees an exact RecSet for only that window and returns an
 // accepted subset. SQL OFFSET/LIMIT count accepted records, while driverOffset
 // counts every candidate already examined.
-func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batchFilter scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
+func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batchFilter scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, isOuter bool, notFoundValue scm.Scmer) scm.Scmer {
 	if limitPartitionCols != 0 {
 		panic("scan_order_batch_accept: partitioned limits are not supported")
 	}
@@ -268,12 +271,10 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	hadValue := false
 	if limit == 0 {
 		if isOuter {
-			callbackProgram := scm.PrepareSerialProc(callback)
-			reduceProgram := scm.PrepareSerialProc(aggregate)
-			var reduceArgs [2]scm.Scmer
-			reduceArgs[0] = result
-			reduceArgs[1] = callbackProgram.Call(buildOuterNullCallbackRow(callbackCols))
-			return reduceProgram.Call(reduceArgs[:])
+			nullArgs := make([]scm.Scmer, len(callbackCols)+1)
+			nullArgs[0] = result
+			mapReduceProgram := scm.PrepareSerialProc(mapReduce)
+			return mapReduceProgram.Call(nullArgs)
 		}
 		return notFoundValue
 	}
@@ -290,7 +291,7 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	mapperFor := func(shard *storageShard) *ShardMapReducer {
 		mapper := mappers[shard]
 		if mapper == nil {
-			mapper = shard.OpenMapReducer(callbackCols, callback, aggregate, false, 0, nil, currentTx)
+			mapper = shard.OpenMapReducer(callbackCols, mapReduce, false, 0, nil, currentTx)
 			mappers[shard] = mapper
 		}
 		return mapper
@@ -372,12 +373,10 @@ func scanOrderBatchAccept(currentTx *TxContext, source scanOrderTableSpec, batch
 	}
 
 	if !hadValue && isOuter {
-		callbackProgram := scm.PrepareSerialProc(callback)
-		reduceProgram := scm.PrepareSerialProc(aggregate)
-		var reduceArgs [2]scm.Scmer
-		reduceArgs[0] = result
-		reduceArgs[1] = callbackProgram.Call(buildOuterNullCallbackRow(callbackCols))
-		result = reduceProgram.Call(reduceArgs[:])
+		nullArgs := make([]scm.Scmer, len(callbackCols)+1)
+		nullArgs[0] = result
+		mapReduceProgram := scm.PrepareSerialProc(mapReduce)
+		result = mapReduceProgram.Call(nullArgs)
 		hadValue = true
 	}
 	if !hadValue && !isOuter {

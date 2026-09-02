@@ -168,6 +168,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (match expr_gc '((symbol get_column) (eval tblx) _ col _) col "no") "id" "match get_column for alias t -> id")
 	(define expr_gc_src (source "unit" 1 1 expr_gc))
 	(assert (match expr_gc_src '((symbol get_column) (eval tblx) _ col _) col "no") "id" "match get_column with SourceInfo wrapper")
+	(assert (equal? (scan_mapreduce_expr (list 'value) 'sql_sum_reduce 'value) 'sql_sum_reduce)
+		true "identity aggregate map lowers to its reducer")
+	(define arbitrary_scan_reducer (list 'lambda (list 'acc 'value) (list 'cons 'value 'acc)))
+	(assert (equal? (scan_mapreduce_expr (list 'value) arbitrary_scan_reducer 'value) arbitrary_scan_reducer)
+		true "identity aggregate map lowers every reducer shape directly")
+	(assert (equal? (scan_mapreduce_expr '() '+ 1) 'scan_count)
+		true "constant count subtree lowers to native scan_count callback")
+	(assert (equal? (scan_mapreduce_expr (list 'value) '+ (list '* 'value 2))
+		(list 'lambda (list '__scan_acc 'value) (list '+ '__scan_acc (list '* 'value 2))))
+		true "non-identity aggregate map remains one fused callback")
 	(define simple_select_ast (list "memcp-tests"
 		(list (list "t" "memcp-tests" "t" false nil))
 		(list "id" expr_gc)
@@ -532,10 +542,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(list "d" "memcp-tests" "graph_d" false nil)))
 	(define test_physical_scan_signature (lambda (expr)
 		(match expr
-			((symbol scan) _tx ((symbol table) _schema relation) _filtercols _filterfn _mapcols mapfn _reducefn _init _limit outer)
-			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapfn))
-			((symbol scan_order) _tx ((symbol table) _schema relation) _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapfn _reducefn _init outer)
-			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapfn))
+			((symbol scan) _tx ((symbol table) _schema relation) _filtercols _filterfn _mapcols mapreduce _init _combine outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
+			((symbol scan_order) _tx ((symbol table) _schema relation) _filtercols _filterfn _sortcols _sortdirs _brake _offset _limit _mapcols mapreduce _init outer)
+			(concat relation ":" (string outer) ">" (test_physical_scan_signature mapreduce))
 			(cons head tail) (concat (test_physical_scan_signature head) (test_physical_scan_signature tail))
 			_ "")))
 	(define bushy_scan_expr (build_join_scan_with_mapper_using_recipe
@@ -1636,8 +1646,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 				(list 'count (list 'parallelN 4 (list 'lambda (list 'i) 'i)))))))
 		4
 		"length hook: count folds parallelN length")
-	/* scan callback ownership: reduce accumulator enables _mut inside reduce body */
-	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '("x") '('lambda '('x) true) '("x") '('lambda '('x) 'x) '('lambda '('acc 'row) '(set_assoc 'acc 'row true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (\"x\") (lambda (x) true 1) (\"x\") (lambda (x) (var 0) 1) (lambda (acc row) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: reduce acc enables set_assoc_mut")
+	/* scan callback ownership: mapreduce accumulator enables _mut inside its body */
+	(assert (serialize (optimize '('scan nil '('table "db" "tbl") '("x") '('lambda '('x) true) '("x") '('lambda '('acc 'x) '(set_assoc 'acc 'x true)) '(list) nil false))) "(scan nil (table \"db\" \"tbl\") (\"x\") (lambda (x) true 1) (\"x\") (lambda (acc x) (set_assoc_mut (var 0) (var 1) true) 2) '() nil false)" "scan hook: mapreduce acc enables set_assoc_mut")
 	(define opt_merge_unique_ser (serialize (optimize
 		(list 'lambda
 			(list 'a 'b 'c)
@@ -2102,14 +2112,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(assert (jit? jit_nested_add7) (jit-enabled?) "jit: captured nested lambda is compiled")
 	(assert (jit_nested_add7 5) 12 "jit: captured nested lambda reads its outer value")
 	(define jit_scan_filter (jit (lambda (value) (> value 1))))
-	(define jit_scan_map (jit (lambda (value) value)))
-	(define jit_scan_reduce (jit (lambda (total value) (+ total value))))
+	(define jit_scan_mapreduce (jit (lambda (total value) (+ total value))))
 	(jit-warn-if-fallback jit_scan_filter "jit: scan filter callback")
-	(jit-warn-if-fallback jit_scan_map "jit: scan map callback")
-	(jit-warn-if-fallback jit_scan_reduce "jit: scan reduce callback")
+	(jit-warn-if-fallback jit_scan_mapreduce "jit: scan mapreduce callback")
 	(assert (scan nil (list (list "value" 1) (list "value" 2) (list "value" 3))
-		'("value") jit_scan_filter '("value") jit_scan_map jit_scan_reduce 0)
-		5 "jit: storage scan executes compiled filter/map/reduce callbacks")
+		'("value") jit_scan_filter '("value") jit_scan_mapreduce 0 +)
+		5 "jit: storage scan executes compiled filter/mapreduce callbacks")
 	(define jit_pointer_callee (lambda (value) (list value "rooted")))
 	(define jit_pointer_flow (jit (lambda (value) (list (jit_pointer_callee value) (now)))))
 	(jit-warn-if-fallback jit_pointer_flow "jit: rooted callback result")

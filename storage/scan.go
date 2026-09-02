@@ -66,23 +66,18 @@ func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
-// optimizeScan is the Optimize hook for the scan declaration.
-// It propagates the optimizer's structural callback types through map, reduce,
-// and reduce2, including ownership of individual list/association keys.
-func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceIdx, neutralIdx, reduce2Idx, outerIdx int) (scm.Scmer, *scm.TypeDescriptor) {
-	const mapIdx = 6
-	rawMap := v[mapIdx]
-	var rawReduce, rawReduce2 scm.Scmer
-	if len(v) > reduceIdx {
-		rawReduce = v[reduceIdx]
-	}
-	if len(v) > reduce2Idx {
-		rawReduce2 = v[reduce2Idx]
+// optimizeScanShared propagates the accumulator type through the combined
+// (accumulator, column...) callback and then through the shard combiner.
+func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapReduceIdx, neutralIdx, combineIdx, outerIdx int) (scm.Scmer, *scm.TypeDescriptor) {
+	rawMapReduce := v[mapReduceIdx]
+	rawCombine := scm.NewNil()
+	if len(v) > combineIdx {
+		rawCombine = v[combineIdx]
 	}
 
 	// Optimize scalar/operator arguments independently of callback ownership.
-	for i := 1; i <= mapEnd && i < len(v); i++ {
-		if i != mapIdx {
+	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
+		if i != mapReduceIdx {
 			v[i], _ = oc.OptimizeSub(v[i], true)
 		}
 	}
@@ -91,20 +86,18 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapEnd, reduceI
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
 		neutralType = normalizeScanType(neutralType)
 	}
-	if !rawReduce.IsNil() {
-		oc.SetCallbackReturnFlow(scm.CallbackReturnFlow(rawMap, rawReduce, 1))
-	}
 	oc.Ome.IncrLoopDepth()
-	optimizedMap, mapType := oc.OptimizeSub(rawMap, true)
-	v[mapIdx] = optimizedMap
-	mapType = normalizeScanType(mapType)
-
-	reduceType := neutralType
-	if !rawReduce.IsNil() {
-		v[reduceIdx], reduceType = oc.OptimizeReducerCallback(rawReduce, neutralType, mapType)
+	columnTypes := []*scm.TypeDescriptor(nil)
+	if params, _, ok := scanLambdaParts(rawMapReduce); ok && len(params) > 1 {
+		columnTypes = make([]*scm.TypeDescriptor, len(params)-1)
+		for i := range columnTypes {
+			columnTypes[i] = unknownScanType()
+		}
 	}
-	if !rawReduce2.IsNil() {
-		v[reduce2Idx], reduceType = oc.OptimizeReducerCallback(rawReduce2, reduceType, reduceType)
+	optimizedMapReduce, reduceType := oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
+	v[mapReduceIdx] = optimizedMapReduce
+	if !rawCombine.IsNil() {
+		v[combineIdx], reduceType = oc.OptimizeReducerCallback(rawCombine, reduceType, reduceType)
 	}
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
@@ -146,7 +139,7 @@ func optimizeScan(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.
 			return result, td
 		}
 	}
-	return optimizeScanShared(v, oc, 6, 7, 8, 9, 10)
+	return optimizeScanShared(v, oc, 6, 7, 8, 9)
 }
 
 // tryScanInvariantFilterRewrite selects a row-independent IF branch once per
@@ -251,17 +244,14 @@ func scanLiftOutOfLambda(expr scm.Scmer) scm.Scmer {
 }
 
 func tryScanExistsRewrite(v []scm.Scmer) scm.Scmer {
-	// scan: [fn, tx, table, filtercols, filterfn, mapcols, mapfn, reduce, neutral, reduce2, isOuter]
-	if len(v) < 9 {
+	// scan: [fn, tx, table, filtercols, filterfn, mapcols, mapreduce, neutral, combine, isOuter]
+	if len(v) < 10 {
 		return scm.NewNil()
 	}
-	if len(v) > 10 && scm.ToBool(v[10]) {
+	if scm.ToBool(v[9]) {
 		return scm.NewNil()
 	}
-	if len(v) > 9 && !v[9].IsNil() {
-		return scm.NewNil()
-	}
-	if !scanFalseNeutral(v[8]) || !scanExistsMap(v[6]) || !scanExistsOrReducer(v[7]) {
+	if !scanFalseNeutral(v[7]) || !scanExistsMapReduce(v[6]) || !scanExistsOrReducer(v[8]) {
 		return scm.NewNil()
 	}
 	if scanMapColsHaveSideEffects(v[5]) || scanExprMayHaveSideEffects(v[4]) {
@@ -283,9 +273,30 @@ func scanFalseNeutral(v scm.Scmer) bool {
 	return false
 }
 
-func scanExistsMap(v scm.Scmer) bool {
-	_, body, ok := scanLambdaParts(v)
-	return ok && scanExprIsTrue(body)
+func scanExistsMapReduce(v scm.Scmer) bool {
+	params, body, ok := scanLambdaParts(v)
+	if !ok || len(params) == 0 {
+		return false
+	}
+	acc, ok := scanSymbolName(params[0])
+	if !ok || !body.IsSlice() {
+		return false
+	}
+	items := body.Slice()
+	if len(items) < 3 || !scanSymbolIs(items[0], "or") {
+		return false
+	}
+	seenAcc := false
+	seenTrue := false
+	for _, item := range items[1:] {
+		if item.IsSymbol() && item.String() == acc {
+			seenAcc = true
+		}
+		if scanExprIsTrue(item) {
+			seenTrue = true
+		}
+	}
+	return seenAcc && seenTrue
 }
 
 func scanExistsOrReducer(v scm.Scmer) bool {
@@ -454,7 +465,7 @@ func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 			return result, td
 		}
 	}
-	return optimizeScanShared(v, oc, 8, 9, 10, 11, 12)
+	return optimizeScanShared(v, oc, 6, 9, 10, 11)
 }
 
 // scanResult bundles per-shard outputs to minimize allocations and type assertions.
@@ -623,16 +634,16 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCo
 	return found.Load()
 }
 
-// map reduce implementation based on scheme scripts
-func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool) scm.Scmer {
-	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, 0, nil, nil)
+// Fused map-reduce implementation based on Scheme callbacks.
+func (t *table) scan(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool) scm.Scmer {
+	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, mapReduce, neutral, combine, isOuter, 0, nil, nil)
 }
 
-func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
-	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, callback, aggregate, neutral, aggregate2, isOuter, stride, batchdata, nil)
+func (t *table) scanWithBatch(currentTx *TxContext, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer) scm.Scmer {
+	return t.scanWithBatchFrom(currentTx, nil, conditionCols, condition, callbackCols, mapReduce, neutral, combine, isOuter, stride, batchdata, nil)
 }
 
-func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, aggregate2 scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer, requiredBoundaries boundaries) scm.Scmer {
+func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, combine scm.Scmer, isOuter bool, stride int, batchdata []scm.Scmer, requiredBoundaries boundaries) scm.Scmer {
 	ss := SessionStateFromTx(currentTx)
 	querySeq := querySeqFromTx(currentTx)
 	hasMutationCallback := false
@@ -700,7 +711,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 		if ss != nil && ss.IsKilledSeq(querySeq) {
 			panic("query killed")
 		}
-		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
+		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
 		values <- scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount}
 	})
 	if done != nil {
@@ -711,8 +722,8 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 	akkumulator := neutral
 	hadValue := false
 	var scanErr scanError
-	if !aggregate2.IsNil() {
-		fn := scm.OptimizeProcToSerialFunction(aggregate2)
+	if !combine.IsNil() {
+		fn := scm.OptimizeProcToSerialFunction(combine)
 		for msg := range values {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
@@ -732,32 +743,9 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 			}
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := buildOuterNullCallbackRow(callbackCols)
-			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
-		}
-	} else if !aggregate.IsNil() {
-		fn := scm.OptimizeProcToSerialFunction(aggregate)
-		for msg := range values {
-			if msg.err.r != nil {
-				if scanErr.r == nil {
-					scanErr = msg.err
-				}
-				continue
-			}
-			if scanErr.r != nil {
-				continue
-			}
-			inputCount += msg.inputCount
-			candidateCount += msg.candidateCount
-			outCount += msg.outCount
-			if msg.outCount > 0 {
-				akkumulator = fn(akkumulator, msg.res)
-				hadValue = true
-			}
-		}
-		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := buildOuterNullCallbackRow(callbackCols)
-			akkumulator = fn(akkumulator, scm.Apply(callback, nullRow...)) // outer join: push one NULL row
+			nullArgs := make([]scm.Scmer, len(callbackCols)+1)
+			nullArgs[0] = akkumulator
+			akkumulator = scm.Apply(mapReduce, nullArgs...)
 		}
 	} else {
 		for msg := range values {
@@ -776,8 +764,9 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 			hadValue = hadValue || msg.outCount > 0
 		}
 		if scanErr.r == nil && !hadValue && isOuter {
-			nullRow := buildOuterNullCallbackRow(callbackCols)
-			scm.Apply(callback, nullRow...) // outer join: push one NULL row
+			nullArgs := make([]scm.Scmer, len(callbackCols)+1)
+			nullArgs[0] = akkumulator
+			akkumulator = scm.Apply(mapReduce, nullArgs...)
 		}
 	}
 	if scanErr.r != nil {
@@ -1103,9 +1092,9 @@ func (t *storageShard) scanFirstRecord(boundaries boundaries, lower []scm.Scmer,
 	return foundID, found
 }
 
-func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
 	if stride > 0 {
-		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, callback, aggregate, neutral, stride, batchdata, currentTx, ss)
+		return t.scanBatch(boundaries, lower, upperLast, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
 	}
 	akkumulator := neutral
 	var outCount int64
@@ -1239,15 +1228,15 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		cdataset = make([]scm.Scmer, len(conditionCols))
 	}
 
-	// MapReducer for map+reduce phase (builds column readers internally)
+	// MapReducer for the fused callback phase (builds column readers internally)
 	var mapperStorage ShardMapReducer
 	var mapperWorkspace shardMapReducerWorkspace
 	mapper := &mapperStorage
 	if mapReducerCanUseReadWorkspace(callbackCols) {
 		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
-		t.initReadMapReducer(&mapperStorage, callbackCols, callback, aggregate, skipShardReadLock, currentTx)
+		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
 	} else {
-		mapper = t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, 0, nil, currentTx)
+		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, 0, nil, currentTx)
 	}
 	defer mapper.Close()
 	// Use a guarded lock that will always be released on panic to avoid leaked locks.
@@ -1311,7 +1300,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 				outCount += int64(outN)
 				hadValue = true
 			} else {
-				// release lock for map+reduce (UpdateFunction needs write lock)
+				// release lock for the fused callback (UpdateFunction needs write lock)
 				if locked {
 					t.mu.RUnlock()
 					locked = false
@@ -1343,7 +1332,7 @@ func (t *storageShard) scan(boundaries boundaries, lower []scm.Scmer, upperLast 
 		return scm.NewNil(), outCount, candidateCount
 	}
 	if hasMutationCallback && len(pendingRecids) > 0 {
-		// Release exclusive lock before map+reduce phase: mapFn may contain
+		// Release exclusive lock before the fused callback: it may contain
 		// nested scans on the same table (e.g. EXISTS inside UPDATE).
 		// The mapper re-acquires mu.Lock() per batch internally via
 		// processMainBlock/processDeltaBlock when shardWriteLocked=false.
@@ -1434,7 +1423,7 @@ func (t *storageShard) hasOrderedScanProxy(cols []string, currentTx *TxContext) 
 	return false
 }
 
-func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, callback scm.Scmer, aggregate scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
+func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, callbackCols []string, mapReduce scm.Scmer, neutral scm.Scmer, stride int, batchdata []scm.Scmer, currentTx *TxContext, ss *scm.SessionState) (scm.Scmer, int64, int64) {
 	akkumulator := neutral
 	var outCount int64
 	var candidateCount int64
@@ -1514,9 +1503,9 @@ func (t *storageShard) scanBatch(boundaries boundaries, lower []scm.Scmer, upper
 	mapper := &mapperStorage
 	if stride == 0 && mapReducerCanUseReadWorkspace(callbackCols) {
 		prepareReadMapReducerStorage(&mapperStorage, &mapperWorkspace, len(callbackCols))
-		t.initReadMapReducer(&mapperStorage, callbackCols, callback, aggregate, skipShardReadLock, currentTx)
+		t.initReadMapReducer(&mapperStorage, callbackCols, mapReduce, skipShardReadLock, currentTx)
 	} else {
-		mapper = t.OpenMapReducer(callbackCols, callback, aggregate, skipShardReadLock, stride, batchdata, currentTx)
+		mapper = t.OpenMapReducer(callbackCols, mapReduce, skipShardReadLock, stride, batchdata, currentTx)
 	}
 	defer mapper.Close()
 

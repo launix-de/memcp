@@ -11,6 +11,7 @@ metadata:
 
 setup:
   - sql: "DROP TABLE IF EXISTS ps_guard_left"
+  - sql: "DROP TABLE IF EXISTS ps_guard_many"
   - sql: "DROP TABLE IF EXISTS ps_guard_right"
   - sql: "DROP TABLE IF EXISTS ps_search_docs"
   - sql: "DROP TABLE IF EXISTS ps_search_files"
@@ -19,8 +20,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS ps_test"
   - sql: "CREATE TABLE ps_test (id int, name text, score float)"
   - sql: "CREATE TABLE ps_guard_left (id int primary key, rhs int)"
+  - sql: "CREATE TABLE ps_guard_many (id int)"
   - sql: "CREATE TABLE ps_guard_right (id int primary key)"
   - sql: "INSERT INTO ps_guard_left (id, rhs) VALUES (1, 1), (2, 1)"
+  - sql: "INSERT INTO ps_guard_many (id) VALUES (1)"
   - sql: "INSERT INTO ps_guard_right (id) VALUES (1)"
   - sql: "CREATE TABLE ps_search_docs (id int primary key, file int, title text, sort_key int)"
   - sql: "CREATE TABLE ps_search_files (id int primary key, filename text, search text)"
@@ -31,6 +34,7 @@ setup:
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS ps_guard_left"
+  - sql: "DROP TABLE IF EXISTS ps_guard_many"
   - sql: "DROP TABLE IF EXISTS ps_guard_right"
   - sql: "DROP TABLE IF EXISTS ps_search_docs"
   - sql: "DROP TABLE IF EXISTS ps_search_files"
@@ -707,6 +711,69 @@ test_cases:
         (insert (table "memcp-tests" "ps_guard_right") '("id")
           (map (produceN 500) (lambda (i) (list (+ i 2)))))
         (rebuild (table "memcp-tests" "ps_guard_right") true false)
+        (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
+        (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))
+          "ok"
+          (error (concat "unexpected statistics variants: first=" variants_after_first
+            " final=" (count (entry "variants"))))))
+    expect:
+      data: ["ok"]
+
+  - name: "Cached SQL join survives a rebuild with unchanged statistics"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define resultrow (lambda (_row) nil))
+        /* ORDER BY fixes the left driver here. Rebuilding the right table changes
+        its immutable statistics token, but cannot change the winning plan. */
+        (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_right r ON r.id = l.rhs ORDER BY l.id")
+        (define right_table (table "memcp-tests" "ps_guard_right"))
+        (rebuild right_table true false)
+        (define first_token (table_planner_statistics_token right_table))
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+          resultrow (lambda (_fields) nil))
+        (define entry (car (cache (car (cache)))))
+        (rebuild right_table true false)
+        (define second_token (table_planner_statistics_token right_table))
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+          resultrow (lambda (_fields) nil))
+        /* Repeated token misses exercise the coarse fingerprint fallback; they
+        must not accumulate variants merely because REBUILD ran. */
+        (rebuild right_table true false)
+        (sql_execute_formula sess nil
+          (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true)
+          resultrow (lambda (_fields) nil))
+        (if (and
+          (not (equal? first_token second_token))
+          (equal? (count (entry "variants")) 1))
+          "ok"
+          (error (concat "unchanged cost choices recompiled: variants="
+            (count (entry "variants"))))))
+    expect:
+      data: ["ok"]
+
+  - name: "Cached SQL join recompiles after a large cardinality change"
+    scm: |
+      (begin
+        (define cache (newcachemap))
+        (define sess (newsession))
+        (sess "username" "root")
+        (sess "schema" "memcp-tests")
+        (define resultrow (lambda (_row) nil))
+        (define query "SELECT l.id FROM ps_guard_left l JOIN ps_guard_many r ON r.id = l.rhs")
+        (define first_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
+        (sql_execute_formula sess nil first_formula resultrow (lambda (_fields) nil))
+        (define entry (car (cache (car (cache)))))
+        (define variants_after_first (count (entry "variants")))
+        (insert (table "memcp-tests" "ps_guard_many") '("id")
+          (map (produceN 500) (lambda (i) (list (+ i 2)))))
+        (rebuild (table "memcp-tests" "ps_guard_many") true false)
         (define second_formula (cached_parse cache (list parse_sql) "memcp-tests" query nil "root" sess true))
         (sql_execute_formula sess nil second_formula resultrow (lambda (_fields) nil))
         (if (and (equal? variants_after_first 1) (equal? (count (entry "variants")) 2))

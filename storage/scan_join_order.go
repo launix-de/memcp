@@ -23,17 +23,13 @@ import "container/heap"
 import "github.com/launix-de/memcp/scm"
 
 func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm.Scmer, *scm.TypeDescriptor) {
-	const mapIdx, reduceIdx, neutralIdx, reduce2Idx, outerIdx, notFoundIdx = 14, 15, 16, 17, 18, 19
-	rawMap := v[mapIdx]
-	rawReduce := scm.NewNil()
-	rawReduce2 := scm.NewNil()
-	if len(v) > reduceIdx {
-		rawReduce = v[reduceIdx]
+	const mapReduceIdx, neutralIdx, combineIdx, outerIdx, notFoundIdx = 14, 15, 16, 17, 18
+	rawMapReduce := v[mapReduceIdx]
+	rawCombine := scm.NewNil()
+	if len(v) > combineIdx {
+		rawCombine = v[combineIdx]
 	}
-	if len(v) > reduce2Idx {
-		rawReduce2 = v[reduce2Idx]
-	}
-	for i := 1; i < mapIdx && i < len(v); i++ {
+	for i := 1; i < mapReduceIdx && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	neutralType := unknownScanType()
@@ -41,19 +37,18 @@ func optimizeScanJoinOrder(v []scm.Scmer, oc *scm.OptimizerContext, _ bool) (scm
 		v[neutralIdx], neutralType = oc.OptimizeSub(v[neutralIdx], true)
 		neutralType = normalizeScanType(neutralType)
 	}
-	if !rawReduce.IsNil() {
-		oc.SetCallbackReturnFlow(scm.CallbackReturnFlow(rawMap, rawReduce, 1))
-	}
 	oc.Ome.IncrLoopDepth()
-	optimizedMap, mapType := oc.OptimizeSub(rawMap, true)
-	v[mapIdx] = optimizedMap
-	mapType = normalizeScanType(mapType)
-	resultType := neutralType
-	if !rawReduce.IsNil() {
-		v[reduceIdx], resultType = oc.OptimizeReducerCallback(rawReduce, neutralType, mapType)
+	columnTypes := []*scm.TypeDescriptor(nil)
+	if params, _, ok := scanLambdaParts(rawMapReduce); ok && len(params) > 1 {
+		columnTypes = make([]*scm.TypeDescriptor, len(params)-1)
+		for i := range columnTypes {
+			columnTypes[i] = unknownScanType()
+		}
 	}
-	if !rawReduce2.IsNil() {
-		v[reduce2Idx], resultType = oc.OptimizeReducerCallback(rawReduce2, resultType, resultType)
+	optimizedMapReduce, resultType := oc.OptimizeReducerCallback(rawMapReduce, neutralType, columnTypes...)
+	v[mapReduceIdx] = optimizedMapReduce
+	if !rawCombine.IsNil() {
+		v[combineIdx], resultType = oc.OptimizeReducerCallback(rawCombine, resultType, resultType)
 	}
 	if len(v) > outerIdx {
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
@@ -100,9 +95,8 @@ type scanJoinOrderSpec struct {
 	joinFilterCols []scanJoinOrderColumn
 	joinFilter     scm.Scmer
 	mapCols        []scanJoinOrderColumn
-	mapFn          scm.Scmer
-	reduceFn       scm.Scmer
-	reduce2Fn      scm.Scmer
+	mapReduceFn    scm.Scmer
+	combineFn      scm.Scmer
 	neutral        scm.Scmer
 	isOuter        bool
 	notFoundValue  scm.Scmer
@@ -197,18 +191,13 @@ func scanJoinTrue() scm.Scmer {
 }
 
 func scanJoinOrderOuterResult(spec *scanJoinOrderSpec, result scm.Scmer) scm.Scmer {
-	mapProgram := scm.PrepareSerialProc(spec.mapFn)
-	reduce := spec.reduceFn
-	if reduce.IsNil() {
-		reduce = scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
+	mapReduceProgram := scm.PrepareSerialProc(spec.mapReduceFn)
+	args := make([]scm.Scmer, len(spec.mapCols)+1)
+	args[0] = result
+	for i := 1; i < len(args); i++ {
+		args[i] = scm.NewNil()
 	}
-	reduceProgram := scm.PrepareSerialProc(reduce)
-	nulls := make([]scm.Scmer, len(spec.mapCols))
-	for i := range nulls {
-		nulls[i] = scm.NewNil()
-	}
-	args := [2]scm.Scmer{result, mapProgram.Call(nulls)}
-	return reduceProgram.Call(args[:])
+	return mapReduceProgram.Call(args)
 }
 
 func appendScanJoinColumn(cols []string, indexes map[string]int, col string) ([]string, map[string]int) {
@@ -232,8 +221,8 @@ func prepareScanJoinOrderSpec(spec *scanJoinOrderSpec) {
 	if spec.limitPartitionCols != 0 {
 		panic("scan_join_order: partitioned limits are not supported")
 	}
-	if !spec.reduce2Fn.IsNil() && (spec.offset != 0 || spec.limit != -1) {
-		panic("scan_join_order: reduce2 requires an unlimited scan without offset")
+	if !spec.combineFn.IsNil() && (spec.offset != 0 || spec.limit != -1) {
+		panic("scan_join_order: combine requires an unlimited scan without offset")
 	}
 	if len(spec.orderCols) != len(spec.orderDirs) {
 		panic("scan_join_order: order columns and directions must have equal length")
@@ -313,7 +302,7 @@ func collectScanJoinOrderRecords(currentTx *TxContext, input *scanJoinOrderInput
 		}
 	}
 	scanOrderMulti(currentTx, []scanOrderTableSpec{source}, sortdirs, 0, offset, limit,
-		scm.NewNil(), scm.NewNil(), false, scm.NewNil())
+		scm.NewNil(), false, scm.NewNil())
 	return records
 }
 
@@ -331,7 +320,7 @@ func materializeScanJoinRecords(currentTx *TxContext, input *scanJoinOrderInput,
 	for _, ref := range refs {
 		mapper := mappers[ref.shard]
 		if mapper == nil {
-			mapper = ref.shard.OpenMapReducer(input.readCols, identity, scm.NewNil(), false, 0, nil, currentTx)
+			mapper = ref.shard.OpenMapper(input.readCols, identity, false, currentTx)
 			mappers[ref.shard] = mapper
 		}
 		values := mapper.MapOne(ref.recid)
@@ -481,7 +470,7 @@ func (readers *scanJoinOrderMapReaders) values(tuple *scanJoinOrderTuple, dst []
 			}
 			mapper := inputMappers[record.shard]
 			if mapper == nil {
-				mapper = record.shard.OpenMapReducer(input.lateMapCols, readers.identity, scm.NewNil(), false, 0, nil, readers.currentTx)
+				mapper = record.shard.OpenMapper(input.lateMapCols, readers.identity, false, readers.currentTx)
 				inputMappers[record.shard] = mapper
 			}
 			lateValues[ref.table] = mapper.MapOne(record.recid).Slice()
@@ -744,32 +733,15 @@ func reduceScanJoinOrderTuples(currentTx *TxContext, spec *scanJoinOrderSpec, tu
 	if len(tuples) == 0 {
 		return result, false
 	}
-	mapProgram := scm.PrepareSerialProc(spec.mapFn)
-	reduceProgram := scm.PrepareSerialProc(spec.reduceFn)
-	if spec.reduceFn.IsNil() {
-		reduceProgram = scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }))
-	}
-	var reduceArgs [2]scm.Scmer
-	reduceValue := func(acc scm.Scmer, value scm.Scmer) scm.Scmer {
-		reduceArgs[0], reduceArgs[1] = acc, value
-		return reduceProgram.Call(reduceArgs[:])
-	}
-	if spec.reduce2Fn.IsNil() {
-		// Keep scan_join_order aligned with the scan callback pipeline: COUNT(*)
-		// is one addition per accepted batch, not one callback pair per row.
-		if mapProgram.Kind == scm.SerialProcConstant && mapProgram.Value.IsInt() && mapProgram.Value.Int() == 1 && reduceProgram.IsNative(scm.Symbol("+")) {
-			reduceArgs[0] = result
-			reduceArgs[1] = scm.NewInt(int64(len(tuples)))
-			result = reduceProgram.Function(reduceArgs[:]...)
-			*emitted += len(tuples)
-			return result, true
-		}
+	mapReduceProgram := scm.PrepareSerialProc(spec.mapReduceFn)
+	if spec.combineFn.IsNil() {
 		readers := newScanJoinOrderMapReaders(currentTx, spec)
 		defer readers.close()
-		var args []scm.Scmer
+		args := make([]scm.Scmer, len(spec.mapCols)+1)
 		for _, tuple := range tuples {
-			args = readers.values(tuple, args)
-			result = reduceValue(result, mapProgram.Call(args))
+			args[0] = result
+			readers.values(tuple, args[1:])
+			result = mapReduceProgram.Call(args)
 			*emitted++
 		}
 		return result, true
@@ -780,43 +752,31 @@ func reduceScanJoinOrderTuples(currentTx *TxContext, spec *scanJoinOrderSpec, tu
 	tasks := (len(tuples) + chunkSize - 1) / chunkSize
 	partials := make([]scm.Scmer, tasks)
 	done := runFanoutTasks(currentTx, tasks, func(task int, _ bool) {
-		localMap := scm.PrepareSerialProc(spec.mapFn)
-		localReduce := scm.PrepareSerialProc(spec.reduceFn)
-		if spec.reduceFn.IsNil() {
-			localReduce = scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] }))
-		}
+		localMapReduce := scm.PrepareSerialProc(spec.mapReduceFn)
 		readers := newScanJoinOrderMapReaders(currentTx, spec)
 		defer readers.close()
 		partial := spec.neutral
-		var localReduceArgs [2]scm.Scmer
 		start := task * chunkSize
 		end := start + chunkSize
 		if end > len(tuples) {
 			end = len(tuples)
 		}
-		if localMap.Kind == scm.SerialProcConstant && localMap.Value.IsInt() && localMap.Value.Int() == 1 && localReduce.IsNative(scm.Symbol("+")) {
-			localReduceArgs[0] = partial
-			localReduceArgs[1] = scm.NewInt(int64(end - start))
-			partials[task] = localReduce.Function(localReduceArgs[:]...)
-			return
-		}
-		var args []scm.Scmer
+		args := make([]scm.Scmer, len(spec.mapCols)+1)
 		for i := start; i < end; i++ {
-			args = readers.values(tuples[i], args)
-			localReduceArgs[0] = partial
-			localReduceArgs[1] = localMap.Call(args)
-			partial = localReduce.Call(localReduceArgs[:])
+			args[0] = partial
+			readers.values(tuples[i], args[1:])
+			partial = localMapReduce.Call(args)
 		}
 		partials[task] = partial
 	})
 	if done != nil {
 		<-done
 	}
-	reduce2Program := scm.PrepareSerialProc(spec.reduce2Fn)
-	var reduce2Args [2]scm.Scmer
+	combineProgram := scm.PrepareSerialProc(spec.combineFn)
+	var combineArgs [2]scm.Scmer
 	for _, partial := range partials {
-		reduce2Args[0], reduce2Args[1] = result, partial
-		result = reduce2Program.Call(reduce2Args[:])
+		combineArgs[0], combineArgs[1] = result, partial
+		result = combineProgram.Call(combineArgs[:])
 	}
 	*emitted += len(tuples)
 	return result, true
@@ -924,17 +884,15 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	for keyIndex := 0; keyIndex < keyWidth; keyIndex++ {
 		callbackCols = append(callbackCols, fmt.Sprintf("#%d", keyIndex))
 	}
-	callback := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		return scm.NewSlice(append([]scm.Scmer(nil), values...))
-	})
-	collect := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		return scm.NewSlice(append(values[0].Slice(), values[1]))
+	mapReduce := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		row := scm.NewSlice(append([]scm.Scmer(nil), values[1:]...))
+		return scm.NewSlice(append(values[0].Slice(), row))
 	})
 	combine := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewSlice(append(values[0].Slice(), values[1].Slice()...))
 	})
 	rows := input.table.scanWithBatchFrom(currentTx, nil, conditionCols, condition,
-		callbackCols, callback, collect, scm.NewSlice(nil), combine, false,
+		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
 		stride, batchdata, required).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))
 	for _, rowValue := range rows {
@@ -1352,14 +1310,7 @@ func runScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderS
 func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrderSpec, combination []*scanJoinOrderShardStream) (scm.Scmer, int) {
 	result := spec.neutral
 	count := 0
-	mapProgram := scm.PrepareSerialProc(spec.mapFn)
-	reduce := spec.reduceFn
-	if reduce.IsNil() {
-		reduce = scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
-	}
-	reduceProgram := scm.PrepareSerialProc(reduce)
-	countPipeline := mapProgram.Kind == scm.SerialProcConstant && mapProgram.Value.IsInt() && mapProgram.Value.Int() == 1 && reduceProgram.IsNative(scm.Symbol("+"))
-	var reduceArgs [2]scm.Scmer
+	mapReduceProgram := scm.PrepareSerialProc(spec.mapReduceFn)
 	readers := newScanJoinOrderMapReaders(currentTx, spec)
 	defer readers.close()
 	var filterProgram *scm.SerialProc
@@ -1374,6 +1325,7 @@ func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrd
 		}
 	}
 	records := make([]*scanJoinOrderRecord, len(combination))
+	mapReduceArgs := make([]scm.Scmer, len(spec.mapCols)+1)
 	var enumerate func(int)
 	enumerate = func(inputIndex int) {
 		if inputIndex == len(combination) {
@@ -1384,14 +1336,9 @@ func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrd
 					return
 				}
 			}
-			if countPipeline {
-				count++
-				return
-			}
-			mapArgs := readers.values(tuple, nil)
-			reduceArgs[0] = result
-			reduceArgs[1] = mapProgram.Call(mapArgs)
-			result = reduceProgram.Call(reduceArgs[:])
+			mapReduceArgs[0] = result
+			readers.values(tuple, mapReduceArgs[1:])
+			result = mapReduceProgram.Call(mapReduceArgs)
 			count++
 			return
 		}
@@ -1418,11 +1365,6 @@ func reduceScanJoinOrderShardCombination(currentTx *TxContext, spec *scanJoinOrd
 	for _, driverRecord := range combination[0].records {
 		records[0] = driverRecord
 		enumerate(1)
-	}
-	if countPipeline && count > 0 {
-		reduceArgs[0] = result
-		reduceArgs[1] = scm.NewInt(int64(count))
-		result = reduceProgram.Function(reduceArgs[:]...)
 	}
 	return result, count
 }
@@ -1519,7 +1461,7 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 	}
 
 	combinations := scanJoinOrderShardCombinations(&spec, streams)
-	if !spec.reduce2Fn.IsNil() {
+	if !spec.combineFn.IsNil() {
 		partials := make([]scm.Scmer, len(combinations))
 		counts := make([]int, len(combinations))
 		done := runFanoutTasks(currentTx, len(combinations), func(runner int, _ bool) {
@@ -1528,16 +1470,16 @@ func scanJoinOrder(currentTx *TxContext, spec scanJoinOrderSpec) scm.Scmer {
 		if done != nil {
 			<-done
 		}
-		reduce2Program := scm.PrepareSerialProc(spec.reduce2Fn)
-		var reduce2Args [2]scm.Scmer
+		combineProgram := scm.PrepareSerialProc(spec.combineFn)
+		var combineArgs [2]scm.Scmer
 		result := spec.neutral
 		total := 0
 		for runner, partial := range partials {
 			if counts[runner] == 0 {
 				continue
 			}
-			reduce2Args[0], reduce2Args[1] = result, partial
-			result = reduce2Program.Call(reduce2Args[:])
+			combineArgs[0], combineArgs[1] = result, partial
+			result = combineProgram.Call(combineArgs[:])
 			total += counts[runner]
 		}
 		if total > 0 {
@@ -1643,19 +1585,19 @@ func declareScanJoinOrder(en *scm.Env) {
 				orderDirs[i] = scm.OptimizeProcToSerialFunction(direction)
 			}
 			neutral := scm.NewNil()
+			if len(a) > 14 {
+				neutral = a[14]
+			}
+			combine := scm.NewNil()
 			if len(a) > 15 {
-				neutral = a[15]
+				combine = a[15]
 			}
-			reduce2 := scm.NewNil()
-			if len(a) > 16 {
-				reduce2 = a[16]
-			}
-			isOuter := len(a) > 17 && scm.ToBool(a[17])
+			isOuter := len(a) > 16 && scm.ToBool(a[16])
 			notFoundValue := neutral
-			if len(a) > 18 {
-				notFoundValue = a[18]
+			if len(a) > 17 {
+				notFoundValue = a[17]
 			}
-			batchedProbe := len(a) > 19 && scm.ToBool(a[19])
+			batchedProbe := len(a) > 18 && scm.ToBool(a[18])
 			return scanJoinOrder(scmerToTxContext(a[0]), scanJoinOrderSpec{
 				inputs:             decodeScanJoinOrderInputs(tables, a[2], a[3], a[4]),
 				joinFilterCols:     decodeScanJoinOrderColumns(a[5], "joinFilterColumns"),
@@ -1666,9 +1608,8 @@ func declareScanJoinOrder(en *scm.Env) {
 				offset:             int(scm.ToInt(a[10])),
 				limit:              int(scm.ToInt(a[11])),
 				mapCols:            decodeScanJoinOrderColumns(a[12], "mapColumns"),
-				mapFn:              a[13],
-				reduceFn:           a[14],
-				reduce2Fn:          reduce2,
+				mapReduceFn:        a[13],
+				combineFn:          combine,
 				neutral:            neutral,
 				isOuter:            isOuter,
 				notFoundValue:      notFoundValue,
@@ -1692,11 +1633,10 @@ func declareScanJoinOrder(en *scm.Env) {
 				{Kind: "int", Label: "limitPartitionCols", Description: "reserved for scan_order compatibility; currently must be 0"},
 				{Kind: "int", Label: "offset", Description: "joined rows skipped in final order"},
 				{Kind: "int", Label: "limit", Description: "joined rows emitted in final order; -1 is unlimited"},
-				{Kind: "list", Label: "mapColumns", Description: "joined columns supplied to the sole outer map callback", Element: joinedColumn},
-				{Kind: "func", Label: "map", Description: "map callback evaluated only for final OFFSET/LIMIT rows"},
-				{Kind: "func|nil", Label: "reduce", Description: "global reducer; when reduce2 is supplied, this becomes the runner-local first-stage reducer", Optional: true},
-				{Kind: "any", Label: "neutral", Description: "optional reducer neutral value", Optional: true},
-				{Kind: "func|nil", Label: "reduce2", Description: "optional global second-stage reducer combining runner-local reduce results; permitted only with offset 0 and unlimited limit -1", Optional: true},
+				{Kind: "list", Label: "mapReduceColumns", Description: "joined columns supplied after the accumulator", Element: joinedColumn},
+				{Kind: "func", Label: "mapReduce", Description: "callback (accumulator columns...) returning the next accumulator for final OFFSET/LIMIT rows"},
+				{Kind: "any", Label: "neutral", Description: "optional neutral accumulator", Optional: true},
+				{Kind: "func|nil", Label: "combine", Description: "optional global combiner for runner-local accumulators; permitted only with offset 0 and unlimited limit -1", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "optional whole-scan NULL fallback", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "optional result when no joined row is emitted", Optional: true},
 				{Kind: "bool", Label: "batchedProbe", Description: "probe inner equality indexes from growing ordered-driver batches instead of materializing inner inputs", Optional: true},

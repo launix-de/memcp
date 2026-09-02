@@ -200,10 +200,8 @@ test_cases:
       rows: 1
       result_contains:
         - "scan"
-        - "reduce_assoc"
         - "set_assoc_mut"
         - "merge_assoc_mut"
-        - "!list"
       result_not_contains:
         - ".grp:lookup_group_items:"
         - "scan_group"
@@ -295,10 +293,10 @@ test_cases:
         (define plan (serialize (optimize
           (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
-            (list "id") (list 'lambda (list 'id) (list 'list 'id (list 'list)))
-            (list 'lambda (list 'acc 'row)
-              (list 'begin (list 'set_assoc (list 'cadr 'row) "seen" true) 'acc))
-            0 nil false))))
+            (list "id") (list 'lambda (list 'acc 'id)
+              (list 'set_assoc 'acc 'id
+                (list 'set_assoc (list 'list) "seen" true)))
+            (list 'list) nil false))))
         (if (not (match plan (regex "set_assoc_mut" _) true false))
           (error (concat "owned projected value was not propagated: " plan)))
         true)
@@ -309,9 +307,10 @@ test_cases:
         (define plan (serialize (optimize
           (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
-            (list "id") (list 'lambda (list 'id) (list 'list 'id (list 'list)))
-            (list 'lambda (list 'acc 'row)
-              (list 'begin (list 'set_assoc (list 'car 'row) "seen" true) 'acc))
+            (list "id") (list 'lambda (list 'acc 'id)
+              (list 'begin
+                (list 'set_assoc (list 'car (list 'list 'id (list 'list))) "seen" true)
+                'acc))
             0 nil false))))
         (if (match plan (regex "set_assoc_mut" _) true false)
           (error (concat "borrowed projected value became mutable: " plan)))
@@ -323,8 +322,8 @@ test_cases:
         (define plan (serialize (optimize
           (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
-            (list "id") (list 'lambda (list 'id) 'id)
-            (list 'lambda (list 'acc 'row) (list 'set_assoc 'acc 'row true))
+            (list "id") (list 'lambda (list 'acc 'id)
+              (list 'set_assoc 'acc 'id true))
             (list 'quote (list "existing" true)) nil false))))
         (if (match plan (regex "set_assoc_mut" _) true false)
           (error (concat "borrowed neutral accumulator became mutable: " plan)))
@@ -336,9 +335,8 @@ test_cases:
         (define plan (serialize (optimize
           (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
-            (list "id") (list 'lambda (list 'id) 'id)
-            (list 'lambda (list 'acc 'row)
-              (list 'begin (list 'set_assoc 'acc 'row true) 'row))
+            (list "id") (list 'lambda (list 'acc 'id)
+              (list 'begin (list 'set_assoc 'acc 'id true) 'id))
             (list 'list) nil false))))
         (if (match plan (regex "set_assoc_mut" _) true false)
           (error (concat "non-preserving reducer received owned accumulator: " plan)))
@@ -358,9 +356,10 @@ test_cases:
         (define plan (serialize (optimize
           (list 'scan nil (list 'table "memcp-tests" "lookup_group_items")
             (list "id") (list 'lambda (list 'id) true)
-            (list "id") (list 'lambda (list 'id)
-              (list 'list (list 'list 'id) (list 'list 'id 1)))
-            wrapped (list 'list) wrapped false))))
+            (list "id") (list 'lambda (list 'acc 'id)
+              (list wrapped 'acc
+                (list 'list (list 'list 'id) (list 'list 'id 1))))
+            (list 'list) wrapped false))))
         (if (not (match plan (regex "merge_assoc_mut" _) true false))
           (error (concat "join reducer wrapper lost accumulator ownership: " plan)))
         (if (match plan (regex "\\(merge_assoc \\(var 0\\)" _) true false)

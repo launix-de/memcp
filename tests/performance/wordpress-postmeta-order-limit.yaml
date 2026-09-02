@@ -130,8 +130,8 @@ test_cases:
             (list (collate "utf8mb4" true))
             0 0 20
             (list (list 1 "ID") (list 1 "post_title") (list 0 "meta_value"))
-            (lambda (_id _title _value) 1)
-            + 0 nil false 0 true))
+            (lambda (acc _id _title _value) (+ acc 1))
+            0 nil false 0 true))
         (if (equal? found 20) "ok"
           (error "wrong WordPress scan_join_order row count")))
     expect:

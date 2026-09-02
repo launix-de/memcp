@@ -113,14 +113,13 @@ func queryBlobsTable(t *testing.T, db *database) map[string]int {
 		}),
 		[]string{"hash", "refcount"},
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-			h := scm.String(a[0])
-			rc := int(scm.ToInt(a[1]))
+			h := scm.String(a[1])
+			rc := int(scm.ToInt(a[2]))
 			result[h] = rc
-			return scm.NewNil()
+			return a[0]
 		}),
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 		scm.NewNil(),
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
+		scm.NewNil(),
 		false,
 	)
 	return result
@@ -224,12 +223,11 @@ func TestBlobInsertRebuildAndRead(t *testing.T) {
 			[]string{"id"}, scanCondition("id", scm.NewInt(tc.id)),
 			[]string{"content"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-				readLen = len(scm.String(a[0]))
-				return scm.NewNil()
+				readLen = len(scm.String(a[1]))
+				return a[0]
 			}),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 			scm.NewNil(),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
+			scm.NewNil(),
 			false,
 		)
 		if readLen != tc.len {
@@ -289,10 +287,10 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 			[]string{"id"}, scanCondition("id", scm.NewInt(id)),
 			[]string{"$update"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-				scm.Apply(a[0]) // delete
-				return scm.NewNil()
+				scm.Apply(a[1]) // delete
+				return a[0]
 			}),
-			scm.NewNil(), scm.NewNil(), scm.NewNil(), false,
+			scm.NewNil(), scm.NewNil(), false,
 		)
 	}
 
@@ -326,12 +324,11 @@ func TestBlobDeleteRowsAndRebuild(t *testing.T) {
 			[]string{"id"}, scanCondition("id", scm.NewInt(id)),
 			[]string{"content"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-				readLen = len(scm.String(a[0]))
-				return scm.NewNil()
+				readLen = len(scm.String(a[1]))
+				return a[0]
 			}),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 			scm.NewNil(),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
+			scm.NewNil(),
 			false,
 		)
 		if readLen != len(longA) {
@@ -462,12 +459,11 @@ func TestBlobSharedAcrossTables(t *testing.T) {
 		[]string{"id"}, scanCondition("id", scm.NewInt(1)),
 		[]string{"content"},
 		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-			readLen = len(scm.String(a[0]))
-			return scm.NewNil()
+			readLen = len(scm.String(a[1]))
+			return a[0]
 		}),
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 		scm.NewNil(),
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
+		scm.NewNil(),
 		false,
 	)
 	if readLen != len(shared) {
@@ -627,12 +623,11 @@ func TestDoubleRebuildPreservesShardFiles(t *testing.T) {
 			[]string{"id"}, scanCondition("id", scm.NewInt(tc.id)),
 			[]string{"name"},
 			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-				readName = scm.String(a[0])
-				return scm.NewNil()
+				readName = scm.String(a[1])
+				return a[0]
 			}),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
 			scm.NewNil(),
-			scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }),
+			scm.NewNil(),
 			false,
 		)
 		if readName != tc.name {

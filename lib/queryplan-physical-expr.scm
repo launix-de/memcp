@@ -344,12 +344,12 @@ partner. */
 					0
 					partition_limit
 					(cons (quote list) mapcols)
-					(list (quote lambda)
+					(scan_mapreduce_expr
 						(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+						(if check_cardinality
+							(scalar_query_probe_reduce_cardinality)
+							(scalar_once_reduce_first))
 						(lower_column_expr_for_alias src value_expr))
-					(if check_cardinality
-						(scalar_query_probe_reduce_cardinality)
-						(scalar_once_reduce_first))
 					(if check_cardinality
 						(list (quote quote) scalar_query_probe_empty)
 						nil)
@@ -1390,8 +1390,8 @@ through to reach the base table -- src already is it. */
 				0
 				partition_limit
 				(cons (quote list) (list requested_col))
-				(list (quote lambda) (list (symbol requested_col)) (symbol requested_col))
-				(scalar_once_reduce_first)
+				(scan_mapreduce_expr (list (symbol requested_col))
+					(scalar_once_reduce_first) (symbol requested_col))
 				nil
 				false)))))
 
@@ -1912,10 +1912,10 @@ would still have to project that value over the segment. */
 			(coalesceNil offset_value 0)
 			partition_limit
 			(cons (quote list) mapcols)
-			(list (quote lambda)
+			(scan_mapreduce_expr
 				(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+				(scalar_once_reduce_first)
 				(lower_column_expr_for_alias src value_expr))
-			(scalar_once_reduce_first)
 			nil
 			false))))
 
@@ -2077,12 +2077,12 @@ would still have to project that value over the segment. */
 						(cons (quote and)
 							(cons (lower_column_expr_for_alias src condition) key_terms)))
 					(cons (quote list) value_cols)
-					(list (quote lambda)
+					(scan_mapreduce_expr
 						(map value_cols (lambda (col) (symbol (concat (source_alias src) "." col))))
+						reduce_expr
 						(lower_column_expr_for_alias src value_expr))
-					reduce_expr
 					neutral_expr
-					nil
+					reduce_expr
 					false)))))))
 
 (define lower_scalar_cardinality_probe_expr (lambda (sources default_alias stage requested_col)
@@ -2140,12 +2140,10 @@ would still have to project that value over the segment. */
 					partition_limit
 					(cons (quote list) value_cols)
 					(list (quote lambda)
-						(map value_cols (lambda (col) (symbol (concat (source_alias src) "." col))))
-						(lower_column_expr_for_alias src value_expr))
-					(list (quote lambda) '((quote acc) (quote value))
+						(cons (quote acc) (map value_cols (lambda (col) (symbol (concat (source_alias src) "." col)))))
 						(list (quote if)
 							(list (quote equal?) (quote acc) unset)
-							(quote value)
+							(lower_column_expr_for_alias src value_expr)
 							(list (quote error) "scalar subselect returned more than one row")))
 					unset
 					false
@@ -2512,7 +2510,7 @@ retain the scalar's complete value, including SQL NULL. */
 			(map lookup_filter_cols (lambda (col) (symbol (concat lookup_alias "." col))))
 			(lower_column_expr_for_join sources default_alias probe_condition)))
 		(define map_expr (list (quote lambda)
-			(map lookup_map_cols (lambda (col) (symbol (concat lookup_alias "." col))))
+			(cons (quote __scan_acc) (map lookup_map_cols (lambda (col) (symbol (concat lookup_alias "." col)))))
 			(lower_column_expr_for_join sources default_alias expr)))
 		(define probe (list (quote scan_order)
 			(physical_query_tx_symbol)
@@ -2524,7 +2522,6 @@ retain the scalar's complete value, including SQL NULL. */
 			0 0 1
 			(cons (quote list) lookup_map_cols)
 			map_expr
-			(list (quote lambda) (list (quote _old) (quote value)) (quote value))
 			nil true nil))
 		(list (quote lambda)
 			(map driver_cols symbol)
@@ -2691,10 +2688,10 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 			0
 			1
 			(cons (quote list) valuecols)
-			(list (quote lambda)
+			(scan_mapreduce_expr
 				(map valuecols (lambda (col) (symbol (concat grouptbl "." col))))
+				(scalar_once_reduce_first)
 				(lower_column_expr_for_alias group_src value_expr))
-			(scalar_once_reduce_first)
 			nil
 			false))))
 
@@ -2715,10 +2712,9 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 				(map filtercols (lambda (col) (symbol (concat alias "." col))))
 				(lower_column_expr_for_alias src condition))
 			(list (quote list))
-			(list (quote lambda) '() 1)
-			(quote +)
+			(scan_mapreduce_expr '() (quote +) 1)
 			0
-			nil
+			(quote +)
 			false))))
 
 (define lower_union_count_expr (lambda (block)
@@ -2753,10 +2749,9 @@ is still available. Explicit COLLATE and user callbacks pass through intact. */
 				(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
 				lowered_condition)
 			(list (quote list))
-			(list (quote lambda) '() 1)
-			(quote +)
+			(scan_mapreduce_expr '() (quote +) 1)
 			0
-			nil
+			(quote +)
 			false))))
 
 /* A complex decorrelated membership domain cannot be reconstructed as one raw
@@ -4091,6 +4086,32 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 
 (define aggregate_count_descriptor (list 1 (quote +) 0))
 
+/* Select the direct already-fused callback while the physical plan is still
+data. An identity map needs no wrapper around its reducer, regardless of which
+aggregate implements it. COUNT(*) has no source column, so its constant-one
+mapping uses the native unary callback selected here. */
+(define scan_mapreduce_expr (lambda (params reduce_expr mapped_expr)
+	(begin
+		(define callback_shape (list (quote lambda)
+			(match (count params)
+				0 (list (quote __scan_acc))
+				1 (list (quote __scan_acc) (quote __scan_value))
+				_ '())
+			(list reduce_expr (quote __scan_acc)
+				(match (list (count params) mapped_expr
+					(equal? params (list mapped_expr)))
+					'(0 1 _) 1
+					'(1 _ true) (quote __scan_value)
+					_ (quote __scan_non_identity)))))
+		(match callback_shape
+			'((symbol lambda) (list (symbol __scan_acc))
+				((symbol +) (symbol __scan_acc) 1)) (quote scan_count)
+			'((symbol lambda) (list (symbol __scan_acc) (symbol __scan_value))
+				(cons reducer (list (symbol __scan_acc) (symbol __scan_value)))) reducer
+			_ (list (quote lambda)
+				(cons (quote __scan_acc) params)
+				(list reduce_expr (quote __scan_acc) mapped_expr))))))
+
 (define count_distinct_reduce (lambda ()
 	(list (quote lambda) (list (quote a) (quote b))
 		(list (quote begin)
@@ -4120,7 +4141,7 @@ candidate-keyset choice replaces the marker with a projected RecSet carrier. */
 (define aggregate_shard_combine (lambda (ag)
 	(if (count_distinct_descriptor? ag)
 		(count_distinct_combine)
-		nil)))
+		(nth ag 1))))
 
 (define aggregate_map_value_expr (lambda (ag expr)
 	(if (count_distinct_descriptor? ag)
@@ -5233,10 +5254,10 @@ ever-larger subtrees. */
 					(coalesceNil offset_value 0)
 					1
 					(cons (quote list) mapcols)
-					(list (quote lambda)
+					(scan_mapreduce_expr
 						(map mapcols (lambda (col) (symbol (concat alias "." col))))
+						agg_reduce
 						(lower_column_expr_for_alias src value_expr))
-					agg_reduce
 					agg_neutral
 					false))))))
 
@@ -5279,13 +5300,11 @@ ever-larger subtrees. */
 				-1
 				(cons (quote list) mapcols)
 				(list (quote lambda)
-					(map mapcols (lambda (col) (symbol (concat alias "." col))))
-					(runtime_cons_list_expr (list key_expr payload_expr)))
-				(list (quote lambda) (list (quote acc) (quote rowvals))
+					(cons (quote acc) (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 					(list (quote set_assoc)
 						(quote acc)
-						(list (quote car) (quote rowvals))
-						(list (quote cadr) (quote rowvals))
+						key_expr
+						payload_expr
 						keep_first))
 				(list (quote list))
 				false)))))
@@ -5353,10 +5372,10 @@ ever-larger subtrees. */
 							(lower_column_expr_for_alias src condition)
 							(group_key_equality_terms alias key_names keys))))
 					(cons (quote list) aggcols)
-					(list (quote lambda)
+					(scan_mapreduce_expr
 						(map aggcols (lambda (col) (symbol (concat alias "." col))))
+						agg_reduce
 						(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr)))
-					agg_reduce
 					agg_neutral
 					(aggregate_shard_combine ag)
 					false)))
@@ -5484,13 +5503,11 @@ ever-larger subtrees. */
 				(lower_column_expr_for_alias src condition))
 			(cons (quote list) mapcols)
 			(list (quote lambda)
-				(map mapcols (lambda (col) (symbol (concat alias "." col))))
-				(list (quote list) key_expr payload_expr))
-			(list (quote lambda) (list (quote acc) (quote rowvals))
+				(cons (quote acc) (map mapcols (lambda (col) (symbol (concat alias "." col)))))
 				(list (quote set_assoc)
 					(quote acc)
-					(list (quote car) (quote rowvals))
-					(list (quote cadr) (quote rowvals))
+					key_expr
+					payload_expr
 					merge_payload))
 			(list (quote list))
 			merge_groups
@@ -5709,12 +5726,13 @@ join reducer aggregate shard-local states and merge them once at the root. */
 			(list (quote lambda) '() true)
 			(cons (quote list) (cons "$update" key_names))
 			(list (quote lambda)
-				(cons (quote $update) key_symbols)
-				(list (quote if)
-					(list (quote has_assoc?) (quote grouped) key_expr)
-					true
-					(list (quote $update))))
-			nil
+				(cons (quote __scan_acc) (cons (quote $update) key_symbols))
+				(list (quote begin)
+					(list (quote if)
+						(list (quote has_assoc?) (quote grouped) key_expr)
+						true
+						(list (quote $update)))
+					(quote __scan_acc)))
 			nil
 			nil
 			false))))

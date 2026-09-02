@@ -29,13 +29,7 @@ import (
 func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 	tbl := benchScanTable(b, "family")
 	trueFn := scm.NewFunc(func(...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
-	mapFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
-		if len(values) == 0 {
-			return scm.NewNil()
-		}
-		return values[0]
-	})
-	reduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[1] })
+	mapReduceFn := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 	nilValue := scm.NewNil()
 	sortCols := []scm.Scmer{scm.NewString("id")}
 	sortDirs := []func(...scm.Scmer) scm.Scmer{scm.OptimizeProcToSerialFunction(scm.Globalenv.Vars[scm.Symbol("<")])}
@@ -44,7 +38,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		condition:      trueFn,
 		sortcols:       sortCols,
 		callbackCols:   []string{"id"},
-		callback:       mapFn,
+		callback:       mapReduceFn,
 		perTableOffset: -1,
 		perTableLimit:  -1,
 	}
@@ -79,36 +73,36 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		{
 			name: "batch",
 			run: func() {
-				tbl.scanWithBatch(nil, []string{"#0"}, trueFn, []string{"id"}, mapFn,
-					reduceFn, nilValue, nilValue, false, 1, []scm.Scmer{scm.NewInt(1)})
+				tbl.scanWithBatch(nil, []string{"#0"}, trueFn, []string{"id"}, mapReduceFn,
+					nilValue, nilValue, false, 1, []scm.Scmer{scm.NewInt(1)})
 			},
 		},
 		{
 			name: "order",
 			run: func() {
 				tbl.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
-					[]string{"id"}, mapFn, reduceFn, nilValue, false, nilValue, nil, nilValue)
+					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue)
 			},
 		},
 		{
 			name: "order_recset",
 			run: func() {
 				recSetInput.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
-					[]string{"id"}, mapFn, reduceFn, nilValue, false, nilValue, nil, nilValue)
+					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue)
 			},
 		},
 		{
 			name: "order_multi",
 			run: func() {
 				scanOrderMulti(nil, []scanOrderTableSpec{orderedSpec, orderedSpec}, sortDirs,
-					0, 0, 72, reduceFn, nilValue, false, nilValue)
+					0, 0, 72, nilValue, false, nilValue)
 			},
 		},
 		{
 			name: "order_batch_accept",
 			run: func() {
 				scanOrderBatchAccept(nil, orderedSpec, identityRecSet, sortCols, sortDirs,
-					0, 0, 72, []string{"id"}, mapFn, reduceFn, nilValue, false, nilValue)
+					0, 0, 72, []string{"id"}, mapReduceFn, nilValue, false, nilValue)
 			},
 		},
 	}

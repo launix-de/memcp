@@ -47,6 +47,7 @@ func benchScanTable(b *testing.B, name string) *table {
 func BenchmarkScanFixedCosts_NoSession(b *testing.B) {
 	tbl := benchScanTable(b, "nosession")
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
 
@@ -55,8 +56,8 @@ func BenchmarkScanFixedCosts_NoSession(b *testing.B) {
 		tbl.scan(
 			nil,
 			[]string{"id"}, trueFn,
-			[]string{"id"}, trueFn,
-			nilFn, neutral, nilFn, false,
+			[]string{"id"}, mapReduceFn,
+			neutral, nilFn, false,
 		)
 	}
 }
@@ -65,13 +66,14 @@ func BenchmarkScanFixedCosts_NoSession(b *testing.B) {
 func BenchmarkScanFixedCosts_WithExplicitTx(b *testing.B) {
 	tbl := benchScanTable(b, "explicit_tx")
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
 	tx := NewTxContext(TxCursorStability)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tbl.scan(tx, []string{"id"}, trueFn, []string{"id"}, trueFn, nilFn, neutral, nilFn, false)
+		tbl.scan(tx, []string{"id"}, trueFn, []string{"id"}, mapReduceFn, neutral, nilFn, false)
 	}
 }
 
@@ -80,6 +82,7 @@ func BenchmarkScanFixedCosts_WithExplicitTx(b *testing.B) {
 func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 	tbl := benchScanTable(b, "autocommit")
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
 	session := scm.NewSession()
@@ -90,8 +93,8 @@ func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 			return tbl.scan(
 				scmerToTxContext(a[0]),
 				[]string{"id"}, trueFn,
-				[]string{"id"}, trueFn,
-				nilFn, neutral, nilFn, false,
+				[]string{"id"}, mapReduceFn,
+				neutral, nilFn, false,
 			)
 		}))
 	}
@@ -102,6 +105,7 @@ func BenchmarkScanFixedCosts_WithAutocommit(b *testing.B) {
 func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 	tbl := benchScanTable(b, "deepstack")
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
 
@@ -122,8 +126,8 @@ func BenchmarkScanFixedCosts_DeepStack(b *testing.B) {
 			tbl.scan(
 				nil,
 				[]string{"id"}, trueFn,
-				[]string{"id"}, trueFn,
-				nilFn, neutral, nilFn, false,
+				[]string{"id"}, mapReduceFn,
+				neutral, nilFn, false,
 			)
 		})
 	}
@@ -144,15 +148,15 @@ func benchmarkUniquePointScan(b *testing.B, name string, currentTx *TxContext) {
 	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
 
 	condition := scanCondition("id", scm.NewInt(511))
-	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
 	nilFn := scm.NewNil()
 	// Warm the lazily built index before measuring regular probe overhead.
-	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
+	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapFn, nilFn, scm.NewNil(), nilFn, false)
+		tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
 	}
 }
 
@@ -176,15 +180,15 @@ func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {
 	tbl, _ := CreateTable(dbName, "items", Memory, true)
 	tbl.CreateColumn("id", "INT", nil, nil)
 	shard := tbl.Shards[0]
-	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewNil() })
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 
-	readMapper := shard.OpenMapReducer([]string{"id"}, mapFn, scm.NewNil(), false, 0, nil, nil)
+	readMapper := shard.OpenMapReducer([]string{"id"}, mapReduceFn, false, 0, nil, nil)
 	defer readMapper.Close()
 	if readMapper.isUpdate != nil || readMapper.isIncrement != nil || readMapper.setClosureFn != nil {
 		t.Fatal("read mapper allocated mutation-only metadata")
 	}
 
-	mutationMapper := shard.OpenMapReducer([]string{"$update"}, mapFn, scm.NewNil(), false, 0, nil, nil)
+	mutationMapper := shard.OpenMapReducer([]string{"$update"}, mapReduceFn, false, 0, nil, nil)
 	defer mutationMapper.Close()
 	if len(mutationMapper.isUpdate) != 1 || !mutationMapper.isUpdate[0] || len(mutationMapper.setClosureFn) != 1 {
 		t.Fatal("mutation mapper did not initialize mutation metadata")
@@ -217,14 +221,15 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 
 	shard := tbl.Shards[0]
 	mapLast := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[len(args)-1] })
-	reduceLast := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[1] })
+	mapReduceLast := scm.NewFunc(func(args ...scm.Scmer) scm.Scmer { return args[len(args)-1] })
 
 	// A small projection uses the inline workspace. MapOne follows Stream to
 	// ensure it reads its requested row instead of reusing prefetched values.
 	var inlineMapper ShardMapReducer
 	var inlineWorkspace shardMapReducerWorkspace
 	prepareReadMapReducerStorage(&inlineMapper, &inlineWorkspace, 2)
-	shard.initReadMapReducer(&inlineMapper, columns[:2], mapLast, reduceLast, false, nil)
+	shard.initReadMapReducer(&inlineMapper, columns[:2], mapReduceLast, false, nil)
+	inlineMapper.mapProgram = scm.PrepareSerialProc(mapLast)
 	inlineMapper.Stream(scm.NewNil(), []uint32{0}, nil)
 	if got := inlineMapper.MapOne(1).Int(); got != mainRows[1][1].Int() {
 		t.Fatalf("inline main-row projection = %d, want %d", got, mainRows[1][1].Int())
@@ -235,7 +240,8 @@ func TestReadMapReducerWorkspaceMainDeltaAndWideProjection(t *testing.T) {
 	var mapper ShardMapReducer
 	var workspace shardMapReducerWorkspace
 	prepareReadMapReducerStorage(&mapper, &workspace, len(columns))
-	shard.initReadMapReducer(&mapper, columns, mapLast, reduceLast, false, nil)
+	shard.initReadMapReducer(&mapper, columns, mapReduceLast, false, nil)
+	mapper.mapProgram = scm.PrepareSerialProc(mapLast)
 	if got := mapper.Stream(scm.NewNil(), []uint32{0}, nil).Int(); got != mainRows[0][len(columns)-1].Int() {
 		t.Fatalf("wide main-row projection = %d, want %d", got, mainRows[0][len(columns)-1].Int())
 	}
@@ -297,6 +303,7 @@ func BenchmarkScanUpdate(b *testing.B) {
 	tbl.ComputeColumn("cached_val", []string{"val"}, computor, nil, scm.NewNil(), nil)
 
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })
 	nilFn := scm.NewNil()
 	neutral := scm.NewNil()
 
@@ -306,8 +313,8 @@ func BenchmarkScanUpdate(b *testing.B) {
 		tbl.scan(
 			nil,
 			[]string{"id"}, trueFn,
-			[]string{"id", "$increment:cached_val"}, trueFn,
-			nilFn, neutral, nilFn, false,
+			[]string{"id", "$increment:cached_val"}, mapReduceFn,
+			neutral, nilFn, false,
 		)
 	}
 }

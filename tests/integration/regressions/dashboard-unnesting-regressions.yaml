@@ -48,8 +48,8 @@ test_cases:
     scm: |
       (scan nil (table "system" "user")
         '() (lambda () true)
-        '("username") (lambda (u) u)
-        (lambda (a b) b) "")
+        '("username") (lambda (acc u) u)
+        "" (lambda (a b) b))
 
   - name: "boolean expression head is not a subquery marker"
     fail_comment: "symbol marker detection must not compare TRUE equal to inner_select"

@@ -110,10 +110,9 @@ type scanArgLayout struct {
 	filterColsIdx int
 	filterFnIdx   int
 	mapColsIdx    int
-	mapFnIdx      int
-	reduceIdx     int
+	mapReduceIdx  int
 	neutralIdx    int
-	reduce2Idx    int
+	combineIdx    int
 	outerIdx      int
 	sortColsIdx   int
 	sortDirsIdx   int
@@ -131,11 +130,10 @@ func scanLayout(a []scm.Scmer) scanArgLayout {
 		filterColsIdx: 2,
 		filterFnIdx:   3,
 		mapColsIdx:    4,
-		mapFnIdx:      5,
-		reduceIdx:     6,
-		neutralIdx:    7,
-		reduce2Idx:    8,
-		outerIdx:      9,
+		mapReduceIdx:  5,
+		neutralIdx:    6,
+		combineIdx:    7,
+		outerIdx:      8,
 		sortColsIdx:   4,
 		sortDirsIdx:   5,
 		partColsIdx:   6,
@@ -629,7 +627,7 @@ func invalidateComputedRows(proxy *StorageComputeProxy, recids map[uint32]struct
 }
 
 func Init(en scm.Env) {
-	const scanFilterColumnsDesc = "physical columns passed to filter before map/reduce; $recset_contains supplies a row-bound RecSet membership closure"
+	const scanFilterColumnsDesc = "physical columns passed to filter before mapreduce; $recset_contains supplies a row-bound RecSet membership closure"
 	const scanMapColumnsDesc = "physical columns passed to map after filtering; pseudo columns are $update (update/delete current row), $recset_contains (row-bound RecSet membership), $set:<column>, $increment:<column>, and $invalidate:<column> (computed-column maintenance), plus NEW.<column> in trigger plans"
 	const scanOrderMapColumnsDesc = scanMapColumnsDesc + "; $break is reserved for internal ORC convergence and must not implement SQL OFFSET/LIMIT, which belong in the native offset and limit arguments"
 	columnList := func(label, description string) *scm.TypeDescriptor {
@@ -735,13 +733,12 @@ func Init(en scm.Env) {
 			"default_expression": {Kind: "string", Label: "default_expression", Description: "expression evaluated when an insert omits the column"},
 			"filtercols":         columnList("filtercols", "columns supplied to filter before computing a value"),
 			"filter":             rowCallback("filter", "predicate limiting which rows are computed", "bool", "true when the row should be computed"),
-			"mapcols":            columnList("mapcols", "columns supplied to mapfn for ordered-reduce computation"),
-			"mapfn":              rowCallback("mapfn", "maps one source row into a value for reducefn", "any", "value passed to reducefn"),
+			"mapcols":            columnList("mapcols", "columns supplied to mapreducefn for ordered computation"),
+			"mapreducefn":        rowCallback("mapreducefn", "lambda (accumulator $set mapcols...) returning the next accumulator and writing the computed row value through $set", "any", "updated accumulator"),
 			"null":               {Kind: "bool", Label: "null", Description: "whether the column accepts nil values"},
 			"partitioncount":     {Kind: "int", Label: "partitioncount", Description: "number of leading sort columns that define independent reducer partitions"},
 			"primary":            {Kind: "bool", Label: "primary", Description: "whether this column belongs to the primary key"},
-			"reducefn":           reducer("reducefn", "combines ordered mapped values into the computed-column aggregate"),
-			"reduceinit":         {Kind: "any", Label: "reduceinit", Description: "initial accumulator supplied to reducefn"},
+			"reduceinit":         {Kind: "any", Label: "reduceinit", Description: "initial accumulator supplied to mapreducefn"},
 			"sortcols":           sortColumnList("sortcols", "columns or expressions defining ordered-reduce input order"),
 			"sortdirs":           sortDirectionList("sortdirs", "one ordering relation for every sortcols entry"),
 			"temp":               {Kind: "bool", Label: "temp", Description: "whether this is a query-local temporary computed column"},
@@ -832,6 +829,52 @@ func Init(en scm.Env) {
 				{Kind: "table", Label: "table"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics_fingerprint",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			if a[0].IsNil() {
+				return scm.NewNil()
+			}
+			return scm.NewInt(int64(TableFromScmer(a[0]).PlannerStatisticsFingerprint()))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "return the coarse cost-class fingerprint of a table's immutable planner-statistics snapshot",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "table", Label: "table"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "int"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "table_planner_statistics_compatible?",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			db := GetDatabase(scm.String(a[0]))
+			if db == nil {
+				return scm.NewBool(false)
+			}
+			tbl := db.GetTable(scm.String(a[1]))
+			if tbl == nil {
+				return scm.NewBool(false)
+			}
+			compileToken := uint64(a[2].Int())
+			if tbl.PlannerStatsToken() == compileToken {
+				return scm.NewBool(true)
+			}
+			compileFingerprint := uint64(a[3].Int())
+			return scm.NewBool(tbl.PlannerStatisticsFingerprint() == compileFingerprint)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "check whether cached-plan table statistics remain in the same cost class",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "schema"},
+				{Kind: "string", Label: "table"},
+				{Kind: "int", Label: "compile_token"},
+				{Kind: "int", Label: "compile_fingerprint"},
+			},
+			Return:         &scm.TypeDescriptor{Kind: "bool"},
+			HasSideEffects: true,
 		},
 	})
 	scm.Declare(&en, &scm.Declaration{
@@ -1180,6 +1223,19 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_count",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewInt(a[0].Int() + 1)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "planner-selected fused COUNT(*) map-reducer",
+			Params: []*scm.TypeDescriptor{
+				{Kind: "int", Label: "accumulator", Description: "current row count"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "int", Label: "accumulator", Description: "row count incremented by one"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
@@ -1197,12 +1253,8 @@ func Init(en scm.Env) {
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
-				mapparams := make([]scm.Scmer, len(mapcols))
-				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if len(a) > layout.reduceIdx {
-					reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx])
-				}
+				mapReduceFn := scm.OptimizeProcToSerialFunction(a[layout.mapReduceIdx])
+				mapReduceParams := make([]scm.Scmer, len(mapcols)+1)
 				hadValue := false
 				for _, val := range list {
 					row := mustScmerSlice(val, "scan list row")
@@ -1214,74 +1266,67 @@ func Init(en scm.Env) {
 						continue
 					}
 					hadValue = true
+					mapReduceParams[0] = result
 					for i, col := range mapcols {
-						mapparams[i], _ = ds.GetI(col)
+						mapReduceParams[i+1], _ = ds.GetI(col)
 					}
-					result = reducefn(result, mapfn(mapparams...))
+					result = mapReduceFn(mapReduceParams...)
 				}
 				if !hadValue && isOuter {
-					for i := range mapparams {
-						mapparams[i] = scm.NewNil()
+					mapReduceParams[0] = result
+					for i := 1; i < len(mapReduceParams); i++ {
+						mapReduceParams[i] = scm.NewNil()
 					}
-					result = reducefn(result, mapfn(mapparams...))
+					result = mapReduceFn(mapReduceParams...)
 				}
-				if len(a) > layout.reduce2Idx && !a[layout.reduce2Idx].IsNil() {
-					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx])
+				if len(a) > layout.combineIdx && !a[layout.combineIdx].IsNil() {
+					combineFn := scm.OptimizeProcToSerialFunction(a[layout.combineIdx])
 					base := neutral
 					if len(a) > layout.neutralIdx {
 						base = a[layout.neutralIdx]
 					}
-					result = reduce2fn(base, result)
+					result = combineFn(base, result)
 				}
 				return result
 			}
 
 			if tableArg.IsCustom(TagRecSet) {
 				rs := RecSetFromScmer(tableArg)
-				aggregate := scm.NewNil()
-				if len(a) > layout.reduceIdx {
-					aggregate = a[layout.reduceIdx]
-				}
 				neutral := scm.NewNil()
 				if len(a) > layout.neutralIdx {
 					neutral = a[layout.neutralIdx]
 				}
-				reduce2 := scm.NewNil()
-				if len(a) > layout.reduce2Idx {
-					reduce2 = a[layout.reduce2Idx]
+				combine := scm.NewNil()
+				if len(a) > layout.combineIdx {
+					combine = a[layout.combineIdx]
 				}
-				return rs.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
+				return rs.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter)
 			}
 
 			t := TableFromScmer(tableArg)
 
-			aggregate := scm.NewNil()
-			if len(a) > layout.reduceIdx {
-				aggregate = a[layout.reduceIdx]
-			}
 			neutral := scm.NewNil()
 			if len(a) > layout.neutralIdx {
 				neutral = a[layout.neutralIdx]
 			}
-			reduce2 := scm.NewNil()
-			if len(a) > layout.reduce2Idx {
-				reduce2 = a[layout.reduce2Idx]
+			combine := scm.NewNil()
+			if len(a) > layout.combineIdx {
+				combine = a[layout.combineIdx]
 			}
-			return t.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter)
+			return t.scan(layout.tx, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filter-map-reduce pass on a single table and returns the reduced result",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filtered reduction on a single table and returns the reduced result",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
 				columnList("filterColumns", scanFilterColumnsDesc),
 				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to map"),
-				columnList("mapColumns", scanMapColumnsDesc),
-				rowCallback("map", "lambda function that extracts or produces one value from the row; it may also use documented pseudo columns for mutations or result output", "any", "value passed to reduce, or returned directly when no reducer is supplied"),
-				reducer("reduce", "optional aggregation function used first within shards and then to combine shard results"),
-				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				reducer("reduce2", "optional final reducer that combines the neutral value with the result produced by reduce"),
-				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+				columnList("mapReduceColumns", scanMapColumnsDesc),
+				rowCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator; it may also use documented pseudo columns for mutations or result output", "any", "updated accumulator"),
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
+				reducer("combine", "optional reducer combining shard-local accumulators"),
+				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, call mapReduce once with the neutral accumulator and NULL columns when there are no hits", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -1297,9 +1342,7 @@ func Init(en scm.Env) {
 			stride := int(scm.ToInt(a[layout.strideIdx]))
 			batchdata := mustScmerSlice(a[layout.batchDataIdx], "batchdata")
 			tableArg := a[layout.tableIdx]
-			// scan_batch inserts stride+batchdata (2 slots) between mapfn and
-			// reduce, so reduce/neutral/reduce2/isOuter sit at scanLayout's
-			// reduceIdx/neutralIdx/reduce2Idx/outerIdx + 2.
+			// scan_batch inserts stride+batchdata between mapReduce and neutral.
 			const sbShift = 2
 			isOuter := len(a) > layout.outerIdx+sbShift && scm.ToBool(a[layout.outerIdx+sbShift])
 
@@ -1311,12 +1354,8 @@ func Init(en scm.Env) {
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[layout.mapFnIdx])
-				mapparams := make([]scm.Scmer, len(mapcols))
-				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if len(a) > layout.reduceIdx+sbShift {
-					reducefn = scm.OptimizeProcToSerialFunction(a[layout.reduceIdx+sbShift])
-				}
+				mapReduceFn := scm.OptimizeProcToSerialFunction(a[layout.mapReduceIdx])
+				mapReduceParams := make([]scm.Scmer, len(mapcols)+1)
 				hadValue := false
 				batchCount := 0
 				if stride > 0 {
@@ -1337,29 +1376,31 @@ func Init(en scm.Env) {
 							continue
 						}
 						hadValue = true
+						mapReduceParams[0] = result
 						for i, col := range mapcols {
 							if subidx, ok := parseBatchPseudoColName(col); ok {
-								mapparams[i] = batchdata[batchid*stride+subidx]
+								mapReduceParams[i+1] = batchdata[batchid*stride+subidx]
 							} else {
-								mapparams[i], _ = ds.GetI(col)
+								mapReduceParams[i+1], _ = ds.GetI(col)
 							}
 						}
-						result = reducefn(result, mapfn(mapparams...))
+						result = mapReduceFn(mapReduceParams...)
 					}
 				}
 				if !hadValue && isOuter {
-					for i := range mapparams {
-						mapparams[i] = scm.NewNil()
+					mapReduceParams[0] = result
+					for i := 1; i < len(mapReduceParams); i++ {
+						mapReduceParams[i] = scm.NewNil()
 					}
-					result = reducefn(result, mapfn(mapparams...))
+					result = mapReduceFn(mapReduceParams...)
 				}
-				if len(a) > layout.reduce2Idx+sbShift && !a[layout.reduce2Idx+sbShift].IsNil() {
-					reduce2fn := scm.OptimizeProcToSerialFunction(a[layout.reduce2Idx+sbShift])
+				if len(a) > layout.combineIdx+sbShift && !a[layout.combineIdx+sbShift].IsNil() {
+					combineFn := scm.OptimizeProcToSerialFunction(a[layout.combineIdx+sbShift])
 					base := neutral
 					if len(a) > layout.neutralIdx+sbShift {
 						base = a[layout.neutralIdx+sbShift]
 					}
-					result = reduce2fn(base, result)
+					result = combineFn(base, result)
 				}
 				return result
 			}
@@ -1373,33 +1414,28 @@ func Init(en scm.Env) {
 				t = TableFromScmer(tableArg)
 			}
 
-			aggregate := scm.NewNil()
-			if len(a) > layout.reduceIdx+sbShift {
-				aggregate = a[layout.reduceIdx+sbShift]
-			}
 			neutral := scm.NewNil()
 			if len(a) > layout.neutralIdx+sbShift {
 				neutral = a[layout.neutralIdx+sbShift]
 			}
-			reduce2 := scm.NewNil()
-			if len(a) > layout.reduce2Idx+sbShift {
-				reduce2 = a[layout.reduce2Idx+sbShift]
+			combine := scm.NewNil()
+			if len(a) > layout.combineIdx+sbShift {
+				combine = a[layout.combineIdx+sbShift]
 			}
-			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapFnIdx], aggregate, neutral, reduce2, isOuter, stride, batchdata, nil)
+			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, stride, batchdata, nil)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filter-map-reduce pass on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filtered reduction on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
 				columnList("filterColumns", "columns passed to filter; #0, #1, ... address batchdata slots"),
 				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase", "bool", "true when this table row and batch row proceed to map"),
-				columnList("mapColumns", "columns passed to map; #0, #1, ... address batchdata slots"),
-				rowCallback("map", "lambda function that extracts data from the table row and batch row", "any", "value passed to reduce or returned directly"),
+				columnList("mapReduceColumns", "columns passed after the accumulator; #0, #1, ... address batchdata slots"),
+				rowCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator", "any", "updated accumulator"),
 				{Kind: "int", Label: "stride", Description: "number of batchdata entries per batch row"},
 				{Kind: "list", Label: "batchdata", Description: "flat batch buffer accessed via #N pseudo columns", Element: &scm.TypeDescriptor{Kind: "any", Label: "slot", Description: "one batch value; every stride consecutive slots form a batch row"}},
-				reducer("reduce", "optional lambda function that aggregates mapped values"),
-				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				reducer("reduce2", "optional final reducer that combines the neutral value with the result produced by reduce"),
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
+				reducer("combine", "optional reducer combining shard-local accumulators"),
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
@@ -1423,19 +1459,15 @@ func Init(en scm.Env) {
 			offset := scm.ToInt(a[6])
 			limit := scm.ToInt(a[7])
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[8], "mapColumns"))
-			callback := a[9]
-			aggregate := scm.NewNil()
-			if len(a) > 10 {
-				aggregate = a[10]
-			}
+			mapReduce := a[9]
 			neutral := scm.NewNil()
-			if len(a) > 11 {
-				neutral = a[11]
+			if len(a) > 10 {
+				neutral = a[10]
 			}
-			isOuter := len(a) > 12 && scm.ToBool(a[12])
+			isOuter := len(a) > 11 && scm.ToBool(a[11])
 			notFoundValue := neutral
-			if len(a) > 13 {
-				notFoundValue = a[13]
+			if len(a) > 12 {
+				notFoundValue = a[12]
 			}
 			source := scanOrderTableSpec{}
 			if tableArg.IsCustom(TagRecSet) {
@@ -1444,9 +1476,9 @@ func Init(en scm.Env) {
 				source.table = TableFromScmer(tableArg)
 			}
 			return scanOrderBatchAccept(currentTx, source, batchFilter, sortcolsVals, sortdirs,
-				limitPartitionCols, offset, limit, mapcols, callback, aggregate, neutral, isOuter, notFoundValue)
+				limitPartitionCols, offset, limit, mapcols, mapReduce, neutral, isOuter, notFoundValue)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "incrementally scans a table or existing RecSet in scan_order order and applies a RecSet batch filter before OFFSET/LIMIT and map/reduce. The first candidate RecSet contains offset+limit rows; if too few rows are accepted, subsequent disjoint batches contain twice as many candidates until the accepted limit is satisfied or the input is exhausted. batchFilter is called as (batchFilter input_recset) and must return an exact subset RecSet of the same base table and transaction. A simple batchFilter may call (scan_recset tx input_recset filterColumns realFilter); complex filters may project input_recset to another table, apply search/ACL scans and project the result back to the input table. The returned RecSet is used only as a membership mask against the already ordered candidate vector, so output order is preserved without scanning the unordered RecSet again. For non-unique ORDER BY values, include an explicit unique tie-breaker. sortcols/sortdirs may both be empty; that path greedily collects candidates without sorting. limitPartitionCols is present for scan_order signature compatibility and currently must be 0",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "incrementally scans a table or existing RecSet in scan_order order and applies a RecSet batch filter before OFFSET/LIMIT and the fused map-reducer. The first candidate RecSet contains offset+limit rows; if too few rows are accepted, subsequent disjoint batches contain twice as many candidates until the accepted limit is satisfied or the input is exhausted. batchFilter is called as (batchFilter input_recset) and must return an exact subset RecSet of the same base table and transaction. A simple batchFilter may call (scan_recset tx input_recset filterColumns realFilter); complex filters may project input_recset to another table, apply search/ACL scans and project the result back to the input table. The returned RecSet is used only as a membership mask against the already ordered candidate vector, so output order is preserved without scanning the unordered RecSet again. For non-unique ORDER BY values, include an explicit unique tie-breaker. sortcols/sortdirs may both be empty; that path greedily collects candidates without sorting. limitPartitionCols is present for scan_order signature compatibility and currently must be 0",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used consistently by the candidate scan and every batch filter operation; usually ((context \"session\") \"__memcp_tx\")"},
@@ -1456,13 +1488,12 @@ func Init(en scm.Env) {
 				sortDirectionList("sortdirs", "same as scan_order: one relation per sort column; must also be empty when sortcols is empty"),
 				{Kind: "number", Label: "limitPartitionCols", Description: "reserved for scan_order signature compatibility; currently must be 0"},
 				{Kind: "number", Label: "offset", Description: "number of batch-filter-accepted rows to skip; it is not the number of driver candidates already examined"},
-				{Kind: "number", Label: "limit", Description: "finite maximum number of accepted rows passed to map; the initial candidate batch size is offset+limit and doubles for every subsequent batch"},
-				columnList("mapColumns", scanOrderMapColumnsDesc),
-				rowCallback("map", "same map callback contract as scan_order; accepted record IDs are passed to its shard mapper in batches", "any", "value passed to reduce or returned directly"),
-				reducer("reduce", "optional serial reducer over mapped accepted rows, with the same accumulator contract as scan_order"),
-				{Kind: "any", Label: "neutral", Description: "optional neutral element for reduce; defaults to nil", Optional: true},
-				{Kind: "bool", Label: "isOuter", Description: "optional scan_order-compatible outer behavior: map one NULL row when no accepted row reaches map", Optional: true},
-				{Kind: "any", Label: "notFoundValue", Description: "optional result when no accepted row reaches map and isOuter is false; defaults to neutral", Optional: true},
+				{Kind: "number", Label: "limit", Description: "finite maximum number of accepted rows passed to mapReduce; the initial candidate batch size is offset+limit and doubles for every subsequent batch"},
+				columnList("mapReduceColumns", scanOrderMapColumnsDesc),
+				rowCallback("mapReduce", "same (accumulator columns...) callback contract as scan_order", "any", "updated accumulator"),
+				{Kind: "any", Label: "neutral", Description: "optional neutral accumulator; defaults to nil", Optional: true},
+				{Kind: "bool", Label: "isOuter", Description: "optional scan_order-compatible outer behavior: call mapReduce once with NULL columns when no row is accepted", Optional: true},
+				{Kind: "any", Label: "notFoundValue", Description: "optional result when no accepted row reaches mapReduce and isOuter is false; defaults to neutral", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -1480,13 +1511,9 @@ func Init(en scm.Env) {
 			mapcols := scmerSliceToStrings(mustScmerSlice(a[layout.limitIdx+1], "mapColumns"))
 			tableArg := a[layout.tableIdx]
 
-			aggregate := scm.NewNil()
-			if len(a) > layout.limitIdx+3 {
-				aggregate = a[layout.limitIdx+3]
-			}
 			neutral := scm.NewNil()
-			if len(a) > layout.limitIdx+4 {
-				neutral = a[layout.limitIdx+4]
+			if len(a) > layout.limitIdx+3 {
+				neutral = a[layout.limitIdx+3]
 			}
 
 			sortdirs := make([]func(...scm.Scmer) scm.Scmer, len(sortcolsVals))
@@ -1494,16 +1521,16 @@ func Init(en scm.Env) {
 				sortdirs[i] = scm.OptimizeProcToSerialFunction(dir)
 			}
 
-			isOuter := len(a) > layout.limitIdx+5 && scm.ToBool(a[layout.limitIdx+5])
+			isOuter := len(a) > layout.limitIdx+4 && scm.ToBool(a[layout.limitIdx+4])
 			notFoundValue := neutral
-			if len(a) > layout.limitIdx+6 {
-				notFoundValue = a[layout.limitIdx+6]
+			if len(a) > layout.limitIdx+5 {
+				notFoundValue = a[layout.limitIdx+5]
 			}
 			postOrderCols := []string(nil)
 			postOrderFilter := scm.NewNil()
-			if len(a) > layout.limitIdx+8 {
-				postOrderCols = scmerSliceToStrings(mustScmerSlice(a[layout.limitIdx+7], "postOrderFilterColumns"))
-				postOrderFilter = a[layout.limitIdx+8]
+			if len(a) > layout.limitIdx+7 {
+				postOrderCols = scmerSliceToStrings(mustScmerSlice(a[layout.limitIdx+6], "postOrderFilterColumns"))
+				postOrderFilter = a[layout.limitIdx+7]
 			}
 
 			// TODO(planner-scalability): remove list-backed relational scans after
@@ -1513,16 +1540,12 @@ func Init(en scm.Env) {
 				result := neutral
 				filterfn := scm.OptimizeProcToSerialFunction(a[layout.filterFnIdx])
 				filterparams := make([]scm.Scmer, len(filtercols))
-				mapfn := scm.OptimizeProcToSerialFunction(a[layout.limitIdx+2])
-				mapparams := make([]scm.Scmer, len(mapcols))
+				mapReduceFn := scm.OptimizeProcToSerialFunction(a[layout.limitIdx+2])
+				mapReduceParams := make([]scm.Scmer, len(mapcols)+1)
 				var postOrderFn func(...scm.Scmer) scm.Scmer
 				postOrderParams := make([]scm.Scmer, len(postOrderCols))
 				if !postOrderFilter.IsNil() {
 					postOrderFn = scm.OptimizeProcToSerialFunction(postOrderFilter)
-				}
-				reducefn := func(args ...scm.Scmer) scm.Scmer { return args[1] }
-				if !aggregate.IsNil() {
-					reducefn = scm.OptimizeProcToSerialFunction(aggregate)
 				}
 				var filtered []scm.Scmer
 				for _, val := range list {
@@ -1597,18 +1620,20 @@ func Init(en scm.Env) {
 					if limit >= 0 && count >= limit {
 						break
 					}
+					mapReduceParams[0] = result
 					for i, col := range mapcols {
-						mapparams[i], _ = ds.GetI(col)
+						mapReduceParams[i+1], _ = ds.GetI(col)
 					}
-					result = reducefn(result, mapfn(mapparams...))
+					result = mapReduceFn(mapReduceParams...)
 					hadValue = true
 					count++
 				}
 				if !hadValue && isOuter {
-					for i := range mapparams {
-						mapparams[i] = scm.NewNil()
+					mapReduceParams[0] = result
+					for i := 1; i < len(mapReduceParams); i++ {
+						mapReduceParams[i] = scm.NewNil()
 					}
-					result = reducefn(result, mapfn(mapparams...))
+					result = mapReduceFn(mapReduceParams...)
 				}
 				if !hadValue && !isOuter {
 					result = notFoundValue
@@ -1617,14 +1642,14 @@ func Init(en scm.Env) {
 			}
 
 			if tableArg.IsCustom(TagRecSet) {
-				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
+				return RecSetFromScmer(tableArg).scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
 			}
 
 			t := TableFromScmer(a[layout.tableIdx])
 
-			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], aggregate, neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
+			return t.scan_order(layout.tx, filtercols, a[layout.filterFnIdx], sortcolsVals, sortdirs, limitPartitionCols, scm.ToInt(a[layout.offsetIdx]), scm.ToInt(a[layout.limitIdx]), mapcols, a[layout.limitIdx+2], neutral, isOuter, notFoundValue, postOrderCols, postOrderFilter)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial map-reduce pass on a single table and returns the reduced result",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial reduction pass on a single table and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local RecSet, or a list for temporary data"},
@@ -1635,11 +1660,10 @@ func Init(en scm.Env) {
 				{Kind: "number", Label: "limitPartitionCols", Description: "number of leading sort columns that form the partition key for per-partition offset/limit. 0 (default) means global offset/limit."},
 				{Kind: "number", Label: "offset", Description: "number of globally ordered, filter-accepted items to skip before map; apply SQL OFFSET here rather than in map"},
 				{Kind: "number", Label: "limit", Description: "maximum globally ordered, filter-accepted items passed to map; -1 means unlimited; apply SQL LIMIT here so shard-local Top-K and the global merge can brake early"},
-				columnList("mapColumns", scanOrderMapColumnsDesc),
-				rowCallback("map", "lambda function that extracts or produces one value from each accepted row", "any", "value passed to reduce or returned directly"),
-				reducer("reduce", "optional serial aggregation function over mapped values"),
-				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for the reduce phase, otherwise nil is assumed", Optional: true},
-				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+				columnList("mapReduceColumns", scanOrderMapColumnsDesc),
+				rowCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator for each accepted row", "any", "updated accumulator"),
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
+				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, call mapReduce once with the neutral accumulator and NULL columns when there are no hits", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
 				func() *scm.TypeDescriptor {
 					value := columnList("postOrderFilterColumns", "optional columns for a predicate evaluated in global order before OFFSET/LIMIT are counted; use for expensive acceptance checks that cannot participate in index boundaries")
@@ -1647,7 +1671,7 @@ func Init(en scm.Env) {
 					return value
 				}(),
 				func() *scm.TypeDescriptor {
-					value := rowCallback("postOrderFilter", "optional late acceptance predicate. Rejected rows do not count toward OFFSET/LIMIT and never reach map", "bool", "true when the ordered row counts toward OFFSET/LIMIT and reaches map")
+					value := rowCallback("postOrderFilter", "optional late acceptance predicate. Rejected rows do not count toward OFFSET/LIMIT and never reach mapReduce", "bool", "true when the ordered row counts toward OFFSET/LIMIT and reaches mapReduce")
 					value.Optional = true
 					return value
 				}(),
@@ -1672,12 +1696,11 @@ func Init(en scm.Env) {
 			// 8:  limitPartitionCols (global Top-K-per-partition across merge)
 			// 9:  offset (global)
 			// 10: limit  (global; -1 = unlimited)
-			// 11: mapColumns per table (list of lists)
-			// 12: mapFns per table (list of lambdas)
-			// 13: reduce (optional)
-			// 14: neutral (optional)
-			// 15: isOuter (optional)
-			// 16: notFoundValue (optional)
+			// 11: mapReduceColumns per table (list of lists)
+			// 12: mapReduceFns per table (list of lambdas)
+			// 13: neutral (optional)
+			// 14: isOuter (optional)
+			// 15: notFoundValue (optional)
 			currentTx := scmerToTxContext(a[0])
 			tables := mustScmerSlice(a[1], "tables")
 			filterColsArr := mustScmerSlice(a[2], "filterColumns")
@@ -1690,24 +1713,20 @@ func Init(en scm.Env) {
 			limitPartitionCols := scm.ToInt(a[8])
 			offset := scm.ToInt(a[9])
 			limit := scm.ToInt(a[10])
-			mapColsArr := mustScmerSlice(a[11], "mapColumns")
-			mapFnArr := mustScmerSlice(a[12], "mapFns")
+			mapColsArr := mustScmerSlice(a[11], "mapReduceColumns")
+			mapReduceFnArr := mustScmerSlice(a[12], "mapReduceFns")
 
-			aggregate := scm.NewNil()
-			if len(a) > 13 {
-				aggregate = a[13]
-			}
 			neutral := scm.NewNil()
-			if len(a) > 14 {
-				neutral = a[14]
+			if len(a) > 13 {
+				neutral = a[13]
 			}
-			isOuter := len(a) > 15 && scm.ToBool(a[15])
+			isOuter := len(a) > 14 && scm.ToBool(a[14])
 			notFoundValue := neutral
-			if len(a) > 16 {
-				notFoundValue = a[16]
+			if len(a) > 15 {
+				notFoundValue = a[15]
 			}
 
-			if len(filterColsArr) != n || len(filterFnArr) != n || len(sortcolsArr) != n || len(mapColsArr) != n || len(mapFnArr) != n {
+			if len(filterColsArr) != n || len(filterFnArr) != n || len(sortcolsArr) != n || len(mapColsArr) != n || len(mapReduceFnArr) != n {
 				panic("scan_order_multi: all per-table arrays must have the same length")
 			}
 
@@ -1723,7 +1742,7 @@ func Init(en scm.Env) {
 					condition:      filterFnArr[i],
 					sortcols:       mustScmerSlice(sortcolsArr[i], "sortcols[i]"),
 					callbackCols:   scmerSliceToStrings(mustScmerSlice(mapColsArr[i], "mapColumns[i]")),
-					callback:       mapFnArr[i],
+					callback:       mapReduceFnArr[i],
 					perTableOffset: perTableOffsets[i],
 					perTableLimit:  perTableLimits[i],
 				}
@@ -1734,9 +1753,9 @@ func Init(en scm.Env) {
 				}
 			}
 
-			return scanOrderMulti(currentTx, specs, sortdirs, int(limitPartitionCols), int(offset), int(limit), aggregate, neutral, isOuter, notFoundValue)
+			return scanOrderMulti(currentTx, specs, sortdirs, int(limitPartitionCols), int(offset), int(limit), neutral, isOuter, notFoundValue)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial map-reduce pass across multiple tables simultaneously, merging results into a single sorted stream",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an ordered parallel filter and serial reduction pass across multiple tables simultaneously, merging results into a single sorted stream",
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context"},
 				{Kind: "list", Label: "tables", Description: "scan sources; all per-table lists must have this length", Element: &scm.TypeDescriptor{Kind: "table|recset", Label: "source", Description: "base table or query-local record set for one input stream"}},
@@ -1749,10 +1768,9 @@ func Init(en scm.Env) {
 				{Kind: "number", Label: "limitPartitionCols", Description: "number of leading sort columns forming partition key"},
 				{Kind: "number", Label: "offset", Description: "number of items to skip (global)"},
 				{Kind: "number", Label: "limit", Description: "max number of items to read (global; -1 = unlimited)"},
-				{Kind: "list", Label: "mapColumns", Description: "map column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table map columns", Description: "columns supplied to the matching mapFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
-				{Kind: "list", Label: "mapFns", Description: "map lambdas, one per table", Element: rowCallback("table map", "mapper for the corresponding table and mapColumns entry", "any", "value inserted into the merged stream and passed to reduce")},
-				reducer("reduce", "optional aggregation function over mapped values from the merged stream"),
-				{Kind: "any", Label: "neutral", Description: "(optional) neutral element for reduce", Optional: true},
+				{Kind: "list", Label: "mapReduceColumns", Description: "map-reduce column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table map-reduce columns", Description: "columns supplied after the accumulator to the matching mapReduceFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
+				{Kind: "list", Label: "mapReduceFns", Description: "lambdas (accumulator columns...) returning the next accumulator, one per table", Element: rowCallback("table mapReduce", "map-reducer for the corresponding table and mapReduceColumns entry", "any", "updated accumulator")},
+				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, emit null row when no hits", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
 			},
@@ -2072,7 +2090,7 @@ func Init(en scm.Env) {
 			var orcPartCount int
 			var orcFilterCols []string
 			var orcMapCols []string
-			var orcFilterFn, orcMapFn, orcReduceFn, orcReduceInit scm.Scmer
+			var orcFilterFn, orcMapReduceFn, orcReduceInit scm.Scmer
 			for i := 0; i+1 < len(typeparams); i += 2 {
 				key := scm.String(typeparams[i])
 				val := typeparams[i+1]
@@ -2093,10 +2111,8 @@ func Init(en scm.Env) {
 					orcFilterFn = val
 				case "mapcols":
 					orcMapCols = scmerSliceToStrings(mustScmerSlice(val, "mapcols"))
-				case "mapfn":
-					orcMapFn = val
-				case "reducefn":
-					orcReduceFn = val
+				case "mapreducefn":
+					orcMapReduceFn = val
 				case "reduceinit":
 					orcReduceInit = val
 				}
@@ -2122,7 +2138,7 @@ func Init(en scm.Env) {
 			//    planner therefore includes the predicate recipe in its canonical
 			//    temp-column name; this entrypoint must preserve that identity.
 			if len(orcSortCols) > 0 {
-				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, orcPartCount, orcFilterCols, orcFilterFn, orcMapCols, orcMapFn, orcReduceFn, orcReduceInit)
+				t.computeOrderedColumnDDLLocked(colname, orcSortCols, orcSortDirs, orcPartCount, orcFilterCols, orcFilterFn, orcMapCols, orcMapReduceFn, orcReduceInit)
 				return scm.NewBool(true)
 			}
 
@@ -2773,7 +2789,7 @@ func Init(en scm.Env) {
 				return result
 			}
 
-			// Build count-scan: (scan tx (table base_schema base_table) (list base_cols...) (lambda (tblvar.col...) (and (equal? tblvar.col (get_assoc OLD "col")) ...)) () (lambda () 1) + 0 nil)
+			// Build a fused count scan over matching base rows.
 			buildCountScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
@@ -2783,12 +2799,13 @@ func Init(en scm.Env) {
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(tblvar, baseCols)},
 						buildAndEquals(scanParamSyms(tblvar, baseCols), getAssocs(dictSym, baseCols)))),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{}), scm.NewInt(1)}),
-					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("+"), scm.NewSymbol("acc"), scm.NewInt(1)})}),
+					scm.NewInt(0), scm.NewSymbol("+"),
 				})
 			}
 
-			// Build delete-scan: (scan tx (table kt_schema kt_name) (list kt_cols...) (lambda (kt.col...) (and (equal? kt.col (get_assoc OLD "base_col")) ...)) (list "$update") (lambda ($update) ($update)) + 0 nil)
+			// Build a fused delete scan over matching keytable rows.
 			buildDeleteScan := func(dictSym string) scm.Scmer {
 				return scm.NewSlice([]scm.Scmer{
 					scm.NewSymbol("scan"),
@@ -2798,9 +2815,10 @@ func Init(en scm.Env) {
 					scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("lambda"), scanFilterParams(ktName, ktCols)},
 						buildAndEquals(scanParamSyms(ktName, ktCols), getAssocs(dictSym, baseCols)))),
 					scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("$update")}),
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}),
-						scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")})}),
-					scm.NewSymbol("+"), scm.NewInt(0), scm.NewNil(),
+					scm.NewSlice([]scm.Scmer{scm.NewSymbol("lambda"), scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc"), scm.NewSymbol("$update")}),
+						scm.NewSlice([]scm.Scmer{scm.NewSymbol("begin"),
+							scm.NewSlice([]scm.Scmer{scm.NewSymbol("$update")}), scm.NewSymbol("acc")})}),
+					scm.NewNil(), scm.NewNil(),
 				})
 			}
 
@@ -3972,14 +3990,16 @@ func fkExistenceCheck(currentTx *TxContext, tbl *table, filterCols []string, val
 		}
 		return scm.NewBool(true)
 	})
-	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
-	reduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		if scm.ToBool(a[0]) || scm.ToBool(a[1]) {
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		if scm.ToBool(a[0]) {
 			return scm.NewBool(true)
 		}
-		return scm.NewBool(false)
+		return scm.NewBool(true)
 	})
-	return scm.ToBool(tbl.scan(currentTx, filterCols, condition, filterCols[:0], mapFn, reduceFn, scm.NewBool(false), reduceFn, false))
+	combineFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		return scm.NewBool(scm.ToBool(a[0]) || scm.ToBool(a[1]))
+	})
+	return scm.ToBool(tbl.scan(currentTx, filterCols, condition, filterCols[:0], mapReduceFn, scm.NewBool(false), combineFn, false))
 }
 
 // fkCascadeDelete deletes rows in childTbl where cols match vals.
@@ -3995,11 +4015,11 @@ func fkCascadeDelete(currentTx *TxContext, childTbl *table, cols []string, vals 
 	mapCols := make([]string, len(cols)+1)
 	copy(mapCols, cols)
 	mapCols[len(cols)] = "$update"
-	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		scm.Apply(a[len(cols)]) // $update() with no args = delete
-		return scm.NewNil()
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		scm.Apply(a[len(cols)+1]) // $update() with no args = delete
+		return a[0]
 	})
-	childTbl.scan(currentTx, cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeSetNull sets FK cols to NULL in childTbl where cols match vals.
@@ -4020,11 +4040,11 @@ func fkCascadeSetNull(currentTx *TxContext, childTbl *table, cols []string, vals
 	mapCols := make([]string, len(cols)+1)
 	copy(mapCols, cols)
 	mapCols[len(cols)] = "$update"
-	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		scm.Apply(a[len(cols)], scm.NewSlice(payload))
-		return scm.NewNil()
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		scm.Apply(a[len(cols)+1], scm.NewSlice(payload))
+		return a[0]
 	})
-	childTbl.scan(currentTx, cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
 }
 
 // fkCascadeUpdate updates FK cols in childTbl from oldVals to newVals.
@@ -4045,11 +4065,11 @@ func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVa
 	mapCols := make([]string, len(cols)+1)
 	copy(mapCols, cols)
 	mapCols[len(cols)] = "$update"
-	mapFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
-		scm.Apply(a[len(cols)], scm.NewSlice(payload))
-		return scm.NewNil()
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer {
+		scm.Apply(a[len(cols)+1], scm.NewSlice(payload))
+		return a[0]
 	})
-	childTbl.scan(currentTx, cols, condition, mapCols, mapFn, scm.NewNil(), scm.NewNil(), scm.NewNil(), false)
+	childTbl.scan(currentTx, cols, condition, mapCols, mapReduceFn, scm.NewNil(), scm.NewNil(), false)
 }
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.

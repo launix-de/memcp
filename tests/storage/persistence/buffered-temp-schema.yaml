@@ -55,10 +55,9 @@ test_cases:
           "sortdirs" (list false)
           "partitioncount" 0
           "mapcols" '()
-          "mapfn" (lambda ($set) (list $set))
-          "reducefn" (lambda (acc mapped)
+          "mapreducefn" (lambda (acc $set)
             (begin
-              ((car mapped) (+ acc 1))
+              ($set (+ acc 1))
               (+ acc 1)))
           "reduceinit" 0))
 

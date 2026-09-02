@@ -54,18 +54,22 @@ setup:
   - scm: "(rebuild)"
   # Feed representative equality probes into the automatic partition scorer,
   # then persist the selected layout. Shard size remains the production default.
-  - scm: |
-      (begin
-        (define tx (session "__memcp_tx"))
-        (define forums (table "memcp-tests" "forum_hierarchy_forums"))
-        (define threads (table "memcp-tests" "forum_hierarchy_threads"))
-        (map (produceN 8) (lambda (i)
-          (begin
-            (define forum_id (+ i 1))
-            (scan tx forums '("parentID") (lambda (parentID) (equal?? parentID forum_id))
-              '() (lambda () 1) + 0 + false)
-            (scan tx threads '("forumID") (lambda (threadForumID) (equal?? threadForumID forum_id))
-              '("postCount") (lambda (postCount) postCount) + nil nil false)))))
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 1"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 1"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 2"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 2"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 3"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 3"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 4"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 4"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 5"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 5"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 6"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 6"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 7"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 7"
+  - sql: "SELECT COUNT(*) FROM forum_hierarchy_forums WHERE parentID = 8"
+  - sql: "SELECT SUM(postCount) FROM forum_hierarchy_threads WHERE forumID = 8"
   - scm: "(rebuild)"
 
 test_cases:
@@ -234,35 +238,37 @@ test_cases:
         (define users (table "memcp-tests" "forum_hierarchy_users"))
         (define selected_heritage
           (scan tx forums '("forumID") (lambda (forumID) (equal? forumID 8))
-            '("heritage") (lambda (heritage) heritage)
-            (lambda (_old value) value) nil nil false))
+            '("heritage") (lambda (_old heritage) heritage)
+            nil (lambda (_old value) value) false))
         (define found
           (scan tx forums '("heritage")
             (lambda (heritage) (strlike selected_heritage (concat heritage "%")))
             '("forumID")
-            (lambda (forumID)
+            (lambda (count forumID)
               (begin
                 (define child_count
                   (scan tx forums '("parentID") (lambda (parentID) (equal?? parentID forumID))
-                    '() (lambda () 1) + 0 + false))
+                    '() (lambda (acc) (+ acc 1)) 0 + false))
                 (define thread_stats
                   (scan tx threads '("forumID") (lambda (threadForumID) (equal?? threadForumID forumID))
-                    '("postCount" "lastPostID") (lambda (postCount lastPostID) (list postCount lastPostID))
-                    (lambda (acc row) (list (+ (car acc) (car row)) (max (cadr acc) (cadr row))))
+                    '("postCount" "lastPostID")
+                    (lambda (acc postCount lastPostID)
+                      (list (+ (car acc) postCount) (max (cadr acc) lastPostID)))
                     '(0 0)
                     (lambda (acc row) (list (+ (car acc) (car row)) (max (cadr acc) (cadr row))))
                     false))
                 (define post
                   (scan tx posts '("postID") (lambda (postID) (equal?? postID (cadr thread_stats)))
-                    '("authorID" "datePosted") (lambda (authorID datePosted) (list authorID datePosted))
-                    (lambda (_old row) row) nil nil true))
+                    '("authorID" "datePosted")
+                    (lambda (_old authorID datePosted) (list authorID datePosted))
+                    nil (lambda (_old row) row) true))
                 (define username
                   (if (nil? post) nil
                     (scan tx users '("userID") (lambda (userID) (equal?? userID (car post)))
-                      '("username") (lambda (value) value)
-                      (lambda (_old value) value) nil nil true)))
-                (list forumID child_count (car thread_stats) (cadr thread_stats) username)))
-            (lambda (count _row) (+ count 1)) 0 + false))
+                      '("username") (lambda (_old value) value)
+                      nil (lambda (_old value) value) true)))
+                (+ count 1)))
+            0 + false))
         (if (equal? found 8) "ok" (error (concat "wrong hierarchy row count: " found))))
 
 cleanup:

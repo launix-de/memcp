@@ -1248,22 +1248,22 @@ func containsSymbol(expr scm.Scmer, name string) bool {
 	return false
 }
 
-// analyzeOrcSuffix inspects an ORC reduceFn to determine if the accumulator
+// analyzeOrcSuffix inspects an ORC mapReduceFn to determine if the accumulator
 // equals the emitted value ($set argument). This enables suffix recompute
 // by reading the stored ORC value as the start accumulator.
 //
-// The reducer has the form: (lambda (acc mapped) body)
-// where body calls (setter value) and returns new_acc.
+// The callback has the form: (lambda (acc $set cols...) body)
+// where body calls ($set value) and returns new_acc.
 // If value == new_acc, it's an identity accumulator.
-func analyzeOrcSuffix(reduceFn scm.Scmer) int {
-	if reduceFn.IsNil() {
+func analyzeOrcSuffix(mapReduceFn scm.Scmer) int {
+	if mapReduceFn.IsNil() {
 		return OrcSuffixOpaque
 	}
 	var body scm.Scmer
-	if reduceFn.IsProc() {
-		body = reduceFn.Proc().Body
-	} else if reduceFn.IsSlice() {
-		items := reduceFn.Slice()
+	if mapReduceFn.IsProc() {
+		body = mapReduceFn.Proc().Body
+	} else if mapReduceFn.IsSlice() {
+		items := mapReduceFn.Slice()
 		if len(items) >= 3 && items[0].SymbolEquals("lambda") {
 			body = items[2]
 		}

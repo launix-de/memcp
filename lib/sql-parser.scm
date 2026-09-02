@@ -1153,14 +1153,33 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		)
 	))
 	(define sql_insert_select_plan (lambda (schema2 tbl coldesc inner ignoreexists updaterows updaterows2 updatecols) (begin
-		'('begin
-			'('set 'resultrow '('lambda '('item) '('insert '('table schema2 tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
+		(define count_var (symbol "__insert_select_count"))
+		(define inserted_var (symbol "__insert_select_inserted"))
+		(define insert_expr '('insert '('table schema2 tbl) (cons list coldesc) (cons list '((cons list (map (produceN (count coldesc)) (lambda (i) '('nth 'item (+ (* i 2) 1))))))) (cons list updatecols)
 				(if (and ignoreexists (nil? updaterows))
 					'((quote lambda) '() 0)
 					(if ignoreexists '('lambda '() true) (if (nil? updaterows) nil '('lambda (map updatecols (lambda (c) (symbol c))) '('$update (cons 'list (map_assoc updaterows2 (lambda (k v) (replace_stupid v)))))))))
-				nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx))))
-			(build_queryplan_term (sql_expand_views inner policy) planning_session tx)
-		)
+				nil '('lambda '('id) '('session "last_insert_id" 'id)) (quote tx)))
+		(define plan (build_queryplan_term (sql_expand_views inner policy) planning_session tx))
+		(define ordered (or
+			(and (query_block? inner) (not (empty_list? (coalesceNil (qb_order inner) '()))))
+			(and (union_block? inner) (not (empty_list? (coalesceNil (union_order inner) '()))))))
+		(if ordered
+			(list (quote begin)
+				(list (quote set) count_var (list (quote newsession)))
+				(list count_var "count" 0)
+				(list (quote set) (quote resultrow)
+					(list (quote lambda) (list (quote item))
+						(list (quote begin)
+							(list (quote set) inserted_var insert_expr)
+							(list count_var "count" (list (quote +) (list count_var "count") inserted_var))
+							inserted_var)))
+				plan
+				(list count_var "count"))
+			(list (quote begin)
+				(list (quote set) (quote resultrow)
+					(list (quote lambda) (list (quote item)) insert_expr))
+				plan))
 	)))
 	(define sql_select_core (parser '(
 		(atom "SELECT" true)
@@ -1760,16 +1779,18 @@ arithmetic; leave expressions containing columns or functions untouched. */
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
+						0
 						(quote +)
-						0)
+						false)
 					'((quote scan) '(session "__memcp_tx") '('table "system" "user")
 						'('list "username")
 						'((quote lambda) '('username) '((quote equal??) (quote username) username))
 						'(list "$update")
-						'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
+						'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
+						0
 						(quote +)
-						0)
+						false)
 				))
 		))
 		(parser '((atom "CREATE" true) (atom "USER" true) (? (atom "IF" true) (atom "NOT" true) (atom "EXISTS" true)) (define username sql_user_ident)
@@ -1780,7 +1801,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "ALTER" true) (atom "USER" true) (define username sql_user_ident)
 			(? '((atom "IDENTIFIED" true) (atom "BY" true) (define password sql_expression))))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "password" '('password password)))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "password" '('password password))) '__scan_acc)) nil nil false)
 		))
 
 		/* FLUSH PRIVILEGES / FLUSH TABLES / FLUSH ... — no-op in memcp */
@@ -1790,7 +1811,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* GRANT ALL [PRIVILEGES] ON *.* TO user -> set admin true */
 		(parser '((atom "GRANT" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "TO" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" true))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" true)) '__scan_acc)) nil nil false)
 		))
 		/* GRANT <anything> ON db.* TO user -> insert access (idempotent) */
 		(parser '((atom "GRANT" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "TO" true) (define username sql_user_ident))
@@ -1807,7 +1828,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* REVOKE ALL [PRIVILEGES] ON *.* FROM user -> set admin false */
 		(parser '((atom "REVOKE" true) (atom "ALL" true) (? (atom "PRIVILEGES" true)) (atom "ON" true) (atom "*" true) (atom "." true) (atom "*" true) (atom "FROM" true) (define username sql_user_ident))
 			(begin (if policy (policy "system" true true) true)
-				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('$update) '('$update '('list "admin" '('protected_sql_admin_revoke_value username)))))
+				'((quote scan) '(session "__memcp_tx") '('table "system" "user") '('list "username") '((quote lambda) '('username) '((quote equal?) (quote username) username)) '('list "$update") '('lambda '('__scan_acc '$update) '('begin '('$update '('list "admin" '('protected_sql_admin_revoke_value username))) '__scan_acc)) nil nil false)
 		))
 		/* REVOKE <anything> ON db.* FROM user -> delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) (or (atom "*" true) sql_identifier) (atom "FROM" true) (define username sql_user_ident))
@@ -1818,9 +1839,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
+					'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
 					0
+					(quote +)
+					false
 		)))
 		/* REVOKE <anything> ON db.table FROM user -> treat as db-level and delete access entry */
 		(parser '((atom "REVOKE" true) (+ (or sql_identifier "," (atom "SELECT" true) (atom "ALL" true) (atom "PRIVILEGES" true))) (atom "ON" true) (define db sql_identifier) (atom "." true) sql_identifier (atom "FROM" true) (define username sql_user_ident))
@@ -1831,9 +1853,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 					'(list "username" "database")
 					'((quote lambda) '('username 'database) '((quote and) '((quote equal??) (quote username) username) '((quote equal??) (quote database) db)))
 					'(list "$update")
-					'((quote lambda) '((quote $update)) '((quote if) '((quote $update)) 1 0))
-					(quote +)
+					'((quote lambda) '((quote __scan_acc) (quote $update)) '((quote +) (quote __scan_acc) '((quote if) '((quote $update)) 1 0)))
 					0
+					(quote +)
+					false
 		)))
 
 		/* SHOW CREATE DATABASE [IF NOT EXISTS] database */

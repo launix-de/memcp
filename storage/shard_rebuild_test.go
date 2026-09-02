@@ -1096,7 +1096,6 @@ func TestEnsureColumnLoadedRehydratesOrderedProxyFromSchemaPlaceholder(t *testin
 		[]string{"id"},
 		scm.NewNil(),
 		scm.NewNil(),
-		scm.NewNil(),
 	)
 	tbl.ddlMu.Unlock()
 
@@ -1220,15 +1219,13 @@ func TestCreateColumnBuiltinUpgradesExistingColumnToORC(t *testing.T) {
 		{scm.NewInt(2), scm.NewInt(20), scm.NewInt(200)},
 	}, nil, scm.NewNil(), false, nil)
 
-	mapFn := scm.Eval(scm.Read("test", "(lambda ($set v) (list $set v))"), &scm.Globalenv)
-	reduceFn := scm.Eval(scm.Read("test", "(lambda (acc mapped) (begin (define new_acc (+ acc (cadr mapped))) ((car mapped) new_acc) new_acc))"), &scm.Globalenv)
+	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))"), &scm.Globalenv)
 	options := scm.NewSlice([]scm.Scmer{
 		scm.NewString("sortcols"), scm.NewSlice([]scm.Scmer{scm.NewString("day")}),
 		scm.NewString("sortdirs"), scm.NewSlice([]scm.Scmer{scm.NewBool(false)}),
 		scm.NewString("partitioncount"), scm.NewInt(0),
 		scm.NewString("mapcols"), scm.NewSlice([]scm.Scmer{scm.NewString("amount")}),
-		scm.NewString("mapfn"), mapFn,
-		scm.NewString("reducefn"), reduceFn,
+		scm.NewString("mapreducefn"), mapReduceFn,
 		scm.NewString("reduceinit"), scm.NewInt(0),
 	})
 	createcolumn := scm.Globalenv.Vars[scm.Symbol("createcolumn")]
@@ -1293,15 +1290,13 @@ func TestMutationScanRepairsInvalidOrderedComputeColumnBeforeTakingShardLock(t *
 		{scm.NewInt(20), scm.NewInt(200)},
 	}, nil, scm.NewNil(), false, nil)
 
-	mapFn := scm.Eval(scm.Read("test", "(lambda ($set v) (list $set v))"), &scm.Globalenv)
-	reduceFn := scm.Eval(scm.Read("test", "(lambda (acc mapped) (begin (define new_acc (+ acc (cadr mapped))) ((car mapped) new_acc) new_acc))"), &scm.Globalenv)
+	mapReduceFn := scm.Eval(scm.Read("test", "(lambda (acc $set v) (begin (define new_acc (+ acc v)) ($set new_acc) new_acc))"), &scm.Globalenv)
 	options := scm.NewSlice([]scm.Scmer{
 		scm.NewString("sortcols"), scm.NewSlice([]scm.Scmer{scm.NewString("day")}),
 		scm.NewString("sortdirs"), scm.NewSlice([]scm.Scmer{scm.NewBool(false)}),
 		scm.NewString("partitioncount"), scm.NewInt(0),
 		scm.NewString("mapcols"), scm.NewSlice([]scm.Scmer{scm.NewString("amount")}),
-		scm.NewString("mapfn"), mapFn,
-		scm.NewString("reducefn"), reduceFn,
+		scm.NewString("mapreducefn"), mapReduceFn,
 		scm.NewString("reduceinit"), scm.NewInt(0),
 	})
 	createcolumn := scm.Globalenv.Vars[scm.Symbol("createcolumn")]
@@ -1335,10 +1330,9 @@ func TestMutationScanRepairsInvalidOrderedComputeColumnBeforeTakingShardLock(t *
 			trueCondition(),
 			[]string{"$update", "running"},
 			scm.NewFunc(func(args ...scm.Scmer) scm.Scmer {
-				values = append(values, args[1].Int())
-				return scm.NewNil()
+				values = append(values, args[2].Int())
+				return args[0]
 			}),
-			scm.NewNil(),
 			scm.NewNil(),
 			scm.NewNil(),
 			false,

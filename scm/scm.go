@@ -33602,6 +33602,75 @@ func init() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "clone_optimizer_expression",
+
+		Fn: func(a ...Scmer) Scmer {
+			return CloneOptimizerExpression(a[0])
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "copy an AST before transferring a separate copy to the optimizer",
+			Params: []*TypeDescriptor{
+				{Kind: "any", Label: "expression"},
+			},
+			Return:         &TypeDescriptor{Kind: "any"},
+			HasSideEffects: true,
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				if !jitEnabled {
+					return jitEmitGoVariadicCallFromDescs(ctx, declarations["clone_optimizer_expression"].Fn, args, result)
+				}
+				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
+				for i := range args {
+					ctx.StabilizeDescForControlFlow(&args[i])
+				}
+				d0 := args[0]
+				d0.ID = 0
+				ctx.EnsureDesc(&d0)
+				ctx.EnsureDesc(&d0)
+				d0 = JITPrepareScmerGoArg(ctx, d0)
+				ctx.SyncDesc(&d0)
+				d1 := ctx.EmitGoCallScalar(GoFuncAddr(CloneOptimizerExpression), []JITValueDesc{d0}, 2)
+				d1.NoHeapPointer = false
+				ctx.BindReg(d1.Reg, &d1)
+				ctx.BindReg(d1.Reg2, &d1)
+				ctx.FreeDesc(&d0)
+				if d1.Loc == LocImm {
+					if result.Loc == LocAny {
+						return d1
+					}
+				}
+				if result.Loc == LocAny {
+					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+					ctx.BindReg(result.Reg, &result)
+					ctx.BindReg(result.Reg2, &result)
+				}
+				ctx.SyncDesc(&d1)
+				if d1.Loc == LocRegPair || d1.Loc == LocStackPair || d1.Loc == LocInputPair {
+					ctx.EmitMovPairToResult(&d1, &result)
+					result.Type = d1.Type
+				} else {
+					switch d1.Type {
+					case tagBool:
+						ctx.EmitMakeBool(result, d1)
+						result.Type = tagBool
+					case tagInt:
+						ctx.EmitMakeInt(result, d1)
+						result.Type = tagInt
+					case tagFloat:
+						ctx.EmitMakeFloat(result, d1)
+						result.Type = tagFloat
+					case tagNil:
+						ctx.EmitMakeNil(result)
+						result.Type = tagNil
+					default:
+						panic("jit: single-block scalar return with unknown type")
+					}
+				}
+				return result
+				return result
+			},
+			JITInlineCost: 4,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "optimize",
 
 		Fn: func(a ...Scmer) Scmer {

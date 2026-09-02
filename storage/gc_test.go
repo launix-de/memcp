@@ -136,9 +136,8 @@ func TestCleanNoOrphans(t *testing.T) {
 	// Data still readable
 	count := 0
 	tbl.scan(nil, []string{}, trueCondition(), []string{"id"},
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return scm.NewNil() }),
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
-		scm.NewNil(), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }), false)
+		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return a[0] }),
+		scm.NewNil(), scm.NewNil(), false)
 	if count != 3 {
 		t.Errorf("expected 3 rows, got %d", count)
 	}
@@ -184,9 +183,8 @@ func TestCleanOrphanedBlob(t *testing.T) {
 	// Data still readable.
 	count := 0
 	tbl.scan(nil, []string{}, trueCondition(), []string{"id"},
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return scm.NewNil() }),
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
-		scm.NewNil(), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }), false)
+		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return a[0] }),
+		scm.NewNil(), scm.NewNil(), false)
 	if count != 3 {
 		t.Errorf("expected 3 rows after GC, got %d", count)
 	}
@@ -517,9 +515,8 @@ func TestCleanAfterRebuildSupersedesShards(t *testing.T) {
 	count := 0
 	tbl = db.GetTable("docs")
 	tbl.scan(nil, []string{}, trueCondition(), []string{"id"},
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return scm.NewNil() }),
-		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] }),
-		scm.NewNil(), scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] }), false)
+		scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { count++; return a[0] }),
+		scm.NewNil(), scm.NewNil(), false)
 	if count != 2 {
 		t.Errorf("expected 2 rows after GC, got %d", count)
 	}

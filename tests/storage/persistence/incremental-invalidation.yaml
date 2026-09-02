@@ -83,15 +83,12 @@ test_cases:
           "sortdirs"  (list false false)
           "partitioncount" 1
           "mapcols"   '("grp")
-          "mapfn"     (lambda ($set pk) (cons pk (list $set)))
-          "reducefn"  (lambda (acc mapped)
+          "mapreducefn" (lambda (acc $set pk)
                         (begin
-                          (define pk (car mapped))
-                          (define inner (cdr mapped))
                           (define prev_pk (cadr acc))
                           (define inner_acc (car acc))
                           (define eff_acc (if (or (nil? prev_pk) (equal? pk prev_pk)) inner_acc 0))
-                          ((car inner) (+ eff_acc 1))
+                          ($set (+ eff_acc 1))
                           (list (+ eff_acc 1) pk)))
           "reduceinit" (list 0 nil)))
 

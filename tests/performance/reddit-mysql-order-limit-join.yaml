@@ -89,7 +89,7 @@ test_cases:
             (list (list 0 "id")) (list >)
             0 0 20
             (list (list 0 "id"))
-            (lambda (_id) 1) + 0))
+            (lambda (acc _id) (+ acc 1)) 0))
         (if (equal? found 20) "ok" (error "wrong scan_join_order row count")))
 
 cleanup:

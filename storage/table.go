@@ -19,6 +19,7 @@ package storage
 import "context"
 import "fmt"
 import "math"
+import "math/bits"
 import "sync"
 import "time"
 import "errors"
@@ -128,9 +129,8 @@ type column struct {
 	OrcPartitionCount int       `json:",omitempty"` // number of leading OrcSortCols that form the window partition
 	OrcFilterCols     []string  `json:",omitempty"` // rows admitted to the ordered reduction before window evaluation
 	OrcFilterFn       scm.Scmer // predicate over OrcFilterCols; nil means every row
-	OrcMapCols        []string  `json:",omitempty"` // additional input columns passed to OrcMapFn
-	OrcMapFn          scm.Scmer // (lambda ($set mapcols...) ...) — passes data to reduceFn
-	OrcReduceFn       scm.Scmer // (lambda (acc mapped) ...) — accumulates and writes via $set
+	OrcMapCols        []string  `json:",omitempty"` // additional input columns passed to OrcMapReduceFn
+	OrcMapReduceFn    scm.Scmer // (lambda (acc $set mapcols...) ...) — accumulates and writes via $set
 	OrcReduceInit     scm.Scmer // initial accumulator value (neutral element)
 }
 
@@ -1261,6 +1261,8 @@ func (t *table) adjustPlannerRows(delta int64) {
 		plannerRoot.Set(scm.NewString("columns"), columns, nil)
 		replacement := *current
 		replacement.plannerValue = scm.NewFastDict(plannerRoot)
+		replacement.plannerFingerprint = plannerStatisticsFingerprint(
+			rowEstimate, replacement.plannerColumnsFingerprint)
 		replacement.rowEstimate = uint(rowEstimate)
 		if t.showColumnsSnapshot.CompareAndSwap(current, &replacement) {
 			t.publishPlannerStatsToken()
@@ -1380,12 +1382,75 @@ func getForeignKeyMode(val scm.Scmer) foreignKeyMode {
 }
 
 type tableShowColumnsSnapshot struct {
-	value        scm.Scmer
-	plannerValue scm.Scmer
-	rowEstimate  uint
-	columns      *tableShowColumnsMetadata
-	columnNames  *tableColumnNamesSnapshot
-	statistics   *tableStatisticsSnapshot
+	value                     scm.Scmer
+	plannerValue              scm.Scmer
+	plannerFingerprint        uint64
+	plannerColumnsFingerprint uint64
+	rowEstimate               uint
+	columns                   *tableShowColumnsMetadata
+	columnNames               *tableColumnNamesSnapshot
+	statistics                *tableStatisticsSnapshot
+}
+
+func plannerFingerprintMix(fingerprint, value uint64) uint64 {
+	fingerprint ^= value + 0x9e3779b97f4a7c15 + (fingerprint << 6) + (fingerprint >> 2)
+	return fingerprint
+}
+
+func plannerFingerprintString(fingerprint uint64, value string) uint64 {
+	for i := 0; i < len(value); i++ {
+		fingerprint = plannerFingerprintMix(fingerprint, uint64(value[i]))
+	}
+	return plannerFingerprintMix(fingerprint, uint64(len(value)))
+}
+
+// plannerMagnitudeBucket groups positive estimates by powers of two. Cost
+// choices should survive ordinary rebuild noise while still being reconsidered
+// when a table, distinct domain, or value width changes order of magnitude.
+func plannerMagnitudeBucket(value uint64) uint64 {
+	return uint64(bits.Len64(value))
+}
+
+func plannerFractionBucket(value float64) uint64 {
+	if math.IsNaN(value) {
+		return 0
+	}
+	if value <= 0 {
+		return 1
+	}
+	if value >= 1 {
+		return 10
+	}
+	return 2 + uint64(value*8)
+}
+
+func plannerWidthBucket(value float64) uint64 {
+	if math.IsNaN(value) || value <= 0 {
+		return 0
+	}
+	if math.IsInf(value, 1) {
+		return ^uint64(0)
+	}
+	_, exponent := math.Frexp(value)
+	return uint64(int64(exponent) + 1<<31)
+}
+
+func plannerColumnFingerprint(fingerprint uint64, c *column, distinctEstimate uint64, stats *columnPlannerStatistics) uint64 {
+	fingerprint = plannerFingerprintString(fingerprint, c.Name)
+	fingerprint = plannerFingerprintString(fingerprint, c.Typ)
+	fingerprint = plannerFingerprintMix(fingerprint, plannerMagnitudeBucket(distinctEstimate))
+	if stats == nil {
+		return plannerFingerprintMix(fingerprint, 0)
+	}
+	fingerprint = plannerFingerprintMix(fingerprint, 1)
+	fingerprint = plannerFingerprintString(fingerprint, stats.Source)
+	fingerprint = plannerFingerprintMix(fingerprint, plannerFractionBucket(stats.Confidence))
+	fingerprint = plannerFingerprintMix(fingerprint, plannerFractionBucket(stats.NullFraction))
+	return plannerFingerprintMix(fingerprint, plannerWidthBucket(stats.AverageValueBytes))
+}
+
+func plannerStatisticsFingerprint(rowEstimate, columnsFingerprint uint64) uint64 {
+	return plannerFingerprintMix(columnsFingerprint, plannerMagnitudeBucket(rowEstimate))
 }
 
 type tableShowColumnsMetadata struct {
@@ -1421,6 +1486,7 @@ func foldIdentifier(name string) string {
 func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnapshot {
 	result := make([]scm.Scmer, len(t.Columns))
 	plannerColumns := scm.NewFastDictValue(len(t.Columns))
+	plannerColumnsFingerprint := uint64(0x6a09e667f3bcc909)
 	distinctEstimates := make([]uint64, len(t.Columns))
 	plannerStatistics := make([]*columnPlannerStatistics, len(t.Columns))
 	columnNames := t.buildColumnNamesSnapshot()
@@ -1443,6 +1509,8 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 		}
 		distinctEstimates[i] = distinctEstimate
 		plannerStatistics[i] = c.PlannerStats.Load()
+		plannerColumnsFingerprint = plannerColumnFingerprint(
+			plannerColumnsFingerprint, c, distinctEstimate, plannerStatistics[i])
 		result[i] = c.show(keyType, distinctEstimate, rowEstimate, plannerStatistics[i])
 		plannerStatsValue := plannerColumnStatisticsValue(distinctEstimate, plannerStatistics[i], c.Typ)
 		plannerColumns.Set(scm.NewString(c.Name), plannerStatsValue, nil)
@@ -1450,13 +1518,17 @@ func (t *table) buildShowColumnsSnapshot(rowEstimate uint) *tableShowColumnsSnap
 			plannerColumns.Set(scm.NewString(folded), plannerStatsValue, nil)
 		}
 	}
+	plannerColumnsValue := scm.NewFastDict(plannerColumns)
 	plannerRoot := scm.NewFastDictValue(2)
 	plannerRoot.Set(scm.NewString("row_count"), scm.NewInt(int64(rowEstimate)), nil)
-	plannerRoot.Set(scm.NewString("columns"), scm.NewFastDict(plannerColumns), nil)
+	plannerRoot.Set(scm.NewString("columns"), plannerColumnsValue, nil)
+	plannerValue := scm.NewFastDict(plannerRoot)
 	snapshot := &tableShowColumnsSnapshot{
-		value:        scm.NewSlice(result),
-		plannerValue: scm.NewFastDict(plannerRoot),
-		rowEstimate:  rowEstimate,
+		value:                     scm.NewSlice(result),
+		plannerValue:              plannerValue,
+		plannerFingerprint:        plannerStatisticsFingerprint(uint64(rowEstimate), plannerColumnsFingerprint),
+		plannerColumnsFingerprint: plannerColumnsFingerprint,
+		rowEstimate:               rowEstimate,
 		columns: &tableShowColumnsMetadata{
 			distinctEstimates: distinctEstimates,
 			plannerStatistics: plannerStatistics,
@@ -1543,6 +1615,22 @@ func (t *table) PlannerStatistics() scm.Scmer {
 		snapshot := t.showColumnsSnapshot.Load()
 		if snapshot != nil {
 			return snapshot.plannerValue
+		}
+		t.publishShowColumnsSnapshot()
+	}
+}
+
+// PlannerStatisticsFingerprint identifies the coarse cost class of immutable
+// statistics independently of its rebuild generation. It is computed once
+// while publishing the snapshot, so cache revalidation remains O(1).
+func (t *table) PlannerStatisticsFingerprint() uint64 {
+	if t == nil {
+		return 0
+	}
+	for {
+		snapshot := t.showColumnsSnapshot.Load()
+		if snapshot != nil {
+			return snapshot.plannerFingerprint
 		}
 		t.publishShowColumnsSnapshot()
 	}
@@ -1933,7 +2021,7 @@ func (t *table) createColumnLocked(name string, typ string, typdimensions []int,
 			c.IsTemp = scm.ToBool(extrainfo[i+1])
 		case "filtercols", "filter":
 			// handled by createcolumn builtin, not a column property
-		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapfn", "reducefn", "reduceinit":
+		case "sortcols", "sortdirs", "partitioncount", "mapcols", "mapreducefn", "reduceinit":
 			// ORC params handled by createcolumn builtin after CreateColumn
 		default:
 			panic("unknown column attribute: " + key)

@@ -33,7 +33,7 @@ derived SELECT before untangle_query sees the complete query. */
 			(define references_view (scan nil (table "system" "views")
 				'("name")
 				(lambda (name) (> (count (split normalized_query (toLower name))) 1))
-				'() (lambda () true) (lambda (a b) (or a b)) false))
+				'() (lambda (acc) true) false (lambda (a b) (or a b))))
 			(if references_view (sql_view_catalog_state "version") 0))
 		0)))
 
@@ -62,9 +62,8 @@ derived SELECT before untangle_query sees the complete query. */
 		(lambda (view_schema view_name)
 			(and (equal?? view_schema schema) (equal?? view_name name)))
 		'("dialect" "sql" "ir")
-		(lambda (dialect sql ir) (list dialect sql ir))
-		(lambda (a b) b)
-		nil)))
+		(lambda (acc dialect sql ir) (list dialect sql ir))
+		nil (lambda (a b) b))))
 
 (define sql_expand_views (lambda (query policy) (begin
 	(define expand_node (lambda (node stack)
@@ -125,7 +124,7 @@ derived SELECT before untangle_query sees the complete query. */
 		'("database" "name")
 		(lambda (view_schema view_name)
 			(and (equal?? view_schema schema) (equal?? view_name name)))
-		'() (lambda () 1) + 0))
+		'() (lambda (acc) (+ acc 1)) 0 +))
 	(define result
 		(if (> existing 0)
 			(match mode
@@ -135,9 +134,10 @@ derived SELECT before untangle_query sees the complete query. */
 					(lambda (view_schema view_name)
 						(and (equal?? view_schema schema) (equal?? view_name name)))
 					'("$update")
-					(lambda ($update)
-						($update (list "dialect" dialect "sql" sql "ir" serialized_ir)))
-					+ 0)
+					(lambda (acc $update) (begin
+						($update (list "dialect" dialect "sql" sql "ir" serialized_ir))
+						(+ acc 1)))
+					0 +)
 				"ignore" 0
 				_ (error (concat "view " schema "." name " already exists")))
 			(insert (table "system" "views")
@@ -158,8 +158,8 @@ derived SELECT before untangle_query sees the complete query. */
 		(lambda (view_schema view_name)
 			(and (equal?? view_schema schema) (equal?? view_name name)))
 		'("$update")
-		(lambda ($update) ($update))
-		+ 0))
+		(lambda (acc $update) (begin ($update) (+ acc 1)))
+		0 +))
 	(if (> removed 0)
 		(begin
 			(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed)))
@@ -177,14 +177,14 @@ metadata. */
 			'("database")
 			(lambda (database) (equal?? database schema))
 			'("$update")
-			(lambda ($update) ($update))
-			+ 0)
+			(lambda (acc $update) (begin ($update) (+ acc 1)))
+			0 +)
 		(define removed_views (scan tx (table "system" "views")
 			'("database")
 			(lambda (database) (equal?? database schema))
 			'("$update")
-			(lambda ($update) ($update))
-			+ 0))
+			(lambda (acc $update) (begin ($update) (+ acc 1)))
+			0 +))
 		(if (> removed_views 0) (begin
 			(sql_view_catalog_set_count (max 0 (- (sql_view_catalog_state "count") removed_views)))
 			(sql_view_catalog_changed)

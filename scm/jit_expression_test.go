@@ -155,6 +155,15 @@ func TestJITExpressionReduceLambdaArgumentOrder(t *testing.T) {
 	}
 }
 
+func TestJITExpressionFusedMapReducerArithmetic(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda (acc value id) (+ acc (+ (* value 3) id)))`)
+	requireNoDynamicJITCalls(t, compiled)
+	if got := Apply(compiled, NewInt(10), NewInt(4), NewInt(2)); !Equal(got, NewInt(24)) {
+		t.Fatalf("unexpected fused arithmetic result: %s", String(got))
+	}
+}
+
 func TestJITExpressionHigherOrderClosureCapture(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (values blocked) (begin
 		(define blocked_set (reduce blocked (lambda (acc item) (set_assoc acc item true)) '()))

@@ -281,10 +281,7 @@ func jitCopyScmerToPair(ctx *JITContext, src JITValueDesc) JITValueDesc {
 func JITPrepareScmerGoArg(ctx *JITContext, src JITValueDesc) JITValueDesc {
 	ctx.SyncDesc(&src)
 	switch src.Loc {
-	case LocRegPair, LocInputPair:
-		return src
-	case LocStackPair:
-		ctx.EnsureDesc(&src)
+	case LocRegPair, LocStackPair, LocInputPair:
 		return src
 	case LocImm, LocReg, LocStack:
 		return jitCopyScmerToPair(ctx, src)

@@ -8044,12 +8044,6 @@ func (g *codeGen) emitInstrLegacy(instr ssa.Instruction) {
 			}
 			bindings[i] = closureBinding{outerName: binding.Name(), value: captured, scope: g.bbScope}
 		}
-		if len(bindings) == 1 && isForwardingMergeClosure(closureFn) && bindings[0].value.marker == "_serial_callable" {
-			dv := g.allocDesc()
-			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildMergeClosure), []JITValueDesc{%s}, 1)", dv, bindings[0].value.goVar)
-			g.vals[name] = genVal{goVar: dv, isDesc: true, marker: "_gofunc", pinAcrossBlock: true}
-			break
-		}
 		if len(bindings) == 1 && closureFn.Signature.Params().Len() == 1 && closureFn.Signature.Results().Len() == 0 && closureHasStaticCall(closureFn, "Apply") && bindings[0].value.isDesc {
 			dv := g.allocDesc()
 			g.emit("%s := ctx.EmitGoCallScalar(GoFuncAddr(JITBuildScmerCallback), []JITValueDesc{%s}, 1)", dv, bindings[0].value.goVar)
