@@ -3687,6 +3687,21 @@ func functionWritesMemory(fn *ssa.Function) bool {
 	return false
 }
 
+func functionCallsMultipleResults(fn *ssa.Function) bool {
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			if tuple, ok := call.Type().Underlying().(*types.Tuple); ok && tuple.Len() > 1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func blockEndsInPanic(block *ssa.BasicBlock) bool {
 	return block != nil && len(block.Instrs) > 0 && func() bool {
 		_, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Panic)
@@ -3724,6 +3739,13 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 		return genVal{}, false
 	}
 	if functionBuildsScmerStruct(callee) {
+		return genVal{}, false
+	}
+	// Keep tuple-producing calls inside their native helper until nested inline
+	// CFG returns have a stable, path-independent representation. Flattening
+	// such a helper into its caller can otherwise make a later return arm reuse
+	// an earlier arm's result register while the tuple call is being emitted.
+	if functionCallsMultipleResults(callee) {
 		return genVal{}, false
 	}
 	if cost := inlineInstructionCount(callee); cost > inlineInstructionBudget {
