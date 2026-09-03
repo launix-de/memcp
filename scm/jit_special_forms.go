@@ -618,6 +618,15 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		if _, ok := Globalenv.Vars[symbol]; ok {
 			continue
 		}
+		if runtimeEnv, ok := ctx.RuntimeEnv.Any().(*Env); ok && runtimeEnv != nil {
+			if binding := runtimeEnv.FindRead(symbol); binding != nil && binding != &Globalenv {
+				if _, exists := binding.Vars[symbol]; exists {
+					capturedSymbols = append(capturedSymbols, symbol)
+					argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(symbol))}))
+					argExprs = append(argExprs, NewSymbol(string(symbol)))
+				}
+			}
+		}
 	}
 	consumesRuntimeEnv := jitExpressionConsumesRuntimeEnv(body)
 	outerCaptures := jitLambdaOuterCaptures(body, !consumesRuntimeEnv)

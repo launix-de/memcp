@@ -384,6 +384,29 @@ func TestJITExpressionWithSessionRebindsRuntimeEnvironment(t *testing.T) {
 	}
 }
 
+func TestJITExpressionNestedRuntimeLambdaCapturesNamedEnvironment(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	want := NewString("named environment callable")
+	env := &Env{
+		Vars: Vars{
+			Symbol("local_print"): NewFunc(func(...Scmer) Scmer { return want }),
+		},
+		Outer: &Globalenv,
+	}
+	expression := Optimize(Read(t.Name(), `(lambda () (begin
+		(define inner (lambda () (begin (eval 'nil) (local_print))))
+		(inner)))`), env, nil)
+	compiled := jitCompile(Eval(expression, env))
+	if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("outer runtime-environment closure did not compile")
+	}
+	if got := Apply(compiled); !Equal(got, want) {
+		t.Fatalf("nested runtime lambda returned %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITExpressionNestedAnonymousLambdasPreserveOuterDepth(t *testing.T) {
 	param := func(name string) Scmer { return NewSlice([]Scmer{NewSymbol(name)}) }
 	call := func(lambda Scmer, value int64) Scmer {
