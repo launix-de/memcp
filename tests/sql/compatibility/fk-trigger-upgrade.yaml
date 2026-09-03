@@ -1,0 +1,119 @@
+# Copyright (C) 2026 Launix GmbH
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "Canonical FK trigger regeneration when loading schemas from older releases"
+  isolated: true
+
+setup:
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_child"
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_parent"
+  - sql: "CREATE TABLE fk_upgrade_parent (id INT PRIMARY KEY, label VARCHAR(40))"
+  - sql: "CREATE TABLE fk_upgrade_child (id INT PRIMARY KEY, title VARCHAR(40), payload TEXT, parent_id INT, created_at INT, omitted_value VARCHAR(40), CONSTRAINT fk_upgrade_ref FOREIGN KEY (parent_id) REFERENCES fk_upgrade_parent(id) ON DELETE CASCADE ON UPDATE CASCADE)"
+  - sql: "INSERT INTO fk_upgrade_parent (id, label) VALUES (7, 'available'), (9, 'replacement')"
+
+test_cases:
+  - name: "Persist every FK callback with the pre-transaction ABI"
+    scm: |
+      (begin
+        (createtrigger
+          (table "memcp-tests" "fk_upgrade_child")
+          "__fk_fk_upgrade_ref_child_insert"
+          "before_insert"
+          ""
+          ""
+          (lambda (OLD NEW session tx)
+            (begin
+              (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") (list (get_assoc NEW "parent_id")) "fk_upgrade_ref")
+              NEW))
+          false)
+        (createtrigger
+          (table "memcp-tests" "fk_upgrade_child")
+          "__fk_fk_upgrade_ref_child_update"
+          "before_update"
+          ""
+          ""
+          (lambda (OLD NEW session tx)
+            (begin
+              (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") (list (get_assoc NEW "parent_id")) "fk_upgrade_ref")
+              NEW))
+          false)
+        (createtrigger
+          (table "memcp-tests" "fk_upgrade_parent")
+          "__fk_fk_upgrade_ref_parent_delete"
+          "before_delete"
+          ""
+          ""
+          (lambda (OLD NEW session tx)
+            (__fk_on_parent_delete "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) "fk_upgrade_ref" "CASCADE"))
+          false)
+        (createtrigger
+          (table "memcp-tests" "fk_upgrade_parent")
+          "__fk_fk_upgrade_ref_parent_update"
+          "after_update"
+          ""
+          ""
+          (lambda (OLD NEW session tx)
+            (__fk_on_parent_update "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) (list (get_assoc NEW "id")) "fk_upgrade_ref" "CASCADE"))
+          false))
+    expect:
+      data: [true]
+
+  - name: "Restart with legacy compiled FK procedures on disk"
+    sql: "SHUTDOWN"
+    restart_timeout: 300
+
+  - name: "Partial upload-shaped insert works after load migration"
+    sql: "INSERT INTO fk_upgrade_child (id, title, payload, parent_id, created_at) VALUES (1, 'upload', 'contents', 7, 1234)"
+    expect:
+      affected_rows: 1
+
+  - name: "Loaded child-update trigger validates the replacement parent"
+    sql: "UPDATE fk_upgrade_child SET parent_id = 9 WHERE id = 1"
+    expect:
+      affected_rows: 1
+
+  - name: "Loaded parent-update trigger cascades"
+    sql: "UPDATE fk_upgrade_parent SET id = 10 WHERE id = 9"
+    expect:
+      affected_rows: 1
+
+  - name: "Partial row and update cascade are correct"
+    sql: "SELECT id, title, parent_id, omitted_value FROM fk_upgrade_child WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          title: "upload"
+          parent_id: 10
+          omitted_value: null
+
+  - name: "Force canonical regenerated triggers through a schema save"
+    sql: "CREATE TABLE fk_upgrade_save_marker (id INT PRIMARY KEY)"
+    expect: {}
+
+  - name: "Restart after saving FK triggers without compiled Scheme code"
+    sql: "SHUTDOWN"
+    restart_timeout: 300
+
+  - name: "Loaded parent-delete trigger cascades"
+    sql: "DELETE FROM fk_upgrade_parent WHERE id = 10"
+    expect:
+      affected_rows: 1
+
+  - name: "Delete cascade removed the uploaded child"
+    sql: "SELECT COUNT(*) AS cnt FROM fk_upgrade_child"
+    expect:
+      rows: 1
+      data:
+        - cnt: 0
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_save_marker"
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_child"
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_parent"

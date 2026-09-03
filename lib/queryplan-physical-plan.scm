@@ -7391,7 +7391,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 (define prejoin_create_trigger_plan (lambda (src name timing body)
 	(list (quote createtrigger)
 		(list (quote table) (source_schema src) (source_relation src))
-		name timing "" (prejoin_deferred_trigger body) false)))
+		name timing "" "" (prejoin_deferred_trigger body) false)))
 
 (define prejoin_trigger_registration_plans (lambda (block table_name)
 	(merge (map (qb_sources block) (lambda (src)

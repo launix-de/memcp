@@ -3518,11 +3518,15 @@ func Init(en scm.Env) {
 					if !tr.Func.IsNil() {
 						funcStr = scm.String(tr.Func)
 					}
+					statement := ""
+					if tr.Language == "sql" {
+						statement = tr.Source
+					}
 					rows = append(rows, scm.NewSlice([]scm.Scmer{
 						scm.NewString("Trigger"), scm.NewString(tr.Name),
 						scm.NewString("Event"), scm.NewString(event),
 						scm.NewString("Table"), scm.NewString(t.Name),
-						scm.NewString("Statement"), scm.NewString(tr.SourceSQL),
+						scm.NewString("Statement"), scm.NewString(statement),
 						scm.NewString("Timing"), scm.NewString(timing),
 						scm.NewString("Created"), scm.NewNil(),
 						scm.NewString("sql_mode"), scm.NewString(""),
@@ -3655,33 +3659,53 @@ func Init(en scm.Env) {
 
 	// Trigger management
 	scm.Declare(&en, &scm.Declaration{
+		Name: "registertriggerlanguage",
+
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			registerTriggerLanguage(scm.String(a[0]), a[1])
+			return scm.NewBool(true)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "registers or replaces a process-local compiler for persistent trigger source; compiler is called as (source context)", HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "string", Label: "language", Description: "persistent trigger language identifier"},
+				{Kind: "func", Label: "compiler", Description: "compile lambda accepting source and an assoc context"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "bool"},
+		},
+	})
+	scm.Declare(&en, &scm.Declaration{
 		Name: "createcreatetabletrigger",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			body, deferredPlan := unwrapDeferredTriggerBody(a[4])
+			if (scm.String(a[3]) == "") != (scm.String(a[4]) == "") {
+				panic("trigger source and language must either both be set or both be empty")
+			}
+			body, deferredPlan := unwrapDeferredTriggerBody(a[5])
 			if triggerScmerMissing(body) && !triggerScmerMissing(deferredPlan) {
 				body = scm.Eval(deferredPlan, &scm.Globalenv)
 			}
-			if triggerScmerMissing(body) {
+			if triggerScmerMissing(body) && scm.String(a[4]) == "" {
 				panic("create-table trigger body must not be empty")
 			}
 			trigger := TriggerDescription{
-				Name:      scm.String(a[2]),
-				Timing:    AfterCreateTable,
-				Func:      body,
-				SourceSQL: scm.String(a[3]),
-				Hidden:    !scm.ToBool(a[5]),
+				Name:     scm.String(a[2]),
+				Timing:   AfterCreateTable,
+				Func:     body,
+				Source:   scm.String(a[3]),
+				Language: scm.String(a[4]),
+				Hidden:   !scm.ToBool(a[6]),
 			}
 			finalizeTriggerCompilation(&trigger)
 			registerCreateTableTrigger(CreateTableTriggerRegistration{
-				Schema:    scm.String(a[0]),
-				Table:     scm.String(a[1]),
-				Name:      trigger.Name,
-				SourceSQL: trigger.SourceSQL,
-				Hidden:    trigger.Hidden,
-				Priority:  trigger.Priority,
-				Async:     trigger.Async,
-				Func:      trigger.Func,
+				Schema:   scm.String(a[0]),
+				Table:    scm.String(a[1]),
+				Name:     trigger.Name,
+				Source:   trigger.Source,
+				Language: trigger.Language,
+				Hidden:   trigger.Hidden,
+				Priority: trigger.Priority,
+				Async:    trigger.Async,
+				Func:     trigger.Func,
 			})
 			return scm.NewBool(true)
 		},
@@ -3690,7 +3714,8 @@ func Init(en scm.Env) {
 				{Kind: "string", Label: "schema", Description: "name of the database"},
 				{Kind: "string", Label: "table", Description: "name of the table to watch for creation"},
 				{Kind: "string", Label: "name", Description: "name of the trigger"},
-				{Kind: "string", Label: "source_sql", Description: "original SQL body text (for diagnostics)"},
+				{Kind: "string", Label: "source", Description: "authoritative trigger source, or empty for compiled internal triggers"},
+				{Kind: "string", Label: "language", Description: "registered source language, or empty when body is the durable definition"},
 				{Kind: "any", Label: "body", Description: "trigger body (Scheme procedure or deferred trigger expression)"},
 				{Kind: "bool", Label: "visible", Description: "true = user trigger, false = internal trigger"},
 			},
@@ -3755,21 +3780,26 @@ func Init(en scm.Env) {
 				panic("invalid trigger timing: " + timingStr)
 			}
 
-			sourceSQL := scm.String(a[3])
-			body, deferredPlan := unwrapDeferredTriggerBody(a[4])
-			visible := scm.ToBool(a[5])
+			source := scm.String(a[3])
+			language := scm.String(a[4])
+			if (source == "") != (language == "") {
+				panic("trigger source and language must either both be set or both be empty")
+			}
+			body, deferredPlan := unwrapDeferredTriggerBody(a[5])
+			visible := scm.ToBool(a[6])
 			if visible {
 				requireTableMaintenance(db.Name, t.Name, maintenanceAlter)
 			}
 
 			trigger := TriggerDescription{
-				Name:      name,
-				Timing:    timing,
-				Func:      body,
-				FuncPlan:  deferredPlan,
-				SourceSQL: sourceSQL,
-				Hidden:    !visible,
-				Priority:  0,
+				Name:     name,
+				Timing:   timing,
+				Func:     body,
+				FuncPlan: deferredPlan,
+				Source:   source,
+				Language: language,
+				Hidden:   !visible,
+				Priority: 0,
 			}
 			t.ddlMu.Lock()
 			defer t.ddlMu.Unlock()
@@ -3785,7 +3815,8 @@ func Init(en scm.Env) {
 				{Kind: "table", Label: "table"},
 				{Kind: "string", Label: "name", Description: "name of the trigger"},
 				{Kind: "string", Label: "timing", Description: "one of: before_insert, after_insert, before_update, after_update, before_delete, after_delete"},
-				{Kind: "string", Label: "source_sql", Description: "original SQL body text (for SHOW TRIGGERS)"},
+				{Kind: "string", Label: "source", Description: "authoritative trigger source, or empty for compiled internal triggers"},
+				{Kind: "string", Label: "language", Description: "registered source language, or empty when body is the durable definition"},
 				{Kind: "any", Label: "body", Description: "trigger body (parsed Scheme expression)"},
 				{Kind: "bool", Label: "visible", Description: "true = user trigger (shown in SHOW TRIGGERS), false = internal trigger (hidden)"},
 			},
@@ -4360,6 +4391,43 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 			scm.NewSymbol("NEW"),
 		})),
 	})
+}
+
+// rebuildFKTriggersAfterLoad replaces persisted FK implementation details with
+// the canonical trigger programs emitted by this binary. Foreign-key metadata
+// is authoritative; its system triggers are derived code and must not retain an
+// obsolete builtin ABI forever merely because schema.json contains an older
+// compiled Proc. User triggers are untouched because only names owned by an
+// actual foreign-key declaration are replaced.
+func rebuildFKTriggersAfterLoad(db *database) {
+	seen := make(map[string]struct{})
+	for _, child := range db.tables.GetAll() {
+		for _, fk := range child.Foreign {
+			if fk.Tbl1 != child.Name {
+				continue
+			}
+			key := fk.Tbl1 + "\x00" + fk.Tbl2 + "\x00" + fk.Id
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+
+			parent := db.tables.Get(fk.Tbl2)
+			if parent == nil {
+				continue
+			}
+			prefix := "__fk_" + fk.Id + "_"
+			for child.RemoveTrigger(prefix + "child_insert") {
+			}
+			for child.RemoveTrigger(prefix + "child_update") {
+			}
+			for parent.RemoveTrigger(prefix + "parent_delete") {
+			}
+			for parent.RemoveTrigger(prefix + "parent_update") {
+			}
+			installFKTriggers(db, child, parent, fk)
+		}
+	}
 }
 
 // showEngineStr returns the engine name string for a table (matches dashboard dropdown values).

@@ -73,8 +73,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	)
 )))
 
-/* SHOW CREATE TRIGGER must expose executable SQL. SourceSQL contains the
-original body, while SHOW TRIGGERS supplies the table, timing, and event. */
+/* SHOW CREATE TRIGGER exposes SQL-language source. SHOW TRIGGERS supplies the
+table, timing, and event around that language-neutral persisted source. */
 (define format_create_trigger (lambda (schema trigger_name) (begin
 	(define tr (find (show_triggers schema) (lambda (row)
 		(equal? (row "Trigger") trigger_name))))
