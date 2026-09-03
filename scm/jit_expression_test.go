@@ -24,6 +24,125 @@ import (
 
 var jitListBenchmarkSink Scmer
 
+func TestJITPreviewCallArgumentResolvesSymbols(t *testing.T) {
+	local := JITValueDesc{Loc: LocStackPair, Type: tagFastDict, StackOff: 32}
+	ctx := &JITContext{Env: &JITEnv{Vars: map[Symbol]JITValueDesc{
+		Symbol("dynamic_argument"): local,
+	}}}
+	if got := jitPreviewCallArgument(ctx, nil, 0, NewSymbol("dynamic_argument")); got.Loc != local.Loc || got.Type != local.Type || got.StackOff != local.StackOff {
+		t.Fatalf("local symbol preview = %+v, want %+v", got, local)
+	}
+
+	const globalName = Symbol("jit_preview_global_argument")
+	previous, existed := Globalenv.Vars[globalName]
+	Globalenv.Vars[globalName] = NewSlice([]Scmer{NewInt(1), NewInt(2)})
+	defer func() {
+		if existed {
+			Globalenv.Vars[globalName] = previous
+		} else {
+			delete(Globalenv.Vars, globalName)
+		}
+	}()
+	got := jitPreviewCallArgument(ctx, nil, 0, NewSymbol(string(globalName)))
+	if got.Loc != LocImm || got.Type != tagSlice || !got.SliceSizeKnown || got.KnownSliceLen != 2 {
+		t.Fatalf("global symbol preview = %+v, want known two-item slice", got)
+	}
+}
+
+func TestJITExpressionKeepsLocalAcrossConsecutiveDirectProcCalls(t *testing.T) {
+	const candidateName = Symbol("jit_test_candidate_facts")
+	const factsName = Symbol("jit_test_stage_facts")
+	for name, source := range map[Symbol]string{
+		candidateName: `(lambda (stage session) (list (list (quote candidate) (nth stage 0))))`,
+		factsName:     `(lambda (stage) (nth stage 11))`,
+	} {
+		previous, existed := Globalenv.Vars[name]
+		compiled := compileJITExpressionTestProc(t, source)
+		Globalenv.Vars[name] = compiled
+		defer func() {
+			if existed {
+				Globalenv.Vars[name] = previous
+			} else {
+				delete(Globalenv.Vars, name)
+			}
+		}()
+	}
+	compiled := compileJITExpressionTestProc(t, `(lambda (membership session)
+		(begin
+			(define stage (nth membership 0))
+			(merge (list
+				(jit_test_candidate_facts stage session)
+				(jit_test_stage_facts stage)))))`)
+	stage := []Scmer{NewInt(7), NewNil(), NewNil(), NewNil(), NewNil(), NewNil(), NewNil(), NewNil(), NewNil(), NewNil(), NewNil(), NewSlice([]Scmer{NewSlice([]Scmer{NewSymbol("fact"), NewInt(42)})})}
+	want := NewSlice([]Scmer{NewSlice([]Scmer{NewSymbol("candidate"), NewInt(7)}), NewSlice([]Scmer{NewSymbol("fact"), NewInt(42)})})
+	if got := compiled.Proc().Compiled.Call(NewSlice([]Scmer{NewSlice(stage)}), NewNil()); !Equal(got, want) {
+		t.Fatalf("consecutive direct calls = %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionKeepsComputedListAcrossWideDirectProcCall(t *testing.T) {
+	const calleeName = Symbol("jit_test_wide_list_callee")
+	previous, existed := Globalenv.Vars[calleeName]
+	Globalenv.Vars[calleeName] = compileJITExpressionTestProc(t, `(lambda (all lookup stage nested sink)
+		(merge (list (list stage) all)))`)
+	defer func() {
+		if existed {
+			Globalenv.Vars[calleeName] = previous
+		} else {
+			delete(Globalenv.Vars, calleeName)
+		}
+	}()
+	compiled := compileJITExpressionTestProc(t, `(lambda (stage tail)
+		(begin
+			(define catalog (merge (list (list stage) tail)))
+			(jit_test_wide_list_callee catalog catalog stage true nil)))`)
+	want := NewSlice([]Scmer{NewSymbol("stage"), NewSymbol("stage"), NewSymbol("tail")})
+	if got := compiled.Proc().Compiled.Call(NewSymbol("stage"), NewSlice([]Scmer{NewSymbol("tail")})); !Equal(got, want) {
+		t.Fatalf("wide direct call = %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionDirectProcCallRelocatesArgsOnStackGrowth(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const calleeName = Symbol("jit_test_stack_growing_callee")
+	previous, existed := Globalenv.Vars[calleeName]
+	callee := jitCompile(NewProcStruct(Proc{
+		Params:       NewSlice([]Scmer{NewSymbol("value")}),
+		Body:         NewNthLocalVar(0),
+		En:           &Globalenv,
+		NumVars:      2048,
+		NumberedOnly: true,
+	}))
+	Globalenv.Vars[calleeName] = callee
+	defer func() {
+		if existed {
+			Globalenv.Vars[calleeName] = previous
+		} else {
+			delete(Globalenv.Vars, calleeName)
+		}
+	}()
+	caller := compileJITExpressionTestProc(t, `(lambda (value) (jit_test_stack_growing_callee value))`)
+	want := NewSlice([]Scmer{NewString("stack-relocated")})
+	if got := callJITExpressionAtDepth(caller, want, 128); !Equal(got, want) {
+		t.Fatalf("direct call after stack growth = %s, want %s", String(got), String(want))
+	}
+}
+
+func callJITExpressionAtDepth(callable, arg Scmer, depth int) Scmer {
+	var frame [512]byte
+	frame[0] = byte(depth)
+	if depth == 0 {
+		result := Apply(callable, arg)
+		runtime.KeepAlive(frame)
+		return result
+	}
+	result := callJITExpressionAtDepth(callable, arg, depth-1)
+	runtime.KeepAlive(frame)
+	return result
+}
+
 func compileJITExpressionTestProc(t *testing.T, source string) Scmer {
 	t.Helper()
 	if !jitEnabled {
@@ -407,6 +526,39 @@ func TestJITExpressionNestedRuntimeLambdaCapturesNamedEnvironment(t *testing.T) 
 	}
 }
 
+func TestJITExpressionNestedLambdaKeepsParameterSeparateFromCapture(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (req)
+		(lambda (username) (equal? username (req "username"))))`)
+	req := NewSlice([]Scmer{NewString("username"), NewString("root")})
+	inner := Apply(compiled, req)
+	if inner.Proc() == nil {
+		t.Fatalf("nested lambda returned %s, want procedure", String(inner))
+	}
+	if got := Apply(inner, NewString("root")); !Equal(got, NewBool(true)) {
+		t.Fatalf("nested lambda body %s returned %s, want true", String(inner), String(got))
+	}
+}
+
+func TestJITExpressionNestedLambdaCapturesShadowedOuterParameter(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value inner)
+		((lambda (value) (list value (outer 1 value))) inner))`)
+	want := NewSlice([]Scmer{NewInt(7), NewInt(5)})
+	if got := Apply(compiled, NewInt(5), NewInt(7)); !Equal(got, want) {
+		t.Fatalf("shadowed outer parameter capture returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITExpressionCallbackKeepsParameterSeparateFromCapture(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (req)
+		(map '("root") (lambda (username) (equal? username (req "username")))))`)
+	req := NewSlice([]Scmer{NewString("username"), NewString("root")})
+	got := Apply(compiled, req)
+	want := NewSlice([]Scmer{NewBool(true)})
+	if !Equal(got, want) {
+		t.Fatalf("callback returned %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITExpressionNestedAnonymousLambdasPreserveOuterDepth(t *testing.T) {
 	param := func(name string) Scmer { return NewSlice([]Scmer{NewSymbol(name)}) }
 	call := func(lambda Scmer, value int64) Scmer {
@@ -498,6 +650,89 @@ func TestJITExpressionTailSelfCallAdvancesArguments(t *testing.T) {
 	}
 	if got := Apply(compiled, NewSlice([]Scmer{NewInt(1), NewInt(2)})); !got.IsBool() || !got.Bool() {
 		t.Fatalf("tail-recursive JIT call returned %s, want true", String(got))
+	}
+}
+
+func TestJITExpressionRecursiveMatchKeepsEarlierFixedListBranch(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	const name = Symbol("jit_test_recursive_match_branches")
+	previous, existed := Globalenv.Vars[name]
+	defer func() {
+		if existed {
+			Globalenv.Vars[name] = previous
+		} else {
+			delete(Globalenv.Vars, name)
+		}
+	}()
+	EvalAllJIT(t.Name(), `(define jit_test_recursive_match_branches (lambda (expr)
+		(match expr
+			((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+				(and (string? tblvar) (strlike tblvar "__exists_%"))
+			((quote get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+				(and (string? tblvar) (strlike tblvar "__exists_%"))
+			(cons _head tail) (reduce tail (lambda (found item)
+				(or found (jit_test_recursive_match_branches item))) false)
+			_ false)))`, &Globalenv)
+	compiled := Globalenv.Vars[name]
+	if compiled.GetTag() != tagProc || compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+		t.Fatal("recursive match procedure was not JIT compiled")
+	}
+	Globalenv.Vars[name] = compiled
+	input := NewSlice([]Scmer{
+		NewSymbol("get_column"), NewString("__exists_source"),
+		NewBool(false), NewString("value"), NewBool(false),
+	})
+	if got := Apply(compiled, input); !got.IsBool() || !got.Bool() {
+		t.Fatalf("earlier fixed-list branch returned %s, want true", String(got))
+	}
+	if got := callJITExpressionAtDepth(compiled, input, 128); !got.IsBool() || !got.Bool() {
+		t.Fatalf("deep-stack fixed-list branch returned %s, want true", String(got))
+	}
+}
+
+func TestJITExpressionWideMatchPreservesEveryCapture(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (query) (match query
+		((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
+			(list schema tables fields condition group having order limit offset hidden stages facts)
+		_ nil))`)
+	want := make([]Scmer, 12)
+	for index := range want {
+		want[index] = NewInt(int64(index + 1))
+	}
+	input := append([]Scmer{NewSymbol("query-block")}, want...)
+	got := Apply(compiled, NewSlice(input))
+	if !Equal(got, NewSlice(want)) {
+		t.Fatalf("wide match returned %s, want %s", String(got), String(NewSlice(want)))
+	}
+}
+
+func TestJITExpressionQueryBlockMatchHelpersKeepConditionAndStage(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (query order limit offset) (begin
+		(define select_order (lambda (query) (match query
+			((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts) order
+			_ nil)))
+		(define clear_stage (lambda (query) (match query
+			((symbol query-block) schema tables fields condition group having order limit offset hidden stages facts)
+				(list (quote query-block) schema tables fields condition group having nil nil nil '() '() '())
+			_ query)))
+		(define combine (lambda (left right)
+			(list left (clear_stage right) (select_order right))))
+		(combine (quote left) query)))`)
+	query := NewSlice([]Scmer{
+		NewSymbol("query-block"), NewString("schema"), NewString("tables"), NewString("fields"),
+		NewString("condition"), NewString("group"), NewString("having"), NewString("order"),
+		NewInt(2), NewInt(1), NewString("hidden"), NewString("stages"), NewString("facts"),
+	})
+	got := Apply(compiled, query, NewNil(), NewNil(), NewNil())
+	items := got.Slice()
+	if len(items) != 3 || !Equal(items[2], NewString("order")) {
+		t.Fatalf("query-block helpers returned %s, want order capture", String(got))
+	}
+	cleared := items[1].Slice()
+	if len(cleared) != 13 || !Equal(cleared[4], NewString("condition")) {
+		t.Fatalf("clear-stage helper returned %s, want condition capture", String(items[1]))
 	}
 }
 

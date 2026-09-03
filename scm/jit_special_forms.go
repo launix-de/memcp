@@ -629,7 +629,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		}
 	}
 	consumesRuntimeEnv := jitExpressionConsumesRuntimeEnv(body)
-	outerCaptures := jitLambdaOuterCaptures(body, !consumesRuntimeEnv)
+	outerCaptures, namedOuterCaptures := jitLambdaOuterCaptures(body, !consumesRuntimeEnv)
 	if consumesRuntimeEnv {
 		seen := make(map[jitLambdaOuterCapture]struct{}, len(outerCaptures))
 		for _, capture := range outerCaptures {
@@ -647,8 +647,12 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), key}))
 		argExprs = append(argExprs, jitLambdaCaptureReference(capture.index, capture.depth))
 	}
-	if ctx.RecursiveLambdas && len(capturedSymbols)+len(outerCaptures) != 0 &&
-		len(argExprs) == 3+2*(len(capturedSymbols)+len(outerCaptures)) && !jitExpressionConsumesRuntimeEnv(body) {
+	for _, capture := range namedOuterCaptures {
+		argExprs = append(argExprs, NewSlice([]Scmer{NewSymbol("quote"), NewSymbol(string(capture.symbol))}))
+		argExprs = append(argExprs, jitLambdaNamedCaptureReference(capture.symbol, capture.depth))
+	}
+	if ctx.RecursiveLambdas && len(capturedSymbols)+len(outerCaptures)+len(namedOuterCaptures) != 0 &&
+		len(argExprs) == 3+2*(len(capturedSymbols)+len(outerCaptures)+len(namedOuterCaptures)) && !jitExpressionConsumesRuntimeEnv(body) {
 		plainParams := params.WithoutSourceInfo()
 		if plainParams.IsSlice() {
 			publicParams := plainParams.Slice()
@@ -661,13 +665,21 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 			for _, capture := range outerCaptures {
 				outerBindings[capture] = NthLocalVar(captureBase + len(symbolBindings) + len(outerBindings))
 			}
-			captureCount := len(symbolBindings) + len(outerBindings)
+			namedOuterBindings := make(map[jitLambdaNamedOuterCapture]NthLocalVar, len(namedOuterCaptures))
+			for _, capture := range namedOuterCaptures {
+				namedOuterBindings[capture] = NthLocalVar(captureBase + len(symbolBindings) + len(outerBindings) + len(namedOuterBindings))
+			}
+			captureCount := len(symbolBindings) + len(outerBindings) + len(namedOuterBindings)
 			captureSymbols := append([]Symbol(nil), capturedSymbols...)
 			for _, capture := range outerCaptures {
 				symbol, _ := jitOuterCaptureSymbol(ctx, capture)
 				captureSymbols = append(captureSymbols, symbol)
 			}
-			boundBody := jitBindLambdaCaptures(body, symbolBindings, outerBindings)
+			for _, capture := range namedOuterCaptures {
+				captureSymbols = append(captureSymbols, capture.symbol)
+			}
+			boundBody := jitBindLambdaCaptures(body, symbolBindings, outerBindings, namedOuterBindings)
+			argExprs[1] = NewSlice([]Scmer{NewSymbol("quote"), boundBody})
 			if ctx.DefiningSymbol == "" {
 				template := jitBuildLambdaClosure(NewSlice(publicParams), boundBody, NewInt(int64(captureBase+captureCount)))
 				template.Proc().jitCaptureBase = captureBase

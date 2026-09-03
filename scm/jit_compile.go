@@ -2183,6 +2183,22 @@ func jitPreviewCallArgument(ctx *JITContext, decl *Declaration, index int, expr 
 			return JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(local)}
 		}
 	}
+	if expr.IsSymbol() {
+		if ctx.Env != nil {
+			if value, exists := ctx.Env.Lookup(expr.Symbol()); exists {
+				return value
+			}
+		}
+		if value, exists := Globalenv.Vars[expr.Symbol()]; exists {
+			preview := JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value}
+			if value.IsSlice() {
+				preview.KnownSliceLen = int32(len(value.Slice()))
+				preview.SliceSizeKnown = true
+			}
+			return preview
+		}
+		return JITValueDesc{Type: JITTypeUnknown}
+	}
 	if expr.GetTag() != tagSlice {
 		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
 	}

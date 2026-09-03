@@ -127,3 +127,29 @@ func TestJITParserGeneratorReadsAncestorAndOuterScopes(t *testing.T) {
 		t.Fatalf("nested generator returned %s, want %s", String(got), String(want))
 	}
 }
+
+func TestJITParserRecursiveRightBranchKeepsOptionalBindings(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (input) (begin
+		(define word (parser (regex "[A-Z]" false true)))
+		(define combine (lambda (left right) (list left right)))
+		(define core (parser '(
+			(define value word)
+			(? (atom "WHERE" true) (define condition word))
+			(? (atom "ORDER" true) (define order word))
+			(? (atom "LIMIT" true) (define limit word)))
+			(list value condition order limit)))
+		(define select (parser (or
+			(parser '((define left core) (atom "UNION" true) (define right select))
+				(combine left right))
+			core)))
+		((parser (define command select) command) input)))`)
+	requireNoDynamicJITCalls(t, compiled)
+	got := compiled.Proc().Compiled.Call(NewString("A UNION B WHERE C ORDER D LIMIT E"))
+	want := NewSlice([]Scmer{
+		NewSlice([]Scmer{NewString("A"), NewNil(), NewNil(), NewNil()}),
+		NewSlice([]Scmer{NewString("B"), NewString("C"), NewString("D"), NewString("E")}),
+	})
+	if !Equal(got, want) {
+		t.Fatalf("recursive parser returned %s, want %s", String(got), String(want))
+	}
+}

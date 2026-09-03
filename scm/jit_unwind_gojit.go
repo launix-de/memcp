@@ -83,9 +83,12 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 		}
 		if maps[i].entry {
 			runtimeMaps[i] = jit.StackMap{
-				PCOffset:       maps[i].pcOffset,
-				FrameWords:     1,
-				PointerMask:    []byte{0},
+				PCOffset: maps[i].pcOffset,
+				// The Go-compatible morestack path spills the incoming variadic
+				// slice at SP+8, SP+16 and SP+24. Its data word points into the
+				// caller's JIT frame and must be relocated when copystack moves it.
+				FrameWords:     4,
+				PointerMask:    []byte{0b00000010},
 				HasUnwind:      true,
 				CallerPCOffset: 0,
 				CallerSPOffset: unsafe.Sizeof(uintptr(0)),

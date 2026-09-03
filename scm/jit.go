@@ -1501,6 +1501,52 @@ func jitAddLambdaBoundParams(params Scmer, bound map[Symbol]struct{}) {
 	}
 }
 
+func jitAddMatchPatternBoundSymbols(pattern Scmer, bound map[Symbol]struct{}) {
+	for pattern.IsSourceInfo() {
+		pattern = pattern.SourceInfo().value
+	}
+	if pattern.IsSymbol() {
+		symbol := pattern.Symbol()
+		switch symbol {
+		case "_", "nil", "true", "false":
+			return
+		}
+		bound[symbol] = struct{}{}
+		return
+	}
+	if !pattern.IsSlice() {
+		return
+	}
+	items := pattern.Slice()
+	if len(items) == 0 {
+		return
+	}
+	head, hasHead := scmerSymbol(items[0])
+	if !hasHead {
+		for _, item := range items {
+			jitAddMatchPatternBoundSymbols(item, bound)
+		}
+		return
+	}
+	switch head {
+	case "quote", "symbol", "eval", "ignorecase", "var":
+		return
+	case "regex":
+		for _, item := range items[2:] {
+			jitAddMatchPatternBoundSymbols(item, bound)
+		}
+		return
+	case "merge":
+		if len(items) > 2 {
+			jitAddMatchPatternBoundSymbols(items[2], bound)
+		}
+		return
+	}
+	for _, item := range items[1:] {
+		jitAddMatchPatternBoundSymbols(item, bound)
+	}
+}
+
 func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map[Symbol]struct{}, out *[]Symbol) {
 	if expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
@@ -1538,6 +1584,24 @@ func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map
 				}
 				jitAddLambdaBoundParams(list[1], innerBound)
 				jitCollectLambdaFreeSymbols(list[2], innerBound, seen, out)
+				return
+			case "match", "match_mut":
+				if len(list) > 1 {
+					jitCollectLambdaFreeSymbols(list[1], bound, seen, out)
+				}
+				index := 2
+				for index+1 < len(list) {
+					branchBound := make(map[Symbol]struct{}, len(bound)+4)
+					for symbol := range bound {
+						branchBound[symbol] = struct{}{}
+					}
+					jitAddMatchPatternBoundSymbols(list[index], branchBound)
+					jitCollectLambdaFreeSymbols(list[index+1], branchBound, seen, out)
+					index += 2
+				}
+				if index < len(list) {
+					jitCollectLambdaFreeSymbols(list[index], bound, seen, out)
+				}
 				return
 			}
 		}
@@ -1592,7 +1656,15 @@ type jitLambdaOuterCapture struct {
 	index NthLocalVar
 }
 
-func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, countScopes bool, seen map[jitLambdaOuterCapture]struct{}, out *[]jitLambdaOuterCapture) {
+type jitLambdaNamedOuterCapture struct {
+	depth  int
+	symbol Symbol
+}
+
+func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, countScopes bool,
+	seen map[jitLambdaOuterCapture]struct{}, out *[]jitLambdaOuterCapture,
+	namedSeen map[jitLambdaNamedOuterCapture]struct{}, namedOut *[]jitLambdaNamedOuterCapture,
+) {
 	if expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
 	}
@@ -1609,33 +1681,33 @@ func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, countScopes bool
 			return
 		case "lambda":
 			if len(list) >= 3 {
-				jitCollectLambdaOuterCaptures(list[2], lambdaDepth+1, countScopes, seen, out)
+				jitCollectLambdaOuterCaptures(list[2], lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
 			}
 			return
 		case "begin":
 			if countScopes {
 				for _, item := range list[1:] {
-					jitCollectLambdaOuterCaptures(item, lambdaDepth+1, countScopes, seen, out)
+					jitCollectLambdaOuterCaptures(item, lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
 				}
 				return
 			}
 		case "begin_mut":
 			if countScopes {
 				if len(list) > 1 {
-					jitCollectLambdaOuterCaptures(list[1], lambdaDepth, countScopes, seen, out)
+					jitCollectLambdaOuterCaptures(list[1], lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
 				}
 				for _, item := range list[2:] {
-					jitCollectLambdaOuterCaptures(item, lambdaDepth+1, countScopes, seen, out)
+					jitCollectLambdaOuterCaptures(item, lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
 				}
 				return
 			}
 		case "match", "match_mut":
 			if countScopes {
 				if len(list) > 1 {
-					jitCollectLambdaOuterCaptures(list[1], lambdaDepth, countScopes, seen, out)
+					jitCollectLambdaOuterCaptures(list[1], lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
 				}
 				for index := 3; index < len(list); index += 2 {
-					jitCollectLambdaOuterCaptures(list[index], lambdaDepth+1, countScopes, seen, out)
+					jitCollectLambdaOuterCaptures(list[index], lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
 				}
 				return
 			}
@@ -1646,26 +1718,38 @@ func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, countScopes bool
 				if arg.IsSourceInfo() {
 					arg = arg.SourceInfo().value
 				}
-				if validDepth && int(depth) > lambdaDepth && arg.GetTag() == tagNthLocalVar {
-					capture := jitLambdaOuterCapture{depth: int(depth) - lambdaDepth - 1, index: arg.NthLocalVar()}
-					if _, ok := seen[capture]; !ok {
-						seen[capture] = struct{}{}
-						*out = append(*out, capture)
+				if validDepth && int(depth) > lambdaDepth {
+					captureDepth := int(depth) - lambdaDepth - 1
+					switch arg.GetTag() {
+					case tagNthLocalVar:
+						capture := jitLambdaOuterCapture{depth: captureDepth, index: arg.NthLocalVar()}
+						if _, ok := seen[capture]; !ok {
+							seen[capture] = struct{}{}
+							*out = append(*out, capture)
+						}
+					case tagSymbol:
+						capture := jitLambdaNamedOuterCapture{depth: captureDepth, symbol: arg.Symbol()}
+						if _, ok := namedSeen[capture]; !ok {
+							namedSeen[capture] = struct{}{}
+							*namedOut = append(*namedOut, capture)
+						}
 					}
 				}
 			}
 		}
 	}
 	for _, item := range list {
-		jitCollectLambdaOuterCaptures(item, lambdaDepth, countScopes, seen, out)
+		jitCollectLambdaOuterCaptures(item, lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
 	}
 }
 
-func jitLambdaOuterCaptures(body Scmer, countScopes bool) []jitLambdaOuterCapture {
+func jitLambdaOuterCaptures(body Scmer, countScopes bool) ([]jitLambdaOuterCapture, []jitLambdaNamedOuterCapture) {
 	seen := make(map[jitLambdaOuterCapture]struct{}, 4)
 	out := make([]jitLambdaOuterCapture, 0, 4)
-	jitCollectLambdaOuterCaptures(body, 0, countScopes, seen, &out)
-	return out
+	namedSeen := make(map[jitLambdaNamedOuterCapture]struct{}, 4)
+	namedOut := make([]jitLambdaNamedOuterCapture, 0, 4)
+	jitCollectLambdaOuterCaptures(body, 0, countScopes, seen, &out, namedSeen, &namedOut)
+	return out, namedOut
 }
 
 // jitBindLambdaCaptures turns lexical symbol and outer-slot reads into hidden
@@ -1680,8 +1764,16 @@ func jitLambdaCaptureReference(index NthLocalVar, depth int) Scmer {
 	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), local})
 }
 
-func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar) Scmer {
-	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, 0)
+func jitLambdaNamedCaptureReference(symbol Symbol, depth int) Scmer {
+	value := NewSymbol(string(symbol))
+	if depth == 0 {
+		return value
+	}
+	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), value})
+}
+
+func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, namedOuterVars map[jitLambdaNamedOuterCapture]NthLocalVar) Scmer {
+	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, namedOuterVars, 0)
 }
 
 // jitBindLambdaSelfValues routes a named recursive closure used as a value
@@ -1740,10 +1832,10 @@ func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, 
 	return NewSlice(bound)
 }
 
-func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, depth int) Scmer {
+func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, namedOuterVars map[jitLambdaNamedOuterCapture]NthLocalVar, depth int) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = jitBindLambdaCapturesAtDepth(source.value, symbols, outerVars, depth)
+		source.value = jitBindLambdaCapturesAtDepth(source.value, symbols, outerVars, namedOuterVars, depth)
 		return NewSourceInfo(source)
 	}
 	if expr.IsSymbol() {
@@ -1772,6 +1864,12 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 					return jitLambdaCaptureReference(param, depth)
 				}
 			}
+			if validDepth && int(outerDepth) > depth && key.IsSymbol() {
+				capture := jitLambdaNamedOuterCapture{depth: int(outerDepth) - depth - 1, symbol: key.Symbol()}
+				if param, exists := namedOuterVars[capture]; exists {
+					return jitLambdaCaptureReference(param, depth)
+				}
+			}
 		}
 		if string(head) == "lambda" && len(items) >= 3 {
 			bound := append([]Scmer(nil), items...)
@@ -1787,46 +1885,58 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 					delete(innerSymbols, symbol)
 				}
 			}
-			bound[2] = jitBindLambdaCapturesAtDepth(items[2], innerSymbols, outerVars, depth+1)
+			bound[2] = jitBindLambdaCapturesAtDepth(items[2], innerSymbols, outerVars, namedOuterVars, depth+1)
 			return NewSlice(bound)
 		}
 		if string(head) == "begin" {
 			bound := append([]Scmer(nil), items...)
 			for index := 1; index < len(items); index++ {
-				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, depth+1)
+				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, namedOuterVars, depth+1)
 			}
 			return NewSlice(bound)
 		}
 		if string(head) == "begin_mut" {
 			bound := append([]Scmer(nil), items...)
 			if len(items) > 1 {
-				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, depth)
+				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, namedOuterVars, depth)
 			}
 			for index := 2; index < len(items); index++ {
-				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, depth+1)
+				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, namedOuterVars, depth+1)
 			}
 			return NewSlice(bound)
 		}
 		if string(head) == "match" || string(head) == "match_mut" {
 			bound := append([]Scmer(nil), items...)
 			if len(items) > 1 {
-				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, depth)
+				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, namedOuterVars, depth)
 			}
 			for index := 3; index < len(items); index += 2 {
-				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, depth+1)
+				branchSymbols := symbols
+				if len(symbols) != 0 {
+					branchSymbols = make(map[Symbol]NthLocalVar, len(symbols))
+					for symbol, slot := range symbols {
+						branchSymbols[symbol] = slot
+					}
+					patternSymbols := make(map[Symbol]struct{})
+					jitAddMatchPatternBoundSymbols(items[index-1], patternSymbols)
+					for symbol := range patternSymbols {
+						delete(branchSymbols, symbol)
+					}
+				}
+				bound[index] = jitBindLambdaCapturesAtDepth(items[index], branchSymbols, outerVars, namedOuterVars, depth+1)
 			}
 			return NewSlice(bound)
 		}
 		if (string(head) == "define" || string(head) == "set" || string(head) == "setN") && len(items) == 3 {
 			bound := append([]Scmer(nil), items...)
-			bound[2] = jitBindLambdaCapturesAtDepth(items[2], symbols, outerVars, depth)
+			bound[2] = jitBindLambdaCapturesAtDepth(items[2], symbols, outerVars, namedOuterVars, depth)
 			return NewSlice(bound)
 		}
 	}
 	changed := false
 	bound := make([]Scmer, len(items))
 	for index, item := range items {
-		bound[index] = jitBindLambdaCapturesAtDepth(item, symbols, outerVars, depth)
+		bound[index] = jitBindLambdaCapturesAtDepth(item, symbols, outerVars, namedOuterVars, depth)
 		changed = changed || bound[index] != item
 	}
 	if !changed {
