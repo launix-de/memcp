@@ -18,36 +18,111 @@ package scm
 
 import (
 	"fmt"
+	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 	"unsafe"
 )
 
 var jitListBenchmarkSink Scmer
 
+func gcPointerWordOffsets(typ reflect.Type, base uintptr) []int32 {
+	var result []int32
+	var walk func(reflect.Type, uintptr)
+	walk = func(current reflect.Type, offset uintptr) {
+		switch current.Kind() {
+		case reflect.Pointer, reflect.UnsafePointer, reflect.Map, reflect.Chan, reflect.Func:
+			result = append(result, int32(offset))
+		case reflect.Interface:
+			result = append(result, int32(offset+unsafe.Sizeof(uintptr(0))))
+		case reflect.Slice, reflect.String:
+			result = append(result, int32(offset))
+		case reflect.Array:
+			for index := 0; index < current.Len(); index++ {
+				walk(current.Elem(), offset+uintptr(index)*current.Elem().Size())
+			}
+		case reflect.Struct:
+			for index := 0; index < current.NumField(); index++ {
+				field := current.Field(index)
+				walk(field.Type, offset+field.Offset)
+			}
+		}
+	}
+	walk(typ, base)
+	return result
+}
+
+func TestJITProcStackPointerOffsetsMatchLayout(t *testing.T) {
+	want := gcPointerWordOffsets(reflect.TypeOf(Proc{}), 0)
+	got := jitProcStackPointerOffsets[:]
+	if !slices.Equal(got, want) {
+		t.Fatalf("Proc pointer words = %v, want %v", got, want)
+	}
+}
+
+func TestJITGeneratedProcFieldOffsetsFollowCurrentLayout(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value) (close_procedure value))`)
+	originalMeta := &ProcOptimizerMeta{Return: tiZero.WithKind(KindInt), HasReturn: true}
+	original := NewProcStruct(Proc{
+		Params:        NewSlice(nil),
+		Body:          NewInt(7),
+		En:            &Env{Vars: Vars{}, Outer: &Globalenv},
+		OptimizerMeta: originalMeta,
+	})
+	closed := Apply(compiled, original)
+	if !closed.IsProc() || closed.Proc().OptimizerMeta == nil {
+		t.Fatal("generated close_procedure lost Proc optimizer metadata")
+	}
+	if closed.Proc().OptimizerMeta == originalMeta {
+		t.Fatal("generated close_procedure reused mutable Proc optimizer metadata")
+	}
+	if !closed.Proc().OptimizerMeta.HasReturn || closed.Proc().OptimizerMeta.Return.Kind() != KindInt {
+		t.Fatalf("generated close_procedure read stale Proc field offsets: %#v", closed.Proc().OptimizerMeta)
+	}
+}
+
+//go:noinline
+func growJITCallbackTestStack(depth int) int {
+	var frame [1024]byte
+	frame[0] = byte(depth)
+	if depth == 0 {
+		runtime.KeepAlive(&frame)
+		return int(frame[0])
+	}
+	result := int(frame[0]) + growJITCallbackTestStack(depth-1)
+	runtime.KeepAlive(&frame)
+	return result
+}
+
+func jitCallbackTestSafepoint(args ...Scmer) Scmer {
+	runtime.GC()
+	_ = growJITCallbackTestStack(64)
+	return args[0]
+}
+
 func TestJITFunctionValueCarriesOriginalProcAndInlineCaptures(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
 		(lambda (value) (list captured value)))`)
 	inner := Apply(compiled, NewString("outer"))
-	if inner.Proc() == nil || inner.Proc().JIT == nil {
+	if inner.Proc() == nil || inner.Proc().JITCode == 0 {
 		t.Fatal("capturing lambda has no native function")
 	}
-	if got := JITProcForFunction(inner.Proc().JIT); got != inner.Proc() {
+	function := inner.Proc().jitFunction()
+	if got := JITProcForFunction(function); got != inner.Proc() {
 		t.Fatalf("funcval Proc = %p, want %p", got, inner.Proc())
 	}
-	funcval := *(*unsafe.Pointer)(unsafe.Pointer(&inner.Proc().JIT))
-	if got := *(**Proc)(unsafe.Add(funcval, unsafe.Sizeof(uintptr(0)))); got != inner.Proc() {
-		t.Fatalf("RDX+8 Proc = %p, want %p", got, inner.Proc())
+	funcval := *(*unsafe.Pointer)(unsafe.Pointer(&function))
+	if got := (*Proc)(funcval); got != inner.Proc() {
+		t.Fatalf("funcval Proc = %p, want %p", got, inner.Proc())
 	}
-	if got := *(**byte)(unsafe.Add(funcval, 2*unsafe.Sizeof(uintptr(0)))); got != &jitFuncValueSentinel {
-		t.Fatal("funcval sentinel is missing")
+	captures := jitProcCaptures(inner.Proc())
+	if len(captures) != 1 {
+		t.Fatalf("capture count = %d, want 1", len(captures))
 	}
-	if len(inner.Proc().jitCaptures) != 1 {
-		t.Fatalf("capture count = %d, want 1", len(inner.Proc().jitCaptures))
-	}
-	capture := *(*Scmer)(unsafe.Add(funcval, jitFuncValueHeaderSize))
-	if !Equal(capture, inner.Proc().jitCaptures[0]) {
-		t.Fatalf("inline capture = %s, want %s", String(capture), String(inner.Proc().jitCaptures[0]))
+	capture := *(*Scmer)(unsafe.Add(funcval, unsafe.Offsetof(ProcJIT{}.Context)))
+	if !Equal(capture, captures[0]) {
+		t.Fatalf("inline capture = %s, want %s", String(capture), String(captures[0]))
 	}
 	if got := Apply(inner, NewString("inner")); !Equal(got, NewSlice([]Scmer{NewString("outer"), NewString("inner")})) {
 		t.Fatalf("capturing funcval returned %s", String(got))
@@ -63,11 +138,12 @@ func TestJITProcForFunctionRejectsOrdinaryGoFunction(t *testing.T) {
 
 func TestJITNoEscapeCallbackUsesStackFuncval(t *testing.T) {
 	const name = "jit_test_noescape_callback"
+	const safepointName = "jit_test_callback_safepoint"
 	consumer := func(args ...Scmer) Scmer {
-		if len(args) != 2 || args[0].GetTag() != tagFunc {
-			panic("noescape callback was not passed as a native func")
+		if len(args) != 2 || args[0].GetTag() != tagProc || args[0].Proc().JITCode == 0 {
+			panic("noescape callback was not passed as a native Proc")
 		}
-		if JITProcForFunction(args[0].Func()) == nil {
+		if JITProcForFunction(args[0].Proc().jitFunction()) != args[0].Proc() {
 			panic("noescape callback lost its original Proc")
 		}
 		prepared := PrepareSerialProc(args[0])
@@ -82,23 +158,73 @@ func TestJITNoEscapeCallbackUsesStackFuncval(t *testing.T) {
 		}, Return: &TypeDescriptor{Kind: "any"}},
 	}
 	Declare(&Globalenv, declaration)
+	safepointDeclaration := &Declaration{
+		Name: safepointName,
+		Fn:   jitCallbackTestSafepoint,
+		Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
+			{Kind: "any"},
+		}, Return: &TypeDescriptor{Kind: "any"}},
+	}
+	Declare(&Globalenv, safepointDeclaration)
 	defer func() {
 		delete(Globalenv.Vars, Symbol(name))
 		delete(declarations, name)
 		delete(declarationsByFunction, FunctionIdentity(consumer))
+		delete(Globalenv.Vars, Symbol(safepointName))
+		delete(declarations, safepointName)
+		delete(declarationsByFunction, FunctionIdentity(jitCallbackTestSafepoint))
 	}()
 	compiled := compileJITExpressionTestProc(t, `(lambda (captured value)
-		(jit_test_noescape_callback (lambda (item) (+ item captured)) value))`)
+		(begin
+			(jit_test_callback_safepoint value)
+			(jit_test_noescape_callback (lambda (item) (+ (jit_test_callback_safepoint item) captured)) value)))`)
 	args := []Scmer{NewInt(5), NewInt(7)}
-	if got := compiled.Proc().JIT(args...); !Equal(got, NewInt(12)) {
+	if got := compiled.Proc().jitFunction()(args...); !Equal(got, NewInt(12)) {
 		t.Fatalf("stack funcval returned %s, want 12", String(got))
 	}
 	if allocations := testing.AllocsPerRun(100, func() {
-		if got := compiled.Proc().JIT(args...); !Equal(got, NewInt(12)) {
+		if got := compiled.Proc().jitFunction()(args...); !Equal(got, NewInt(12)) {
 			t.Fatalf("stack funcval returned %s, want 12", String(got))
 		}
 	}); allocations != 0 {
 		t.Fatalf("noescape callback call allocated %.2f objects, want 0", allocations)
+	}
+}
+
+func TestJITEscapingCallbackUsesOneTypedAllocation(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
+		(lambda (value) (+ captured value)))`)
+	args := []Scmer{NewInt(5)}
+	var closure Scmer
+	if allocations := testing.AllocsPerRun(100, func() {
+		closure = compiled.Proc().jitFunction()(args...)
+	}); allocations != 1 {
+		t.Fatalf("escaping callback binding allocated %.2f objects, want 1", allocations)
+	}
+	runtime.GC()
+	_ = growJITCallbackTestStack(64)
+	if closure.Proc() == nil || JITProcForFunction(closure.Proc().jitFunction()) != closure.Proc() {
+		t.Fatal("escaping callback lost its Go-compatible Proc funcval")
+	}
+	if got := closure.Proc().jitFunction()(NewInt(7)); !Equal(got, NewInt(12)) {
+		t.Fatalf("escaping callback returned %s, want 12", String(got))
+	}
+}
+
+func TestJITCallPadsMissingArguments(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (query planning_session tx)
+		(list query planning_session tx))`)
+	want := NewSlice([]Scmer{NewString("t"), NewNil(), NewNil()})
+	if got := Apply(compiled, NewString("t")); !Equal(got, want) {
+		t.Fatalf("padded native call returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITMissingArgumentRemainsNilAcrossCallbackCapture(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (query planning_session tx)
+		(reduce (list query) (lambda (_ src) planning_session) nil))`)
+	if got := Apply(compiled, NewString("t")); !got.IsNil() {
+		t.Fatalf("captured missing argument returned %s, want nil", String(got))
 	}
 }
 

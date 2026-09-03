@@ -387,8 +387,9 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 	if !fn.IsProc() {
 		return Apply(fn)
 	}
-	proc := *fn.Proc()
-	outer := proc.En
+	original := fn.Proc()
+	proc := *original
+	outer := original.En
 	if outer == nil {
 		outer = &Globalenv
 	}
@@ -398,16 +399,17 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 		vars[name] = value
 	}
 	vars[Symbol("session")] = session
-	proc.En = &Env{
+	reboundEnv := &Env{
 		Vars:         vars,
 		VarsNumbered: outer.VarsNumbered,
 		Outer:        outer.Outer,
 		Nodefine:     outer.Nodefine,
 	}
-	if jitRebindProcCapture(&proc, NewSymbol("session"), previousSession, hadPreviousSession, session) {
-		return Apply(NewProcStruct(proc))
+	if rebound := jitRebindProcCapture(original, reboundEnv, NewSymbol("session"), previousSession, hadPreviousSession, session); rebound != nil {
+		return Apply(Scmer{ptr: (*byte)(unsafe.Pointer(rebound)), aux: makeAux(tagProc, 0)})
 	}
-	proc.JIT = nil
+	proc.En = reboundEnv
+	proc.JITCode = 0
 	proc.Compiled = nil
 	callable := NewProcStruct(proc)
 	if jitEnabled {

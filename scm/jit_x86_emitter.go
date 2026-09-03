@@ -235,17 +235,18 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ctx.emitMovRegReg(RegR12, RegRSP)
 		ctx.SliceBaseTracksRSP = true
 	}
-	if proc != nil && (proc.jitCaptureCount != 0 || ctx.UsesRuntimeEnv) {
+	captureCount := 0
+	if proc != nil && proc.Compiled != nil {
+		captureCount = proc.Compiled.CaptureCount
+	}
+	if proc != nil && (captureCount != 0 || ctx.UsesRuntimeEnv) {
 		ctx.ClosureFuncOff = ctx.AllocStack(8)
 		ctx.EmitStoreRegMem(RegRDX, RegRSP, ctx.ClosureFuncOff)
 		ctx.setStackPointer(jitStackRootFrameSP, ctx.ClosureFuncOff, true)
 		if ctx.UsesRuntimeEnv {
-			ctx.RuntimeEnvOff = ctx.AllocStack(16)
-			runtimeEnvOffset := int32(jitFuncValueHeaderSize) + int32(proc.jitCaptureCount*16)
-			ctx.EmitMovRegMem(RegR11, RegRDX, runtimeEnvOffset)
+			ctx.RuntimeEnvOff = ctx.AllocStack(8)
+			ctx.EmitMovRegMem(RegR11, RegRDX, int32(unsafe.Offsetof(Proc{}.En)))
 			ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.RuntimeEnvOff)
-			ctx.EmitMovRegMem(RegR11, RegRDX, runtimeEnvOffset+8)
-			ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.RuntimeEnvOff+8)
 			ctx.setStackPointer(jitStackRootFrameSP, ctx.RuntimeEnvOff, true)
 		}
 	}
@@ -271,12 +272,14 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 				}
 				numbered[index] = desc
 			}
-			for index := 0; index < proc.jitCaptureCount; index++ {
-				slot := proc.jitCaptureBase + index
-				if slot < 0 || slot >= len(numbered) {
-					panic("jit: closure capture slot outside local frame")
+			if proc.Compiled != nil {
+				for index := 0; index < proc.Compiled.CaptureCount; index++ {
+					slot := proc.Compiled.CaptureBase + index
+					if slot < 0 || slot >= len(numbered) {
+						panic("jit: closure capture slot outside local frame")
+					}
+					numbered[slot] = JITValueDesc{Loc: LocClosurePair, Type: JITTypeUnknown, StackOff: int32(index)}
 				}
-				numbered[slot] = JITValueDesc{Loc: LocClosurePair, Type: JITTypeUnknown, StackOff: int32(index)}
 			}
 		}
 		putVar := func(sym Symbol, index int) {
@@ -293,10 +296,14 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		case tagSlice:
 			params := proc.Params.Slice()
 			for i := 0; i < len(params) && (inputArgCount < 0 || i < inputArgCount); i++ {
-				if params[i].GetTag() != tagSymbol {
+				param := params[i]
+				for param.GetTag() == tagSourceInfo {
+					param = param.SourceInfo().value
+				}
+				if param.GetTag() != tagSymbol {
 					continue
 				}
-				putVar(params[i].Symbol(), i)
+				putVar(param.Symbol(), i)
 			}
 		case tagSymbol:
 			if inputArgCount > 0 {

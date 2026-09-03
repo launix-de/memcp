@@ -19,8 +19,18 @@ Copyright (C) 2024-2026  Carl-Philip Hänsch
 
 package scm
 
+import "unsafe"
+
 func jitRuntimeStackCheck() (guardOffset, stackSmall, moreStackPC uintptr) {
 	return 0, 0, 0
+}
+
+func jitPrepareProcContextType(_ int) unsafe.Pointer {
+	panic("jit: tail type preparation requires GOEXPERIMENT=jit")
+}
+
+func jitRuntimeAllocTyped(_ unsafe.Pointer) unsafe.Pointer {
+	panic("jit: typed allocation requires GOEXPERIMENT=jit")
 }
 
 // registerJITArena is a no-op on stock Go builds without runtime/jit.

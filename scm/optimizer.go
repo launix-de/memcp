@@ -132,15 +132,15 @@ func optimizeProcToSerialBorrowed(val Scmer) func([]Scmer) Scmer {
 		captured := val
 		return func([]Scmer) Scmer { return captured }
 	}
-	p := *proc
 	// A Proc keeps its source body even after native compilation. Execute the
 	// attached entry point now; future scan specialization may recompile the same
 	// filter/map/reduce body against concrete storage and column types first.
-	if p.JIT != nil {
+	if proc.JITCode != 0 {
 		return func(args []Scmer) Scmer {
-			return p.callJIT(args)
+			return proc.callJIT(args)
 		}
 	}
+	p := *proc
 
 	// constant body
 	switch p.Body.GetTag() {
@@ -1439,7 +1439,7 @@ func buildProcSpecialization(proc *Proc, key procSpecializationKey, paramTypes [
 	}
 	// Machine code belongs to the exact optimized body. Never inherit the
 	// generic Proc's entry point when publishing a specialized body.
-	specialized.JIT = nil
+	specialized.JITCode = 0
 	specialized.Compiled = nil
 	specialized.OptimizerMeta = &ProcOptimizerMeta{
 		Return:    proc.OptimizerMeta.Return,

@@ -29,6 +29,15 @@ func jitRuntimeStackCheck() (guardOffset, stackSmall, moreStackPC uintptr) {
 	return config.StackGuardOffset, config.StackSmall, config.MoreStackPC
 }
 
+func jitPrepareProcContextType(captureCount int) unsafe.Pointer {
+	prepared := jit.TailTypeFor[ProcJIT](uintptr(captureCount))
+	return unsafe.Pointer(&prepared)
+}
+
+func jitRuntimeAllocTyped(preparedType unsafe.Pointer) unsafe.Pointer {
+	return (*jit.TailType)(preparedType).Alloc()
+}
+
 // registerJITArena registers a JIT arena with the Go runtime so the
 // unwinder, GC, and panic/recover can walk through JIT frames.
 // The Describe callback resolves PCs to Scheme source locations

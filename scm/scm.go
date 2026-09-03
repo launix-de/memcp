@@ -265,7 +265,7 @@ restart:
 			return fn(args...)
 		case tagProc:
 			// Lambdas (procs)
-			if proc := procedure.Proc(); proc != nil && proc.JIT != nil {
+			if proc := procedure.Proc(); proc != nil && proc.JITCode != 0 {
 				args := make([]Scmer, len(operands))
 				for i, operand := range operands {
 					args[i] = Eval(operand, en)
@@ -418,18 +418,16 @@ func newProcCallEnv(proc Proc) *Env {
 	return &Env{VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En}
 }
 
-func installProcCallCaptures(env *Env, proc Proc) {
-	if len(proc.jitCaptures) == 0 {
+func installProcCallCaptures(env *Env, proc *Proc) {
+	captures := jitProcCaptures(proc)
+	if len(captures) == 0 {
 		return
 	}
-	if len(proc.jitCaptures) != proc.jitCaptureCount {
-		panic("apply: inconsistent JIT capture metadata")
-	}
-	end := proc.jitCaptureBase + len(proc.jitCaptures)
-	if proc.jitCaptureBase < 0 || end > len(env.VarsNumbered) {
+	end := proc.Compiled.CaptureBase + len(captures)
+	if proc.Compiled.CaptureBase < 0 || end > len(env.VarsNumbered) {
 		panic("apply: JIT captures exceed procedure frame")
 	}
-	copy(env.VarsNumbered[proc.jitCaptureBase:end], proc.jitCaptures)
+	copy(env.VarsNumbered[proc.Compiled.CaptureBase:end], captures)
 }
 
 func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
@@ -497,7 +495,7 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 	default:
 		panic("proc parameters must be list, symbol, or nil")
 	}
-	installProcCallCaptures(env, proc)
+	installProcCallCaptures(env, p)
 	return env, proc.Body
 }
 
@@ -558,7 +556,7 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 	default:
 		panic("proc parameters must be list, symbol, or nil")
 	}
-	installProcCallCaptures(env, proc)
+	installProcCallCaptures(env, p)
 	return env, proc.Body
 }
 
@@ -608,7 +606,7 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 		return fn(id, args...)
 	// Lambdas
 	case tagProc:
-		if proc := procedure.Proc(); proc != nil && proc.JIT != nil {
+		if proc := procedure.Proc(); proc != nil && proc.JITCode != 0 {
 			return proc.callJIT(args)
 		}
 		env, body := prepareProcCallWithArgs(procedure.Proc(), args)
@@ -654,10 +652,11 @@ func ApplyEx(procedure Scmer, args []Scmer, en *Env) (value Scmer) {
 // TODO: Proc2 for an optimized Env based on arrays rather than maps
 
 type Proc struct {
+	// JITCode is first so a *Proc is also a Go-compatible funcval context.
+	// Native calls receive this same pointer in the closure-context register.
+	JITCode      uintptr
 	Params, Body Scmer
 	En           *Env
-	NumVars      int
-	NumberedOnly bool
 	// Compiled is an optional native implementation of this procedure. The
 	// original body remains attached so storage scan callbacks can later be
 	// specialized and recompiled against concrete column/storage types.
@@ -668,26 +667,18 @@ type Proc struct {
 	// can never retain code or captures from a different Proc.
 	// Keep optimizer-only fields after the runtime/JIT-facing Proc layout.
 	OptimizerMeta *ProcOptimizerMeta
-	// JIT is the native implementation of this exact procedure. Keep new runtime
-	// fields at the end so generated field offsets remain stable across jitgen
-	// bootstrapping. Callers prefer this function over interpreting Body.
-	JIT       func(...Scmer) Scmer
-	JITArity  int
-	JITDirect uintptr
-	// jitCaptureBase and jitCaptureCount describe numbered slots backed by the
-	// Go funcval closure environment. They are compiler metadata only: captures
-	// never extend the public func(...Scmer) Scmer argument slice.
-	jitCaptureBase  int
-	jitCaptureCount int
-	// jitCaptures keeps the typed capture environment available when the
-	// optimizer derives and recompiles a specialized Proc. The executable
-	// funcval owns the same values at runtime; this copy is compiler metadata.
-	jitCaptureKeys    []Scmer
-	jitCaptureSymbols []Symbol
-	jitCaptures       []Scmer
+	NumVars       int
+	NumberedOnly  bool
 	// jitCompiling breaks mutually recursive on-demand compilation without
 	// serializing unrelated procedures.
 	jitCompiling uint32
+}
+
+// ProcJIT describes the native closure ABI. Context is a flexible array member:
+// concrete allocations replace its zero length with the required capture count.
+type ProcJIT struct {
+	Proc    Proc
+	Context [0]Scmer
 }
 
 // ProcOptimizerMeta belongs to one concrete Proc identity. Specialization
@@ -844,7 +835,7 @@ func CloseProcedure(value Scmer) Scmer {
 	collectProcedureBindings(proc.Body, bound)
 	proc.Body = closeProcedureCaptures(proc.Body, callFrame, bound)
 	proc.En = &Globalenv
-	proc.JIT = nil
+	proc.JITCode = 0
 	proc.Compiled = nil
 	if proc.OptimizerMeta != nil {
 		proc.OptimizerMeta = &ProcOptimizerMeta{
@@ -1288,13 +1279,13 @@ func init() {
 				var d10 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 32
+					fieldAddr := uintptr(d7.Imm.Int()) + 40
 					r1 := ctx.AllocReg()
 					ctx.EmitMovRegMem64(r1, fieldAddr)
 					d10 = JITValueDesc{Loc: LocReg, Reg: r1}
 					ctx.BindReg(r1, &d10)
 				} else {
-					off := int32(32)
+					off := int32(40)
 					baseReg := d7.Reg
 					r2 := ctx.AllocRegExcept(baseReg)
 					ctx.EmitMovRegMem(r2, baseReg, off)
@@ -1354,13 +1345,13 @@ func init() {
 				var d13 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 32
+					fieldAddr := uintptr(d7.Imm.Int()) + 40
 					r4 := ctx.AllocReg()
 					ctx.EmitMovRegMem64(r4, fieldAddr)
 					d13 = JITValueDesc{Loc: LocReg, Reg: r4}
 					ctx.BindReg(r4, &d13)
 				} else {
-					off := int32(32)
+					off := int32(40)
 					baseReg := d7.Reg
 					r5 := ctx.AllocRegExcept(baseReg)
 					ctx.EmitMovRegMem(r5, baseReg, off)
@@ -1441,13 +1432,13 @@ func init() {
 				var d18 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 32
+					fieldAddr := uintptr(d7.Imm.Int()) + 40
 					r9 := ctx.AllocReg()
 					ctx.EmitMovRegMem64(r9, fieldAddr)
 					d18 = JITValueDesc{Loc: LocReg, Reg: r9}
 					ctx.BindReg(r9, &d18)
 				} else {
-					off := int32(32)
+					off := int32(40)
 					baseReg := d7.Reg
 					r10 := ctx.AllocRegExcept(baseReg)
 					ctx.EmitMovRegMem(r10, baseReg, off)
@@ -1468,7 +1459,7 @@ func init() {
 				var d20 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 0
+					fieldAddr := uintptr(d7.Imm.Int()) + 8
 					r11 := ctx.AllocReg()
 					r12 := ctx.AllocRegExcept(r11)
 					ctx.EmitMovRegMem64(r11, fieldAddr)
@@ -1477,7 +1468,7 @@ func init() {
 					ctx.BindReg(r11, &d20)
 					ctx.BindReg(r12, &d20)
 				} else {
-					off := int32(0)
+					off := int32(8)
 					baseReg := d7.Reg
 					r13 := ctx.AllocRegExcept(baseReg)
 					r14 := ctx.AllocRegExcept(baseReg, r13)
@@ -1528,7 +1519,7 @@ func init() {
 				var d24 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 0
+					fieldAddr := uintptr(d7.Imm.Int()) + 8
 					r15 := ctx.AllocReg()
 					r16 := ctx.AllocRegExcept(r15)
 					ctx.EmitMovRegMem64(r15, fieldAddr)
@@ -1537,7 +1528,7 @@ func init() {
 					ctx.BindReg(r15, &d24)
 					ctx.BindReg(r16, &d24)
 				} else {
-					off := int32(0)
+					off := int32(8)
 					baseReg := d7.Reg
 					r17 := ctx.AllocRegExcept(baseReg)
 					r18 := ctx.AllocRegExcept(baseReg, r17)
@@ -1594,7 +1585,7 @@ func init() {
 				var d27 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 16
+					fieldAddr := uintptr(d7.Imm.Int()) + 24
 					r19 := ctx.AllocReg()
 					r20 := ctx.AllocRegExcept(r19)
 					ctx.EmitMovRegMem64(r19, fieldAddr)
@@ -1603,7 +1594,7 @@ func init() {
 					ctx.BindReg(r19, &d27)
 					ctx.BindReg(r20, &d27)
 				} else {
-					off := int32(16)
+					off := int32(24)
 					baseReg := d7.Reg
 					r21 := ctx.AllocRegExcept(baseReg)
 					r22 := ctx.AllocRegExcept(baseReg, r21)
@@ -1631,7 +1622,7 @@ func init() {
 				var d28 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 16
+					fieldAddr := uintptr(d7.Imm.Int()) + 24
 					r23 := ctx.AllocReg()
 					r24 := ctx.AllocRegExcept(r23)
 					ctx.EmitMovRegMem64(r23, fieldAddr)
@@ -1640,7 +1631,7 @@ func init() {
 					ctx.BindReg(r23, &d28)
 					ctx.BindReg(r24, &d28)
 				} else {
-					off := int32(16)
+					off := int32(24)
 					baseReg := d7.Reg
 					r25 := ctx.AllocRegExcept(baseReg)
 					r26 := ctx.AllocRegExcept(baseReg, r25)
@@ -1687,10 +1678,10 @@ func init() {
 				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value *Env) { base.En = value }), []JITValueDesc{d7, d30})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
-				d31 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
+				d31 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(0)}
 				ctx.EnsureDesc(&d7)
 				ctx.EnsureDesc(&d31)
-				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value func(...Scmer) Scmer) { base.JIT = value }), []JITValueDesc{d7, d31})
+				ctx.EmitGoCallVoid(GoFuncAddr(func(base *Proc, value uintptr) { base.JITCode = value }), []JITValueDesc{d7, d31})
 				ctx.ReclaimUntrackedRegs()
 				ctx.ReclaimUntrackedRegs()
 				d32 := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
@@ -1702,13 +1693,13 @@ func init() {
 				var d33 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 64
+					fieldAddr := uintptr(d7.Imm.Int()) + 56
 					r27 := ctx.AllocReg()
 					ctx.EmitMovRegMem64(r27, fieldAddr)
 					d33 = JITValueDesc{Loc: LocReg, Reg: r27}
 					ctx.BindReg(r27, &d33)
 				} else {
-					off := int32(64)
+					off := int32(56)
 					baseReg := d7.Reg
 					r28 := ctx.AllocRegExcept(baseReg)
 					ctx.EmitMovRegMem(r28, baseReg, off)
@@ -1836,7 +1827,7 @@ func init() {
 				var d42 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 0
+					fieldAddr := uintptr(d7.Imm.Int()) + 8
 					r32 := ctx.AllocReg()
 					r33 := ctx.AllocRegExcept(r32)
 					ctx.EmitMovRegMem64(r32, fieldAddr)
@@ -1845,7 +1836,7 @@ func init() {
 					ctx.BindReg(r32, &d42)
 					ctx.BindReg(r33, &d42)
 				} else {
-					off := int32(0)
+					off := int32(8)
 					baseReg := d7.Reg
 					r34 := ctx.AllocRegExcept(baseReg)
 					r35 := ctx.AllocRegExcept(baseReg, r34)
@@ -1975,7 +1966,7 @@ func init() {
 				var d49 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 0
+					fieldAddr := uintptr(d7.Imm.Int()) + 8
 					r39 := ctx.AllocReg()
 					r40 := ctx.AllocRegExcept(r39)
 					ctx.EmitMovRegMem64(r39, fieldAddr)
@@ -1984,7 +1975,7 @@ func init() {
 					ctx.BindReg(r39, &d49)
 					ctx.BindReg(r40, &d49)
 				} else {
-					off := int32(0)
+					off := int32(8)
 					baseReg := d7.Reg
 					r41 := ctx.AllocRegExcept(baseReg)
 					r42 := ctx.AllocRegExcept(baseReg, r41)
@@ -2112,13 +2103,13 @@ func init() {
 				var d59 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 64
+					fieldAddr := uintptr(d7.Imm.Int()) + 56
 					r44 := ctx.AllocReg()
 					ctx.EmitMovRegMem64(r44, fieldAddr)
 					d59 = JITValueDesc{Loc: LocReg, Reg: r44}
 					ctx.BindReg(r44, &d59)
 				} else {
-					off := int32(64)
+					off := int32(56)
 					baseReg := d7.Reg
 					r45 := ctx.AllocRegExcept(baseReg)
 					ctx.EmitMovRegMem(r45, baseReg, off)
@@ -2150,13 +2141,13 @@ func init() {
 				var d61 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 64
+					fieldAddr := uintptr(d7.Imm.Int()) + 56
 					r48 := ctx.AllocReg()
 					ctx.EmitMovRegMem64(r48, fieldAddr)
 					d61 = JITValueDesc{Loc: LocReg, Reg: r48}
 					ctx.BindReg(r48, &d61)
 				} else {
-					off := int32(64)
+					off := int32(56)
 					baseReg := d7.Reg
 					r49 := ctx.AllocRegExcept(baseReg)
 					ctx.EmitMovRegMem(r49, baseReg, off)
@@ -2188,13 +2179,13 @@ func init() {
 				var d63 JITValueDesc
 				ctx.EnsureDesc(&d7)
 				if d7.Loc == LocImm {
-					fieldAddr := uintptr(d7.Imm.Int()) + 64
+					fieldAddr := uintptr(d7.Imm.Int()) + 56
 					r52 := ctx.AllocReg()
 					ctx.EmitMovRegMem64(r52, fieldAddr)
 					d63 = JITValueDesc{Loc: LocReg, Reg: r52}
 					ctx.BindReg(r52, &d63)
 				} else {
-					off := int32(64)
+					off := int32(56)
 					baseReg := d7.Reg
 					r53 := ctx.AllocRegExcept(baseReg)
 					ctx.EmitMovRegMem(r53, baseReg, off)
@@ -4348,7 +4339,7 @@ func init() {
 				var d13 JITValueDesc
 				ctx.EnsureDesc(&d10)
 				if d10.Loc == LocImm {
-					fieldAddr := uintptr(d10.Imm.Int()) + 0
+					fieldAddr := uintptr(d10.Imm.Int()) + 8
 					r1 := ctx.AllocReg()
 					r2 := ctx.AllocRegExcept(r1)
 					ctx.EmitMovRegMem64(r1, fieldAddr)
@@ -4357,7 +4348,7 @@ func init() {
 					ctx.BindReg(r1, &d13)
 					ctx.BindReg(r2, &d13)
 				} else {
-					off := int32(0)
+					off := int32(8)
 					baseReg := d10.Reg
 					r3 := ctx.AllocRegExcept(baseReg)
 					r4 := ctx.AllocRegExcept(baseReg, r3)
@@ -4434,7 +4425,7 @@ func init() {
 				var d17 JITValueDesc
 				ctx.EnsureDesc(&d10)
 				if d10.Loc == LocImm {
-					fieldAddr := uintptr(d10.Imm.Int()) + 0
+					fieldAddr := uintptr(d10.Imm.Int()) + 8
 					r6 := ctx.AllocReg()
 					r7 := ctx.AllocRegExcept(r6)
 					ctx.EmitMovRegMem64(r6, fieldAddr)
@@ -4443,7 +4434,7 @@ func init() {
 					ctx.BindReg(r6, &d17)
 					ctx.BindReg(r7, &d17)
 				} else {
-					off := int32(0)
+					off := int32(8)
 					baseReg := d10.Reg
 					r8 := ctx.AllocRegExcept(baseReg)
 					r9 := ctx.AllocRegExcept(baseReg, r8)

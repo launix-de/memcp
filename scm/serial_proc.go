@@ -222,7 +222,7 @@ func PrepareSerialProc(source Scmer) SerialProc {
 		params, fixedArity := scmerSlice(proc.Params)
 		if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 {
 			prepared.Kind = SerialProcJIT
-			prepared.Function = proc.JIT
+			prepared.Function = proc.jitFunction()
 			if prepared.Function == nil {
 				prepared.Function = proc.Compiled.Native
 			}
