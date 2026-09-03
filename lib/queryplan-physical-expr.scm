@@ -706,9 +706,9 @@ pass correlation keys to it instead of copying the complete recipe per field. */
 		_ false)))
 
 /* A base-table presence stage whose lookup domain contains only literals,
-parameters, or session values is invariant for one query execution. A column
-reference would make that unsafe. */
-(define query_scoped_presence_stage? (lambda (stage)
+parameters, or session values is invariant for one query execution. It may be
+bound once outside row callbacks; a column reference would make that unsafe. */
+(define query_invariant_presence_stage? (lambda (stage)
 	(and (presence_probe_stage? stage)
 		(and (source_is_base_table? (gs_input stage))
 			(and (not (stage_has_residual_outer_refs? stage))
@@ -716,17 +716,6 @@ reference would make that unsafe. */
 					(lambda (invariant key)
 						(and invariant (not (expr_contains_column_ref? key))))
 					true))))))
-
-/* Keyed query constants can be bound outside row callbacks. An unkeyed EXISTS
-stays as a lazy query-local memo at its physical use site: hoisting it can lose
-an enclosing stage carrier and would also evaluate it before driver filters. */
-(define query_invariant_presence_stage? (lambda (stage)
-	(and (query_scoped_presence_stage? stage)
-		(not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))))))
-
-(define query_local_unkeyed_presence_stage? (lambda (stage)
-	(and (query_scoped_presence_stage? stage)
-		(empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))))
 
 (define query_invariant_probe_requested_col (lambda (_stage)
 	(aggregate_col_name aggregate_count_descriptor)))
@@ -1890,17 +1879,12 @@ would still have to project that value over the segment. */
 
 (define scalar_first_probe_query_invariant? (lambda (stage requested_col)
 	(and (presence_probe_stage? stage)
-		(or (query_local_unkeyed_presence_stage? stage)
-			(or (qassoc_get (gs_facts stage) (quote inline_query_invariant_probe) false)
-				(not (nil? (query_invariant_probe_binding_for_col stage requested_col))))))))
+		(or (qassoc_get (gs_facts stage) (quote inline_query_invariant_probe) false)
+			(not (nil? (query_invariant_probe_binding_for_col stage requested_col)))))))
 
 (define query_invariant_scalar_first_probe_key (lambda (stage requested_col)
 	(concat
-		(if (presence_probe_stage? stage)
-			(if (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
-				"__query_local_presence_probe_"
-				"__query_presence_probe_")
-			"__query_scalar_probe_")
+		(if (presence_probe_stage? stage) "__query_presence_probe_" "__query_scalar_probe_")
 		(stable_structural_hash (list (gs_id stage) requested_col) true))))
 
 (define lower_query_invariant_scalar_first_probe_expr (lambda (stage requested_col expr)
@@ -6567,7 +6551,7 @@ aggregate scan. Keep every ambiguous outer-join shape on the shared group cache.
 		(define lookups (map key_names (lambda (key_name)
 			(reduce terms (lambda (found term)
 				(coalesceNil found (direct_group_probe_lookup_from_term (source_alias src) key_name term)))
-				nil)))))
+				nil))))
 		(if (and (equal? (count terms) (count key_names))
 			(reduce lookups (lambda (complete lookup) (and complete (not (nil? lookup)))) true))
 			lookups

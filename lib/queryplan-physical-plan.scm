@@ -9183,59 +9183,6 @@ row callback. */
 						expr)))
 				(list (rewrite_query_invariant_presence_memos plan)))))))))
 
-(define query_local_presence_memo_parts (lambda (expr)
-	(match expr
-		'(session_symbol "get_or_compute_scoped" scope_symbol key _tx producer)
-		(if (and (equal? session_symbol (physical_query_session_symbol))
-			(and (equal? scope_symbol (physical_query_scope_symbol))
-				(and (string? key) (strlike key "__query_local_presence_probe_%"))))
-			(list key producer)
-			nil)
-		_ nil)))
-
-(define collect_query_local_presence_memos (lambda (expr entries)
-	(begin
-		(define parts (query_local_presence_memo_parts expr))
-		(define found (if (nil? parts) entries (set_assoc entries (nth parts 0) expr)))
-		(match expr
-			((symbol quote) _value) found
-			((quote quote) _value) found
-			(cons head tail) (reduce tail (lambda (acc item)
-				(collect_query_local_presence_memos item acc))
-				(collect_query_local_presence_memos head found))
-			_ found))))
-
-(define query_local_presence_thunk_symbol (lambda (key)
-	(symbol (concat "__query_local_presence_thunk_" (fnv_hash key)))))
-
-(define rewrite_query_local_presence_memos (lambda (expr)
-	(begin
-		(define parts (query_local_presence_memo_parts expr))
-		(if (not (nil? parts))
-			(list (query_local_presence_thunk_symbol (nth parts 0)))
-			(match expr
-				((symbol quote) _value) expr
-				((quote quote) _value) expr
-				(cons head tail) (cons
-					(rewrite_query_local_presence_memos head)
-					(map tail rewrite_query_local_presence_memos))
-				_ expr)))))
-
-/* Keep unkeyed EXISTS lazy so selective driver predicates run first. The
-query-scoped memo inside each thunk still evaluates the physical scan at most
-once, while the short call keeps the producer out of row callbacks. */
-(define consolidate_query_local_presence_memos (lambda (plan)
-	(begin
-		(define entries (collect_query_local_presence_memos plan '()))
-		(if (empty_list? entries)
-			plan
-			(cons (quote !begin) (merge (list
-				(extract_assoc entries (lambda (key expr)
-					(list (quote define)
-						(query_local_presence_thunk_symbol key)
-						(list (quote lambda) '() expr))))
-				(list (rewrite_query_local_presence_memos plan)))))))))
-
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define plan (match (ir_return ir)
@@ -9257,8 +9204,7 @@ once, while the short call keeps the producer out of row callbacks. */
 		(define memoized_plan (if (empty_list? (ir_stages ir))
 			deduplicated_plan
 			(consolidate_query_invariant_presence_memos deduplicated_plan)))
-		(require_physical_scan_relations
-			(consolidate_query_local_presence_memos memoized_plan)))))
+		(require_physical_scan_relations memoized_plan))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir nil nil))))
