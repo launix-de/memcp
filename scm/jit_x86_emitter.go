@@ -187,18 +187,20 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	frameFixup := ctx.EmitSubRSP32Fixup() // sub rsp, <patched>
 
 	ctx.emitMovRegReg(RegR12, RegRAX) // save incoming args slice
-	// Safepoint maps are path-sensitive, but a shared block may name a stack
-	// home whose producer belongs to a branch that was not taken. Clear the
-	// reusable goroutine-stack frame before entering the body so such a slot is
-	// nil instead of retaining a pointer from an older invocation. REP STOSQ is
-	// the x86-specific compact form; future architectures provide their own
-	// prolog sequence while common lowering remains register-bank based.
-	ctx.emitMovRegReg(RegRDI, RegRSP)
-	ctx.emitBytes(0x31, 0xC0) // xor eax, eax
-	ctx.emitByte(0xB9)        // mov ecx, <frame words>
-	frameWordsFixup := ctx.Ptr
-	ctx.emitU32(0)
-	ctx.emitBytes(0xF3, 0x48, 0xAB) // rep stosq
+	// Parser control flow can enter a shared block whose stack target was
+	// produced only on a sibling path. Clear parser frames so every root named
+	// by such a block starts as nil. Ordinary expressions initialize their
+	// pointer-bearing targets before publishing them in a safepoint map, so
+	// clearing their entire frame would only add work to every invocation.
+	var frameWordsFixup unsafe.Pointer
+	if ctx.StackPhiTargets {
+		ctx.emitMovRegReg(RegRDI, RegRSP)
+		ctx.emitBytes(0x31, 0xC0) // xor eax, eax
+		ctx.emitByte(0xB9)        // mov ecx, <frame words>
+		frameWordsFixup = ctx.Ptr
+		ctx.emitU32(0)
+		ctx.emitBytes(0xF3, 0x48, 0xAB) // rep stosq
+	}
 	useInputFrame := proc != nil && proc.NumberedOnly && numVars == inputArgCount && !ctx.HasSelfLoop
 	// Allocate local vars via AllocStack.
 	if numVars > 0 && !useInputFrame {
@@ -352,7 +354,9 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	frameSize = (frameSize + 15) &^ 15
 	buf.stackFrameSize = frameSize
 	ctx.PatchInt32(frameFixup, frameSize)
-	ctx.PatchInt32(frameWordsFixup, frameSize/8)
+	if frameWordsFixup != nil {
+		ctx.PatchInt32(frameWordsFixup, frameSize/8)
+	}
 	if hasStackCheck {
 		// Account for the frame record and the deepest temporary call area below
 		// the fixed frame. Like Go's outgoing-argument area, DynamicSP is part of
