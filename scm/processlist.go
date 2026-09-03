@@ -326,6 +326,19 @@ func (s *SessionState) AddLock(unlock func()) {
 	s.heldLocksMu.Unlock()
 }
 
+// HasLocks reports whether this connection currently owns user-level table
+// locks. The planner uses it to avoid publishing session-independent cache
+// recipes whose source scan would have to re-enter the owner's lock.
+func (s *SessionState) HasLocks() bool {
+	if s == nil {
+		return false
+	}
+	s.heldLocksMu.Lock()
+	hasLocks := len(s.heldLocks) != 0
+	s.heldLocksMu.Unlock()
+	return hasLocks
+}
+
 // ReleaseAllLocks releases all table locks held by this session.
 func (s *SessionState) ReleaseAllLocks() {
 	s.heldLocksMu.Lock()

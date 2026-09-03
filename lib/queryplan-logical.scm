@@ -1174,28 +1174,37 @@ by the outer block's direct consumers (fields/where/group/having/order/hidden). 
 /* Session reads affect a dependent helper like outer-column reads do. Keep
 their expressions in Domain D so reusable group caches are keyed by the binding
 instead of capturing whichever session populated the cache first. */
-(define query_expr_session_reads (lambda (expr)
+(define query_session_read_expr (lambda (expr)
 	(match expr
-		((symbol session) "__memcp_tx") '()
-		((quote session) "__memcp_tx") '()
-		((symbol session) key) (list (list (quote session) key))
-		((quote session) key) (list (list (quote session) key))
-		((symbol session_globalvar) key) (list (list (quote session_globalvar) key))
-		((quote session_globalvar) key) (list (list (quote session_globalvar) key))
-		(cons head tail) (merge_unique (cons
-			(query_expr_session_reads head)
-			(map tail query_expr_session_reads)))
-		_ '())))
+		((symbol session) "__memcp_tx") nil
+		((quote session) "__memcp_tx") nil
+		((symbol session) key) (list (quote session) key)
+		((quote session) key) (list (quote session) key)
+		((symbol session_globalvar) key) (list (quote session_globalvar) key)
+		((quote session_globalvar) key) (list (quote session_globalvar) key)
+		(cons head tail) (if (and (equal? (count tail) 1)
+			(not (equal? (car tail) "__memcp_tx")))
+			(if (equal? head session)
+				(list (quote session) (car tail))
+				(if (equal? head session_globalvar)
+					(list (quote session_globalvar) (car tail))
+					nil))
+			nil)
+		_ nil)))
+
+(define query_expr_session_reads (lambda (expr)
+	(begin
+		(define read_expr (query_session_read_expr expr))
+		(if (not (nil? read_expr))
+			(list read_expr)
+			(match expr
+				(cons head tail) (merge_unique (cons
+					(query_expr_session_reads head)
+					(map tail query_expr_session_reads)))
+				_ '())))))
 
 (define query_session_read? (lambda (expr)
-	(match expr
-		((symbol session) "__memcp_tx") false
-		((quote session) "__memcp_tx") false
-		((symbol session) _key) true
-		((quote session) _key) true
-		((symbol session_globalvar) _key) true
-		((quote session_globalvar) _key) true
-		_ false)))
+	(not (nil? (query_session_read_expr expr)))))
 
 (define session_domain_pairs (lambda (node)
 	(map (query_expr_session_reads node) (lambda (expr) (list expr expr)))))
@@ -1978,7 +1987,8 @@ the original SQL shape after join reorder and stage rewrites. */
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
 		(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote exists))
-			(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
+			(and (not (and (query_block? (gs_input stage))
+				(empty_list? (qb_sources (gs_input stage)))))
 				(and (equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
 					(equal? (coalesceNil (gs_having stage) true) true)))))))
 

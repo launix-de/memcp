@@ -690,6 +690,42 @@ func BenchmarkSchemeHelperOwnedReturnAppend(b *testing.B) {
 	}
 }
 
+// TestRecursiveAccumulatorIfBranchesCountAsSingleUse covers the common
+// "return the accumulator on the empty case, otherwise recurse with an
+// extended accumulator" idiom. Before this fix, procParameterOwnershipUses
+// summed if-branch occurrences instead of treating them as mutually
+// exclusive, so the accumulator was always seen as "used twice" and the
+// recursive call's append could never be promoted to append_mut.
+func TestRecursiveAccumulatorIfBranchesCountAsSingleUse(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("recursive accumulator ownership test", `(define recursive_append_accumulate (lambda (acc remaining)
+		(if (equal? remaining '())
+			acc
+			(recursive_append_accumulate (append acc (car remaining)) (cdr remaining)))))`, env)
+
+	base := env.Vars[Symbol("recursive_append_accumulate")].Proc()
+	call := []Scmer{NewSymbol("recursive_append_accumulate"), NewSymbol("fresh")}
+	freshList := &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}
+	meta := newOptimizerMetainfo()
+	variant, ok := trySpecializeProcCall(call, []TypeInfo{tiZero, TypeInfoFromTD(freshList)}, env, &meta)
+	if !ok || !variant.IsProc() {
+		t.Fatal("fresh accumulator did not produce a Proc specialization")
+	}
+	if body := serializedTestExpr(t, env, variant.Proc().Body); !strings.Contains(body, "append_mut") {
+		t.Fatalf("recursive accumulator did not become append_mut: %s", body)
+	}
+	_ = base
+
+	// Call with the proc's real two-parameter arity (a fresh accumulator,
+	// then the remaining items) so the recursive branch is actually
+	// exercised, not just the empty-input base case.
+	got := Apply(variant, NewSlice(nil), NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
+	if !Equal(got, want) {
+		t.Fatalf("specialized accumulator returned %s, want %s", String(got), String(want))
+	}
+}
+
 func BenchmarkOptimizeInlinedNestedLambdaHelper(b *testing.B) {
 	env := newOptimizerTestEnv()
 	EvalAll("nested lambda inline benchmark", `(define benchmark_filter_owned (lambda (values) (filter values (lambda (x) (> x 1)))))`, env)

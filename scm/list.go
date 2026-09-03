@@ -921,46 +921,34 @@ func optimizerInlineReducerLocals(body Scmer, params []Scmer) (Scmer, bool) {
 	return optimizerSubstituteReducerLocals(items[len(items)-1], locals)
 }
 
-// optimizeAssocReducerFold recognizes the functional meaning of the common
-// imperative get-transform-set reducer. It performs one bounded root-shape
-// walk over the already optimized callback and never invokes analysis again.
-func optimizeAssocReducerFold(input, reducer, neutral Scmer) (Scmer, *TypeDescriptor, bool) {
-	if !optimizerEmptyListLiteral(neutral) {
-		return NewNil(), nil, false
-	}
-	params, body, ok := optimizerLambdaParts(reducer)
-	if !ok || len(params) != 2 {
-		return NewNil(), nil, false
-	}
-	body, ok = optimizerInlineReducerLocals(body, params)
-	if !ok {
-		return NewNil(), nil, false
-	}
-	setCall, ok := scmerSlice(body)
-	if !ok || len(setCall) != 4 ||
-		(!scmerIsSymbol(setCall[0], "set_assoc") && !scmerIsSymbol(setCall[0], "set_assoc_mut")) ||
-		!optimizerLambdaParamReference(setCall[1], params, 0) ||
-		optimizerExpressionReferencesParam(setCall[2], params, 0) || exprMayHaveSideEffects(setCall[2]) {
-		return NewNil(), nil, false
-	}
+// assocFoldLeg is one recognized (key, update) pair inside a chain of
+// set_assoc[_mut] calls on the reducer's accumulator parameter. kind is either
+// "append" (get_assoc+append per key) or "count" (get_assoc+1 per key).
+type assocFoldLeg struct {
+	key   Scmer
+	kind  string
+	value Scmer // only set for "append" legs
+}
 
+// matchAssocFoldLeg recognizes a single (set_assoc[_mut] _ key update) call as
+// one leg of a hashmap-shaped fold. setCall[1] (the target) is validated by
+// the caller, which also knows whether it is the chain's base case.
+func matchAssocFoldLeg(setCall []Scmer, params []Scmer) (assocFoldLeg, bool) {
+	key := setCall[2]
+	if optimizerExpressionReferencesParam(key, params, 0) || exprMayHaveSideEffects(key) {
+		return assocFoldLeg{}, false
+	}
 	update, ok := scmerSlice(setCall[3])
 	if !ok || len(update) != 3 {
-		return NewNil(), nil, false
+		return assocFoldLeg{}, false
 	}
 	if scmerIsSymbol(update[0], "append") || scmerIsSymbol(update[0], "append_mut") {
 		lookupKey, fallback, lookup := optimizerAssocLookup(update[1], params)
-		if !lookup || !structuralEqual(setCall[2], lookupKey) || !optimizerEmptyListLiteral(fallback) ||
+		if !lookup || !structuralEqual(key, lookupKey) || !optimizerEmptyListLiteral(fallback) ||
 			optimizerExpressionReferencesParam(update[2], params, 0) {
-			return NewNil(), nil, false
+			return assocFoldLeg{}, false
 		}
-		keyFn, keyOK := optimizerLambdaWithBody(reducer, setCall[2])
-		valueFn, valueOK := optimizerLambdaWithBody(reducer, update[2])
-		if !keyOK || !valueOK {
-			return NewNil(), nil, false
-		}
-		return NewSlice([]Scmer{NewSymbol("group_assoc_append_reduce"), input, keyFn, valueFn}),
-			&TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}}, true
+		return assocFoldLeg{key: key, kind: "append", value: update[2]}, true
 	}
 	if scmerIsSymbol(update[0], "+") {
 		var lookupExpr Scmer
@@ -970,18 +958,194 @@ func optimizeAssocReducerFold(input, reducer, neutral Scmer) (Scmer, *TypeDescri
 		case optimizerOneLiteral(update[1]):
 			lookupExpr = update[2]
 		default:
-			return NewNil(), nil, false
+			return assocFoldLeg{}, false
 		}
 		lookupKey, fallback, lookup := optimizerAssocLookup(lookupExpr, params)
-		if !lookup || !structuralEqual(setCall[2], lookupKey) || !optimizerZeroLiteral(fallback) {
-			return NewNil(), nil, false
+		if !lookup || !structuralEqual(key, lookupKey) || !optimizerZeroLiteral(fallback) {
+			return assocFoldLeg{}, false
 		}
-		keyFn, ok := optimizerLambdaWithBody(reducer, setCall[2])
+		return assocFoldLeg{key: key, kind: "count"}, true
+	}
+	return assocFoldLeg{}, false
+}
+
+// collectAssocFoldLegs walks a chain of set_assoc[_mut] calls rooted at the
+// accumulator parameter, e.g. (set_assoc (set_assoc acc k1 v1) k2 v2), and
+// collects one leg per nesting level in source order. Any link that isn't a
+// recognized leg, or doesn't eventually bottom out at the bare accumulator
+// parameter, rejects the whole chain.
+func collectAssocFoldLegs(body Scmer, params []Scmer) ([]assocFoldLeg, bool) {
+	setCall, ok := scmerSlice(body)
+	if !ok || len(setCall) != 4 ||
+		(!scmerIsSymbol(setCall[0], "set_assoc") && !scmerIsSymbol(setCall[0], "set_assoc_mut")) {
+		return nil, false
+	}
+	leg, ok := matchAssocFoldLeg(setCall, params)
+	if !ok {
+		return nil, false
+	}
+	if optimizerLambdaParamReference(setCall[1], params, 0) {
+		return []assocFoldLeg{leg}, true
+	}
+	rest, ok := collectAssocFoldLegs(setCall[1], params)
+	if !ok {
+		return nil, false
+	}
+	return append(rest, leg), true
+}
+
+// foldCountLegs lowers one or more "count" legs to a chain of
+// group_assoc_count_reduce calls merged with +. Count is commutative and
+// associative, so running each leg as an independent full pass and merging
+// the resulting maps afterward reproduces the same result as a single
+// interleaved pass would.
+func foldCountLegs(input, reducer Scmer, legs []assocFoldLeg) (Scmer, *TypeDescriptor, bool) {
+	assocType := &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}}
+	if len(legs) == 1 {
+		keyFn, ok := optimizerLambdaWithBody(reducer, legs[0].key)
 		if !ok {
 			return NewNil(), nil, false
 		}
-		return NewSlice([]Scmer{NewSymbol("group_assoc_count_reduce"), input, keyFn}),
-			&TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}}, true
+		return NewSlice([]Scmer{NewSymbol("group_assoc_count_reduce"), input, keyFn}), assocType, true
+	}
+	call := []Scmer{NewSymbol("group_assoc_multi_count_reduce"), input}
+	for _, leg := range legs {
+		keyFn, ok := optimizerLambdaWithBody(reducer, leg.key)
+		if !ok {
+			return NewNil(), nil, false
+		}
+		call = append(call, keyFn)
+	}
+	return NewSlice(call), assocType, true
+}
+
+// foldAppendLegs lowers one or more "append" legs. A single leg keeps the
+// original single-call shape. Multiple legs go through
+// group_assoc_multi_append_reduce, which applies every leg to each item in
+// one item-major/leg-minor pass — unlike the count case, append is not
+// commutative across legs (a key can receive contributions from more than one
+// leg across different items), so legs cannot be folded independently and
+// merged afterward without risking element reordering.
+func foldAppendLegs(input, reducer Scmer, legs []assocFoldLeg) (Scmer, *TypeDescriptor, bool) {
+	assocType := &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}}
+	if len(legs) == 1 {
+		keyFn, keyOK := optimizerLambdaWithBody(reducer, legs[0].key)
+		valueFn, valueOK := optimizerLambdaWithBody(reducer, legs[0].value)
+		if !keyOK || !valueOK {
+			return NewNil(), nil, false
+		}
+		return NewSlice([]Scmer{NewSymbol("group_assoc_append_reduce"), input, keyFn, valueFn}), assocType, true
+	}
+	call := []Scmer{NewSymbol("group_assoc_multi_append_reduce"), input}
+	for _, leg := range legs {
+		keyFn, keyOK := optimizerLambdaWithBody(reducer, leg.key)
+		valueFn, valueOK := optimizerLambdaWithBody(reducer, leg.value)
+		if !keyOK || !valueOK {
+			return NewNil(), nil, false
+		}
+		call = append(call, keyFn, valueFn)
+	}
+	return NewSlice(call), assocType, true
+}
+
+// optimizerAppendNeutralKeyInit recognizes a neutral of the shape
+// (reduce keys (lambda (acc k) (set_assoc[_mut] acc key '())) '()), which
+// pre-populates a fixed key set with an empty list before any real
+// contribution is folded in (e.g. so isolated graph nodes still get an empty
+// adjacency entry instead of being absent from the result). It returns the
+// keys list and a key-extractor lambda so the caller can rebuild an
+// equivalent init map and merge it under the real fold.
+func optimizerAppendNeutralKeyInit(neutral Scmer) (Scmer, Scmer, bool) {
+	items, ok := scmerSlice(neutral)
+	if !ok || len(items) != 4 || !scmerIsSymbol(items[0], "reduce") || !optimizerEmptyListLiteral(items[3]) {
+		return NewNil(), NewNil(), false
+	}
+	keys, initReducer := items[1], items[2]
+	params, body, ok := optimizerLambdaParts(initReducer)
+	if !ok || len(params) != 2 {
+		return NewNil(), NewNil(), false
+	}
+	body, ok = optimizerInlineReducerLocals(body, params)
+	if !ok {
+		return NewNil(), NewNil(), false
+	}
+	setCall, ok := scmerSlice(body)
+	if !ok || len(setCall) != 4 ||
+		(!scmerIsSymbol(setCall[0], "set_assoc") && !scmerIsSymbol(setCall[0], "set_assoc_mut")) ||
+		!optimizerLambdaParamReference(setCall[1], params, 0) ||
+		optimizerExpressionReferencesParam(setCall[2], params, 0) || exprMayHaveSideEffects(setCall[2]) ||
+		!optimizerEmptyListLiteral(setCall[3]) {
+		return NewNil(), NewNil(), false
+	}
+	keyFn, ok := optimizerLambdaWithBody(initReducer, setCall[2])
+	if !ok {
+		return NewNil(), NewNil(), false
+	}
+	return keys, keyFn, true
+}
+
+// foldAppendLegsWithKeyInit lowers the append-leg fold the same way as
+// foldAppendLegs, then merges the result under an init map built from the
+// neutral's key set so every initialized key stays present. Real edge
+// contributions must dominate, matching the original sequential fold where
+// the initializer always ran strictly before any edge could touch the same
+// key — merge_assoc's default "second argument wins" semantics gives
+// exactly that when the edge-derived map is passed second.
+func foldAppendLegsWithKeyInit(input, reducer Scmer, legs []assocFoldLeg, keys, keyFn Scmer) (Scmer, *TypeDescriptor, bool) {
+	edgesCall, assocType, ok := foldAppendLegs(input, reducer, legs)
+	if !ok {
+		return NewNil(), nil, false
+	}
+	emptyValueFn := NewSlice([]Scmer{NewSymbol("lambda"), NewSlice([]Scmer{NewSymbol("index"), NewSymbol("item")}),
+		NewSlice([]Scmer{NewSymbol("quote"), NewSlice([]Scmer{})})})
+	// index_assoc sets each key directly (last-wins), matching the original
+	// (set_assoc acc key '()) semantics exactly. group_assoc_append_reduce
+	// would be wrong here: it appends the value as one bucket element per
+	// occurrence, producing (()) instead of () for a key seen once.
+	initCall := NewSlice([]Scmer{NewSymbol("index_assoc"), keys, keyFn, emptyValueFn})
+	return NewSlice([]Scmer{NewSymbol("merge_assoc_mut"), initCall, edgesCall}), assocType, true
+}
+
+// optimizeAssocReducerFold recognizes the functional meaning of the common
+// imperative get-transform-set reducer, including a chain of several such
+// updates in one reduce step (e.g. updating both endpoints of a graph edge
+// per item). It performs one bounded root-shape walk over the already
+// optimized callback and never invokes analysis again.
+func optimizeAssocReducerFold(input, reducer, neutral Scmer) (Scmer, *TypeDescriptor, bool) {
+	params, body, ok := optimizerLambdaParts(reducer)
+	if !ok || len(params) != 2 {
+		return NewNil(), nil, false
+	}
+	body, ok = optimizerInlineReducerLocals(body, params)
+	if !ok {
+		return NewNil(), nil, false
+	}
+	legs, ok := collectAssocFoldLegs(body, params)
+	if !ok || len(legs) == 0 {
+		return NewNil(), nil, false
+	}
+	kind := legs[0].kind
+	for _, leg := range legs[1:] {
+		if leg.kind != kind {
+			// Mixed append/count legs in one chain aren't lowered here; the
+			// generic _mut rewrite still applies to the un-folded body.
+			return NewNil(), nil, false
+		}
+	}
+	if optimizerEmptyListLiteral(neutral) {
+		if kind == "count" {
+			return foldCountLegs(input, reducer, legs)
+		}
+		return foldAppendLegs(input, reducer, legs)
+	}
+	// A non-literal neutral can still be safe to fold away for append legs
+	// when it is recognized as a plain key-initializer; count legs keep the
+	// strict literal requirement since there's no analogous "count identity
+	// initializer" shape in use anywhere in the codebase today.
+	if kind == "append" {
+		if keys, keyFn, ok := optimizerAppendNeutralKeyInit(neutral); ok {
+			return foldAppendLegsWithKeyInit(input, reducer, legs, keys, keyFn)
+		}
 	}
 	return NewNil(), nil, false
 }

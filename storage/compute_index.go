@@ -49,74 +49,66 @@ func hasSessionRead(expr scm.Scmer) bool {
 	return false
 }
 
-// bindSessionReads specializes query-invariant bindings once before a computed
-// function enters the row loop. The original procedure remains immutable and
-// reusable for other session variants.
-func bindSessionReads(expr scm.Scmer, tx *TxContext) scm.Scmer {
-	if key, ok := sessionReadKey(expr); ok {
-		if tx == nil {
-			return scm.NewNil()
-		}
-		return tx.SessionValue(key)
+// hasImplicitComputeContext reports whether a persistent computed-column
+// callback reads request-local execution state. Computed values are shared by
+// every reader and therefore cannot close over either binding. Query-specific
+// values must be materialized as ordinary input columns and passed as callback
+// parameters instead.
+func hasImplicitComputeContext(expr scm.Scmer) bool {
+	return hasImplicitComputeContextUsing(expr, nil)
+}
+
+func hasImplicitComputeContextUsing(expr scm.Scmer, bound map[string]bool) bool {
+	if expr.IsSourceInfo() {
+		return hasImplicitComputeContextUsing(expr.WithoutSourceInfo(), bound)
 	}
 	if expr.IsProc() {
-		proc := *expr.Proc()
-		proc.Body = bindSessionReads(proc.Body, tx)
-		return scm.NewProcStruct(proc)
+		proc := expr.Proc()
+		return hasImplicitComputeContextUsing(proc.Body, bindComputeParams(bound, proc.Params))
+	}
+	if expr.IsSymbol() {
+		name := expr.String()
+		return isComputeContextSymbol(name) && !bound[name]
 	}
 	if !expr.IsSlice() {
-		return expr
+		return false
 	}
 	items := expr.Slice()
-	bound := make([]scm.Scmer, len(items))
-	for i, item := range items {
-		bound[i] = bindSessionReads(item, tx)
+	if len(items) == 0 || items[0].SymbolEquals("quote") {
+		return false
 	}
-	return scm.NewSlice(bound)
-}
-
-func extractSessionKeys(expr scm.Scmer) []string {
-	seen := make(map[string]bool)
-	var out []string
-	var walk func(scm.Scmer)
-	walk = func(node scm.Scmer) {
-		if node.IsProc() {
-			walk(node.Proc().Body)
-			return
-		}
-		if !node.IsSlice() {
-			return
-		}
-		items := node.Slice()
-		if len(items) == 0 {
-			return
-		}
-		if key, ok := sessionReadKey(node); ok {
-			if !seen[key] {
-				seen[key] = true
-				out = append(out, key)
-			}
-		}
-		for _, it := range items {
-			walk(it)
+	if items[0].SymbolEquals("lambda") && len(items) >= 3 {
+		return hasImplicitComputeContextUsing(items[2], bindComputeParams(bound, items[1]))
+	}
+	for _, item := range items {
+		if hasImplicitComputeContextUsing(item, bound) {
+			return true
 		}
 	}
-	walk(expr)
-	return out
+	return false
 }
 
-func mergeSessionKeys(parts ...[]string) []string {
-	seen := make(map[string]bool)
-	out := make([]string, 0)
-	for _, part := range parts {
-		for _, key := range part {
-			if !seen[key] {
-				seen[key] = true
-				out = append(out, key)
+func isComputeContextSymbol(name string) bool {
+	return name == "session" || name == "tx" || name == "__memcp_tx"
+}
+
+func bindComputeParams(bound map[string]bool, params scm.Scmer) map[string]bool {
+	result := make(map[string]bool, len(bound)+4)
+	for name, present := range bound {
+		result[name] = present
+	}
+	if params.IsSymbol() {
+		result[params.String()] = true
+		return result
+	}
+	if params.IsSlice() {
+		for _, param := range params.Slice() {
+			if param.IsSymbol() {
+				result[param.String()] = true
 			}
 		}
 	}
-	return out
+	return result
 }
 
 // containsNthLocalVar reports whether expr contains at least one optimizer-local
@@ -160,11 +152,10 @@ func isRawDataset(params []scm.Scmer, expr scm.Scmer) bool {
 	if expr.IsNthLocalVar() {
 		return int(expr.NthLocalVar()) >= 0 && int(expr.NthLocalVar()) < len(params)
 	}
-	// SQL literals and prepared parameters are lowered to read-only query
-	// bindings before the physical scan is built. They are invariant for one
-	// index variant and are tracked by extractSessionKeys.
+	// Request-local bindings cannot define a shared computed index. The planner
+	// must project them into explicit row parameters before index analysis.
 	if _, ok := sessionReadKey(expr); ok {
-		return true
+		return false
 	}
 	// function call: look up declaration and require Foldable.
 	// DeclarationForValue handles both unoptimized (symbol) and

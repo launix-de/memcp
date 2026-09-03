@@ -74,3 +74,32 @@ func TestWithAutocommitReusesParkedTransactionAndClearsQueryState(t *testing.T) 
 		t.Fatal("autocommit allocated a new transaction instead of reusing the session object")
 	}
 }
+
+func TestTransactionChoosesQueryLocalCacheWhenSharedRecipesAreUnsafe(t *testing.T) {
+	if txRequiresQueryLocalCache(nil) {
+		t.Fatal("nil transaction disabled shared caches")
+	}
+	tx := NewTxContext(TxCursorStability)
+	tx.autoCommit = true
+	if txRequiresQueryLocalCache(tx) {
+		t.Fatal("ordinary autocommit transaction disabled shared caches")
+	}
+
+	tx.autoCommit = false
+	if !txRequiresQueryLocalCache(tx) {
+		t.Fatal("explicit transaction reused a shared cache")
+	}
+	tx.autoCommit = true
+	tx.Mode = TxACID
+	if !txRequiresQueryLocalCache(tx) {
+		t.Fatal("ACID transaction reused a shared cache")
+	}
+
+	tx.Mode = TxCursorStability
+	tx.SessionState = &scm.SessionState{}
+	tx.SessionState.AddLock(func() {})
+	defer tx.SessionState.ReleaseAllLocks()
+	if !txRequiresQueryLocalCache(tx) {
+		t.Fatal("table-lock owner reused a shared cache")
+	}
+}

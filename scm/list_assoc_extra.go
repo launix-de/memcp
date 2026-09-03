@@ -3310,6 +3310,76 @@ func init_list_assoc_extra() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
+		Name: "group_assoc_multi_append_reduce",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "group_assoc_multi_append_reduce")
+			legs := (len(a) - 1) / 2
+			keys := make([]func(...Scmer) Scmer, legs)
+			values := make([]func(...Scmer) Scmer, legs)
+			for i := 0; i < legs; i++ {
+				keys[i] = OptimizeProcToSerialFunction(a[1+2*i])
+				values[i] = OptimizeProcToSerialFunction(a[2+2*i])
+			}
+			result := NewFastDictValue(groupAssocCapacity(len(input) * legs))
+			for _, item := range input {
+				for i := 0; i < legs; i++ {
+					result.AppendValue(keys[i](NewNil(), item), values[i](NewNil(), item))
+				}
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only multi-leg append reduction: applies an ordered sequence of (key, value) extractor pairs to every item, preserving item-major/leg-minor insertion order so results match the equivalent chain of set_assoc/append calls",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "extractor...", Description: "alternating key/value extractor functions, one pair per leg", Variadic: true, Params: []*TypeDescriptor{{Kind: "any", Label: "unused_current"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}},
+			Const:     true,
+			Forbidden: true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// JITGen native call boundary: leg count varies per call site.
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_multi_append_reduce"].Fn, args, result)
+			},
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
+		Name: "group_assoc_multi_count_reduce",
+		Fn: func(a ...Scmer) Scmer {
+			input := asSlice(a[0], "group_assoc_multi_count_reduce")
+			legs := len(a) - 1
+			keys := make([]func(...Scmer) Scmer, legs)
+			for i := 0; i < legs; i++ {
+				keys[i] = OptimizeProcToSerialFunction(a[1+i])
+			}
+			result := NewFastDictValue(groupAssocCapacity(len(input) * legs))
+			for _, item := range input {
+				for i := 0; i < legs; i++ {
+					result.IncrementCount(keys[i](NewNil(), item))
+				}
+			}
+			return NewFastDict(result)
+		},
+		Type: &TypeDescriptor{Kind: "func", Description: "optimizer-only multi-leg counting reduction: increments a count per key extractor per item in one pass",
+			Params: []*TypeDescriptor{
+				{Kind: "list", Label: "list", NoEscape: true},
+				{Kind: "func", Label: "key...", Description: "one key extractor per leg", Variadic: true, Params: []*TypeDescriptor{{Kind: "any", Label: "unused_current"}, {Kind: "any", Label: "item"}}, Return: &TypeDescriptor{Kind: "any"}},
+			},
+			Return:    &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength, Element: &TypeDescriptor{Kind: "int", Transfer: true}},
+			Const:     true,
+			Forbidden: true,
+			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				// JITGen native call boundary: leg count varies per call site.
+				return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_multi_count_reduce"].Fn, args, result)
+			},
+			JITVirtualArgs:     true,
+			JITInlineCallbacks: false,
+			JITInlineCost:      65535,
+		},
+	})
+	Declare(&Globalenv, &Declaration{
 		Name: "group_assoc_count",
 		Fn: func(a ...Scmer) Scmer {
 			input := asSlice(a[0], "group_assoc_count")

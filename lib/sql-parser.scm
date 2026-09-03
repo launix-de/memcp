@@ -358,167 +358,172 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* For other statements: returns the statement as-is */
 		(define compile_stmt (lambda (stmt)
 			(if (not (list? stmt)) nil
-				(begin
-					(define tag (car stmt))
-					(if (equal? tag '!set)
-						/* SET NEW.col = expr - stmt is (!set a1 a2 ...) where ai are (col expr) pairs */
-						(if is_after
-							(error "SET NEW is not allowed in AFTER triggers")
-							(compile_set_assignments (cdr stmt)))
-						(if (equal? tag '!if)
-							/* IF condition THEN stmts [ELSE stmts] END IF - stmt is (!if condition then_stmts else_stmts) */
+				(match (car stmt)
+					/* SET NEW.col = expr - stmt is (!set a1 a2 ...) where ai are (col expr) pairs */
+					'!set
+					(if is_after
+						(error "SET NEW is not allowed in AFTER triggers")
+						(compile_set_assignments (cdr stmt)))
+
+					/* IF condition THEN stmts [ELSE stmts] END IF - stmt is (!if condition then_stmts else_stmts) */
+					'!if
+					(begin
+						(define condition (car (cdr stmt)))
+						(define then_stmts (car (cdr (cdr stmt))))
+						(define else_stmts (car (cdr (cdr (cdr stmt)))))
+						/* Compile statements inside IF - flatten nested lists from SET */
+						(define compiled_then (merge (map then_stmts compile_stmt)))
+						(define valid_then (filter compiled_then (lambda (s) (not (nil? s)))))
+						/* Use !begin (no new scope) so set writes to outer changed_rows */
+						(define then_body (if (> (count valid_then) 1)
+							(cons '!begin valid_then)
+							(if (> (count valid_then) 0) (car valid_then) nil)))
+						/* Compile ELSE branch if present */
+						(define else_body (if (nil? else_stmts) nil
 							(begin
-								(define condition (car (cdr stmt)))
-								(define then_stmts (car (cdr (cdr stmt))))
-								(define else_stmts (car (cdr (cdr (cdr stmt)))))
-								/* Compile statements inside IF - flatten nested lists from SET */
-								(define compiled_then (merge (map then_stmts compile_stmt)))
-								(define valid_then (filter compiled_then (lambda (s) (not (nil? s)))))
-								/* Use !begin (no new scope) so set writes to outer changed_rows */
-								(define then_body (if (> (count valid_then) 1)
-									(cons '!begin valid_then)
-									(if (> (count valid_then) 0) (car valid_then) nil)))
-								/* Compile ELSE branch if present */
-								(define else_body (if (nil? else_stmts) nil
-									(begin
-										(define compiled_else (merge (map else_stmts compile_stmt)))
-										(define valid_else (filter compiled_else (lambda (s) (not (nil? s)))))
-										(if (> (count valid_else) 1)
-											(cons '!begin valid_else)
-											(if (> (count valid_else) 0) (car valid_else) nil)))))
-								/* Return as single-element list to be flattened by caller */
-								(list (list (symbol "if") (transform_trigger_expr condition) then_body else_body)))
-							(if (equal? tag '!insert)
-								/* INSERT INTO table - stmt is (!insert tbl cols vals ignore) */
-								(begin
-									(define tbl (car (cdr stmt)))
-									(define cols (car (cdr (cdr stmt))))
-									(define vals (car (cdr (cdr (cdr stmt)))))
-									(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
-									(list (list (symbol "insert") (list (symbol "table") schema tbl)
+								(define compiled_else (merge (map else_stmts compile_stmt)))
+								(define valid_else (filter compiled_else (lambda (s) (not (nil? s)))))
+								(if (> (count valid_else) 1)
+									(cons '!begin valid_else)
+									(if (> (count valid_else) 0) (car valid_else) nil)))))
+						/* Return as single-element list to be flattened by caller */
+						(list (list (symbol "if") (transform_trigger_expr condition) then_body else_body)))
+
+					/* INSERT INTO table - stmt is (!insert tbl cols vals ignore) */
+					'!insert
+					(begin
+						(define tbl (car (cdr stmt)))
+						(define cols (car (cdr (cdr stmt))))
+						(define vals (car (cdr (cdr (cdr stmt)))))
+						(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
+						(list (list (symbol "insert") (list (symbol "table") schema tbl)
+							(cons (symbol "list") cols)
+							(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
+							(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil)))
+
+					/* INSERT INTO tbl (cols) <full SELECT> - stmt is (!insert_select tbl cols inner_select ignore) */
+					/* Reuses sql_select + build_queryplan_term (same as top-level INSERT...SELECT) */
+					'!insert_select
+					(begin
+						(define tbl (car (cdr stmt)))
+						(define cols (car (cdr (cdr stmt))))
+						(define inner (car (cdr (cdr (cdr stmt)))))
+						(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
+						/* Transform: replace NEW/OLD column refs with get_assoc for trigger context */
+						(define transform_new_old (lambda (expr) (match expr
+							((symbol get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+							((quote get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+							((symbol get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							((quote get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							(cons h t) (cons (transform_new_old h) (map t transform_new_old))
+							expr)))
+						(define inner_t (transform_new_old inner))
+						/* UNION output names are defined by its first branch. Extract
+						them recursively instead of mistaking a UNION for a SELECT
+						without FROM and synthesizing one empty row. */
+						(define trigger_select_fields (lambda (query) (match query
+							((symbol query-block) _ _ fields _ _ _ _ _ _ _ _ _) fields
+							'(_ _ fields _ _ _ _ _ _) fields
+							((symbol union-block) _ (cons first _) _ _ _ _) (trigger_select_fields first)
+							((symbol union_all) (cons first _) _ _ _) (trigger_select_fields first)
+							((symbol union_distinct) (cons first _) _ _ _) (trigger_select_fields first)
+							_ (error "trigger INSERT SELECT has no output fields"))))
+						(define select_fields (trigger_select_fields inner_t))
+						(define select_names (extract_assoc select_fields (lambda (k v) k)))
+						/* Use the relational plan for every SELECT shape, including
+						SELECT literals without FROM. It alone owns whether zero, one,
+						or many rows are emitted. */
+						(list (list (symbol "begin")
+							(list (symbol "set") (symbol "resultrow")
+								(list (symbol "lambda") (list (symbol "item"))
+									(list (symbol "insert") (list (symbol "table") schema tbl)
 										(cons (symbol "list") cols)
-										(cons (symbol "list") (map vals (lambda (row) (cons (symbol "list") (map row transform_trigger_expr)))))
-										(list (symbol "list")) (if ignore (list (symbol "lambda") '() 0) nil) false nil)))
-								(if (equal? tag '!insert_select)
-									/* INSERT INTO tbl (cols) <full SELECT> - stmt is (!insert_select tbl cols inner_select ignore) */
-									/* Reuses sql_select + build_queryplan_term (same as top-level INSERT...SELECT) */
-									(begin
-										(define tbl (car (cdr stmt)))
-										(define cols (car (cdr (cdr stmt))))
-										(define inner (car (cdr (cdr (cdr stmt)))))
-										(define ignore (car (cdr (cdr (cdr (cdr stmt))))))
-										/* Transform: replace NEW/OLD column refs with get_assoc for trigger context */
-										(define transform_new_old (lambda (expr) (match expr
-											((symbol get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-											((quote get_column) "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-											((symbol get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-											((quote get_column) "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-											(cons h t) (cons (transform_new_old h) (map t transform_new_old))
-											expr)))
-										(define inner_t (transform_new_old inner))
-										/* UNION output names are defined by its first branch. Extract
-										them recursively instead of mistaking a UNION for a SELECT
-										without FROM and synthesizing one empty row. */
-										(define trigger_select_fields (lambda (query) (match query
-											((symbol query-block) _ _ fields _ _ _ _ _ _ _ _ _) fields
-											'(_ _ fields _ _ _ _ _ _) fields
-											((symbol union-block) _ (cons first _) _ _ _ _) (trigger_select_fields first)
-											((symbol union_all) (cons first _) _ _ _) (trigger_select_fields first)
-											((symbol union_distinct) (cons first _) _ _ _) (trigger_select_fields first)
-											_ (error "trigger INSERT SELECT has no output fields"))))
-										(define select_fields (trigger_select_fields inner_t))
-										(define select_names (extract_assoc select_fields (lambda (k v) k)))
-										/* Use the relational plan for every SELECT shape, including
-										SELECT literals without FROM. It alone owns whether zero, one,
-										or many rows are emitted. */
-										(list (list (symbol "begin")
-											(list (symbol "set") (symbol "resultrow")
-												(list (symbol "lambda") (list (symbol "item"))
-													(list (symbol "insert") (list (symbol "table") schema tbl)
-														(cons (symbol "list") cols)
-														(list (symbol "list")
-															(cons (symbol "list")
-																(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
-														(list (symbol "list"))
-														(if ignore (list (symbol "lambda") '() 0) nil)
-														false nil)))
-											(build_queryplan_term (sql_expand_views inner_t policy) planning_session tx))))
-									(if (equal? tag '!update)
-										/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
-										(begin
-											(define tbl (car (cdr stmt)))
-											(define assignments (merge (car (cdr (cdr stmt)))))
-											(define where_raw (car (cdr (cdr (cdr stmt)))))
-											/* Transform NEW/OLD -> get_assoc */
-											(define fix_expr (lambda (expr) (match expr
-												'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-												'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-												(cons h t) (cons (fix_expr h) (map t fix_expr))
-												expr)))
-											(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
-											(define t_cols (map_assoc assignments (lambda (col expr) (fix_expr expr))))
-											(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) t_cols t_cond nil nil nil planning_session tx)))
-										(if (equal? tag '!delete)
-											/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
-											(begin
-												(define tbl (car (cdr stmt)))
-												(define where_raw (car (cdr (cdr stmt))))
-												(define fix_expr (lambda (expr) (match expr
-													'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-													'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-													(cons h t) (cons (fix_expr h) (map t fix_expr))
-													expr)))
-												(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
-												(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) nil t_cond nil nil nil planning_session tx)))
-											(if (equal? tag '!delete_using)
-												/* DELETE FROM target USING target, other [AS alias] WHERE condition */
-												/* stmt is (!delete_using target tabledefs where) */
-												(begin
-													(define target (car (cdr stmt)))
-													(define raw_defs (car (cdr (cdr stmt))))
-													(define where_raw (car (cdr (cdr (cdr stmt)))))
-													(define transform_dml (lambda (expr) (match expr
-														'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-														'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-														(cons head tail) (cons (transform_dml head) (map tail transform_dml))
-														expr
-													)))
-													(define all_defs (transform_dml raw_defs))
-													(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
-														'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
-														acc)) nil))
-													(define target_alias (match target_def '(id _ _ _ _) id))
-													(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-													(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-													(list (build_dml_plan schema target_tbl target_alias all_defs nil t_where nil nil nil planning_session tx)))
-												(if (equal? tag '!update_multi)
-													/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
-													/* stmt is (!update_multi tbls assignments where) */
-													(begin
-														(define raw_defs (car (cdr stmt)))
-														(define assignments_raw (merge (car (cdr (cdr stmt)))))
-														(define where_raw (car (cdr (cdr (cdr stmt)))))
-														(define transform_dml (lambda (expr) (match expr
-															'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
-															'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
-															(cons head tail) (cons (transform_dml head) (map tail transform_dml))
-															expr
-														)))
-														(define all_defs (transform_dml raw_defs))
-														(define target_def (car all_defs))
-														(define target_alias (match target_def '(id _ _ _ _) id))
-														(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
-														(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
-														(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
-														(list (build_dml_plan schema target_tbl target_alias all_defs t_cols t_where nil nil nil planning_session tx)))
-													(if (equal? tag '!nop)
-														/* No-op statement (e.g. SET @var) - return empty list */
-														'()
-														/* Unknown statement type */
-														nil
-					)))))))))
-				)
-		)))
+										(list (symbol "list")
+											(cons (symbol "list")
+												(map select_names (lambda (name) (list (symbol "get_assoc") (symbol "item") name)))))
+										(list (symbol "list"))
+										(if ignore (list (symbol "lambda") '() 0) nil)
+										false nil)))
+							(build_queryplan_term (sql_expand_views inner_t policy) planning_session tx))))
+
+					/* UPDATE table SET ... WHERE ... - stmt is (!update tbl assignments where) */
+					'!update
+					(begin
+						(define tbl (car (cdr stmt)))
+						(define assignments (merge (car (cdr (cdr stmt)))))
+						(define where_raw (car (cdr (cdr (cdr stmt)))))
+						/* Transform NEW/OLD -> get_assoc */
+						(define fix_expr (lambda (expr) (match expr
+							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							(cons h t) (cons (fix_expr h) (map t fix_expr))
+							expr)))
+						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
+						(define t_cols (map_assoc assignments (lambda (col expr) (fix_expr expr))))
+						(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) t_cols t_cond nil nil nil planning_session tx)))
+
+					/* DELETE FROM table WHERE ... - stmt is (!delete tbl where) */
+					'!delete
+					(begin
+						(define tbl (car (cdr stmt)))
+						(define where_raw (car (cdr (cdr stmt))))
+						(define fix_expr (lambda (expr) (match expr
+							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							(cons h t) (cons (fix_expr h) (map t fix_expr))
+							expr)))
+						(define t_cond (if (nil? where_raw) true (fix_expr where_raw)))
+						(list (build_dml_plan schema tbl nil (list (list tbl schema tbl false nil)) nil t_cond nil nil nil planning_session tx)))
+
+					/* DELETE FROM target USING target, other [AS alias] WHERE condition */
+					/* stmt is (!delete_using target tabledefs where) */
+					'!delete_using
+					(begin
+						(define target (car (cdr stmt)))
+						(define raw_defs (car (cdr (cdr stmt))))
+						(define where_raw (car (cdr (cdr (cdr stmt)))))
+						(define transform_dml (lambda (expr) (match expr
+							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							(cons head tail) (cons (transform_dml head) (map tail transform_dml))
+							expr
+						)))
+						(define all_defs (transform_dml raw_defs))
+						(define target_def (reduce all_defs (lambda (acc tdef) (match tdef
+							'(id _ tbl _ _) (if (or (equal?? target id) (equal?? target tbl)) tdef acc)
+							acc)) nil))
+						(define target_alias (match target_def '(id _ _ _ _) id))
+						(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
+						(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
+						(list (build_dml_plan schema target_tbl target_alias all_defs nil t_where nil nil nil planning_session tx)))
+
+					/* UPDATE tbl1, tbl2 [AS alias], ... SET tbl1.col = expr WHERE condition; */
+					/* stmt is (!update_multi tbls assignments where) */
+					'!update_multi
+					(begin
+						(define raw_defs (car (cdr stmt)))
+						(define assignments_raw (merge (car (cdr (cdr stmt)))))
+						(define where_raw (car (cdr (cdr (cdr stmt)))))
+						(define transform_dml (lambda (expr) (match expr
+							'('get_column "NEW" _ col _) (list (symbol "get_assoc") (symbol "NEW") col)
+							'('get_column "OLD" _ col _) (list (symbol "get_assoc") (symbol "OLD") col)
+							(cons head tail) (cons (transform_dml head) (map tail transform_dml))
+							expr
+						)))
+						(define all_defs (transform_dml raw_defs))
+						(define target_def (car all_defs))
+						(define target_alias (match target_def '(id _ _ _ _) id))
+						(define target_tbl (match target_def '(_ _ tbl _ _) tbl))
+						(define t_where (if (nil? where_raw) true (transform_dml where_raw)))
+						(define t_cols (map_assoc assignments_raw (lambda (col expr) (transform_dml expr))))
+						(list (build_dml_plan schema target_tbl target_alias all_defs t_cols t_where nil nil nil planning_session tx)))
+
+					/* No-op statement (e.g. SET @var) - return empty list */
+					'!nop
+					'()
+
+					/* Unknown statement type */
+					_ nil))))
 
 		(match body
 			/* BEGIN...END block - compile all statements */

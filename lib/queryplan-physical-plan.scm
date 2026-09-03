@@ -1487,7 +1487,9 @@ outer joins. */
 					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols))))
 			(if scalar_order_base_stage
 				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
-				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
+				(map ags (lambda (ag)
+					(build_group_aggregate_column
+						stage schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
 		(define empty_aggregate_seed_plans (if (and query_input
 			(and initializer_owner
 				(and (not scalar_single_stage)
@@ -3934,7 +3936,12 @@ RecSet; membership edges retain their own physical operators. */
 				(define group_stage (make_group_stage_for_block grouped_block src))
 				(if (direct_base_group_plan_preferred? group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
-					(lower_group_stage group_stage)))
+					(if (direct_base_group_plan_eligible? group_stage)
+						(list (quote if)
+							(list (quote tx_requires_query_local_cache) (physical_query_tx_symbol))
+							(lower_query_local_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
+							(lower_group_stage group_stage))
+						(lower_group_stage group_stage))))
 			(begin
 				(define alias (source_alias src))
 				(define raw_condition (combine_where (qb_where block) (source_join_expr src)))
@@ -7416,7 +7423,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define computor (list (quote lambda)
 			(map input_cols symbol)
 			(list (quote scan)
-				(physical_query_tx_symbol)
+				nil
 				(source_table_expr src)
 				(cons (quote list) key_cols)
 				(list (quote lambda) filter_params (combine_where_terms filter_terms true))
@@ -7768,15 +7775,33 @@ physical decision and preserve its runtime recompile gate. */
 			schema sources plan default_alias effective_needed_exprs effective_condition row_expr
 			order_items offset_value limit_value true bounded_probe_work_rows nil stages scalar_plan facts))))
 
+(define lower_zero_source_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr)
+	(begin
+		(define field_exprs (extract_assoc fields (lambda (_title expr)
+			(lower_scalar_marker_expr expr))))
+		(define row_expr (cons row_mapper field_exprs))
+		(define condition (lower_scalar_marker_expr (coalesceNil (qb_where block) true)))
+		(define offset_value (coalesceNil (qb_offset block) 0))
+		(define limit_value (coalesceNil (qb_limit block) -1))
+		(list (quote if)
+			(list (quote and)
+				condition
+				(list (quote and)
+					(list (quote equal?) offset_value 0)
+					(list (quote not) (list (quote equal?) limit_value 0))))
+			(list reduce_expr neutral_expr row_expr)
+			neutral_expr))))
+
 (define lower_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr shard_reduce_expr)
 	(begin
-		(if (empty_list? (qb_sources block))
-			(neumann_fail "build_queryplan" "dataset reducer requires a FROM source")
-			true)
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(neumann_fail "build_queryplan" "dataset reducer cannot consume grouped input")
 			true)
 		(define sources (qb_sources block))
+		(if (empty_list? sources)
+			(lower_zero_source_query_block_as_dataset_reduce
+				block fields row_mapper reduce_expr neutral_expr)
+			(begin
 		(define first_alias (source_alias (car sources)))
 		(define scan_sources sources)
 		(define scan_plan (query_block_join_plan block scan_sources))
@@ -7870,7 +7895,7 @@ physical decision and preserve its runtime recompile gate. */
 									scan_sources first_alias expr probe_work_rows)))))
 					reduce_expr neutral_expr)
 				(neumann_fail "build_queryplan"
-					"ordered dataset reduction has no streamable join-tree order"))))))
+					"ordered dataset reduction has no streamable join-tree order"))))))))
 
 (define scalar_order_lookup_input_keys (lambda (stage)
 	(begin

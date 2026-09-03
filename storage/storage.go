@@ -2162,11 +2162,7 @@ func Init(en scm.Env) {
 						filter = typeparams[i+1]
 					}
 				}
-				var currentTx *TxContext
-				if len(a) > 7 {
-					currentTx = scmerToTxContext(a[7])
-				}
-				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter, currentTx)
+				t.computeColumnDDLLocked(colname, paramNames, a[6], filterCols, filter)
 				return scm.NewBool(true)
 			}
 
@@ -2189,7 +2185,6 @@ func Init(en scm.Env) {
 					value.Optional = true
 					return value
 				}(),
-				{Kind: "any", Label: "tx", Description: "explicit transaction used while materializing computed values", Optional: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},

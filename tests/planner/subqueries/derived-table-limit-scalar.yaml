@@ -897,8 +897,10 @@ test_cases:
     expect:
       result_contains:
         - "scan_exists"
-        - "(and (equal??"
+        - "__query_presence_value_"
+        - "(equal?? (var 0) 20)"
       result_not_contains:
+        - ".grp:dtl_global_access"
         - "(and (begin"
         - "(and (coalesceNil (__scalar_query_probe_"
 

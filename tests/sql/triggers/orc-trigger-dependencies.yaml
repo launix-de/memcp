@@ -53,7 +53,7 @@ test_cases:
           "mapreducefn" (lambda (acc $set ref_id)
                         (begin
                           (define value
-                            (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_src")
+                            (scan nil (table "memcp-tests" "orc_dep_src")
                             '("ref_id")
                             (lambda (src.ref_id) (equal? src.ref_id (outer 1 ref_id)))
                             '("val")
@@ -140,7 +140,7 @@ test_cases:
           "mapreducefn" (lambda (acc $set ref_id)
                         (begin
                           (define value
-                            (scan (session "__memcp_tx") (table "memcp-tests" "orc_dep_fb_src")
+                            (scan nil (table "memcp-tests" "orc_dep_fb_src")
                             '("ref_id")
                             (lambda (src.ref_id) (equal? (+ src.ref_id 0) (outer 1 ref_id)))
                             '("val")
