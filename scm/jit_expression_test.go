@@ -187,11 +187,19 @@ func TestJITMetadataCallPreservesAndShortCircuit(t *testing.T) {
 					(regex "^/\\*![0-9]+[\\r\\n\\t ]+((?is:CREATE[\\r\\n\\t ]+TRIGGER.*))[\\r\\n\\t ]*\\*/$" _ body) body
 					s)
 				s))
-			(and (>= (strlen s) 31)
-				(equal? (substr s 0 31) "SELECT DISTINCT TABLESPACE_NAME"))))`)
-	for _, input := range []string{"NULL", "SHOW", "SELECT 1"} {
+			(or
+				(and (>= (strlen s) 25)
+					(equal? (substr s 0 25) "SELECT LOGFILE_GROUP_NAME"))
+				(and (>= (strlen s) 31)
+					(equal? (substr s 0 31) "SELECT DISTINCT TABLESPACE_NAME")))))`)
+	for _, input := range []string{
+		"NULL",
+		"SHOW",
+		"SELECT 1",
+		"CREATE TABLE user(username text, password text, admin boolean DEFAULT FALSE) ENGINE=SAFE",
+	} {
 		if got := Apply(compiled, NewString("system"), NewString(input), NewBool(true)); !got.IsBool() || got.Bool() {
-			t.Fatalf("short input %q returned %s, want false", input, SerializeToString(got, &Globalenv))
+			t.Fatalf("input %q returned %s, want false", input, SerializeToString(got, &Globalenv))
 		}
 	}
 }

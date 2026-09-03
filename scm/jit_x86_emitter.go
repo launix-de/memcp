@@ -2105,11 +2105,17 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 
 	callResult := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: RegRAX, Reg2: RegRBX}
 	base := ctx.StackReg
+	targetOff := target.StackOff
 	if target.StackOff < 0 {
 		base = ctx.FrameReg
+	} else {
+		// Live-register preservation temporarily moves RSP below the fixed JIT
+		// frame. Positive descriptors remain relative to the fixed frame base,
+		// so compensate until the saved registers have been restored.
+		targetOff += ctx.DynamicSP
 	}
-	ctx.EmitStoreRegMem(callResult.Reg, base, target.StackOff)
-	ctx.EmitStoreRegMem(callResult.Reg2, base, target.StackOff+8)
+	ctx.EmitStoreRegMem(callResult.Reg, base, targetOff)
+	ctx.EmitStoreRegMem(callResult.Reg2, base, targetOff+8)
 	for i, r := range liveRegs {
 		ctx.EmitMovRegMem(r, RegRSP, int32(i*8))
 	}
@@ -2117,8 +2123,8 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 		ctx.EmitAddRSP32(frameBytes)
 	}
 	if targetHasRegs {
-		ctx.EmitMovRegMem(requestedTarget.Reg, base, target.StackOff)
-		ctx.EmitMovRegMem(requestedTarget.Reg2, base, target.StackOff+8)
+		ctx.EmitMovRegMem(requestedTarget.Reg, base, targetOff)
+		ctx.EmitMovRegMem(requestedTarget.Reg2, base, targetOff+8)
 		requestedTarget.Type = JITTypeUnknown
 		ctx.BindReg(requestedTarget.Reg, &requestedTarget)
 		ctx.BindReg(requestedTarget.Reg2, &requestedTarget)
