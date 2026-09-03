@@ -689,7 +689,7 @@ consumer stage. */
 			(list? l) (eval l)
 			(error "SPARQL error: unsupported property path subject " expr)
 		)))
-		(define rdf_path_target_plan_local (lambda (obj target_sym tail order ctx resultfunc2) (match obj
+		(define rdf_path_target_plan_local (lambda (build_scan obj target_sym tail order ctx resultfunc2) (match obj
 			'('get_var var)
 			(if (rdf_ctx_bound ctx var)
 				(list (quote if) (list (quote equal?) target_sym (ctx var)) (build_scan tail order ctx resultfunc2) nil)
@@ -795,7 +795,7 @@ consumer stage. */
 						(list (quote map)
 							(list (quote rdf_path_targets) schema start_expr pred true)
 							(list (quote lambda) (list target_sym)
-								(rdf_path_target_plan_local o target_sym tail order ctx resultfunc2))))
+								(rdf_path_target_plan_local build_scan o target_sym tail order ctx resultfunc2))))
 					'("__path_plus__" pred)
 					(begin
 						(define start_expr (rdf_path_subject_value_local s ctx))
@@ -803,7 +803,7 @@ consumer stage. */
 						(list (quote map)
 							(list (quote rdf_path_targets) schema start_expr pred false)
 							(list (quote lambda) (list target_sym)
-								(rdf_path_target_plan_local o target_sym tail order ctx resultfunc2))))
+								(rdf_path_target_plan_local build_scan o target_sym tail order ctx resultfunc2))))
 					_
 					(begin
 						(define process (lambda (v sym conditions vars) (match v
