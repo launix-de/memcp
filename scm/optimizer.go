@@ -1133,21 +1133,38 @@ func procOwnershipParameterMask(expr Scmer, paramCount int) uint64 {
 	return mask
 }
 
+// procParameterOwnershipUses analyzes how many times each of the first
+// paramCount parameters is referenced in expr, whether any reference is
+// captured inside a nested closure, and whether at least one reference sits
+// in a position that consumes (transfers) ownership.
+//
+// if-branches (and the final expression of a top-level begin) are mutually
+// exclusive or sequentially terminal, so a parameter referenced once in each
+// branch of an if is still used at most once per actual execution: branch
+// occurrence counts are combined with max rather than summed, which is what
+// lets the common "return the accumulator on the empty case, otherwise
+// recurse with an extended accumulator" idiom qualify as a single linear use
+// instead of being permanently rejected as "used twice". A bare parameter
+// reference in the proc's own tail position is itself a consuming use,
+// mirroring passing it to a declared transfer-consuming builtin: returning a
+// value already hands its ownership to the caller.
 func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bool) {
 	uses := make([]int, paramCount)
 	captured := make([]bool, paramCount)
 	consumed := make([]bool, paramCount)
-	var visit func(Scmer, int, bool)
-	visit = func(current Scmer, lambdaDepth int, throughOuter bool) {
+	var visit func(current Scmer, lambdaDepth int, throughOuter bool, tail bool, u []int, cap []bool, cons []bool)
+	visit = func(current Scmer, lambdaDepth int, throughOuter bool, tail bool, u []int, cap []bool, cons []bool) {
 		if stripped, ok := scmerStripSourceInfo(current); ok {
 			current = stripped
 		}
 		if current.IsNthLocalVar() {
 			idx := int(current.NthLocalVar())
 			if idx >= 0 && idx < paramCount && (lambdaDepth == 0 || throughOuter) {
-				uses[idx]++
+				u[idx]++
 				if lambdaDepth > 0 {
-					captured[idx] = true
+					cap[idx] = true
+				} else if tail {
+					cons[idx] = true
 				}
 			}
 			return
@@ -1165,28 +1182,56 @@ func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bo
 				mask := procOwnershipParameterMask(items[1], paramCount)
 				for idx := 0; idx < paramCount && idx < 64; idx++ {
 					if mask&(1<<uint(idx)) != 0 {
-						consumed[idx] = true
+						cons[idx] = true
 					}
 				}
 			}
 		}
 		if scmerIsSymbol(items[0], "lambda") {
 			if len(items) > 2 {
-				visit(items[2], lambdaDepth+1, false)
+				visit(items[2], lambdaDepth+1, false, false, u, cap, cons)
 			}
 			return
 		}
 		if scmerIsSymbol(items[0], "outer") {
 			for _, item := range items[1:] {
-				visit(item, lambdaDepth, true)
+				visit(item, lambdaDepth, true, false, u, cap, cons)
 			}
 			return
 		}
+		if lambdaDepth == 0 && scmerIsSymbol(items[0], "if") && (len(items) == 3 || len(items) == 4) {
+			visit(items[1], lambdaDepth, throughOuter, false, u, cap, cons)
+			maxU := make([]int, paramCount)
+			for _, branch := range items[2:] {
+				branchU := make([]int, paramCount)
+				branchCap := make([]bool, paramCount)
+				branchCons := make([]bool, paramCount)
+				visit(branch, lambdaDepth, throughOuter, tail, branchU, branchCap, branchCons)
+				for idx := 0; idx < paramCount; idx++ {
+					if branchU[idx] > maxU[idx] {
+						maxU[idx] = branchU[idx]
+					}
+					cap[idx] = cap[idx] || branchCap[idx]
+					cons[idx] = cons[idx] || branchCons[idx]
+				}
+			}
+			for idx := 0; idx < paramCount; idx++ {
+				u[idx] += maxU[idx]
+			}
+			return
+		}
+		if lambdaDepth == 0 && scmerIsSymbol(items[0], "begin") && len(items) > 1 {
+			for _, item := range items[1 : len(items)-1] {
+				visit(item, lambdaDepth, throughOuter, false, u, cap, cons)
+			}
+			visit(items[len(items)-1], lambdaDepth, throughOuter, tail, u, cap, cons)
+			return
+		}
 		for _, item := range items {
-			visit(item, lambdaDepth, throughOuter)
+			visit(item, lambdaDepth, throughOuter, false, u, cap, cons)
 		}
 	}
-	visit(expr, 0, false)
+	visit(expr, 0, false, true, uses, captured, consumed)
 	return uses, captured, consumed
 }
 
