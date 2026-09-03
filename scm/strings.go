@@ -384,66 +384,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["string?"].Fn, args, result)
-				}
 				declaration := declarations["string?"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -531,66 +476,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_concat"].Fn, args, result)
-				}
 				declaration := declarations["sql_concat"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -664,66 +554,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["substr"].Fn, args, result)
-				}
 				declaration := declarations["substr"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -1399,66 +1234,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_substr"].Fn, args, result)
-				}
 				declaration := declarations["sql_substr"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d3 JITValueDesc
 				_ = d3
 				var d4 JITValueDesc
@@ -5304,66 +5084,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["simplify"].Fn, args, result)
-				}
 				declaration := declarations["simplify"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -5470,66 +5195,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strlen"].Fn, args, result)
-				}
 				declaration := declarations["strlen"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -5614,66 +5284,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strlike"].Fn, args, result)
-				}
 				declaration := declarations["strlike"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d2 JITValueDesc
 				_ = d2
 				var d3 JITValueDesc
@@ -6901,66 +6516,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strlike_cs"].Fn, args, result)
-				}
 				declaration := declarations["strlike_cs"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -7575,66 +7135,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["toLower"].Fn, args, result)
-				}
 				declaration := declarations["toLower"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -7716,66 +7221,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["toUpper"].Fn, args, result)
-				}
 				declaration := declarations["toUpper"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -7857,66 +7307,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["replace"].Fn, args, result)
-				}
 				declaration := declarations["replace"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -8123,66 +7518,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strtrim"].Fn, args, result)
-				}
 				declaration := declarations["strtrim"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -8264,66 +7604,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strltrim"].Fn, args, result)
-				}
 				declaration := declarations["strltrim"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -8434,66 +7719,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strrtrim"].Fn, args, result)
-				}
 				declaration := declarations["strrtrim"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -8608,66 +7838,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_trim"].Fn, args, result)
-				}
 				declaration := declarations["sql_trim"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -8995,66 +8170,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_ltrim"].Fn, args, result)
-				}
 				declaration := declarations["sql_ltrim"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -9413,66 +8533,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_rtrim"].Fn, args, result)
-				}
 				declaration := declarations["sql_rtrim"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -9837,66 +8902,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["split"].Fn, args, result)
-				}
 				declaration := declarations["split"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d3 JITValueDesc
 				_ = d3
 				var d4 JITValueDesc
@@ -11218,66 +10228,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["string_repeat"].Fn, args, result)
-				}
 				declaration := declarations["string_repeat"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -12182,66 +11137,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["htmlentities"].Fn, args, result)
-				}
 				declaration := declarations["htmlentities"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -12323,66 +11223,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["urlencode"].Fn, args, result)
-				}
 				declaration := declarations["urlencode"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -12468,66 +11313,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["urldecode"].Fn, args, result)
-				}
 				declaration := declarations["urldecode"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -12875,66 +11665,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode"].Fn, args, result)
-				}
 				declaration := declarations["json_encode"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -13275,66 +12010,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_quote"].Fn, args, result)
-				}
 				declaration := declarations["json_quote"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -15032,66 +13712,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_decode"].Fn, args, result)
-				}
 				declaration := declarations["json_decode"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -15559,66 +14184,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_decode_scmer"].Fn, args, result)
-				}
 				declaration := declarations["json_decode_scmer"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -16042,66 +14612,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["base64_encode"].Fn, args, result)
-				}
 				declaration := declarations["base64_encode"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -16252,66 +14767,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["base64_decode"].Fn, args, result)
-				}
 				declaration := declarations["base64_decode"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -16730,66 +15190,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["bin2hex"].Fn, args, result)
-				}
 				declaration := declarations["bin2hex"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d2 JITValueDesc
 				_ = d2
 				var d3 JITValueDesc
@@ -17782,66 +16187,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["bin2hex"].Fn, args, result)
-				}
 				declaration := declarations["bin2hex"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d2 JITValueDesc
 				_ = d2
 				var d3 JITValueDesc
@@ -18831,66 +17181,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["hex2bin"].Fn, args, result)
-				}
 				declaration := declarations["hex2bin"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -19245,66 +17540,11 @@ func init_strings() {
 			Const:  false, /* NOT const — each call must return a unique value */
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["uuid"].Fn, args, result)
-				}
 				declaration := declarations["uuid"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d1 JITValueDesc
 				_ = d1
 				var d2 JITValueDesc
@@ -19613,66 +17853,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["randomBytes"].Fn, args, result)
-				}
 				declaration := declarations["randomBytes"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -20477,66 +18662,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_replace"].Fn, args, result)
-				}
 				declaration := declarations["regexp_replace"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -21254,66 +19384,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["fnv_hash"].Fn, args, result)
-				}
 				declaration := declarations["fnv_hash"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -21408,66 +19483,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["stable_structural_hash"].Fn, args, result)
-				}
 				declaration := declarations["stable_structural_hash"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -22648,66 +20668,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sha1"].Fn, args, result)
-				}
 				declaration := declarations["sha1"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -22880,66 +20845,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sha256"].Fn, args, result)
-				}
 				declaration := declarations["sha256"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -23117,66 +21027,11 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_test"].Fn, args, result)
-				}
 				declaration := declarations["regexp_test"]
-				inline := declaration.RetainsCallArgs
-				knownTypes, knownShapes, knownArgs := 0, 0, 0
-				hasVirtualArgs := false
-				knownCallback, hasCallback := false, false
-				for index, arg := range args {
-					if arg.Type != JITTypeUnknown {
-						knownTypes++
-					}
-					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-					if hasKnownShape {
-						knownShapes++
-					}
-					if arg.Type != JITTypeUnknown || hasKnownShape {
-						knownArgs++
-					}
-					parameter := jitDeclarationParam(declaration, index)
-					if parameter != nil && parameter.Kind == "func" {
-						hasCallback = true
-						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-							knownCallback = true
-						}
-					}
-				}
-				cost := int(declaration.Type.JITInlineCost)
-				if !inline && hasCallback {
-					inline = declaration.Type.JITInlineCallbacks && knownCallback
-				} else if !inline {
-					switch {
-					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-						inline = true
-					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
-						inline = true
-					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-						inline = true
-					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-						inline = true
-					}
-					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-						inline = false
-					}
-					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-						inline = false
-					}
-				}
-				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-					inline = false
-				}
-				if !inline {
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
 				}
-				ctx.BuiltinInlineCost += cost
-				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc

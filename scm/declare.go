@@ -91,6 +91,7 @@ func (d *Declaration) MaxParams() int {
 type TypeDescriptor struct {
 	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
 	NoEscape       bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
+	SameGoroutine  bool                       // for NoEscape func parameters: callback runs synchronously on the caller goroutine
 	Transfer       bool                       // callee receives ownership, can mutate
 	CallsOnce      bool                       // for func params: callback is invoked at most once per call; default false = unknown or repeated
 	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold

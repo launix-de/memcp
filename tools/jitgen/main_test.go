@@ -89,7 +89,7 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 	}
 	for _, want := range []string{
 		`declaration := declarations["add"]`,
-		"ctx.Coverage.InlinedCalls++",
+		"jitGeneratedEmitterInline(ctx, declaration, args)",
 		"= result.Reg2",
 		"ctx.EmitAddInt64",
 		"ctx.EmitMakeInt(result",

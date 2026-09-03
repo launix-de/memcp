@@ -77,7 +77,7 @@ func TestJITNoEscapeCallbackUsesStackFuncval(t *testing.T) {
 		Name: name,
 		Fn:   consumer,
 		Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
-			{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+			{Kind: "func", NoEscape: true, SameGoroutine: true, Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
 			{Kind: "any"},
 		}, Return: &TypeDescriptor{Kind: "any"}},
 	}

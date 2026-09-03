@@ -695,7 +695,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 				template.Proc().jitCaptureSymbols = captureSymbols
 				template = jitCompileModeDeferred(true, template)
 				ctx.TrackImm(template)
-				if ctx.NoEscapeLambda {
+				if result.StackFunc {
 					return jitEmitNoEscapeLambdaFunc(ctx, template, argExprs[3:], ctx.SliceBase, result)
 				}
 				builderArgs := append([]Scmer{template}, argExprs...)
@@ -734,7 +734,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		closure := jitBuildLambdaClosure(params, body, NewInt(int64(numVars)))
 		compiled := jitCompileModeDeferred(true, closure)
 		ctx.TrackImm(compiled)
-		if ctx.NoEscapeLambda {
+		if result.StackFunc {
 			return jitEmitNoEscapeLambdaFunc(ctx, compiled, nil, ctx.SliceBase, result)
 		}
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)

@@ -1697,12 +1697,11 @@ func jitEmitDeclaredGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) S
 	if argc > 0 {
 		argsOff = ctx.AllocStack(int32(argc * 16))
 		for i := range argExprs {
-			previousNoEscape := ctx.NoEscapeLambda
-			if param := jitDeclarationParam(decl, i); param != nil && param.Kind == "func" && param.NoEscape {
-				ctx.NoEscapeLambda = true
+			expected := JITValueDesc{Loc: LocAny}
+			if param := jitDeclarationParam(decl, i); param != nil && param.Kind == "func" && param.NoEscape && param.SameGoroutine {
+				expected.StackFunc = true
 			}
-			jitCompileRootedCallValueAt(ctx, argExprs[i], sliceBase, argsOff+int32(i*16))
-			ctx.NoEscapeLambda = previousNoEscape
+			jitCompileRootedCallValueAtResult(ctx, argExprs[i], sliceBase, argsOff+int32(i*16), expected)
 		}
 		// Every argument is stable in the frame now. Argument emitters may have
 		// consumed temporary registers without descriptor ownership; none remain
@@ -1792,7 +1791,11 @@ func jitEmitGoVariadicCallFromDescs(ctx *JITContext, fn func(...Scmer) Scmer, va
 }
 
 func jitCompileRootedCallValueAt(ctx *JITContext, expr Scmer, sliceBase Reg, off int32) JITValueDesc {
-	value := jitCompileExpr(ctx, expr, sliceBase, JITValueDesc{Loc: LocAny})
+	return jitCompileRootedCallValueAtResult(ctx, expr, sliceBase, off, JITValueDesc{Loc: LocAny})
+}
+
+func jitCompileRootedCallValueAtResult(ctx *JITContext, expr Scmer, sliceBase Reg, off int32, result JITValueDesc) JITValueDesc {
+	value := jitCompileExpr(ctx, expr, sliceBase, result)
 	// Input values remain reachable through the caller's argument slice for the
 	// complete native invocation. The safepoint map relocates a saved input
 	// pointer if a callback grows the goroutine stack.
@@ -2011,12 +2014,11 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	operandOff := ctx.AllocStack(int32(len(operands) * 16))
 	operandValues := make([]JITValueDesc, len(operands))
 	for index, operand := range operands {
-		previousNoEscape := ctx.NoEscapeLambda
-		if param := jitDeclarationParam(decl, index); param != nil && param.Kind == "func" && param.NoEscape {
-			ctx.NoEscapeLambda = true
+		expected := JITValueDesc{Loc: LocAny}
+		if param := jitDeclarationParam(decl, index); param != nil && param.Kind == "func" && param.NoEscape && param.SameGoroutine {
+			expected.StackFunc = true
 		}
-		operandValues[index] = jitCompileRootedCallValueAt(ctx, operand, sliceBase, operandOff+int32(index*16))
-		ctx.NoEscapeLambda = previousNoEscape
+		operandValues[index] = jitCompileRootedCallValueAtResult(ctx, operand, sliceBase, operandOff+int32(index*16), expected)
 	}
 
 	resultOff := ctx.AllocSpill(16)
@@ -2142,6 +2144,71 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 
 const jitBuiltinInlineBudget = 2048
 const jitTrivialVirtualInlineCost = 2
+
+// jitGeneratedEmitterInline implements the shared size/type policy used by
+// generated declaration hooks. Call dispatch itself remains declaration-owned:
+// the expression compiler invokes Type.JITEmit, and that hook asks this helper
+// whether to render its SSA body or emit its native call boundary.
+func jitGeneratedEmitterInline(ctx *JITContext, declaration *Declaration, args []JITValueDesc) bool {
+	if !jitEnabled || declaration == nil || declaration.Type == nil {
+		return false
+	}
+	inline := declaration.RetainsCallArgs
+	knownTypes, knownShapes, knownArgs := 0, 0, 0
+	hasVirtualArgs := false
+	knownCallback, hasCallback := false, false
+	for index, arg := range args {
+		if arg.Type != JITTypeUnknown {
+			knownTypes++
+		}
+		hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
+		hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
+		if hasKnownShape {
+			knownShapes++
+		}
+		if arg.Type != JITTypeUnknown || hasKnownShape {
+			knownArgs++
+		}
+		parameter := jitDeclarationParam(declaration, index)
+		if parameter != nil && parameter.Kind == "func" {
+			hasCallback = true
+			if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
+				(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
+				knownCallback = true
+			}
+		}
+	}
+	cost := int(declaration.Type.JITInlineCost)
+	if !inline && hasCallback {
+		inline = declaration.Type.JITInlineCallbacks && knownCallback
+	} else if !inline {
+		switch {
+		case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
+			inline = true
+		case declaration.Type.JITVirtualArgs && hasVirtualArgs && cost <= 32:
+			inline = true
+		case len(args) > 0 && knownTypes == len(args) && cost <= 256:
+			inline = true
+		case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
+			inline = true
+		}
+		if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
+			inline = false
+		}
+		if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
+			inline = false
+		}
+	}
+	if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+		return false
+	}
+	if !inline {
+		return false
+	}
+	ctx.BuiltinInlineCost += cost
+	ctx.Coverage.InlinedCalls++
+	return true
+}
 
 func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	if ctx.SelfParamCount < 0 || len(operands) > ctx.SelfParamCount {
