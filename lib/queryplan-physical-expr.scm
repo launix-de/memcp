@@ -5475,6 +5475,67 @@ ever-larger subtrees. */
 			(extract_assoc resolved_fields (lambda (_title expr) expr))))
 		(direct_group_result_assoc_expr_indexed alias keys key_names ags key_index items resolved_fields))))
 
+/* A transaction-local scalar aggregate keeps the scalar reducer shape used by
+the ordinary cache fill. It bypasses the shared cache without introducing an
+otherwise unnecessary one-entry associative group. */
+(define lower_query_local_base_scalar_stage (lambda (stage fields offset_value limit_value)
+	(begin
+		(define src (gs_input stage))
+		(define schema (source_schema src))
+		(define tbl (source_relation src))
+		(define alias (source_alias src))
+		(define keys '(1))
+		(define key_names (group_key_cols keys))
+		(define ags (gs_aggregates stage))
+		(define scalar_parts (ungrouped_aggregate_parts keys key_names ags))
+		(if (nil? scalar_parts)
+			(neumann_fail "build_queryplan" "query-local scalar aggregate requires exactly one aggregate")
+			true)
+		(define ag (cadr scalar_parts))
+		(define condition (coalesceNil (qassoc_get (gs_facts stage) (quote condition) true) true))
+		(define membership_parts (base_group_membership_parts src condition))
+		(define membership_expr (car membership_parts))
+		(define effective_condition (cadr membership_parts))
+		(define membership_var (symbol "__group_membership_recset"))
+		(define source_expr (if (nil? membership_expr) (source_table_expr src) membership_var))
+		(define aggregate_state (symbol "__aggregate_state"))
+		(define aggregate_col (aggregate_col_name_using src ag))
+		(define rowassoc_expr (runtime_cons_list_expr (list
+			(car key_names) 1
+			aggregate_col (aggregate_finalize_expr ag aggregate_state))))
+		(define having_expr (replace_direct_group_expr alias keys key_names ags
+			(coalesceNil (gs_having stage) true)))
+		(define offset_expr (coalesceNil offset_value 0))
+		(define limit_expr (coalesceNil limit_value -1))
+		(define emit_expr (list (quote resultrow)
+			(direct_group_result_assoc_expr alias keys key_names ags fields)))
+		(define state_plan (build_base_ungrouped_aggregate_state_plan
+			schema tbl alias source_expr effective_condition ag))
+		(define plan (list
+			(list (quote lambda) (list aggregate_state)
+				(list (quote begin)
+					(list (quote define) (quote rowassoc) rowassoc_expr)
+					(list (quote if)
+						(list (quote and) having_expr
+							(list (quote and)
+								(list (quote equal?) offset_expr 0)
+								(list (quote or)
+									(list (quote equal?) limit_expr -1)
+									(list (quote >) limit_expr 0))))
+							(list (quote begin) emit_expr nil)
+							nil)))
+				state_plan))
+		(if (nil? membership_expr)
+			plan
+			(list
+				(list (quote lambda) (list membership_var) plan)
+				membership_expr)))))
+
+(define lower_query_local_base_group_stage (lambda (stage fields order_items offset_value limit_value)
+	(if (empty_list? (gs_keys stage))
+		(lower_query_local_base_scalar_stage stage fields offset_value limit_value)
+		(lower_direct_base_group_stage stage fields order_items offset_value limit_value))))
+
 (define build_base_group_scan_assoc_plan (lambda (schema tbl alias table_expr keys condition ags)
 	(begin
 		(define src (list alias schema tbl false nil))

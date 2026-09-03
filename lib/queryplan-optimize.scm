@@ -3058,6 +3058,12 @@ their tighter direct bound; this product is only an additional candidate. */
 				(planner_row_count_after_selectivity src (list src)
 					(source_alias src) residual total_rows))))))
 
+(define direct_base_group_plan_eligible? (lambda (stage)
+	(and (source_is_base_table? (gs_input stage))
+		(and (or (not (empty_list? (gs_keys stage)))
+			(equal? (count (gs_aggregates stage)) 1))
+			(empty_list? (gs_order stage))))))
+
 (define direct_base_group_plan_preferred? (lambda (stage)
 	(begin
 		(define src (gs_input stage))
@@ -3066,13 +3072,12 @@ their tighter direct bound; this product is only an additional candidate. */
 		(define distinct (if (or (nil? rows) (empty_list? keys))
 			nil
 			(planner_group_distinct_estimate src keys rows)))
-		(and (source_is_base_table? src)
-			(and (empty_list? (gs_order stage))
-				(and (empty_list? (group_stage_session_domain_keys stage))
+		(and (direct_base_group_plan_eligible? stage)
+			(and (empty_list? (group_stage_session_domain_keys stage))
 					(and (not (nil? rows))
 						(and (>= rows 1024)
 							(and (not (nil? distinct))
-								(>= (* distinct 4) rows))))))))))
+								(>= (* distinct 4) rows)))))))))
 
 (define source_join_present? (lambda (src)
 	(begin
