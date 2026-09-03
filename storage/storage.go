@@ -4068,12 +4068,23 @@ func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVa
 }
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.
+func fkTriggerTxArg(args []scm.Scmer, index int) *TxContext {
+	// FK triggers are persisted as compiled Scheme procedures. Releases before
+	// explicit transaction propagation emitted these builtin calls without the
+	// final tx argument, so that argument is part of a backward-compatible ABI.
+	// New triggers pass it; old triggers retain their original nil-tx behavior.
+	if len(args) <= index {
+		return nil
+	}
+	return scmerToTxContext(args[index])
+}
+
 func initFKBuiltins(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "__fk_check_ref",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := scmerToTxContext(a[5])
+			currentTx := fkTriggerTxArg(a, 5)
 			schema := scm.String(a[0])
 			parentTable := scm.String(a[1])
 			parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
@@ -4105,7 +4116,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "parent_cols", Description: "parent column names"},
 				{Kind: "list", Label: "values", Description: "FK values to check"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
-				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4116,7 +4127,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_delete",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := scmerToTxContext(a[6])
+			currentTx := fkTriggerTxArg(a, 6)
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -4152,7 +4163,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "parent_vals", Description: "old parent PK values"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
 				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
-				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4163,7 +4174,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_update",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := scmerToTxContext(a[7])
+			currentTx := fkTriggerTxArg(a, 7)
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -4213,7 +4224,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "new_vals", Description: "new parent PK values"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
 				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
-				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,

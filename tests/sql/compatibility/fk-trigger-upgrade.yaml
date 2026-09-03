@@ -1,0 +1,81 @@
+# Copyright (C) 2026 Launix GmbH
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+metadata:
+  version: "1.0"
+  description: "Backward-compatible FK trigger execution after upgrading persisted schemas"
+
+setup:
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_child"
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_parent"
+  - sql: "CREATE TABLE fk_upgrade_parent (id INT PRIMARY KEY, label VARCHAR(40))"
+  - sql: "CREATE TABLE fk_upgrade_child (id INT PRIMARY KEY, title VARCHAR(40), payload TEXT, parent_id INT, created_at INT, omitted_value VARCHAR(40), CONSTRAINT fk_upgrade_ref FOREIGN KEY (parent_id) REFERENCES fk_upgrade_parent(id))"
+  - sql: "INSERT INTO fk_upgrade_parent (id, label) VALUES (7, 'available')"
+
+test_cases:
+  - name: "Install the five-argument FK trigger shape persisted by older releases"
+    scm: |
+      (createtrigger
+        (table "memcp-tests" "fk_upgrade_child")
+        "legacy_fk_child_insert"
+        "before_insert"
+        "legacy persisted FK trigger"
+        (lambda (OLD NEW session tx)
+          (begin
+            (__fk_check_ref
+              "memcp-tests"
+              "fk_upgrade_parent"
+              '("id")
+              (list (get_assoc NEW "parent_id"))
+              "fk_upgrade_ref")
+            NEW))
+        false)
+    expect:
+      data: [true]
+
+  - name: "Partial upload-shaped insert works through a legacy FK trigger"
+    sql: "INSERT INTO fk_upgrade_child (id, title, payload, parent_id, created_at) VALUES (1, 'upload', 'contents', 7, 1234)"
+    expect:
+      affected_rows: 1
+
+  - name: "Persisted legacy FK check without transaction argument remains executable"
+    scm: |
+      (begin
+        (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") '(7) "fk_upgrade_ref")
+        true)
+    expect:
+      data: [true]
+
+  - name: "Persisted legacy parent-delete callback remains executable"
+    scm: |
+      (begin
+        (__fk_on_parent_delete "memcp-tests" "fk_upgrade_child" '("parent_id") '(999) "fk_upgrade_ref" "RESTRICT")
+        true)
+    expect:
+      data: [true]
+
+  - name: "Persisted legacy parent-update callback remains executable"
+    scm: |
+      (begin
+        (__fk_on_parent_update "memcp-tests" "fk_upgrade_child" '("parent_id") '(999) '(999) "fk_upgrade_ref" "RESTRICT")
+        true)
+    expect:
+      data: [true]
+
+  - name: "Partial upload-shaped row was stored with omitted column null"
+    sql: "SELECT id, title, parent_id, omitted_value FROM fk_upgrade_child WHERE id = 1"
+    expect:
+      rows: 1
+      data:
+        - id: 1
+          title: "upload"
+          parent_id: 7
+          omitted_value: null
+
+cleanup:
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_child"
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_parent"
