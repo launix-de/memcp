@@ -214,6 +214,15 @@ func TestJITExpressionKeepsAdjacentStringLengths(t *testing.T) {
 	}
 }
 
+func TestJITExpressionStrLikeWithDynamicValue(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda (value) (strlike (concat value) "a%" "utf8mb4_general_ci"))`)
+	requireNoDynamicJITCalls(t, compiled)
+	if got := Apply(compiled, NewString("Alpha")); !Equal(got, NewBool(true)) {
+		t.Fatalf("dynamic case-insensitive LIKE returned %s, want true", String(got))
+	}
+}
+
 func TestJITExpressionKeepsQueryPlanColumnNames(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")

@@ -148,6 +148,19 @@ func TestBoundedAppendStartsWithSpareCapacity(t *testing.T) {
 	}
 }
 
+func TestFunctionCallsMultipleResults(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func pair() (bool, bool) { return true, true }
+func caller() bool {
+	matched, handled := pair()
+	return matched && handled
+}
+`, "caller")
+	if !functionCallsMultipleResults(fn) {
+		t.Fatal("call returning a tuple was not detected")
+	}
+}
+
 func TestCollectOperatorsRejectsNonFunctionRootType(t *testing.T) {
 	const source = `package sample
 func init() {
