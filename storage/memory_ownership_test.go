@@ -154,18 +154,3 @@ func TestScmerCustomHandleDoesNotClaimOwnedPayload(t *testing.T) {
 		t.Fatalf("custom handle size = %d, want one Scmer slot", got)
 	}
 }
-
-func TestComputeProxySizeIncludesSessionVariants(t *testing.T) {
-	proxy := &StorageComputeProxy{
-		delta:    make(map[uint32]scm.Scmer),
-		variants: make(map[string]*storageComputeVariant),
-	}
-	before := proxy.ComputeSize()
-	variant := newStorageComputeVariant(1)
-	variant.delta[0] = scm.NewString("variant-owned-value")
-	proxy.variants["tenant"] = variant
-	after := proxy.ComputeSize()
-	if after <= before {
-		t.Fatalf("session variant is absent from proxy ownership: before=%d after=%d", before, after)
-	}
-}

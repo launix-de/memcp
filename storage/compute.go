@@ -24,9 +24,17 @@ import "runtime/debug"
 import "sync/atomic"
 import "github.com/launix-de/memcp/scm"
 
+func requireStatelessComputedCallback(label string, callback scm.Scmer) {
+	if callback.IsNil() {
+		return
+	}
+	if hasImplicitComputeContext(callback) {
+		panic(label + " must not read tx or session implicitly; pass query values as explicit callback parameters")
+	}
+}
+
 // newCachedColumnReaderTx returns a per-goroutine ColumnReader for the given
-// storage and tx context. Context-sensitive storages can bind a session-aware
-// reader variant here; plain storages keep using the legacy reader path.
+// storage and tx context.
 //
 // For StorageEnum this gives O(1) sequential decode; for others it's a no-op.
 // Do not strip runtime overlays here: generic scan/read paths must still see
@@ -39,21 +47,9 @@ func newCachedColumnReaderTx(col ColumnStorage, tx *TxContext) ColumnReader {
 	return col.GetCachedReader()
 }
 
-func collectDependentSessionKeys(shard *storageShard, cols []string) []string {
-	if shard == nil || len(cols) == 0 {
-		return nil
-	}
-	keys := make([]string, 0)
-	for _, col := range cols {
-		cs := shard.getColumnStorageOrPanic(col, false, nil)
-		if proxy, ok := cs.(*StorageComputeProxy); ok {
-			keys = mergeSessionKeys(keys, proxy.sessionKeys)
-		}
-	}
-	return keys
-}
-
-func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, currentTx *TxContext) {
+func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
+	requireStatelessComputedCallback("computed-column function", computor)
+	requireStatelessComputedCallback("computed-column preparation filter", filter)
 	// Ordinary computed-column DDL installs one complete logical column.
 	// filter/filterCols only select the initial prewarm batch for values the caller
 	// expects to read; they never restrict the column's domain. Rows outside that
@@ -112,7 +108,7 @@ func (t *table) computeColumnDDLLocked(name string, inputCols []string, computor
 							done <- scanError{r, string(debug.Stack())}
 						}
 					}()
-					s.ComputeColumn(name, inputCols, computor, filterCols, filter, currentTx)
+					s.ComputeColumn(name, inputCols, computor, filterCols, filter)
 					done <- nil
 				}(s)
 			}
@@ -164,13 +160,13 @@ func (t *table) tempColumnMemory(column *column, shards []*storageShard) int64 {
 	return size
 }
 
-func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, currentTx *TxContext) {
+func (t *table) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	t.ddlMu.Lock()
 	defer t.ddlMu.Unlock()
-	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter, currentTx)
+	t.computeColumnDDLLocked(name, inputCols, computor, filterCols, filter)
 }
 
-func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer, tx *TxContext) {
+func (s *storageShard) ComputeColumn(name string, inputCols []string, computor scm.Scmer, filterCols []string, filter scm.Scmer) {
 	// Ensure shard is loaded from disk before we mark it WRITE (ensureLoaded
 	// guards on COLD state; setting WRITE first would skip the load entirely).
 	s.ensureLoaded()
@@ -191,34 +187,21 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	s.mu.RLock()
 	existing := s.columns[name]
 	s.mu.RUnlock()
-	dependentSessionKeys := mergeSessionKeys(
-		collectDependentSessionKeys(s, inputCols),
-		collectDependentSessionKeys(s, filterCols),
-	)
 	if proxy, ok := existing.(*StorageComputeProxy); ok {
 		proxy.computor = computor // update lambda
-		proxy.sessionKeys = mergeSessionKeys(extractSessionKeys(computor), extractSessionKeys(filter), dependentSessionKeys)
-		if proxy.hasSessionVariants() {
-			if !filter.IsNil() {
-				proxy.CompressFiltered(tx, filterCols, filter)
-			} else {
-				proxy.Compress(tx)
-			}
-			return
-		}
 		// skip recompute if proxy is still valid (no invalidation since last compute)
 		if !proxy.needsUnfilteredPreparation() {
 			if filter.IsNil() {
 				return // fully prepared, nothing to do
 			}
 			// filter given: ensure filtered rows are valid (CompressFiltered is idempotent)
-			proxy.CompressFiltered(tx, filterCols, filter)
+			proxy.CompressFiltered(nil, filterCols, filter)
 			return
 		}
 		if !filter.IsNil() {
-			proxy.CompressFiltered(tx, filterCols, filter)
+			proxy.CompressFiltered(nil, filterCols, filter)
 		} else {
-			proxy.Compress(tx)
+			proxy.Compress(nil)
 		}
 		return
 	}
@@ -227,13 +210,12 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// the proxy: prewarmed rows hit its cache, while every other row is computed
 	// pointwise by GetValue and then cached.
 	proxy := &StorageComputeProxy{
-		delta:       make(map[uint32]scm.Scmer),
-		computor:    computor,
-		inputCols:   inputCols,
-		shard:       s,
-		colName:     name,
-		count:       s.main_count,
-		sessionKeys: mergeSessionKeys(extractSessionKeys(computor), extractSessionKeys(filter), dependentSessionKeys),
+		delta:     make(map[uint32]scm.Scmer),
+		computor:  computor,
+		inputCols: inputCols,
+		shard:     s,
+		colName:   name,
+		count:     s.main_count,
 	}
 
 	s.mu.Lock()
@@ -243,9 +225,9 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 	// pre-free memory before allocating the compute result array
 	GlobalCache.CheckPressure(int64(s.main_count) * 16)
 	if !filter.IsNil() {
-		proxy.CompressFiltered(tx, filterCols, filter)
+		proxy.CompressFiltered(nil, filterCols, filter)
 	} else {
-		proxy.Compress(tx) // eagerly compute + compress all values (same behavior as before)
+		proxy.Compress(nil) // eagerly compute + compress all values (same behavior as before)
 	}
 }
 
@@ -260,6 +242,8 @@ func (s *storageShard) ComputeColumn(name string, inputCols []string, computor s
 // mapReduceFn: (lambda (acc $set mapCols...) ...) — calls ($set newVal), returns new acc
 // reduceInit: initial accumulator value
 func (t *table) computeOrderedColumnDDLLocked(name string, sortCols []string, sortDirs []bool, partCount int, filterCols []string, filterFn scm.Scmer, mapCols []string, mapReduceFn scm.Scmer, reduceInit scm.Scmer) {
+	requireStatelessComputedCallback("ordered computed-column filter", filterFn)
+	requireStatelessComputedCallback("ordered computed-column reducer", mapReduceFn)
 	found := false
 	paramsChanged := false
 	isTemp := false
@@ -361,7 +345,7 @@ func (t *table) initORCShard(s *storageShard, name string) {
 // The invalidation scan (run by triggers) has already set validMask bits to 0
 // for affected rows. This function finds the earliest invalid row's sort key,
 // predicts the accumulator from the last valid predecessor, and scans forward.
-func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32, currentTx *TxContext) {
+func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard, requestIdx uint32) {
 	recomputeStart := time.Now()
 	defer func() {
 		// Record recompute cost for invalidation telemetry
@@ -488,7 +472,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		scanCallbackCols = append(scanCallbackCols, "$set:"+name)
 		scanCallbackCols = append(scanCallbackCols, col.OrcMapCols...)
 		t.scan_order(
-			currentTx,
+			nil,
 			col.OrcFilterCols, domainCondFn,
 			sortcolsScmer, sortdirsFns,
 			0, 0, -1,
@@ -558,7 +542,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 	})
 
 	t.scan_order(
-		currentTx,
+		nil,
 		condCols, condFn,
 		sortcolsScmer, sortdirsFns,
 		0, 0, -1,

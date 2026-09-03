@@ -904,10 +904,6 @@ func (t *table) repartitionDDLReadLocked(shardCandidates []shardDimension) {
 			}
 			// Shift delta btree indexes
 			for _, index := range s.Indexes {
-				if len(index.sessionKeys) > 0 {
-					index.markVariantsDirty()
-					continue
-				}
 				if index.baseState.deltaBtree != nil {
 					// Rebuild with shifted recids
 					items := make([]indexPair, 0)

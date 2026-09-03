@@ -300,7 +300,7 @@ func BenchmarkScanUpdate(b *testing.B) {
 	tbl.Insert([]string{"id", "val"}, rows, nil, scm.NewNil(), false, nil)
 
 	// Attach the computor to the column after data is loaded
-	tbl.ComputeColumn("cached_val", []string{"val"}, computor, nil, scm.NewNil(), nil)
+	tbl.ComputeColumn("cached_val", []string{"val"}, computor, nil, scm.NewNil())
 
 	trueFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
 	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[0] })

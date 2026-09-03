@@ -239,19 +239,6 @@ func appendColumnBlobReferences(storage ColumnStorage, references map[string]str
 			appendColumnBlobReferences(typed.main, references, count)
 		}
 		typed.mu.RUnlock()
-		typed.variantsMu.RLock()
-		variants := make([]*storageComputeVariant, 0, len(typed.variants))
-		for _, variant := range typed.variants {
-			variants = append(variants, variant)
-		}
-		typed.variantsMu.RUnlock()
-		for _, variant := range variants {
-			variant.mu.RLock()
-			if variant.main != nil {
-				appendColumnBlobReferences(variant.main, references, variant.count)
-			}
-			variant.mu.RUnlock()
-		}
 	}
 }
 

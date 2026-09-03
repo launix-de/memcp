@@ -44,27 +44,101 @@ func setupComputeConcurrencyTest(t *testing.T) func() {
 	}
 }
 
-func TestApplyWithTxRebindsCapturedPhysicalQueryTransaction(t *testing.T) {
-	staleTx := &TxContext{}
-	currentTx := &TxContext{}
+func TestComputedColumnRejectsImplicitExecutionContext(t *testing.T) {
+	for _, symbol := range []string{"tx", "session", "__memcp_tx"} {
+		computor := scm.NewProcStruct(scm.Proc{
+			Params: scm.NewSlice(nil),
+			Body:   scm.NewSymbol(symbol),
+			En:     &scm.Globalenv,
+		})
+		if !hasImplicitComputeContext(computor) {
+			t.Fatalf("computed-column dependency on %s was accepted", symbol)
+		}
+	}
+
+	stateless := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("value")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("+"), scm.NewSymbol("value"), scm.NewInt(1),
+		}),
+		En: &scm.Globalenv,
+	})
+	if hasImplicitComputeContext(stateless) {
+		t.Fatal("ordinary computed-column parameter was treated as request context")
+	}
+	explicitSession := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("session")}),
+		Body:   scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("key")}),
+		En:     &scm.Globalenv,
+	})
+	if hasImplicitComputeContext(explicitSession) {
+		t.Fatal("explicit computed-column session parameter was treated as a closure dependency")
+	}
+}
+
+func TestComputeColumnRejectsRequestContextBeforePublishing(t *testing.T) {
+	cleanup := setupComputeConcurrencyTest(t)
+	defer cleanup()
+
+	CreateDatabase("compconc", false)
+	tbl, _ := CreateTable("compconc", "stateless", Memory, false)
+	tbl.CreateColumn("base", "INT", nil, nil)
+	tbl.CreateColumn("derived", "INT", nil, nil)
 	computor := scm.NewProcStruct(scm.Proc{
-		Params: scm.NewSlice(nil),
-		Body:   scm.NewSymbol("tx"),
-		En: &scm.Env{
-			Vars: scm.Vars{
-				scm.Symbol("tx"): scm.NewAny(staleTx),
-			},
-			Outer: &scm.Globalenv,
-		},
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("base")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("session"), scm.NewString("request-value"),
+		}),
+		En: &scm.Globalenv,
 	})
 
-	got := applyWithTx(currentTx, computor)
-	if got.Any().(*TxContext) != currentTx {
-		t.Fatal("computed column reused the transaction captured by its creating query")
+	var failure any
+	func() {
+		defer func() { failure = recover() }()
+		tbl.ComputeColumn("derived", []string{"base"}, computor, nil, scm.NewNil())
+	}()
+	if failure == nil {
+		t.Fatal("computed column accepted an implicit session dependency")
 	}
-	binding := computor.Proc().En.FindRead(scm.Symbol("tx"))
-	if binding.Vars[scm.Symbol("tx")].Any().(*TxContext) != staleTx {
-		t.Fatal("transaction rebinding mutated the shared computed-column closure")
+	shard := tbl.Shards[0]
+	shard.mu.RLock()
+	_, published := shard.columns["derived"].(*StorageComputeProxy)
+	shard.mu.RUnlock()
+	if published {
+		t.Fatal("invalid computed-column callback was published before validation")
+	}
+}
+
+func BenchmarkComputedColumnRepair(b *testing.B) {
+	oldBasepath := Basepath
+	Basepath = b.TempDir()
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("bench_stateless_compute")
+
+	CreateDatabase("bench_stateless_compute", false)
+	tbl, _ := CreateTable("bench_stateless_compute", "items", Memory, false)
+	tbl.CreateColumn("base", "INT", nil, nil)
+	tbl.CreateColumn("derived", "INT", nil, nil)
+	tbl.Insert([]string{"base"}, [][]scm.Scmer{{scm.NewInt(41)}}, nil, scm.NewNil(), false, nil)
+	if result := GetDatabase("bench_stateless_compute").rebuild(true, false, true); len(result.errors) > 0 {
+		b.Fatalf("rebuild errors: %v", result.errors)
+	}
+	computor := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("base")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("+"), scm.NewSymbol("base"), scm.NewInt(1),
+		}),
+		En: &scm.Globalenv,
+	})
+	tbl.ComputeColumn("derived", []string{"base"}, computor, nil, scm.NewNil())
+	proxy := tbl.Shards[0].columns["derived"].(*StorageComputeProxy)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		proxy.Invalidate(0)
 	}
 }
 
@@ -136,7 +210,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 	keytable.Insert([]string{"1"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 
 	computor := countCollapsedComputor()
-	keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil(), nil)
+	keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil())
 
 	row := []scm.Scmer{
 		scm.NewNil(),
@@ -166,7 +240,7 @@ func TestGlobalAggregateComputeAndInsertDoNotDeadlock(t *testing.T) {
 				}()
 				<-start
 				for iter := 0; iter < iterations; iter++ {
-					keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil(), nil)
+					keytable.ComputeColumn("counted", []string{"1"}, computor, nil, scm.NewNil())
 				}
 			}
 		}(worker)()
@@ -254,17 +328,17 @@ func TestFilteredComputeColumnConservativelyRecomputesRepeatedFilter(t *testing.
 		NumVars: 1,
 	})
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2, nil)
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
 	if got := computeCalls.Load(); got != 2 {
 		t.Fatalf("first filtered compute invoked computor %d times, want 2", got)
 	}
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2, nil)
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT2)
 	if got := computeCalls.Load(); got != 4 {
 		t.Fatalf("repeated filtered compute invoked computor %d times, want 4 total", got)
 	}
 
-	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1, nil)
+	tbl.ComputeColumn("cached", []string{"val"}, computor, []string{"val"}, filterGT1)
 	if got := computeCalls.Load(); got != 7 {
 		t.Fatalf("changing filtered materialization invoked computor %d times, want 7 total", got)
 	}

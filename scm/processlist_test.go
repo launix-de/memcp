@@ -78,6 +78,22 @@ func TestEvictHTTPSessionReleasesLocksAndKillsQuery(t *testing.T) {
 	}
 }
 
+func TestSessionStateReportsHeldLocks(t *testing.T) {
+	ss := RegisterSession("u", "h", "db")
+	defer UnregisterSession(ss.ID)
+	if ss.HasLocks() {
+		t.Fatal("new session unexpectedly reports a table lock")
+	}
+	ss.AddLock(func() {})
+	if !ss.HasLocks() {
+		t.Fatal("registered table lock is not visible to physical planning")
+	}
+	ss.ReleaseAllLocks()
+	if ss.HasLocks() {
+		t.Fatal("released table lock remained visible")
+	}
+}
+
 func TestKillQueryMarksOnlyCurrentGeneration(t *testing.T) {
 	ss := RegisterSession("u", "h", "db")
 	defer UnregisterSession(ss.ID)
