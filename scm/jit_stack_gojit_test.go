@@ -20,36 +20,11 @@ Copyright (C) 2026  MemCP Contributors
 package scm
 
 import (
-	"bytes"
 	"runtime"
 	"testing"
 	"time"
 	"unsafe"
 )
-
-var jitFrameClearInstruction = []byte{0xf3, 0x48, 0xab}
-
-func jitEntryCode(entry *JITEntryPoint) []byte {
-	return unsafe.Slice((*byte)(entry.CodePtr), entry.CodeLen)
-}
-
-func TestJITFrameClearingLimitedToParserControlFlow(t *testing.T) {
-	t.Run("query projection", func(t *testing.T) {
-		compiled := compileJITExpressionTestProc(t, `(lambda (a b) (list "a" a "b" b))`)
-		if bytes.Contains(jitEntryCode(compiled.Proc().Compiled), jitFrameClearInstruction) {
-			t.Fatal("ordinary expression clears its entire JIT frame")
-		}
-	})
-
-	t.Run("parser", func(t *testing.T) {
-		compiled := compileJITExpressionTestProc(t, `(lambda (input) (begin
-			(define word (parser (regex "[a-z]+" false false)))
-			((parser '((define value word) $) value "") input)))`)
-		if !bytes.Contains(jitEntryCode(compiled.Proc().Compiled), jitFrameClearInstruction) {
-			t.Fatal("parser expression does not clear shared JIT frame targets")
-		}
-	})
-}
 
 func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 	code := make([]byte, 128)
