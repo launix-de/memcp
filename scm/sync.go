@@ -392,6 +392,7 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 	if outer == nil {
 		outer = &Globalenv
 	}
+	previousSession, hadPreviousSession := outer.Vars[Symbol("session")]
 	vars := make(Vars, len(outer.Vars)+1)
 	for name, value := range outer.Vars {
 		vars[name] = value
@@ -403,9 +404,16 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 		Outer:        outer.Outer,
 		Nodefine:     outer.Nodefine,
 	}
+	if jitRebindProcCapture(&proc, NewSymbol("session"), previousSession, hadPreviousSession, session) {
+		return Apply(NewProcStruct(proc))
+	}
 	proc.JIT = nil
 	proc.Compiled = nil
-	return Apply(NewProcStruct(proc))
+	callable := NewProcStruct(proc)
+	if jitEnabled {
+		callable = jitCompileMode(true, callable)
+	}
+	return Apply(callable)
 }
 
 func init_sync() {

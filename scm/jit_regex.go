@@ -851,22 +851,45 @@ func jitEmitConstantRegexpPredicate(ctx *JITContext, pattern *regexp.Regexp, val
 		return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(pattern.MatchString(text)), NoHeapPointer: true}
 	}
 	program := jitCompileRegexProgram(pattern)
-	result := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: ctx.AllocReg(), NoHeapPointer: true}
-	ctx.BindReg(result.Reg, &result)
+	result := JITValueDesc{Loc: LocStack, Type: tagBool, StackOff: ctx.AllocStack(8), NoHeapPointer: true}
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
+	value = ctx.stabilizeForNested(value)
+	if bits.OnesCount64(ctx.FreeRegs&ctx.AllRegs&^ctx.ProtectedRegs) < 6 {
+		outer := ctx.PreserveOuterRegs()
+		success := ctx.ReserveLabel()
+		fail := ctx.ReserveLabel()
+		invalid := ctx.ReserveLabel()
+		done := ctx.ReserveLabel()
+		jitEmitNativeRegex(ctx, program, value, nil, success, fail, invalid, nil, false)
+		ctx.MarkLabel(success)
+		ctx.RestoreOuterRegs(outer)
+		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true), NoHeapPointer: true}, result.StackOff)
+		ctx.EmitJmp(done)
+		ctx.MarkLabel(fail)
+		ctx.RestoreOuterRegs(outer)
+		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
+		ctx.EmitJmp(done)
+		ctx.MarkLabel(invalid)
+		ctx.RestoreOuterRegs(outer)
+		ctx.EmitGoPanic("regex expects string")
+		ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
+		ctx.MarkLabel(done)
+		return result
+	}
 	success := ctx.ReserveLabel()
 	fail := ctx.ReserveLabel()
 	invalid := ctx.ReserveLabel()
 	done := ctx.ReserveLabel()
 	jitEmitNativeRegex(ctx, program, value, nil, success, fail, invalid, nil, false)
 	ctx.MarkLabel(success)
-	ctx.EmitMovRegImm64(result.Reg, 1)
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true), NoHeapPointer: true}, result.StackOff)
 	ctx.EmitJmp(done)
 	ctx.MarkLabel(fail)
-	ctx.EmitMovRegImm64(result.Reg, 0)
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
 	ctx.EmitJmp(done)
 	ctx.MarkLabel(invalid)
 	ctx.EmitGoPanic("regex expects string")
-	ctx.EmitMovRegImm64(result.Reg, 0)
+	ctx.EmitStoreToStack(JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false), NoHeapPointer: true}, result.StackOff)
 	ctx.MarkLabel(done)
 	return result
 }

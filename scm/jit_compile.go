@@ -222,7 +222,7 @@ func jitPlaceIntoPair(ctx *JITContext, src *JITValueDesc, target JITValueDesc) J
 			ctx.EmitMovRegImm64(target.Reg2, aux)
 		}
 		return target
-	case LocInputPair, LocStack, LocStackPair:
+	case LocInputPair, LocClosurePair, LocStack, LocStackPair:
 		ctx.EnsureDesc(src)
 		return jitPlaceIntoPair(ctx, src, target)
 	case LocRegPair:
@@ -432,6 +432,19 @@ func jitResolveRuntimeSymbol(envValue, symbol Scmer) Scmer {
 		panic("jit: unresolved symbol " + string(sym))
 	}
 	return binding.Vars[sym]
+}
+
+func jitCurrentRuntimeEnv(ctx *JITContext) JITValueDesc {
+	if !ctx.UsesRuntimeEnv {
+		ctx.TrackImm(ctx.RuntimeEnv)
+		immediate := JITValueDesc{Loc: LocImm, Type: tagAny, Imm: ctx.RuntimeEnv}
+		pair := jitAllocTrackedPair(ctx, tagAny)
+		return jitPlaceIntoPair(ctx, &immediate, pair)
+	}
+	pair := jitAllocTrackedPair(ctx, tagAny)
+	ctx.EmitMovRegMem(pair.Reg, ctx.StackReg, ctx.RuntimeEnvOff)
+	ctx.EmitMovRegMem(pair.Reg2, ctx.StackReg, ctx.RuntimeEnvOff+8)
+	return pair
 }
 
 func jitResolveGlobalSymbol(symbol Scmer) Scmer {
@@ -1606,7 +1619,7 @@ func jitCondToBoolBorrowed(ctx *JITContext, cond *JITValueDesc) JITValueDesc {
 			ctx.EmitMovRegImm64(mask, 0x7fffffffffffffff)
 			ctx.EmitAndInt64(dst, mask)
 			ctx.FreeReg(mask)
-		} else if cond.Type == tagBool {
+		} else if cond.Type == tagBool && cond.Loc == LocRegPair {
 			// Bool payload is auxVal in bits [63:8]; low 8 bits hold the tag.
 			ctx.EmitShrRegImm8(dst, 8)
 		}
@@ -2062,11 +2075,8 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	args := make([]JITValueDesc, 0, len(operands)+2)
 	args = append(args, callable)
 
-	envImm := JITValueDesc{Loc: LocImm, Type: tagAny, Imm: ctx.RuntimeEnv}
-	ctx.TrackImm(ctx.RuntimeEnv)
 	envOff := ctx.AllocStack(16)
-	envPair := jitAllocTrackedPair(ctx, tagAny)
-	envPair = jitPlaceIntoPair(ctx, &envImm, envPair)
+	envPair := jitCurrentRuntimeEnv(ctx)
 	ctx.EmitStoreScmerToStack(envPair, envOff)
 	ctx.FreeDesc(&envPair)
 	args = append(args, JITValueDesc{Loc: LocStackPair, Type: tagAny, StackOff: envOff})
@@ -2277,10 +2287,6 @@ func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueD
 	return true
 }
 
-func jitIsNativeReturnTarget(ctx *JITContext, result JITValueDesc) bool {
-	return result.Loc == LocRegPair && result.Reg == ctx.ResultPtrReg && result.Reg2 == ctx.ResultAuxReg
-}
-
 func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	if ctx.SelfParamCount < 0 || len(operands) > ctx.SelfParamCount {
 		panic("jit: invalid self call arity")
@@ -2296,46 +2302,37 @@ func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result
 		ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, argsOff+int32(i*16))
 	}
 
-	if ctx.HasSelfLoop && jitIsNativeReturnTarget(ctx, result) {
-		for i := 0; i < ctx.SelfParamCount; i++ {
-			ctx.EmitCopyStackWords(JITValueDesc{Loc: LocStackPair, StackOff: argsOff + int32(i*16)}, int32(i*16), 2)
-		}
-		for i := ctx.SelfParamCount; i < ctx.LocalSlotCount; i++ {
-			ctx.EmitStoreScmerToStack(JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}, int32(i*16))
-		}
-		ctx.FreeStack(ctx.BPOffset - stackStart)
-		ctx.EmitJmp(ctx.SelfLoopLabel)
-		return result
+	if !ctx.HasSelfLoop {
+		panic("jit: recursive call has no current function value")
 	}
 
 	argsPtr := ctx.AllocReg()
 	argsLen := ctx.AllocRegExcept(argsPtr)
-	argsSlice := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: argsPtr, Reg2: argsLen}
+	argsSlice := JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: argsPtr, Reg2: argsLen}
 	ctx.BindReg(argsPtr, &argsSlice)
 	ctx.BindReg(argsLen, &argsSlice)
 	ctx.EmitLeaRegMem(argsPtr, ctx.StackReg, argsOff)
 	ctx.EmitMovRegImm64(argsLen, uint64(ctx.SelfParamCount))
-	fnData := unsafe.Pointer(&struct{ *byte }{(*byte)(ctx.Start)})
-	native := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fnData))
-	ctx.ConstRoots = append(ctx.ConstRoots, fnData)
-	target := jitEnsureResultPair(ctx, result)
-	target = ctx.EmitGoCallVariadic(native, argsSlice, target)
+	fnValue := JITValueDesc{
+		Loc: LocStack, Type: tagFunc, StackOff: ctx.CurrentFuncOff,
+		Rooted: true, RelocatablePointer: true,
+	}
+	resultOff := ctx.AllocSpill(16)
+	callResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
+	ctx.EmitZeroDescWords(&callResult, 2)
+	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+	ctx.EmitProcJITCall(fnValue, argsSlice, callResult)
 	ctx.FreeDesc(&argsSlice)
-	target.Type = JITTypeUnknown
-	ctx.BindReg(target.Reg, &target)
-	ctx.BindReg(target.Reg2, &target)
+	target := jitPlaceScmerIntoTarget(ctx, callResult, result)
 	ctx.FreeStack(ctx.BPOffset - stackStart)
 	return target
 }
 
 func jitCompileRuntimeSymbol(ctx *JITContext, symbol Scmer, result JITValueDesc) JITValueDesc {
 	ctx.ReclaimUntrackedRegs()
-	envImm := JITValueDesc{Loc: LocImm, Type: tagAny, Imm: ctx.RuntimeEnv}
 	symbolImm := JITValueDesc{Loc: LocImm, Type: tagSymbol, Imm: symbol}
-	ctx.TrackImm(ctx.RuntimeEnv)
 	ctx.TrackImm(symbol)
-	envPair := jitAllocTrackedPair(ctx, tagAny)
-	envPair = jitPlaceIntoPair(ctx, &envImm, envPair)
+	envPair := jitCurrentRuntimeEnv(ctx)
 	symbolPair := jitAllocTrackedPair(ctx, tagSymbol)
 	symbolPair = jitPlaceIntoPair(ctx, &symbolImm, symbolPair)
 	target := jitEnsureResultPair(ctx, result)
@@ -2512,7 +2509,7 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			case LocImm:
 				ctx.TrackImm(src.Imm)
 				return src // constants are always safe to alias
-			case LocInputPair, LocStack, LocStackPair, LocStackTriple:
+			case LocInputPair, LocClosurePair, LocStack, LocStackPair, LocStackTriple:
 				// Preserve lazy locations across an inlined Proc boundary. The
 				// consumer decides whether it needs registers; eagerly loading here
 				// both loses the callback argument's real stack location and creates

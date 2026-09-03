@@ -143,6 +143,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		LocalSlotCount:   numVars,
 		RecursiveLambdas: recursiveLambdas,
 		StackPhiTargets:  jitExpressionContainsParser(body),
+		UsesRuntimeEnv:   jitExpressionConsumesRuntimeEnv(body),
 		SelfSymbols:      selfSymbols,
 		SelfParamCount:   inputArgCount,
 		Arena:            buf.arena,
@@ -232,6 +233,26 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ctx.emitMovRegReg(RegR12, RegRSP)
 		ctx.SliceBaseTracksRSP = true
 	}
+	if proc != nil && (proc.jitCaptureCount != 0 || ctx.UsesRuntimeEnv) {
+		ctx.ClosureEnvOff = ctx.AllocStack(8)
+		ctx.EmitMovRegMem(RegR11, RegRDX, 8)
+		ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.ClosureEnvOff)
+		ctx.setStackPointer(jitStackRootFrameSP, ctx.ClosureEnvOff, true)
+		if ctx.UsesRuntimeEnv {
+			ctx.RuntimeEnvOff = ctx.AllocStack(16)
+			ctx.EmitMovRegMem(RegR11, RegR11, 32)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.RuntimeEnvOff)
+			ctx.EmitMovRegMem(RegR11, RegRDX, 8)
+			ctx.EmitMovRegMem(RegR11, RegR11, 40)
+			ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.RuntimeEnvOff+8)
+			ctx.setStackPointer(jitStackRootFrameSP, ctx.RuntimeEnvOff, true)
+		}
+	}
+	if ctx.HasSelfLoop {
+		ctx.CurrentFuncOff = ctx.AllocStack(8)
+		ctx.EmitStoreRegMem(RegRDX, RegRSP, ctx.CurrentFuncOff)
+		ctx.setStackPointer(jitStackRootFrameSP, ctx.CurrentFuncOff, true)
+	}
 
 	// Map lambda parameters to local stack slots so symbol lookup remains correct
 	// even when the optimizer did not rewrite body symbols to NthLocalVar.
@@ -248,6 +269,13 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 					desc.StackOff = int32(index * 16)
 				}
 				numbered[index] = desc
+			}
+			for index := 0; index < proc.jitCaptureCount; index++ {
+				slot := proc.jitCaptureBase + index
+				if slot < 0 || slot >= len(numbered) {
+					panic("jit: closure capture slot outside local frame")
+				}
+				numbered[slot] = JITValueDesc{Loc: LocClosurePair, Type: JITTypeUnknown, StackOff: int32(index)}
 			}
 		}
 		putVar := func(sym Symbol, index int) {
@@ -343,20 +371,20 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.emitByte(0xC3) // ret
 	if hasStackCheck {
 		ctx.MarkLabel(stackGrowLabel)
-		// A fixed-arity Proc reconstructs len and cap, so the sole value which
-		// must survive morestack is the argument data pointer. morestack already
-		// preserves DX as closure context across stack growth. This keeps the
-		// growth path entirely callee-owned and requires no caller spill area.
-		ctx.EmitMovRegReg(RegRDX, RegRAX)
+		// Match Go's regabi prolog: public slice arguments use their caller-owned
+		// spill homes, while runtime.morestack preserves DX as closure context.
+		ctx.EmitStoreRegMem(RegRAX, RegRSP, 8)
+		ctx.EmitStoreRegMem(RegRBX, RegRSP, 16)
+		ctx.EmitStoreRegMem(RegRCX, RegRSP, 24)
 		ctx.EmitMovRegImm64(RegR11, uint64(moreStackPC))
 		ctx.emitBytes(0x41, 0xFF, 0xD3) // call r11
 		ctx.Safepoints = append(ctx.Safepoints, jitSafepoint{
 			pcOffset: int32(uintptr(ctx.Ptr) - uintptr(ctx.Start)),
 			entry:    true,
 		})
-		ctx.EmitMovRegReg(RegRAX, RegRDX)
-		ctx.EmitMovRegImm64(RegRBX, uint64(inputArgCount))
-		ctx.EmitMovRegImm64(RegRCX, uint64(inputArgCount))
+		ctx.EmitMovRegMem(RegRAX, RegRSP, 8)
+		ctx.EmitMovRegMem(RegRBX, RegRSP, 16)
+		ctx.EmitMovRegMem(RegRCX, RegRSP, 24)
 		ctx.EmitJmp(stackRetryLabel)
 	}
 	buf.stackMaps = ctx.finalizeStackMaps(frameSize, arenaOffset)
@@ -1678,7 +1706,7 @@ func (ctx *JITContext) EmitBoolDesc(src *JITValueDesc, result JITValueDesc) JITV
 			ctx.EmitMovRegImm64(mask, 0x7fffffffffffffff)
 			ctx.EmitAndInt64(dst, mask)
 			ctx.FreeReg(mask)
-		} else if src.Type == tagBool {
+		} else if src.Type == tagBool && srcLoc == LocRegPair {
 			// Bool payload is auxVal in bits [63:8]; low 8 bits hold the tag.
 			ctx.EmitShrRegImm8(dst, 8)
 		}
@@ -2155,8 +2183,13 @@ func (ctx *JITContext) EmitProcJITCall(fn, argslice, result JITValueDesc) JITVal
 	ctx.EmitMovRegReg(RegRCX, RegRBX)
 	ctx.EmitMovRegMem(RegR11, RegRDX, 0)
 
+	// Go callees own spill homes for register arguments in the caller's frame.
+	// A JIT callee uses these homes before runtime.morestack just like compiled
+	// Go code, so reserve the standard call area even on the compact path.
+	ctx.EmitSubRSP32(int32(jitGoSpillBytes))
 	ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
-	ctx.recordSafepoint(transientRoots, 0)
+	ctx.recordSafepoint(transientRoots, int32(jitGoSpillBytes))
+	ctx.EmitAddRSP32(int32(jitGoSpillBytes))
 
 	ctx.EmitStoreRegMem(RegRAX, ctx.FrameReg, result.StackOff)
 	ctx.EmitStoreRegMem(RegRBX, ctx.FrameReg, result.StackOff+8)
@@ -2440,6 +2473,12 @@ func (ctx *JITContext) EmitStoreScmerToStack(desc JITValueDesc, disp int32) {
 		if base != ctx.SliceBase {
 			ctx.FreeReg(base)
 		}
+	case LocClosurePair:
+		value := desc
+		ctx.EnsureDesc(&value)
+		ctx.EmitStoreRegMem(value.Reg, RegRSP, disp)
+		ctx.EmitStoreRegMem(value.Reg2, RegRSP, disp+8)
+		ctx.FreeDesc(&value)
 	case LocImm:
 		// Store ptr word
 		ctx.EmitMovRegImm64(RegR11, uint64(uintptr(unsafe.Pointer(desc.Imm.ptr))))

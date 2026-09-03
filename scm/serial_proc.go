@@ -49,8 +49,6 @@ type SerialProc struct {
 	borrowed      func([]Scmer) Scmer
 	jitEntry      *JITEntryPoint
 	jitArity      int
-	jitPublicArgs int
-	jitBoundArgs  []Scmer
 }
 
 func serialProcBody(v Scmer) Scmer {
@@ -211,21 +209,14 @@ func PrepareSerialProc(source Scmer) SerialProc {
 	// classifying that body could silently bypass code generation semantics.
 	if proc.Compiled != nil {
 		params, fixedArity := scmerSlice(proc.Params)
-		compiledParams, compiledFixedArity := params, fixedArity
-		if len(proc.Compiled.BoundArgs) != 0 {
-			compiledParams, compiledFixedArity = scmerSlice(proc.Compiled.Proc.Params)
-		}
-		if jitEnabled && fixedArity && compiledFixedArity && len(proc.Compiled.HiddenArgs) == 0 &&
-			len(compiledParams)-len(proc.Compiled.BoundArgs) == len(params) {
+		if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 {
 			prepared.Kind = SerialProcJIT
 			prepared.Function = proc.JIT
 			if prepared.Function == nil {
 				prepared.Function = proc.Compiled.Native
 			}
 			prepared.jitEntry = proc.Compiled
-			prepared.jitArity = len(compiledParams)
-			prepared.jitPublicArgs = len(params)
-			prepared.jitBoundArgs = proc.Compiled.BoundArgs
+			prepared.jitArity = len(params)
 			return prepared
 		}
 		prepared.Kind = SerialProcGeneral
@@ -288,7 +279,7 @@ func (p *SerialProc) PrepareCallFrame(args []Scmer) []Scmer {
 		return args
 	}
 	provided := len(args)
-	if provided > p.jitPublicArgs {
+	if provided > p.jitArity {
 		panic("JIT map-reducer received more arguments than declared parameters")
 	}
 	if p.jitArity > cap(args) {
@@ -298,10 +289,9 @@ func (p *SerialProc) PrepareCallFrame(args []Scmer) []Scmer {
 	} else {
 		args = args[:p.jitArity]
 	}
-	for index := provided; index < p.jitPublicArgs; index++ {
+	for index := provided; index < p.jitArity; index++ {
 		args[index] = NewNil()
 	}
-	copy(args[p.jitPublicArgs:], p.jitBoundArgs)
 	return args
 }
 

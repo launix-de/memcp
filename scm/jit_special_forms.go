@@ -242,6 +242,49 @@ func jitEmitSpecialStackList(ctx *JITContext, args []Scmer, _ []JITValueDesc, re
 	return jitCompileStackList(ctx, jitSpecialFormList("!list", args), ctx.SliceBase, result)
 }
 
+func jitSameCaptureLocation(left, right JITValueDesc) bool {
+	if left.Loc != right.Loc {
+		return false
+	}
+	switch left.Loc {
+	case LocInputPair, LocClosurePair, LocStack, LocStackPair, LocStackTriple:
+		return left.StackOff == right.StackOff
+	case LocReg, LocRegPair, LocRegTriple:
+		return left.Reg == right.Reg && left.Reg2 == right.Reg2 && left.Reg3 == right.Reg3
+	case LocImm:
+		return Equal(left.Imm, right.Imm)
+	case LocMem:
+		return left.MemPtr == right.MemPtr
+	default:
+		return false
+	}
+}
+
+func jitOuterCaptureSymbol(ctx *JITContext, capture jitLambdaOuterCapture) (Symbol, bool) {
+	env := ctx.Env
+	for depth := 0; depth < capture.depth && env != nil; depth++ {
+		env = env.Outer
+	}
+	index := int(capture.index)
+	if env == nil || index < 0 || index >= len(env.Numbered) {
+		return "", false
+	}
+	target := env.Numbered[index]
+	var best Symbol
+	for symbol, candidate := range env.Vars {
+		if !jitSameCaptureLocation(candidate, target) {
+			continue
+		}
+		if symbol == Symbol("session") {
+			return symbol, true
+		}
+		if best == "" || symbol < best {
+			best = symbol
+		}
+	}
+	return best, best != ""
+}
+
 func jitEmitSpecialReservedList(ctx *JITContext, args []Scmer, _ []JITValueDesc, result JITValueDesc) JITValueDesc {
 	var capacityExpr Scmer
 	switch {
@@ -576,8 +619,9 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 			continue
 		}
 	}
-	outerCaptures := jitLambdaOuterCaptures(body)
-	if jitExpressionConsumesRuntimeEnv(body) {
+	consumesRuntimeEnv := jitExpressionConsumesRuntimeEnv(body)
+	outerCaptures := jitLambdaOuterCaptures(body, !consumesRuntimeEnv)
+	if consumesRuntimeEnv {
 		seen := make(map[jitLambdaOuterCapture]struct{}, len(outerCaptures))
 		for _, capture := range outerCaptures {
 			seen[capture] = struct{}{}
@@ -599,35 +643,42 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		plainParams := params.WithoutSourceInfo()
 		if plainParams.IsSlice() {
 			publicParams := plainParams.Slice()
-			templateParams := append([]Scmer(nil), publicParams...)
-			for len(templateParams) < numVars {
-				templateParams = append(templateParams, NewSymbol("\x00jit-bound-padding"))
-			}
+			captureBase := numVars
 			symbolBindings := make(map[Symbol]NthLocalVar, len(capturedSymbols))
 			for _, symbol := range capturedSymbols {
-				symbolBindings[symbol] = NthLocalVar(len(templateParams))
-				templateParams = append(templateParams, NewSymbol("\x00jit-bound-symbol"))
+				symbolBindings[symbol] = NthLocalVar(captureBase + len(symbolBindings))
 			}
 			outerBindings := make(map[jitLambdaOuterCapture]NthLocalVar, len(outerCaptures))
 			for _, capture := range outerCaptures {
-				outerBindings[capture] = NthLocalVar(len(templateParams))
-				templateParams = append(templateParams, NewSymbol("\x00jit-bound-outer"))
+				outerBindings[capture] = NthLocalVar(captureBase + len(symbolBindings) + len(outerBindings))
+			}
+			captureCount := len(symbolBindings) + len(outerBindings)
+			captureSymbols := append([]Symbol(nil), capturedSymbols...)
+			for _, capture := range outerCaptures {
+				symbol, _ := jitOuterCaptureSymbol(ctx, capture)
+				captureSymbols = append(captureSymbols, symbol)
 			}
 			boundBody := jitBindLambdaCaptures(body, symbolBindings, outerBindings)
 			if ctx.DefiningSymbol == "" {
-				template := jitBuildLambdaClosure(NewSlice(templateParams), boundBody, NewInt(int64(len(templateParams))))
+				template := jitBuildLambdaClosure(NewSlice(publicParams), boundBody, NewInt(int64(captureBase+captureCount)))
+				template.Proc().jitCaptureBase = captureBase
+				template.Proc().jitCaptureCount = captureCount
+				template.Proc().jitCaptureSymbols = captureSymbols
 				template = jitCompileModeDeferred(true, template)
 				ctx.TrackImm(template)
 				builderArgs := append([]Scmer{template}, argExprs...)
 				return jitEmitGoVariadicCallFromExprs(ctx, jitBuildBoundCompiledLambdaClosure, builderArgs, ctx.SliceBase, result, false)
 			}
-			selfParam := NthLocalVar(len(templateParams))
-			templateParams = append(templateParams, NewSymbol("\x00jit-bound-self"))
+			selfParam := NthLocalVar(captureBase + captureCount)
+			captureCount++
 			boundBody = jitBindLambdaSelfValues(boundBody, ctx.DefiningSymbol, selfParam)
 			template := jitBuildNamedLambdaClosure(
-				NewSymbol(string(ctx.DefiningSymbol)), NewSlice(templateParams),
-				boundBody, NewInt(int64(len(templateParams))),
+				NewSymbol(string(ctx.DefiningSymbol)), NewSlice(publicParams),
+				boundBody, NewInt(int64(captureBase+captureCount)),
 			)
+			template.Proc().jitCaptureBase = captureBase
+			template.Proc().jitCaptureCount = captureCount
+			template.Proc().jitCaptureSymbols = append(captureSymbols, ctx.DefiningSymbol)
 			template = jitCompileModeDeferred(true, template)
 			ctx.TrackImm(template)
 			builderArgs := make([]Scmer, 0, len(argExprs)+2)

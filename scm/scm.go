@@ -418,6 +418,20 @@ func newProcCallEnv(proc Proc) *Env {
 	return &Env{VarsNumbered: make([]Scmer, proc.NumVars), Outer: proc.En}
 }
 
+func installProcCallCaptures(env *Env, proc Proc) {
+	if len(proc.jitCaptures) == 0 {
+		return
+	}
+	if len(proc.jitCaptures) != proc.jitCaptureCount {
+		panic("apply: inconsistent JIT capture metadata")
+	}
+	end := proc.jitCaptureBase + len(proc.jitCaptures)
+	if proc.jitCaptureBase < 0 || end > len(env.VarsNumbered) {
+		panic("apply: JIT captures exceed procedure frame")
+	}
+	copy(env.VarsNumbered[proc.jitCaptureBase:end], proc.jitCaptures)
+}
+
 func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 	if p == nil {
 		panic("apply: nil procedure")
@@ -483,6 +497,7 @@ func prepareProcCall(p *Proc, operands []Scmer, caller *Env) (*Env, Scmer) {
 	default:
 		panic("proc parameters must be list, symbol, or nil")
 	}
+	installProcCallCaptures(env, proc)
 	return env, proc.Body
 }
 
@@ -543,6 +558,7 @@ func prepareProcCallWithArgs(p *Proc, args []Scmer) (*Env, Scmer) {
 	default:
 		panic("proc parameters must be list, symbol, or nil")
 	}
+	installProcCallCaptures(env, proc)
 	return env, proc.Body
 }
 
@@ -658,6 +674,17 @@ type Proc struct {
 	JIT       func(...Scmer) Scmer
 	JITArity  int
 	JITDirect uintptr
+	// jitCaptureBase and jitCaptureCount describe numbered slots backed by the
+	// Go funcval closure environment. They are compiler metadata only: captures
+	// never extend the public func(...Scmer) Scmer argument slice.
+	jitCaptureBase  int
+	jitCaptureCount int
+	// jitCaptures keeps the typed capture environment available when the
+	// optimizer derives and recompiles a specialized Proc. The executable
+	// funcval owns the same values at runtime; this copy is compiler metadata.
+	jitCaptureKeys    []Scmer
+	jitCaptureSymbols []Symbol
+	jitCaptures       []Scmer
 	// jitCompiling breaks mutually recursive on-demand compilation without
 	// serializing unrelated procedures.
 	jitCompiling uint32

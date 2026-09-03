@@ -104,32 +104,20 @@ func TestPrepareSerialProcUsesCompiledJITDirectly(t *testing.T) {
 	}
 }
 
-func TestPrepareSerialProcInstallsBoundJITArgumentsInCallFrame(t *testing.T) {
+func TestPrepareSerialProcKeepsJITCapturesOutsideCallFrame(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
 	}
-	native := func(args ...Scmer) Scmer {
-		return NewInt(args[0].Int() + args[1].Int() + args[2].Int())
-	}
-	entry := &JITEntryPoint{
-		Native: native,
-		Proc: Proc{Params: NewSlice([]Scmer{
-			NewSymbol("acc"), NewSymbol("value"), NewSymbol("captured"),
-		})},
-		BoundArgs: []Scmer{NewInt(40)},
-	}
-	source := NewProcStruct(Proc{
-		Params: NewSlice([]Scmer{NewSymbol("acc"), NewSymbol("value")}),
-		Body:   NewNil(),
-	})
-	attachProcJIT(source.Proc(), entry)
+	outer := compileJITExpressionTestProc(t,
+		`(lambda (captured) (lambda (acc value) (+ captured acc value)))`)
+	source := Apply(outer, NewInt(40))
 	prepared := PrepareSerialProc(source)
 	if prepared.Kind != SerialProcJIT {
 		t.Fatalf("bound procedure shape = %d, want direct JIT", prepared.Kind)
 	}
 	frame := prepared.PrepareCallFrame([]Scmer{NewInt(1), NewInt(1)})
-	if len(frame) != 3 || !Equal(frame[2], NewInt(40)) {
-		t.Fatalf("prepared frame = %v, want two public arguments and bound 40", frame)
+	if len(frame) != 2 {
+		t.Fatalf("prepared frame length = %d, want public arity 2", len(frame))
 	}
 	if got := prepared.Function(frame...); !Equal(got, NewInt(42)) {
 		t.Fatalf("bound direct JIT result = %s, want 42", String(got))
