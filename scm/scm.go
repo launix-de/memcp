@@ -818,8 +818,18 @@ func CloseProcedure(value Scmer) Scmer {
 		return value
 	}
 	proc := *value.Proc()
+	hadJITCaptures := proc.JITCode != 0 && proc.Compiled != nil && proc.Compiled.CaptureCount != 0
+	if hadJITCaptures {
+		captures := append([]Scmer(nil), jitProcCaptures(value.Proc())...)
+		proc.Body = closeJITProcedureCaptures(proc.Body, proc.Compiled.CaptureBase, captures, 0)
+	}
 	if proc.En == nil || proc.En == &Globalenv {
-		return value
+		if !hadJITCaptures {
+			return value
+		}
+		proc.JITCode = 0
+		proc.Compiled = nil
+		return NewProcStruct(proc)
 	}
 	callFrame := &Env{Outer: proc.En}
 	bound := make(map[Symbol]struct{})

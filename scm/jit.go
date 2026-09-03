@@ -2054,6 +2054,81 @@ func jitProcCaptures(proc *Proc) []Scmer {
 	return unsafe.Slice((*Scmer)(unsafe.Add(unsafe.Pointer(proc), unsafe.Offsetof(ProcJIT{}.Context))), proc.Compiled.CaptureCount)
 }
 
+// closeJITProcedureCaptures replaces the hidden numbered parameters of a
+// ProcJIT tail with ordinary Scheme literals. Closed procedures are persisted
+// independently of executable mappings, so their serialized body must not
+// depend on the process-local capture tail.
+func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, depth int) Scmer {
+	if expr.IsSourceInfo() {
+		source := *expr.SourceInfo()
+		source.value = closeJITProcedureCaptures(source.value, captureBase, captures, depth)
+		return NewSourceInfo(source)
+	}
+	if depth == 0 && expr.IsNthLocalVar() {
+		index := int(expr.NthLocalVar()) - captureBase
+		if index >= 0 && index < len(captures) {
+			return captures[index]
+		}
+		return expr
+	}
+	if !expr.IsSlice() {
+		return expr
+	}
+	items := expr.Slice()
+	if len(items) == 0 {
+		return expr
+	}
+	head, hasHead := scmerSymbol(items[0])
+	if hasHead && head == Symbol("quote") {
+		return expr
+	}
+	if hasHead && head == Symbol("outer") && len(items) == 3 {
+		outerDepth, validDepth := outerDepthLiteral(items[1])
+		key := items[2].WithoutSourceInfo()
+		if validDepth && int(outerDepth) == depth && key.IsNthLocalVar() {
+			index := int(key.NthLocalVar()) - captureBase
+			if index >= 0 && index < len(captures) {
+				return captures[index]
+			}
+		}
+	}
+	bound := append([]Scmer(nil), items...)
+	if hasHead {
+		switch head {
+		case Symbol("lambda"):
+			if len(items) >= 3 {
+				bound[2] = closeJITProcedureCaptures(items[2], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		case Symbol("begin"):
+			for index := 1; index < len(items); index++ {
+				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		case Symbol("begin_mut"):
+			if len(items) > 1 {
+				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+			}
+			for index := 2; index < len(items); index++ {
+				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		case Symbol("match"), Symbol("match_mut"):
+			if len(items) > 1 {
+				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+			}
+			for index := 3; index < len(items); index += 2 {
+				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		}
+	}
+	for index, item := range items {
+		bound[index] = closeJITProcedureCaptures(item, captureBase, captures, depth)
+	}
+	return NewSlice(bound)
+}
+
 // jitBuildLambdaClosure constructs a closure Proc from a lambda form plus
 // captured symbol/value pairs:
 //

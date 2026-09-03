@@ -49,13 +49,16 @@ func buildTestSSAFunction(t *testing.T, source, name string) *ssa.Function {
 	return fn
 }
 
-func TestFallbackClosureCallsDeclaredBuiltinDirectly(t *testing.T) {
+func TestFallbackClosureUsesGeneratedCallBoundary(t *testing.T) {
 	got := generateFallbackClosure("json_encode")
 	if _, err := parser.ParseExpr(got); err != nil {
 		t.Fatalf("fallback is not valid Go: %v\n%s", err, got)
 	}
-	if !strings.Contains(got, `jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode"].Fn, args, result)`) {
-		t.Fatalf("fallback does not call the declaration directly:\n%s", got)
+	if !strings.Contains(got, `jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)`) {
+		t.Fatalf("fallback does not materialize callbacks at the generated call boundary:\n%s", got)
+	}
+	if !strings.Contains(got, `declaration := declarations["json_encode"]`) {
+		t.Fatalf("fallback does not resolve the declaration once:\n%s", got)
 	}
 	if !strings.Contains(got, `ctx.Coverage.NativeCalls++`) {
 		t.Fatalf("fallback does not account for the native declaration call:\n%s", got)

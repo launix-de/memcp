@@ -226,6 +226,19 @@ func TestJITEscapingProducerPreservesNestedOuterCaptures(t *testing.T) {
 	}
 }
 
+func TestJITCloseProcedureMaterializesInlineCaptures(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
+		(lambda () (lambda () captured)))`)
+	closed := CloseProcedure(Apply(compiled, NewString("persisted capture")))
+	if closed.Proc().JITCode != 0 || closed.Proc().Compiled != nil {
+		t.Fatal("closed capturing procedure retained process-local JIT state")
+	}
+	inner := Apply(closed)
+	if got := Apply(inner); !Equal(got, NewString("persisted capture")) {
+		t.Fatalf("closed nested capture returned %s", SerializeToString(got, &Globalenv))
+	}
+}
+
 func TestJITNoEscapeCallbackUsesStackFuncval(t *testing.T) {
 	const name = "jit_test_noescape_callback"
 	const safepointName = "jit_test_callback_safepoint"
