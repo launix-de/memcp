@@ -1487,7 +1487,9 @@ outer joins. */
 					(build_query_group_aggregates_insert_plan prepared_src grouptbl keys key_names lowering_ags aggregate_cols))))
 			(if scalar_order_base_stage
 				(list (build_group_ordered_scalar_columns_insert_plan schema tbl alias grouptbl keys key_names condition ags))
-				(map ags (lambda (ag) (build_group_aggregate_column schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
+				(map ags (lambda (ag)
+					(build_group_aggregate_column
+						stage schema tbl alias grouptbl keys key_names aggregate_condition ag))))))
 		(define empty_aggregate_seed_plans (if (and query_input
 			(and initializer_owner
 				(and (not scalar_single_stage)

@@ -4752,16 +4752,17 @@ self-joins of the same base table still describe two distinct row roles. */
 
 (define replace_group_session_expr (lambda (stage keys key_names expr)
 	(begin
+		(define normalized_expr (coalesceNil (query_session_read_expr expr) expr))
 		(define pair (reduce (group_stage_session_key_pairs stage keys key_names)
 			(lambda (found candidate)
-				(if (not (nil? found)) found (if (equal? expr (nth candidate 0)) candidate nil)))
+				(if (not (nil? found)) found (if (equal? normalized_expr (nth candidate 0)) candidate nil)))
 			nil))
 		(if (not (nil? pair))
 			(list (quote outer) 1 (symbol (nth pair 1)))
-			(match expr
-				(cons head tail) (cons head (map tail (lambda (item)
+			(if (and (list? expr) (not (empty_list? expr)))
+				(cons (car expr) (map (cdr expr) (lambda (item)
 					(replace_group_session_expr stage keys key_names item))))
-				_ expr)))))
+				expr)))))
 
 (define group_stage_session_filter_expr (lambda (stage grouptbl keys key_names)
 	(begin
@@ -5220,7 +5221,7 @@ ever-larger subtrees. */
 				(list (quote list))
 				combine_grouped)))))
 
-(define build_group_ordered_scalar_column (lambda (schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
+(define build_group_ordered_scalar_column (lambda (stage schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
 	(begin
 		(define src (list alias schema tbl false nil))
 		(define agg_col (aggregate_col_name_using src ag))
@@ -5257,7 +5258,8 @@ ever-larger subtrees. */
 					(scan_mapreduce_expr
 						(map mapcols (lambda (col) (symbol (concat alias "." col))))
 						agg_reduce
-						(lower_column_expr_for_alias src value_expr))
+						(replace_group_session_expr stage keys key_names
+							(lower_column_expr_for_alias src value_expr)))
 					agg_neutral
 					false))))))
 
@@ -5309,16 +5311,16 @@ ever-larger subtrees. */
 				(list (quote list))
 				false)))))
 
-(define build_group_aggregate_column (lambda (schema tbl alias grouptbl keys key_names condition ag)
+(define build_group_aggregate_column (lambda (stage schema tbl alias grouptbl keys key_names condition ag)
 	(match ag
 		'(((symbol scalar_order_value) value_expr order_exprs dirs offset_value) agg_reduce agg_neutral)
-		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column stage schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
 		'(((quote scalar_order_value) value_expr order_exprs dirs offset_value) agg_reduce agg_neutral)
-		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column stage schema tbl alias grouptbl keys key_names condition ag value_expr order_exprs dirs offset_value agg_reduce agg_neutral)
 		'(((symbol scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
-		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column stage schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
 		'(((quote scalar_order_value) value_expr order_expr dir) agg_reduce agg_neutral)
-		(build_group_ordered_scalar_column schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
+		(build_group_ordered_scalar_column stage schema tbl alias grouptbl keys key_names condition ag value_expr (list order_expr) (list dir) 0 agg_reduce agg_neutral)
 		(cons agg_expr (cons agg_reduce (cons agg_neutral _rest))) (begin
 			(define src (list alias schema tbl false nil))
 			(define agg_col (aggregate_col_name_using src ag))
@@ -5375,7 +5377,8 @@ ever-larger subtrees. */
 					(scan_mapreduce_expr
 						(map aggcols (lambda (col) (symbol (concat alias "." col))))
 						agg_reduce
-						(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr)))
+						(replace_group_session_expr stage keys key_names
+							(aggregate_map_value_expr ag (lower_column_expr_for_alias src agg_expr))))
 					agg_neutral
 					(aggregate_shard_combine ag)
 					false)))
