@@ -184,8 +184,19 @@ func PrepareSerialProc(source Scmer) SerialProc {
 		return prepared
 	}
 	if source.GetTag() == tagFunc {
+		function := source.Func()
+		if proc := JITProcForFunction(function); proc != nil && proc.Compiled != nil {
+			params, fixedArity := scmerSlice(proc.Params)
+			if jitEnabled && fixedArity && len(proc.Compiled.HiddenArgs) == 0 {
+				prepared.Kind = SerialProcJIT
+				prepared.Function = function
+				prepared.jitEntry = proc.Compiled
+				prepared.jitArity = len(params)
+				return prepared
+			}
+		}
 		prepared.Kind = SerialProcNative
-		prepared.Function = source.Func()
+		prepared.Function = function
 		prepared.Value = source
 		return prepared
 	}
@@ -323,7 +334,7 @@ func (p *SerialProc) Call(args []Scmer) Scmer {
 	case SerialProcNative:
 		return p.Function(args...)
 	case SerialProcJIT:
-		return p.jitEntry.Call(args...)
+		return p.CallPrepared(p.PrepareCallFrame(args))
 	case SerialProcNativeArgConstant:
 		var call [2]Scmer
 		if p.ConstantFirst {

@@ -673,20 +673,7 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 	for valueExpr.IsSourceInfo() {
 		valueExpr = valueExpr.SourceInfo().value
 	}
-	var value JITValueDesc
-	if items, ok := scmerAsSlice(valueExpr); ok && len(items) > 0 && items[0].SymbolEquals("list") {
-		values := make([]JITValueDesc, len(items)-1)
-		for i := 1; i < len(items); i++ {
-			item := jitCompileExpr(ctx, items[i], sliceBase, JITValueDesc{Loc: LocAny})
-			values[i-1] = jitMatchStableValue(ctx, item)
-		}
-		value = JITValueDesc{
-			Loc: LocVirtualSlice, Type: tagSlice, Virtual: values,
-			KnownSliceLen: int32(len(values)), KnownSliceCap: int32(len(values)), SliceSizeKnown: true,
-		}
-	} else {
-		value = jitCompileExpr(ctx, valueExpr, sliceBase, JITValueDesc{Loc: LocAny})
-	}
+	value := jitCompileExpr(ctx, valueExpr, sliceBase, JITValueDesc{Loc: LocAny})
 	value = jitMatchStableValue(ctx, value)
 	var target JITValueDesc
 	if result.Loc == LocStackPair {

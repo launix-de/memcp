@@ -16,6 +16,8 @@ Copyright (C) 2026  Carl-Philip Hänsch
 */
 package scm
 
+import "unsafe"
+
 func jitSpecialFormList(name string, args []Scmer) []Scmer {
 	list := make([]Scmer, len(args)+1)
 	list[0] = NewSymbol(name)
@@ -693,6 +695,9 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 				template.Proc().jitCaptureSymbols = captureSymbols
 				template = jitCompileModeDeferred(true, template)
 				ctx.TrackImm(template)
+				if ctx.NoEscapeLambda {
+					return jitEmitNoEscapeLambdaFunc(ctx, template, argExprs[3:], ctx.SliceBase, result)
+				}
 				builderArgs := append([]Scmer{template}, argExprs...)
 				return jitEmitGoVariadicCallFromExprs(ctx, jitBuildBoundCompiledLambdaClosure, builderArgs, ctx.SliceBase, result, false)
 			}
@@ -729,6 +734,9 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		closure := jitBuildLambdaClosure(params, body, NewInt(int64(numVars)))
 		compiled := jitCompileModeDeferred(true, closure)
 		ctx.TrackImm(compiled)
+		if ctx.NoEscapeLambda {
+			return jitEmitNoEscapeLambdaFunc(ctx, compiled, nil, ctx.SliceBase, result)
+		}
 		return jitPlaceScmerIntoTarget(ctx, JITValueDesc{Loc: LocImm, Type: tagProc, Imm: compiled}, result)
 	}
 	builder := jitBuildLambdaClosure
@@ -749,4 +757,51 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 		}
 	}
 	return jitEmitGoVariadicCallFromExprs(ctx, builder, argExprs, ctx.SliceBase, result, false)
+}
+
+// jitEmitNoEscapeLambdaFunc materializes a Go-compatible funcval in the
+// current JIT frame. The declaration of the receiving builtin guarantees that
+// neither the func value nor its context survives the call.
+func jitEmitNoEscapeLambdaFunc(ctx *JITContext, template Scmer, captureArgs []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+	proc := template.Proc()
+	if proc == nil || proc.Compiled == nil || proc.JIT == nil {
+		panic("jit: noescape lambda template is not compiled")
+	}
+	if len(captureArgs)%2 != 0 || len(captureArgs)/2 != proc.jitCaptureCount {
+		panic("jit: invalid noescape lambda captures")
+	}
+	captureCount := len(captureArgs) / 2
+	objectBytes := int32(jitFuncValueHeaderSize) + int32(captureCount*16) + 16
+	objectOff := ctx.AllocStack(objectBytes)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uintptr(proc.Compiled.CodePtr)))
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, objectOff)
+	ctx.TrackImm(template)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uintptr(unsafe.Pointer(proc))))
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, objectOff+8)
+	ctx.setStackPointer(jitStackRootFrameSP, objectOff+8, true)
+	ctx.EmitMovRegImm64(ctx.ScratchReg, uint64(uintptr(unsafe.Pointer(&jitFuncValueSentinel))))
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, objectOff+16)
+	ctx.setStackPointer(jitStackRootFrameSP, objectOff+16, true)
+	for index := 0; index < captureCount; index++ {
+		captureOff := objectOff + int32(jitFuncValueHeaderSize) + int32(index*16)
+		jitCompileRootedCallValueAt(ctx, captureArgs[index*2+1], sliceBase, captureOff)
+	}
+	runtimeEnv := JITValueDesc{Loc: LocImm, Type: tagAny, Imm: NewAny(proc.En)}
+	ctx.TrackImm(runtimeEnv.Imm)
+	runtimeEnvOff := objectOff + int32(jitFuncValueHeaderSize) + int32(captureCount*16)
+	ctx.EmitStoreScmerToStack(runtimeEnv, runtimeEnvOff)
+	ctx.setStackPointer(jitStackRootFrameSP, runtimeEnvOff, true)
+
+	holderOff := ctx.AllocStack(8)
+	ctx.EmitLeaRegMem(ctx.ScratchReg, ctx.StackReg, objectOff)
+	ctx.EmitStoreRegMem(ctx.ScratchReg, ctx.StackReg, holderOff)
+	ctx.setStackPointer(jitStackRootFrameSP, holderOff, true)
+	target := jitEnsureResultPair(ctx, result)
+	ctx.EmitLeaRegMem(target.Reg, ctx.StackReg, holderOff)
+	ctx.EmitMovRegImm64(target.Reg2, makeAux(tagFunc, 0))
+	target.Type = tagFunc
+	target.Rooted = true
+	ctx.BindReg(target.Reg, &target)
+	ctx.BindReg(target.Reg2, &target)
+	return target
 }

@@ -20,32 +20,124 @@ import (
 	"fmt"
 	"runtime"
 	"testing"
+	"unsafe"
 )
 
 var jitListBenchmarkSink Scmer
 
-func TestJITPreviewCallArgumentResolvesSymbols(t *testing.T) {
-	local := JITValueDesc{Loc: LocStackPair, Type: tagFastDict, StackOff: 32}
-	ctx := &JITContext{Env: &JITEnv{Vars: map[Symbol]JITValueDesc{
-		Symbol("dynamic_argument"): local,
-	}}}
-	if got := jitPreviewCallArgument(ctx, nil, 0, NewSymbol("dynamic_argument")); got.Loc != local.Loc || got.Type != local.Type || got.StackOff != local.StackOff {
-		t.Fatalf("local symbol preview = %+v, want %+v", got, local)
+func TestJITFunctionValueCarriesOriginalProcAndInlineCaptures(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
+		(lambda (value) (list captured value)))`)
+	inner := Apply(compiled, NewString("outer"))
+	if inner.Proc() == nil || inner.Proc().JIT == nil {
+		t.Fatal("capturing lambda has no native function")
 	}
+	if got := JITProcForFunction(inner.Proc().JIT); got != inner.Proc() {
+		t.Fatalf("funcval Proc = %p, want %p", got, inner.Proc())
+	}
+	funcval := *(*unsafe.Pointer)(unsafe.Pointer(&inner.Proc().JIT))
+	if got := *(**Proc)(unsafe.Add(funcval, unsafe.Sizeof(uintptr(0)))); got != inner.Proc() {
+		t.Fatalf("RDX+8 Proc = %p, want %p", got, inner.Proc())
+	}
+	if got := *(**byte)(unsafe.Add(funcval, 2*unsafe.Sizeof(uintptr(0)))); got != &jitFuncValueSentinel {
+		t.Fatal("funcval sentinel is missing")
+	}
+	if len(inner.Proc().jitCaptures) != 1 {
+		t.Fatalf("capture count = %d, want 1", len(inner.Proc().jitCaptures))
+	}
+	capture := *(*Scmer)(unsafe.Add(funcval, jitFuncValueHeaderSize))
+	if !Equal(capture, inner.Proc().jitCaptures[0]) {
+		t.Fatalf("inline capture = %s, want %s", String(capture), String(inner.Proc().jitCaptures[0]))
+	}
+	if got := Apply(inner, NewString("inner")); !Equal(got, NewSlice([]Scmer{NewString("outer"), NewString("inner")})) {
+		t.Fatalf("capturing funcval returned %s", String(got))
+	}
+}
 
-	const globalName = Symbol("jit_preview_global_argument")
-	previous, existed := Globalenv.Vars[globalName]
-	Globalenv.Vars[globalName] = NewSlice([]Scmer{NewInt(1), NewInt(2)})
-	defer func() {
-		if existed {
-			Globalenv.Vars[globalName] = previous
-		} else {
-			delete(Globalenv.Vars, globalName)
+func TestJITProcForFunctionRejectsOrdinaryGoFunction(t *testing.T) {
+	ordinary := func(...Scmer) Scmer { return NewNil() }
+	if got := JITProcForFunction(ordinary); got != nil {
+		t.Fatalf("ordinary Go function resolved to Proc %p", got)
+	}
+}
+
+func TestJITNoEscapeCallbackUsesStackFuncval(t *testing.T) {
+	const name = "jit_test_noescape_callback"
+	consumer := func(args ...Scmer) Scmer {
+		if len(args) != 2 || args[0].GetTag() != tagFunc {
+			panic("noescape callback was not passed as a native func")
 		}
+		if JITProcForFunction(args[0].Func()) == nil {
+			panic("noescape callback lost its original Proc")
+		}
+		prepared := PrepareSerialProc(args[0])
+		return prepared.Function(args[1:2]...)
+	}
+	declaration := &Declaration{
+		Name: name,
+		Fn:   consumer,
+		Type: &TypeDescriptor{Kind: "func", Forbidden: true, Params: []*TypeDescriptor{
+			{Kind: "func", NoEscape: true, Params: []*TypeDescriptor{{Kind: "any"}}, Return: &TypeDescriptor{Kind: "any"}},
+			{Kind: "any"},
+		}, Return: &TypeDescriptor{Kind: "any"}},
+	}
+	Declare(&Globalenv, declaration)
+	defer func() {
+		delete(Globalenv.Vars, Symbol(name))
+		delete(declarations, name)
+		delete(declarationsByFunction, FunctionIdentity(consumer))
 	}()
-	got := jitPreviewCallArgument(ctx, nil, 0, NewSymbol(string(globalName)))
-	if got.Loc != LocImm || got.Type != tagSlice || !got.SliceSizeKnown || got.KnownSliceLen != 2 {
-		t.Fatalf("global symbol preview = %+v, want known two-item slice", got)
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured value)
+		(jit_test_noescape_callback (lambda (item) (+ item captured)) value))`)
+	args := []Scmer{NewInt(5), NewInt(7)}
+	if got := compiled.Proc().JIT(args...); !Equal(got, NewInt(12)) {
+		t.Fatalf("stack funcval returned %s, want 12", String(got))
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if got := compiled.Proc().JIT(args...); !Equal(got, NewInt(12)) {
+			t.Fatalf("stack funcval returned %s, want 12", String(got))
+		}
+	}); allocations != 0 {
+		t.Fatalf("noescape callback call allocated %.2f objects, want 0", allocations)
+	}
+}
+
+func TestJITStackListPreservesNestedListWords(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (membership)
+		(begin
+			(define stage (nth membership 0))
+			(merge (list (list (list 'work 1)) (nth stage 11))))))`)
+	facts := NewSlice([]Scmer{NewSlice([]Scmer{NewSymbol("fact"), NewInt(2)})})
+	stageItems := make([]Scmer, 12)
+	for index := range stageItems {
+		stageItems[index] = NewNil()
+	}
+	stageItems[11] = facts
+	membership := NewSlice([]Scmer{NewSlice(stageItems)})
+	want := NewSlice([]Scmer{
+		NewSlice([]Scmer{NewSymbol("work"), NewInt(1)}),
+		NewSlice([]Scmer{NewSymbol("fact"), NewInt(2)}),
+	})
+	if got := Apply(compiled, membership); !Equal(got, want) {
+		t.Fatalf("nested stack-list value = %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITNestedListProducerSurvivesWideLocalFrame(t *testing.T) {
+	source := `(lambda (stage) (begin `
+	for index := 0; index < 48; index++ {
+		source += fmt.Sprintf(`(define value%d (list %d)) `, index, index)
+	}
+	source += `(merge (list value0 value7 value19 value31 value47 (nth stage 11)))))`
+	compiled := compileJITExpressionTestProc(t, source)
+	stage := make([]Scmer, 12)
+	for index := range stage {
+		stage[index] = NewNil()
+	}
+	stage[11] = NewSlice([]Scmer{NewInt(99)})
+	want := NewSlice([]Scmer{NewInt(0), NewInt(7), NewInt(19), NewInt(31), NewInt(47), NewInt(99)})
+	if got := Apply(compiled, NewSlice(stage)); !Equal(got, want) {
+		t.Fatalf("wide-frame nested list = %s, want %s", String(got), String(want))
 	}
 }
 
@@ -162,6 +254,53 @@ func requireNoDynamicJITCalls(t *testing.T, compiled Scmer) {
 	coverage := compiled.Proc().Compiled.Coverage
 	if coverage.DynamicCalls != 0 {
 		t.Fatalf("expected complete expression lowering, got %+v", coverage)
+	}
+}
+
+func TestJITOrdinaryBuiltinsDispatchThroughDeclarationEmitter(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	tests := []struct {
+		name string
+	}{
+		{name: "jit-enabled?"},
+		{name: "cdr"},
+		{name: "error"},
+	}
+	for _, test := range tests {
+		declaration := declarations[test.name]
+		if declaration == nil || declaration.Type == nil || declaration.Type.JITEmit == nil {
+			t.Fatalf("builtin %s has no declaration emitter", test.name)
+		}
+		original := declaration.Type.JITEmit
+		called := func() (called bool) {
+			declaration.Type.JITEmit = func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc {
+				called = true
+				return original(ctx, args, descs, result)
+			}
+			defer func() { declaration.Type.JITEmit = original }()
+			params := NewSlice(nil)
+			call := []Scmer{Globalenv.Vars[Symbol(test.name)]}
+			if test.name != "jit-enabled?" {
+				params = NewSlice([]Scmer{NewSymbol("value")})
+				call = append(call, NewNthLocalVar(0))
+			}
+			compiled := jitCompile(NewProcStruct(Proc{
+				Params:       params,
+				Body:         NewSlice(call),
+				En:           &Globalenv,
+				NumVars:      len(call) - 1,
+				NumberedOnly: true,
+			}))
+			if compiled.Proc() == nil || compiled.Proc().Compiled == nil {
+				t.Fatalf("builtin %s test procedure did not compile", test.name)
+			}
+			return called
+		}()
+		if !called {
+			t.Fatalf("builtin %s bypassed its declaration emitter", test.name)
+		}
 	}
 }
 
@@ -496,6 +635,9 @@ func TestJITExpressionWithSessionRebindsNativeCapture(t *testing.T) {
 }
 
 func TestJITExpressionWithSessionRebindsRuntimeEnvironment(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
 	first := NewFunc(func(...Scmer) Scmer { return NewInt(1) })
 	second := NewFunc(func(...Scmer) Scmer { return NewInt(2) })
 	env := &Env{Vars: Vars{Symbol("session"): first}, Outer: &Globalenv}

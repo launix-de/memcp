@@ -19,7 +19,6 @@ package scm
 import (
 	"fmt"
 	"io"
-	"math"
 	"math/bits"
 	"sort"
 	"sync/atomic"
@@ -89,11 +88,9 @@ func jitRequiredLocalSlots(expr Scmer, minimum int) int {
 	}
 	items := expr.Slice()
 	if len(items) > 0 {
-		if head, ok := scmerSymbol(items[0]); ok {
-			switch string(head) {
-			case "quote", "parser", "lambda":
-				return minimum
-			}
+		switch jitSyntaxKind(items[0]) {
+		case SyntaxQuote, SyntaxParser, SyntaxLambda:
+			return minimum
 		}
 	}
 	for _, item := range items {
@@ -407,14 +404,6 @@ func jitMakeReservedList(capacityValue Scmer) Scmer {
 		capacity = 0
 	}
 	return NewSlice(make([]Scmer, 0, capacity))
-}
-
-func jitCdrScmer(value Scmer) Scmer {
-	list := asSlice(value, "cdr")
-	if len(list) == 0 {
-		return NewSlice(nil)
-	}
-	return NewSlice(list[1:])
 }
 
 func jitStoreScmerAt(address *Scmer, value Scmer) {
@@ -1698,13 +1687,22 @@ func jitBuildIfTail(tail []Scmer) Scmer {
 }
 
 func jitEmitGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, argExprs []Scmer, sliceBase Reg, result JITValueDesc, retainsArgs bool) JITValueDesc {
+	return jitEmitDeclaredGoVariadicCallFromExprs(ctx, fn, nil, argExprs, sliceBase, result, retainsArgs)
+}
+
+func jitEmitDeclaredGoVariadicCallFromExprs(ctx *JITContext, fn func(...Scmer) Scmer, decl *Declaration, argExprs []Scmer, sliceBase Reg, result JITValueDesc, retainsArgs bool) JITValueDesc {
 	argc := len(argExprs)
 	stackStart := ctx.BPOffset
 	argsOff := int32(0)
 	if argc > 0 {
 		argsOff = ctx.AllocStack(int32(argc * 16))
 		for i := range argExprs {
+			previousNoEscape := ctx.NoEscapeLambda
+			if param := jitDeclarationParam(decl, i); param != nil && param.Kind == "func" && param.NoEscape {
+				ctx.NoEscapeLambda = true
+			}
 			jitCompileRootedCallValueAt(ctx, argExprs[i], sliceBase, argsOff+int32(i*16))
+			ctx.NoEscapeLambda = previousNoEscape
 		}
 		// Every argument is stable in the frame now. Argument emitters may have
 		// consumed temporary registers without descriptor ownership; none remain
@@ -1989,7 +1987,7 @@ func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, opera
 	return out
 }
 
-func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
+func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, decl *Declaration, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	if parser, ok := jitStaticParserForExpr(ctx, callableExpr); ok {
 		if len(operands) != 1 {
 			panic("jit: parser call expects one input")
@@ -2013,7 +2011,12 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	operandOff := ctx.AllocStack(int32(len(operands) * 16))
 	operandValues := make([]JITValueDesc, len(operands))
 	for index, operand := range operands {
+		previousNoEscape := ctx.NoEscapeLambda
+		if param := jitDeclarationParam(decl, index); param != nil && param.Kind == "func" && param.NoEscape {
+			ctx.NoEscapeLambda = true
+		}
 		operandValues[index] = jitCompileRootedCallValueAt(ctx, operand, sliceBase, operandOff+int32(index*16))
+		ctx.NoEscapeLambda = previousNoEscape
 	}
 
 	resultOff := ctx.AllocSpill(16)
@@ -2134,174 +2137,11 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 	recursiveLambdas := ctx.RecursiveLambdas
 	ctx.RecursiveLambdas = false
 	defer func() { ctx.RecursiveLambdas = recursiveLambdas }()
-	return jitCompileDynamicCall(ctx, callableExpr, operands, sliceBase, result)
-}
-
-func jitTypeDescriptorTag(td *TypeDescriptor) uint8 {
-	if td == nil {
-		return JITTypeUnknown
-	}
-	switch td.Kind {
-	case "bool":
-		return tagBool
-	case "int":
-		return tagInt
-	case "string":
-		return tagString
-	case "symbol":
-		return tagSymbol
-	case "nil":
-		return tagNil
-	case "list":
-		return tagSlice
-	default:
-		return JITTypeUnknown
-	}
-}
-
-// jitPreviewCallArgument extracts policy facts without writing machine code.
-// The real argument compiler remains the single source of value placement;
-// this preview only carries facts that are already explicit in the optimized
-// Scheme tree or its lexical descriptor environment.
-func jitPreviewCallArgument(ctx *JITContext, decl *Declaration, index int, expr Scmer) JITValueDesc {
-	for expr.IsSourceInfo() {
-		expr = expr.SourceInfo().value
-	}
-	if param := jitDeclarationParam(decl, index); param != nil && param.Kind == "func" {
-		if lambda, ok := jitLambdaTemplate(expr, ctx.Env); ok {
-			return JITValueDesc{Loc: LocLambdaTemplate, Type: tagProc, Lambda: lambda}
-		}
-	}
-	if expr.IsNthLocalVar() {
-		local := int(expr.NthLocalVar())
-		if ctx.Env != nil && local < len(ctx.Env.Numbered) {
-			if value := ctx.Env.Numbered[local]; value.Loc != LocNone {
-				return value
-			}
-		}
-		if local < ctx.InputArgCount {
-			return JITValueDesc{Loc: LocInputPair, Type: JITTypeUnknown, StackOff: int32(local)}
-		}
-	}
-	if expr.IsSymbol() {
-		if ctx.Env != nil {
-			if value, exists := ctx.Env.Lookup(expr.Symbol()); exists {
-				return value
-			}
-		}
-		if value, exists := Globalenv.Vars[expr.Symbol()]; exists {
-			preview := JITValueDesc{Loc: LocImm, Type: value.GetTag(), Imm: value}
-			if value.IsSlice() {
-				preview.KnownSliceLen = int32(len(value.Slice()))
-				preview.SliceSizeKnown = true
-			}
-			return preview
-		}
-		return JITValueDesc{Type: JITTypeUnknown}
-	}
-	if expr.GetTag() != tagSlice {
-		return JITValueDesc{Loc: LocImm, Type: expr.GetTag(), Imm: expr}
-	}
-	parts := expr.Slice()
-	if len(parts) == 2 && parts[0].SymbolEquals("quote") {
-		quoted := parts[1]
-		preview := JITValueDesc{Loc: LocImm, Type: quoted.GetTag(), Imm: quoted}
-		if quoted.IsSlice() {
-			preview.KnownSliceLen = int32(len(quoted.Slice()))
-			preview.SliceSizeKnown = true
-		}
-		return preview
-	}
-	if len(parts) == 0 {
-		return JITValueDesc{Type: JITTypeUnknown}
-	}
-	if nested := DeclarationForValue(parts[0]); nested != nil && nested.Type != nil {
-		preview := JITValueDesc{Type: jitTypeDescriptorTag(nested.Type.Return)}
-		if preview.Type == tagSlice && nested.Type.Return != nil && nested.Type.Return.Length >= 0 {
-			preview.KnownSliceLen = int32(nested.Type.Return.Length)
-			preview.SliceSizeKnown = true
-		}
-		return preview
-	}
-	return JITValueDesc{Type: JITTypeUnknown}
+	return jitCompileDynamicCall(ctx, callableExpr, operands, nil, sliceBase, result)
 }
 
 const jitBuiltinInlineBudget = 2048
 const jitTrivialVirtualInlineCost = 2
-
-func jitShouldInlineBuiltin(ctx *JITContext, decl *Declaration, args []JITValueDesc) bool {
-	if decl == nil || decl.Type == nil || decl.Type.JITInlineCost == 0 {
-		return true
-	}
-	knownTypes, knownShapes, knownArgs := 0, 0, 0
-	hasVirtualArgs := false
-	knownCallback, hasCallback := false, false
-	for index, arg := range args {
-		if arg.Type != JITTypeUnknown {
-			knownTypes++
-		}
-		hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
-		hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
-		if hasKnownShape {
-			knownShapes++
-		}
-		if arg.Type != JITTypeUnknown || hasKnownShape {
-			knownArgs++
-		}
-		param := jitDeclarationParam(decl, index)
-		if param != nil && param.Kind == "func" {
-			hasCallback = true
-			if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
-				(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
-				knownCallback = true
-			}
-		}
-	}
-	if hasCallback {
-		// A known callback removes the Apply boundary from every loop iteration;
-		// this dominates the one-time instruction-cache cost for map/reduce-style
-		// operators. Unknown callbacks retain the compact native Go loop.
-		if !decl.Type.JITInlineCallbacks || !knownCallback {
-			return false
-		}
-	} else {
-		cost := int(decl.Type.JITInlineCost)
-		if decl.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
-			return false
-		}
-		if decl.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
-			return false
-		}
-		switch {
-		case decl.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
-			// Trivial aggregate constructors such as list only arrange their SSA
-			// inputs and perform one ownership materialization. Unknown element
-			// types do not add control flow, so routing them through the generic
-			// variadic Go-call builder would only allocate an argument slice and
-			// invoke a write-barrier helper once per element.
-		case decl.Type.JITVirtualArgs && hasVirtualArgs && decl.Type.JITInlineCost <= 32:
-			// Virtual-list producers and consumers preserve fusion opportunities
-			// which a native Go call would force us to materialize.
-		case len(args) > 0 && knownTypes == len(args) && cost <= 256:
-			// Full type knowledge lets generated emitters discard dynamic type
-			// switches. Partial knowledge did not amortize emitted code in A/B.
-		case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
-			// Small shape-specialized emitters can eliminate list allocation and
-			// length/tag checks even when element types remain dynamic.
-		default:
-			return false
-		}
-	}
-	cost := int(decl.Type.JITInlineCost)
-	if cost == math.MaxUint16 {
-		return false
-	}
-	if ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
-		return false
-	}
-	ctx.BuiltinInlineCost += cost
-	return true
-}
 
 func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
 	if ctx.SelfParamCount < 0 || len(operands) > ctx.SelfParamCount {
@@ -2581,11 +2421,10 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			// well: routing an already-known variadic function through ApplyEx would
 			// let it retain the JIT's temporary argument frame.
 			if decl == nil || decl.IsSpecialForm {
-				return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
+				return jitCompileDynamicCall(ctx, list[0], list[1:], nil, sliceBase, result)
 			}
 			head = Symbol(decl.Name)
 		}
-		name := string(head)
 		if decl != nil && decl.IsSpecialForm {
 			if decl.Type == nil || decl.Type.JITEmit == nil {
 				panic("jit: special form has no declaration emitter: " + decl.Name)
@@ -2595,64 +2434,14 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 		if jitIsSelfCall(ctx, head) {
 			return jitCompileSelfCall(ctx, list[1:], sliceBase, result)
 		}
-		switch name {
-		case "jit-enabled?":
-			if len(list) != 1 {
-				panic("jit: jit-enabled? does not accept arguments")
-			}
-			imm := NewBool(jitEnabled)
-			ctx.TrackImm(imm)
-			return JITValueDesc{Loc: LocImm, Type: tagBool, Imm: imm}
-		case "cdr":
-			if len(list) != 2 {
-				panic("jit: cdr expects exactly one argument")
-			}
-			stackStart := ctx.BPOffset
-			value := jitCompileRootedCallValue(ctx, list[1], sliceBase)
-			target := jitEnsureResultPair(ctx, result)
-			out := ctx.EmitGoCallScalarInto(GoFuncAddr(jitCdrScmer), []JITValueDesc{value}, target)
-			out.Type = tagSlice
-			ctx.FreeStack(ctx.BPOffset - stackStart)
-			return jitRootScmer(ctx, out)
-		case "error":
-			if len(list) > 2 {
-				declaration := declarations["error"]
-				return jitEmitGoVariadicCallFromExprs(ctx, declaration.Fn, list[1:], sliceBase, result, declaration.RetainsCallArgs)
-			}
-			if len(list) != 2 {
-				panic("jit: error expects at least one argument")
-			}
-			arg := jitCompileExpr(ctx, list[1], sliceBase, JITValueDesc{Loc: LocAny})
-			pair := JITValueDesc{
-				Loc:  LocRegPair,
-				Type: JITTypeUnknown,
-				Reg:  ctx.AllocReg(),
-				Reg2: ctx.AllocReg(),
-			}
-			pair = jitPlaceIntoPair(ctx, &arg, pair)
-			ctx.EmitGoCallVoid(GoFuncAddr(jitPanic), []JITValueDesc{pair})
-			ctx.FreeDesc(&pair)
-			target := jitEnsureResultPair(ctx, result)
-			ctx.EmitMakeNil(target)
-			return target
-		}
 		if decl == nil {
 			var ok bool
-			decl, ok = declarations[name]
+			decl, ok = declarations[string(head)]
 			if !ok {
-				return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
+				return jitCompileDynamicCall(ctx, list[0], list[1:], nil, sliceBase, result)
 			}
 		}
 		if decl.Type != nil && decl.Type.JITEmit != nil {
-			policyArgs := make([]JITValueDesc, len(list)-1)
-			for i := 1; i < len(list); i++ {
-				policyArgs[i-1] = jitPreviewCallArgument(ctx, decl, i-1, list[i])
-			}
-			if !jitShouldInlineBuiltin(ctx, decl, policyArgs) {
-				ctx.Coverage.NativeCalls++
-				return jitEmitGoVariadicCallFromExprs(ctx, decl.Fn, list[1:], sliceBase, result, decl.RetainsCallArgs)
-			}
-			ctx.Coverage.InlinedCalls++
 			if decl.Type.JITVirtualArgs {
 				args := make([]JITValueDesc, len(list)-1)
 				for i := 1; i < len(list); i++ {
@@ -2680,6 +2469,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 					args[i-1] = ctx.stabilizeForNested(args[i-1])
 				}
 				ctx.ReclaimUntrackedRegs()
+				if decl.Type.JITInlineCost == 0 {
+					ctx.Coverage.InlinedCalls++
+				}
 				out := decl.Type.JITEmit(ctx, list[1:], args, result)
 				out.NoHeapPointer = jitReturnHasNoHeapPointer(decl.Type.Return)
 				return out
@@ -2745,6 +2537,9 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			ctx.ReclaimUntrackedRegs()
 			allocatedBeforeEmitter := ctx.AllRegs &^ ctx.FreeRegs
 			labelsBefore := len(ctx.Labels)
+			if decl.Type.JITInlineCost == 0 {
+				ctx.Coverage.InlinedCalls++
+			}
 			out := decl.Type.JITEmit(ctx, list[1:], args, result)
 			ctx.SyncDesc(&out)
 			// Generated control-flow emitters may spill their result placement while
@@ -2802,10 +2597,11 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 			}
 			return out
 		}
-		// Declarations without a dedicated emitter stay interpreted. The former
-		// generic variadic bridge built argument arrays below the fixed frame and
-		// also made every ordinary runtime function part of the experimental ABI.
-		return jitCompileDynamicCall(ctx, list[0], list[1:], sliceBase, result)
+		// A known native declaration needs neither Apply nor dynamic callable
+		// dispatch. Its recursive parameter descriptors also tell lambda emission
+		// which callback funcvals may live in this invocation's stack frame.
+		ctx.Coverage.NativeCalls++
+		return jitEmitDeclaredGoVariadicCallFromExprs(ctx, decl.Fn, decl, list[1:], sliceBase, result, decl.RetainsCallArgs)
 	default:
 		if expr.GetTag() >= 100 {
 			// Storage and extensions use opaque custom literal tags. Eval returns

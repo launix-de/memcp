@@ -57,6 +57,9 @@ func TestFallbackClosureCallsDeclaredBuiltinDirectly(t *testing.T) {
 	if !strings.Contains(got, `jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode"].Fn, args, result)`) {
 		t.Fatalf("fallback does not call the declaration directly:\n%s", got)
 	}
+	if !strings.Contains(got, `ctx.Coverage.NativeCalls++`) {
+		t.Fatalf("fallback does not account for the native declaration call:\n%s", got)
+	}
 }
 
 func TestOperatorJITEmitMissing(t *testing.T) {
@@ -85,6 +88,8 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 		t.Fatal(errMsg)
 	}
 	for _, want := range []string{
+		`declaration := declarations["add"]`,
+		"ctx.Coverage.InlinedCalls++",
 		"= result.Reg2",
 		"ctx.EmitAddInt64",
 		"ctx.EmitMakeInt(result",

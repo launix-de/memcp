@@ -236,16 +236,15 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ctx.SliceBaseTracksRSP = true
 	}
 	if proc != nil && (proc.jitCaptureCount != 0 || ctx.UsesRuntimeEnv) {
-		ctx.ClosureEnvOff = ctx.AllocStack(8)
-		ctx.EmitMovRegMem(RegR11, RegRDX, 8)
-		ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.ClosureEnvOff)
-		ctx.setStackPointer(jitStackRootFrameSP, ctx.ClosureEnvOff, true)
+		ctx.ClosureFuncOff = ctx.AllocStack(8)
+		ctx.EmitStoreRegMem(RegRDX, RegRSP, ctx.ClosureFuncOff)
+		ctx.setStackPointer(jitStackRootFrameSP, ctx.ClosureFuncOff, true)
 		if ctx.UsesRuntimeEnv {
 			ctx.RuntimeEnvOff = ctx.AllocStack(16)
-			ctx.EmitMovRegMem(RegR11, RegR11, 32)
+			runtimeEnvOffset := int32(jitFuncValueHeaderSize) + int32(proc.jitCaptureCount*16)
+			ctx.EmitMovRegMem(RegR11, RegRDX, runtimeEnvOffset)
 			ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.RuntimeEnvOff)
-			ctx.EmitMovRegMem(RegR11, RegRDX, 8)
-			ctx.EmitMovRegMem(RegR11, RegR11, 40)
+			ctx.EmitMovRegMem(RegR11, RegRDX, runtimeEnvOffset+8)
 			ctx.EmitStoreRegMem(RegR11, RegRSP, ctx.RuntimeEnvOff+8)
 			ctx.setStackPointer(jitStackRootFrameSP, ctx.RuntimeEnvOff, true)
 		}
@@ -327,12 +326,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		ctx.EnsureDesc(&desc)
 		switch desc.Loc {
 		case LocRegPair:
-			if desc.Reg != RegRAX {
-				ctx.emitMovRegReg(RegRAX, desc.Reg)
-			}
-			if desc.Reg2 != RegRBX {
-				ctx.emitMovRegReg(RegRBX, desc.Reg2)
-			}
+			ctx.EmitMovPairToResult(&desc, &result)
 		case LocReg:
 			ret := JITValueDesc{Loc: LocRegPair, Reg: RegRAX, Reg2: RegRBX}
 			switch desc.Type {

@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 	"time"
 )
-import "unsafe"
 
 // SessionState tracks one active connection for SHOW [FULL] PROCESSLIST.
 // The owning goroutine is the only writer of mutable fields — no global lock
@@ -432,8 +431,65 @@ func init_processlist() {
 			Return: &TypeDescriptor{Kind: "list"},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				if !jitEnabled {
+					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declarations["show_processlist"].Fn, args, result)
 				}
+				declaration := declarations["show_processlist"]
+				inline := declaration.RetainsCallArgs
+				knownTypes, knownShapes, knownArgs := 0, 0, 0
+				hasVirtualArgs := false
+				knownCallback, hasCallback := false, false
+				for index, arg := range args {
+					if arg.Type != JITTypeUnknown {
+						knownTypes++
+					}
+					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
+					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
+					if hasKnownShape {
+						knownShapes++
+					}
+					if arg.Type != JITTypeUnknown || hasKnownShape {
+						knownArgs++
+					}
+					parameter := jitDeclarationParam(declaration, index)
+					if parameter != nil && parameter.Kind == "func" {
+						hasCallback = true
+						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
+							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
+							knownCallback = true
+						}
+					}
+				}
+				cost := int(declaration.Type.JITInlineCost)
+				if !inline && hasCallback {
+					inline = declaration.Type.JITInlineCallbacks && knownCallback
+				} else if !inline {
+					switch {
+					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
+						inline = true
+					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
+						inline = true
+					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
+						inline = true
+					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
+						inline = true
+					}
+					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
+						inline = false
+					}
+					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
+						inline = false
+					}
+				}
+				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+					inline = false
+				}
+				if !inline {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+				}
+				ctx.BuiltinInlineCost += cost
+				ctx.Coverage.InlinedCalls++
 				var d4 JITValueDesc
 				_ = d4
 				var d5 JITValueDesc
@@ -3478,8 +3534,65 @@ func init_processlist() {
 			Return: &TypeDescriptor{Kind: "int"},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				if !jitEnabled {
+					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declarations["connection_id"].Fn, args, result)
 				}
+				declaration := declarations["connection_id"]
+				inline := declaration.RetainsCallArgs
+				knownTypes, knownShapes, knownArgs := 0, 0, 0
+				hasVirtualArgs := false
+				knownCallback, hasCallback := false, false
+				for index, arg := range args {
+					if arg.Type != JITTypeUnknown {
+						knownTypes++
+					}
+					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
+					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
+					if hasKnownShape {
+						knownShapes++
+					}
+					if arg.Type != JITTypeUnknown || hasKnownShape {
+						knownArgs++
+					}
+					parameter := jitDeclarationParam(declaration, index)
+					if parameter != nil && parameter.Kind == "func" {
+						hasCallback = true
+						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
+							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
+							knownCallback = true
+						}
+					}
+				}
+				cost := int(declaration.Type.JITInlineCost)
+				if !inline && hasCallback {
+					inline = declaration.Type.JITInlineCallbacks && knownCallback
+				} else if !inline {
+					switch {
+					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
+						inline = true
+					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
+						inline = true
+					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
+						inline = true
+					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
+						inline = true
+					}
+					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
+						inline = false
+					}
+					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
+						inline = false
+					}
+				}
+				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+					inline = false
+				}
+				if !inline {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+				}
+				ctx.BuiltinInlineCost += cost
+				ctx.Coverage.InlinedCalls++
 				var d0 JITValueDesc
 				_ = d0
 				var d1 JITValueDesc
@@ -4046,8 +4159,65 @@ func init_processlist() {
 			Return: &TypeDescriptor{Kind: "bool"},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				if !jitEnabled {
+					ctx.Coverage.NativeCalls++
 					return jitEmitGoVariadicCallFromDescs(ctx, declarations["kill_query"].Fn, args, result)
 				}
+				declaration := declarations["kill_query"]
+				inline := declaration.RetainsCallArgs
+				knownTypes, knownShapes, knownArgs := 0, 0, 0
+				hasVirtualArgs := false
+				knownCallback, hasCallback := false, false
+				for index, arg := range args {
+					if arg.Type != JITTypeUnknown {
+						knownTypes++
+					}
+					hasKnownShape := arg.Loc == LocImm || arg.SliceSizeKnown || arg.Loc == LocVirtualSlice
+					hasVirtualArgs = hasVirtualArgs || arg.Loc == LocVirtualSlice
+					if hasKnownShape {
+						knownShapes++
+					}
+					if arg.Type != JITTypeUnknown || hasKnownShape {
+						knownArgs++
+					}
+					parameter := jitDeclarationParam(declaration, index)
+					if parameter != nil && parameter.Kind == "func" {
+						hasCallback = true
+						if (arg.Loc == LocLambdaTemplate && arg.Lambda != nil) ||
+							(arg.Loc == LocImm && (arg.Imm.GetTag() == tagProc || arg.Imm.GetTag() == tagFunc)) {
+							knownCallback = true
+						}
+					}
+				}
+				cost := int(declaration.Type.JITInlineCost)
+				if !inline && hasCallback {
+					inline = declaration.Type.JITInlineCallbacks && knownCallback
+				} else if !inline {
+					switch {
+					case declaration.Type.JITVirtualArgs && cost <= jitTrivialVirtualInlineCost && (jitDirectSliceBuilder(len(args)) != 0 || len(args) > 8):
+						inline = true
+					case declaration.Type.JITVirtualArgs && hasVirtualArgs && declaration.Type.JITInlineCost <= 32:
+						inline = true
+					case len(args) > 0 && knownTypes == len(args) && cost <= 256:
+						inline = true
+					case knownShapes == len(args) && knownArgs == len(args) && cost <= 32:
+						inline = true
+					}
+					if declaration.Type.JITVirtualArgs && cost > jitTrivialVirtualInlineCost && !hasVirtualArgs && knownShapes != len(args) {
+						inline = false
+					}
+					if declaration.Type.JITVirtualArgs && cost > 32 && knownShapes == 0 {
+						inline = false
+					}
+				}
+				if cost == 65535 || !declaration.RetainsCallArgs && ctx.BuiltinInlineCost+cost > jitBuiltinInlineBudget {
+					inline = false
+				}
+				if !inline {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+				}
+				ctx.BuiltinInlineCost += cost
+				ctx.Coverage.InlinedCalls++
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
@@ -4085,173 +4255,34 @@ func init_processlist() {
 				}
 				ctx.FreeDesc(&d1)
 				ctx.EnsureDesc(&d2)
-				d3 := d2
-				_ = d3
-				ctx.StabilizeDescForControlFlow(&d3)
-				lbl0 := ctx.ReserveLabel()
-				bbpos_1_0 := int32(-1)
-				_ = bbpos_1_0
-				lbl1 := ctx.ReserveLabel()
-				_ = lbl1
-				bbpos_1_1 := int32(-1)
-				_ = bbpos_1_1
-				lbl2 := ctx.ReserveLabel()
-				_ = lbl2
-				bbpos_1_2 := int32(-1)
-				_ = bbpos_1_2
-				lbl3 := ctx.ReserveLabel()
-				_ = lbl3
-				bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl1)
-				ctx.ResolveFixups()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d3)
-				d4 := ctx.EmitGoCallScalar(GoFuncAddr(func(value uint64) any { return value }), []JITValueDesc{d3}, 2)
-				ctx.ReclaimUntrackedRegs()
-				d5 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(unsafe.Pointer(&processList)))), NoHeapPointer: true, Rooted: true}
-				if d5.Loc == LocRegPair || d5.Loc == LocStackPair || d5.Loc == LocRegTriple || d5.Loc == LocStackTriple {
+				ctx.EnsureDesc(&d2)
+				if d2.Loc == LocRegPair || d2.Loc == LocStackPair || d2.Loc == LocRegTriple || d2.Loc == LocStackTriple {
 					panic("jit: generic call arg expects 1-word value")
 				}
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
-				ctx.EnsureDesc(&d4)
-				if d4.Loc == LocImm {
-					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d4.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					if d4.Imm.GetTag() == tagBool {
-						ctx.EmitMakeBool(tmpPair, d4)
-					} else if d4.Imm.GetTag() == tagInt {
-						ctx.EmitMakeInt(tmpPair, d4)
-					} else if d4.Imm.GetTag() == tagFloat {
-						ctx.EmitMakeFloat(tmpPair, d4)
-					} else if d4.Imm.GetTag() == tagNil {
-						ctx.EmitMakeNil(tmpPair)
-					} else {
-						ptrWord, auxWord := d4.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, auxWord)
-					}
-					d4 = tmpPair
-				} else if d4.Loc == LocReg {
-					tmpPair := JITValueDesc{Loc: LocRegPair, Type: d4.Type, Reg: ctx.AllocRegExcept(d4.Reg), Reg2: ctx.AllocRegExcept(d4.Reg)}
-					switch d4.Type {
-					case tagBool:
-						ctx.EmitMakeBool(tmpPair, d4)
-					case tagInt:
-						ctx.EmitMakeInt(tmpPair, d4)
-					case tagFloat:
-						ctx.EmitMakeFloat(tmpPair, d4)
-					default:
-						panic("jit: generic call arg scalar type unknown for 2-word value")
-					}
-					ctx.FreeDesc(&d4)
-					d4 = tmpPair
-				}
-				if d4.Loc != LocRegPair && d4.Loc != LocStackPair && d4.Loc != LocInputPair {
-					panic("jit: generic call arg expects 2-word value ((*sync.Map).Load arg1)")
-				}
-				ctx.SyncDesc(&d5)
-				ctx.SyncDesc(&d4)
-				callResults6 := JITEmitGoCallResults(ctx, GoFuncAddr((*sync.Map).Load), []JITValueDesc{d5, d4}, []uint8{2, 1}, []uint8{3, 0})
-				d7 := callResults6[0]
-				_ = d7
-				d8 := callResults6[1]
-				_ = d8
-				ctx.ReclaimUntrackedRegs()
-				ctx.StabilizeDescForControlFlow(&d7)
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				d9 := d8
-				ctx.EnsureDesc(&d9)
-				if d9.Loc != LocImm && d9.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
-				}
-				lbl4 := ctx.ReserveLabel()
-				lbl5 := ctx.ReserveLabel()
-				if d9.Loc == LocImm {
-					if d9.Imm.Bool() {
-						ctx.MarkLabel(lbl4)
-						ctx.EmitJmp(lbl3)
-					} else {
-						ctx.MarkLabel(lbl5)
-						ctx.EmitJmp(lbl2)
-					}
-				} else {
-					ctx.EmitCmpRegImm32(d9.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl4)
-					ctx.EmitJmp(lbl5)
-					ctx.MarkLabel(lbl4)
-					ctx.EmitJmp(lbl3)
-					ctx.MarkLabel(lbl5)
-					ctx.EmitJmp(lbl2)
-				}
-				ctx.FreeDesc(&d8)
-				bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl2)
-				ctx.ResolveFixups()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				r1 := ctx.AllocReg()
-				d10 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(false)}
-				ctx.EnsureDesc(&d10)
-				if d10.Loc == LocRegPair {
-					panic("jit: scalar inline return has LocRegPair")
-				} else {
-					ctx.EmitMovToReg(r1, d10)
-				}
-				ctx.EmitJmp(lbl0)
-				bbpos_1_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl3)
-				ctx.ResolveFixups()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d7)
-				d11 := ctx.EmitGoCallScalar(GoFuncAddr(func(value any) *SessionState { return value.(*SessionState) }), []JITValueDesc{d7}, 1)
-				ctx.FreeDesc(&d7)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d11)
-				ctx.EnsureDesc(&d11)
-				if d11.Loc == LocRegPair || d11.Loc == LocStackPair || d11.Loc == LocRegTriple || d11.Loc == LocStackTriple {
-					panic("jit: generic call arg expects 1-word value")
-				}
-				ctx.SyncDesc(&d11)
-				d12 := ctx.EmitGoCallScalar(GoFuncAddr((*SessionState).Kill), []JITValueDesc{d11}, 1)
-				d12.NoHeapPointer = true
-				ctx.EmitAndRegImm32(d12.Reg, 1)
-				d12.Type = tagBool
-				ctx.BindReg(d12.Reg, &d12)
-				ctx.FreeDesc(&d11)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d12)
-				ctx.EnsureDesc(&d12)
-				if d12.Loc == LocRegPair {
-					panic("jit: scalar inline return has LocRegPair")
-				} else {
-					ctx.EmitMovToReg(r1, d12)
-				}
-				ctx.EmitJmp(lbl0)
-				ctx.MarkLabel(lbl0)
-				d13 := JITValueDesc{Loc: LocReg, Reg: r1}
-				ctx.BindReg(r1, &d13)
-				ctx.BindReg(r1, &d13)
+				ctx.SyncDesc(&d2)
+				d3 := ctx.EmitGoCallScalar(GoFuncAddr(KillSession), []JITValueDesc{d2}, 1)
+				d3.NoHeapPointer = true
+				ctx.EmitAndRegImm32(d3.Reg, 1)
+				d3.Type = tagBool
+				ctx.BindReg(d3.Reg, &d3)
 				ctx.FreeDesc(&d2)
-				ctx.EnsureDesc(&d13)
+				ctx.EnsureDesc(&d3)
 				if result.Loc == LocAny {
 					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
 					ctx.BindReg(result.Reg, &result)
 					ctx.BindReg(result.Reg2, &result)
 				}
-				if d13.Loc == LocImm {
-					ctx.EmitMakeBool(result, d13)
+				if d3.Loc == LocImm {
+					ctx.EmitMakeBool(result, d3)
 				} else {
-					ctx.EmitMakeBool(result, d13)
-					ctx.FreeReg(d13.Reg)
+					ctx.EmitMakeBool(result, d3)
+					ctx.FreeReg(d3.Reg)
 				}
 				result.Type = tagBool
 				return result
 				return result
 			},
-			JITInlineCost: 16,
+			JITInlineCost: 7,
 		},
 	})
 }

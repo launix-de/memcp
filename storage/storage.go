@@ -656,9 +656,15 @@ func Init(en scm.Env) {
 			Return: &scm.TypeDescriptor{Kind: returnKind, Label: "result", Description: returnDescription},
 		}
 	}
+	scanCallback := func(label, description, returnKind, returnDescription string) *scm.TypeDescriptor {
+		value := rowCallback(label, description, returnKind, returnDescription)
+		value.NoEscape = true
+		return value
+	}
 	reducer := func(label, description string) *scm.TypeDescriptor {
 		return &scm.TypeDescriptor{
 			Kind:        "func",
+			NoEscape:    true,
 			Label:       label,
 			Description: description,
 			Optional:    true,
@@ -996,7 +1002,7 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table", Label: "table"},
 				columnList("condition_cols", "columns passed to the selectivity predicate"),
-				rowCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
+				scanCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
 				{Kind: "int", Label: "max_rows"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list"},
@@ -1034,7 +1040,7 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "any", Label: "table", Description: "a table, or an existing recset to narrow further"},
 				columnList("filterColumns", scanFilterColumnsDesc),
-				rowCallback("filter", "lambda function that decides whether a row enters the recset", "bool", "true when the row belongs in the recset"),
+				scanCallback("filter", "lambda function that decides whether a row enters the recset", "bool", "true when the row belongs in the recset"),
 			},
 			Return: &scm.TypeDescriptor{Kind: "recset"},
 		},
@@ -1216,7 +1222,7 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table"},
 				columnList("filterColumns", scanFilterColumnsDesc),
-				rowCallback("filter", "lambda function that decides whether a row exists", "bool", "true when the row satisfies the existence test"),
+				scanCallback("filter", "lambda function that decides whether a row exists", "bool", "true when the row satisfies the existence test"),
 			},
 			Return: &scm.TypeDescriptor{Kind: "bool"},
 		},
@@ -1321,9 +1327,9 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
 				columnList("filterColumns", scanFilterColumnsDesc),
-				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to map"),
+				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to map"),
 				columnList("mapReduceColumns", scanMapColumnsDesc),
-				rowCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator; it may also use documented pseudo columns for mutations or result output", "any", "updated accumulator"),
+				scanCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator; it may also use documented pseudo columns for mutations or result output", "any", "updated accumulator"),
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
 				reducer("combine", "optional reducer combining shard-local accumulators"),
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, call mapReduce once with the neutral accumulator and NULL columns when there are no hits", Optional: true},
@@ -1429,9 +1435,9 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local recset, or a list for temporary data"},
 				columnList("filterColumns", "columns passed to filter; #0, #1, ... address batchdata slots"),
-				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase", "bool", "true when this table row and batch row proceed to map"),
+				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase", "bool", "true when this table row and batch row proceed to map"),
 				columnList("mapReduceColumns", "columns passed after the accumulator; #0, #1, ... address batchdata slots"),
-				rowCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator", "any", "updated accumulator"),
+				scanCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator", "any", "updated accumulator"),
 				{Kind: "int", Label: "stride", Description: "number of batchdata entries per batch row"},
 				{Kind: "list", Label: "batchdata", Description: "flat batch buffer accessed via #N pseudo columns", Element: &scm.TypeDescriptor{Kind: "any", Label: "slot", Description: "one batch value; every stride consecutive slots form a batch row"}},
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
@@ -1483,14 +1489,14 @@ func Init(en scm.Env) {
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used consistently by the candidate scan and every batch filter operation; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|recset", Label: "table_or_recset", Description: "base table or complete existing query-local RecSet from which ordered candidate batches are drawn"},
-				{Kind: "func", Label: "batchFilter", Description: "function (lambda (input_recset) accepted_recset). It may naively narrow input_recset with scan_recset, or run arbitrary RecSet projections/search/ACL operations and project back. It must return a same-table, same-transaction subset of input_recset", Params: []*scm.TypeDescriptor{{Kind: "recset", Label: "input_recset"}}, Return: &scm.TypeDescriptor{Kind: "recset"}},
+				{Kind: "func", NoEscape: true, Label: "batchFilter", Description: "function (lambda (input_recset) accepted_recset). It may naively narrow input_recset with scan_recset, or run arbitrary RecSet projections/search/ACL operations and project back. It must return a same-table, same-transaction subset of input_recset", Params: []*scm.TypeDescriptor{{Kind: "recset", Label: "input_recset"}}, Return: &scm.TypeDescriptor{Kind: "recset"}},
 				sortColumnList("sortcols", "same as scan_order: columns or computed sort functions. Include a unique tie-breaker for a total repeatable order; use an empty list for greedy unsorted collection"),
 				sortDirectionList("sortdirs", "same as scan_order: one relation per sort column; must also be empty when sortcols is empty"),
 				{Kind: "number", Label: "limitPartitionCols", Description: "reserved for scan_order signature compatibility; currently must be 0"},
 				{Kind: "number", Label: "offset", Description: "number of batch-filter-accepted rows to skip; it is not the number of driver candidates already examined"},
 				{Kind: "number", Label: "limit", Description: "finite maximum number of accepted rows passed to mapReduce; the initial candidate batch size is offset+limit and doubles for every subsequent batch"},
 				columnList("mapReduceColumns", scanOrderMapColumnsDesc),
-				rowCallback("mapReduce", "same (accumulator columns...) callback contract as scan_order", "any", "updated accumulator"),
+				scanCallback("mapReduce", "same (accumulator columns...) callback contract as scan_order", "any", "updated accumulator"),
 				{Kind: "any", Label: "neutral", Description: "optional neutral accumulator; defaults to nil", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "optional scan_order-compatible outer behavior: call mapReduce once with NULL columns when no row is accepted", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "optional result when no accepted row reaches mapReduce and isOuter is false; defaults to neutral", Optional: true},
@@ -1654,14 +1660,14 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "tx", Description: "transaction context to use for visibility and mutations; usually ((context \"session\") \"__memcp_tx\")"},
 				{Kind: "table|list|recset", Label: "table", Description: "table handle, query-local RecSet, or a list for temporary data"},
 				columnList("filterColumns", scanFilterColumnsDesc),
-				rowCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to ordering and map"),
+				scanCallback("filter", "lambda function that decides whether a dataset is passed to the map phase. Equality and range comparisons may be translated into indexed scans", "bool", "true when the row proceeds to ordering and map"),
 				sortColumnList("sortcols", "columns used for ordering; each entry corresponds to one relation in sortdirs"),
 				sortDirectionList("sortdirs", "one ordering relation per entry in sortcols; < is ascending and > is descending"),
 				{Kind: "number", Label: "limitPartitionCols", Description: "number of leading sort columns that form the partition key for per-partition offset/limit. 0 (default) means global offset/limit."},
 				{Kind: "number", Label: "offset", Description: "number of globally ordered, filter-accepted items to skip before map; apply SQL OFFSET here rather than in map"},
 				{Kind: "number", Label: "limit", Description: "maximum globally ordered, filter-accepted items passed to map; -1 means unlimited; apply SQL LIMIT here so shard-local Top-K and the global merge can brake early"},
 				columnList("mapReduceColumns", scanOrderMapColumnsDesc),
-				rowCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator for each accepted row", "any", "updated accumulator"),
+				scanCallback("mapReduce", "lambda (accumulator columns...) returning the next accumulator for each accepted row", "any", "updated accumulator"),
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, call mapReduce once with the neutral accumulator and NULL columns when there are no hits", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
@@ -1671,7 +1677,7 @@ func Init(en scm.Env) {
 					return value
 				}(),
 				func() *scm.TypeDescriptor {
-					value := rowCallback("postOrderFilter", "optional late acceptance predicate. Rejected rows do not count toward OFFSET/LIMIT and never reach mapReduce", "bool", "true when the ordered row counts toward OFFSET/LIMIT and reaches mapReduce")
+					value := scanCallback("postOrderFilter", "optional late acceptance predicate. Rejected rows do not count toward OFFSET/LIMIT and never reach mapReduce", "bool", "true when the ordered row counts toward OFFSET/LIMIT and reaches mapReduce")
 					value.Optional = true
 					return value
 				}(),
@@ -1760,7 +1766,7 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "tx", Description: "transaction context"},
 				{Kind: "list", Label: "tables", Description: "scan sources; all per-table lists must have this length", Element: &scm.TypeDescriptor{Kind: "table|recset", Label: "source", Description: "base table or query-local record set for one input stream"}},
 				{Kind: "list", Label: "filterColumns", Description: "filter column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table filter columns", Description: "columns supplied to the matching filterFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
-				{Kind: "list", Label: "filterFns", Description: "filter lambdas, one per table", Element: rowCallback("table filter", "predicate for the corresponding table and filterColumns entry", "bool", "true when the row enters that table's ordered stream")},
+				{Kind: "list", Label: "filterFns", Description: "filter lambdas, one per table", Element: scanCallback("table filter", "predicate for the corresponding table and filterColumns entry", "bool", "true when the row enters that table's ordered stream")},
 				{Kind: "list", Label: "sortcols", Description: "sort column lists, one per table; every inner list must match sortdirs in length and result domains", Element: sortColumnList("table sort columns", "sort expressions for the corresponding table")},
 				sortDirectionList("sortdirs", "shared ordering relations used for every table stream and for the outer merge"),
 				{Kind: "list|nil", Label: "perTableOffset", Description: "optional per-table offsets; nil disables all per-table offsets", Element: &scm.TypeDescriptor{Kind: "int", Label: "offset", Description: "rows skipped in the corresponding table before the outer merge; -1 disables the offset"}},
@@ -1769,7 +1775,7 @@ func Init(en scm.Env) {
 				{Kind: "number", Label: "offset", Description: "number of items to skip (global)"},
 				{Kind: "number", Label: "limit", Description: "max number of items to read (global; -1 = unlimited)"},
 				{Kind: "list", Label: "mapReduceColumns", Description: "map-reduce column lists, one per table", Element: &scm.TypeDescriptor{Kind: "list", Label: "table map-reduce columns", Description: "columns supplied after the accumulator to the matching mapReduceFns entry", Element: &scm.TypeDescriptor{Kind: "string", Label: "column", Description: "column name in the corresponding table"}}},
-				{Kind: "list", Label: "mapReduceFns", Description: "lambdas (accumulator columns...) returning the next accumulator, one per table", Element: rowCallback("table mapReduce", "map-reducer for the corresponding table and mapReduceColumns entry", "any", "updated accumulator")},
+				{Kind: "list", Label: "mapReduceFns", Description: "lambdas (accumulator columns...) returning the next accumulator, one per table", Element: scanCallback("table mapReduce", "map-reducer for the corresponding table and mapReduceColumns entry", "any", "updated accumulator")},
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, emit null row when no hits", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
