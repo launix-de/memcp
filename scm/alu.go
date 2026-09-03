@@ -92,7 +92,7 @@ func init_alu() {
 				declaration := declarations["int?"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -151,7 +151,7 @@ func init_alu() {
 				declaration := declarations["number?"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -726,7 +726,7 @@ func init_alu() {
 				declaration := declarations["symbol?"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -808,7 +808,7 @@ func init_alu() {
 				declaration := declarations["+"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d6 JITValueDesc
 				_ = d6
@@ -3743,7 +3743,7 @@ func init_alu() {
 				declaration := declarations["sql_sum_reduce"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -5137,7 +5137,7 @@ func init_alu() {
 				declaration := declarations["-"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d8 JITValueDesc
 				_ = d8
@@ -12430,7 +12430,7 @@ func init_alu() {
 				declaration := declarations["sql_add_numeric_literals"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -12516,7 +12516,7 @@ func init_alu() {
 				declaration := declarations["sql_sub_numeric_literals"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -12633,7 +12633,7 @@ func init_alu() {
 				declaration := declarations["*"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d7 JITValueDesc
 				_ = d7
@@ -18738,7 +18738,7 @@ func init_alu() {
 				declaration := declarations["/"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d4 JITValueDesc
 				_ = d4
@@ -20583,7 +20583,7 @@ func init_alu() {
 				declaration := declarations["intdiv"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -25280,7 +25280,7 @@ func init_alu() {
 				declaration := declarations["mod"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -27339,7 +27339,7 @@ func init_alu() {
 				declaration := declarations["<="]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -27874,7 +27874,7 @@ func init_alu() {
 				declaration := declarations["<"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -28373,7 +28373,7 @@ func init_alu() {
 				declaration := declarations[">"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -28872,7 +28872,7 @@ func init_alu() {
 				declaration := declarations[">="]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -29404,7 +29404,7 @@ func init_alu() {
 				declaration := declarations["equal?"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -29466,7 +29466,7 @@ func init_alu() {
 				declaration := declarations["equal??"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -29548,7 +29548,7 @@ func init_alu() {
 				declaration := declarations["sql_not"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -29882,7 +29882,7 @@ func init_alu() {
 				declaration := declarations["equal_collate"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -32940,7 +32940,7 @@ func init_alu() {
 				declaration := declarations["notequal_collate"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d1 JITValueDesc
 				_ = d1
@@ -33386,7 +33386,7 @@ func init_alu() {
 				declaration := declarations["!"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -33459,7 +33459,7 @@ func init_alu() {
 				declaration := declarations["not"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -33532,7 +33532,7 @@ func init_alu() {
 				declaration := declarations["nil?"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -33588,7 +33588,7 @@ func init_alu() {
 				declaration := declarations["min"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -35501,7 +35501,7 @@ func init_alu() {
 				declaration := declarations["max"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -37406,7 +37406,7 @@ func init_alu() {
 				declaration := declarations["floor"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -37490,7 +37490,7 @@ func init_alu() {
 				declaration := declarations["ceil"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -37574,7 +37574,7 @@ func init_alu() {
 				declaration := declarations["round"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -37658,7 +37658,7 @@ func init_alu() {
 				declaration := declarations["sql_decimal_output"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -44534,7 +44534,7 @@ func init_alu() {
 				declaration := declarations["sql_abs"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -46254,7 +46254,7 @@ func init_alu() {
 				declaration := declarations["sqrt"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -46834,9 +46834,10 @@ func init_alu() {
 			Return: &TypeDescriptor{Kind: "number"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				ctx.Coverage.NativeCalls++
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_rand"].Fn, args, result)
+				declaration := declarations["sql_rand"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,

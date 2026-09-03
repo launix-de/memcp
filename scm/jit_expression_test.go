@@ -574,6 +574,24 @@ func TestJITExpressionReduceLambdaArgumentOrder(t *testing.T) {
 	}
 }
 
+func TestJITKnownLambdaMaterializesAtGeneratedBuiltinCallBoundary(t *testing.T) {
+	declaration := declarations["map"]
+	previous := declaration.Type.JITInlineCallbacks
+	declaration.Type.JITInlineCallbacks = false
+	defer func() { declaration.Type.JITInlineCallbacks = previous }()
+
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda (values offset) (map values (lambda (value) (+ value offset))))`)
+	if coverage := compiled.Proc().Compiled.Coverage; coverage.NativeCalls == 0 {
+		t.Fatalf("expected generated map call boundary, got %+v", coverage)
+	}
+	got := Apply(compiled, NewSlice([]Scmer{NewInt(1), NewInt(2)}), NewInt(10))
+	want := NewSlice([]Scmer{NewInt(11), NewInt(12)})
+	if !Equal(got, want) {
+		t.Fatalf("generated call-boundary lambda returned %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITExpressionFusedMapReducerArithmetic(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t,
 		`(lambda (acc value id) (+ acc (+ (* value 3) id)))`)

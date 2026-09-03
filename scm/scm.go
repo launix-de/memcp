@@ -1054,7 +1054,7 @@ func init() {
 				declaration := declarations["size"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -1127,7 +1127,7 @@ func init() {
 				declaration := declarations["close_procedure"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -2517,7 +2517,7 @@ func init() {
 				declaration := declarations["clone_optimizer_expression"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -2600,7 +2600,7 @@ func init() {
 				declaration := declarations["optimize"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -3158,7 +3158,7 @@ func init() {
 				declaration := declarations["error"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -3989,10 +3989,11 @@ func init() {
 			Return: &TypeDescriptor{Kind: "any"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
 				ctx.Coverage.NativeCalls++
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["try"].Fn, args, result)
+				declaration := declarations["try"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -4016,7 +4017,7 @@ func init() {
 				declaration := declarations["apply"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -4132,7 +4133,7 @@ func init() {
 				declaration := declarations["apply_assoc"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -5006,7 +5007,7 @@ func init() {
 				declaration := declarations["symbol"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -5144,7 +5145,7 @@ func init() {
 				declaration := declarations["for"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var stackArray2 int32
 				var d3 JITValueDesc
@@ -6332,7 +6333,7 @@ func init() {
 				declaration := declarations["for_mut"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -7504,7 +7505,7 @@ func init() {
 				declaration := declarations["string"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -7639,7 +7640,7 @@ Patterns can be any of:
 				declaration := declarations["source"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -7818,10 +7819,11 @@ Patterns can be any of:
 				{Kind: "string", Label: "prefix", Description: "source path prefix", Optional: true},
 			},
 			Return: &TypeDescriptor{Kind: "assoc"},
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: native range iterator.
 				ctx.Coverage.NativeCalls++
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["source_coverage_report"].Fn, args, result)
+				declaration := declarations["source_coverage_report"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -7849,7 +7851,7 @@ Patterns can be any of:
 				declaration := declarations["scheme"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -43328,7 +43330,7 @@ Patterns can be any of:
 				declaration := declarations["serialize"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -43385,7 +43387,7 @@ Patterns can be any of:
 				declaration := declarations["pretty_print"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2

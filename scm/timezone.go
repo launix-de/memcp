@@ -185,7 +185,7 @@ func init_timezone() {
 				declaration := declarations["unix_timestamp"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -1073,7 +1073,7 @@ func init_timezone() {
 				declaration := declarations["system_time_zone"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -1148,7 +1148,7 @@ func init_timezone() {
 				declaration := declarations["convert_tz"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -5399,7 +5399,7 @@ func init_timezone() {
 				declaration := declarations["from_unixtime"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -8071,7 +8071,7 @@ func init_timezone() {
 				declaration := declarations["utc_timestamp"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8172,7 +8172,7 @@ func init_timezone() {
 				declaration := declarations["utc_date"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8363,7 +8363,7 @@ func init_timezone() {
 				declaration := declarations["utc_time"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8602,7 +8602,7 @@ func init_timezone() {
 				declaration := declarations["sysdate"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8718,7 +8718,7 @@ func init_timezone() {
 				declaration := declarations["at_time_zone"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -12127,7 +12127,7 @@ func init_timezone() {
 				declaration := declarations["timestampdiff"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0

@@ -79,7 +79,7 @@ func declareSQLLiteralParameterizer() {
 				declaration := declarations["parameterize_sql_select_literals"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {

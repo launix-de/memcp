@@ -2146,6 +2146,28 @@ func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, opera
 const jitBuiltinInlineBudget = 2048
 const jitTrivialVirtualInlineCost = 2
 
+// jitEmitGeneratedCallBoundary materializes compiler-only lambda templates
+// only when a generated builtin emitter chooses its native call boundary.
+// Other arguments were already evaluated into descriptors and must not be
+// evaluated again. The declaration decides whether the resulting Proc funcval
+// may live in the current JIT frame or needs one typed heap allocation.
+func jitEmitGeneratedCallBoundary(ctx *JITContext, declaration *Declaration, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+	for index := range args {
+		if args[index].Loc != LocLambdaTemplate {
+			continue
+		}
+		if index >= len(sourceArgs) {
+			panic("jit: generated callback has no source expression")
+		}
+		expected := JITValueDesc{Loc: LocAny}
+		if param := jitDeclarationParam(declaration, index); param != nil && param.Kind == "func" && param.NoEscape && param.SameGoroutine {
+			expected.StackFunc = true
+		}
+		args[index] = jitCompileExpr(ctx, sourceArgs[index], ctx.SliceBase, expected)
+	}
+	return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+}
+
 // jitGeneratedEmitterInline implements the shared size/type policy used by
 // generated declaration hooks. Call dispatch itself remains declaration-owned:
 // the expression compiler invokes Type.JITEmit, and that hook asks this helper

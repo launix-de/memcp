@@ -3298,9 +3298,10 @@ func init_jit() {
 			},
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				ctx.Coverage.NativeCalls++
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["jit"].Fn, args, result)
+				declaration := declarations["jit"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -3322,7 +3323,7 @@ func init_jit() {
 				declaration := declarations["jit?"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -4530,7 +4531,7 @@ func init_jit() {
 				declaration := declarations["jit-warn-if-fallback"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d4 JITValueDesc
 				_ = d4
@@ -7259,7 +7260,7 @@ func init_jit() {
 				declaration := declarations["jit-enabled?"]
 				if !jitGeneratedEmitterInline(ctx, declaration, args) {
 					ctx.Coverage.NativeCalls++
-					return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {

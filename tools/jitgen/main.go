@@ -688,17 +688,19 @@ func nativeCallBoundaryReason(fn *ssa.Function) string {
 }
 
 func generateFallbackClosure(opName string) string {
-	return fmt.Sprintf(`func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+	return fmt.Sprintf(`func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	ctx.Coverage.NativeCalls++
-	return jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)
+	declaration := declarations[%q]
+	return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 }`, opName)
 }
 
 func generateNativeCallClosure(opName, reason string) string {
-	return fmt.Sprintf(`func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+	return fmt.Sprintf(`func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	// JITGen native call boundary: %s.
 	ctx.Coverage.NativeCalls++
-	return jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)
+	declaration := declarations[%q]
+	return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 }`, reason, opName)
 }
 
@@ -706,7 +708,7 @@ func generateEmitterGuard(opName string) string {
 	return fmt.Sprintf(`	declaration := declarations[%[1]q]
 	if !jitGeneratedEmitterInline(ctx, declaration, args) {
 		ctx.Coverage.NativeCalls++
-		return jitEmitGoVariadicCallFromDescs(ctx, declaration.Fn, args, result)
+		return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 	}
 `, opName)
 }
