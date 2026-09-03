@@ -36,10 +36,11 @@ type computeProxyReader struct {
 
 type orderedComputeProxyReader struct {
 	proxy *StorageComputeProxy
+	tx    *TxContext
 }
 
 func (r *orderedComputeProxyReader) GetValue(idx uint32) scm.Scmer {
-	return r.proxy.getValueTx(nil, idx)
+	return r.proxy.getValueTx(r.tx, idx)
 }
 
 func (r *orderedComputeProxyReader) GetValueRange(recid uint32, count uint32, target []scm.Scmer, stride int) {
@@ -47,7 +48,7 @@ func (r *orderedComputeProxyReader) GetValueRange(recid uint32, count uint32, ta
 		stride = 1
 	}
 	for i := uint32(0); i < count; i++ {
-		target[int(i)*stride] = r.proxy.getValueTx(nil, recid+i)
+		target[int(i)*stride] = r.proxy.getValueTx(r.tx, recid+i)
 	}
 }
 
@@ -56,7 +57,7 @@ func (r *orderedComputeProxyReader) GetValueMulti(recids []uint32, target []scm.
 		stride = 1
 	}
 	for i, recid := range recids {
-		target[i*stride] = r.proxy.getValueTx(nil, recid)
+		target[i*stride] = r.proxy.getValueTx(r.tx, recid)
 	}
 }
 
@@ -254,9 +255,9 @@ func (r *computeProxyReader) GetValueMulti(recids []uint32, target []scm.Scmer, 
 	}
 }
 
-func (p *StorageComputeProxy) GetCachedReaderTx(_ *TxContext) ColumnReader {
+func (p *StorageComputeProxy) GetCachedReaderTx(tx *TxContext) ColumnReader {
 	if p.isOrdered {
-		return &orderedComputeProxyReader{proxy: p}
+		return &orderedComputeProxyReader{proxy: p, tx: tx}
 	}
 	// Bind input readers before the physical scan acquires the shard read lock.
 	// A cache miss may compute a value, but it must stay within the already
@@ -264,7 +265,10 @@ func (p *StorageComputeProxy) GetCachedReaderTx(_ *TxContext) ColumnReader {
 	// This also keeps the reader executable on a future remote shard owner.
 	readers := make([]ColumnReader, len(p.inputCols))
 	for i, col := range p.inputCols {
-		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(nil, col))
+		// tx is a physical lock-capability token here, not callback state.
+		// Passing it through prevents a mutation scan which already owns the
+		// shard write lock from recursively acquiring the same RWMutex.
+		readers[i] = ColumnReaderFunc(p.shard.ColumnReaderTx(tx, col))
 	}
 	return &computeProxyReader{
 		proxy:   p,
@@ -384,7 +388,7 @@ func (p *StorageComputeProxy) GetValue(idx uint32) scm.Scmer {
 	return p.getValueTx(nil, idx)
 }
 
-func (p *StorageComputeProxy) getValueTx(_ *TxContext, idx uint32) scm.Scmer {
+func (p *StorageComputeProxy) getValueTx(tx *TxContext, idx uint32) scm.Scmer {
 	// ORC path: validity tracked per-row via validMask.
 	if p.isOrdered {
 		if !p.validMask.Get(uint(idx)) {
@@ -433,7 +437,7 @@ func (p *StorageComputeProxy) getValueTx(_ *TxContext, idx uint32) scm.Scmer {
 	for i, col := range p.inputCols {
 		// Delta rows must be read via the shard-level ColumnReader; direct
 		// ColumnStorage access only understands main-row indexes.
-		colvalues[i] = p.shard.ColumnReaderTx(nil, col)(idx)
+		colvalues[i] = p.shard.ColumnReaderTx(tx, col)(idx)
 	}
 	val := scm.Apply(p.computor, colvalues...)
 
@@ -687,12 +691,13 @@ func (p *StorageComputeProxy) Invalidate(idx uint32) {
 
 // InvalidateTx preserves the mutation API while computed-column repair remains
 // independent from the request transaction.
-func (p *StorageComputeProxy) InvalidateTx(_ *TxContext, idx uint32) {
+func (p *StorageComputeProxy) InvalidateTx(tx *TxContext, idx uint32) {
 	p.revision.Add(1)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Try in-place update if main supports SetValue (StorageSCMER)
 	if p.compressed {
+		alreadyLocked := tx != nil && tx.HasShardWrite(p.shard)
 		if scmer, ok := p.main.(*StorageSCMER); ok {
 			if idx >= p.count {
 				p.validMask.Set(uint(idx), false)
@@ -702,7 +707,7 @@ func (p *StorageComputeProxy) InvalidateTx(_ *TxContext, idx uint32) {
 			// recompute single value and write directly
 			colvalues := make([]scm.Scmer, len(p.inputCols))
 			for i, col := range p.inputCols {
-				colvalues[i] = p.shard.getColumnStorageOrPanic(col, false, nil).GetValue(idx)
+				colvalues[i] = p.shard.getColumnStorageOrPanic(col, alreadyLocked, tx).GetValue(idx)
 			}
 			val := scm.Apply(p.computor, colvalues...)
 			scmer.SetValue(idx, val)
@@ -715,7 +720,7 @@ func (p *StorageComputeProxy) InvalidateTx(_ *TxContext, idx uint32) {
 		if idx < p.count {
 			colvalues := make([]scm.Scmer, len(p.inputCols))
 			for i, col := range p.inputCols {
-				colvalues[i] = p.shard.getColumnStorageOrPanic(col, false, nil).GetValue(idx)
+				colvalues[i] = p.shard.getColumnStorageOrPanic(col, alreadyLocked, tx).GetValue(idx)
 			}
 			p.delta[idx] = scm.Apply(p.computor, colvalues...)
 			return

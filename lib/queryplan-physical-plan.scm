@@ -7770,15 +7770,33 @@ physical decision and preserve its runtime recompile gate. */
 			schema sources plan default_alias effective_needed_exprs effective_condition row_expr
 			order_items offset_value limit_value true bounded_probe_work_rows nil stages scalar_plan facts))))
 
+(define lower_zero_source_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr)
+	(begin
+		(define field_exprs (extract_assoc fields (lambda (_title expr)
+			(lower_scalar_marker_expr expr))))
+		(define row_expr (cons row_mapper field_exprs))
+		(define condition (lower_scalar_marker_expr (coalesceNil (qb_where block) true)))
+		(define offset_value (coalesceNil (qb_offset block) 0))
+		(define limit_value (coalesceNil (qb_limit block) -1))
+		(list (quote if)
+			(list (quote and)
+				condition
+				(list (quote and)
+					(list (quote equal?) offset_value 0)
+					(list (quote not) (list (quote equal?) limit_value 0))))
+			(list reduce_expr neutral_expr row_expr)
+			neutral_expr))))
+
 (define lower_query_block_as_dataset_reduce (lambda (block fields row_mapper reduce_expr neutral_expr shard_reduce_expr)
 	(begin
-		(if (empty_list? (qb_sources block))
-			(neumann_fail "build_queryplan" "dataset reducer requires a FROM source")
-			true)
 		(if (or (not (empty_list? (qb_group block))) (or (not (nil? (qb_having block))) (query_block_has_aggregates? block)))
 			(neumann_fail "build_queryplan" "dataset reducer cannot consume grouped input")
 			true)
 		(define sources (qb_sources block))
+		(if (empty_list? sources)
+			(lower_zero_source_query_block_as_dataset_reduce
+				block fields row_mapper reduce_expr neutral_expr)
+			(begin
 		(define first_alias (source_alias (car sources)))
 		(define scan_sources sources)
 		(define scan_plan (query_block_join_plan block scan_sources))
@@ -7872,7 +7890,7 @@ physical decision and preserve its runtime recompile gate. */
 									scan_sources first_alias expr probe_work_rows)))))
 					reduce_expr neutral_expr)
 				(neumann_fail "build_queryplan"
-					"ordered dataset reduction has no streamable join-tree order"))))))
+					"ordered dataset reduction has no streamable join-tree order"))))))))
 
 (define scalar_order_lookup_input_keys (lambda (stage)
 	(begin
@@ -9165,6 +9183,59 @@ row callback. */
 						expr)))
 				(list (rewrite_query_invariant_presence_memos plan)))))))))
 
+(define query_local_presence_memo_parts (lambda (expr)
+	(match expr
+		'(session_symbol "get_or_compute_scoped" scope_symbol key _tx producer)
+		(if (and (equal? session_symbol (physical_query_session_symbol))
+			(and (equal? scope_symbol (physical_query_scope_symbol))
+				(and (string? key) (strlike key "__query_local_presence_probe_%"))))
+			(list key producer)
+			nil)
+		_ nil)))
+
+(define collect_query_local_presence_memos (lambda (expr entries)
+	(begin
+		(define parts (query_local_presence_memo_parts expr))
+		(define found (if (nil? parts) entries (set_assoc entries (nth parts 0) expr)))
+		(match expr
+			((symbol quote) _value) found
+			((quote quote) _value) found
+			(cons head tail) (reduce tail (lambda (acc item)
+				(collect_query_local_presence_memos item acc))
+				(collect_query_local_presence_memos head found))
+			_ found))))
+
+(define query_local_presence_thunk_symbol (lambda (key)
+	(symbol (concat "__query_local_presence_thunk_" (fnv_hash key)))))
+
+(define rewrite_query_local_presence_memos (lambda (expr)
+	(begin
+		(define parts (query_local_presence_memo_parts expr))
+		(if (not (nil? parts))
+			(list (query_local_presence_thunk_symbol (nth parts 0)))
+			(match expr
+				((symbol quote) _value) expr
+				((quote quote) _value) expr
+				(cons head tail) (cons
+					(rewrite_query_local_presence_memos head)
+					(map tail rewrite_query_local_presence_memos))
+				_ expr)))))
+
+/* Keep unkeyed EXISTS lazy so selective driver predicates run first. The
+query-scoped memo inside each thunk still evaluates the physical scan at most
+once, while the short call keeps the producer out of row callbacks. */
+(define consolidate_query_local_presence_memos (lambda (plan)
+	(begin
+		(define entries (collect_query_local_presence_memos plan '()))
+		(if (empty_list? entries)
+			plan
+			(cons (quote !begin) (merge (list
+				(extract_assoc entries (lambda (key expr)
+					(list (quote define)
+						(query_local_presence_thunk_symbol key)
+						(list (quote lambda) '() expr))))
+				(list (rewrite_query_local_presence_memos plan)))))))))
+
 (define emit_physical_queryplan (lambda (ir)
 	(begin
 		(define plan (match (ir_return ir)
@@ -9186,7 +9257,8 @@ row callback. */
 		(define memoized_plan (if (empty_list? (ir_stages ir))
 			deduplicated_plan
 			(consolidate_query_invariant_presence_memos deduplicated_plan)))
-		(require_physical_scan_relations memoized_plan))))
+		(require_physical_scan_relations
+			(consolidate_query_local_presence_memos memoized_plan)))))
 
 (define build_queryplan (lambda (ir)
 	(emit_physical_queryplan (prepare_physical_queryplan ir nil nil))))
