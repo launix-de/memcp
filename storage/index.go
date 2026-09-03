@@ -106,9 +106,7 @@ type StorageIndex struct {
 	t            *storageShard
 	lastHit      atomic.Uint32 // last search position for sorted access pattern optimization
 	mu           sync.Mutex
-	sessionKeys  []string
 	baseState    storageIndexState
-	variants     map[string]*storageIndexState
 }
 
 func orderRelationMeta(order func(...scm.Scmer) scm.Scmer) string {
@@ -188,9 +186,8 @@ func (s *StorageIndex) usesNaturalAscendingOrder(col int) bool {
 
 // buildGetters returns per-column value getters for this index, reading from the
 // shard under a currently-held RLock. Must be called with s.t.mu.RLock held.
-func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
+func (s *StorageIndex) buildGetters(_ *TxContext) []colGetter {
 	getters := make([]colGetter, len(s.Cols))
-	sessionKeys := make([]string, 0)
 	for i, col := range s.Cols {
 		if !s.columnIsSorted(i) && isScanPseudoColName(col) {
 			continue
@@ -204,26 +201,17 @@ func (s *StorageIndex) buildGetters(tx *TxContext) ([]colGetter, []string) {
 					continue
 				}
 				cs := s.t.getColumnStorageRLocked(mc)
-				mapColReaders[j] = newCachedColumnReaderTx(cs, tx)
-				if proxy, ok := cs.(*StorageComputeProxy); ok {
-					sessionKeys = mergeSessionKeys(sessionKeys, proxy.sessionKeys)
-				}
+				mapColReaders[j] = newCachedColumnReaderTx(cs, nil)
 			}
 			mapFn := s.ColMapFn[i]
-			if hasSessionRead(mapFn) {
-				mapFn = bindSessionReads(mapFn, tx)
-			}
 			fn := scm.OptimizeProcToSerialFunction(mapFn)
 			getters[i] = colGetter{mapCols: mapColReaders, mapFn: fn}
 		} else {
 			cs := s.t.getColumnStorageRLocked(col)
-			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, tx)}
-			if proxy, ok := cs.(*StorageComputeProxy); ok {
-				sessionKeys = mergeSessionKeys(sessionKeys, proxy.sessionKeys)
-			}
+			getters[i] = colGetter{raw: newCachedColumnReaderTx(cs, nil)}
 		}
 	}
-	return getters, sessionKeys
+	return getters
 }
 
 // computedRevisionsRLocked snapshots the logical generations of computed
@@ -288,94 +276,16 @@ func (idx *StorageIndex) columnIsSorted(i int) bool {
 	return len(idx.ColMatchers) <= i || idx.ColMatchers[i] == nil || idx.ColMatchers[i].IsSorted()
 }
 
-func (idx *StorageIndex) sessionVariantKey(tx *TxContext) string {
-	if len(idx.sessionKeys) == 0 {
-		return ""
-	}
-	keyExpr := make([]scm.Scmer, 0, len(idx.sessionKeys)*2+1)
-	keyExpr = append(keyExpr, scm.NewSymbol("list"))
-	for _, key := range idx.sessionKeys {
-		val := scm.NewNil()
-		if tx != nil {
-			val = tx.SessionValue(key)
-		}
-		keyExpr = append(keyExpr, scm.NewString(key), val)
-	}
-	return encodeScmerToString(scm.NewSlice(keyExpr), nil, nil)
-}
-
-func (idx *StorageIndex) syncSessionKeys(keys []string) {
-	idx.mu.Lock()
-	idx.sessionKeys = mergeSessionKeys(idx.sessionKeys, keys)
-	idx.mu.Unlock()
-}
-
-func (idx *StorageIndex) stateForTx(tx *TxContext, create bool) *storageIndexState {
-	if len(idx.sessionKeys) == 0 {
-		return &idx.baseState
-	}
-	key := idx.sessionVariantKey(tx)
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	if idx.variants == nil {
-		if !create {
-			return nil
-		}
-		idx.variants = make(map[string]*storageIndexState)
-	}
-	state := idx.variants[key]
-	if state == nil && create {
-		state = &storageIndexState{}
-		idx.variants[key] = state
-	}
-	return state
-}
-
-// addSavings records reuse against the data variant that would actually be
-// built. A frequently reused prepared value must not prewarm every new value
-// of the same query shape into an immediate full index build.
 func (idx *StorageIndex) addSavings(state *storageIndexState, usageWeight float64) float64 {
-	if len(idx.sessionKeys) == 0 {
-		if usageWeight > 0 {
-			idx.Savings += usageWeight
-		}
-		return idx.Savings
-	}
 	if usageWeight > 0 {
-		state.savings += usageWeight
+		idx.Savings += usageWeight
 	}
-	return state.savings
-}
-
-func (idx *StorageIndex) markVariantsDirty() {
-	idx.mu.Lock()
-	var freedHooks int64
-	for _, state := range idx.variants {
-		state.active = false
-		state.mainIndexes = StorageInt{}
-		state.mainIndexPositions = StorageInt{}
-		state.deltaBtree = nil
-		state.indexHooks = nil
-		freedHooks += state.indexHookBytes.Swap(0)
-		state.minVals = nil
-		state.maxVals = nil
-		state.precomputedDelta = false
-	}
-	if freedHooks > 0 {
-		GlobalCache.UpdateSizeAsync(idx, -freedHooks)
-	}
-	idx.mu.Unlock()
+	return idx.Savings
 }
 
 func (idx *StorageIndex) ComputeSize() uint {
 	var sz uint = 24 * 8 // heuristic
-	states := []*storageIndexState{&idx.baseState}
-	idx.mu.Lock()
-	for _, state := range idx.variants {
-		states = append(states, state)
-	}
-	idx.mu.Unlock()
-	for _, state := range states {
+	for _, state := range []*storageIndexState{&idx.baseState} {
 		if !idx.Native {
 			sz += state.mainIndexes.ComputeSize()
 		}
@@ -401,7 +311,6 @@ func (idx *StorageIndex) evict(mode evictionMode, currentSize int64, _ *[numEvic
 		return evictionResult{}
 	}
 	idx.baseState = storageIndexState{}
-	idx.variants = nil
 	return evictionResult{freedBytes: currentSize, fullyEvicted: true, success: true}
 }
 
@@ -411,8 +320,8 @@ func (idx *StorageIndex) computeDeltaBtreeSize(state *storageIndexState) uint {
 	}
 	// The B-tree owns nodes and indexPair values. For normal delta rows,
 	// indexPair.data points at shard inserts that are already counted by the
-	// shard; count only the slice header there. Session-sensitive indexes store
-	// precomputed values and own that slice payload as well.
+	// shard; count only the slice header there. A future precomputed payload
+	// would have to be accounted separately.
 	var sz uint = 64 + uint(state.deltaBtree.Len())*64
 	state.deltaBtree.Ascend(func(item indexPair) bool {
 		if state.precomputedDelta {
@@ -808,9 +717,6 @@ func (t *storageShard) iterateIndexEx(tx *TxContext, cols boundaries, lower []sc
 			index.Cols[i] = cols[i].col
 			index.ColMapCols[i] = cols[i].mapCols // nil for raw columns
 			index.ColMapFn[i] = cols[i].mapFn     // IsNil() for raw columns
-			if !cols[i].mapFn.IsNil() {
-				index.sessionKeys = mergeSessionKeys(index.sessionKeys, extractSessionKeys(cols[i].mapFn))
-			}
 			if cols[i].matcher.IsSorted() {
 				index.ColOrder[i], index.ColOrderMeta[i] = boundaryOrder(t.t, cols[i])
 			} else {
@@ -897,7 +803,6 @@ func snapshotIndexesForRebuild(indexes []*StorageIndex) []*StorageIndex {
 		clone.Cols = append([]string(nil), idx.Cols...)
 		clone.ColMapCols = idx.ColMapCols // shallow copy OK (immutable per-col slices)
 		clone.ColMapFn = idx.ColMapFn     // shallow copy OK
-		clone.sessionKeys = append([]string(nil), idx.sessionKeys...)
 		for i, matcher := range idx.ColMatchers {
 			if matcher == nil || matcher.IsSorted() {
 				continue
@@ -1026,7 +931,7 @@ func (s *StorageIndex) fullScan(maxInsertIndex int, buf []uint32, matchers []Ind
 	}
 }
 
-// buildIndex constructs the index data structures for one global/session variant.
+// buildIndex constructs the shared index data structures.
 // cols must contain value getters for each index column in order.
 // The caller must hold s.mu.Lock() or have exclusive access.
 func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx *TxContext) {
@@ -1199,19 +1104,7 @@ func (s *StorageIndex) buildIndex(state *storageIndexState, cols []colGetter, tx
 	// fill deltaBtree with global record IDs
 	for i, data := range s.t.inserts {
 		recid := s.t.main_count + uint32(i)
-		if len(s.sessionKeys) > 0 {
-			values := make([]scm.Scmer, len(s.Cols))
-			for colIdx := range s.Cols {
-				if !s.columnIsSorted(colIdx) {
-					continue
-				}
-				values[colIdx] = s.getDeltaColValueTx(tx, recid, data, colIdx)
-			}
-			state.precomputedDelta = true
-			state.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: values})
-		} else {
-			state.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: data})
-		}
+		state.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: data})
 	}
 
 	endRevisions := s.computedRevisionsRLocked()
@@ -1523,7 +1416,7 @@ func emitRowMatchers(matchers []IndexRowMatcher, ids []uint32, callback func([]u
 }
 
 func (s *StorageIndex) estimateHookCandidates(tx *TxContext, bounds boundaries) (uint32, uint32, bool) {
-	state := s.stateForTx(tx, false)
+	state := &s.baseState
 	if state == nil {
 		return 0, 0, false
 	}
@@ -1568,9 +1461,8 @@ func (s *StorageIndex) iterate(tx *TxContext, bounds boundaries, lower []scm.Scm
 	// (scan, scan_order, GetRecordidForUnique) already holds s.t.mu.RLock().
 	// Re-acquiring RLock via getColumnStorageOrPanic would deadlock when a
 	// concurrent writer is waiting for s.t.mu.Lock() (write-preferring RWMutex).
-	cols, sessionKeys := s.buildGetters(tx)
-	s.syncSessionKeys(sessionKeys)
-	state := s.stateForTx(tx, true)
+	cols := s.buildGetters(tx)
+	state := &s.baseState
 	currentRevisions := s.computedRevisionsRLocked()
 	s.mu.Lock()
 	if state.active && !sameComputedRevisions(state.computedRevisions, currentRevisions) {

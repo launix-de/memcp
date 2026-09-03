@@ -349,19 +349,6 @@ func materializedDictionaryMemory(storage any) uint {
 			size += materializedDictionaryMemory(typed.main)
 		}
 		typed.mu.RUnlock()
-		typed.variantsMu.RLock()
-		variants := make([]*storageComputeVariant, 0, len(typed.variants))
-		for _, variant := range typed.variants {
-			variants = append(variants, variant)
-		}
-		typed.variantsMu.RUnlock()
-		for _, variant := range variants {
-			variant.mu.RLock()
-			if variant.main != nil {
-				size += materializedDictionaryMemory(variant.main)
-			}
-			variant.mu.RUnlock()
-		}
 		return size
 	default:
 		return 0
@@ -504,7 +491,6 @@ func (u *storageShard) attachColumnRuntime(colName string, columnstorage ColumnS
 		// the owning shard/column must be restored when the storage is loaded.
 		proxy.shard = u
 		proxy.colName = colName
-		proxy.sessionKeys = extractSessionKeys(proxy.computor)
 		if col != nil && len(col.OrcSortCols) > 0 {
 			proxy.isOrdered = true
 			u.t.hasOrderedColumns.Store(true)
@@ -2652,10 +2638,6 @@ func (t *storageShard) insertDataset(columns []string, values [][]scm.Scmer, onF
 		// also notify indices
 		for _, index := range t.Indexes {
 			// add to delta indexes
-			if len(index.sessionKeys) > 0 {
-				index.markVariantsDirty()
-				continue
-			}
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
 				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
@@ -2706,10 +2688,6 @@ func (t *storageShard) insertDatasetFromLog(columns []string, values [][]scm.Scm
 
 		// update delta indexes
 		for _, index := range t.Indexes {
-			if len(index.sessionKeys) > 0 {
-				index.markVariantsDirty()
-				continue
-			}
 			index.mu.Lock()
 			if index.baseState.deltaBtree != nil {
 				index.baseState.deltaBtree.ReplaceOrInsert(indexPair{itemid: int(recid), data: newrow})
@@ -2804,8 +2782,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	}
 	t.ensureMainCount(false)
 	ccols := make([]ColumnStorage, len(conditionCols))
-	cReaders := make([]ColumnReader, len(conditionCols))
-	cNeedsTxReader := make([]bool, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	bounds := extractBoundaries(conditionCols, condition)
 	lower, upperLast := indexFromBoundaries(bounds)
@@ -2822,10 +2798,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 			continue
 		}
 		ccols[i] = t.getColumnStorageOrPanic(col, false, currentTx)
-		cReaders[i] = newCachedColumnReaderTx(ccols[i], currentTx)
-		if proxy, ok := ccols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
-			cNeedsTxReader[i] = true
-		}
 	}
 
 	conditionProgram := scm.PrepareSerialProc(condition)
@@ -2871,8 +2843,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 				for i, c := range ccols {
 					if getter := conditionGetters[i]; getter != nil {
 						cdataset[i] = getter(idx, 0)
-					} else if cNeedsTxReader[i] {
-						cdataset[i] = cReaders[i].GetValue(idx)
 					} else {
 						cdataset[i] = c.GetValue(idx)
 					}
@@ -2881,8 +2851,6 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 				for i, col := range conditionCols {
 					if getter := conditionGetters[i]; getter != nil {
 						cdataset[i] = getter(idx, 0)
-					} else if cNeedsTxReader[i] {
-						cdataset[i] = cReaders[i].GetValue(idx)
 					} else if _, isProxy := ccols[i].(*StorageComputeProxy); isProxy {
 						cdataset[i] = ccols[i].GetValue(idx)
 					} else {
@@ -3525,9 +3493,8 @@ func (t *storageShard) rebuild(all bool) *storageShard {
 					}
 				}
 				if allFound {
-					getters, sessionKeys := idx.buildGetters(nil)
-					idx.syncSessionKeys(sessionKeys)
-					idx.buildIndex(idx.stateForTx(nil, true), getters, nil)
+					getters := idx.buildGetters(nil)
+					idx.buildIndex(&idx.baseState, getters, nil)
 					GlobalCache.AddItem(idx, int64(idx.ComputeSize()), TypeIndex, indexCleanup, indexLastUsed, indexGetScore)
 				}
 			}

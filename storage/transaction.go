@@ -253,24 +253,6 @@ func txContextScmer(tx *TxContext) scm.Scmer {
 	return scm.NewAny(tx)
 }
 
-func bindExecutionEnv(env *scm.Env, session, tx scm.Scmer) *scm.Env {
-	if env == nil {
-		env = &scm.Globalenv
-	}
-	vars := make(scm.Vars, len(env.Vars)+2)
-	for name, value := range env.Vars {
-		vars[name] = value
-	}
-	vars[scm.Symbol("session")] = session
-	vars[scm.Symbol("tx")] = tx
-	return &scm.Env{
-		Vars:         vars,
-		VarsNumbered: env.VarsNumbered,
-		Outer:        env.Outer,
-		Nodefine:     env.Nodefine,
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

@@ -7416,7 +7416,7 @@ remain query-specific and are evaluated over the cached intermediate relation. *
 		(define computor (list (quote lambda)
 			(map input_cols symbol)
 			(list (quote scan)
-				(physical_query_tx_symbol)
+				nil
 				(source_table_expr src)
 				(cons (quote list) key_cols)
 				(list (quote lambda) filter_params (combine_where_terms filter_terms true))

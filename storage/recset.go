@@ -860,14 +860,8 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 	t.ensureMainCount(skipShardReadLock)
 
 	cols := make([]ColumnStorage, len(sourceKeyCols))
-	readers := make([]ColumnReader, len(sourceKeyCols))
-	needsTxReader := make([]bool, len(sourceKeyCols))
 	for i, col := range sourceKeyCols {
 		cols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
-		readers[i] = newCachedColumnReaderTx(cols[i], currentTx)
-		if proxy, ok := cols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
-			needsTxReader[i] = true
-		}
 	}
 
 	locked := false
@@ -916,11 +910,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 					colBufs[i] = make([]scm.Scmer, runLen)
 				}
 				colBufs[i] = colBufs[i][:runLen]
-				if needsTxReader[i] {
-					readers[i].GetValueRange(base, runLen, colBufs[i], 1)
-				} else {
-					cols[i].GetValueRange(base, runLen, colBufs[i], 1)
-				}
+				cols[i].GetValueRange(base, runLen, colBufs[i], 1)
 			}
 			for row := uint32(0); row < runLen; row++ {
 				skip := false
@@ -941,9 +931,7 @@ func (t *storageShard) collectProjectJoinKeys(part *recSetShard, sourceKeyCols [
 		for idx := mainEnd; idx < end; idx++ {
 			skip := false
 			for i, col := range sourceKeyCols {
-				if needsTxReader[i] {
-					dst[write+i] = readers[i].GetValue(idx)
-				} else if _, isProxy := cols[i].(*StorageComputeProxy); isProxy {
+				if _, isProxy := cols[i].(*StorageComputeProxy); isProxy {
 					dst[write+i] = cols[i].GetValue(idx)
 				} else {
 					dst[write+i] = t.getDelta(int(idx-mainCount), col)
@@ -1023,7 +1011,7 @@ func (t *storageShard) hasEqualityIndexPrefix(currentTx *TxContext, cols []strin
 		if len(index.Cols) < len(cols) {
 			continue
 		}
-		state := index.stateForTx(currentTx, false)
+		state := &index.baseState
 		index.mu.Lock()
 		active := state != nil && state.active
 		index.mu.Unlock()
@@ -1057,14 +1045,8 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	t.ensureMainCount(skipShardReadLock)
 	targetCols := make([]ColumnStorage, len(targetKeyCols))
-	targetReaders := make([]ColumnReader, len(targetKeyCols))
-	targetNeedsTxReader := make([]bool, len(targetKeyCols))
 	for i, col := range targetKeyCols {
 		targetCols[i] = t.getColumnStorageOrPanic(col, skipShardReadLock, currentTx)
-		targetReaders[i] = newCachedColumnReaderTx(targetCols[i], currentTx)
-		if proxy, ok := targetCols[i].(*StorageComputeProxy); ok && proxy.hasSessionVariants() {
-			targetNeedsTxReader[i] = true
-		}
 	}
 
 	locked := false
@@ -1106,13 +1088,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 			}
 			for col := range targetKeyCols {
 				if idx < t.main_count {
-					if targetNeedsTxReader[col] {
-						actual[col] = targetReaders[col].GetValue(idx)
-					} else {
-						actual[col] = targetCols[col].GetValue(idx)
-					}
-				} else if targetNeedsTxReader[col] {
-					actual[col] = targetReaders[col].GetValue(idx)
+					actual[col] = targetCols[col].GetValue(idx)
 				} else if _, proxy := targetCols[col].(*StorageComputeProxy); proxy {
 					actual[col] = targetCols[col].GetValue(idx)
 				} else {
@@ -1159,7 +1135,7 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 				if _, ok := seen[idx]; ok {
 					continue
 				}
-				if !t.projectJoinTargetMatches(idx, key, targetKeyCols, targetCols, targetReaders, targetNeedsTxReader, currentTx) {
+				if !t.projectJoinTargetMatches(idx, key, targetKeyCols, targetCols) {
 					continue
 				}
 				seen[idx] = struct{}{}
@@ -1172,17 +1148,11 @@ func (t *storageShard) projectJoinKeysPart(currentTx *TxContext, targetKeyCols [
 	return newRecSetShardFromSortedIDs(t, visibleUpper, recids)
 }
 
-func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, targetKeyCols []string, targetCols []ColumnStorage, targetReaders []ColumnReader, targetNeedsTxReader []bool, currentTx *TxContext) bool {
+func (t *storageShard) projectJoinTargetMatches(idx uint32, key []scm.Scmer, targetKeyCols []string, targetCols []ColumnStorage) bool {
 	for i, expected := range key {
 		var actual scm.Scmer
 		if idx < t.main_count {
-			if targetNeedsTxReader[i] {
-				actual = targetReaders[i].GetValue(idx)
-			} else {
-				actual = targetCols[i].GetValue(idx)
-			}
-		} else if targetNeedsTxReader[i] {
-			actual = targetReaders[i].GetValue(idx)
+			actual = targetCols[i].GetValue(idx)
 		} else if _, isProxy := targetCols[i].(*StorageComputeProxy); isProxy {
 			actual = targetCols[i].GetValue(idx)
 		} else {

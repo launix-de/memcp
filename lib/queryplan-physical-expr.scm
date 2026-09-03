@@ -5240,7 +5240,7 @@ ever-larger subtrees. */
 			(list (quote lambda)
 				(map key_names (lambda (col) (symbol col)))
 				(list (quote scan_order)
-					(physical_query_tx_symbol)
+					nil
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -5346,10 +5346,11 @@ ever-larger subtrees. */
 			(define filtercols (merge_unique (list group_key_cols_for_scan condition_cols)))
 			(define aggcols (extract_columns_for_alias src agg_expr))
 			(define direct_recset_count (and (not (nil? membership_expr))
-				(and (equal? effective_condition true)
+				(and (empty_list? (query_expr_session_reads membership_expr))
+					(and (equal? effective_condition true)
 					(and (not (reduce keys (lambda (has_columns key)
 						(or has_columns (expr_contains_column_ref? key))) false))
-						(aggregate_counts_every_input_row? ag)))))
+						(aggregate_counts_every_input_row? ag))))))
 			(define aggregate_state_expr (if direct_recset_count
 				(list (quote recset_count)
 					(list
@@ -5360,10 +5361,9 @@ ever-larger subtrees. */
 						(quote tx)
 						(list (quote lambda) (list (quote tx)) membership_expr)))
 				(list (quote scan)
-					/* Computed group columns outlive the request which creates them.
-					applyWithTx rebinds this captured physical slot to the transaction of
-					each later materialization or repair before invoking the closure. */
-					(physical_query_tx_symbol)
+					/* Persistent computed columns read committed storage independently
+					from the request which first creates or later repairs them. */
+					nil
 					(list (quote table) schema tbl)
 					(cons (quote list) filtercols)
 					(list (quote lambda)
@@ -5389,8 +5389,7 @@ ever-larger subtrees. */
 				(cons (quote list) key_names)
 				(list (quote lambda)
 					(map key_names (lambda (col) (symbol col)))
-					aggregate_value_expr)
-				(physical_query_tx_symbol))))))
+					aggregate_value_expr))))))
 
 (define direct_group_aggregate_read_expr (lambda (ag)
 	(begin
