@@ -2054,6 +2054,17 @@ func jitProcCaptures(proc *Proc) []Scmer {
 	return unsafe.Slice((*Scmer)(unsafe.Add(unsafe.Pointer(proc), unsafe.Offsetof(ProcJIT{}.Context))), proc.Compiled.CaptureCount)
 }
 
+// JITCapturedLocals returns the numbered-local base and inline capture values
+// of this concrete procedure. The returned slice aliases the ProcJIT tail and
+// remains valid while proc is reachable. Analyzers use it to reconstruct the
+// call frame without separating executable callbacks from their source Proc.
+func (proc *Proc) JITCapturedLocals() (base int, captures []Scmer) {
+	if proc == nil || proc.Compiled == nil {
+		return 0, nil
+	}
+	return proc.Compiled.CaptureBase, jitProcCaptures(proc)
+}
+
 // closeJITProcedureCaptures replaces the hidden numbered parameters of a
 // ProcJIT tail with ordinary Scheme literals. Closed procedures are persisted
 // independently of executable mappings, so their serialized body must not

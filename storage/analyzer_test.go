@@ -72,6 +72,26 @@ func TestBoundaryConstantThroughCapturedCallable(t *testing.T) {
 	}
 }
 
+func TestBoundaryConstantThroughJITInlineCapture(t *testing.T) {
+	dictionary := scm.NewFastDictValue(1)
+	dictionary.Set(scm.NewString("id"), scm.NewInt(424), nil)
+	factory := scm.EvalAllJIT(t.Name(), `(lambda (lookup)
+		(lambda (id) (equal?? id (lookup "id"))))`, &scm.Globalenv)
+	condition := scm.Apply(factory, scm.NewFastDict(dictionary))
+	if condition.Proc().Compiled == nil {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+
+	base, captures := condition.Proc().JITCapturedLocals()
+	if base != 1 || len(captures) != 1 {
+		t.Fatalf("JIT captures = base %d, count %d; want base 1, count 1", base, len(captures))
+	}
+	bounds := extractBoundaries([]string{"ID"}, condition)
+	if len(bounds) != 1 || bounds[0].col != "ID" || bounds[0].matcher != EqualMatcher || bounds[0].lower.Int() != 424 {
+		t.Fatalf("JIT captured callable boundary = %#v, want ID = 424", bounds)
+	}
+}
+
 func TestComputedBoundaryThroughCapturedCallable(t *testing.T) {
 	dictionary := scm.NewFastDictValue(2)
 	dictionary.Set(scm.NewString("offset"), scm.NewInt(1), nil)

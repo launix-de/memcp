@@ -354,10 +354,15 @@ func evalIndependentScmer(expr scm.Scmer, env *scm.Env) (result scm.Scmer, ok bo
 // Build that otherwise-empty frame only for expressions which need it; common
 // literal and session-read boundaries retain the allocation-free path.
 func evalIndependentProcBodyScmer(expr scm.Scmer, proc *scm.Proc) (scm.Scmer, bool) {
-	if !hasExplicitOuterReference(expr) {
+	captureBase, captures := proc.JITCapturedLocals()
+	if len(captures) == 0 && !hasExplicitOuterReference(expr) {
 		return evalIndependentScmer(expr, proc.En)
 	}
 	bodyEnv := scm.Env{Outer: proc.En}
+	if len(captures) != 0 {
+		bodyEnv.VarsNumbered = make([]scm.Scmer, captureBase+len(captures))
+		copy(bodyEnv.VarsNumbered[captureBase:], captures)
+	}
 	return evalIndependentScmer(expr, &bodyEnv)
 }
 
