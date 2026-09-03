@@ -2814,8 +2814,8 @@ would lose nested-stage and join semantics. */
 				(if (nil? input_src)
 					(lower_driver_membership_cache_probe_expr sources default_alias stage)
 					(begin
-						(define keys (gs_keys stage))
 						(define lookup_keys (qassoc_get (gs_facts stage) (quote lookup-keys) '()))
+						(define keys (if (empty_list? lookup_keys) '() (gs_keys stage)))
 						(if (not (equal? (count keys) (count lookup_keys)))
 							(neumann_fail "build_queryplan" "driver membership probe key/domain mismatch")
 							true)
@@ -4730,9 +4730,7 @@ self-joins of the same base table still describe two distinct row roles. */
 	(query_expr_session_reads (gs_domain stage))))
 
 (define group_key_expr_index (lambda (keys expr)
-	(reduce (produceN (count keys)) (lambda (found i)
-		(if (not (nil? found)) found (if (equal? (nth keys i) expr) i nil)))
-		nil)))
+	((make_structural_index keys (list expr)) expr)))
 
 (define group_stage_session_key_pairs (lambda (stage keys key_names)
 	(map (group_stage_session_domain_keys stage) (lambda (expr)
@@ -4753,12 +4751,10 @@ self-joins of the same base table still describe two distinct row roles. */
 (define replace_group_session_expr (lambda (stage keys key_names expr)
 	(begin
 		(define normalized_expr (coalesceNil (query_session_read_expr expr) expr))
-		(define pair (reduce (group_stage_session_key_pairs stage keys key_names)
-			(lambda (found candidate)
-				(if (not (nil? found)) found (if (equal? normalized_expr (nth candidate 0)) candidate nil)))
-			nil))
-		(if (not (nil? pair))
-			(list (quote outer) 1 (symbol (nth pair 1)))
+		(define pairs (group_stage_session_key_pairs stage keys key_names))
+		(define pair_idx (group_key_expr_index (map pairs (lambda (pair) (nth pair 0))) normalized_expr))
+		(if (not (nil? pair_idx))
+			(list (quote outer) 1 (symbol (nth (nth pairs pair_idx) 1)))
 			(if (and (list? expr) (not (empty_list? expr)))
 				(cons (car expr) (map (cdr expr) (lambda (item)
 					(replace_group_session_expr stage keys key_names item))))

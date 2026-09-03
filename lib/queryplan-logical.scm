@@ -1987,9 +1987,8 @@ the original SQL shape after join reorder and stage rewrites. */
 (define presence_probe_stage? (lambda (stage)
 	(and (group_stage? stage)
 		(and (equal? (qassoc_get (gs_facts stage) (quote null_semantics) nil) (quote exists))
-			(and (not (empty_list? (qassoc_get (gs_facts stage) (quote lookup-keys) '())))
-				(and (equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
-					(equal? (coalesceNil (gs_having stage) true) true)))))))
+			(and (equal? (qassoc_get (gs_facts stage) (quote presence_only) false) true)
+				(equal? (coalesceNil (gs_having stage) true) true))))))
 
 (define stage_has_residual_outer_refs? (lambda (stage)
 	(not (empty_list? (qassoc_get (gs_facts stage) (quote btw2025_accessing_after_simple) '())))))
