@@ -109,6 +109,39 @@ func TestComputeColumnRejectsRequestContextBeforePublishing(t *testing.T) {
 	}
 }
 
+func BenchmarkComputedColumnRepair(b *testing.B) {
+	oldBasepath := Basepath
+	Basepath = b.TempDir()
+	defer func() { Basepath = oldBasepath }()
+	Init(scm.Globalenv)
+	LoadDatabases()
+	defer databases.Remove("bench_stateless_compute")
+
+	CreateDatabase("bench_stateless_compute", false)
+	tbl, _ := CreateTable("bench_stateless_compute", "items", Memory, false)
+	tbl.CreateColumn("base", "INT", nil, nil)
+	tbl.CreateColumn("derived", "INT", nil, nil)
+	tbl.Insert([]string{"base"}, [][]scm.Scmer{{scm.NewInt(41)}}, nil, scm.NewNil(), false, nil)
+	if result := GetDatabase("bench_stateless_compute").rebuild(true, false, true); len(result.errors) > 0 {
+		b.Fatalf("rebuild errors: %v", result.errors)
+	}
+	computor := scm.NewProcStruct(scm.Proc{
+		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("base")}),
+		Body: scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("+"), scm.NewSymbol("base"), scm.NewInt(1),
+		}),
+		En: &scm.Globalenv,
+	})
+	tbl.ComputeColumn("derived", []string{"base"}, computor, nil, scm.NewNil())
+	proxy := tbl.Shards[0].columns["derived"].(*StorageComputeProxy)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		proxy.Invalidate(0)
+	}
+}
+
 func countCollapsedComputor() scm.Scmer {
 	filter := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{
