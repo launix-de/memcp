@@ -510,16 +510,24 @@ func jitEmitSpecialCoalesce(nilOnly bool) func(*JITContext, []Scmer, []JITValueD
 			ctx.TrackImm(imm)
 			return JITValueDesc{Loc: LocImm, Type: tagNil, Imm: imm}
 		}
-		target := jitEnsureResultPair(ctx, result)
+		target := JITValueDesc{
+			Loc: LocStackPair, Type: JITTypeUnknown,
+			StackOff: ctx.AllocStack(16), Rooted: true,
+		}
+		ctx.PrepareScmerStackTarget(target.StackOff)
+		store := func(value *JITValueDesc) {
+			ctx.EmitCopyScmerToDesc(&target, value)
+			ctx.FreeDesc(value)
+		}
 		endLabel := ctx.ReserveLabel()
 		if nilOnly {
 			nilValue := JITValueDesc{Loc: LocImm, Type: tagNil, Imm: NewNil()}
-			_ = jitPlaceIntoPair(ctx, &nilValue, target)
+			store(&nilValue)
 		}
 		for i, expression := range args {
 			value := jitCompileExpr(ctx, expression, ctx.SliceBase, JITValueDesc{Loc: LocAny})
 			if !nilOnly && i == len(args)-1 {
-				_ = jitPlaceIntoPair(ctx, &value, target)
+				store(&value)
 				break
 			}
 			if value.Loc == LocImm {
@@ -528,7 +536,7 @@ func jitEmitSpecialCoalesce(nilOnly bool) func(*JITContext, []Scmer, []JITValueD
 					take = value.Imm.Bool()
 				}
 				if take {
-					_ = jitPlaceIntoPair(ctx, &value, target)
+					store(&value)
 					ctx.EmitJmp(endLabel)
 					break
 				}
@@ -546,10 +554,11 @@ func jitEmitSpecialCoalesce(nilOnly bool) func(*JITContext, []Scmer, []JITValueD
 					take = predicate.Imm.Bool()
 				}
 				if take {
-					_ = jitPlaceIntoPair(ctx, &value, target)
+					store(&value)
 					ctx.EmitJmp(endLabel)
+				} else {
+					ctx.FreeDesc(&value)
 				}
-				ctx.FreeDesc(&value)
 				continue
 			}
 			takeLabel, nextLabel := ctx.ReserveLabel(), ctx.ReserveLabel()
@@ -561,16 +570,13 @@ func jitEmitSpecialCoalesce(nilOnly bool) func(*JITContext, []Scmer, []JITValueD
 			}
 			ctx.EmitJmp(nextLabel)
 			ctx.MarkLabel(takeLabel)
-			_ = jitPlaceIntoPair(ctx, &value, target)
+			store(&value)
 			ctx.EmitJmp(endLabel)
 			ctx.MarkLabel(nextLabel)
 			ctx.FreeDesc(&predicate)
-			ctx.FreeDesc(&value)
 		}
 		ctx.MarkLabel(endLabel)
-		ctx.BindReg(target.Reg, &target)
-		ctx.BindReg(target.Reg2, &target)
-		return target
+		return jitPlaceScmerIntoTarget(ctx, target, result)
 	}
 }
 
