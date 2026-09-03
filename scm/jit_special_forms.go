@@ -709,10 +709,7 @@ func jitEmitSpecialLambda(ctx *JITContext, args []Scmer, _ []JITValueDesc, resul
 				}
 				template = jitCompileModeDeferred(true, template)
 				ctx.TrackImm(template)
-				if result.StackFunc {
-					return jitEmitBoundLambdaProc(ctx, template, argExprs[3:], ctx.SliceBase, result, true, false)
-				}
-				return jitEmitBoundLambdaProc(ctx, template, argExprs[3:], ctx.SliceBase, result, false, false)
+				return jitEmitBoundLambdaProc(ctx, template, argExprs[3:], ctx.SliceBase, result, result.StackFunc, false)
 			}
 			selfParam := NthLocalVar(captureBase + captureCount)
 			captureCount++
@@ -822,7 +819,7 @@ func jitEmitBoundLambdaProc(ctx *JITContext, template Scmer, captureArgs []Scmer
 		ctx.EmitLeaRegMem(object.Reg, ctx.StackReg, objectOff)
 		ctx.BindReg(object.Reg, &object)
 	} else {
-		_, typ := jitProcContextAllocation(captureCount)
+		typ := jitProcContextAllocation(captureCount)
 		ctx.TrackPointer(typ)
 		object = ctx.EmitGoCallScalar(GoFuncAddr(jitRuntimeAllocTyped), []JITValueDesc{
 			{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(uintptr(typ))), NoHeapPointer: true},

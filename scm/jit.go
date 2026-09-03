@@ -292,16 +292,16 @@ var (
 	jitNativeCodes      sync.Map // map[uintptr]struct{}, exact JIT entry PCs
 )
 
-func jitProcContextAllocation(captureCount int) (uintptr, unsafe.Pointer) {
+func jitProcContextAllocation(captureCount int) unsafe.Pointer {
 	if captureCount < 0 {
 		panic("jit: negative Proc capture count")
 	}
 	if cached, ok := jitProcContextTypes.Load(captureCount); ok {
-		return unsafe.Offsetof(ProcJIT{}.Context) + uintptr(captureCount)*unsafe.Sizeof(Scmer{}), cached.(unsafe.Pointer)
+		return cached.(unsafe.Pointer)
 	}
 	prepared := jitPrepareProcContextType(captureCount)
 	actual, _ := jitProcContextTypes.LoadOrStore(captureCount, prepared)
-	return unsafe.Offsetof(ProcJIT{}.Context) + uintptr(captureCount)*unsafe.Sizeof(Scmer{}), actual.(unsafe.Pointer)
+	return actual.(unsafe.Pointer)
 }
 
 func (proc *Proc) jitFunction() func(...Scmer) Scmer {
@@ -313,7 +313,7 @@ func (proc *Proc) jitFunction() func(...Scmer) Scmer {
 }
 
 func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
-	_, typ := jitProcContextAllocation(captureCount)
+	typ := jitProcContextAllocation(captureCount)
 	bound := (*Proc)(jitRuntimeAllocTyped(typ))
 	*bound = *proc
 	return bound
