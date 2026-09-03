@@ -260,9 +260,16 @@ func (proc *Proc) callJIT(args []Scmer) Scmer {
 		runtime.KeepAlive(entry)
 		return result
 	}
-	// Bound captures, hidden specialization arguments, and arity padding are
-	// uncommon metadata paths and remain centralized in the entry point.
-	return entry.callFunction(proc.jitFunction(), args)
+	// Context-free closures have one canonical static funcval. Specialized Proc
+	// copies can share that entry without becoming closure contexts themselves.
+	// A bound capture tail or a rebound lexical environment, however, belongs to
+	// this concrete Proc and must remain in the closure-context register.
+	function := entry.Native
+	template := JITProcForFunction(function)
+	if entry.CaptureCount != 0 || template == nil || template.En != proc.En {
+		function = proc.jitFunction()
+	}
+	return entry.callFunction(function, args)
 }
 
 func attachProcJIT(proc *Proc, entry *JITEntryPoint) {
