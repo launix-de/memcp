@@ -3936,7 +3936,10 @@ RecSet; membership edges retain their own physical operators. */
 				(define group_stage (make_group_stage_for_block grouped_block src))
 				(if (direct_base_group_plan_preferred? group_stage)
 					(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
-					(lower_group_stage group_stage)))
+					(list (quote if)
+						(list (quote tx_requires_query_local_cache) (physical_query_tx_symbol))
+						(lower_direct_base_group_stage group_stage fields (qb_order block) (qb_offset block) (qb_limit block))
+						(lower_group_stage group_stage))))
 			(begin
 				(define alias (source_alias src))
 				(define raw_condition (combine_where (qb_where block) (source_join_expr src)))

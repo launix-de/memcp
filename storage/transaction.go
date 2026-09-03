@@ -858,6 +858,10 @@ func WithAutocommit(session scm.Scmer, ss *scm.SessionState, querySeq uint64, qu
 	return result
 }
 
+func txRequiresQueryLocalCache(tx *TxContext) bool {
+	return tx != nil && (!tx.autoCommit || tx.Mode == TxACID || tx.SessionState.HasLocks())
+}
+
 func initTransaction(en scm.Env) {
 	scm.DeclareTitle("Transactions")
 	scm.Declare(&en, &scm.Declaration{
@@ -867,6 +871,14 @@ func initTransaction(en scm.Env) {
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns the current query generation of an active transaction",
 			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "int"}},
+	})
+	scm.Declare(&en, &scm.Declaration{
+		Name: "tx_requires_query_local_cache",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return scm.NewBool(txRequiresQueryLocalCache(scmerToTxContext(a[0])))
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "reports whether physical planning must avoid persistent shared caches for the current transaction",
+			Params: []*scm.TypeDescriptor{{Kind: "any", Label: "tx"}}, Return: &scm.TypeDescriptor{Kind: "bool"}},
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "tx_check",
