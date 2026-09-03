@@ -308,6 +308,7 @@ func TestRegisteredCreateTableTriggerRunsOnCreate(t *testing.T) {
 		scm.NewString(".hook"),
 		scm.NewString("seed"),
 		scm.NewString(""),
+		scm.NewString(""),
 		body,
 		scm.NewBool(false),
 	)

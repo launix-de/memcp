@@ -2133,7 +2133,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 			(define body sql_trigger_body)
 		) (begin
 				(define compiled (compile_trigger_body schema timing (car (cdr body))))
-				(list 'createtrigger (list 'table schema tbl) name timing (car body) (list 'quote (list 'deferred_trigger compiled)) true)
+				(list 'createtrigger (list 'table schema tbl) name timing (car body) "sql" (list 'quote (list 'deferred_trigger compiled)) true)
 		))
 		/* DROP TRIGGER syntax */
 		(parser '((atom "DROP" true) (atom "TRIGGER" true) (define if_exists (? (atom "IF" true) (atom "EXISTS" true))) (define name sql_identifier))
@@ -2160,6 +2160,30 @@ arithmetic; leave expressions containing columns or functions untouched. */
 	)))
 	((parser (define command p) command "^(?:/\\*.*?\\*/|--[^\r\n]*[\r\n]|--[^\r\n]*$|[\r\n\t ]+)+") s)
 )))
+
+/* Trigger source belongs to its language frontend. Storage only persists the
+source and language name, then calls this registered compiler lazily. Keeping
+the SQL reconstruction here lets MemCP start without lib/sql-parser.scm when a
+different frontend (for example RDF) is used. */
+(define sql_trigger_quote_identifier (lambda (id)
+	(concat "`" (replace id "`" "``") "`")))
+(define sql_trigger_source_timing (lambda (timing)
+	(match timing
+		"before_insert" "BEFORE INSERT"
+		"after_insert" "AFTER INSERT"
+		"before_update" "BEFORE UPDATE"
+		"after_update" "AFTER UPDATE"
+		"before_delete" "BEFORE DELETE"
+		"after_delete" "AFTER DELETE"
+		_ (error (concat "unsupported SQL trigger timing " timing)))))
+(define sql_trigger_source_compile (lambda (source context) (begin
+	(define sql (concat
+		"CREATE TRIGGER " (sql_trigger_quote_identifier (context "name")) " "
+		(sql_trigger_source_timing (context "timing")) " ON "
+		(sql_trigger_quote_identifier (context "table")) " FOR EACH ROW " source))
+	(define plan (parse_sql (context "schema") sql (lambda (schema read write) true) nil nil))
+	(nth plan 6))))
+(registertriggerlanguage "sql" sql_trigger_source_compile)
 
 (define load_sql (lambda (schema stream) (begin
 	(set state (newsession))

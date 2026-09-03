@@ -556,51 +556,6 @@ func (db *database) ensureLoaded() {
 	})
 }
 
-func triggerTimingSQL(timing TriggerTiming) string {
-	switch timing {
-	case BeforeInsert:
-		return "BEFORE INSERT"
-	case AfterInsert:
-		return "AFTER INSERT"
-	case BeforeUpdate:
-		return "BEFORE UPDATE"
-	case AfterUpdate:
-		return "AFTER UPDATE"
-	case BeforeDelete:
-		return "BEFORE DELETE"
-	case AfterDelete:
-		return "AFTER DELETE"
-	case AfterDropTable:
-		return "AFTER DROP TABLE"
-	case AfterDropColumn:
-		return "AFTER DROP COLUMN"
-	case AfterInvalidate:
-		return "AFTER INVALIDATE"
-	case AfterCreateTable:
-		return "AFTER CREATE TABLE"
-	default:
-		panic("unknown trigger timing")
-	}
-}
-
-func loadPersistedTriggerPlan(schemaName, tableName string, trigger *TriggerDescription) {
-	if !triggerScmerMissing(trigger.Func) || !triggerScmerMissing(trigger.FuncPlan) || trigger.SourceSQL == "" {
-		return
-	}
-	parseSQL := scm.Globalenv.Vars[scm.Symbol("parse_sql")]
-	allow := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return scm.NewBool(true) })
-	sql := fmt.Sprintf("CREATE TRIGGER `%s` %s ON `%s` FOR EACH ROW %s", trigger.Name, triggerTimingSQL(trigger.Timing), tableName, trigger.SourceSQL)
-	plan := scm.Apply(parseSQL, scm.NewString(schemaName), scm.NewString(sql), allow)
-	if !plan.IsSlice() {
-		panic("persisted trigger parse did not return an AST")
-	}
-	items := plan.Slice()
-	if len(items) < 6 {
-		panic("persisted trigger AST is incomplete")
-	}
-	trigger.Func, trigger.FuncPlan = unwrapDeferredTriggerBody(items[5])
-}
-
 // SharedResource impl for database
 func (db *database) GetState() SharedState { return db.srState }
 func (db *database) GetRead() func()       { db.ensureLoaded(); return func() {} }

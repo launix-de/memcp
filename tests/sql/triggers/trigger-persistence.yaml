@@ -18,6 +18,10 @@ cleanup:
     sql: "DROP TABLE IF EXISTS tp_customers"
   - action: "Drop trigger test table"
     sql: "DROP TABLE IF EXISTS tp_vals"
+  - action: "Drop Scheme trigger test table"
+    sql: "DROP TABLE IF EXISTS tp_scheme"
+  - action: "Drop unavailable language test table"
+    sql: "DROP TABLE IF EXISTS tp_unknown_language"
 
 test_cases:
   # ----------------------------------------------------------------
@@ -53,6 +57,22 @@ test_cases:
     expect:
       data:
         - val: 105
+
+  - name: "Create table for language-compiler persistence test"
+    sql: "CREATE TABLE tp_scheme (id INT PRIMARY KEY, val INT)"
+
+  - name: "Create source-defined Scheme trigger"
+    scm: |
+      (createtrigger
+        (table "memcp-tests" "tp_scheme")
+        "tp_scheme_add7"
+        "before_insert"
+        "(lambda (OLD NEW session tx) (set_assoc NEW \"val\" (+ (get_assoc NEW \"val\") 7)))"
+        "scheme"
+        (lambda (OLD NEW session tx) (set_assoc NEW "val" (+ (get_assoc NEW "val") 7)))
+        false)
+    expect:
+      data: [true]
 
   # ----------------------------------------------------------------
   # Part 2: prejoin incremental trigger persistence
@@ -151,6 +171,38 @@ test_cases:
       data:
         - val: 107
 
+  - name: "After restart: Scheme source is compiled by its registered language hook"
+    sql: "INSERT INTO tp_scheme VALUES (1, 5)"
+    expect:
+      affected_rows: 1
+
+  - name: "After restart: Scheme trigger result is correct"
+    sql: "SELECT val FROM tp_scheme WHERE id = 1"
+    expect:
+      data:
+        - val: 12
+
+  - name: "Create table for unavailable language test"
+    sql: "CREATE TABLE tp_unknown_language (id INT PRIMARY KEY)"
+
+  - name: "Persist trigger source whose frontend is not loaded"
+    scm: |
+      (createtrigger
+        (table "memcp-tests" "tp_unknown_language")
+        "tp_unknown_language_trigger"
+        "before_insert"
+        "opaque source"
+        "not-loaded-in-this-process"
+        nil
+        false)
+    expect:
+      data: [true]
+
+  - name: "Unavailable trigger language fails only when trigger is needed"
+    sql: "INSERT INTO tp_unknown_language VALUES (1)"
+    expect:
+      error: true
+
   - name: "After restart: serialized logical view IR is restored"
     sql: "SELECT customer_id, total FROM tp_order_totals ORDER BY customer_id"
     expect:
@@ -211,3 +263,9 @@ test_cases:
 
   - name: "Cleanup tp_vals"
     sql: "DROP TABLE tp_vals"
+
+  - name: "Cleanup tp_scheme"
+    sql: "DROP TABLE tp_scheme"
+
+  - name: "Cleanup unavailable language table"
+    sql: "DROP TABLE tp_unknown_language"

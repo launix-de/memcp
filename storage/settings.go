@@ -18,6 +18,7 @@ package storage
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
@@ -57,25 +58,71 @@ type SettingsT struct {
 }
 
 type CreateTableTriggerRegistration struct {
-	Schema    string    `json:"schema"`
-	Table     string    `json:"table"`
-	Name      string    `json:"name"`
-	SourceSQL string    `json:"source_sql,omitempty"`
-	Hidden    bool      `json:"hidden,omitempty"`
-	Priority  int       `json:"priority,omitempty"`
-	Async     bool      `json:"async,omitempty"`
-	Func      scm.Scmer `json:"func"`
+	Schema   string
+	Table    string
+	Name     string
+	Source   string
+	Language string
+	Hidden   bool
+	Priority int
+	Async    bool
+	Func     scm.Scmer
+}
+
+type persistedCreateTableTriggerRegistration struct {
+	Schema          string     `json:"schema"`
+	Table           string     `json:"table"`
+	Name            string     `json:"name"`
+	Source          string     `json:"source,omitempty"`
+	Language        string     `json:"language,omitempty"`
+	LegacySourceSQL string     `json:"source_sql,omitempty"`
+	Hidden          bool       `json:"hidden,omitempty"`
+	Priority        int        `json:"priority,omitempty"`
+	Async           bool       `json:"async,omitempty"`
+	Func            *scm.Scmer `json:"func,omitempty"`
+}
+
+func (r CreateTableTriggerRegistration) MarshalJSON() ([]byte, error) {
+	persist := persistedCreateTableTriggerRegistration{
+		Schema: r.Schema, Table: r.Table, Name: r.Name,
+		Source: r.Source, Language: r.Language,
+		Hidden: r.Hidden, Priority: r.Priority, Async: r.Async,
+	}
+	if r.Language == "" {
+		fn := r.Func
+		persist.Func = &fn
+	}
+	return json.Marshal(persist)
+}
+
+func (r *CreateTableTriggerRegistration) UnmarshalJSON(data []byte) error {
+	var persist persistedCreateTableTriggerRegistration
+	if err := json.Unmarshal(data, &persist); err != nil {
+		return err
+	}
+	r.Schema, r.Table, r.Name = persist.Schema, persist.Table, persist.Name
+	r.Source, r.Language = persist.Source, persist.Language
+	if r.Source == "" && persist.LegacySourceSQL != "" {
+		r.Source, r.Language = persist.LegacySourceSQL, "sql"
+	}
+	r.Hidden, r.Priority, r.Async = persist.Hidden, persist.Priority, persist.Async
+	r.Func = scm.NewNil()
+	if persist.Func != nil {
+		r.Func = *persist.Func
+	}
+	return nil
 }
 
 func (r CreateTableTriggerRegistration) triggerDescription() TriggerDescription {
 	return TriggerDescription{
-		Name:      r.Name,
-		Timing:    AfterCreateTable,
-		Func:      r.Func,
-		SourceSQL: r.SourceSQL,
-		Hidden:    r.Hidden,
-		Priority:  r.Priority,
-		Async:     r.Async,
+		Name:     r.Name,
+		Timing:   AfterCreateTable,
+		Func:     r.Func,
+		Source:   r.Source,
+		Language: r.Language,
+		Hidden:   r.Hidden,
+		Priority: r.Priority,
+		Async:    r.Async,
 	}
 }
 

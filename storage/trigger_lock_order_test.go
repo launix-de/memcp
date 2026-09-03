@@ -23,7 +23,97 @@ import (
 	"time"
 
 	"github.com/launix-de/NonLockingReadMap"
+	"github.com/launix-de/memcp/scm"
 )
+
+func TestForeignKeyTriggerPersistenceOmitsRegenerableProc(t *testing.T) {
+	trigger := TriggerDescription{
+		Name:     "__fk_example_child_insert",
+		Timing:   BeforeInsert,
+		Func:     scm.NewBool(true),
+		IsSystem: true,
+	}
+	encoded, err := json.Marshal(trigger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, persisted := fields["func"]; persisted {
+		t.Fatalf("regenerable FK trigger persisted compiled Scheme code: %s", encoded)
+	}
+}
+
+func TestNonRegenerableInternalTriggerPersistenceKeepsProc(t *testing.T) {
+	trigger := TriggerDescription{
+		Name:     ".internal_example",
+		Timing:   BeforeInsert,
+		Func:     scm.NewBool(true),
+		IsSystem: true,
+	}
+	encoded, err := json.Marshal(trigger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, persisted := fields["func"]; !persisted {
+		t.Fatalf("non-regenerable internal trigger lost compiled Scheme code: %s", encoded)
+	}
+}
+
+func TestLanguageTriggerPersistenceKeepsOnlySourceDefinition(t *testing.T) {
+	trigger := TriggerDescription{
+		Name:     "source_defined",
+		Timing:   BeforeInsert,
+		Func:     scm.NewBool(true),
+		Source:   "trigger source",
+		Language: "example",
+	}
+	encoded, err := json.Marshal(trigger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, persisted := fields["func"]; persisted {
+		t.Fatalf("source-defined trigger persisted compiled Scheme code: %s", encoded)
+	}
+	if string(fields["source"]) != `"trigger source"` || string(fields["language"]) != `"example"` {
+		t.Fatalf("source-defined trigger lost its generic definition: %s", encoded)
+	}
+}
+
+func TestLegacySQLTriggerSourceImportsIntoLanguageDefinition(t *testing.T) {
+	encoded := []byte(`{"name":"legacy","timing":"before_insert","source_sql":"SET NEW.value = 1"}`)
+	var trigger TriggerDescription
+	if err := json.Unmarshal(encoded, &trigger); err != nil {
+		t.Fatal(err)
+	}
+	if trigger.Source != "SET NEW.value = 1" || trigger.Language != "sql" {
+		t.Fatalf("legacy SQL source imported as source=%q language=%q", trigger.Source, trigger.Language)
+	}
+	upgraded, err := json.Marshal(trigger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(upgraded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, legacy := fields["source_sql"]; legacy {
+		t.Fatalf("upgraded trigger retained legacy source_sql field: %s", upgraded)
+	}
+	if string(fields["language"]) != `"sql"` {
+		t.Fatalf("upgraded trigger did not persist SQL language: %s", upgraded)
+	}
+}
 
 func TestPersistedKeytableTriggerWaitsForRuntimeTarget(t *testing.T) {
 	original := TriggerDescription{

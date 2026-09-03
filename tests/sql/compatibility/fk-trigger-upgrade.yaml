@@ -26,6 +26,7 @@ test_cases:
           "__fk_fk_upgrade_ref_child_insert"
           "before_insert"
           ""
+          ""
           (lambda (OLD NEW session tx)
             (begin
               (__fk_check_ref "memcp-tests" "fk_upgrade_parent" '("id") (list (get_assoc NEW "parent_id")) "fk_upgrade_ref")
@@ -35,6 +36,7 @@ test_cases:
           (table "memcp-tests" "fk_upgrade_child")
           "__fk_fk_upgrade_ref_child_update"
           "before_update"
+          ""
           ""
           (lambda (OLD NEW session tx)
             (begin
@@ -46,6 +48,7 @@ test_cases:
           "__fk_fk_upgrade_ref_parent_delete"
           "before_delete"
           ""
+          ""
           (lambda (OLD NEW session tx)
             (__fk_on_parent_delete "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) "fk_upgrade_ref" "CASCADE"))
           false)
@@ -53,6 +56,7 @@ test_cases:
           (table "memcp-tests" "fk_upgrade_parent")
           "__fk_fk_upgrade_ref_parent_update"
           "after_update"
+          ""
           ""
           (lambda (OLD NEW session tx)
             (__fk_on_parent_update "memcp-tests" "fk_upgrade_child" '("parent_id") (list (get_assoc OLD "id")) (list (get_assoc NEW "id")) "fk_upgrade_ref" "CASCADE"))
@@ -89,6 +93,14 @@ test_cases:
           parent_id: 10
           omitted_value: null
 
+  - name: "Force canonical regenerated triggers through a schema save"
+    sql: "CREATE TABLE fk_upgrade_save_marker (id INT PRIMARY KEY)"
+    expect: {}
+
+  - name: "Restart after saving FK triggers without compiled Scheme code"
+    sql: "SHUTDOWN"
+    restart_timeout: 300
+
   - name: "Loaded parent-delete trigger cascades"
     sql: "DELETE FROM fk_upgrade_parent WHERE id = 10"
     expect:
@@ -102,5 +114,6 @@ test_cases:
         - cnt: 0
 
 cleanup:
+  - sql: "DROP TABLE IF EXISTS fk_upgrade_save_marker"
   - sql: "DROP TABLE IF EXISTS fk_upgrade_child"
   - sql: "DROP TABLE IF EXISTS fk_upgrade_parent"
