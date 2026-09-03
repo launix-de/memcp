@@ -1051,6 +1051,26 @@ func TestJITExpressionTailSelfCallAdvancesArguments(t *testing.T) {
 	}
 }
 
+func TestJITSQLNotPreservesUnknownFromIn(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value) (sql_not (sql_in (list ((lambda () nil)) 1) value)))`)
+	if got := Apply(compiled, NewInt(0)); !got.IsNil() {
+		t.Fatalf("JIT NOT IN returned %s, want nil", String(got))
+	}
+	if got := Apply(compiled, NewInt(1)); !got.IsBool() || got.Bool() {
+		t.Fatalf("JIT NOT IN returned %s, want false", String(got))
+	}
+	if got := Apply(compiled, NewInt(2)); !got.IsNil() {
+		t.Fatalf("JIT NOT IN returned %s, want nil", String(got))
+	}
+	rowProc := compileJITExpressionTestProc(t, `(lambda (resultrow)
+		(resultrow (list "negated" (sql_not (sql_in (list ((lambda () nil)) 1) 0)))))`)
+	got := Apply(rowProc, NewFunc(func(args ...Scmer) Scmer { return args[0] }))
+	want := NewSlice([]Scmer{NewString("negated"), NewNil()})
+	if !Equal(got, want) {
+		t.Fatalf("JIT row NOT IN returned %s, want %s", String(got), String(want))
+	}
+}
+
 func TestJITExpressionRecursiveMatchKeepsEarlierFixedListBranch(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")

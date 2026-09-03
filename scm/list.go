@@ -40624,7 +40624,7 @@ func init_list() {
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "tests SQL IN-list membership and returns nil when NULL makes the result UNKNOWN",
 			Params: []*TypeDescriptor{{Kind: "list", Label: "values", Description: "SQL IN-list values", NoEscape: true}, {Kind: "any", Label: "value", Description: "value to find"}},
-			Return: &TypeDescriptor{Kind: "bool"},
+			Return: &TypeDescriptor{Kind: "bool|nil"},
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {

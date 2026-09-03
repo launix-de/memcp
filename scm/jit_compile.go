@@ -2562,7 +2562,15 @@ func jitCompileExpr(ctx *JITContext, expr Scmer, sliceBase Reg, result JITValueD
 				if decl.Type.JITInlineCost == 0 {
 					ctx.Coverage.InlinedCalls++
 				}
+				labelsBefore := len(ctx.Labels)
 				out := decl.Type.JITEmit(ctx, list[1:], args, result)
+				// Virtual-argument emitters use the same generated control-flow
+				// machinery as eagerly compiled declarations. A descriptor's Type
+				// after rendering several paths belongs only to the path rendered
+				// last; consumers must inspect the emitted Scmer tag at runtime.
+				if len(ctx.Labels) != labelsBefore && out.Loc == LocRegPair {
+					out.Type = JITTypeUnknown
+				}
 				out.NoHeapPointer = jitReturnHasNoHeapPointer(decl.Type.Return)
 				return out
 			}
