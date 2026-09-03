@@ -539,8 +539,10 @@ func (db *database) ensureLoaded() {
 			t.initializeLegacyPlannerRowEstimate()
 			t.publishShowColumnsSnapshot()
 		}
-		// FK enforcement triggers are serializable Procs and persist with the table JSON.
-		// No re-installation needed on load.
+		// FK declarations are authoritative, while their system triggers are
+		// generated code. Rebuild that code at the persistence boundary so schema
+		// files written by older binaries cannot retain an obsolete builtin ABI.
+		rebuildFKTriggersAfterLoad(db)
 		db.srState = SHARED
 		// Dot-prefixed cache tables are planner-owned and persisted only so a
 		// warm query cache can survive restart. Re-register their table-level

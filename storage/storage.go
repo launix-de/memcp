@@ -4068,23 +4068,12 @@ func fkCascadeUpdate(currentTx *TxContext, childTbl *table, cols []string, oldVa
 }
 
 // initFKBuiltins declares the FK enforcement builtins used by trigger Procs.
-func fkTriggerTxArg(args []scm.Scmer, index int) *TxContext {
-	// FK triggers are persisted as compiled Scheme procedures. Releases before
-	// explicit transaction propagation emitted these builtin calls without the
-	// final tx argument, so that argument is part of a backward-compatible ABI.
-	// New triggers pass it; old triggers retain their original nil-tx behavior.
-	if len(args) <= index {
-		return nil
-	}
-	return scmerToTxContext(args[index])
-}
-
 func initFKBuiltins(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "__fk_check_ref",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := fkTriggerTxArg(a, 5)
+			currentTx := scmerToTxContext(a[5])
 			schema := scm.String(a[0])
 			parentTable := scm.String(a[1])
 			parentCols := scmerSliceToStrings(mustScmerSlice(a[2], "parent_cols"))
@@ -4116,7 +4105,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "parent_cols", Description: "parent column names"},
 				{Kind: "list", Label: "values", Description: "FK values to check"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
-				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4127,7 +4116,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_delete",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := fkTriggerTxArg(a, 6)
+			currentTx := scmerToTxContext(a[6])
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -4163,7 +4152,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "parent_vals", Description: "old parent PK values"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
 				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
-				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4174,7 +4163,7 @@ func initFKBuiltins(en scm.Env) {
 		Name: "__fk_on_parent_update",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			currentTx := fkTriggerTxArg(a, 7)
+			currentTx := scmerToTxContext(a[7])
 			schema := scm.String(a[0])
 			childTable := scm.String(a[1])
 			childCols := scmerSliceToStrings(mustScmerSlice(a[2], "child_cols"))
@@ -4224,7 +4213,7 @@ func initFKBuiltins(en scm.Env) {
 				{Kind: "list", Label: "new_vals", Description: "new parent PK values"},
 				{Kind: "string", Label: "fk_id", Description: "FK constraint name"},
 				{Kind: "string", Label: "mode", Description: "RESTRICT, CASCADE, or SETNULL"},
-				{Kind: "any", Label: "tx", Description: "explicit transaction context", Optional: true},
+				{Kind: "any", Label: "tx", Description: "explicit transaction context"},
 			},
 			Return:    &scm.TypeDescriptor{Kind: "nil"},
 			Forbidden: true,
@@ -4371,6 +4360,43 @@ func installFKTriggers(db *database, t1, t2 *table, fk foreignKey) {
 			scm.NewSymbol("NEW"),
 		})),
 	})
+}
+
+// rebuildFKTriggersAfterLoad replaces persisted FK implementation details with
+// the canonical trigger programs emitted by this binary. Foreign-key metadata
+// is authoritative; its system triggers are derived code and must not retain an
+// obsolete builtin ABI forever merely because schema.json contains an older
+// compiled Proc. User triggers are untouched because only names owned by an
+// actual foreign-key declaration are replaced.
+func rebuildFKTriggersAfterLoad(db *database) {
+	seen := make(map[string]struct{})
+	for _, child := range db.tables.GetAll() {
+		for _, fk := range child.Foreign {
+			if fk.Tbl1 != child.Name {
+				continue
+			}
+			key := fk.Tbl1 + "\x00" + fk.Tbl2 + "\x00" + fk.Id
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+
+			parent := db.tables.Get(fk.Tbl2)
+			if parent == nil {
+				continue
+			}
+			prefix := "__fk_" + fk.Id + "_"
+			for child.RemoveTrigger(prefix + "child_insert") {
+			}
+			for child.RemoveTrigger(prefix + "child_update") {
+			}
+			for parent.RemoveTrigger(prefix + "parent_delete") {
+			}
+			for parent.RemoveTrigger(prefix + "parent_update") {
+			}
+			installFKTriggers(db, child, parent, fk)
+		}
+	}
 }
 
 // showEngineStr returns the engine name string for a table (matches dashboard dropdown values).
