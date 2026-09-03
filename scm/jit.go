@@ -189,6 +189,17 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if jep == nil || jep.Native == nil {
 		panic("JIT: nil entry point")
 	}
+	return jep.callFunction(jep.Native, args)
+}
+
+// callFunction applies entry-point metadata but invokes the supplied concrete
+// funcval. Bound Proc instances share immutable compilation metadata while the
+// funcval context identifies the instance whose inline capture tail must be
+// visible in the closure-context register.
+func (jep *JITEntryPoint) callFunction(function func(...Scmer) Scmer, args []Scmer) (result Scmer) {
+	if jep == nil || function == nil {
+		panic("JIT: nil entry point")
+	}
 	if JITLog && jep.DebugName != "" {
 		fmt.Printf("JIT: call %s argc=%d\n", jep.DebugName, len(args))
 	}
@@ -230,7 +241,7 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 			panic("JIT: invalid hidden argument kind")
 		}
 	}
-	result = jep.Native(args...)
+	result = function(args...)
 	runtime.KeepAlive(args)
 	runtime.KeepAlive(jep)
 	runtime.KeepAlive(jep.Owner)
@@ -251,7 +262,7 @@ func (proc *Proc) callJIT(args []Scmer) Scmer {
 	}
 	// Bound captures, hidden specialization arguments, and arity padding are
 	// uncommon metadata paths and remain centralized in the entry point.
-	return proc.Compiled.Call(args...)
+	return entry.callFunction(proc.jitFunction(), args)
 }
 
 func attachProcJIT(proc *Proc, entry *JITEntryPoint) {

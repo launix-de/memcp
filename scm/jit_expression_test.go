@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"unsafe"
 )
@@ -133,6 +134,70 @@ func TestJITProcForFunctionRejectsOrdinaryGoFunction(t *testing.T) {
 	ordinary := func(...Scmer) Scmer { return NewNil() }
 	if got := JITProcForFunction(ordinary); got != nil {
 		t.Fatalf("ordinary Go function resolved to Proc %p", got)
+	}
+}
+
+func TestSerializeJITFunctionUsesOriginalProc(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (value) (+ value 1))`)
+	function := NewFunc(compiled.Proc().jitFunction())
+	serialized := SerializeToString(function, &Globalenv)
+	if serialized == "[unserializable native func]" || serialized == "[native func]" {
+		t.Fatalf("JIT function was not serialized through its Proc: %s", serialized)
+	}
+	if !strings.HasPrefix(serialized, "(lambda ") {
+		t.Fatalf("JIT function serialization = %s, want lambda", serialized)
+	}
+}
+
+func TestJITDynamicCallReceivesBoundLocalLambda(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t,
+		`(lambda (consumer value) (begin (define producer (lambda () value)) (consumer producer)))`)
+	consumer := NewFunc(func(args ...Scmer) Scmer {
+		if len(args) != 1 || args[0].GetTag() != tagProc {
+			t.Fatalf("consumer received %v, want one Proc", args)
+		}
+		return Apply(args[0])
+	})
+	if got := Apply(compiled, consumer, NewInt(42)); !Equal(got, NewInt(42)) {
+		t.Fatalf("dynamic callback result = %s, want 42", String(got))
+	}
+}
+
+func TestJITMetadataCallUsesBoundProcFuncval(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (captured)
+		(lambda () captured))`)
+	bound := Apply(compiled, NewString("bound capture"))
+	if !bound.IsProc() || bound.Proc().Compiled == nil {
+		t.Fatal("capturing lambda has no JIT entry")
+	}
+	entry := bound.Proc().Compiled
+	direct := entry.JITDirect
+	entry.JITDirect = 0
+	t.Cleanup(func() { entry.JITDirect = direct })
+	if got := Apply(bound); !Equal(got, NewString("bound capture")) {
+		t.Fatalf("metadata call read %s, want concrete Proc capture", SerializeToString(got, &Globalenv))
+	}
+}
+
+func TestJITEscapingProducerPreservesNestedOuterCaptures(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (consumer parse_query policy session parse_fn schema tx)
+		(begin
+			(define exact_compile (lambda (compile_tx)
+				(begin
+					(define resolved_policy policy)
+					(define compile_policy resolved_policy)
+					(with_session session (lambda ()
+						(list parse_fn schema parse_query compile_policy session compile_tx))))))
+			(consumer exact_compile tx)))`)
+	session := NewSession()
+	parseFn := NewFunc(func(...Scmer) Scmer { return NewNil() })
+	policy := NewSymbol("policy")
+	tx := NewSymbol("tx")
+	consumer := NewFunc(func(args ...Scmer) Scmer { return Apply(args[0], args[1]) })
+	got := Apply(compiled, consumer, NewString("SELECT 1"), policy, session, parseFn, NewString("schema"), tx)
+	want := NewSlice([]Scmer{parseFn, NewString("schema"), NewString("SELECT 1"), policy, session, tx})
+	if !Equal(got, want) {
+		t.Fatalf("nested producer captures = %s, want %s", SerializeToString(got, &Globalenv), SerializeToString(want, &Globalenv))
 	}
 }
 

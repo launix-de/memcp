@@ -493,6 +493,10 @@ func serializeProcShallow(b *schemeTextWriter, v Proc, glob *Env) {
 func serializeNativeFunc(b *schemeTextWriter, fn any, en *Env) {
 	switch f := fn.(type) {
 	case func(...Scmer) Scmer:
+		if proc := JITProcForFunction(f); proc != nil {
+			serializeProcShallow(b, *proc, &Globalenv)
+			return
+		}
 		if col, rev, ok := LookupCollate(f); ok {
 			b.WriteString("(collate \"")
 			b.WriteString(strings.ReplaceAll(col, "\"", "\\\""))
