@@ -2129,8 +2129,7 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 // callable and argument array in rooted frame slots, so only the outer slice
 // base needs preservation here.
 func (ctx *JITContext) EmitProcJITCall(fn, argslice, result JITValueDesc) JITValueDesc {
-	ctx.EnsureDesc(&fn)
-	ctx.EnsureDesc(&argslice)
+	ctx.EnsureDescsTogether(&fn, &argslice)
 	if fn.Loc != LocReg || argslice.Loc != LocRegPair || result.Loc != LocStackPair || result.StackOff >= 0 {
 		panic("jit: invalid Proc.JIT call placement")
 	}

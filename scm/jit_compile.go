@@ -1958,12 +1958,9 @@ func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, opera
 	}
 	ctx.TrackImm(callable)
 	ctx.TrackEntry(proc.Compiled)
-	fnData := *(*uintptr)(unsafe.Pointer(&proc.JIT))
-	if fnData == 0 {
-		panic("jit: static Proc has nil native function value")
-	}
 	fnReg := ctx.AllocReg()
-	ctx.EmitMovRegImm64(fnReg, uint64(fnData))
+	ctx.EmitMovRegImm64(fnReg, uint64(uintptr(unsafe.Pointer(proc))))
+	ctx.EmitMovRegMem(fnReg, fnReg, int32(unsafe.Offsetof(Proc{}.JIT)))
 	fnValue := JITValueDesc{Loc: LocReg, Type: tagFunc, Reg: fnReg, RelocatablePointer: true}
 	ctx.BindReg(fnReg, &fnValue)
 	argsPtr := ctx.AllocRegExcept(fnReg)
