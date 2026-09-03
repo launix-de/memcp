@@ -701,7 +701,7 @@ func TestRecursiveAccumulatorIfBranchesCountAsSingleUse(t *testing.T) {
 	EvalAll("recursive accumulator ownership test", `(define recursive_append_accumulate (lambda (acc remaining)
 		(if (equal? remaining '())
 			acc
-			(recursive_append_accumulate (append acc (list (car remaining))) (cdr remaining)))))`, env)
+			(recursive_append_accumulate (append acc (car remaining)) (cdr remaining)))))`, env)
 
 	base := env.Vars[Symbol("recursive_append_accumulate")].Proc()
 	call := []Scmer{NewSymbol("recursive_append_accumulate"), NewSymbol("fresh")}
@@ -716,10 +716,48 @@ func TestRecursiveAccumulatorIfBranchesCountAsSingleUse(t *testing.T) {
 	}
 	_ = base
 
-	got := Apply(variant, NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	// Call with the proc's real two-parameter arity (a fresh accumulator,
+	// then the remaining items) so the recursive branch is actually
+	// exercised, not just the empty-input base case.
+	got := Apply(variant, NewSlice(nil), NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
 	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
 	if !Equal(got, want) {
 		t.Fatalf("specialized accumulator returned %s, want %s", String(got), String(want))
+	}
+}
+
+// TestRecursiveAccumulatorMatchArmsCountAsSingleUse is the match-based analog
+// of TestRecursiveAccumulatorIfBranchesCountAsSingleUse. This project's own
+// style convention prefers match over if-cascades, so the same "return the
+// accumulator on the empty case, otherwise recurse with an extended
+// accumulator" idiom commonly shows up as match clauses instead of an if.
+// Before generalizing procParameterOwnershipUses's branch-exclusivity
+// handling from if to match, this was rejected the same way the if case was.
+func TestRecursiveAccumulatorMatchArmsCountAsSingleUse(t *testing.T) {
+	env := newOptimizerTestEnv()
+	EvalAll("recursive accumulator match ownership test", `(define recursive_match_accumulate (lambda (acc remaining)
+		(match remaining
+			'() acc
+			(cons item rest) (recursive_match_accumulate (append acc item) rest))))`, env)
+
+	call := []Scmer{NewSymbol("recursive_match_accumulate"), NewSymbol("fresh")}
+	freshList := &TypeDescriptor{Kind: "list", Transfer: true, Length: UnknownLength}
+	meta := newOptimizerMetainfo()
+	variant, ok := trySpecializeProcCall(call, []TypeInfo{tiZero, TypeInfoFromTD(freshList)}, env, &meta)
+	if !ok || !variant.IsProc() {
+		t.Fatal("fresh accumulator did not produce a Proc specialization")
+	}
+	if body := serializedTestExpr(t, env, variant.Proc().Body); !strings.Contains(body, "append_mut") {
+		t.Fatalf("recursive match accumulator did not become append_mut: %s", body)
+	}
+
+	// Call with the proc's real two-parameter arity (a fresh accumulator,
+	// then the remaining items) so the recursive branch is actually
+	// exercised, not just the empty-input base case.
+	got := Apply(variant, NewSlice(nil), NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)}))
+	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
+	if !Equal(got, want) {
+		t.Fatalf("specialized match accumulator returned %s, want %s", String(got), String(want))
 	}
 }
 

@@ -120,17 +120,26 @@ literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 			(match prefix (regex "(?s:.*)\\bAGAINST\\s*\\($" _) true false)))))
 	(define read_string_literal (lambda (q start quote_ch) (begin
 		(define len (strlen q))
-		(for (list (+ start 1) "" false)
-			(lambda (i value done) (and (not done) (< i len)))
-			(lambda (i value done) (begin
+		/* Store each piece under its own session key (O(1) amortized per
+		write, like any dict built incrementally in a loop) instead of
+		concat-in-a-loop, which would copy the whole prefix on every
+		character (O(n^2) for a literal of length n). cons/append aren't an
+		O(1) alternative here either: both are implemented as a full copy of
+		the existing list on this slice-backed representation. */
+		(define pieces (newsession))
+		(match (for (list (+ start 1) 0 false)
+			(lambda (i count done) (and (not done) (< i len)))
+			(lambda (i count done) (begin
 				(define ch (substr q i 1))
 				(if (equal? ch "\\")
 					(if (< (+ i 1) len)
-						(list (+ i 2) (concat value (substr q (+ i 1) 1)) false)
-						(list (+ i 1) value false))
+						(begin (pieces count (substr q (+ i 1) 1)) (list (+ i 2) (+ count 1) false))
+						(list (+ i 1) count false))
 					(if (equal? ch quote_ch)
-						(list (+ i 1) value true)
-						(list (+ i 1) (concat value ch) false)))))))))
+						(list (+ i 1) count true)
+						(begin (pieces count ch) (list (+ i 1) (+ count 1) false)))))))
+			'(next_i count done)
+			(list next_i (apply concat (map (produceN count) (lambda (idx) (pieces idx)))) done)))))
 	(if (or
 		(not enabled)
 		(not (starts_like_select query))
@@ -144,20 +153,24 @@ literals, DDL/DML and already-parameterized statements keep exact cache keys. */
 		(list query '())
 		(begin
 			(define len (strlen query))
-			(define state (for (list 0 "" '() false)
-				(lambda (i out bindings invalid) (and (not invalid) (< i len)))
-				(lambda (i out bindings invalid) (begin
+			/* Same session-backed accumulation as read_string_literal: out
+			collects pieces (single chars or a "?" placeholder) by index
+			instead of concatenating on every character. */
+			(define out (newsession))
+			(define state (for (list 0 0 '() false)
+				(lambda (i out_count bindings invalid) (and (not invalid) (< i len)))
+				(lambda (i out_count bindings invalid) (begin
 					(define ch (substr query i 1))
 					(if (and (or (equal? ch "'") (equal? ch "\"")) (parameterized_rhs_literal? query i))
 						(match (read_string_literal query i ch) '(next_i value done)
 							(if done
-								(list next_i (concat out "?") (merge bindings (list value)) false)
-								(list len query '() true)))
-						(list (+ i 1) (concat out ch) bindings false))))))
-			(match state '(end_i normalized bindings invalid)
+								(begin (out out_count "?") (list next_i (+ out_count 1) (merge bindings (list value)) false))
+								(list len out_count '() true)))
+						(begin (out out_count ch) (list (+ i 1) (+ out_count 1) bindings false)))))))
+			(match state '(end_i out_count bindings invalid)
 				(if (or invalid (equal? bindings '()))
 					(list query '())
-					(list normalized bindings))))))))
+					(list (apply concat (map (produceN out_count) (lambda (idx) (out idx)))) bindings))))))))
 
 /* Copy request bindings and catalog context into an isolated planning session.
 The request transaction is deliberately excluded: cached plans must obtain

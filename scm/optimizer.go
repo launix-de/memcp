@@ -1138,16 +1138,18 @@ func procOwnershipParameterMask(expr Scmer, paramCount int) uint64 {
 // captured inside a nested closure, and whether at least one reference sits
 // in a position that consumes (transfers) ownership.
 //
-// if-branches (and the final expression of a top-level begin) are mutually
-// exclusive or sequentially terminal, so a parameter referenced once in each
-// branch of an if is still used at most once per actual execution: branch
-// occurrence counts are combined with max rather than summed, which is what
-// lets the common "return the accumulator on the empty case, otherwise
-// recurse with an extended accumulator" idiom qualify as a single linear use
-// instead of being permanently rejected as "used twice". A bare parameter
-// reference in the proc's own tail position is itself a consuming use,
-// mirroring passing it to a declared transfer-consuming builtin: returning a
-// value already hands its ownership to the caller.
+// if-branches, match/match_mut clause results (and the final expression of a
+// top-level begin) are mutually exclusive or sequentially terminal, so a
+// parameter referenced once in each branch/clause is still used at most once
+// per actual execution: branch occurrence counts are combined with max
+// rather than summed, which is what lets the common "return the accumulator
+// on the empty case, otherwise recurse with an extended accumulator" idiom
+// qualify as a single linear use instead of being permanently rejected as
+// "used twice" — whether that dispatch is written as an if or, per this
+// project's own style preference, as a match. A bare parameter reference in
+// the proc's own tail position is itself a consuming use, mirroring passing
+// it to a declared transfer-consuming builtin: returning a value already
+// hands its ownership to the caller.
 func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bool) {
 	uses := make([]int, paramCount)
 	captured := make([]bool, paramCount)
@@ -1214,6 +1216,44 @@ func procParameterOwnershipUses(expr Scmer, paramCount int) ([]int, []bool, []bo
 					cap[idx] = cap[idx] || branchCap[idx]
 					cons[idx] = cons[idx] || branchCons[idx]
 				}
+			}
+			for idx := 0; idx < paramCount; idx++ {
+				u[idx] += maxU[idx]
+			}
+			return
+		}
+		if lambdaDepth == 0 && (scmerIsSymbol(items[0], "match") || scmerIsSymbol(items[0], "match_mut")) && len(items) >= 2 {
+			// The scrutinee always evaluates; patterns are structural
+			// matchers rather than live expressions, so they're visited
+			// generically (summed, non-branch) exactly as before. Only the
+			// per-clause result bodies (and a trailing unpaired default, if
+			// present) are mutually exclusive at runtime — the same
+			// max-instead-of-sum treatment as if-branches, generalized to
+			// match's arbitrary number of arms.
+			visit(items[1], lambdaDepth, throughOuter, false, u, cap, cons)
+			rest := items[2:]
+			hasDefault := len(rest)%2 == 1
+			pairCount := len(rest) / 2
+			maxU := make([]int, paramCount)
+			visitBranch := func(branch Scmer) {
+				branchU := make([]int, paramCount)
+				branchCap := make([]bool, paramCount)
+				branchCons := make([]bool, paramCount)
+				visit(branch, lambdaDepth, throughOuter, tail, branchU, branchCap, branchCons)
+				for idx := 0; idx < paramCount; idx++ {
+					if branchU[idx] > maxU[idx] {
+						maxU[idx] = branchU[idx]
+					}
+					cap[idx] = cap[idx] || branchCap[idx]
+					cons[idx] = cons[idx] || branchCons[idx]
+				}
+			}
+			for i := 0; i < pairCount; i++ {
+				visit(rest[2*i], lambdaDepth, throughOuter, false, u, cap, cons)
+				visitBranch(rest[2*i+1])
+			}
+			if hasDefault {
+				visitBranch(rest[len(rest)-1])
 			}
 			for idx := 0; idx < paramCount; idx++ {
 				u[idx] += maxU[idx]
