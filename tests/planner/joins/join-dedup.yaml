@@ -12,9 +12,10 @@ setup:
   - sql: "DROP TABLE IF EXISTS jd_ref"
   - sql: "DROP TABLE IF EXISTS jd_permission"
   - sql: |
-      CREATE TABLE jd_item (id INT, ref_id INT)
+      CREATE TABLE jd_item (id INT, ref_id INT, expected_score INT)
   - sql: |
-      INSERT INTO jd_item (id, ref_id) VALUES (1, 10), (2, 20), (3, 10), (4, NULL)
+      INSERT INTO jd_item (id, ref_id, expected_score) VALUES
+        (1, 10, 100), (2, 20, 200), (3, 10, 100), (4, NULL, NULL)
   - sql: |
       CREATE TABLE jd_ref (id INT, label VARCHAR(40), score INT, doc VARCHAR(40))
   - sql: |
@@ -330,6 +331,23 @@ test_cases:
         - "scan_order"
         - "scan_order_point"
         - ".grp:jd_ref"
+
+  - name: "Composite scalar key lowers to one direct lookup"
+    sql: |
+      EXPLAIN
+      SELECT (SELECT label FROM jd_ref
+              WHERE jd_ref.id = jd_item.ref_id
+                AND jd_ref.score = jd_item.expected_score) AS label
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_lookup"
+        - "jd_ref"
+        - "expected_score"
+      result_not_contains:
+        - "scan_order"
 
   - name: "Cost calibration can force scalar lookup alternatives"
     sql: |

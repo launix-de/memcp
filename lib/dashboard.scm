@@ -95,10 +95,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 /* check if user has access to a specific database */
 (define dashboard_has_db_access (lambda (username is_admin dbname)
 	(if is_admin true
-		(> (scan nil (table "system" "access")
-			'("username" "database") (lambda (u db) (and (equal?? u username) (equal?? db dbname)))
-			'() (lambda (acc) (+ acc 1))
-			0 +) 0)
+		(scan_lookup nil (table "system" "access")
+			'("username" "database") (list username dbname))
 	)
 ))
 
@@ -132,7 +130,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: build JSON for a single user entry (takes username string) */
 (define dashboard_build_user_json (lambda (uname) (begin
-	(set is_adm (scan nil (table "system" "user") '("username") (lambda (u) (equal? u uname)) '("admin") (lambda (acc a) a) false (lambda (a b) b)))
+	(set is_adm (scan_lookup nil (table "system" "user") '("username") (list uname) "admin"))
 	/* get database access for non-admins */
 	(set dbs_csv (if is_adm ""
 		(scan nil (table "system" "access") '("username") (lambda (u) (equal?? u uname))
@@ -353,7 +351,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_401 res)
 					(begin
 						(define default_pw (if is_admin
-							(scan nil (table "system" "user") '("username") (lambda (username) (equal? username "root")) '("password") (lambda (acc pw) (equal? pw (password "admin"))) false (lambda (a b) b))
+							(equal? (scan_lookup nil (table "system" "user") '("username") '("root") "password")
+								(password "admin"))
 							false))
 						(dashboard_send_json res (concat
 							"{\"admin\":" (if is_admin "true" "false")
