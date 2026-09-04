@@ -570,6 +570,23 @@ type jitSafepoint struct {
 	entry     bool
 }
 
+// jitSortedFrameRoots returns the permanent frame words registered by the
+// one-pass emitter in deterministic order. Dynamic call-area roots live below
+// the stable stack pointer and are initialized at their call site.
+func jitSortedFrameRoots(unique map[jitStackRoot]struct{}) []jitStackRoot {
+	roots := make([]jitStackRoot, 0, len(unique))
+	for root := range unique {
+		roots = append(roots, root)
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		if roots[i].base != roots[j].base {
+			return roots[i].base < roots[j].base
+		}
+		return roots[i].offset < roots[j].offset
+	})
+	return roots
+}
+
 // jitStackMap is the runtime-independent form passed through the common JIT
 // code. The goexperiment.jit implementation converts it to runtime/jit maps;
 // the vanilla implementation deliberately ignores it.
@@ -653,6 +670,10 @@ type JITContext struct {
 	// current emission point. Safepoints copy this set before sibling control
 	// flow can restore a different allocator state.
 	StackRoots map[jitStackRoot]struct{}
+	// FrameRoots accumulates permanent pointer slots as they are first emitted.
+	// Unlike StackRoots it is shared by branch contexts and never removes slots,
+	// avoiding a second traversal over every safepoint after code generation.
+	FrameRoots map[jitStackRoot]struct{}
 	Safepoints []jitSafepoint
 	Coverage   JITCoverage
 
@@ -867,6 +888,12 @@ func (ctx *JITContext) setStackPointer(base jitStackRootBase, offset int32, poin
 			ctx.StackRoots = make(map[jitStackRoot]struct{})
 		}
 		ctx.StackRoots[root] = struct{}{}
+		if base == jitStackRootFrameBP || base == jitStackRootFrameSP && offset >= 0 {
+			if ctx.FrameRoots == nil {
+				ctx.FrameRoots = make(map[jitStackRoot]struct{})
+			}
+			ctx.FrameRoots[root] = struct{}{}
+		}
 		return
 	}
 	delete(ctx.StackRoots, root)

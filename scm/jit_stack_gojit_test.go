@@ -51,6 +51,34 @@ func TestJITFrameClearingLimitedToParserControlFlow(t *testing.T) {
 	})
 }
 
+func TestJITFrameRootInitializationIsPreciseAndDeterministic(t *testing.T) {
+	ctx := JITContext{}
+	for _, root := range []jitStackRoot{
+		{base: jitStackRootCallSP, offset: 16},
+		{base: jitStackRootFrameBP, offset: -8},
+		{base: jitStackRootFrameSP, offset: -16},
+		{base: jitStackRootFrameSP, offset: 32},
+		{base: jitStackRootFrameSP, offset: 32},
+		{base: jitStackRootFrameBP, offset: -24},
+	} {
+		ctx.setStackPointer(root.base, root.offset, true)
+	}
+	want := []jitStackRoot{
+		{base: jitStackRootFrameSP, offset: 32},
+		{base: jitStackRootFrameBP, offset: -24},
+		{base: jitStackRootFrameBP, offset: -8},
+	}
+	got := jitSortedFrameRoots(ctx.FrameRoots)
+	if len(got) != len(want) {
+		t.Fatalf("frame roots = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("frame root %d = %v, want %v", index, got[index], want[index])
+		}
+	}
+}
+
 func TestJITScalarPointerSpillRemainsInStackMap(t *testing.T) {
 	code := make([]byte, 128)
 	start := unsafe.Pointer(&code[0])
