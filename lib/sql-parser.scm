@@ -914,7 +914,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(parser '((atom "LTRIM" true) "(" (define e sql_expression) ")") '((quote sql_ltrim) e))
 		(parser '((atom "RTRIM" true) "(" (define e sql_expression) ")") '((quote sql_rtrim) e))
 
-		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression ",")) ")") (cons (quote coalesceNil) args))
+		(parser '((atom "COALESCE" true) "(" (define args (* sql_expression "," true)) ")") (cons (quote coalesceNil) args))
 		/* MySQL IFNULL(val, default) — alias for COALESCE with 2 args */
 		(parser '((atom "IFNULL" true) "(" (define a sql_expression) "," (define b sql_expression) ")") '((quote coalesceNil) a b))
 		/* SQL NULLIF(a, b) returns NULL when the values compare equal, otherwise a. */
@@ -954,9 +954,9 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		/* JSON_OBJECTAGG has two input expressions. */
 		(parser '((atom "JSON_OBJECTAGG" true) "(" (define key sql_expression) "," (define value sql_expression) ")") '('aggregate '('json_objectagg_entry key value) 'json_objectagg_reduce nil))
 		/* window functions: parse OVER(...) clause and emit AST node */
-		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func (toUpper fn) args _over))
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression "," true)) ")" (atom "OVER" true) "(" (define _over sql_window_spec) ")") '('window_func (toUpper fn) args _over))
 		/* fallback: user-registered aggregates or builtins */
-		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression ",")) ")")
+		(parser '((define fn sql_identifier_unquoted) "(" (define args (* sql_expression "," true)) ")")
 			(begin (define d (sql_aggregates (toUpper fn)))
 				(if (not (nil? d))
 					'('aggregate (car args) (car d) (cadr d))
@@ -1479,7 +1479,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(atom "VALUES" true)
 		(define datasets (* (parser '(
 			"("
-			(define dataset (* sql_expression ","))
+			(define dataset (* sql_expression "," true))
 			")"
 		) dataset) ","))
 		(define updaterows (? (parser '(
@@ -1515,10 +1515,10 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(? (define schema2 sql_identifier) ".")
 		(define tbl sql_identifier)
 		(? "("
-			(define coldesc (* sql_identifier ","))
+			(define coldesc (* sql_identifier "," true))
 			")")
 		(atom "VALUES" true)
-		(define datasets (* (parser '("(" (define dataset (* sql_expression ",")) ")") dataset) ","))
+		(define datasets (* (parser '("(" (define dataset (* sql_expression "," true)) ")") dataset) ","))
 	) (begin
 			(if policy (policy (coalesce schema2 schema) tbl true) true)
 			(define coldesc (coalesce coldesc (map (get_schema (coalesce schema2 schema) tbl) (lambda (col) (col "Field")))))
@@ -1575,7 +1575,7 @@ arithmetic; leave expressions containing columns or functions untouched. */
 		(define inner sql_select) /* INNER SELECT */
 		(define datasets (* (parser '(
 			"("
-			(define dataset (* sql_expression ","))
+			(define dataset (* sql_expression "," true))
 			")"
 		) dataset) ","))
 		(define updaterows (? (parser '(

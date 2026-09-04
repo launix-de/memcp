@@ -141,6 +141,16 @@ type jitParserEmitter struct {
 	skipLabel         JITLabel
 	inlineActions     bool
 	skipperRule       int
+	// noMemoDepth counts enclosing repeat nodes whose grammar author marked
+	// noMemo (the (* sub sep #t) form). Left-to-right, unbranched repeat
+	// bodies revisit no position twice, so rule references emitted while this
+	// is >0 skip the memo entry-check via emitLexicalRuleRef: jitParserPushRuleFrame
+	// still tags the frame by the target rule's own memoize bit and
+	// jitParserCompleteRule still writes its memo entry unconditionally on
+	// that bit, so callers elsewhere that do check the memo keep seeing
+	// correct, up to date results - only the redundant pre-check here is
+	// skipped, matching go-packrat's KleeneParser.NoMemo contract.
+	noMemoDepth int
 }
 
 func (emitter *jitParserEmitter) statePointer() JITValueDesc {
@@ -425,6 +435,17 @@ func (emitter *jitParserEmitter) continuation(label JITLabel) int64 {
 }
 
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
+	// A lexical sub-rule (lexicalParent >= 0) is never memoized or left
+	// recursive, and a rule referenced from inside a noMemo-marked unbranched
+	// repeat body provably cannot have been visited at this position before
+	// (see jitParserEmitter.noMemoDepth). Either way jitParserEnterRuleNative's
+	// memo/left-recursion-head check can only ever report a miss here, so its
+	// full call, 3-word return, and cache-hit branch are dead work; jump
+	// straight to jitParserPushRuleFrame and the rule body instead.
+	if emitter.program.rules[node.rule].lexicalParent >= 0 || emitter.noMemoDepth > 0 {
+		emitter.emitLexicalRuleRef(node, success, failure)
+		return
+	}
 	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	position := emitter.loadPosition()
 	statePointer := emitter.statePointer()
@@ -456,7 +477,38 @@ func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failu
 	emitter.ctx.EmitJmp(failure)
 }
 
+// emitLexicalRuleRef is the entry-check-free fast path carved out of
+// emitRuleRef: jitParserPushRuleFrame directly (void, no memo/left-recursion
+// bookkeeping applies) and an unconditional jump to the rule body, instead of
+// a call whose memo/head lookup can only ever report a miss here.
+func (emitter *jitParserEmitter) emitLexicalRuleRef(node *jitParserNode, success, failure JITLabel) {
+	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
+	position := emitter.loadPosition()
+	statePointer := emitter.statePointer()
+	emitter.emitVoid(jitParserPushRuleFrame, statePointer,
+		jitParserScalar(int64(node.rule)),
+		jitParserScalar(emitter.continuation(accepted)),
+		jitParserScalar(emitter.continuation(rejected)),
+		position,
+		jitParserBoolScalar(false),
+		jitParserBoolScalar(false))
+	emitter.ctx.FreeDesc(&statePointer)
+	emitter.ctx.FreeDesc(&position)
+	emitter.ctx.EmitJmp(emitter.ruleLabels[node.rule])
+	emitter.ctx.MarkLabel(accepted)
+	if node.ignoreResult {
+		emitter.discardValue()
+	}
+	emitter.ctx.EmitJmp(success)
+	emitter.ctx.MarkLabel(rejected)
+	emitter.ctx.EmitJmp(failure)
+}
+
 func (emitter *jitParserEmitter) emitRepeat(node *jitParserNode, rule int, success, failure JITLabel) {
+	if node.noMemo {
+		emitter.noMemoDepth++
+		defer func() { emitter.noMemoDepth-- }()
+	}
 	emitter.pushCheckpoint()
 	if !node.ignoreResult {
 		emitter.emitVoid(jitParserPushMarkNative, emitter.state)
