@@ -7429,7 +7429,11 @@ func jitCompileMode(recursiveLambdas bool, a ...Scmer) Scmer {
 }
 
 func jitCompileModeDeferred(recursiveLambdas bool, a ...Scmer) Scmer {
-	return jitCompileModePublish(recursiveLambdas, false, true, a...)
+	// A deferred entry's stack maps are published together with its enclosing
+	// reservation. Keep the entry on a private Proc copy until then: installing
+	// it on the shared template would let another goroutine execute code whose
+	// safepoint metadata is not visible to the runtime yet.
+	return jitCompileModePublish(recursiveLambdas, false, false, a...)
 }
 
 func jitCompileProbe(a ...Scmer) Scmer {

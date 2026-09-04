@@ -134,3 +134,23 @@ func TestJITEntryGrowsStackInPrologue(t *testing.T) {
 		t.Fatal("JIT stack growth did not resume the generated procedure")
 	}
 }
+
+func TestJITDeferredCompilationKeepsTemplateUnpublished(t *testing.T) {
+	template := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+	if !template.IsProc() || template.Proc() == nil {
+		t.Fatal("lambda did not produce a Proc template")
+	}
+	compiled := jitCompileModeDeferred(true, template)
+	if !compiled.IsProc() || compiled.Proc() == nil {
+		t.Fatal("deferred compilation did not return a Proc")
+	}
+	if compiled.Proc() == template.Proc() {
+		t.Fatal("deferred compilation installed code on the shared Proc template")
+	}
+	if template.Proc().JITCode != 0 || template.Proc().Compiled != nil {
+		t.Fatal("shared Proc template exposes deferred code before stack-map publication")
+	}
+	if compiled.Proc().JITCode == 0 || compiled.Proc().Compiled == nil {
+		t.Fatal("deferred compilation did not return its private compiled Proc")
+	}
+}
