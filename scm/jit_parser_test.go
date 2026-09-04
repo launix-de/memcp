@@ -17,7 +17,16 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
+
+func TestJITParserMemoEntryStaysCacheCompact(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) == 8 && unsafe.Sizeof(jitParserMemoEntry{}) != 32 {
+		t.Fatalf("parser memo entry grew to %d bytes, want 32", unsafe.Sizeof(jitParserMemoEntry{}))
+	}
+}
 
 func TestJITParserMemoSeparatesRulesAndPositions(t *testing.T) {
 	program := &jitParserProgram{rules: make([]jitParserRule, 10)}

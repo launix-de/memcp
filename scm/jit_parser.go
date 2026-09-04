@@ -654,7 +654,7 @@ type jitParserMemoKey struct {
 
 type jitParserMemoEntry struct {
 	value    Scmer
-	position int
+	position uint32
 	success  bool
 	active   bool
 	head     *jitParserLeftRecursionHead
@@ -997,7 +997,7 @@ func jitParserCompleteRule(state *jitParserState, position int, value Scmer, suc
 	if frame.transient {
 		key := jitParserMemoKey{rule: frame.rule, position: frame.position}
 		memo, _ := state.memoGet(key)
-		memo.value, memo.position, memo.success = value, position, success
+		memo.value, memo.position, memo.success = value, uint32(position), success
 		memo.active = false
 		state.memoSet(key, memo)
 		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
@@ -1008,8 +1008,8 @@ func jitParserCompleteRule(state *jitParserState, position int, value Scmer, suc
 	key := jitParserMemoKey{rule: frame.rule, position: frame.position}
 	memo, _ := state.memoGet(key)
 	if frame.growing {
-		if success && position > memo.position {
-			memo.value, memo.position, memo.success = value, position, true
+		if success && position > int(memo.position) {
+			memo.value, memo.position, memo.success = value, uint32(position), true
 			state.memoSet(key, memo)
 			jitParserResetRuleFrame(state, frame, true)
 			for range state.program.rules[frame.rule].bindings {
@@ -1019,9 +1019,9 @@ func jitParserCompleteRule(state *jitParserState, position int, value Scmer, suc
 			return int64(frame.rule), int64(frame.position), true
 		}
 		state.heads[frame.position] = nil
-		return jitParserDeliverRuleResult(state, frame, memo.position, memo.value, memo.success, true)
+		return jitParserDeliverRuleResult(state, frame, int(memo.position), memo.value, memo.success, true)
 	}
-	memo.value, memo.position, memo.success = value, position, success
+	memo.value, memo.position, memo.success = value, uint32(position), success
 	if memo.head == nil {
 		memo.active = false
 		state.memoSet(key, memo)
@@ -1295,7 +1295,10 @@ func jitParserEnterRuleNative(state *jitParserState, ruleValue, success, failure
 			}
 			return failure, int64(memo.position), true
 		}
-		state.memoSet(key, jitParserMemoEntry{position: int(position), active: true})
+		if position > int64(^uint32(0)) {
+			panic("jit: parser input exceeds supported position range")
+		}
+		state.memoSet(key, jitParserMemoEntry{position: uint32(position), active: true})
 		jitParserPushRuleFrame(state, rule, int(success), int(failure), int(position), true, false)
 		return 0, position, false
 	}
