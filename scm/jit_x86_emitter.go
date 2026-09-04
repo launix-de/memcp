@@ -2164,11 +2164,31 @@ func (ctx *JITContext) EmitGoCallVariadic(f func(...Scmer) Scmer, argslice JITVa
 	return target
 }
 
-// EmitProcJITCall performs the compact JIT-to-JIT ABI transition for a native
-// function value loaded from Proc.JIT. Common lowering has already placed the
-// callable and argument array in rooted frame slots, so only the outer slice
-// base needs preservation here.
-func (ctx *JITContext) EmitProcJITCall(fn, argslice, result JITValueDesc) JITValueDesc {
+type jitFuncValueCallKind uint8
+
+const (
+	jitProcCall jitFuncValueCallKind = iota
+	jitGoFuncCall
+)
+
+// EmitProcCall bitcasts a JIT-capable *Proc to func(...Scmer) Scmer and calls
+// it through the compact JIT-to-JIT ABI. The Proc starts with the machine-code
+// pointer and its inline capture context follows the Proc header, exactly like
+// a Go funcval and its closure words.
+func (ctx *JITContext) EmitProcCall(proc, argslice, result JITValueDesc) JITValueDesc {
+	return ctx.emitFuncValueCall(proc, argslice, result, jitProcCall)
+}
+
+// EmitGoFuncCall calls a regular Go func(...Scmer) Scmer value. Unlike a JIT
+// Proc, a Go callee requires the patched runtime's foreign-frame transition.
+func (ctx *JITContext) EmitGoFuncCall(fn, argslice, result JITValueDesc) JITValueDesc {
+	return ctx.emitFuncValueCall(fn, argslice, result, jitGoFuncCall)
+}
+
+// emitFuncValueCall contains only the register-save and shared regabi
+// machinery. The call kind deliberately remains private: common JIT lowering
+// must choose explicitly between EmitProcCall and EmitGoFuncCall.
+func (ctx *JITContext) emitFuncValueCall(fn, argslice, result JITValueDesc, kind jitFuncValueCallKind) JITValueDesc {
 	ctx.EnsureDescsTogether(&fn, &argslice)
 	if fn.Loc != LocReg || argslice.Loc != LocRegPair || result.Loc != LocStackPair || result.StackOff >= 0 {
 		panic("jit: invalid Proc.JIT call placement")
@@ -2220,13 +2240,21 @@ func (ctx *JITContext) EmitProcJITCall(fn, argslice, result JITValueDesc) JITVal
 	ctx.EmitMovRegReg(RegRCX, RegRBX)
 	ctx.EmitMovRegMem(RegR11, RegRDX, 0)
 
+	callAreaBytes := int32(jitGoSpillBytes)
+	if kind == jitGoFuncCall {
+		ctx.EmitMovRegReg(RegR13, RegRBP)
+		ctx.EmitSubInt64(RegR13, RegRSP)
+		ctx.EmitPushReg(RegR13)
+		ctx.EmitPushReg(RegR13)
+		callAreaBytes += 16
+	}
 	// Go callees own spill homes for register arguments in the caller's frame.
 	// A JIT callee uses these homes before runtime.morestack just like compiled
 	// Go code, so reserve the standard call area even on the compact path.
 	ctx.EmitSubRSP32(int32(jitGoSpillBytes))
 	ctx.emitBytes(0x41, 0xFF, 0xD3) // CALL R11
-	ctx.recordSafepoint(transientRoots, int32(jitGoSpillBytes))
-	ctx.EmitAddRSP32(int32(jitGoSpillBytes))
+	ctx.recordSafepoint(transientRoots, callAreaBytes)
+	ctx.EmitAddRSP32(callAreaBytes)
 
 	ctx.EmitStoreRegMem(RegRAX, ctx.FrameReg, result.StackOff)
 	ctx.EmitStoreRegMem(RegRBX, ctx.FrameReg, result.StackOff+8)

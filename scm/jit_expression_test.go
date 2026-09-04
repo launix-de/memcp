@@ -464,7 +464,7 @@ func callJITExpressionAtDepth(callable, arg Scmer, depth int) Scmer {
 	return result
 }
 
-func compileJITExpressionTestProc(t *testing.T, source string) Scmer {
+func compileJITExpressionTestProc(t testing.TB, source string) Scmer {
 	t.Helper()
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
@@ -483,6 +483,31 @@ func requireNoDynamicJITCalls(t *testing.T, compiled Scmer) {
 	coverage := compiled.Proc().Compiled.Coverage
 	if coverage.DynamicCalls != 0 {
 		t.Fatalf("expected complete expression lowering, got %+v", coverage)
+	}
+}
+
+func TestJITDynamicNativeFuncPreservesClosureContextAcrossGC(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (callback value) (callback value))`)
+	captured := NewString("captured native closure context")
+	callback := NewFunc(func(args ...Scmer) Scmer {
+		_ = jitCallbackTestSafepoint(args...)
+		return NewSlice([]Scmer{captured, args[0]})
+	})
+	argument := NewString("dynamic argument")
+	want := NewSlice([]Scmer{captured, argument})
+	if got := Apply(compiled, callback, argument); !Equal(got, want) {
+		t.Fatalf("dynamic native callback returned %s, want %s", String(got), String(want))
+	}
+}
+
+func BenchmarkJITDynamicNativeFuncCall(b *testing.B) {
+	compiled := compileJITExpressionTestProc(b, `(lambda (callback value) (callback value))`)
+	callback := NewFunc(func(args ...Scmer) Scmer { return args[0] })
+	argument := NewInt(42)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		jitListBenchmarkSink = Apply(compiled, callback, argument)
 	}
 }
 
@@ -550,8 +575,13 @@ func TestJITExpressionListResultOwnsBackingStorage(t *testing.T) {
 
 func TestJITDynamicListCallOwnsBackingStorage(t *testing.T) {
 	compiled := compileJITExpressionTestProc(t, `(lambda (callback value) (callback value 2 3))`)
-	first := Apply(compiled, NewFunc(List), NewInt(1))
-	_ = Apply(compiled, NewFunc(List), NewInt(99))
+	callableType := &TypeDescriptor{Kind: "func", Return: &TypeDescriptor{Kind: "list"}}
+	typedList := NewTypedFunc(List, RegisterCallableType(callableType))
+	if got := typedList.CallableType(); got != callableType {
+		t.Fatalf("retaining function lost callable type metadata: got %p, want %p", got, callableType)
+	}
+	first := Apply(compiled, typedList, NewInt(1))
+	_ = Apply(compiled, typedList, NewInt(99))
 	want := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3)})
 	if !Equal(first, want) {
 		t.Fatalf("dynamic list result changed after frame reuse: got %s, want %s", String(first), String(want))
