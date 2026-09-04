@@ -5303,6 +5303,50 @@ ever-larger subtrees. */
 					(lower_column_expr_for_alias src (nth keys i))
 					(list (quote outer) 1 (symbol (nth key_names i))))))))))
 
+/* aggregate_probe_bindings describe query-local equality probes over a shared
+partitioned aggregate. They affect only which computed group rows are eagerly
+repaired by this createcolumn call; the computed column remains defined for
+every group row and its canonical identity stays independent of bound values. */
+(define group_aggregate_probe_filter_parts (lambda (stage src keys key_names)
+	(begin
+		(define bindings
+			(coalesceNil (qassoc_get (gs_facts stage) (quote aggregate_probe_bindings) '()) '()))
+		(define indexed (map bindings (lambda (binding)
+			(match binding
+				'(column op value) (begin
+					(define index (reduce (produceN (count keys)) (lambda (found i)
+						(if (not (nil? found)) found
+							(if (equal?? (direct_column_name_for_alias src (nth keys i)) column)
+								i nil))) nil))
+					(if (nil? index)
+						(neumann_fail "build_queryplan" (concat
+							"aggregate probe binding has no matching group key: " column))
+						(list (nth key_names index) op value)))
+				_ (neumann_fail "build_queryplan" "malformed aggregate probe binding")))))
+		(if (empty_list? indexed)
+			nil
+			(begin
+				(define filter_names (reduce indexed (lambda (names binding)
+					(append_unique names (car binding))) '()))
+				(define filter_terms (map indexed (lambda (binding)
+					(list (nth binding 1)
+						(symbol (car binding))
+						(lower_column_expr_for_alias src (nth binding 2))))))
+				(list filter_names
+					(list (quote lambda) (map filter_names symbol)
+						(combine_where_terms filter_terms true))))))))
+
+(define group_aggregate_column_options (lambda (stage src keys key_names)
+	(begin
+		(define filter_parts
+			(group_aggregate_probe_filter_parts stage src keys key_names))
+		(if (nil? filter_parts)
+			(quoted_runtime_list '("temp" true))
+			(list (quote list)
+				"temp" true
+				"filtercols" (quoted_runtime_list (car filter_parts))
+				"filter" (cadr filter_parts))))))
+
 (define build_group_constant_key_insert_plan (lambda (schema grouptbl)
 	(list (quote insert)
 		(list (quote table) schema grouptbl)
@@ -5513,7 +5557,7 @@ ever-larger subtrees. */
 				agg_col
 				"any"
 				(list (quote list))
-				(quoted_runtime_list '("temp" true))
+				(group_aggregate_column_options stage src keys key_names)
 				(cons (quote list) key_names)
 				(list (quote lambda)
 					(map key_names (lambda (col) (symbol col)))

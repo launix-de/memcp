@@ -6181,6 +6181,38 @@ accept exactly the same aggregate descriptors. */
 		(filter (split_and_terms (qb_where block)) (lambda (term)
 			(equal? (aggregate_pushdown_stage_filter_term? stage_aliases term) stage_filters))))))
 
+/* A query-local equality on the aggregate driver is a probe binding, not part
+of the reusable aggregate definition. Moving it above the partition makes the
+driver column a group key while retaining the original equality as the lookup
+predicate. The opposite side must be independent of relation columns and
+request-local session state; join equalities and dynamic bindings therefore
+remain ordinary residual predicates. */
+(define aggregate_pushdown_bound_term_binding (lambda (driver term)
+	(match term
+		'(op left right) (if (or (equal? op (quote equal?)) (equal? op (quote equal??)))
+			(begin
+				(define left_col (direct_column_name_for_alias driver left))
+				(define right_col (direct_column_name_for_alias driver right))
+				(if (and (not (nil? left_col))
+					(and (not (expr_contains_column_ref? right))
+						(empty_list? (query_expr_session_reads right))))
+					(list left_col op right)
+					(if (and (not (nil? right_col))
+						(and (not (expr_contains_column_ref? left))
+							(empty_list? (query_expr_session_reads left))))
+						(list right_col op left)
+						nil)))
+			nil)
+		_ nil)))
+
+(define aggregate_pushdown_bound_terms (lambda (driver terms)
+	(filter terms (lambda (term)
+		(not (nil? (aggregate_pushdown_bound_term_binding driver term)))))))
+
+(define aggregate_pushdown_probe_bindings (lambda (driver terms)
+	(map terms (lambda (term)
+		(aggregate_pushdown_bound_term_binding driver term)))))
+
 (define aggregate_pushdown_filtered_stage_sources (lambda (block filter_terms)
 	(filter (aggregate_pushdown_stage_sources block) (lambda (src)
 		(reduce filter_terms (lambda (filtered term)
@@ -6263,7 +6295,7 @@ accept exactly the same aggregate descriptors. */
 			(aggregate_pushdown_rewrite_count_fields rest partition_alias input aggregate)))
 		_ '())))
 
-(define aggregate_pushdown_build_rewrite (lambda (ir block driver movable_terms residual_terms columns driver_rows group_rows)
+(define aggregate_pushdown_build_rewrite (lambda (ir block driver movable_terms residual_terms probe_bindings columns driver_rows group_rows)
 	(begin
 		(define keys (aggregate_pushdown_keys driver columns))
 		(define residual (combine_where_terms residual_terms true))
@@ -6288,6 +6320,7 @@ accept exactly the same aggregate descriptors. */
 				(list (quote preserve_empty_domain) false)
 				(list (quote null_semantics) (quote aggregate))
 				(list (quote partition_by) keys)
+				(list (quote aggregate_probe_bindings) probe_bindings)
 				(list (quote result_max_rows_per_partition) 1))))
 		(define rewritten_stages (map (qb_stages block) (lambda (stage)
 			(aggregate_pushdown_rewrite_stage driver partition_alias columns stage))))
@@ -6334,9 +6367,15 @@ accept exactly the same aggregate descriptors. */
 					(not (aggregate_pushdown_root_shape? block)))))
 			ir
 			(begin
-				(define movable_terms (aggregate_pushdown_terms block true))
-				(define residual_terms (aggregate_pushdown_terms block false))
 				(define driver (car (aggregate_pushdown_base_sources block)))
+				(define stage_terms (aggregate_pushdown_terms block true))
+				(define base_terms (aggregate_pushdown_terms block false))
+				(define bound_terms (aggregate_pushdown_bound_terms driver base_terms))
+				(define movable_terms (merge (list stage_terms bound_terms)))
+				(define residual_terms (filter base_terms (lambda (term)
+					(not (contains? bound_terms term)))))
+				(define probe_bindings
+					(aggregate_pushdown_probe_bindings driver bound_terms))
 				(define columns
 					(aggregate_pushdown_key_columns block driver movable_terms))
 				(if (or (empty_list? movable_terms) (empty_list? columns))
@@ -6360,7 +6399,7 @@ accept exactly the same aggregate descriptors. */
 							(list (quote aggregate_pushdown_cost_preferred?)
 								driver_rows_expr group_rows_expr))
 							(aggregate_pushdown_build_rewrite ir block driver movable_terms residual_terms
-								columns driver_rows group_rows)
+								probe_bindings columns driver_rows group_rows)
 							ir))))))))
 
 (define join_reorder_node_stage_catalog (lambda (node)
