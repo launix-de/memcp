@@ -33,37 +33,20 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	// 9=partCols, 10=offset, 11=limit, 12=mapReduceCols,
 	// 13=mapReduceFns, 14=neutral, 15=isOuter, 16=notFoundValue
 	if len(v) >= 14 && len(v) <= 17 {
-		filterCols, colsOK := scanStaticListElements(v[3])
-		filterFns, fnsOK := scanStaticListElements(v[4])
-		if colsOK && fnsOK && len(filterCols) == len(filterFns) {
-			schemas := make([]scm.Scmer, len(filterCols))
-			bindings := make([]scm.Scmer, 0)
-			compiledAny := false
-			for i := range filterCols {
-				schema, sourceBindings, ok := compileScanAccess(filterCols[i], filterFns[i])
-				if !ok {
-					schemas[i] = scm.NewNil()
-					continue
+		if schemas, bindings, ok := compileScanAccessList(v[3], v[4], false); ok {
+			for len(v) < 17 {
+				switch len(v) {
+				case 14:
+					v = append(v, scm.NewNil())
+				case 15:
+					v = append(v, scm.NewBool(false))
+				case 16:
+					v = append(v, v[14])
 				}
-				schemas[i] = shiftCompiledScanAccessSlots(schema, len(bindings))
-				bindings = append(bindings, sourceBindings...)
-				compiledAny = true
 			}
-			if compiledAny {
-				for len(v) < 17 {
-					switch len(v) {
-					case 14:
-						v = append(v, scm.NewNil())
-					case 15:
-						v = append(v, scm.NewBool(false))
-					case 16:
-						v = append(v, v[14])
-					}
-				}
-				v = append(v,
-					scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
-					oc.OptimizeNoEscapeList(bindings))
-			}
+			v = append(v,
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
+				oc.OptimizeNoEscapeList(bindings))
 		}
 	}
 	for i := 1; i <= 13 && i < len(v); i++ {

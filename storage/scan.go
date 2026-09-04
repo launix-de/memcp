@@ -221,6 +221,31 @@ func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
 	return scm.NewSlice(shifted)
 }
 
+func compileScanAccessList(columnListsExpr, filtersExpr scm.Scmer, allowBatch bool) ([]scm.Scmer, []scm.Scmer, bool) {
+	columnLists, columnsOK := scanStaticListElements(columnListsExpr)
+	filters, filtersOK := scanStaticListElements(filtersExpr)
+	if !columnsOK || !filtersOK || len(columnLists) != len(filters) {
+		return nil, nil, false
+	}
+	schemas := make([]scm.Scmer, len(columnLists))
+	bindings := make([]scm.Scmer, 0)
+	compiledAny := false
+	for i := range columnLists {
+		schema, sourceBindings, ok := compileScanAccessMode(columnLists[i], filters[i], allowBatch)
+		if !ok {
+			schemas[i] = scm.NewNil()
+			continue
+		}
+		schemas[i] = shiftCompiledScanAccessSlots(schema, len(bindings))
+		bindings = append(bindings, sourceBindings...)
+		compiledAny = true
+	}
+	if !compiledAny {
+		return nil, nil, false
+	}
+	return schemas, bindings, true
+}
+
 func scanParamColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, bool) {
 	for i, param := range params {
 		if i >= len(columns) {
