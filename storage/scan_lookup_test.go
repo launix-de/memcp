@@ -41,6 +41,7 @@ func TestScanLookupReturnsValueNullAndCardinalityError(t *testing.T) {
 		{scm.NewInt(2), scm.NewNil()},
 		{scm.NewInt(3), scm.NewString("first")},
 		{scm.NewInt(3), scm.NewString("second")},
+		{scm.NewNil(), scm.NewString("null-key")},
 	})
 	tx := NewTxContext(TxCursorStability)
 
@@ -52,6 +53,9 @@ func TestScanLookupReturnsValueNullAndCardinalityError(t *testing.T) {
 	}
 	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewInt(99)}, "value", true); !got.IsNil() {
 		t.Fatalf("scanLookup missing value = %s, want nil", scm.String(got))
+	}
+	if got := tbl.scanLookup(tx, []string{"key"}, []scm.Scmer{scm.NewNil()}, "", false); scm.ToBool(got) {
+		t.Fatal("scanLookup matched a SQL NULL key")
 	}
 
 	defer func() {

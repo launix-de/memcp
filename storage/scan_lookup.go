@@ -36,9 +36,24 @@ func (t *table) scanLookup(currentTx *TxContext, lookupCols []string, lookupValu
 	// Keep the dominant authentication and scalar-subselect case free of the
 	// per-dimension reader slices needed by composite probes.
 	if len(lookupCols) == 1 {
+		if lookupValues[0].IsNil() {
+			return scanLookupMiss(returnValue)
+		}
 		return t.scanLookupOne(currentTx, lookupCols[0], lookupValues[0], resultCol, returnValue)
 	}
+	for _, value := range lookupValues {
+		if value.IsNil() {
+			return scanLookupMiss(returnValue)
+		}
+	}
 	return t.scanLookupMany(currentTx, lookupCols, lookupValues, resultCol, returnValue)
+}
+
+func scanLookupMiss(returnValue bool) scm.Scmer {
+	if returnValue {
+		return scm.NewNil()
+	}
+	return scm.NewBool(false)
 }
 
 func (t *table) scanLookupOne(currentTx *TxContext, lookupCol string, lookupValue scm.Scmer, resultCol string, returnValue bool) scm.Scmer {
