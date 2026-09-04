@@ -47,6 +47,7 @@ from run_sql_tests import (  # noqa: E402
     load_performance_scale,
     observe_atomic_json,
     performance_ab_threshold_ms,
+    performance_sample_ns,
     performance_case_fingerprint,
     performance_case_key,
     performance_architecture,
@@ -103,6 +104,12 @@ class PerformanceScaleContractTest(unittest.TestCase):
             self.assertFalse(adaptive_measurement_complete(4, 1_000_000_000))
             self.assertFalse(adaptive_measurement_complete(100, 249_999_999))
             self.assertTrue(adaptive_measurement_complete(5, 250_000_000))
+
+    def test_performance_sample_uses_median_to_ignore_one_scheduling_outlier(self) -> None:
+        self.assertEqual(performance_sample_ns([78, 79, 80, 81, 200]), 80)
+        self.assertEqual(performance_sample_ns([20, 10]), 15)
+        with self.assertRaisesRegex(ValueError, "at least one sample"):
+            performance_sample_ns([])
 
     def test_warmup_accepts_zero_and_counts(self) -> None:
         self.assertEqual(resolve_warmup_runs({}, True), 2)
