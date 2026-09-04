@@ -86,7 +86,7 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 		if schema, bindings, ok := compileScanAccess(v[3], v[4]); ok {
 			if len(v) == 14 {
 				// notFoundValue defaults to the neutral accumulator.
-				v = append(v, v[12])
+				v = append(v, scm.CloneOptimizerExpression(v[12]))
 			}
 			if len(v) == 15 {
 				v = append(v, scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}))
@@ -94,12 +94,16 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 			if len(v) == 16 {
 				v = append(v, scm.NewNil())
 			}
+			// Planner-generated neutral and not-found expressions can share
+			// mutable AST lists. They are optimized independently below.
+			v[14] = scm.CloneOptimizerExpression(v[14])
 			v = append(v,
 				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
 				oc.OptimizeNoEscapeList(bindings))
 		}
 	}
 	mapReduceIdx, neutralIdx, outerIdx, notFoundIdx, postOrderColsIdx, postOrderFilterIdx := 11, 12, 13, 14, 15, 16
+	reuseNeutralForNotFound := len(v) > notFoundIdx && scm.Equal(v[neutralIdx], v[notFoundIdx])
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
 		if i != mapReduceIdx {
@@ -124,7 +128,11 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 		v[outerIdx], _ = oc.OptimizeSub(v[outerIdx], true)
 	}
 	if len(v) > notFoundIdx {
-		v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
+		if reuseNeutralForNotFound {
+			v[notFoundIdx] = v[neutralIdx]
+		} else {
+			v[notFoundIdx], _ = oc.OptimizeSub(v[notFoundIdx], true)
+		}
 	}
 	if len(v) > postOrderColsIdx {
 		v[postOrderColsIdx], _ = oc.OptimizeSub(v[postOrderColsIdx], true)

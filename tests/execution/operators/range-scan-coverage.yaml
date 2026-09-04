@@ -129,7 +129,7 @@ test_cases:
       rows: 1
       data:
         - inputCount: 200
-          candidateCount: 200
+          candidateCount: 10
           outputCount: 3
     cleanup:
       - scm: '(settings "ScanDebugging" false)'
