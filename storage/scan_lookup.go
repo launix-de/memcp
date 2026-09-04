@@ -26,6 +26,11 @@ import (
 
 const scalarSubselectOverflow = "scalar subselect returned more than one row"
 
+type scanLookupMapReader struct {
+	reader   ColumnReader
+	computed bool
+}
+
 // scanLookup probes an exact index prefix. Omitting resultCol turns it into a
 // lightweight existence check; scalar value lookups stop after the second
 // visible match to enforce scalar-subselect cardinality.
@@ -58,6 +63,155 @@ func scanLookupMiss(returnValue bool) scm.Scmer {
 		return scm.NewNil()
 	}
 	return scm.NewBool(false)
+}
+
+// scanLookupMap keeps row materialization inside the point probe, but invokes
+// the mapper only after global scalar cardinality has been validated and all
+// shard locks have been released.
+func (t *table) scanLookupMap(currentTx *TxContext, lookupCols []string, lookupValues []scm.Scmer, mapCols []string, mapProgram *scm.SerialProc) scm.Scmer {
+	validateScanLookupDimensions(len(lookupCols), len(lookupValues))
+	for _, value := range lookupValues {
+		if value.IsNil() {
+			return scm.NewNil()
+		}
+	}
+	var values []scm.Scmer
+	var matches int
+	if len(lookupCols) == 1 {
+		values, matches = t.scanLookupMapOne(currentTx, lookupCols[0], lookupValues[0], mapCols)
+	} else {
+		values, matches = t.scanLookupMapMany(currentTx, lookupCols, lookupValues, mapCols)
+	}
+	if matches > 1 {
+		panic(scalarSubselectOverflow)
+	}
+	if matches == 0 {
+		return scm.NewNil()
+	}
+	return mapProgram.Call(values)
+}
+
+func (t *table) scanLookupMapOne(currentTx *TxContext, lookupCol string, lookupValue scm.Scmer, mapCols []string) ([]scm.Scmer, int) {
+	if t.hasTableLock() {
+		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
+	}
+	touchTempColumns(t, []string{lookupCol}, mapCols)
+	boundary := columnboundaries{
+		col: lookupCol, matcher: EqualMatcher,
+		lower: lookupValue, lowerInclusive: true,
+		upper: lookupValue, upperInclusive: true,
+	}
+
+	var mu sync.Mutex
+	var values []scm.Scmer
+	matches := 0
+	var panicValue any
+	done := t.iterateShardsParallel(currentTx, []columnboundaries{boundary}, func(shard *storageShard, solo bool) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				mu.Lock()
+				if panicValue == nil {
+					panicValue = recovered
+				}
+				mu.Unlock()
+			}
+		}()
+		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
+			panic("query killed")
+		}
+		localValues, count := shard.scanLookupMapOne(boundary, lookupValue, mapCols, currentTx)
+		if count == 0 {
+			return
+		}
+		if solo {
+			values, matches = localValues, count
+			return
+		}
+		mu.Lock()
+		if matches == 0 {
+			values = localValues
+		}
+		matches += count
+		mu.Unlock()
+	})
+	if done != nil {
+		<-done
+	}
+	if panicValue != nil {
+		panic(panicValue)
+	}
+	return values, matches
+}
+
+func (t *storageShard) scanLookupMapOne(boundary columnboundaries, lookupValue scm.Scmer, mapCols []string, currentTx *TxContext) ([]scm.Scmer, int) {
+	t.ensureLoaded()
+	t.ensureMainCount(false)
+	lookupReader := newCachedColumnReaderTx(t.getColumnStorageOrPanic(boundary.col, false, currentTx), currentTx)
+	var fixedMapReaders [8]scanLookupMapReader
+	mapReaders := fixedMapReaders[:]
+	if len(mapCols) <= len(fixedMapReaders) {
+		mapReaders = mapReaders[:len(mapCols)]
+	} else {
+		mapReaders = make([]scanLookupMapReader, len(mapCols))
+	}
+	t.prepareScanLookupMapReaders(mapCols, mapReaders, currentTx)
+
+	var values []scm.Scmer
+	matches := 0
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	mainCount := t.main_count
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	var ids [8]uint32
+	t.iterateIndexForce(currentTx, []columnboundaries{boundary}, []scm.Scmer{lookupValue}, lookupValue, len(t.inserts), ids[:], true, func(batch []uint32) bool {
+		for _, recid := range batch {
+			var actual scm.Scmer
+			if recid < mainCount {
+				actual = lookupReader.GetValue(recid)
+			} else {
+				actual = t.getDelta(int(recid-mainCount), boundary.col)
+			}
+			if !scm.Equal(actual, lookupValue) {
+				continue
+			}
+			if acidMode {
+				if !currentTx.IsVisible(t, recid) {
+					continue
+				}
+			} else if t.deletions.Get(uint(recid)) {
+				continue
+			}
+			matches++
+			if matches == 1 {
+				values = t.scanLookupMapValues(recid, mainCount, mapCols, mapReaders)
+			}
+			if matches == 2 {
+				return false
+			}
+		}
+		return true
+	})
+	return values, matches
+}
+
+func (t *storageShard) prepareScanLookupMapReaders(mapCols []string, readers []scanLookupMapReader, currentTx *TxContext) {
+	for i, col := range mapCols {
+		storage := t.getColumnStorageOrPanic(col, false, currentTx)
+		readers[i].reader = newCachedColumnReaderTx(storage, currentTx)
+		_, readers[i].computed = storage.(*StorageComputeProxy)
+	}
+}
+
+func (t *storageShard) scanLookupMapValues(recid, mainCount uint32, mapCols []string, readers []scanLookupMapReader) []scm.Scmer {
+	values := make([]scm.Scmer, len(mapCols))
+	for i, col := range mapCols {
+		if recid < mainCount || readers[i].computed {
+			values[i] = readers[i].reader.GetValue(recid)
+		} else {
+			values[i] = t.getDelta(int(recid-mainCount), col)
+		}
+	}
+	return values
 }
 
 func (t *table) scanLookupOne(currentTx *TxContext, lookupCol string, lookupValue scm.Scmer, resultCol string, returnValue bool) scm.Scmer {
@@ -334,4 +488,124 @@ func (t *storageShard) scanLookupMany(bounds boundaries, lookupValues []scm.Scme
 		return !stop.Load()
 	})
 	return result, matches
+}
+
+func (t *table) scanLookupMapMany(currentTx *TxContext, lookupCols []string, lookupValues []scm.Scmer, mapCols []string) ([]scm.Scmer, int) {
+	if t.hasTableLock() {
+		t.waitTableLock(SessionStateFromTx(currentTx), querySeqFromTx(currentTx), false)
+	}
+	touchTempColumns(t, lookupCols, mapCols)
+	boundaries := exactLookupBoundaries(lookupCols, lookupValues)
+
+	var mu sync.Mutex
+	var stop atomic.Bool
+	var values []scm.Scmer
+	matches := 0
+	var panicValue any
+	done := t.iterateShardsParallel(currentTx, boundaries, func(shard *storageShard, solo bool) {
+		if stop.Load() {
+			return
+		}
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				mu.Lock()
+				if panicValue == nil {
+					panicValue = recovered
+				}
+				mu.Unlock()
+				stop.Store(true)
+			}
+		}()
+		if ss := SessionStateFromTx(currentTx); ss != nil && ss.IsKilledSeq(querySeqFromTx(currentTx)) {
+			panic("query killed")
+		}
+		localValues, count := shard.scanLookupMapMany(boundaries, lookupValues, mapCols, currentTx, &stop)
+		if count == 0 {
+			return
+		}
+		if solo {
+			values, matches = localValues, count
+			return
+		}
+		mu.Lock()
+		if matches == 0 {
+			values = localValues
+		}
+		matches += count
+		if matches > 1 {
+			stop.Store(true)
+		}
+		mu.Unlock()
+	})
+	if done != nil {
+		<-done
+	}
+	if panicValue != nil {
+		panic(panicValue)
+	}
+	return values, matches
+}
+
+func (t *storageShard) scanLookupMapMany(bounds boundaries, lookupValues []scm.Scmer, mapCols []string, currentTx *TxContext, stop *atomic.Bool) ([]scm.Scmer, int) {
+	t.ensureLoaded()
+	t.ensureMainCount(false)
+	lookupReaders := make([]ColumnReader, len(bounds))
+	for i, boundary := range bounds {
+		lookupReaders[i] = newCachedColumnReaderTx(t.getColumnStorageOrPanic(boundary.col, false, currentTx), currentTx)
+	}
+	var fixedMapReaders [8]scanLookupMapReader
+	mapReaders := fixedMapReaders[:]
+	if len(mapCols) <= len(fixedMapReaders) {
+		mapReaders = mapReaders[:len(mapCols)]
+	} else {
+		mapReaders = make([]scanLookupMapReader, len(mapCols))
+	}
+	t.prepareScanLookupMapReaders(mapCols, mapReaders, currentTx)
+
+	var values []scm.Scmer
+	matches := 0
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	mainCount := t.main_count
+	acidMode := currentTx != nil && currentTx.Mode == TxACID
+	var ids [8]uint32
+	t.iterateIndexForce(currentTx, bounds, lookupValues, lookupValues[len(lookupValues)-1], len(t.inserts), ids[:], true, func(batch []uint32) bool {
+		if stop.Load() {
+			return false
+		}
+		for _, recid := range batch {
+			exact := true
+			for i, boundary := range bounds {
+				var actual scm.Scmer
+				if recid < mainCount {
+					actual = lookupReaders[i].GetValue(recid)
+				} else {
+					actual = t.getDelta(int(recid-mainCount), boundary.col)
+				}
+				if !scm.Equal(actual, lookupValues[i]) {
+					exact = false
+					break
+				}
+			}
+			if !exact {
+				continue
+			}
+			if acidMode {
+				if !currentTx.IsVisible(t, recid) {
+					continue
+				}
+			} else if t.deletions.Get(uint(recid)) {
+				continue
+			}
+			matches++
+			if matches == 1 {
+				values = t.scanLookupMapValues(recid, mainCount, mapCols, mapReaders)
+			}
+			if matches == 2 {
+				return false
+			}
+		}
+		return !stop.Load()
+	})
+	return values, matches
 }

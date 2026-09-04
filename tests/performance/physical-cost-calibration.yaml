@@ -175,6 +175,21 @@ test_cases:
       FROM pc_lookup_outer d
       WHERE d.id = 1
 
+  # A multi-column scalar expression cannot be lifted across the missing-row
+  # boundary. Compare the fused lookup mapper with the complete cardinality-
+  # checking scan that it replaces.
+  - name: "mapped scalar point lookup dominance"
+    physical_calibration: true
+    calibration_decision: "scan_lookup_map"
+    warmup: 2
+    repetitions: 7
+    sql: |
+      SELECT d.id,
+        (SELECT v.score + LENGTH(v.value) FROM pc_lookup_values v
+         WHERE v.lookup_id = d.lookup_id) AS value
+      FROM pc_lookup_outer d
+      WHERE d.id = 1
+
   - name: "unordered selective joined reduction"
     physical_calibration: true
     calibration_decision: "scan_join_order"

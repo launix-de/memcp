@@ -394,6 +394,64 @@ test_cases:
       result_not_contains:
         - "scan_order"
 
+  - name: "Multi-column scalar calculation is fused into the point lookup"
+    sql: |
+      EXPLAIN
+      SELECT (SELECT score + LENGTH(label) FROM jd_ref
+              WHERE jd_ref.id = jd_item.ref_id) AS adjusted
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_lookup_map"
+        - "score"
+        - "label"
+      result_not_contains:
+        - "scan_order"
+
+  - name: "Mapped scalar lookup exposes its dominance calibration"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE DISCOVER
+      SELECT (SELECT score + LENGTH(label) FROM jd_ref
+              WHERE jd_ref.id = jd_item.ref_id) AS adjusted
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      data:
+        - decision: "scan_lookup_map"
+          alternatives:
+            - "scan_lookup_map"
+            - "scan_order"
+
+  - name: "Mapped scalar lookup preserves matching NULL versus missing row"
+    sql: |
+      SELECT id,
+        (SELECT COALESCE(label, 'fallback') FROM jd_ref
+         WHERE jd_ref.id = jd_item.id + 29) AS mapped
+      FROM jd_item
+      WHERE id IN (1, 4)
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          mapped: fallback
+        - id: 4
+          mapped: null
+
+  - name: "Mapped scalar lookup validates cardinality before mapping"
+    sql: |
+      SELECT (SELECT score + LENGTH(COALESCE(label, '')) FROM jd_ref
+              WHERE jd_ref.id = jd_item.id + 39) AS adjusted
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      error: true
+      contains:
+        - "scalar subselect returned more than one row"
+
   - name: "Lifted scalar calculations preserve NULL and missing-row semantics"
     sql: |
       SELECT id,

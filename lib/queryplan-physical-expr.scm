@@ -2117,11 +2117,12 @@ would still have to project that value over the segment. */
 		(define lookup_parts (direct_exact_scan_lookup_parts
 			sources default_alias src condition keys lookup_keys))
 		(define result_col (direct_column_name_for_alias src value_expr))
-		(if (or (nil? lookup_parts) (nil? result_col))
+		(define map_cols (extract_columns_for_alias src value_expr))
+		(if (or (nil? lookup_parts) (and (nil? result_col) (empty_list? map_cols)))
 			nil
-			(list (nth lookup_parts 0) (nth lookup_parts 1) result_col)))))
+			(list (nth lookup_parts 0) (nth lookup_parts 1) result_col map_cols)))))
 
-(define lower_scalar_cardinality_scan_lookup_choice (lambda (stage lookup_expr scan_expr)
+(define lower_scalar_cardinality_scan_lookup_choice (lambda (stage lookup_kind lookup_expr scan_expr)
 	(begin
 		(define planning_session (qassoc_get (gs_facts stage) (quote physical_planning_session) nil))
 		/* The complete leaf match is measured dominant, so ordinary compilation
@@ -2130,9 +2131,9 @@ would still have to project that value over the segment. */
 		(if (nil? (planner_physical_explain_accumulator planning_session))
 			lookup_expr
 			(begin
-				(define decision_id (concat "scan_lookup:" (gs_id stage)))
-				(define alternatives (list "scan_lookup" "scan_order"))
-				(define chosen (planner_physical_choice decision_id "scan_lookup" alternatives planning_session))
+				(define decision_id (concat lookup_kind ":" (gs_id stage)))
+				(define alternatives (list lookup_kind "scan_order"))
+				(define chosen (planner_physical_choice decision_id lookup_kind alternatives planning_session))
 				(define lookup_cost (planner_direct_presence_probe_cost 1))
 				(define scan_cost (planner_cost
 					planner_membership_scan_invocation_ns
@@ -2141,18 +2142,18 @@ would still have to project that value over the segment. */
 					0 0 planner_membership_map_column_row_ns 0 0 1 0.75))
 				(planner_record_physical_decision (list
 					(list "decision_id" decision_id)
-					(list "decision" "scan_lookup")
+					(list "decision" lookup_kind)
 					(list "decision_site" "scalar_cardinality_probe")
 					(list "chosen" chosen)
-					(list "normally_chosen" "scan_lookup")
+					(list "normally_chosen" lookup_kind)
 					(list "selection" "dominance")
-					(list "reason" "complete_indexed_scalar_probe_avoids_scan_materialization")
+					(list "reason" "complete_indexed_scalar_probe_avoids_scan_materialization_and_row_reducer")
 					(list "inputs" (list (list "probe_invocations" 1)))
 					(list "alternatives" (list
-						(list (list "plan" "scan_lookup") (list "cost" (planner_cost_explain lookup_cost)))
+						(list (list "plan" lookup_kind) (list "cost" (planner_cost_explain lookup_cost)))
 						(list (list "plan" "scan_order") (list "cost" (planner_cost_explain scan_cost))))))
 					planning_session)
-				(if (equal? chosen "scan_lookup") lookup_expr scan_expr)))))))
+				(if (equal? chosen lookup_kind) lookup_expr scan_expr)))))))
 
 (define lower_scalar_cardinality_probe_expr (lambda (sources default_alias stage requested_col)
 	(begin
@@ -2223,14 +2224,29 @@ would still have to project that value over the segment. */
 					sources default_alias src condition value_expr keys lookup_keys))
 				(if (nil? lookup_parts)
 					scan_expr
-					(lower_scalar_cardinality_scan_lookup_choice stage
-						(list (quote scan_lookup)
-							(physical_query_tx_symbol)
-							(source_table_expr src)
-							(cons (quote list) (nth lookup_parts 0))
-							(cons (quote list) (nth lookup_parts 1))
-							(nth lookup_parts 2))
-						scan_expr)))))))
+					(begin
+						(define result_col (nth lookup_parts 2))
+						(define map_cols (nth lookup_parts 3))
+						(define lookup_kind (if (nil? result_col) "scan_lookup_map" "scan_lookup"))
+						(define lookup_expr (if (nil? result_col)
+							(list (quote scan_lookup_map)
+								(physical_query_tx_symbol)
+								(source_table_expr src)
+								(cons (quote list) (nth lookup_parts 0))
+								(cons (quote list) (nth lookup_parts 1))
+								(cons (quote list) map_cols)
+								(list (quote lambda)
+									(map map_cols (lambda (col)
+										(symbol (concat (source_alias src) "." col))))
+									(lower_column_expr_for_alias src value_expr)))
+							(list (quote scan_lookup)
+								(physical_query_tx_symbol)
+								(source_table_expr src)
+								(cons (quote list) (nth lookup_parts 0))
+								(cons (quote list) (nth lookup_parts 1))
+								result_col)))
+						(lower_scalar_cardinality_scan_lookup_choice
+							stage lookup_kind lookup_expr scan_expr))))))))
 
 (define collect_join_columns_acc (lambda (sources default_alias target_alias expr columns_by_alias)
 	(match expr

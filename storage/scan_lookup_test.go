@@ -125,6 +125,112 @@ func TestScanLookupCompositeValueAndExists(t *testing.T) {
 	}
 }
 
+func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
+	database := "test_scan_lookup_map"
+	databases.Remove(database)
+	t.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	tbl, _ := CreateTable(database, "items", Memory, true)
+	tbl.CreateColumn("tenant", "INT", nil, nil)
+	tbl.CreateColumn("key", "INT", nil, nil)
+	tbl.CreateColumn("left_value", "INT", nil, nil)
+	tbl.CreateColumn("right_value", "INT", nil, nil)
+	tbl.Insert([]string{"tenant", "key", "left_value", "right_value"}, [][]scm.Scmer{
+		{scm.NewInt(1), scm.NewInt(7), scm.NewInt(10), scm.NewInt(20)},
+		{scm.NewInt(1), scm.NewInt(8), scm.NewInt(30), scm.NewInt(40)},
+		{scm.NewInt(2), scm.NewInt(8), scm.NewInt(50), scm.NewInt(60)},
+		{scm.NewInt(3), scm.NewInt(9), scm.NewInt(70), scm.NewInt(80)},
+		{scm.NewInt(3), scm.NewInt(9), scm.NewInt(90), scm.NewInt(100)},
+	}, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	calls := 0
+	mapper := scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		calls++
+		return scm.NewInt(values[0].Int() + values[1].Int())
+	}))
+
+	got := tbl.scanLookupMap(tx,
+		[]string{"tenant", "key"},
+		[]scm.Scmer{scm.NewInt(1), scm.NewInt(7)},
+		[]string{"left_value", "right_value"},
+		&mapper,
+	)
+	if !scm.Equal(got, scm.NewInt(30)) || calls != 1 {
+		t.Fatalf("scanLookupMap = %s with %d mapper calls, want 30 with one call", scm.String(got), calls)
+	}
+	RebuildTable(tbl, true, false)
+	got = tbl.scanLookupMap(tx,
+		[]string{"tenant", "key"},
+		[]scm.Scmer{scm.NewInt(1), scm.NewInt(7)},
+		[]string{"left_value", "right_value"},
+		&mapper,
+	)
+	if !scm.Equal(got, scm.NewInt(30)) || calls != 2 {
+		t.Fatalf("rebuilt scanLookupMap = %s with %d mapper calls, want 30 with two", scm.String(got), calls)
+	}
+	if got := tbl.scanLookupMap(tx,
+		[]string{"key"}, []scm.Scmer{scm.NewInt(99)},
+		[]string{"left_value", "right_value"}, &mapper,
+	); !got.IsNil() || calls != 2 {
+		t.Fatalf("missing scanLookupMap = %s with %d total mapper calls, want nil and two", scm.String(got), calls)
+	}
+	if got := tbl.scanLookupMap(tx,
+		[]string{"key"}, []scm.Scmer{scm.NewNil()},
+		[]string{"left_value", "right_value"}, &mapper,
+	); !got.IsNil() || calls != 2 {
+		t.Fatalf("NULL-key scanLookupMap = %s with %d total mapper calls, want nil and two", scm.String(got), calls)
+	}
+
+	func() {
+		defer func() {
+			if got := recover(); fmt.Sprint(got) != scalarSubselectOverflow {
+				t.Fatalf("duplicate scanLookupMap panic = %v, want %q", got, scalarSubselectOverflow)
+			}
+		}()
+		tbl.scanLookupMap(tx,
+			[]string{"tenant", "key"},
+			[]scm.Scmer{scm.NewInt(3), scm.NewInt(9)},
+			[]string{"left_value", "right_value"},
+			&mapper,
+		)
+	}()
+	if calls != 2 {
+		t.Fatalf("duplicate scanLookupMap invoked mapper; total calls = %d, want 2", calls)
+	}
+}
+
+func TestScanLookupMapSchemeOperatorCanPerformNestedLookup(t *testing.T) {
+	Init(scm.Globalenv)
+	tbl := setupScanLookupTable(t, "test_scan_lookup_map_operator", [][]scm.Scmer{
+		{scm.NewInt(7), scm.NewString("seven")},
+	})
+	operator := scm.Globalenv.Vars[scm.Symbol("scan_lookup_map")]
+	tx := NewTxContext(TxCursorStability)
+	txValue := scm.NewAny(tx)
+	tableValue := NewTableScmer(tbl)
+	mapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.Apply(
+			scm.Globalenv.Vars[scm.Symbol("scan_lookup")],
+			txValue,
+			tableValue,
+			scm.NewSlice([]scm.Scmer{scm.NewString("key")}),
+			scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
+			scm.NewString("value"),
+		)
+	})
+	got := scm.Apply(operator,
+		txValue,
+		tableValue,
+		scm.NewSlice([]scm.Scmer{scm.NewString("key")}),
+		scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
+		scm.NewSlice([]scm.Scmer{scm.NewString("value")}),
+		mapper,
+	)
+	if !scm.Equal(got, scm.NewString("seven")) {
+		t.Fatalf("nested scan_lookup_map operator = %s, want seven", scm.String(got))
+	}
+}
+
 func BenchmarkScanLookupWithTx(b *testing.B) {
 	rows := make([][]scm.Scmer, 1024)
 	for i := range rows {
@@ -186,5 +292,35 @@ func BenchmarkScanLookupDimensions(b *testing.B) {
 				tbl.scanLookup(tx, bench.cols, bench.values, bench.resultCol, bench.returnValue)
 			}
 		})
+	}
+}
+
+func BenchmarkScanLookupMap(b *testing.B) {
+	database := "bench_scan_lookup_map"
+	databases.Remove(database)
+	b.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	tbl, _ := CreateTable(database, "items", Memory, true)
+	tbl.CreateColumn("key", "INT", nil, nil)
+	tbl.CreateColumn("left_value", "INT", nil, nil)
+	tbl.CreateColumn("right_value", "INT", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i + 1)), scm.NewInt(int64(i + 2))}
+	}
+	tbl.Insert([]string{"key", "left_value", "right_value"}, rows, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	lookupCols := []string{"key"}
+	lookupValues := []scm.Scmer{scm.NewInt(511)}
+	mapCols := []string{"left_value", "right_value"}
+	mapProgram := scm.PrepareSerialProc(scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.NewInt(values[0].Int() + values[1].Int())
+	}))
+	tbl.scanLookupMap(tx, lookupCols, lookupValues, mapCols, &mapProgram)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tbl.scanLookupMap(tx, lookupCols, lookupValues, mapCols, &mapProgram)
 	}
 }

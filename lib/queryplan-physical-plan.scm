@@ -9485,7 +9485,11 @@ ordering run. Storage artifacts begin in build_queryplan. */
 						(if (physical_expr_has_head? plan (quote scan_lookup))
 							"scan_lookup"
 							(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
-						"unknown")))))))
+						(if (equal? kind "scan_lookup_map")
+							(if (physical_expr_has_head? plan (quote scan_lookup_map))
+								"scan_lookup_map"
+								(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+							"unknown"))))))))
 
 (define physical_expr_has_group_relation? (lambda (expr)
 	(match expr

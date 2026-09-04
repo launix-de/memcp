@@ -661,6 +661,16 @@ func Init(en scm.Env) {
 		value.NoEscape = true
 		return value
 	}
+	serialCallback := func(label, description, returnKind, returnDescription string) *scm.TypeDescriptor {
+		value := scanCallback(label, description, returnKind, returnDescription)
+		value.SameGoroutine = true
+		return value
+	}
+	noEscapeColumnList := func(label, description string) *scm.TypeDescriptor {
+		value := columnList(label, description)
+		value.NoEscape = true
+		return value
+	}
 	reducer := func(label, description string) *scm.TypeDescriptor {
 		return &scm.TypeDescriptor{
 			Kind:        "func",
@@ -1272,6 +1282,41 @@ func Init(en scm.Env) {
 				{Kind: "string", Optional: true, Label: "resultColumn", Description: "optional column returned from the matching row; omit for an existence probe"},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any", Description: "projected scalar value or boolean existence result"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_lookup_map",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			lookupColValues := mustScmerSlice(a[2], "scan_lookup_map matchColumns")
+			lookupValues := mustScmerSlice(a[3], "scan_lookup_map matchValues")
+			validateScanLookupDimensions(len(lookupColValues), len(lookupValues))
+			for _, value := range lookupValues {
+				if value.IsNil() {
+					return scm.NewNil()
+				}
+			}
+			mapCols := scmerSliceToStrings(mustScmerSlice(a[4], "scan_lookup_map mapColumns"))
+			mapProgram := scm.PrepareSerialProc(a[5])
+			return TableFromScmer(a[1]).scanLookupMap(
+				scmerToTxContext(a[0]),
+				scmerSliceToStrings(lookupColValues),
+				lookupValues,
+				mapCols,
+				&mapProgram,
+			)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "probes an exact index prefix and maps the only visible matching row; returns NULL for no match and errors on multiple matches",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "transaction context used for visibility"},
+				{Kind: "table", Label: "table"},
+				{Kind: "list", NoEscape: true, Label: "matchColumns", Description: "non-empty exact index-prefix columns", Element: &scm.TypeDescriptor{Kind: "string", Label: "column"}},
+				{Kind: "list", NoEscape: true, Label: "matchValues", Description: "one exact value for each match column", Element: &scm.TypeDescriptor{Kind: "any", Label: "value"}},
+				noEscapeColumnList("mapColumns", "physical columns passed to the mapper for the single matching row"),
+				serialCallback("mapper", "lambda function that computes the scalar result after cardinality validation", "any", "mapped scalar value"),
+			},
+			Return: &scm.TypeDescriptor{Kind: "any", Description: "mapped scalar value or NULL for no visible match"},
 		},
 	})
 
