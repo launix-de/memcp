@@ -96,7 +96,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define dashboard_has_db_access (lambda (username is_admin dbname)
 	(if is_admin true
 		(scan_lookup nil (table "system" "access")
-			'("username" "database") (list username dbname))
+			'("scan_lookup_v1" 2 "username" "database" "exists" 0) (list username dbname))
 	)
 ))
 
@@ -130,7 +130,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: build JSON for a single user entry (takes username string) */
 (define dashboard_build_user_json (lambda (uname) (begin
-	(set is_adm (scan_lookup nil (table "system" "user") '("username") (list uname) "admin"))
+	(set is_adm (scan_lookup nil (table "system" "user") '("scan_lookup_v1" 1 "username" "value" 1 "admin") (list uname)))
 	/* get database access for non-admins */
 	(set dbs_csv (if is_adm ""
 		(scan nil (table "system" "access") '("username") (lambda (u) (equal?? u uname))
@@ -351,7 +351,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_401 res)
 					(begin
 						(define default_pw (if is_admin
-							(equal? (scan_lookup nil (table "system" "user") '("username") '("root") "password")
+							(equal? (scan_lookup nil (table "system" "user") '("scan_lookup_v1" 1 "username" "value" 1 "password") '("root"))
 								(password "admin"))
 							false))
 						(dashboard_send_json res (concat

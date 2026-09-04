@@ -325,12 +325,10 @@ func main() {
 		printModelComparison("direct_group_join", directGroupObservations, c)
 		printDecisionOrdering(directGroupObservations, c)
 	}
-	for _, decision := range []string{"scan_lookup", "scan_lookup_map"} {
-		scanLookupObservations := filterDecisionObservations(observations, decision)
-		if len(scanLookupObservations) > 0 {
-			if err := validateScanLookupDominance(scanLookupObservations, decision); err != nil {
-				fatal(fmt.Errorf("%s: %w", decision, err))
-			}
+	scanLookupObservations := filterDecisionObservations(observations, "scan_lookup")
+	if len(scanLookupObservations) > 0 {
+		if err := validateScanLookupDominance(scanLookupObservations, "scan_lookup"); err != nil {
+			fatal(fmt.Errorf("scan_lookup: %w", err))
 		}
 	}
 	logStep("selected downstream probe coefficient=%d ns/probe", c.downstreamProbeRowNS)
@@ -1503,7 +1501,7 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 }
 
 func isScanLookupDecision(decision string) bool {
-	return decision == "scan_lookup" || decision == "scan_lookup_map"
+	return decision == "scan_lookup"
 }
 
 func validateScanLookupDominance(rows []observation, lookupPlan string) error {

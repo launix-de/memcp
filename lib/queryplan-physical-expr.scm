@@ -329,52 +329,52 @@ partner. */
 				(list (quote if) (coalesceNil (qb_where input) true) value_expr nil))
 			(if (and (single_source? sources)
 				(and (source_is_base_table? (car sources))
-				(and (empty_list? (qb_stages input))
-					(and (empty_list? (qb_group input))
-						(and (nil? (qb_having input))
-							(and (empty_list? (qb_order input))
-								(and (nil? (qb_limit input)) (nil? (qb_offset input)))))))))
-			(begin
-				(define src (car sources))
-				(define condition (combine_where (source_join_expr src) (coalesceNil (qb_where input) true)))
-				(define filtercols (extract_columns_for_alias src condition))
-				(define mapcols (extract_columns_for_alias src value_expr))
-				(define check_cardinality (equal? on_overflow (quote error)))
-				(define raw_probe (list (quote scan_order)
-					(physical_query_tx_symbol)
-					(source_table_expr src)
-					(cons (quote list) filtercols)
-					(list (quote lambda)
-						(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
-						(lower_column_expr_for_alias src condition))
-					(quoted_runtime_list '())
-					(quoted_runtime_list '())
-					0
-					0
-					partition_limit
-					(cons (quote list) mapcols)
-					(scan_mapreduce_expr
-						(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+					(and (empty_list? (qb_stages input))
+						(and (empty_list? (qb_group input))
+							(and (nil? (qb_having input))
+								(and (empty_list? (qb_order input))
+									(and (nil? (qb_limit input)) (nil? (qb_offset input)))))))))
+				(begin
+					(define src (car sources))
+					(define condition (combine_where (source_join_expr src) (coalesceNil (qb_where input) true)))
+					(define filtercols (extract_columns_for_alias src condition))
+					(define mapcols (extract_columns_for_alias src value_expr))
+					(define check_cardinality (equal? on_overflow (quote error)))
+					(define raw_probe (list (quote scan_order)
+						(physical_query_tx_symbol)
+						(source_table_expr src)
+						(cons (quote list) filtercols)
+						(list (quote lambda)
+							(map filtercols (lambda (col) (symbol (concat (source_alias src) "." col))))
+							(lower_column_expr_for_alias src condition))
+						(quoted_runtime_list '())
+						(quoted_runtime_list '())
+						0
+						0
+						partition_limit
+						(cons (quote list) mapcols)
+						(scan_mapreduce_expr
+							(map mapcols (lambda (col) (symbol (concat (source_alias src) "." col))))
+							(if check_cardinality
+								(scalar_query_probe_reduce_cardinality)
+								(scalar_once_reduce_first))
+							(lower_column_expr_for_alias src value_expr))
 						(if check_cardinality
-							(scalar_query_probe_reduce_cardinality)
-							(scalar_once_reduce_first))
-						(lower_column_expr_for_alias src value_expr))
+							(list (quote quote) scalar_query_probe_empty)
+							nil)
+						false))
 					(if check_cardinality
-						(list (quote quote) scalar_query_probe_empty)
-						nil)
-					false))
-				(if check_cardinality
-					(list
-						(list (quote lambda) (list (quote __scalar_probe_result))
-							(list (quote if)
-								(list (quote and)
-									(list (quote symbol?) (quote __scalar_probe_result))
-									(list (quote equal?) (quote __scalar_probe_result)
-										(list (quote quote) scalar_query_probe_empty)))
-								nil
-								(quote __scalar_probe_result)))
-						raw_probe)
-					raw_probe))
+						(list
+							(list (quote lambda) (list (quote __scalar_probe_result))
+								(list (quote if)
+									(list (quote and)
+										(list (quote symbol?) (quote __scalar_probe_result))
+										(list (quote equal?) (quote __scalar_probe_result)
+											(list (quote quote) scalar_query_probe_empty)))
+									nil
+									(quote __scalar_probe_result)))
+							raw_probe)
+						raw_probe))
 				nil)))))
 
 (define physical_expr_refs_unconsumed_stage_output_alias? (lambda (expr)
@@ -2112,6 +2112,22 @@ would still have to project that value over the segment. */
 					(lower_column_expr_for_join sources default_alias key))))
 			nil))))
 
+/* Point probes use the same physical operator for EXISTS, direct projection,
+and computed projection. The quoted schema is persistent plan data; only the
+flat values expression is evaluated for each probe. */
+(define compiled_scan_lookup_expr (lambda (tx table lookup_cols lookup_values consumer map_cols mapper)
+	(list (quote scan_lookup)
+		tx
+		table
+		(list (quote quote) (merge
+			(list "scan_lookup_v1" (count lookup_cols))
+			lookup_cols
+			(list consumer (count map_cols))
+			map_cols))
+		(cons (quote list) (if (equal? consumer "map")
+			(merge lookup_values (list mapper))
+			lookup_values)))))
+
 (define scalar_cardinality_scan_lookup_parts (lambda (sources default_alias src condition value_expr keys lookup_keys)
 	(begin
 		(define lookup_parts (direct_exact_scan_lookup_parts
@@ -2227,24 +2243,27 @@ would still have to project that value over the segment. */
 					(begin
 						(define result_col (nth lookup_parts 2))
 						(define map_cols (nth lookup_parts 3))
-						(define lookup_kind (if (nil? result_col) "scan_lookup_map" "scan_lookup"))
+						(define lookup_kind "scan_lookup")
 						(define lookup_expr (if (nil? result_col)
-							(list (quote scan_lookup_map)
+							(compiled_scan_lookup_expr
 								(physical_query_tx_symbol)
 								(source_table_expr src)
-								(cons (quote list) (nth lookup_parts 0))
-								(cons (quote list) (nth lookup_parts 1))
-								(cons (quote list) map_cols)
+								(nth lookup_parts 0)
+								(nth lookup_parts 1)
+								"map"
+								map_cols
 								(list (quote lambda)
 									(map map_cols (lambda (col)
 										(symbol (concat (source_alias src) "." col))))
 									(lower_column_expr_for_alias src value_expr)))
-							(list (quote scan_lookup)
+							(compiled_scan_lookup_expr
 								(physical_query_tx_symbol)
 								(source_table_expr src)
-								(cons (quote list) (nth lookup_parts 0))
-								(cons (quote list) (nth lookup_parts 1))
-								result_col)))
+								(nth lookup_parts 0)
+								(nth lookup_parts 1)
+								"value"
+								(list result_col)
+								nil)))
 						(lower_scalar_cardinality_scan_lookup_choice
 							stage lookup_kind lookup_expr scan_expr))))))))
 
@@ -2939,11 +2958,14 @@ would lose nested-stage and join semantics. */
 									(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
 									(cons (quote and)
 										(cons (lower_column_expr_for_alias input_src condition) key_terms))))
-							(list (quote scan_lookup)
+							(compiled_scan_lookup_expr
 								(physical_query_tx_symbol)
 								(source_table_expr input_src)
-								(cons (quote list) (nth lookup_parts 0))
-								(cons (quote list) (nth lookup_parts 1))))))))))))
+								(nth lookup_parts 0)
+								(nth lookup_parts 1)
+								"exists"
+								'()
+								nil))))))))))
 
 (define lower_dml_driver_membership_probe_expr (lambda (sources default_alias fallback_schema stage _probe)
 	(begin
@@ -5453,9 +5475,9 @@ ever-larger subtrees. */
 			(define direct_recset_count (and (not (nil? membership_expr))
 				(and (empty_list? (query_expr_session_reads membership_expr))
 					(and (equal? effective_condition true)
-					(and (not (reduce keys (lambda (has_columns key)
-						(or has_columns (expr_contains_column_ref? key))) false))
-						(aggregate_counts_every_input_row? ag))))))
+						(and (not (reduce keys (lambda (has_columns key)
+							(or has_columns (expr_contains_column_ref? key))) false))
+							(aggregate_counts_every_input_row? ag))))))
 			(define aggregate_state_expr (if direct_recset_count
 				(list (quote recset_count)
 					(list
@@ -5620,9 +5642,9 @@ otherwise unnecessary one-entry associative group. */
 								(list (quote or)
 									(list (quote equal?) limit_expr -1)
 									(list (quote >) limit_expr 0))))
-							(list (quote begin) emit_expr nil)
-							nil)))
-				state_plan))
+						(list (quote begin) emit_expr nil)
+						nil)))
+			state_plan))
 		(if (nil? membership_expr)
 			plan
 			(list

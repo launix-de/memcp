@@ -659,13 +659,6 @@ func TestValidateScanLookupDominance(t *testing.T) {
 	if err := validateScanLookupDominance(rows, "scan_lookup"); err == nil {
 		t.Fatal("slower scan_lookup accepted as dominant")
 	}
-	mapRows := []observation{
-		{caseName: "mapped", decision: "scan_lookup_map", plan: "scan_lookup_map", y: 60},
-		{caseName: "mapped", decision: "scan_lookup_map", plan: "scan_order", y: 100},
-	}
-	if err := validateScanLookupDominance(mapRows, "scan_lookup_map"); err != nil {
-		t.Fatalf("dominant scan_lookup_map rejected: %v", err)
-	}
 }
 
 func TestRaceCalibrationVariantsCancelsSlowerPlan(t *testing.T) {

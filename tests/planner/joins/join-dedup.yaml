@@ -404,7 +404,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_lookup_map"
+        - "scan_lookup"
         - "score"
         - "label"
       result_not_contains:
@@ -420,9 +420,9 @@ test_cases:
     expect:
       rows: 1
       data:
-        - decision: "scan_lookup_map"
+        - decision: "scan_lookup"
           alternatives:
-            - "scan_lookup_map"
+            - "scan_lookup"
             - "scan_order"
 
   - name: "Mapped scalar lookup preserves matching NULL versus missing row"

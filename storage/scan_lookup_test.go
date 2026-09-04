@@ -75,9 +75,8 @@ func TestScanLookupSchemeOperator(t *testing.T) {
 		scm.Globalenv.Vars[scm.Symbol("scan_lookup")],
 		scm.NewAny(NewTxContext(TxCursorStability)),
 		NewTableScmer(tbl),
-		scm.NewSlice([]scm.Scmer{scm.NewString("key")}),
+		scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("value"), scm.NewInt(1), scm.NewString("value")}),
 		scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
-		scm.NewString("value"),
 	)
 	if !scm.Equal(got, scm.NewString("seven")) {
 		t.Fatalf("scan_lookup operator = %s, want seven", scm.String(got))
@@ -86,11 +85,25 @@ func TestScanLookupSchemeOperator(t *testing.T) {
 		scm.Globalenv.Vars[scm.Symbol("scan_lookup")],
 		scm.NewAny(NewTxContext(TxCursorStability)),
 		NewTableScmer(tbl),
-		scm.NewSlice([]scm.Scmer{scm.NewString("key")}),
+		scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("exists"), scm.NewInt(0)}),
 		scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
 	)
 	if !scm.ToBool(exists) {
 		t.Fatal("scan_lookup existence operator returned false")
+	}
+}
+
+func TestScanLookupPlanBindingDoesNotAllocate(t *testing.T) {
+	schema := scm.NewSlice([]scm.Scmer{
+		scm.NewString("scan_lookup_v1"), scm.NewInt(2),
+		scm.NewString("tenant"), scm.NewString("key"),
+		scm.NewString("exists"), scm.NewInt(0),
+	})
+	values := scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(7)})
+	if allocs := testing.AllocsPerRun(1000, func() {
+		_ = parseScanLookupPlan(schema, values)
+	}); allocs != 0 {
+		t.Fatalf("scan_lookup plan binding allocated %.2f times per run, want 0", allocs)
 	}
 }
 
@@ -199,12 +212,12 @@ func TestScanLookupMapReturnsComputedValueAfterCardinalityCheck(t *testing.T) {
 	}
 }
 
-func TestScanLookupMapSchemeOperatorCanPerformNestedLookup(t *testing.T) {
+func TestCompiledScanLookupMapCanPerformNestedLookup(t *testing.T) {
 	Init(scm.Globalenv)
 	tbl := setupScanLookupTable(t, "test_scan_lookup_map_operator", [][]scm.Scmer{
 		{scm.NewInt(7), scm.NewString("seven")},
 	})
-	operator := scm.Globalenv.Vars[scm.Symbol("scan_lookup_map")]
+	operator := scm.Globalenv.Vars[scm.Symbol("scan_lookup")]
 	tx := NewTxContext(TxCursorStability)
 	txValue := scm.NewAny(tx)
 	tableValue := NewTableScmer(tbl)
@@ -213,21 +226,18 @@ func TestScanLookupMapSchemeOperatorCanPerformNestedLookup(t *testing.T) {
 			scm.Globalenv.Vars[scm.Symbol("scan_lookup")],
 			txValue,
 			tableValue,
-			scm.NewSlice([]scm.Scmer{scm.NewString("key")}),
+			scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("value"), scm.NewInt(1), scm.NewString("value")}),
 			scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
-			scm.NewString("value"),
 		)
 	})
 	got := scm.Apply(operator,
 		txValue,
 		tableValue,
-		scm.NewSlice([]scm.Scmer{scm.NewString("key")}),
-		scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
-		scm.NewSlice([]scm.Scmer{scm.NewString("value")}),
-		mapper,
+		scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("map"), scm.NewInt(1), scm.NewString("value")}),
+		scm.NewSlice([]scm.Scmer{scm.NewInt(7), mapper}),
 	)
 	if !scm.Equal(got, scm.NewString("seven")) {
-		t.Fatalf("nested scan_lookup_map operator = %s, want seven", scm.String(got))
+		t.Fatalf("nested compiled scan_lookup operator = %s, want seven", scm.String(got))
 	}
 }
 
@@ -248,6 +258,27 @@ func BenchmarkScanLookupWithTx(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		tbl.scanLookup(tx, cols, values, "value", true)
+	}
+}
+
+func BenchmarkCompiledScanLookupWithTx(b *testing.B) {
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl := setupScanLookupTable(b, "bench_compiled_scan_lookup", rows)
+	tx := NewTxContext(TxCursorStability)
+	schema := scm.NewSlice([]scm.Scmer{
+		scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"),
+		scm.NewString("value"), scm.NewInt(1), scm.NewString("value"),
+	})
+	values := scm.NewSlice([]scm.Scmer{scm.NewInt(511)})
+	executeCompiledScanLookup(tbl, tx, schema, values)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		executeCompiledScanLookup(tbl, tx, schema, values)
 	}
 }
 
@@ -322,5 +353,37 @@ func BenchmarkScanLookupMap(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		tbl.scanLookupMap(tx, lookupCols, lookupValues, mapCols, &mapProgram)
+	}
+}
+
+func BenchmarkCompiledScanLookupMap(b *testing.B) {
+	database := "bench_compiled_scan_lookup_map"
+	databases.Remove(database)
+	b.Cleanup(func() { databases.Remove(database) })
+	CreateDatabase(database, true)
+	tbl, _ := CreateTable(database, "items", Memory, true)
+	tbl.CreateColumn("key", "INT", nil, nil)
+	tbl.CreateColumn("left_value", "INT", nil, nil)
+	tbl.CreateColumn("right_value", "INT", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewInt(int64(i + 1)), scm.NewInt(int64(i + 2))}
+	}
+	tbl.Insert([]string{"key", "left_value", "right_value"}, rows, nil, scm.NewNil(), false, nil)
+	tx := NewTxContext(TxCursorStability)
+	mapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
+		return scm.NewInt(values[0].Int() + values[1].Int())
+	})
+	schema := scm.NewSlice([]scm.Scmer{
+		scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"),
+		scm.NewString("map"), scm.NewInt(2), scm.NewString("left_value"), scm.NewString("right_value"),
+	})
+	values := scm.NewSlice([]scm.Scmer{scm.NewInt(511), mapper})
+	executeCompiledScanLookup(tbl, tx, schema, values)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		executeCompiledScanLookup(tbl, tx, schema, values)
 	}
 }

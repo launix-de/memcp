@@ -26,6 +26,147 @@ import (
 
 const scalarSubselectOverflow = "scalar subselect returned more than one row"
 
+const scanLookupSchemaVersion = "scan_lookup_v1"
+
+type scanLookupConsumer uint8
+
+const (
+	scanLookupExists scanLookupConsumer = iota
+	scanLookupValue
+	scanLookupMap
+)
+
+// scanLookupPlan is a non-owning view over the planner-emitted [schema]
+// [values] pair. Both slices refer directly to cached-plan or NoEscape storage.
+type scanLookupPlan struct {
+	matchCols []scm.Scmer
+	values    []scm.Scmer
+	mapCols   []scm.Scmer
+	mapper    scm.Scmer
+	consumer  scanLookupConsumer
+}
+
+func executeCompiledScanLookup(t *table, currentTx *TxContext, schemaValue, valuesValue scm.Scmer) scm.Scmer {
+	schema := mustScmerSlice(schemaValue, "scan_lookup schema")
+	values := mustScmerSlice(valuesValue, "scan_lookup values")
+	// The overwhelmingly common authentication and scalar-subquery shapes use
+	// fixed schema offsets. Keep validation and generic multidimensional binding
+	// out of this path so a cached plan adds no allocation or decoder dispatch.
+	if len(values) == 1 && len(schema) >= 5 && schema[0].String() == scanLookupSchemaVersion && scm.ToInt(schema[1]) == 1 {
+		if values[0].IsNil() {
+			return scanLookupMiss(schema[3].String() != "exists")
+		}
+		switch schema[3].String() {
+		case "exists":
+			if len(schema) == 5 && scm.ToInt(schema[4]) == 0 {
+				return t.scanLookupOne(currentTx, schema[2].String(), values[0], "", false)
+			}
+		case "value":
+			if len(schema) == 6 && scm.ToInt(schema[4]) == 1 {
+				return t.scanLookupOne(currentTx, schema[2].String(), values[0], schema[5].String(), true)
+			}
+		}
+	}
+	return t.executeScanLookup(currentTx, parseScanLookupPlanSlices(schema, values))
+}
+
+func parseScanLookupPlan(schemaValue, valuesValue scm.Scmer) scanLookupPlan {
+	schema := mustScmerSlice(schemaValue, "scan_lookup schema")
+	values := mustScmerSlice(valuesValue, "scan_lookup values")
+	return parseScanLookupPlanSlices(schema, values)
+}
+
+func parseScanLookupPlanSlices(schema, values []scm.Scmer) scanLookupPlan {
+	if len(schema) < 4 || schema[0].String() != scanLookupSchemaVersion {
+		panic("scan_lookup needs a scan_lookup_v1 schema")
+	}
+	matchCount := int(scm.ToInt(schema[1]))
+	if matchCount <= 0 || len(schema) < matchCount+4 {
+		panic("scan_lookup schema has an invalid match-column count")
+	}
+	consumerAt := matchCount + 2
+	projectionCountAt := consumerAt + 1
+	projectionCount := int(scm.ToInt(schema[projectionCountAt]))
+	if projectionCount < 0 || len(schema) != projectionCountAt+1+projectionCount {
+		panic("scan_lookup schema has an invalid projection-column count")
+	}
+
+	plan := scanLookupPlan{
+		matchCols: schema[2:consumerAt],
+		values:    values,
+		mapCols:   schema[projectionCountAt+1:],
+	}
+	switch schema[consumerAt].String() {
+	case "exists":
+		plan.consumer = scanLookupExists
+		if projectionCount != 0 || len(values) != matchCount {
+			panic("scan_lookup exists schema must not project columns")
+		}
+	case "value":
+		plan.consumer = scanLookupValue
+		if projectionCount != 1 || len(values) != matchCount {
+			panic("scan_lookup value schema needs exactly one projection column")
+		}
+	case "map":
+		plan.consumer = scanLookupMap
+		if len(values) != matchCount+1 {
+			panic("scan_lookup map values need one mapper after the match values")
+		}
+		plan.mapper = values[matchCount]
+	default:
+		panic("scan_lookup schema has an unknown consumer")
+	}
+	plan.values = values[:matchCount]
+	return plan
+}
+
+func (t *table) executeScanLookup(currentTx *TxContext, plan scanLookupPlan) scm.Scmer {
+	for _, value := range plan.values {
+		if value.IsNil() {
+			return scanLookupMiss(plan.consumer != scanLookupExists)
+		}
+	}
+	if len(plan.matchCols) == 1 && plan.consumer != scanLookupMap {
+		resultCol := ""
+		if plan.consumer == scanLookupValue {
+			resultCol = plan.mapCols[0].String()
+		}
+		return t.scanLookupOne(
+			currentTx,
+			plan.matchCols[0].String(),
+			plan.values[0],
+			resultCol,
+			plan.consumer == scanLookupValue,
+		)
+	}
+	if len(plan.matchCols) == 1 && plan.consumer == scanLookupMap {
+		mapCols := scmerSliceToStrings(plan.mapCols)
+		mappedValues, matches := t.scanLookupMapOne(
+			currentTx, plan.matchCols[0].String(), plan.values[0], mapCols)
+		if matches > 1 {
+			panic(scalarSubselectOverflow)
+		}
+		if matches == 0 {
+			return scm.NewNil()
+		}
+		mapProgram := scm.PrepareSerialProc(plan.mapper)
+		return mapProgram.Call(mappedValues)
+	}
+	lookupCols := scmerSliceToStrings(plan.matchCols)
+	switch plan.consumer {
+	case scanLookupExists:
+		return t.scanLookup(currentTx, lookupCols, plan.values, "", false)
+	case scanLookupValue:
+		return t.scanLookup(currentTx, lookupCols, plan.values, plan.mapCols[0].String(), true)
+	case scanLookupMap:
+		mapCols := scmerSliceToStrings(plan.mapCols)
+		mapProgram := scm.PrepareSerialProc(plan.mapper)
+		return t.scanLookupMap(currentTx, lookupCols, plan.values, mapCols, &mapProgram)
+	default:
+		panic("invalid scan_lookup consumer")
+	}
+}
+
 type scanLookupMapReader struct {
 	reader   ColumnReader
 	computed bool

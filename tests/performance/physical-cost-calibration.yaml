@@ -180,7 +180,7 @@ test_cases:
   # checking scan that it replaces.
   - name: "mapped scalar point lookup dominance"
     physical_calibration: true
-    calibration_decision: "scan_lookup_map"
+    calibration_decision: "scan_lookup"
     warmup: 2
     repetitions: 7
     sql: |
