@@ -438,6 +438,23 @@ func TestIterateShardsParallelMarksSynchronousMultiShardNonSolo(t *testing.T) {
 	}
 }
 
+func TestScanResultCollectorDoesNotInventEmptyShardResult(t *testing.T) {
+	collector := scanResultCollector{channelSize: 1}
+	collector.finish(nil)
+	if result, ok := collector.next(); ok {
+		t.Fatalf("empty collector returned an invented result: %#v", result)
+	}
+
+	want := scanResult{outCount: 1}
+	collector.send(true, want)
+	if result, ok := collector.next(); !ok || result.outCount != want.outCount {
+		t.Fatalf("solo collector result = (%#v, %v), want (%#v, true)", result, ok, want)
+	}
+	if result, ok := collector.next(); ok {
+		t.Fatalf("solo collector returned a second result: %#v", result)
+	}
+}
+
 func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscanparexplicit")
 	tbl.ShardMode = ShardModePartition

@@ -485,12 +485,14 @@ type scanResultCollector struct {
 	once        sync.Once
 	parallel    chan scanResult
 	solo        scanResult
+	soloSet     bool
 	soloRead    bool
 }
 
 func (c *scanResultCollector) send(solo bool, result scanResult) {
 	if solo {
 		c.solo = result
+		c.soloSet = true
 		return
 	}
 	c.once.Do(func() {
@@ -513,7 +515,7 @@ func (c *scanResultCollector) next() (scanResult, bool) {
 		result, ok := <-c.parallel
 		return result, ok
 	}
-	if c.soloRead {
+	if !c.soloSet || c.soloRead {
 		return scanResult{}, false
 	}
 	c.soloRead = true
