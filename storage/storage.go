@@ -910,6 +910,12 @@ func Init(en scm.Env) {
 			conditionCols := scmerSliceToStrings(mustScmerSlice(a[2], "condition columns"))
 			condition := a[3]
 			limit := scm.ToInt(a[4])
+			accessSchema := scm.NewNil()
+			var accessValues []scm.Scmer
+			if len(a) > 6 {
+				accessSchema = a[5]
+				accessValues = mustScmerSlice(a[6], "scan_selectivity_estimate access values")
+			}
 			if limit <= 0 {
 				limit = 1024
 			}
@@ -942,7 +948,7 @@ func Init(en scm.Env) {
 				estimate := func() filteredRowEstimate {
 					release := shard.GetRead()
 					defer release()
-					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx)
+					return shard.EstimateFilteredRows(conditionCols, condition, limit, currentTx, accessSchema, accessValues)
 				}()
 				if estimate.examined == 0 {
 					continue
@@ -1004,9 +1010,12 @@ func Init(en scm.Env) {
 				columnList("condition_cols", "columns passed to the selectivity predicate"),
 				scanCallback("condition", "predicate sampled to estimate matching rows", "bool", "true when the sampled row matches"),
 				{Kind: "int", Label: "max_rows"},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema", Optional: true, NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "list"},
 		},
+		Optimize: optimizeScanSelectivity,
 	})
 	scm.Declare(&en, &scm.Declaration{
 		Name: "table_empty?",
@@ -1473,7 +1482,13 @@ func Init(en scm.Env) {
 			if len(a) > layout.combineIdx+sbShift {
 				combine = a[layout.combineIdx+sbShift]
 			}
-			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, stride, batchdata, nil, scm.NewNil(), nil)
+			accessSchema := scm.NewNil()
+			var accessValues []scm.Scmer
+			if len(a) > layout.outerIdx+sbShift+2 {
+				accessSchema = a[layout.outerIdx+sbShift+1]
+				accessValues = mustScmerSlice(a[layout.outerIdx+sbShift+2], "scan_batch access values")
+			}
+			return t.scanWithBatchFrom(layout.tx, source, filtercols, a[layout.filterFnIdx], mapcols, a[layout.mapReduceIdx], neutral, combine, isOuter, stride, batchdata, nil, accessSchema, accessValues)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "does an unordered parallel filtered reduction on a single table using batchdata-backed #N pseudo columns and returns the reduced result",
 			Params: []*scm.TypeDescriptor{
@@ -1488,6 +1503,8 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator, otherwise nil is assumed", Optional: true},
 				reducer("combine", "optional reducer combining shard-local accumulators"),
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, in case of no hits, call map once anyway with NULL values", Optional: true},
+				{Kind: "list", Label: "accessSchema", Description: "optimizer-compiled static scan access schema with optional batch slots", Optional: true, NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values referenced by accessSchema", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},
@@ -1784,6 +1801,15 @@ func Init(en scm.Env) {
 			if len(a) > 15 {
 				notFoundValue = a[15]
 			}
+			var accessSchemas []scm.Scmer
+			var accessValues []scm.Scmer
+			if len(a) > 17 {
+				accessSchemas = mustScmerSlice(a[16], "accessSchemas")
+				accessValues = mustScmerSlice(a[17], "scan_order_multi access values")
+				if len(accessSchemas) != n {
+					panic("scan_order_multi: accessSchemas must match the table count")
+				}
+			}
 
 			if len(filterColsArr) != n || len(filterFnArr) != n || len(sortcolsArr) != n || len(mapColsArr) != n || len(mapReduceFnArr) != n {
 				panic("scan_order_multi: all per-table arrays must have the same length")
@@ -1804,6 +1830,10 @@ func Init(en scm.Env) {
 					callback:       mapReduceFnArr[i],
 					perTableOffset: perTableOffsets[i],
 					perTableLimit:  perTableLimits[i],
+				}
+				if accessSchemas != nil {
+					specs[i].accessSchema = accessSchemas[i]
+					specs[i].accessValues = accessValues
 				}
 				if tables[i].IsCustom(TagRecSet) {
 					specs[i].recset = RecSetFromScmer(tables[i])
@@ -1832,6 +1862,8 @@ func Init(en scm.Env) {
 				{Kind: "any", Label: "neutral", Description: "(optional) neutral accumulator", Optional: true},
 				{Kind: "bool", Label: "isOuter", Description: "(optional) if true, emit null row when no hits", Optional: true},
 				{Kind: "any", Label: "notFoundValue", Description: "(optional) result for no hits when isOuter is false; defaults to neutral", Optional: true},
+				{Kind: "list", Label: "accessSchemas", Description: "optimizer-compiled static scan access schemas, one per table", Optional: true, NoEscape: true},
+				{Kind: "list", Label: "accessValues", Description: "flat runtime values shared by accessSchemas", Optional: true, NoEscape: true},
 			},
 			Return: &scm.TypeDescriptor{Kind: "any"},
 		},

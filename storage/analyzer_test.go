@@ -76,6 +76,27 @@ func TestCompileScanAccessRejectsDisjunction(t *testing.T) {
 	}
 }
 
+func TestCompileScanAccessEncodesBatchSlots(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"), scm.NewString("id"), scm.NewString("#0"),
+	})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("id"), scm.NewSymbol("batch_id")}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewSymbol("batch_id")}),
+	})
+	schema, bindings, ok := compileScanAccessMode(columns, filter, true)
+	if !ok || len(bindings) != 0 {
+		t.Fatalf("batch access compilation returned ok=%v bindings=%d", ok, len(bindings))
+	}
+	var storage [scanAnalyzeScratchCapacity]columnboundaries
+	bound, valid := bindCompiledScanAccess(schema, nil, storage[:0])
+	if !valid || len(bound) != 1 || !bound[0].lowerBatch || !bound[0].upperBatch ||
+		bound[0].lowerBatchSubidx != 0 || bound[0].upperBatchSubidx != 0 {
+		t.Fatalf("unexpected compiled batch boundary: valid=%v boundary=%#v", valid, bound)
+	}
+}
+
 func TestSortedBoundariesCoverCondition(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal??"),

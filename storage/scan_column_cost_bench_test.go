@@ -62,7 +62,7 @@ func TestEstimateFilteredRowsReportsExaminedSample(t *testing.T) {
 	if len(shards) != 1 {
 		t.Fatalf("active shards = %d, want 1", len(shards))
 	}
-	estimate := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil)
+	estimate := shards[0].EstimateFilteredRows(cols[:1], condition, 3, nil, scm.NewNil(), nil)
 	if estimate.rows != 3 || !estimate.capped || estimate.examined != 5 ||
 		estimate.population != "table_rows" || estimate.coverage != "sampled" {
 		t.Fatalf("estimate = %+v; want 3 sampled matches after 5 table rows", estimate)
@@ -89,7 +89,7 @@ func TestEstimateFilteredRowsRecognizesCompleteCappedIndexRange(t *testing.T) {
 		shard.mu.RUnlock()
 	}
 
-	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil)
+	estimate := shard.EstimateFilteredRows(cols[:1], condition, 1, nil, scm.NewNil(), nil)
 	if estimate.rows != 1 || estimate.capped || estimate.examined != 1 ||
 		estimate.population != "index_candidates" || estimate.coverage != "exact" {
 		t.Fatalf("estimate = %+v; want complete one-row index range", estimate)
@@ -129,11 +129,11 @@ func TestScanSelectivityEstimateScalesIndexCandidatesByShardPopulation(t *testin
 			func([]uint32) bool { return true })
 		shard.mu.RUnlock()
 	}
-	shardEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 512, nil)
+	shardEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 512, nil, scm.NewNil(), nil)
 	if shardEstimate.population != "index_candidates" || shardEstimate.examined != 100 {
 		t.Fatalf("shard estimate = %+v, want 100 index candidates", shardEstimate)
 	}
-	boundedEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 50, nil)
+	boundedEstimate := shard.EstimateFilteredRows([]string{"tenant"}, condition, 50, nil, scm.NewNil(), nil)
 	if boundedEstimate.rows != 100 || boundedEstimate.capped ||
 		boundedEstimate.population != "index_candidates" || boundedEstimate.coverage != "upper_bound" {
 		t.Fatalf("bounded shard estimate = %+v, want 100-row index upper bound", boundedEstimate)

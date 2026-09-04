@@ -163,15 +163,34 @@ func optimizeScanExists(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool)
 	return oc.ApplyDefaultOptimization(v, useResult)
 }
 
-func scanStaticColumns(expr scm.Scmer) ([]scm.Scmer, bool) {
+func optimizeScanSelectivity(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) (scm.Scmer, *scm.TypeDescriptor) {
+	if len(v) == 6 {
+		if schema, bindings, ok := compileScanAccess(v[3], v[4]); ok {
+			v = append(v,
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
+				oc.OptimizeNoEscapeList(bindings))
+		}
+	}
+	return oc.ApplyDefaultOptimization(v, useResult)
+}
+
+func scanStaticListElements(expr scm.Scmer) ([]scm.Scmer, bool) {
 	if !expr.IsSlice() {
 		return nil, false
 	}
 	items := expr.Slice()
 	if len(items) == 2 && scanSymbolIs(items[0], "quote") && items[1].IsSlice() {
-		items = items[1].Slice()
+		return items[1].Slice(), true
 	} else if len(items) > 0 && scanSymbolIs(items[0], "list") {
-		items = items[1:]
+		return items[1:], true
+	}
+	return items, true
+}
+
+func scanStaticColumns(expr scm.Scmer) ([]scm.Scmer, bool) {
+	items, ok := scanStaticListElements(expr)
+	if !ok {
+		return nil, false
 	}
 	for _, item := range items {
 		if !item.IsString() {
@@ -181,6 +200,20 @@ func scanStaticColumns(expr scm.Scmer) ([]scm.Scmer, bool) {
 	return items, true
 }
 
+func shiftCompiledScanAccessSlots(schemaValue scm.Scmer, shift int) scm.Scmer {
+	schema := schemaValue.Slice()
+	shifted := append([]scm.Scmer(nil), schema...)
+	for offset := 2; offset < len(shifted); offset += 5 {
+		for _, slotOffset := range []int{2, 3} {
+			slot := scm.ToInt(shifted[offset+slotOffset])
+			if slot >= 0 {
+				shifted[offset+slotOffset] = scm.NewInt(int64(slot + shift))
+			}
+		}
+	}
+	return scm.NewSlice(shifted)
+}
+
 func scanParamColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, bool) {
 	for i, param := range params {
 		if i >= len(columns) {
@@ -188,7 +221,10 @@ func scanParamColumn(expr scm.Scmer, params, columns []scm.Scmer) (string, bool)
 		}
 		name, named := scanSymbolName(param)
 		if named && scanExprIsLambdaParam(expr, name, i) {
-			return columns[i].String(), true
+			column := columns[i].String()
+			if _, batch := parseBatchPseudoColName(column); !batch {
+				return column, true
+			}
 		}
 	}
 	return "", false
@@ -221,11 +257,29 @@ type compiledScanBoundary struct {
 	column         string
 	lower          scm.Scmer
 	upper          scm.Scmer
+	lowerBatch     bool
+	upperBatch     bool
+	lowerBatchSlot int
+	upperBatchSlot int
 	lowerInclusive bool
 	upperInclusive bool
 }
 
-func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer) (compiledScanBoundary, bool) {
+func scanBatchParamSlot(expr scm.Scmer, params, columns []scm.Scmer) (int, bool) {
+	for i, param := range params {
+		if i >= len(columns) || !columns[i].IsString() {
+			break
+		}
+		name, named := scanSymbolName(param)
+		if !named || !scanExprIsLambdaParam(expr, name, i) {
+			continue
+		}
+		return parseBatchPseudoColName(columns[i].String())
+	}
+	return 0, false
+}
+
+func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer, allowBatch bool) (compiledScanBoundary, bool) {
 	if !node.IsSlice() {
 		return compiledScanBoundary{}, false
 	}
@@ -248,7 +302,11 @@ func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer) (compile
 	if rightIsColumn {
 		column, value, reversed = rightColumn, items[1], true
 	}
-	if scanExprUsesParams(value, params) {
+	batchSlot, batchValue := 0, false
+	if allowBatch {
+		batchSlot, batchValue = scanBatchParamSlot(value, params, columns)
+	}
+	if !batchValue && scanExprUsesParams(value, params) {
 		return compiledScanBoundary{}, false
 	}
 	if value.IsNil() {
@@ -257,7 +315,9 @@ func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer) (compile
 	value = scanLiftOutOfLambda(value)
 	switch operator {
 	case "equal?", "equal??":
-		return compiledScanBoundary{kind: "equal", column: column, lower: value, upper: value, lowerInclusive: true, upperInclusive: true}, true
+		return compiledScanBoundary{kind: "equal", column: column, lower: value, upper: value,
+			lowerBatch: batchValue, upperBatch: batchValue, lowerBatchSlot: batchSlot, upperBatchSlot: batchSlot,
+			lowerInclusive: true, upperInclusive: true}, true
 	case "<", "<=", ">", ">=":
 		inclusive := operator == "<=" || operator == ">="
 		lower := operator == ">" || operator == ">="
@@ -267,8 +327,10 @@ func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer) (compile
 		boundary := compiledScanBoundary{kind: "range", column: column}
 		if lower {
 			boundary.lower, boundary.lowerInclusive = value, inclusive
+			boundary.lowerBatch, boundary.lowerBatchSlot = batchValue, batchSlot
 		} else {
 			boundary.upper, boundary.upperInclusive = value, inclusive
+			boundary.upperBatch, boundary.upperBatchSlot = batchValue, batchSlot
 		}
 		return boundary, true
 	default:
@@ -276,13 +338,13 @@ func compileScanComparison(node scm.Scmer, params, columns []scm.Scmer) (compile
 	}
 }
 
-func collectCompiledScanBoundaries(node scm.Scmer, params, columns []scm.Scmer, result []compiledScanBoundary) ([]compiledScanBoundary, bool) {
+func collectCompiledScanBoundaries(node scm.Scmer, params, columns []scm.Scmer, result []compiledScanBoundary, allowBatch bool) ([]compiledScanBoundary, bool) {
 	if node.IsSlice() {
 		items := node.Slice()
 		if len(items) > 1 && scanSymbolIs(items[0], "and") {
 			for _, child := range items[1:] {
 				var valid bool
-				result, valid = collectCompiledScanBoundaries(child, params, columns, result)
+				result, valid = collectCompiledScanBoundaries(child, params, columns, result, allowBatch)
 				if !valid {
 					return result, false
 				}
@@ -290,24 +352,28 @@ func collectCompiledScanBoundaries(node scm.Scmer, params, columns []scm.Scmer, 
 			return result, true
 		}
 	}
-	if boundary, ok := compileScanComparison(node, params, columns); ok {
+	if boundary, ok := compileScanComparison(node, params, columns, allowBatch); ok {
 		for i, existing := range result {
 			if existing.column == boundary.column {
 				if existing.kind != "range" || boundary.kind != "range" {
 					return result, false
 				}
-				if !existing.lower.IsNil() && !boundary.lower.IsNil() {
+				if (!existing.lower.IsNil() || existing.lowerBatch) && (!boundary.lower.IsNil() || boundary.lowerBatch) {
 					return result, false
 				}
-				if !existing.upper.IsNil() && !boundary.upper.IsNil() {
+				if (!existing.upper.IsNil() || existing.upperBatch) && (!boundary.upper.IsNil() || boundary.upperBatch) {
 					return result, false
 				}
-				if !boundary.lower.IsNil() {
+				if !boundary.lower.IsNil() || boundary.lowerBatch {
 					result[i].lower = boundary.lower
+					result[i].lowerBatch = boundary.lowerBatch
+					result[i].lowerBatchSlot = boundary.lowerBatchSlot
 					result[i].lowerInclusive = boundary.lowerInclusive
 				}
-				if !boundary.upper.IsNil() {
+				if !boundary.upper.IsNil() || boundary.upperBatch {
 					result[i].upper = boundary.upper
+					result[i].upperBatch = boundary.upperBatch
+					result[i].upperBatchSlot = boundary.upperBatchSlot
 					result[i].upperInclusive = boundary.upperInclusive
 				}
 				return result, true
@@ -319,12 +385,16 @@ func collectCompiledScanBoundaries(node scm.Scmer, params, columns []scm.Scmer, 
 }
 
 func compileScanAccess(columnExpr, filterExpr scm.Scmer) (scm.Scmer, []scm.Scmer, bool) {
+	return compileScanAccessMode(columnExpr, filterExpr, false)
+}
+
+func compileScanAccessMode(columnExpr, filterExpr scm.Scmer, allowBatch bool) (scm.Scmer, []scm.Scmer, bool) {
 	columns, columnsOK := scanStaticColumns(columnExpr)
 	params, body, lambdaOK := scanLambdaParts(filterExpr)
 	if !columnsOK || !lambdaOK || len(params) != len(columns) {
 		return scm.NewNil(), nil, false
 	}
-	compiled, valid := collectCompiledScanBoundaries(body, params, columns, nil)
+	compiled, valid := collectCompiledScanBoundaries(body, params, columns, nil, allowBatch)
 	if !valid || len(compiled) == 0 {
 		return scm.NewNil(), nil, false
 	}
@@ -339,11 +409,15 @@ func compileScanAccess(columnExpr, filterExpr scm.Scmer) (scm.Scmer, []scm.Scmer
 	bindings := make([]scm.Scmer, 0, len(compiled)*2)
 	for _, boundary := range compiled {
 		lowerSlot, upperSlot := int64(-1), int64(-1)
-		if !boundary.lower.IsNil() {
+		if boundary.lowerBatch {
+			lowerSlot = int64(-2 - boundary.lowerBatchSlot)
+		} else if !boundary.lower.IsNil() {
 			lowerSlot = int64(len(bindings))
 			bindings = append(bindings, boundary.lower)
 		}
-		if !boundary.upper.IsNil() {
+		if boundary.upperBatch {
+			upperSlot = int64(-2 - boundary.upperBatchSlot)
+		} else if !boundary.upper.IsNil() {
 			if boundary.kind == "equal" {
 				upperSlot = lowerSlot
 			} else {
@@ -398,12 +472,18 @@ func bindCompiledScanAccess(schemaValue scm.Scmer, values []scm.Scmer, target bo
 				panic("scan access lower slot is out of bounds")
 			}
 			boundary.lower = values[lowerSlot]
+		} else if lowerSlot <= -2 {
+			boundary.lowerBatch = true
+			boundary.lowerBatchSubidx = -lowerSlot - 2
 		}
 		if upperSlot >= 0 {
 			if upperSlot >= len(values) {
 				panic("scan access upper slot is out of bounds")
 			}
 			boundary.upper = values[upperSlot]
+		} else if upperSlot <= -2 {
+			boundary.upperBatch = true
+			boundary.upperBatchSubidx = -upperSlot - 2
 		}
 		target = append(target, boundary)
 	}
@@ -731,6 +811,22 @@ func optimizeScanBatch(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 			Name: "scan-batch-invariant-filter", PreconditionsMet: true, MaxGrowthNodes: 64,
 		}); accepted {
 			return result, td
+		}
+	}
+	if len(v) >= 9 && len(v) <= 12 {
+		if schema, bindings, ok := compileScanAccessMode(v[3], v[4], true); ok {
+			if len(v) == 9 {
+				v = append(v, scm.NewNil())
+			}
+			if len(v) == 10 {
+				v = append(v, scm.NewNil())
+			}
+			if len(v) == 11 {
+				v = append(v, scm.NewBool(false))
+			}
+			v = append(v,
+				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
+				oc.OptimizeNoEscapeList(bindings))
 		}
 	}
 	return optimizeScanShared(v, oc, 6, 9, 10, 11)
