@@ -469,8 +469,19 @@ def performance_ab_threshold_ms(
     ) + jitter_budget_ms / candidate_repetitions
 
 
-def adaptive_measurement_complete(repetitions: int, total_ns: int) -> bool:
-    return repetitions >= 5 and total_ns >= PERF_MIN_MEASURE_MS * 1_000_000
+def adaptive_measurement_complete(samples_ns: List[int]) -> bool:
+    return (
+        len(samples_ns) >= 5
+        and performance_sample_ns(samples_ns) * len(samples_ns)
+        >= PERF_MIN_MEASURE_MS * 1_000_000
+    )
+
+
+def performance_sample_ns(samples_ns: List[int]) -> float:
+    """Return a robust per-repetition latency for a timed sample block."""
+    if not samples_ns:
+        raise ValueError("performance measurement requires at least one sample")
+    return float(statistics.median(samples_ns))
 
 
 def planner_time_limit_with_tolerance_ms(
@@ -1665,13 +1676,14 @@ class SQLTestRunner:
                     measured_total_ns += sample_ns
                     if response is None or response.status_code != 200:
                         break  # don't hammer a broken endpoint
-                    if adaptive_repetitions and adaptive_measurement_complete(
-                        len(samples_ns), measured_total_ns
-                    ):
+                    if adaptive_repetitions and adaptive_measurement_complete(samples_ns):
                         break
 
                 total_ns = measured_total_ns
-                elapsed_ns = total_ns / len(samples_ns)
+                # A/B runs execute the base and candidate in separate processes.
+                # Use the median so one scheduler or background-rebuild outlier
+                # cannot turn otherwise identical binaries into a regression.
+                elapsed_ns = performance_sample_ns(samples_ns)
                 elapsed_ms = elapsed_ns / 1_000_000
                 elapsed_sec = elapsed_ms / 1000
 
