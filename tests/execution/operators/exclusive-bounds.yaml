@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
 # Tests for exclusive lower/upper bound handling in index scans.
 # Verifies that col > 5 skips rows where col = 5, and col < 10 excludes col = 10.
 
@@ -153,6 +155,14 @@ test_cases:
     expect:
       data:
         - cnt: 5
+
+  - name: "EXPLAIN exposes planner-compiled range access"
+    sql: "EXPLAIN SELECT id FROM exbound WHERE id > 10 AND id <= 15"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_access_v1"
+        - "range"
 
   # ==============================================================
   # Exclusive bounds with equality on another column (compound)

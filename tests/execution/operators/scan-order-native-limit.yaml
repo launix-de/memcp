@@ -1,3 +1,5 @@
+# Copyright (C) 2026 Carl-Philip Haensch
+#
 # Native scan_order OFFSET/LIMIT coverage.
 # SQL LIMIT must be passed to scan_order itself so filtering, shard-local Top-K,
 # the global ordered merge, and mapping retain their physical phase boundaries.
@@ -81,6 +83,15 @@ test_cases:
         - "scan_order"
       result_not_contains:
         - "$break"
+
+  - name: "EXPLAIN ORDER LIMIT carries compiled access"
+    sql: "EXPLAIN SELECT id FROM break_test WHERE id >= 5 ORDER BY val LIMIT 3"
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_order"
+        - "scan_access_v1"
+        - "range"
 
   - name: "Cleanup"
     sql: "DROP TABLE IF EXISTS break_test"

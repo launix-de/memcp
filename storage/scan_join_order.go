@@ -893,7 +893,7 @@ func probeScanJoinOrderInput(currentTx *TxContext, spec *scanJoinOrderSpec, tupl
 	})
 	rows := input.table.scanWithBatchFrom(currentTx, nil, conditionCols, condition,
 		callbackCols, mapReduce, scm.NewSlice(nil), combine, false,
-		stride, batchdata, required).Slice()
+		stride, batchdata, required, scm.NewNil(), nil).Slice()
 	hits := make([][]*scanJoinOrderRecord, len(tuples))
 	for _, rowValue := range rows {
 		row := rowValue.Slice()

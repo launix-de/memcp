@@ -44,7 +44,7 @@ func setupAdaptiveRecSetOrderTable(t *testing.T, database string, rows int) *tab
 func recSetForIDs(tbl *table, ids map[int64]bool) *recSet {
 	return tbl.scanRecSet(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(ids[values[0].Int()])
-	}))
+	}), scm.NewNil(), nil)
 }
 
 func scanOrderedRecSetIDs(tbl *table, source *recSet, limit int) []int64 {
@@ -67,7 +67,7 @@ func scanOrderedRecSetIDsWithCondition(tbl *table, source *recSet, limit int, or
 			result = append(result, values[1].Int())
 			return values[0]
 		}),
-		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil())
+		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), scm.NewNil(), nil)
 	return result
 }
 
@@ -107,7 +107,7 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 	}
 	if !source.scanExists(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(values[0].Int() == 150)
-	})) {
+	}), scm.NewNil(), nil) {
 		t.Fatal("scan_exists did not consume the RecSet boundary")
 	}
 }
@@ -209,7 +209,7 @@ func TestDenseOrderedRecSetKeepsIndexDrivenTraversal(t *testing.T) {
 	order := buildRankOrderIndex(t, tbl)
 	source := tbl.scanRecSet(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(values[0].Int()%10 != 0)
-	}))
+	}), scm.NewNil(), nil)
 
 	got := scanOrderedRecSetIDsWithOrder(tbl, source, 3, order)
 	if want := []int64{rows/2 + 1, rows/2 + 2, rows/2 + 3}; !equalInt64s(got, want) {

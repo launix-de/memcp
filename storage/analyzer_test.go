@@ -24,6 +24,58 @@ import (
 
 var benchmarkBoundaries boundaries
 
+func TestCompileScanAccessBindsRuntimeValuesWithoutAllocation(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"), scm.NewString("tenant"), scm.NewString("created_at"),
+	})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("tenant"), scm.NewSymbol("created")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("and"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("tenant"), scm.NewSymbol("wanted_tenant")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol(">="), scm.NewSymbol("created"), scm.NewSymbol("minimum_created")}),
+		}),
+	})
+	schema, bindingExprs, ok := compileScanAccess(columns, filter)
+	if !ok || len(bindingExprs) != 2 {
+		t.Fatalf("compileScanAccess returned ok=%v bindings=%d", ok, len(bindingExprs))
+	}
+	values := []scm.Scmer{scm.NewInt(7), scm.NewInt(100)}
+	var storage [scanAnalyzeScratchCapacity]columnboundaries
+	bound, valid := bindCompiledScanAccess(schema, values, storage[:0])
+	if !valid || len(bound) != 2 {
+		t.Fatalf("bindCompiledScanAccess returned valid=%v boundaries=%d", valid, len(bound))
+	}
+	if bound[0].col != "tenant" || bound[0].matcher != EqualMatcher || bound[0].lower.Int() != 7 {
+		t.Fatalf("unexpected compiled equality: %#v", bound[0])
+	}
+	if bound[1].col != "created_at" || bound[1].matcher != RangeMatcher || bound[1].lower.Int() != 100 || !bound[1].lowerInclusive {
+		t.Fatalf("unexpected compiled range: %#v", bound[1])
+	}
+	if allocs := testing.AllocsPerRun(1000, func() {
+		_, _ = bindCompiledScanAccess(schema, values, storage[:0])
+	}); allocs != 0 {
+		t.Fatalf("compiled scan access binding allocated %.2f times per run, want 0", allocs)
+	}
+}
+
+func TestCompileScanAccessRejectsDisjunction(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{scm.NewSymbol("list"), scm.NewString("id")})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("id")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("or"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewInt(1)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewInt(2)}),
+		}),
+	})
+	if _, _, ok := compileScanAccess(columns, filter); ok {
+		t.Fatal("compileScanAccess accepted a disjunction")
+	}
+}
+
 func TestSortedBoundariesCoverCondition(t *testing.T) {
 	body := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("equal??"),

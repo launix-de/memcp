@@ -45,7 +45,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 	recSetInputTable := benchScanTable(b, "family_recset_input")
 	recSetInputTable.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	RebuildTable(recSetInputTable, true, false)
-	recSetInput := recSetInputTable.scanRecSet(nil, nil, trueFn)
+	recSetInput := recSetInputTable.scanRecSet(nil, nil, trueFn, scm.NewNil(), nil)
 	identityRecSet := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 
 	benchmarks := []struct {
@@ -55,7 +55,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		{
 			name: "recset",
 			run: func() {
-				tbl.scanRecSet(nil, nil, trueFn)
+				tbl.scanRecSet(nil, nil, trueFn, scm.NewNil(), nil)
 			},
 		},
 		{
@@ -81,14 +81,16 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 			name: "order",
 			run: func() {
 				tbl.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
-					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue)
+					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
+					scm.NewNil(), nil)
 			},
 		},
 		{
 			name: "order_recset",
 			run: func() {
 				recSetInput.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
-					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue)
+					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
+					scm.NewNil(), nil)
 			},
 		},
 		{

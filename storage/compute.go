@@ -483,6 +483,8 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			col.OrcReduceInit,
 			nil,
 			scm.NewNil(),
+			scm.NewNil(),
+			nil,
 		)
 		// Speculative callback-column prefetch may read rows rejected by the
 		// predicate. Publish those holes as valid nils after every accepted row
@@ -553,6 +555,8 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		col.OrcReduceInit,
 		nil,
 		scm.NewNil(),
+		scm.NewNil(),
+		nil,
 	)
 }
 

@@ -2720,6 +2720,27 @@ func (oc *OptimizerContext) OptimizeSub(val Scmer, useResult bool) (Scmer, *Type
 	return result, ti.ToTypeDescriptor()
 }
 
+// OptimizeNoEscapeList optimizes a list whose native consumer does not retain
+// it. Inside a numbered procedure frame the result uses the same stack-backed
+// !list representation as a NoEscape declaration parameter.
+func (oc *OptimizerContext) OptimizeNoEscapeList(elements []Scmer) Scmer {
+	optimized := make([]Scmer, len(elements))
+	for i := range elements {
+		optimized[i], _ = oc.OptimizeSub(elements[i], true)
+	}
+	if len(optimized) == 0 {
+		return NewSlice([]Scmer{NewSymbol("list")})
+	}
+	if oc.Ome.nextSlot == nil {
+		return NewSlice(append([]Scmer{NewSymbol("list")}, optimized...))
+	}
+	start := *oc.Ome.nextSlot
+	*oc.Ome.nextSlot += len(optimized)
+	result := make([]Scmer, 0, len(optimized)+3)
+	result = append(result, NewSymbol("!list"), NewNthLocalVar(NthLocalVar(start)), NewInt(int64(len(optimized))))
+	return NewSlice(append(result, optimized...))
+}
+
 // OptimizerRewriteContract declares the safety proof and maximum AST growth
 // for one recursive hook rewrite.
 type OptimizerRewriteContract struct {
