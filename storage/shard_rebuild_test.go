@@ -1762,7 +1762,7 @@ func TestRebuildInsideActiveTransactionDoesNotWaitForItself(t *testing.T) {
 			}
 		}()
 		withTxSession(tx, func() scm.Scmer {
-			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("same-request")}}, nil, scm.NewNil(), false, nil)
+			tbl.Insert([]string{"id", "payload"}, [][]scm.Scmer{{scm.NewInt(2), scm.NewString("same-request")}}, nil, scm.NewNil(), false, nil, tx)
 			resultCh <- RebuildTable(tbl, true, false)
 			return scm.NewNil()
 		})
