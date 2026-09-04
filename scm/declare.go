@@ -307,6 +307,17 @@ var declarations map[string]*Declaration = make(map[string]*Declaration)
 // Keying by the complete function identity preserves distinct closure contexts
 // and avoids fmt.Sprintf allocating on every prepared callback lookup.
 var declarationsByFunction map[uintptr]*Declaration = make(map[uintptr]*Declaration)
+var retainingCallArgFunctionIdentities []uintptr
+
+func registerRetainingCallArgFunction(fn func(...Scmer) Scmer) {
+	identity := FunctionIdentity(fn)
+	for _, registered := range retainingCallArgFunctionIdentities {
+		if registered == identity {
+			return
+		}
+	}
+	retainingCallArgFunctionIdentities = append(retainingCallArgFunctionIdentities, identity)
+}
 
 func DeclareTitle(title string) {
 	declaration_titles = append(declaration_titles, "#"+title)
@@ -332,6 +343,9 @@ func Declare(env *Env, def *Declaration) {
 	declarations[def.Name] = def
 	if def.Fn != nil {
 		declarationsByFunction[FunctionIdentity(def.Fn)] = def
+		if def.RetainsCallArgs {
+			registerRetainingCallArgFunction(def.Fn)
+		}
 		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
 	}
 }
@@ -344,6 +358,9 @@ func DeclareInSection(section string, env *Env, def *Declaration) {
 	declarations[def.Name] = def
 	if def.Fn != nil {
 		declarationsByFunction[FunctionIdentity(def.Fn)] = def
+		if def.RetainsCallArgs {
+			registerRetainingCallArgFunction(def.Fn)
+		}
 		env.Vars[Symbol(def.Name)] = NewFunc(def.Fn)
 	}
 	if def.IsForbidden() {

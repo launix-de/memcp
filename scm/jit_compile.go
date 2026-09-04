@@ -1976,7 +1976,7 @@ func jitCompileStaticProcCall(ctx *JITContext, callable Scmer, proc *Proc, opera
 	callResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	ctx.EmitZeroDescWords(&callResult, 2)
 	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
-	ctx.EmitProcJITCall(fnValue, argsSlice, callResult)
+	ctx.EmitProcCall(fnValue, argsSlice, callResult)
 	ctx.FreeDesc(&fnValue)
 	ctx.FreeDesc(&argsSlice)
 	ctx.Coverage.DirectProcs++
@@ -2030,9 +2030,14 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	}
 	tag := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
 	ctx.EmitGetTagRegs(tag, callableValue.Reg, callableValue.Reg2)
+	nativeFuncLabel := ctx.ReserveLabel()
+	ctx.EmitCmpRegImm8(tag, tagFunc)
+	ctx.EmitJcc(CcE, nativeFuncLabel)
 	ctx.EmitCmpRegImm8(tag, tagProc)
 	ctx.FreeReg(tag)
 	ctx.EmitJcc(CcNE, fallbackLabel)
+	// Scheme procedures need a direct, arity-compatible JIT entry. Their *Proc
+	// pointer is already the funcval context consumed by EmitProcCall.
 	metadata := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
 	ctx.EmitMovRegMem(metadata, callableValue.Reg, int32(unsafe.Offsetof(Proc{}.Compiled)))
 	ctx.EmitCmpRegImm32(metadata, 0)
@@ -2052,31 +2057,51 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	ctx.MarkLabel(arityOK)
 	ctx.FreeReg(arity)
 	ctx.FreeReg(metadata)
-	fnReg := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
-	ctx.EmitMovRegReg(fnReg, callableValue.Reg)
-	codeReg := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2, fnReg)
+	codeReg := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
 	ctx.EmitMovRegMem(codeReg, callableValue.Reg, int32(unsafe.Offsetof(Proc{}.JITCode)))
 	ctx.EmitCmpRegImm32(codeReg, 0)
 	ctx.FreeReg(codeReg)
 	ctx.EmitJcc(CcE, fallbackLabel)
+	fnReg := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
+	ctx.EmitMovRegReg(fnReg, callableValue.Reg)
 	fnValue := JITValueDesc{Loc: LocReg, Type: tagFunc, Reg: fnReg, RelocatablePointer: true}
 	ctx.BindReg(fnReg, &fnValue)
 	ctx.FreeDesc(&callableValue)
-	argsPtr := ctx.AllocRegExcept(fnReg)
-	argsLen := ctx.AllocRegExcept(fnReg, argsPtr)
-	argsSlice := JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: argsPtr, Reg2: argsLen, NoHeapPointer: false}
-	ctx.BindReg(argsPtr, &argsSlice)
-	ctx.BindReg(argsLen, &argsSlice)
-	if len(operands) == 0 {
-		ctx.EmitMovRegImm64(argsPtr, 0)
-	} else {
-		ctx.EmitLeaRegMem(argsPtr, ctx.StackReg, operandOff)
-	}
-	ctx.EmitMovRegImm64(argsLen, uint64(len(operands)))
-	_ = ctx.EmitProcJITCall(fnValue, argsSlice, callResult)
+	argsSlice := jitEmitDynamicCallArgs(ctx, fnReg, operandOff, len(operands))
+	ctx.EmitProcCall(fnValue, argsSlice, callResult)
 	ctx.FreeDesc(&fnValue)
 	ctx.FreeDesc(&argsSlice)
 	ctx.Coverage.DirectProcs++
+	ctx.EmitJmp(endLabel)
+
+	ctx.MarkLabel(nativeFuncLabel)
+	nativeCallable := callable
+	ctx.EnsureDesc(&nativeCallable)
+	if nativeCallable.Loc != LocRegPair {
+		panic("jit: dynamic native callable must be a Scmer pair")
+	}
+	// A tagFunc Scmer points at the Go variable holding the funcval pointer,
+	// whereas a compiled Proc is itself laid out as the funcval object.
+	fnReg = ctx.AllocRegExcept(nativeCallable.Reg, nativeCallable.Reg2)
+	ctx.EmitMovRegMem(fnReg, nativeCallable.Reg, 0)
+	// Retaining native functions need the existing owned-argument boundary.
+	// Declarations populate this small identity set; the hot path remains a
+	// sequence of comparisons without a Go helper or a builtin-name policy.
+	for _, retainingIdentityValue := range retainingCallArgFunctionIdentities {
+		retainingIdentity := ctx.AllocRegExcept(nativeCallable.Reg, nativeCallable.Reg2, fnReg)
+		ctx.EmitMovRegImm64(retainingIdentity, uint64(retainingIdentityValue))
+		ctx.EmitCmpInt64(fnReg, retainingIdentity)
+		ctx.FreeReg(retainingIdentity)
+		ctx.EmitJcc(CcE, fallbackLabel)
+	}
+	fnValue = JITValueDesc{Loc: LocReg, Type: tagFunc, Reg: fnReg, RelocatablePointer: true}
+	ctx.BindReg(fnReg, &fnValue)
+	ctx.FreeDesc(&nativeCallable)
+	argsSlice = jitEmitDynamicCallArgs(ctx, fnReg, operandOff, len(operands))
+	ctx.EmitGoFuncCall(fnValue, argsSlice, callResult)
+	ctx.FreeDesc(&fnValue)
+	ctx.FreeDesc(&argsSlice)
+	ctx.Coverage.NativeCalls++
 	ctx.EmitJmp(endLabel)
 
 	ctx.MarkLabel(fallbackLabel)
@@ -2134,6 +2159,21 @@ func jitCompileDynamicCall(ctx *JITContext, callableExpr Scmer, operands []Scmer
 	}
 	ctx.FreeStack(ctx.BPOffset - stackStart)
 	return out
+}
+
+func jitEmitDynamicCallArgs(ctx *JITContext, fnReg Reg, operandOff int32, operandCount int) JITValueDesc {
+	argsPtr := ctx.AllocRegExcept(fnReg)
+	argsLen := ctx.AllocRegExcept(fnReg, argsPtr)
+	argsSlice := JITValueDesc{Loc: LocRegPair, Type: tagSlice, Reg: argsPtr, Reg2: argsLen, NoHeapPointer: false}
+	ctx.BindReg(argsPtr, &argsSlice)
+	ctx.BindReg(argsLen, &argsSlice)
+	if operandCount == 0 {
+		ctx.EmitMovRegImm64(argsPtr, 0)
+	} else {
+		ctx.EmitLeaRegMem(argsPtr, ctx.StackReg, operandOff)
+	}
+	ctx.EmitMovRegImm64(argsLen, uint64(operandCount))
+	return argsSlice
 }
 
 func jitCompileDynamicHigherOrderCall(ctx *JITContext, callableExpr Scmer, operands []Scmer, sliceBase Reg, result JITValueDesc) JITValueDesc {
@@ -2267,7 +2307,7 @@ func jitCompileSelfCall(ctx *JITContext, operands []Scmer, sliceBase Reg, result
 	callResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	ctx.EmitZeroDescWords(&callResult, 2)
 	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
-	ctx.EmitProcJITCall(fnValue, argsSlice, callResult)
+	ctx.EmitProcCall(fnValue, argsSlice, callResult)
 	ctx.FreeDesc(&argsSlice)
 	target := jitPlaceScmerIntoTarget(ctx, callResult, result)
 	ctx.FreeStack(ctx.BPOffset - stackStart)
