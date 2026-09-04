@@ -2851,18 +2851,14 @@ cache identity or a logical fallback. */
 			true)
 		(define key_names (group_key_cols keys))
 		(define value_col (aggregate_col_name_using (gs_input stage) (car (gs_aggregates stage))))
-		(define lookup_expr (list (quote scan_lookup)
-			(physical_query_tx_symbol)
-			(list (quote table) (group_stage_cache_schema stage) (group_stage_cache_relation stage))
-			(cons (quote list) key_names)
-			(cons (quote list) (map lookup_keys (lambda (key)
-				(lower_column_expr_for_join sources default_alias key))))
-			value_col))
-		/* The cache keys are unique. Read its raw aggregate with one point probe,
-		then apply the presence calculation outside the storage operator. */
-		(define presence_expr (if (presence_probe_stage? stage)
-			(list (quote >) (list (quote coalesceNil) lookup_expr 0) 0)
-			(list (quote equal??) lookup_expr true)))
+		(define filtercols (merge_unique (list key_names (list value_col))))
+		(define key_terms (map (produceN (count keys)) (lambda (i)
+			(list (quote equal??)
+				(symbol (nth key_names i))
+				(lower_column_expr_for_join sources default_alias (nth lookup_keys i))))))
+		(define filter_condition (combine_where_terms
+			(cons (stage_recset_value_filter_term stage value_col) key_terms)
+			true))
 		(define raw_input (gs_input stage))
 		(define stamped_catalog (qassoc_get (gs_facts stage) (quote stage_catalog) '()))
 		(define stage_catalog (stage_catalog_with_nested
@@ -2870,7 +2866,13 @@ cache identity or a logical fallback. */
 				(if (query_block? raw_input) (query_block_stage_catalog raw_input) '())))))
 		(list (quote begin)
 			(lower_group_stage_prepare_using stage_catalog stage_catalog stage true nil)
-			presence_expr))))
+			(list (quote scan_exists)
+				(physical_query_tx_symbol)
+				(list (quote table) (group_stage_cache_schema stage) (group_stage_cache_relation stage))
+				(cons (quote list) filtercols)
+				(list (quote lambda)
+					(map filtercols symbol)
+					filter_condition))))))
 
 /* driver_membership_probe markers reach physical lowering through two
 routes: as a WHERE-term (stripped by driver_membership_for_source, built via
