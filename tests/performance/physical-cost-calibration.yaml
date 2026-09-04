@@ -25,6 +25,8 @@ setup:
   - sql: "DROP TABLE IF EXISTS pc_acl_domain"
   - sql: "DROP TABLE IF EXISTS pc_acl_assignment"
   - sql: "DROP TABLE IF EXISTS pc_acl_override"
+  - sql: "DROP TABLE IF EXISTS pc_lookup_outer"
+  - sql: "DROP TABLE IF EXISTS pc_lookup_values"
   # String-key membership prevents the target-side prefiltered projection and
   # isolates candidate startup from direct probe work.
   - sql: "DROP TABLE IF EXISTS pc_events"
@@ -46,6 +48,8 @@ setup:
   - sql: "CREATE TABLE pc_acl_domain (id INT PRIMARY KEY, direct_flag INT)"
   - sql: "CREATE TABLE pc_acl_assignment (domain_id INT, actor_id INT, allowed INT)"
   - sql: "CREATE TABLE pc_acl_override (domain_id INT, actor_id INT, allowed INT)"
+  - sql: "CREATE TABLE pc_lookup_outer (id INT, lookup_id INT)"
+  - sql: "CREATE TABLE pc_lookup_values (lookup_id INT, value VARCHAR(32), score INT)"
   - sql: "CREATE TABLE pc_events (id INT PRIMARY KEY, entity_key VARCHAR(32), event_time INT, kind VARCHAR(16))"
   - sql: "CREATE TABLE pc_keys (id INT PRIMARY KEY, enabled INT)"
   - sql: "CREATE TABLE pc_files_text (id INT PRIMARY KEY, filename VARCHAR(255), search VARCHAR(255)) ENGINE=memory"
@@ -113,6 +117,14 @@ setup:
             (concat (string_repeat (if (equal? (mod i 10) 0) "c" "x") 8192) (string i))
             (concat (string_repeat (if (equal? (mod i 7) 0) "c" "x") 8192) (string i))))))
   - scm: "(rebuild)"
+  # Keep the point-probe fixture in the delta index, matching the hot path used
+  # by small application lookup tables without perturbing the large rebuilds.
+  - scm: |
+      (begin
+        (insert (table "memcp-tests" "pc_lookup_outer") '("id" "lookup_id")
+          (list (list 1 10) (list 2 20) (list 3 30) (list 4 nil)))
+        (insert (table "memcp-tests" "pc_lookup_values") '("lookup_id" "value" "score")
+          (list (list 10 "ten" 100) (list 20 "twenty" 200) (list 30 nil 300))))
 
 cleanup:
   - sql: "DROP TABLE IF EXISTS pc_files_small"
@@ -124,12 +136,28 @@ cleanup:
   - sql: "DROP TABLE IF EXISTS pc_acl_domain"
   - sql: "DROP TABLE IF EXISTS pc_acl_assignment"
   - sql: "DROP TABLE IF EXISTS pc_acl_override"
+  - sql: "DROP TABLE IF EXISTS pc_lookup_outer"
+  - sql: "DROP TABLE IF EXISTS pc_lookup_values"
   - sql: "DROP TABLE IF EXISTS pc_events"
   - sql: "DROP TABLE IF EXISTS pc_keys"
   - sql: "DROP TABLE IF EXISTS pc_files_text"
   - sql: "DROP TABLE IF EXISTS pc_files_wide"
 
 test_cases:
+  # scan_lookup and scan_order are result-equivalent for this complete scalar
+  # point probe. Costgen forces both plans and rejects the physical dominance
+  # rule unless scan_lookup wins with the same warm fixture and result hash.
+  - name: "scalar point lookup dominance"
+    physical_calibration: true
+    calibration_decision: "scan_lookup"
+    warmup: 2
+    repetitions: 7
+    sql: |
+      SELECT d.id,
+        (SELECT v.score + 1 FROM pc_lookup_values v WHERE v.lookup_id = d.lookup_id) AS value
+      FROM pc_lookup_outer d
+      WHERE d.id = 1
+
   - name: "unordered selective joined reduction"
     physical_calibration: true
     calibration_decision: "scan_join_order"

@@ -1886,6 +1886,68 @@ physical membership probe. */
 		(scalar_once_descriptor value_expr '() nil)
 		aggregate_count_descriptor)))
 
+/* A scalar projection over at most one row need not execute inside the scan.
+Read its one raw input column and apply a NULL-propagating calculation to the
+scalar result afterwards. This is a general materialization rule: every
+physical scan can expose the narrower raw-column boundary, while a complete
+indexed leaf may lower that boundary further to scan_lookup. Expressions such
+as COALESCE are intentionally excluded because a missing row and a matching
+row containing NULL must remain distinguishable for non-strict functions. */
+(define scalar_projection_input_columns (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(if (or (nil? tblvar) (equal? tblvar alias)) (list expr) '())
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(scalar_projection_input_columns alias
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons _head tail) (merge_unique (map tail (lambda (item)
+			(scalar_projection_input_columns alias item))))
+		_ '())))
+
+(define scalar_projection_null_propagating_operator? (lambda (head)
+	(begin
+		(define name (string head))
+		(or (contains? (list json_extract json_unquote json_type
+			json_depth json_length json_keys) head)
+			(contains? '("+" "-" "*" "/" "sql_div" "mod"
+				"json_extract" "json_unquote" "json_type"
+				"json_depth" "json_length" "json_keys") name)))))
+
+(define scalar_projection_null_propagating? (lambda (alias expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(or (nil? tblvar) (equal? tblvar alias))
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(scalar_projection_null_propagating? alias
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (and
+			(scalar_projection_null_propagating_operator? head)
+			(reduce tail (lambda (valid item)
+				(if (empty_list? (scalar_projection_input_columns alias item))
+					valid
+					(and valid (scalar_projection_null_propagating? alias item)))) true))
+		_ false)))
+
+(define scalar_projection_lifted_input (lambda (alias expr)
+	(begin
+		(define inputs (scalar_projection_input_columns alias expr))
+		(if (and (single_source? inputs)
+			(scalar_projection_null_propagating? alias expr))
+			(car inputs)
+			nil))))
+
+(define replace_scalar_projection_input (lambda (alias input replacement expr)
+	(match expr
+		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
+		(if (and (or (nil? tblvar) (equal? tblvar alias)) (equal? expr input))
+			replacement expr)
+		((quote get_column) tblvar tbl_ignorecase col col_ignorecase)
+		(replace_scalar_projection_input alias input replacement
+			(list (quote get_column) tblvar tbl_ignorecase col col_ignorecase))
+		(cons head tail) (cons head (map tail (lambda (item)
+			(replace_scalar_projection_input alias input replacement item))))
+		_ expr)))
+
 (define expr_refs_stage_output_alias? (lambda (expr)
 	(match expr
 		((symbol get_column) tblvar _tbl_ignorecase _col _col_ignorecase)
@@ -3463,7 +3525,13 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 		(define values_for_inner (map value_exprs (lambda (value_expr)
 			(canonical_column_expr_for_alias inner_default
 				(decorrelate_expr_with_pairs inner_default lookup_pairs value_expr)))))
-		(define value_ags (map values_for_inner (lambda (value_for_inner)
+		(define lifted_inputs (map values_for_inner (lambda (value_for_inner)
+			(scalar_projection_lifted_input inner_default value_for_inner))))
+		(define values_for_stage (map (produceN (count values_for_inner)) (lambda (i)
+			(begin
+				(define lifted_input (nth lifted_inputs i))
+				(if (nil? lifted_input) (nth values_for_inner i) lifted_input)))))
+		(define value_ags (map values_for_stage (lambda (value_for_inner)
 			(car (scalar_single_aggregates value_for_inner)))))
 		(define count_ag aggregate_count_descriptor)
 		(define ags (dedupe_aggregates_by_col (merge (list value_ags (list count_ag)))))
@@ -3510,8 +3578,15 @@ IDs. Give each instance its own IDs and source aliases before their plans meet. 
 			(make_stage_output_relation stage_id)
 			(stage_source_outer? outer_sources)
 			(make_exists_stage_join_condition stage_alias key_names lookup_keys)))
-		(define output_exprs (map value_ags (lambda (output_ag)
-			(scalar_single_value_expr stage_input stage_alias output_ag count_ag))))
+		(define output_exprs (map (produceN (count value_ags)) (lambda (i)
+			(begin
+				(define output_ag (nth value_ags i))
+				(define stored (scalar_single_value_expr stage_input stage_alias output_ag count_ag))
+				(define lifted_input (nth lifted_inputs i))
+				(if (nil? lifted_input)
+					stored
+					(replace_scalar_projection_input inner_default lifted_input stored
+						(nth values_for_inner i)))))))
 		(list
 			(nth output_exprs output_index)
 			(list stage)

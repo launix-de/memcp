@@ -1242,6 +1242,29 @@ func Init(en scm.Env) {
 	})
 
 	scm.Declare(&en, &scm.Declaration{
+		Name: "scan_lookup",
+		Fn: func(a ...scm.Scmer) scm.Scmer {
+			return TableFromScmer(a[1]).scanLookup(
+				scmerToTxContext(a[0]),
+				a[2].String(),
+				a[3],
+				a[4].String(),
+			)
+		},
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns one projected value through a direct equality-prefix index lookup; returns NULL for no visible match and errors on multiple matches",
+			HasSideEffects: true,
+			Params: []*scm.TypeDescriptor{
+				{Kind: "any", Label: "tx", Description: "transaction context used for visibility"},
+				{Kind: "table", Label: "table"},
+				{Kind: "string", Label: "lookupColumn", Description: "leading index-prefix column"},
+				{Kind: "any", Label: "lookupValue", Description: "exact value for the index-prefix column"},
+				{Kind: "string", Label: "resultColumn", Description: "column returned from the matching row"},
+			},
+			Return: &scm.TypeDescriptor{Kind: "any"},
+		},
+	})
+
+	scm.Declare(&en, &scm.Declaration{
 		Name: "scan",
 
 		Fn: func(a ...scm.Scmer) scm.Scmer {

@@ -647,6 +647,20 @@ func TestResidualRefinementMustImproveDecisionPool(t *testing.T) {
 	}
 }
 
+func TestValidateScanLookupDominance(t *testing.T) {
+	rows := []observation{
+		{caseName: "point", decision: "scan_lookup", plan: "scan_lookup", y: 50},
+		{caseName: "point", decision: "scan_lookup", plan: "scan_order", y: 100},
+	}
+	if err := validateScanLookupDominance(rows); err != nil {
+		t.Fatalf("dominant scan_lookup rejected: %v", err)
+	}
+	rows[0].y = 101
+	if err := validateScanLookupDominance(rows); err == nil {
+		t.Fatal("slower scan_lookup accepted as dominant")
+	}
+}
+
 func TestRaceCalibrationVariantsCancelsSlowerPlan(t *testing.T) {
 	const decisionID = "membership_carrier:test"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
