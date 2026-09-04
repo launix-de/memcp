@@ -570,6 +570,33 @@ type jitSafepoint struct {
 	entry     bool
 }
 
+// jitFrameRootsToInitialize returns reusable frame words which a safepoint may
+// scan before the current control-flow path has written them. Dynamic call-area
+// roots live below the stable stack pointer and are initialized at their call
+// site. Architecture emitters translate these common frame-bank locations into
+// their native stores.
+func jitFrameRootsToInitialize(safepoints []jitSafepoint) []jitStackRoot {
+	unique := make(map[jitStackRoot]struct{})
+	for _, safepoint := range safepoints {
+		for _, root := range safepoint.roots {
+			if root.base == jitStackRootFrameBP || root.base == jitStackRootFrameSP && root.offset >= 0 {
+				unique[root] = struct{}{}
+			}
+		}
+	}
+	roots := make([]jitStackRoot, 0, len(unique))
+	for root := range unique {
+		roots = append(roots, root)
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		if roots[i].base != roots[j].base {
+			return roots[i].base < roots[j].base
+		}
+		return roots[i].offset < roots[j].offset
+	})
+	return roots
+}
+
 // jitStackMap is the runtime-independent form passed through the common JIT
 // code. The goexperiment.jit implementation converts it to runtime/jit maps;
 // the vanilla implementation deliberately ignores it.

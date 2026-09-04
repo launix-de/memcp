@@ -185,6 +185,17 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.emitByte(0x55)                    // push rbp
 	ctx.emitBytes(0x48, 0x89, 0xE5)       // mov rbp, rsp
 	frameFixup := ctx.EmitSubRSP32Fixup() // sub rsp, <patched>
+	var frameInitLabel, frameBodyLabel JITLabel
+	if !ctx.StackPhiTargets {
+		// Ordinary expressions use precise root-slot initialization instead of
+		// clearing every word in the frame. The root set is known only after the
+		// one-pass body emitter has recorded all safepoints, so enter through a
+		// small initializer emitted after the body and jump back here.
+		frameInitLabel = ctx.ReserveLabel()
+		frameBodyLabel = ctx.ReserveLabel()
+		ctx.EmitJmp(frameInitLabel)
+		ctx.MarkLabel(frameBodyLabel)
+	}
 
 	ctx.emitMovRegReg(RegR12, RegRAX) // save incoming args slice
 	// Parser control flow can enter a shared block whose stack target was
@@ -374,6 +385,21 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	}
 	ctx.emitByte(0xC9) // leave
 	ctx.emitByte(0xC3) // ret
+	if !ctx.StackPhiTargets {
+		ctx.MarkLabel(frameInitLabel)
+		roots := jitFrameRootsToInitialize(ctx.Safepoints)
+		if len(roots) != 0 {
+			ctx.emitBytes(0x45, 0x31, 0xDB) // xor r11d, r11d
+			for _, root := range roots {
+				base := RegRSP
+				if root.base == jitStackRootFrameBP {
+					base = RegRBP
+				}
+				ctx.EmitStoreRegMem(RegR11, base, root.offset)
+			}
+		}
+		ctx.EmitJmp(frameBodyLabel)
+	}
 	if hasStackCheck {
 		ctx.MarkLabel(stackGrowLabel)
 		// Match Go's regabi prolog: public slice arguments use their caller-owned
