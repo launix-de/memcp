@@ -239,6 +239,7 @@ echo ""
 test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
 test_data_dir="${MEMCP_TEST_DATA_DIR:-/tmp/memcp-sql-tests-$test_port}"
 memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
+supervisor_generation_file="${MEMCP_TEST_SUPERVISOR_GENERATION_FILE:-/tmp/memcp-test-supervisor-$test_port.generation}"
 tmpdir=""
 supervisor_pid=""
 enable_mysql=0
@@ -268,6 +269,7 @@ done
 #   with the same data directory before the suite continues.
 
 run_memcp_forever() {
+  local generation=0
   terminate_memcp_child() {
     if [ -z "${memcp_pid:-}" ]; then
       return
@@ -295,6 +297,9 @@ run_memcp_forever() {
     fi
     ./memcp --no-repl -data "$test_data_dir" --api-port=$test_port --mysql-port=$((test_port + 1000)) "${mysql_args[@]}" lib/main.scm >> "$memcp_log" 2>&1 &
     memcp_pid=$!
+    generation=$((generation + 1))
+    printf '%s\n' "$generation" > "$supervisor_generation_file.tmp"
+    mv "$supervisor_generation_file.tmp" "$supervisor_generation_file"
     wait $memcp_pid
     rc=$?
     if [ $rc -ne 0 ]; then
@@ -305,6 +310,7 @@ run_memcp_forever() {
 }
 
 start_supervisor() {
+  rm -f "$supervisor_generation_file" "$supervisor_generation_file.tmp"
   echo -n > /tmp/memcp-test.log
   run_memcp_forever &
   supervisor_pid=$!
@@ -328,6 +334,7 @@ stop_supervisor() {
     supervisor_pid=""
   fi
   pkill -f "memcp.*--api-port=$test_port" 2>/dev/null || true
+  rm -f "$supervisor_generation_file" "$supervisor_generation_file.tmp"
 }
 
 wait_for_sql_ready() {
@@ -435,6 +442,7 @@ run_one() {
     return
   fi
   MEMCP_TEST_SUPERVISOR_PID="$supervisor_pid" \
+    MEMCP_TEST_SUPERVISOR_GENERATION_FILE="$supervisor_generation_file" \
     python3 -u run_sql_tests.py "$tf" $test_port --connect-only "${runner_args[@]}" > "$out" 2>&1
   rc=$?
   if [ $rc -eq 0 ]; then

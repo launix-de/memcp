@@ -1478,6 +1478,7 @@ class SQLTestRunner:
         response: Optional[requests.Response]
         cpu_pct = None  # CPU load percentage, measured during query execution
         if query and query.strip().upper() == "SHUTDOWN":
+            supervisor_generation = shared_supervisor_generation()
             # Issue shutdown
             # A graceful shutdown may close this request before a response reaches
             # the client. Do not wait for that same process to become ready again;
@@ -1495,19 +1496,28 @@ class SQLTestRunner:
                         return self._record_fail(name, "Restart failed after SHUTDOWN", query, None, None, is_noncritical)
                 else:
                     # In connect-only mode the shared test supervisor owns the
-                    # process. Give graceful finalization a bounded window,
-                    # then ask that supervisor to terminate a stuck old process
-                    # and restart the same data directory.
+                    # process. Its generation barrier prevents the old process,
+                    # which may still answer briefly while shutting down, from
+                    # being mistaken for the replacement process.
                     restart_timeout = int(test_case.get("restart_timeout", 120))
                     grace_timeout = min(10, restart_timeout)
-                    ready = wait_for_sql_ready(
-                        self.base_url, tc_user, tc_pass, database,
-                        timeout=grace_timeout,
-                    )
-                    if not ready and request_shared_supervisor_restart():
+                    if supervisor_generation is None:
                         ready = wait_for_sql_ready(
                             self.base_url, tc_user, tc_pass, database,
-                            timeout=max(1, restart_timeout - grace_timeout),
+                            timeout=restart_timeout,
+                        )
+                    else:
+                        replaced = wait_for_shared_supervisor_generation(
+                            supervisor_generation, grace_timeout,
+                        )
+                        if not replaced and request_shared_supervisor_restart():
+                            replaced = wait_for_shared_supervisor_generation(
+                                supervisor_generation,
+                                max(1, restart_timeout - grace_timeout),
+                            )
+                        ready = replaced and wait_for_sql_ready(
+                            self.base_url, tc_user, tc_pass, database,
+                            timeout=restart_timeout,
                         )
                     if not ready:
                         return self._record_fail(name, "Restart timeout: SQL not ready after SHUTDOWN", query, None, None, is_noncritical)
@@ -2171,6 +2181,28 @@ def request_shared_supervisor_restart() -> bool:
         return True
     except OSError:
         return False
+
+
+def shared_supervisor_generation() -> Optional[str]:
+    """Return the current shared-server generation, if the supervisor exposes it."""
+    path = os.environ.get("MEMCP_TEST_SUPERVISOR_GENERATION_FILE", "")
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def wait_for_shared_supervisor_generation(previous: str, timeout: int) -> bool:
+    """Wait until the supervisor has started a different MemCP process."""
+    deadline = time.monotonic() + max(0, timeout)
+    while time.monotonic() < deadline:
+        current = shared_supervisor_generation()
+        if current is not None and current != previous:
+            return True
+        time.sleep(0.05)
+    return False
 
 _memcp_log_file: str = ""
 

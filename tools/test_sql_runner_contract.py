@@ -62,6 +62,7 @@ from run_sql_tests import (  # noqa: E402
     scaled_wall_clock_limit_ms,
     sql_request_is_retry_safe,
     suite_execution_mode,
+    wait_for_shared_supervisor_generation,
 )
 from tools.check_test_table_names import mutable_table_collisions  # noqa: E402
 
@@ -332,19 +333,33 @@ class InterruptedRequestContractTest(unittest.TestCase):
         runner.ensure_database = lambda _database: None
         runner.execute_sql = mock.Mock(return_value=None)
 
-        with mock.patch("run_sql_tests.wait_for_sql_ready", return_value=True) as wait:
+        with mock.patch("run_sql_tests.shared_supervisor_generation", return_value="7"), \
+                mock.patch("run_sql_tests.wait_for_shared_supervisor_generation", return_value=True) as generation_wait, \
+                mock.patch("run_sql_tests.wait_for_sql_ready", return_value=True) as wait:
             self.assertTrue(runner.run_test_case({
                 "name": "shared restart",
                 "sql": "SHUTDOWN",
             }, "memcp-tests"))
 
+        generation_wait.assert_called_once_with("7", 10)
         wait.assert_called_once_with(
             "http://localhost:23456",
             "root",
             "admin",
             "memcp-tests",
-            timeout=10,
+            timeout=120,
         )
+
+    def test_generation_wait_does_not_accept_the_old_server(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            generation = Path(tmp) / "generation"
+            generation.write_text("4\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "MEMCP_TEST_SUPERVISOR_GENERATION_FILE": str(generation),
+            }):
+                self.assertFalse(wait_for_shared_supervisor_generation("4", 0))
+                generation.write_text("5\n", encoding="utf-8")
+                self.assertTrue(wait_for_shared_supervisor_generation("4", 1))
 
 
 class AtomicJSONObserverContractTest(unittest.TestCase):
