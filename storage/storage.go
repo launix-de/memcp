@@ -1244,23 +1244,34 @@ func Init(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_lookup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			return TableFromScmer(a[1]).scanLookup(
-				scmerToTxContext(a[0]),
-				a[2].String(),
-				a[3],
-				a[4].String(),
-			)
+			lookupColValues := mustScmerSlice(a[2], "scan_lookup matchColumns")
+			lookupValues := mustScmerSlice(a[3], "scan_lookup matchValues")
+			validateScanLookupDimensions(len(lookupColValues), len(lookupValues))
+			resultCol := ""
+			returnValue := len(a) == 5
+			if len(a) == 5 {
+				resultCol = a[4].String()
+			}
+			t := TableFromScmer(a[1])
+			currentTx := scmerToTxContext(a[0])
+			if len(lookupColValues) == 1 {
+				if lookupValues[0].IsNil() {
+					return scanLookupMiss(returnValue)
+				}
+				return t.scanLookupOne(currentTx, lookupColValues[0].String(), lookupValues[0], resultCol, returnValue)
+			}
+			return t.scanLookup(currentTx, scmerSliceToStrings(lookupColValues), lookupValues, resultCol, returnValue)
 		},
-		Type: &scm.TypeDescriptor{Kind: "func", Description: "returns one projected value through a direct equality-prefix index lookup; returns NULL for no visible match and errors on multiple matches",
+		Type: &scm.TypeDescriptor{Kind: "func", Description: "probes an exact index prefix; with a result column it returns one value, NULL for no visible match, and errors on multiple matches; without a result column it returns whether a match exists",
 			HasSideEffects: true,
 			Params: []*scm.TypeDescriptor{
 				{Kind: "any", Label: "tx", Description: "transaction context used for visibility"},
 				{Kind: "table", Label: "table"},
-				{Kind: "string", Label: "lookupColumn", Description: "leading index-prefix column"},
-				{Kind: "any", Label: "lookupValue", Description: "exact value for the index-prefix column"},
-				{Kind: "string", Label: "resultColumn", Description: "column returned from the matching row"},
+				{Kind: "list", NoEscape: true, Label: "matchColumns", Description: "non-empty exact index-prefix columns", Element: &scm.TypeDescriptor{Kind: "string", Label: "column"}},
+				{Kind: "list", NoEscape: true, Label: "matchValues", Description: "one exact value for each match column", Element: &scm.TypeDescriptor{Kind: "any", Label: "value"}},
+				{Kind: "string", Optional: true, Label: "resultColumn", Description: "optional column returned from the matching row; omit for an existence probe"},
 			},
-			Return: &scm.TypeDescriptor{Kind: "any"},
+			Return: &scm.TypeDescriptor{Kind: "any", Description: "projected scalar value or boolean existence result"},
 		},
 	})
 

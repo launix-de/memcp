@@ -2094,22 +2094,32 @@ would still have to project that value over the segment. */
 					reduce_expr
 					false)))))))
 
-(define scalar_cardinality_scan_lookup_parts (lambda (sources default_alias src condition value_expr keys lookup_keys)
+(define direct_exact_scan_lookup_parts (lambda (sources default_alias src condition keys lookup_keys)
 	(begin
-		(define lookup_col (if (equal? (count keys) 1)
-			(direct_column_name_for_alias src (car keys)) nil))
-		(define result_col (direct_column_name_for_alias src value_expr))
+		(define lookup_cols (map keys (lambda (key)
+			(direct_column_name_for_alias src key))))
 		(if (and
 			(source_is_base_table? src)
 			(equal? condition true)
-			(not (nil? lookup_col))
-			(not (nil? result_col))
-			(equal? (count lookup_keys) 1)
-			(not (expr_refs_alias? default_alias (source_alias src) (car lookup_keys))))
-			(list lookup_col
-				(lower_column_expr_for_join sources default_alias (car lookup_keys))
-				result_col)
+			(not (empty_list? lookup_cols))
+			(not (reduce lookup_cols (lambda (missing col)
+				(or missing (nil? col))) false))
+			(equal? (count lookup_keys) (count lookup_cols))
+			(not (reduce lookup_keys (lambda (dependent key)
+				(or dependent (expr_refs_alias? default_alias (source_alias src) key))) false)))
+			(list lookup_cols
+				(map lookup_keys (lambda (key)
+					(lower_column_expr_for_join sources default_alias key))))
 			nil))))
+
+(define scalar_cardinality_scan_lookup_parts (lambda (sources default_alias src condition value_expr keys lookup_keys)
+	(begin
+		(define lookup_parts (direct_exact_scan_lookup_parts
+			sources default_alias src condition keys lookup_keys))
+		(define result_col (direct_column_name_for_alias src value_expr))
+		(if (or (nil? lookup_parts) (nil? result_col))
+			nil
+			(list (nth lookup_parts 0) (nth lookup_parts 1) result_col)))))
 
 (define lower_scalar_cardinality_scan_lookup_choice (lambda (stage lookup_expr scan_expr)
 	(begin
@@ -2207,8 +2217,8 @@ would still have to project that value over the segment. */
 					unset
 					false
 					nil))
-				/* This is a complete physical subtree match. Residual predicates,
-				computed projections and compound keys keep the general scan. */
+				/* This is a complete physical subtree match. Residual predicates
+				keep the general scan; compound exact keys remain direct probes. */
 				(define lookup_parts (scalar_cardinality_scan_lookup_parts
 					sources default_alias src condition value_expr keys lookup_keys))
 				(if (nil? lookup_parts)
@@ -2217,8 +2227,8 @@ would still have to project that value over the segment. */
 						(list (quote scan_lookup)
 							(physical_query_tx_symbol)
 							(source_table_expr src)
-							(nth lookup_parts 0)
-							(nth lookup_parts 1)
+							(cons (quote list) (nth lookup_parts 0))
+							(cons (quote list) (nth lookup_parts 1))
 							(nth lookup_parts 2))
 						scan_expr)))))))
 
@@ -2902,14 +2912,22 @@ would lose nested-stage and join semantics. */
 						(define filtercols (merge_unique (list
 							(extract_columns_for_alias input_src condition)
 							(merge_unique (map keys (lambda (key) (extract_columns_for_alias input_src key)))))))
-						(list (quote scan_exists)
-							(physical_query_tx_symbol)
-							(source_table_expr input_src)
-							(cons (quote list) filtercols)
-							(list (quote lambda)
-								(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
-								(cons (quote and)
-									(cons (lower_column_expr_for_alias input_src condition) key_terms))))))))))))
+						(define lookup_parts (direct_exact_scan_lookup_parts
+							sources default_alias input_src condition keys lookup_keys))
+						(if (nil? lookup_parts)
+							(list (quote scan_exists)
+								(physical_query_tx_symbol)
+								(source_table_expr input_src)
+								(cons (quote list) filtercols)
+								(list (quote lambda)
+									(map filtercols (lambda (col) (symbol (concat (source_alias input_src) "." col))))
+									(cons (quote and)
+										(cons (lower_column_expr_for_alias input_src condition) key_terms))))
+							(list (quote scan_lookup)
+								(physical_query_tx_symbol)
+								(source_table_expr input_src)
+								(cons (quote list) (nth lookup_parts 0))
+								(cons (quote list) (nth lookup_parts 1))))))))))))
 
 (define lower_dml_driver_membership_probe_expr (lambda (sources default_alias fallback_schema stage _probe)
 	(begin

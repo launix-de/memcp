@@ -1,3 +1,4 @@
+# Copyright (C) 2026 Carl-Philip Haensch
 # MySQL auth callback must stay readonly and work with tx=nil
 
 metadata:
@@ -31,12 +32,32 @@ test_cases:
         "ok"
         (error "mysql_auth returned wrong password"))
 
+  - name: "Direct scan_lookup resolves password with nil transaction"
+    scm: |
+      (if
+        (equal?
+          (scan_lookup nil (table "system" "user")
+            '("username") '("auth_scan_nil_repro") "password")
+          (password "secret123"))
+        "ok"
+        (error "scan_lookup nil over system.user returned wrong password"))
+
   - name: "mysql_auth returns nil for missing user"
     scm: |
       (if
         (nil? (mysql_auth "auth_scan_nil_other"))
         "ok"
         (error "mysql_auth should return nil for missing user"))
+
+  - name: "Authenticated constant query hot path"
+    sql: "SELECT 1 AS value"
+    warmup: 10
+    timing_samples: 100
+    threshold_ms: 2
+    expect:
+      rows: 1
+      data:
+        - value: 1
 
   - name: "Dashboard user authentication rejects missing credentials without evaluating an empty row"
     scm: |
