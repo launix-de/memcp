@@ -20,7 +20,10 @@ package scm
 import "testing"
 
 func TestJITParserMemoSeparatesRulesAndPositions(t *testing.T) {
-	state := &jitParserState{memo: make([]map[int]uint32, 4)}
+	state := &jitParserState{
+		program:     &jitParserProgram{rules: make([]jitParserRule, 10)},
+		memoOffsets: make([]uint32, 4),
+	}
 	first := jitParserMemoEntry{value: NewString("first"), position: 1, success: true}
 	second := jitParserMemoEntry{value: NewString("second"), position: 2, success: true}
 	otherPosition := jitParserMemoEntry{value: NewString("other"), position: 3, success: true}
@@ -55,14 +58,15 @@ func TestJITParserReleaseDropsOversizedMemoStorage(t *testing.T) {
 	program := &jitParserProgram{}
 	program.pool.New = func() any { return new(jitParserState) }
 	state := &jitParserState{
-		memo:        []map[int]uint32{{1: 1}},
+		memoOffsets: []uint32{1},
+		memoRules:   []uint32{1},
 		memoEntries: make([]jitParserMemoEntry, 1, jitParserRetainedMemoEntryCapacity+1),
 	}
 	state.memoEntries[0].value = NewString("captured")
 
 	program.releaseState(state)
-	if state.memo != nil || state.memoEntries != nil {
-		t.Fatalf("oversized parser memo retained: memo=%v entry-capacity=%d", state.memo != nil, cap(state.memoEntries))
+	if state.memoOffsets != nil || state.memoRules != nil || state.memoEntries != nil {
+		t.Fatalf("oversized parser memo retained: offsets=%v rules=%v entry-capacity=%d", state.memoOffsets != nil, state.memoRules != nil, cap(state.memoEntries))
 	}
 }
 

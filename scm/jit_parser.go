@@ -20,6 +20,7 @@ package scm
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sync"
 	"unicode"
 	"unicode/utf8"
@@ -689,7 +690,8 @@ type jitParserState struct {
 	checkpoints []jitParserCheckpoint
 	marks       []int
 	positions   []int
-	memo        []map[int]uint32
+	memoOffsets []uint32
+	memoRules   []uint32
 	memoEntries []jitParserMemoEntry
 	heads       []*jitParserLeftRecursionHead
 	farthest    int
@@ -730,11 +732,13 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 		state.heads = state.heads[:inputLength+1]
 		clear(state.heads)
 	}
-	if cap(state.memo) < inputLength+1 {
-		state.memo = make([]map[int]uint32, inputLength+1)
+	if cap(state.memoOffsets) < inputLength+1 {
+		state.memoOffsets = make([]uint32, inputLength+1)
 	} else {
-		state.memo = state.memo[:inputLength+1]
+		state.memoOffsets = state.memoOffsets[:inputLength+1]
+		clear(state.memoOffsets)
 	}
+	state.memoRules = state.memoRules[:0]
 	if cap(state.frames) < inputLength+8 {
 		state.frames = make([]jitParserCallFrame, 0, inputLength+8)
 	}
@@ -753,44 +757,54 @@ func (program *jitParserProgram) releaseState(state *jitParserState) {
 	}
 	if cap(state.memoEntries) > jitParserRetainedMemoEntryCapacity {
 		state.memoEntries = nil
-		state.memo = nil
+		state.memoOffsets = nil
+		state.memoRules = nil
 	} else {
 		clear(state.memoEntries)
 		state.memoEntries = state.memoEntries[:0]
-		for _, rules := range state.memo {
-			clear(rules)
-		}
+		clear(state.memoRules)
+		state.memoRules = state.memoRules[:0]
+		clear(state.memoOffsets)
 	}
 	state.program = nil
 	program.pool.Put(state)
 }
 
 func (state *jitParserState) memoGet(key jitParserMemoKey) (jitParserMemoEntry, bool) {
-	if key.position < 0 || key.position >= len(state.memo) {
+	if key.position < 0 || key.position >= len(state.memoOffsets) || key.rule < 0 || key.rule >= len(state.program.rules) {
 		return jitParserMemoEntry{}, false
 	}
-	entryIndex, exists := state.memo[key.position][key.rule]
-	if !exists {
+	offset := state.memoOffsets[key.position]
+	if offset == 0 {
+		return jitParserMemoEntry{}, false
+	}
+	entryIndex := state.memoRules[int(offset)-1+key.rule]
+	if entryIndex == 0 {
 		return jitParserMemoEntry{}, false
 	}
 	return state.memoEntries[entryIndex-1], true
 }
 
 func (state *jitParserState) memoSet(key jitParserMemoKey, entry jitParserMemoEntry) {
-	if key.position < 0 || key.position >= len(state.memo) {
-		panic("jit: parser memo position outside input")
+	if key.position < 0 || key.position >= len(state.memoOffsets) || key.rule < 0 || key.rule >= len(state.program.rules) {
+		panic("jit: parser memo key outside program")
 	}
-	rules := state.memo[key.position]
-	if entryIndex, exists := rules[key.rule]; exists {
+	offset := state.memoOffsets[key.position]
+	if offset == 0 {
+		base := len(state.memoRules)
+		state.memoRules = slices.Grow(state.memoRules, len(state.program.rules))
+		state.memoRules = state.memoRules[:base+len(state.program.rules)]
+		clear(state.memoRules[base:])
+		offset = uint32(base + 1)
+		state.memoOffsets[key.position] = offset
+	}
+	index := int(offset) - 1 + key.rule
+	if entryIndex := state.memoRules[index]; entryIndex != 0 {
 		state.memoEntries[entryIndex-1] = entry
 		return
 	}
-	if rules == nil {
-		rules = make(map[int]uint32)
-		state.memo[key.position] = rules
-	}
 	state.memoEntries = append(state.memoEntries, entry)
-	rules[key.rule] = uint32(len(state.memoEntries))
+	state.memoRules[index] = uint32(len(state.memoEntries))
 }
 
 func jitParserStateValue(value Scmer) *jitParserState {
