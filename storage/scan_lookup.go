@@ -30,9 +30,7 @@ const scalarSubselectOverflow = "scalar subselect returned more than one row"
 // lightweight existence check; scalar value lookups stop after the second
 // visible match to enforce scalar-subselect cardinality.
 func (t *table) scanLookup(currentTx *TxContext, lookupCols []string, lookupValues []scm.Scmer, resultCol string, returnValue bool) scm.Scmer {
-	if len(lookupCols) == 0 || len(lookupCols) != len(lookupValues) {
-		panic(fmt.Sprintf("scan_lookup needs equally sized non-empty match column and value lists, got %d and %d", len(lookupCols), len(lookupValues)))
-	}
+	validateScanLookupDimensions(len(lookupCols), len(lookupValues))
 	// Keep the dominant authentication and scalar-subselect case free of the
 	// per-dimension reader slices needed by composite probes.
 	if len(lookupCols) == 1 {
@@ -47,6 +45,12 @@ func (t *table) scanLookup(currentTx *TxContext, lookupCols []string, lookupValu
 		}
 	}
 	return t.scanLookupMany(currentTx, lookupCols, lookupValues, resultCol, returnValue)
+}
+
+func validateScanLookupDimensions(columnCount, valueCount int) {
+	if columnCount == 0 || columnCount != valueCount {
+		panic(fmt.Sprintf("scan_lookup needs equally sized non-empty match column and value lists, got %d and %d", columnCount, valueCount))
+	}
 }
 
 func scanLookupMiss(returnValue bool) scm.Scmer {

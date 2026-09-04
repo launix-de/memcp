@@ -1244,20 +1244,23 @@ func Init(en scm.Env) {
 	scm.Declare(&en, &scm.Declaration{
 		Name: "scan_lookup",
 		Fn: func(a ...scm.Scmer) scm.Scmer {
-			lookupCols := scmerSliceToStrings(mustScmerSlice(a[2], "scan_lookup matchColumns"))
+			lookupColValues := mustScmerSlice(a[2], "scan_lookup matchColumns")
 			lookupValues := mustScmerSlice(a[3], "scan_lookup matchValues")
+			validateScanLookupDimensions(len(lookupColValues), len(lookupValues))
 			resultCol := ""
 			returnValue := len(a) == 5
 			if len(a) == 5 {
 				resultCol = a[4].String()
 			}
-			return TableFromScmer(a[1]).scanLookup(
-				scmerToTxContext(a[0]),
-				lookupCols,
-				lookupValues,
-				resultCol,
-				returnValue,
-			)
+			t := TableFromScmer(a[1])
+			currentTx := scmerToTxContext(a[0])
+			if len(lookupColValues) == 1 {
+				if lookupValues[0].IsNil() {
+					return scanLookupMiss(returnValue)
+				}
+				return t.scanLookupOne(currentTx, lookupColValues[0].String(), lookupValues[0], resultCol, returnValue)
+			}
+			return t.scanLookup(currentTx, scmerSliceToStrings(lookupColValues), lookupValues, resultCol, returnValue)
 		},
 		Type: &scm.TypeDescriptor{Kind: "func", Description: "probes an exact index prefix; with a result column it returns one value, NULL for no visible match, and errors on multiple matches; without a result column it returns whether a match exists",
 			HasSideEffects: true,
