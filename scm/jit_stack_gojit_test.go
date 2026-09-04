@@ -52,24 +52,23 @@ func TestJITFrameClearingLimitedToParserControlFlow(t *testing.T) {
 }
 
 func TestJITFrameRootInitializationIsPreciseAndDeterministic(t *testing.T) {
-	safepoints := []jitSafepoint{
-		{roots: []jitStackRoot{
-			{base: jitStackRootCallSP, offset: 16},
-			{base: jitStackRootFrameBP, offset: -8},
-			{base: jitStackRootFrameSP, offset: -16},
-			{base: jitStackRootFrameSP, offset: 32},
-		}},
-		{roots: []jitStackRoot{
-			{base: jitStackRootFrameSP, offset: 32},
-			{base: jitStackRootFrameBP, offset: -24},
-		}},
+	ctx := JITContext{}
+	for _, root := range []jitStackRoot{
+		{base: jitStackRootCallSP, offset: 16},
+		{base: jitStackRootFrameBP, offset: -8},
+		{base: jitStackRootFrameSP, offset: -16},
+		{base: jitStackRootFrameSP, offset: 32},
+		{base: jitStackRootFrameSP, offset: 32},
+		{base: jitStackRootFrameBP, offset: -24},
+	} {
+		ctx.setStackPointer(root.base, root.offset, true)
 	}
 	want := []jitStackRoot{
 		{base: jitStackRootFrameSP, offset: 32},
 		{base: jitStackRootFrameBP, offset: -24},
 		{base: jitStackRootFrameBP, offset: -8},
 	}
-	got := jitFrameRootsToInitialize(safepoints)
+	got := jitSortedFrameRoots(ctx.FrameRoots)
 	if len(got) != len(want) {
 		t.Fatalf("frame roots = %v, want %v", got, want)
 	}

@@ -570,20 +570,10 @@ type jitSafepoint struct {
 	entry     bool
 }
 
-// jitFrameRootsToInitialize returns reusable frame words which a safepoint may
-// scan before the current control-flow path has written them. Dynamic call-area
-// roots live below the stable stack pointer and are initialized at their call
-// site. Architecture emitters translate these common frame-bank locations into
-// their native stores.
-func jitFrameRootsToInitialize(safepoints []jitSafepoint) []jitStackRoot {
-	unique := make(map[jitStackRoot]struct{})
-	for _, safepoint := range safepoints {
-		for _, root := range safepoint.roots {
-			if root.base == jitStackRootFrameBP || root.base == jitStackRootFrameSP && root.offset >= 0 {
-				unique[root] = struct{}{}
-			}
-		}
-	}
+// jitSortedFrameRoots returns the permanent frame words registered by the
+// one-pass emitter in deterministic order. Dynamic call-area roots live below
+// the stable stack pointer and are initialized at their call site.
+func jitSortedFrameRoots(unique map[jitStackRoot]struct{}) []jitStackRoot {
 	roots := make([]jitStackRoot, 0, len(unique))
 	for root := range unique {
 		roots = append(roots, root)
@@ -680,6 +670,10 @@ type JITContext struct {
 	// current emission point. Safepoints copy this set before sibling control
 	// flow can restore a different allocator state.
 	StackRoots map[jitStackRoot]struct{}
+	// FrameRoots accumulates permanent pointer slots as they are first emitted.
+	// Unlike StackRoots it is shared by branch contexts and never removes slots,
+	// avoiding a second traversal over every safepoint after code generation.
+	FrameRoots map[jitStackRoot]struct{}
 	Safepoints []jitSafepoint
 	Coverage   JITCoverage
 
@@ -894,6 +888,12 @@ func (ctx *JITContext) setStackPointer(base jitStackRootBase, offset int32, poin
 			ctx.StackRoots = make(map[jitStackRoot]struct{})
 		}
 		ctx.StackRoots[root] = struct{}{}
+		if base == jitStackRootFrameBP || base == jitStackRootFrameSP && offset >= 0 {
+			if ctx.FrameRoots == nil {
+				ctx.FrameRoots = make(map[jitStackRoot]struct{})
+			}
+			ctx.FrameRoots[root] = struct{}{}
+		}
 		return
 	}
 	delete(ctx.StackRoots, root)

@@ -146,6 +146,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 		UsesRuntimeEnv:   jitExpressionConsumesRuntimeEnv(body),
 		SelfSymbols:      selfSymbols,
 		SelfParamCount:   inputArgCount,
+		FrameRoots:       make(map[jitStackRoot]struct{}),
 		Arena:            buf.arena,
 	}
 	if len(selfSymbols) != 0 && inputArgCount >= 0 {
@@ -387,7 +388,7 @@ func jitCompileExprBodyToExec(proc *Proc, body Scmer, numVars int, buf *execBuf,
 	ctx.emitByte(0xC3) // ret
 	if !ctx.StackPhiTargets {
 		ctx.MarkLabel(frameInitLabel)
-		roots := jitFrameRootsToInitialize(ctx.Safepoints)
+		roots := jitSortedFrameRoots(ctx.FrameRoots)
 		if len(roots) != 0 {
 			ctx.emitBytes(0x45, 0x31, 0xDB) // xor r11d, r11d
 			for _, root := range roots {
