@@ -325,6 +325,12 @@ func main() {
 		printModelComparison("direct_group_join", directGroupObservations, c)
 		printDecisionOrdering(directGroupObservations, c)
 	}
+	scanLookupObservations := filterDecisionObservations(observations, "scan_lookup")
+	if len(scanLookupObservations) > 0 {
+		if err := validateScanLookupDominance(scanLookupObservations); err != nil {
+			fatal(fmt.Errorf("scan_lookup: %w", err))
+		}
+	}
 	logStep("selected downstream probe coefficient=%d ns/probe", c.downstreamProbeRowNS)
 	if err := validateDecisionOrdering(training, c); err != nil {
 		fatal(err)
@@ -1091,6 +1097,10 @@ func validateRaceWinner(row calibrationRow, decisionID, plan string) error {
 			row.RowsPerProbe == nil || row.AggregateWidth == nil {
 			return fmt.Errorf("direct grouped join variant has incomplete measurements: %+v", row)
 		}
+	} else if row.Decision == "scan_lookup" {
+		if row.ProbeInvocations == nil {
+			return fmt.Errorf("scan_lookup variant has incomplete measurements: %+v", row)
+		}
 	} else if row.CandidateInputRows == nil || row.CandidateRows == nil ||
 		row.DriverInputRows == nil || row.DriverRows == nil || row.ExpectedDriverRowsVisited == nil {
 		return fmt.Errorf("membership variant has incomplete measurements: %+v", row)
@@ -1251,6 +1261,18 @@ func medianRows(runs [][]calibrationRow) ([]calibrationRow, error) {
 }
 
 func rowFeatures(row calibrationRow) ([]float64, error) {
+	if row.Decision == "scan_lookup" {
+		if row.ProbeInvocations == nil {
+			return nil, fmt.Errorf("scan_lookup work profile contains nil probe count: %+v", row)
+		}
+		if row.Plan != "scan_lookup" && row.Plan != "scan_order" {
+			return nil, fmt.Errorf("unsupported scan_lookup plan %q", row.Plan)
+		}
+		// scan_lookup is a semantic dominance rule rather than another fitted
+		// membership coefficient. Costgen executes both complete plans below and
+		// rejects the model if the specialized operator does not win.
+		return make([]float64, 25), nil
+	}
 	if row.Decision == "direct_group_join" {
 		if row.ProbeInvocations == nil || row.InputRows == nil || row.GroupRows == nil ||
 			row.RowsPerProbe == nil || row.AggregateWidth == nil {
@@ -1476,6 +1498,33 @@ func rowFeatures(row calibrationRow) ([]float64, error) {
 	default:
 		return nil, fmt.Errorf("unsupported plan %q", row.Plan)
 	}
+}
+
+func validateScanLookupDominance(rows []observation) error {
+	byCase := make(map[string]map[string]observation)
+	for _, row := range rows {
+		if byCase[row.caseName] == nil {
+			byCase[row.caseName] = make(map[string]observation)
+		}
+		byCase[row.caseName][row.plan] = row
+	}
+	for caseName, plans := range byCase {
+		lookup, lookupOK := plans["scan_lookup"]
+		scan, scanOK := plans["scan_order"]
+		if !lookupOK || !scanOK {
+			return fmt.Errorf("%q needs scan_lookup and scan_order observations", caseName)
+		}
+		if lookup.censored || scan.censored {
+			return fmt.Errorf("%q dominance comparison was censored", caseName)
+		}
+		if lookup.y >= scan.y {
+			return fmt.Errorf("%q specialized lookup did not win: %.0f ns >= %.0f ns", caseName, lookup.y, scan.y)
+		}
+		improvement := (scan.y - lookup.y) * 100 / scan.y
+		fmt.Printf("scan_lookup %-32s %.0f ns vs %.0f ns (%.1f%% faster)\n",
+			caseName, lookup.y, scan.y, improvement)
+	}
+	return nil
 }
 
 func orderedRecsetSortWork(rows float64) float64 {

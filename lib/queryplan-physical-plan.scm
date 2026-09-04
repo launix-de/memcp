@@ -625,8 +625,16 @@ only partitioned FROM source would erase the block's row multiplicity
 		(define signatures (stage_semantic_signature_index stages))
 		/* Catalog lookups must return the same annotated immutable stage instances
 		that root lowering sees; otherwise nested probe copies derive old names. */
-		(define signature_stages (stages_with_shared_prepare_facts
+		(define canonical_stages (stages_with_shared_prepare_facts
 			(stages_with_canonical_group_caches stages signatures)))
+		/* Attach the compile-only handle after semantic signatures and canonical
+		cache names are complete. Physical expression decisions nested in a stage
+		can then participate in EXPLAIN CALIBRATE without changing its identity. */
+		(define planning_session (planner_context_session (qb_facts block)))
+		(define signature_stages (map canonical_stages (lambda (stage)
+			(if (scalar_cardinality_probe_stage? stage)
+				(group_stage_with_physical_planning_session stage planning_session)
+				stage))))
 		(define catalog (make_lowering_catalog signature_stages))
 		(define cataloged_stages (map (qb_stages block) (lambda (stage)
 			(begin
@@ -9473,7 +9481,11 @@ ordering run. Storage artifacts begin in build_queryplan. */
 				(if (equal? kind "direct_group_join")
 					(if (physical_expr_has_group_relation? plan)
 						"group_carrier" "direct_group_join")
-					"unknown"))))))
+					(if (equal? kind "scan_lookup")
+						(if (physical_expr_has_head? plan (quote scan_lookup))
+							"scan_lookup"
+							(if (physical_expr_has_head? plan (quote scan_order)) "scan_order" "unknown"))
+						"unknown")))))))
 
 (define physical_expr_has_group_relation? (lambda (expr)
 	(match expr

@@ -16,11 +16,12 @@ setup:
   - sql: |
       INSERT INTO jd_item (id, ref_id) VALUES (1, 10), (2, 20), (3, 10), (4, NULL)
   - sql: |
-      CREATE TABLE jd_ref (id INT, label VARCHAR(40), score INT)
+      CREATE TABLE jd_ref (id INT, label VARCHAR(40), score INT, doc VARCHAR(40))
   - sql: |
-      INSERT INTO jd_ref (id, label, score) VALUES
-        (10, 'Alpha', 100), (20, 'Beta', 200), (30, NULL, 300),
-        (40, NULL, 400), (40, 'duplicate', 401)
+      INSERT INTO jd_ref (id, label, score, doc) VALUES
+        (10, 'Alpha', 100, '{"n":10}'), (20, 'Beta', 200, '{"n":20}'),
+        (30, NULL, 300, NULL), (40, NULL, 400, NULL),
+        (40, 'duplicate', 401, '{"n":40}')
   - sql: |
       CREATE TABLE jd_permission (ref_id INT, allowed INT)
   - sql: |
@@ -313,7 +314,7 @@ test_cases:
       contains:
         - "scalar subselect returned more than one row"
 
-  - name: "Scalar cardinality check physically reads at most two rows per key"
+  - name: "Scalar cardinality check uses direct lookup and reads at most two rows per key"
     sql: |
       EXPLAIN
       SELECT id,
@@ -323,12 +324,72 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_order"
+        - "scan_lookup"
         - "jd_ref"
-        - '\n\t\t\t\t\t0\n\t\t\t\t\t2\n'
       result_not_contains:
+        - "scan_order"
         - "scan_order_point"
         - ".grp:jd_ref"
+
+  - name: "Cost calibration can force scalar lookup alternatives"
+    sql: |
+      EXPLAIN PHYSICAL CALIBRATE DISCOVER
+      SELECT id,
+        (SELECT label FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS label
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      data:
+        - decision: "scan_lookup"
+          alternatives:
+            - "scan_lookup"
+            - "scan_order"
+
+  - name: "Scalar arithmetic is evaluated outside the point lookup"
+    sql: |
+      EXPLAIN
+      SELECT (SELECT score + 2 FROM jd_ref
+              WHERE jd_ref.id = jd_item.ref_id) AS adjusted
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_lookup"
+        - "(+"
+      result_not_contains:
+        - "scan_order"
+
+  - name: "Scalar JSON calculation is evaluated outside the point lookup"
+    sql: |
+      EXPLAIN
+      SELECT (SELECT JSON_EXTRACT(doc, '$.n') FROM jd_ref
+              WHERE jd_ref.id = jd_item.ref_id) AS extracted
+      FROM jd_item
+      WHERE jd_item.id = 1
+    expect:
+      rows: 1
+      result_contains:
+        - "scan_lookup"
+        - "json_extract"
+      result_not_contains:
+        - "scan_order"
+
+  - name: "Lifted scalar calculations preserve NULL and missing-row semantics"
+    sql: |
+      SELECT id,
+        (SELECT score + 2 FROM jd_ref WHERE jd_ref.id = jd_item.ref_id) AS adjusted
+      FROM jd_item
+      WHERE id IN (1, 4)
+      ORDER BY id
+    expect:
+      rows: 2
+      data:
+        - id: 1
+          adjusted: 102
+        - id: 4
+          adjusted: null
 
   - name: "Explicit scalar LIMIT 1 physically owns an unordered bounded scan"
     sql: |
