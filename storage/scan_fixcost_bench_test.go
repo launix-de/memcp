@@ -172,6 +172,51 @@ func BenchmarkScanUniquePointWithTx(b *testing.B) {
 	benchmarkUniquePointScan(b, "read_tx", NewTxContext(TxCursorStability))
 }
 
+func benchmarkUniqueMainPointScan(b *testing.B, name string, currentTx *TxContext) {
+	dbName := "bench_scan_main_point_" + name
+	databases.Remove(dbName)
+	CreateDatabase(dbName, true)
+	tbl, _ := CreateTable(dbName, "items", Memory, true)
+	tbl.CreateColumn("id", "INT", nil, nil)
+	tbl.CreateColumn("label", "VARCHAR", nil, nil)
+	rows := make([][]scm.Scmer, 1024)
+	for i := range rows {
+		rows[i] = []scm.Scmer{scm.NewInt(int64(i)), scm.NewString("value")}
+	}
+	tbl.Insert([]string{"id", "label"}, rows, nil, scm.NewNil(), false, nil)
+	tbl.Unique = append(tbl.Unique, uniqueKey{Id: "PRIMARY", Cols: []string{"id"}})
+	result := GetDatabase(dbName).rebuild(true, false, true)
+	if len(result.errors) > 0 {
+		b.Fatalf("rebuild errors: %v", result.errors)
+	}
+
+	condition := scanCondition("id", scm.NewInt(511))
+	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
+	nilFn := scm.NewNil()
+	// The first two probes cross the adaptive-index threshold and build the
+	// main-storage index. Only steady-state point probes are measured.
+	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+	tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tbl.scan(currentTx, []string{"id"}, condition, []string{"label"}, mapReduceFn, scm.NewNil(), nilFn, false)
+	}
+}
+
+// BenchmarkScanUniqueMainPoint measures a warm unique lookup after rows and
+// the corresponding index have moved to compressed main storage.
+func BenchmarkScanUniqueMainPoint(b *testing.B) {
+	benchmarkUniqueMainPointScan(b, "read", nil)
+}
+
+// BenchmarkScanUniqueMainPointWithTx includes the explicit transaction used
+// by prepared SQL execution while retaining the same warm main-storage probe.
+func BenchmarkScanUniqueMainPointWithTx(b *testing.B) {
+	benchmarkUniqueMainPointScan(b, "read_tx", NewTxContext(TxCursorStability))
+}
+
 func TestOpenMapReducerAllocatesMutationMetadataLazily(t *testing.T) {
 	const dbName = "test_scan_mapper_metadata"
 	databases.Remove(dbName)

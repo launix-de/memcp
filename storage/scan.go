@@ -477,6 +477,49 @@ type scanResult struct {
 	err            scanError // err.r != nil indicates an error
 }
 
+// scanResultCollector keeps the one-shard path synchronous. Parallel scans
+// lazily allocate their channel on the first non-solo callback; a scan whose
+// selected topology contains one shard writes its sole result directly.
+type scanResultCollector struct {
+	channelSize int
+	once        sync.Once
+	parallel    chan scanResult
+	solo        scanResult
+	soloRead    bool
+}
+
+func (c *scanResultCollector) send(solo bool, result scanResult) {
+	if solo {
+		c.solo = result
+		return
+	}
+	c.once.Do(func() {
+		c.parallel = make(chan scanResult, c.channelSize)
+	})
+	c.parallel <- result
+}
+
+func (c *scanResultCollector) finish(done <-chan struct{}) {
+	if done != nil {
+		<-done
+	}
+	if c.parallel != nil {
+		close(c.parallel)
+	}
+}
+
+func (c *scanResultCollector) next() (scanResult, bool) {
+	if c.parallel != nil {
+		result, ok := <-c.parallel
+		return result, ok
+	}
+	if c.soloRead {
+		return scanResult{}, false
+	}
+	c.soloRead = true
+	return c.solo, true
+}
+
 const (
 	defaultScanBufferSize     = 1024
 	uniquePointScanBufferSize = 8
@@ -587,16 +630,16 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCo
 		t.AddPartitioningScore([]string{b.col})
 	}
 
-	values := make(chan scanResult, t.shardResultBufferSize())
+	values := scanResultCollector{channelSize: t.shardResultBufferSize()}
 	var found atomic.Bool
 	done := t.iterateShardsParallel(currentTx, boundaries, func(s *storageShard, solo bool) {
 		if found.Load() {
-			values <- scanResult{}
+			values.send(solo, scanResult{})
 			return
 		}
 		defer func() {
 			if r := recover(); r != nil {
-				values <- scanResult{err: scanError{r, string(debug.Stack())}}
+				values.send(solo, scanResult{err: scanError{r, string(debug.Stack())}})
 			}
 		}()
 		// Cancellation contract: check only at the scheduling boundary, before entering
@@ -606,18 +649,15 @@ func (t *table) scanExistsFrom(currentTx *TxContext, source *recSet, conditionCo
 		}
 		if s.scanExists(boundaries, lower, upperLast, conditionCols, condition, currentTx, ss, &found) {
 			found.Store(true)
-			values <- scanResult{outCount: 1}
+			values.send(solo, scanResult{outCount: 1})
 			return
 		}
-		values <- scanResult{}
+		values.send(solo, scanResult{})
 	})
-	if done != nil {
-		<-done
-	}
-	close(values)
+	values.finish(done)
 
 	var scanErr scanError
-	for msg := range values {
+	for msg, ok := values.next(); ok; msg, ok = values.next() {
 		if msg.err.r != nil {
 			if scanErr.r == nil {
 				scanErr = msg.err
@@ -699,11 +739,11 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 	var outCount int64
 	var inputCount int64
 	var candidateCount int64
-	values := make(chan scanResult, t.shardResultBufferSize())
+	values := scanResultCollector{channelSize: t.shardResultBufferSize()}
 	done := t.iterateShardsParallel(currentTx, boundaries, func(s *storageShard, solo bool) {
 		defer func() {
 			if r := recover(); r != nil {
-				values <- scanResult{err: scanError{r, string(debug.Stack())}}
+				values.send(solo, scanResult{err: scanError{r, string(debug.Stack())}})
 			}
 		}()
 		// Cancellation contract: check only at the scheduling boundary, before entering
@@ -712,19 +752,16 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 			panic("query killed")
 		}
 		res, shardOutCount, shardCandidateCount := s.scan(boundaries, lower, upperLast, conditionCols, condition, callbackCols, mapReduce, neutral, stride, batchdata, currentTx, ss)
-		values <- scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount}
+		values.send(solo, scanResult{res: res, outCount: shardOutCount, inputCount: int64(s.Count()), candidateCount: shardCandidateCount})
 	})
-	if done != nil {
-		<-done
-	}
-	close(values)
+	values.finish(done)
 
 	akkumulator := neutral
 	hadValue := false
 	var scanErr scanError
 	if !combine.IsNil() {
 		fn := scm.OptimizeProcToSerialFunction(combine)
-		for msg := range values {
+		for msg, ok := values.next(); ok; msg, ok = values.next() {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err
@@ -748,7 +785,7 @@ func (t *table) scanWithBatchFrom(currentTx *TxContext, source *recSet, conditio
 			akkumulator = scm.Apply(mapReduce, nullArgs...)
 		}
 	} else {
-		for msg := range values {
+		for msg, ok := values.next(); ok; msg, ok = values.next() {
 			if msg.err.r != nil {
 				if scanErr.r == nil {
 					scanErr = msg.err

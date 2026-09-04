@@ -408,6 +408,36 @@ func TestIterateShardsParallelMarksPartitionMultiShardNonSolo(t *testing.T) {
 	}
 }
 
+func TestIterateShardsParallelMarksSynchronousMultiShardNonSolo(t *testing.T) {
+	tbl := setupScanParallelTestTable(t, "tscanparsyncmulti")
+	tbl.ShardMode = ShardModePartition
+	tbl.PDimensions = []shardDimension{{
+		Column:        "id",
+		NumPartitions: 2,
+		Pivots:        []scm.Scmer{scm.NewInt(10)},
+	}}
+	tbl.PShards = []*storageShard{NewShard(tbl), NewShard(tbl)}
+	tbl.publishTopologyLocked()
+	tx := NewTxContext(TxCursorStability)
+	tx.fanoutLimit.Store(1)
+
+	calls := 0
+	sawSolo := false
+	done := tbl.iterateShardsParallel(tx, nil, func(_ *storageShard, solo bool) {
+		calls++
+		sawSolo = sawSolo || solo
+	})
+	if done != nil {
+		t.Fatal("synchronous multi-shard scan unexpectedly returned a done channel")
+	}
+	if calls != 2 {
+		t.Fatalf("synchronous multi-shard calls = %d, want 2", calls)
+	}
+	if sawSolo {
+		t.Fatal("synchronous multi-shard callback was incorrectly marked as solo")
+	}
+}
+
 func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	tbl := setupScanParallelTestTable(t, "tscanparexplicit")
 	tbl.ShardMode = ShardModePartition
