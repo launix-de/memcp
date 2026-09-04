@@ -314,7 +314,7 @@ test_cases:
       contains:
         - "scalar subselect returned more than one row"
 
-  - name: "Scalar cardinality check uses direct lookup and reads at most two rows per key"
+  - name: "Scalar cardinality check physically reads at most two rows per key"
     sql: |
       EXPLAIN
       SELECT id,
