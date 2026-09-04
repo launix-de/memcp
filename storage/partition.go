@@ -147,16 +147,16 @@ func runSingleShardScan(currentTx *TxContext, topology *tableShardTopology, shar
 }
 
 func runParallelShardScans(currentTx *TxContext, shards []*storageShard, topology *tableShardTopology, callback func(*storageShard, bool)) <-chan struct{} {
-	return runFanoutTasks(currentTx, len(shards), func(i int, synchronous bool) {
+	return runFanoutTasks(currentTx, len(shards), func(i int, _ bool) {
 		shard := shards[i]
 		defer topology.releaseOperation()
 		defer shard.activeScanners.Add(-1)
 		release := shard.acquireReadForScan(currentTx)
 		defer release()
 		if scm.Trace == nil {
-			callback(shard, synchronous)
+			callback(shard, false)
 		} else {
-			traceShardScanCallback(callback, shard, synchronous)
+			traceShardScanCallback(callback, shard, false)
 		}
 	})
 }
