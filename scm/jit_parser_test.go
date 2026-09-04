@@ -19,6 +19,65 @@ package scm
 
 import "testing"
 
+func TestJITParserMemoSeparatesRulesAndPositions(t *testing.T) {
+	state := &jitParserState{memo: make([]map[int]uint32, 4)}
+	first := jitParserMemoEntry{value: NewString("first"), position: 1, success: true}
+	second := jitParserMemoEntry{value: NewString("second"), position: 2, success: true}
+	otherPosition := jitParserMemoEntry{value: NewString("other"), position: 3, success: true}
+
+	state.memoSet(jitParserMemoKey{rule: 7, position: 1}, first)
+	state.memoSet(jitParserMemoKey{rule: 8, position: 1}, second)
+	state.memoSet(jitParserMemoKey{rule: 7, position: 2}, otherPosition)
+
+	for key, want := range map[jitParserMemoKey]jitParserMemoEntry{
+		{rule: 7, position: 1}: first,
+		{rule: 8, position: 1}: second,
+		{rule: 7, position: 2}: otherPosition,
+	} {
+		got, exists := state.memoGet(key)
+		if !exists || got.position != want.position || got.success != want.success || !Equal(got.value, want.value) {
+			t.Fatalf("memoGet(%+v) = %+v, %v; want %+v, true", key, got, exists, want)
+		}
+	}
+
+	updated := jitParserMemoEntry{value: NewString("updated"), position: 4}
+	state.memoSet(jitParserMemoKey{rule: 7, position: 1}, updated)
+	got, exists := state.memoGet(jitParserMemoKey{rule: 7, position: 1})
+	if !exists || len(state.memoEntries) != 3 || !Equal(got.value, updated.value) || got.position != updated.position {
+		t.Fatalf("memo update = %+v, %v with %d entries; want %+v, true with 3 entries", got, exists, len(state.memoEntries), updated)
+	}
+	if _, exists := state.memoGet(jitParserMemoKey{rule: 9, position: 1}); exists {
+		t.Fatal("missing memo rule unexpectedly exists")
+	}
+}
+
+func TestJITParserReleaseDropsOversizedMemoStorage(t *testing.T) {
+	program := &jitParserProgram{}
+	program.pool.New = func() any { return new(jitParserState) }
+	state := &jitParserState{
+		memo:        []map[int]uint32{{1: 1}},
+		memoEntries: make([]jitParserMemoEntry, 1, jitParserRetainedMemoEntryCapacity+1),
+	}
+	state.memoEntries[0].value = NewString("captured")
+
+	program.releaseState(state)
+	if state.memo != nil || state.memoEntries != nil {
+		t.Fatalf("oversized parser memo retained: memo=%v entry-capacity=%d", state.memo != nil, cap(state.memoEntries))
+	}
+}
+
+func TestJITParserMemoCapacityHintIsBounded(t *testing.T) {
+	if got := jitParserMemoEntryCapacity(jitParserLargeInputBytes); got != 0 {
+		t.Fatalf("small input capacity hint = %d, want 0", got)
+	}
+	if got := jitParserMemoEntryCapacity(jitParserLargeInputBytes + 1); got <= 0 || got > jitParserMemoPreallocateLimit {
+		t.Fatalf("large input capacity hint = %d, want 1..%d", got, jitParserMemoPreallocateLimit)
+	}
+	if got := jitParserMemoEntryCapacity(int(^uint(0) >> 1)); got != jitParserMemoPreallocateLimit {
+		t.Fatalf("maximum input capacity hint = %d, want %d", got, jitParserMemoPreallocateLimit)
+	}
+}
+
 func TestJITParserGrammarMatchesPackrat(t *testing.T) {
 	if !jitEnabled {
 		t.Skip("requires GOEXPERIMENT=jit")
