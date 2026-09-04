@@ -30,6 +30,8 @@ const (
 	jitParserLargeInputBytes           = 64 << 10
 	jitParserMemoEntriesPerByteHint    = 20
 	jitParserMemoPreallocateLimit      = 4 << 20
+	jitParserMemoRuleSlotsPerByteHint  = 120
+	jitParserMemoRulePreallocateLimit  = 24 << 20
 	jitParserRetainedMemoEntryCapacity = 1 << 18
 )
 
@@ -85,6 +87,8 @@ type jitParserRule struct {
 type jitParserProgram struct {
 	rules         []jitParserRule
 	parserRule    map[*ScmParser]int
+	memoRuleIndex []int32
+	memoRuleCount int
 	inlineActions bool
 	pool          sync.Pool
 }
@@ -148,6 +152,7 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 		}
 		builder.addScmParser(parser)
 	}
+	program.prepareMemoLayout()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program
 }
@@ -159,8 +164,22 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 		active: make(map[*JITParserTemplate]int), inlineActions: true, compileEnv: template.Outer,
 	}
 	rule := builder.addTemplate(template, -1)
+	program.prepareMemoLayout()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
+}
+
+func (program *jitParserProgram) prepareMemoLayout() {
+	program.memoRuleIndex = make([]int32, len(program.rules))
+	for index := range program.memoRuleIndex {
+		program.memoRuleIndex[index] = -1
+	}
+	for rule := range program.rules {
+		if program.rules[rule].lexicalParent < 0 {
+			program.memoRuleIndex[rule] = int32(program.memoRuleCount)
+			program.memoRuleCount++
+		}
+	}
 }
 
 func (builder *jitParserBuilder) addTemplate(template *JITParserTemplate, lexicalParent int) int {
@@ -724,6 +743,19 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 	} else {
 		state.memoEntries = state.memoEntries[:0]
 	}
+	memoRuleCapacity := 0
+	if inputLength > jitParserLargeInputBytes {
+		if inputLength >= jitParserMemoRulePreallocateLimit/jitParserMemoRuleSlotsPerByteHint {
+			memoRuleCapacity = jitParserMemoRulePreallocateLimit
+		} else {
+			memoRuleCapacity = inputLength * jitParserMemoRuleSlotsPerByteHint
+		}
+	}
+	if cap(state.memoRules) < memoRuleCapacity {
+		state.memoRules = make([]uint32, 0, memoRuleCapacity)
+	} else {
+		state.memoRules = state.memoRules[:0]
+	}
 	state.farthest = -1
 	state.expected = state.expected[:0]
 	if cap(state.heads) < inputLength+1 {
@@ -738,7 +770,6 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 		state.memoOffsets = state.memoOffsets[:inputLength+1]
 		clear(state.memoOffsets)
 	}
-	state.memoRules = state.memoRules[:0]
 	if cap(state.frames) < inputLength+8 {
 		state.frames = make([]jitParserCallFrame, 0, inputLength+8)
 	}
@@ -774,11 +805,15 @@ func (state *jitParserState) memoGet(key jitParserMemoKey) (jitParserMemoEntry, 
 	if key.position < 0 || key.position >= len(state.memoOffsets) || key.rule < 0 || key.rule >= len(state.program.rules) {
 		return jitParserMemoEntry{}, false
 	}
+	denseRule := int(state.program.memoRuleIndex[key.rule])
+	if denseRule < 0 {
+		return jitParserMemoEntry{}, false
+	}
 	offset := state.memoOffsets[key.position]
 	if offset == 0 {
 		return jitParserMemoEntry{}, false
 	}
-	entryIndex := state.memoRules[int(offset)-1+key.rule]
+	entryIndex := state.memoRules[int(offset)-1+denseRule]
 	if entryIndex == 0 {
 		return jitParserMemoEntry{}, false
 	}
@@ -789,16 +824,20 @@ func (state *jitParserState) memoSet(key jitParserMemoKey, entry jitParserMemoEn
 	if key.position < 0 || key.position >= len(state.memoOffsets) || key.rule < 0 || key.rule >= len(state.program.rules) {
 		panic("jit: parser memo key outside program")
 	}
+	denseRule := int(state.program.memoRuleIndex[key.rule])
+	if denseRule < 0 {
+		panic("jit: lexical parser rule cannot be memoized")
+	}
 	offset := state.memoOffsets[key.position]
 	if offset == 0 {
 		base := len(state.memoRules)
-		state.memoRules = slices.Grow(state.memoRules, len(state.program.rules))
-		state.memoRules = state.memoRules[:base+len(state.program.rules)]
+		state.memoRules = slices.Grow(state.memoRules, state.program.memoRuleCount)
+		state.memoRules = state.memoRules[:base+state.program.memoRuleCount]
 		clear(state.memoRules[base:])
 		offset = uint32(base + 1)
 		state.memoOffsets[key.position] = offset
 	}
-	index := int(offset) - 1 + key.rule
+	index := int(offset) - 1 + denseRule
 	if entryIndex := state.memoRules[index]; entryIndex != 0 {
 		state.memoEntries[entryIndex-1] = entry
 		return

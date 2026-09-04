@@ -20,8 +20,13 @@ package scm
 import "testing"
 
 func TestJITParserMemoSeparatesRulesAndPositions(t *testing.T) {
+	program := &jitParserProgram{rules: make([]jitParserRule, 10)}
+	for index := range program.rules {
+		program.rules[index].lexicalParent = -1
+	}
+	program.prepareMemoLayout()
 	state := &jitParserState{
-		program:     &jitParserProgram{rules: make([]jitParserRule, 10)},
+		program:     program,
 		memoOffsets: make([]uint32, 4),
 	}
 	first := jitParserMemoEntry{value: NewString("first"), position: 1, success: true}
