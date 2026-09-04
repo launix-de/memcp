@@ -306,15 +306,20 @@ func NewSession(a ...Scmer) Scmer {
 	return NewFunc(func(a ...Scmer) (result Scmer) {
 		switch len(a) {
 		case 2:
-			sess.Mu.Lock()
-			defer sess.Mu.Unlock()
+			// No panic path between lock and unlock, so an explicit unlock avoids
+			// the per-call deferred-record cost on this very hot accessor.
 			if a[0].GetTag() >= 100 {
+				sess.Mu.Lock()
 				if sess.Handles == nil {
 					sess.Handles = make(map[Scmer]Scmer)
 				}
 				sess.Handles[a[0]] = a[1]
+				sess.Mu.Unlock()
 			} else {
-				sess.Map[a[0].String()] = a[1]
+				key := a[0].String()
+				sess.Mu.Lock()
+				sess.Map[key] = a[1]
+				sess.Mu.Unlock()
 			}
 			return a[1]
 		case 4:
@@ -328,15 +333,20 @@ func NewSession(a ...Scmer) Scmer {
 			}
 			return sessionGetOrComputeScoped(sess, a[1], a[2].String(), a[3], a[4], true)
 		case 1:
-			sess.Mu.RLock()
-			defer sess.Mu.RUnlock()
 			if a[0].GetTag() >= 100 {
-				if v, ok := sess.Handles[a[0]]; ok {
+				sess.Mu.RLock()
+				v, ok := sess.Handles[a[0]]
+				sess.Mu.RUnlock()
+				if ok {
 					return v
 				}
 				return NewNil()
 			}
-			if v, ok := sess.Map[a[0].String()]; ok {
+			key := a[0].String()
+			sess.Mu.RLock()
+			v, ok := sess.Map[key]
+			sess.Mu.RUnlock()
+			if ok {
 				return v
 			}
 			return NewNil()

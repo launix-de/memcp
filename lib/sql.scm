@@ -956,6 +956,27 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 /* shared callbacks for mysql protocol (TCP and Unix socket) */
 (set mysql_auth (lambda (username_) (scan nil (table "system" "user") '("username") (lambda (username) (equal? username username_)) '("password") (lambda (acc password) password) nil (lambda (a b) b))))
 (set mysql_schema (lambda (username schema) (or (equal?? schema "information_schema") (list? (show schema)))))
+
+/* Top-level so the interpreter compiles this body once instead of rebuilding a
+large lambda Proc (and re-walking it via procCanUseNumberedOnly) on every
+statement inside the per-query transaction callback. */
+(define mysql_run_sql_statement (lambda (tx schema sql session resultrow resultfields_sql) (begin
+	(define sql_parse_input (strtrim sql))
+	/* tolerate an optional trailing ';' - input is already trimmed, so a
+	single last-character check replaces a backtracking regex on the hot path */
+	(define sql_parse_input_len (strlen sql_parse_input))
+	(if (and (> sql_parse_input_len 0)
+			(equal? (substr sql_parse_input (- sql_parse_input_len 1) 1) ";"))
+		(set sql_parse_input (substr sql_parse_input 0 (- sql_parse_input_len 1)))
+		nil)
+	(define mysql_username (coalesce (session "username") "root"))
+	(define formula (if (equal? (session "syntax") "postgresql")
+		(cached_parse psql_queryplan_cache (list parse_psql) schema sql_parse_input
+			(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
+		(cached_parse sql_queryplan_cache (list parse_sql) schema sql_parse_input
+			(list (quote sql-policy-for) mysql_username) mysql_username session true tx)))
+	(sql_execute_formula session tx formula resultrow resultfields_sql))))
+
 (set mysql_handler (lambda (schema sql resultrow_sql resultfields_sql session session_state query_seq) (begin
 	(session "schema" schema)
 	(define resultrow resultrow_sql)
@@ -965,19 +986,7 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 			(set print (lambda args (resultrow '("result" (concat args)))))
 			(resultrow '("result" (eval (scheme sql))))
 		) (time (with_autocommit session session_state query_seq sql
-				(lambda (tx) (begin
-					/* SQL syntax mode */
-					(define sql_parse_input (strtrim sql))
-					/* tolerate an optional trailing ';' - must be at end of string */
-					(set sql_parse_input (match sql_parse_input (regex "^((?s:.*));\\s*$" _ body) body sql_parse_input))
-					(define mysql_username (coalesce (session "username") "root"))
-					(define formula (if (equal? (session "syntax") "postgresql")
-						(cached_parse psql_queryplan_cache (list parse_psql) schema sql_parse_input
-							(list (quote sql-policy-for) mysql_username) mysql_username session false tx)
-						(cached_parse sql_queryplan_cache (list parse_sql) schema sql_parse_input
-							(list (quote sql-policy-for) mysql_username) mysql_username session true tx)))
-					(sql_execute_formula session tx formula resultrow resultfields_sql)
-			))) sql))
+				(lambda (tx) (mysql_run_sql_statement tx schema sql session resultrow resultfields_sql))) sql))
 	)) (lambda (e) (begin
 			(error_log (concat e) schema (coalesce (session "username") "root") sql)
 			(error e) /* re-throw so MySQL protocol sends proper error packet */
