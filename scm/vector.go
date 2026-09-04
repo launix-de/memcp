@@ -65,8 +65,10 @@ func init_vector() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["dot"].Fn, args, result)
+				declaration := declarations["dot"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d9 JITValueDesc
 				_ = d9

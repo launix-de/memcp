@@ -42,29 +42,6 @@ const (
 	specialFormBangBegin
 )
 
-func specialFormDispatchForName(name string) specialFormDispatch {
-	switch name {
-	case "outer":
-		return specialFormOuter
-	case "eval":
-		return specialFormEval
-	case "if":
-		return specialFormIf
-	case "match":
-		return specialFormMatch
-	case "match_mut":
-		return specialFormMatchMut
-	case "begin":
-		return specialFormBegin
-	case "begin_mut":
-		return specialFormBeginMut
-	case "!begin":
-		return specialFormBangBegin
-	default:
-		return specialFormCall
-	}
-}
-
 // DeclareSpecialForm registers syntax as a normal global callable while
 // preserving its unevaluated-operand calling convention. Optimize and JIT
 // hooks live on def.Type just like they do for ordinary declarations.
@@ -73,7 +50,7 @@ func DeclareSpecialForm(env *Env, def *Declaration, fn SpecialForm, jitEmit JITE
 	def.IsSpecialForm = true
 	def.Type.JITEmit = jitEmit
 	Declare(env, def)
-	value := NewSpecialForm(fn, specialFormDispatchForName(def.Name))
+	value := NewSpecialForm(fn, def.evalDispatch)
 	env.Vars[Symbol(def.Name)] = value
 	specialFormNames[value.ptr] = def.Name
 }
@@ -91,7 +68,9 @@ func registerSpecialForms() {
 		}, fn, jitEmit)
 	}
 	DeclareSpecialForm(&Globalenv, &Declaration{
-		Name: "outer",
+		Name:         "outer",
+		SyntaxKind:   SyntaxOuter,
+		evalDispatch: specialFormOuter,
 		Type: &TypeDescriptor{
 			Kind:      "func",
 			Forbidden: true,
@@ -101,13 +80,35 @@ func registerSpecialForms() {
 		Optimize: optimizeOuter,
 	}, nil, jitEmitSpecialOuter)
 	register("setN", specialSetN, jitEmitSpecialSetN)
-	register("parser", specialParser, jitEmitSpecialParser)
+	DeclareSpecialForm(&Globalenv, &Declaration{
+		Name:       "parser",
+		SyntaxKind: SyntaxParser,
+		Type: &TypeDescriptor{
+			Kind:      "func",
+			Forbidden: true,
+			Params:    []*TypeDescriptor{{Kind: "any", Variadic: true}},
+			Return:    &TypeDescriptor{Kind: "any"},
+		},
+	}, specialParser, jitEmitSpecialParser)
 	register("optimizer_proc_return", specialOptimizerProcReturn, jitEmitSpecialOptimizerProcReturn)
 	register("!list", specialBangList, jitEmitSpecialStackList)
 	register("!!list", specialBangBangList, jitEmitSpecialReservedList)
-	register("match_mut", nil, jitEmitSpecialMatch("match_mut"))
-	register("begin_mut", nil, jitEmitSpecialBegin(true, true))
-	register("!begin", nil, jitEmitSpecialBegin(false, false))
+	registerSyntax := func(name string, kind SyntaxKind, dispatch specialFormDispatch, jitEmit JITEmitter) {
+		DeclareSpecialForm(&Globalenv, &Declaration{
+			Name:         name,
+			SyntaxKind:   kind,
+			evalDispatch: dispatch,
+			Type: &TypeDescriptor{
+				Kind:      "func",
+				Forbidden: true,
+				Params:    []*TypeDescriptor{{Kind: "any", Variadic: true}},
+				Return:    &TypeDescriptor{Kind: "any"},
+			},
+		}, nil, jitEmit)
+	}
+	registerSyntax("match_mut", SyntaxMatch, specialFormMatchMut, jitEmitSpecialMatch("match_mut"))
+	registerSyntax("begin_mut", SyntaxBeginMut, specialFormBeginMut, jitEmitSpecialBegin(true, true))
+	registerSyntax("!begin", SyntaxOrdinary, specialFormBangBegin, jitEmitSpecialBegin(false, false))
 }
 
 func specialFormName(value Scmer) string {

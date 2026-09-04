@@ -162,10 +162,6 @@ func jitCompileImportProc(sym Symbol, value Scmer) (Scmer, *JITEntryPoint, bool)
 	// dispatch independently. Keep every successfully emitted outer procedure;
 	// discarding it here would route all of its control flow back through Eval.
 	selected := entry != nil
-	if selected {
-		value.Proc().Compiled = entry
-		compiled = value
-	}
 	if entry != nil {
 		entry.DebugName = string(sym)
 		maybeLogJITCodeName(entry)

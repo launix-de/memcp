@@ -112,6 +112,45 @@ func TestEveryGlobalSpecialFormHasDeclarationJITHooks(t *testing.T) {
 			t.Fatalf("lazy boolean special form %s has no declaration branch emitter", name)
 		}
 	}
+	wantSyntax := map[string]SyntaxKind{
+		"quote":     SyntaxQuote,
+		"eval":      SyntaxEval,
+		"parser":    SyntaxParser,
+		"lambda":    SyntaxLambda,
+		"match":     SyntaxMatch,
+		"match_mut": SyntaxMatch,
+		"begin":     SyntaxBegin,
+		"begin_mut": SyntaxBeginMut,
+		"outer":     SyntaxOuter,
+	}
+	for name, want := range wantSyntax {
+		definition := declarations[name]
+		if definition == nil {
+			t.Fatalf("special form %s has no declaration", name)
+		}
+		if definition.SyntaxKind != want {
+			t.Fatalf("special form %s has syntax kind %d, want %d", name, definition.SyntaxKind, want)
+		}
+	}
+	wantDispatch := map[string]specialFormDispatch{
+		"outer":     specialFormOuter,
+		"eval":      specialFormEval,
+		"if":        specialFormIf,
+		"match":     specialFormMatch,
+		"match_mut": specialFormMatchMut,
+		"begin":     specialFormBegin,
+		"begin_mut": specialFormBeginMut,
+		"!begin":    specialFormBangBegin,
+	}
+	for name, want := range wantDispatch {
+		value := Globalenv.Vars[Symbol(name)]
+		if value.GetTag() != tagSpecialForm {
+			t.Fatalf("special form %s is not registered", name)
+		}
+		if value.specialFormDispatch() != want {
+			t.Fatalf("special form %s has eval dispatch %d, want %d", name, value.specialFormDispatch(), want)
+		}
+	}
 }
 
 func TestEvalUnoptimizedSpecialForm(t *testing.T) {

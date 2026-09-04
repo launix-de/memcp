@@ -139,20 +139,19 @@ type JITEntryPoint struct {
 	Native         func(...Scmer) Scmer // compiled native function pointer
 	DebugName      string
 	StackFrameSize int32
-	// BoundArgs are lexical closure values appended to the public arguments.
-	// Owner keeps the entry point which owns the shared machine code alive.
-	BoundArgs []Scmer
-	Owner     *JITEntryPoint
-	// TransferInputArgs means the native body returns its complete variadic
-	// argument array as an owned list. Call must make that array fresh because
-	// apply may otherwise pass caller-owned list backing directly.
-	TransferInputArgs bool
-	HiddenArgs        []JITHiddenArg
-	CodePtr           unsafe.Pointer   // start of code in arena
-	CodeLen           int              // bytes used
-	Arena             *jitArena        // owning arena (for free on GC)
-	ConstRoots        []unsafe.Pointer // GC roots for constants embedded into machine code
-	Proc              Proc             // original Proc for serialization
+	// Owner keeps the entry point which owns shared machine code alive. FuncValue
+	// retains the GC-typed Go closure object whose first word is CodePtr.
+	Owner      *JITEntryPoint
+	FuncValue  any
+	HiddenArgs []JITHiddenArg
+	CodePtr    unsafe.Pointer   // start of code in arena
+	CodeLen    int              // bytes used
+	Arena      *jitArena        // owning arena (for free on GC)
+	ConstRoots []unsafe.Pointer // GC roots for constants embedded into machine code
+	// Dependencies keep directly called JIT entry points and their executable
+	// arenas alive for as long as this machine code can branch to them.
+	Dependencies []*JITEntryPoint
+	Proc         Proc // original Proc for serialization
 	// NeedsStableArgs records that emitted code crosses into Go. Precise JIT
 	// stack maps now relocate the saved variadic data pointer during stack growth;
 	// the flag remains diagnostic metadata for compiled entry points.
@@ -164,11 +163,20 @@ type JITEntryPoint struct {
 	// Eval/Apply bridges, compact native builtin calls, and inlined emitters.
 	// It is diagnostic metadata, not a runtime profile.
 	Coverage JITCoverage
+	// Closure metadata is shared by every Proc header bound to this machine
+	// code. Runtime capture values follow the Proc header inline.
+	CaptureBase    int
+	CaptureCount   int
+	CaptureKeys    []Scmer
+	CaptureSymbols []Symbol
+	JITArity       int
+	JITDirect      uintptr
 }
 
 type JITCoverage struct {
 	Expressions  int
 	DynamicCalls int
+	DirectProcs  int
 	NativeCalls  int
 	InlinedCalls int
 }
@@ -181,21 +189,29 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 	if jep == nil || jep.Native == nil {
 		panic("JIT: nil entry point")
 	}
+	return jep.callFunction(jep.Native, args)
+}
+
+// callFunction applies entry-point metadata but invokes the supplied concrete
+// funcval. Bound Proc instances share immutable compilation metadata while the
+// funcval context identifies the instance whose inline capture tail must be
+// visible in the closure-context register.
+func (jep *JITEntryPoint) callFunction(function func(...Scmer) Scmer, args []Scmer) (result Scmer) {
+	if jep == nil || function == nil {
+		panic("JIT: nil entry point")
+	}
 	if JITLog && jep.DebugName != "" {
 		fmt.Printf("JIT: call %s argc=%d\n", jep.DebugName, len(args))
 	}
-	// A transferred list must own fresh backing, and appending hidden inputs must
-	// not reuse caller-owned capacity. Stack maps make an extra copy unnecessary
-	// merely because native code calls back into Go.
-	stableArgs := jep.TransferInputArgs || len(jep.BoundArgs) != 0 || len(jep.HiddenArgs) != 0
+	// Appending closure or specialization inputs must not reuse caller-owned
+	// capacity. A plain Proc call borrows its argument slice for the duration of
+	// the call; builtins which retain it, notably list, own that decision.
+	stableArgs := len(jep.HiddenArgs) != 0
 	if stableArgs {
 		args = append([]Scmer(nil), args...)
 	}
 	if jep.Proc.Params.GetTag() == tagSlice {
-		paramCount := len(jep.Proc.Params.Slice()) - len(jep.BoundArgs)
-		if paramCount < 0 {
-			panic("JIT: invalid bound argument count")
-		}
+		paramCount := len(jep.Proc.Params.Slice())
 		if len(args) > paramCount {
 			panic(fmt.Sprintf("Apply: function with %d parameters is supplied with %d arguments", paramCount, len(args)))
 		}
@@ -208,7 +224,6 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 			args = padded
 		}
 	}
-	args = append(args, jep.BoundArgs...)
 	for _, spec := range jep.HiddenArgs {
 		switch spec.Kind {
 		case jitHiddenPreallocatedSlice:
@@ -226,11 +241,118 @@ func (jep *JITEntryPoint) Call(args ...Scmer) (result Scmer) {
 			panic("JIT: invalid hidden argument kind")
 		}
 	}
-	result = jep.Native(args...)
+	result = function(args...)
 	runtime.KeepAlive(args)
 	runtime.KeepAlive(jep)
 	runtime.KeepAlive(jep.Owner)
 	return result
+}
+
+func (proc *Proc) callJIT(args []Scmer) Scmer {
+	if proc == nil || proc.JITCode == 0 || proc.Compiled == nil {
+		panic("JIT: procedure has no native implementation")
+	}
+	entry := proc.Compiled
+	if entry.JITDirect != 0 && (entry.JITArity < 0 || entry.JITArity == len(args)) {
+		result := proc.jitFunction()(args...)
+		runtime.KeepAlive(args)
+		runtime.KeepAlive(proc)
+		runtime.KeepAlive(entry)
+		return result
+	}
+	// Context-free closures have one canonical static funcval. Specialized Proc
+	// copies can share that entry without becoming closure contexts themselves.
+	// A bound capture tail or a rebound lexical environment, however, belongs to
+	// this concrete Proc and must remain in the closure-context register.
+	function := entry.Native
+	template := JITProcForFunction(function)
+	if entry.CaptureCount != 0 || template == nil || template.En != proc.En {
+		function = proc.jitFunction()
+	}
+	return entry.callFunction(function, args)
+}
+
+func attachProcJIT(proc *Proc, entry *JITEntryPoint) {
+	jitNativeCodes.Store(uintptr(entry.CodePtr), struct{}{})
+	proc.JITCode = uintptr(entry.CodePtr)
+	proc.Compiled = entry
+	entry.Native = proc.jitFunction()
+	if entry.FuncValue == nil {
+		entry.FuncValue = proc
+	}
+	entry.JITArity = 0
+	entry.JITDirect = 0
+	if len(entry.HiddenArgs) != 0 {
+		return
+	}
+	params := proc.Params
+	for params.GetTag() == tagSourceInfo {
+		params = params.SourceInfo().value
+	}
+	switch params.GetTag() {
+	case tagSlice:
+		entry.JITArity = len(params.Slice())
+	case tagNil:
+		entry.JITArity = 0
+	case tagSymbol:
+		// A Scheme variadic parameter is one list binding, not the raw Go
+		// variadic slice. Keep it on the metadata path until the native prolog
+		// materializes that binding explicitly.
+		return
+	default:
+		return
+	}
+	entry.JITDirect = 1
+}
+
+var (
+	jitProcContextTypes sync.Map // map[int]unsafe.Pointer, opaque runtime/jit.TailType
+	jitNativeCodes      sync.Map // map[uintptr]struct{}, exact JIT entry PCs
+)
+
+func jitProcContextAllocation(captureCount int) unsafe.Pointer {
+	if captureCount < 0 {
+		panic("jit: negative Proc capture count")
+	}
+	if cached, ok := jitProcContextTypes.Load(captureCount); ok {
+		return cached.(unsafe.Pointer)
+	}
+	prepared := jitPrepareProcContextType(captureCount)
+	actual, _ := jitProcContextTypes.LoadOrStore(captureCount, prepared)
+	return actual.(unsafe.Pointer)
+}
+
+func (proc *Proc) jitFunction() func(...Scmer) Scmer {
+	if proc == nil || proc.JITCode == 0 {
+		return nil
+	}
+	valuePointer := unsafe.Pointer(proc)
+	return *(*func(...Scmer) Scmer)(unsafe.Pointer(&valuePointer))
+}
+
+func jitAllocateProcContext(proc *Proc, captureCount int) *Proc {
+	typ := jitProcContextAllocation(captureCount)
+	bound := (*Proc)(jitRuntimeAllocTyped(typ))
+	*bound = *proc
+	return bound
+}
+
+// JITProcForFunction recovers the original Scheme procedure from a native JIT
+// funcval in O(1). A code-range check precedes the sentinel read so ordinary Go
+// function values are never interpreted as MemCP closure objects.
+func JITProcForFunction(function func(...Scmer) Scmer) *Proc {
+	if function == nil {
+		return nil
+	}
+	valuePointer := *(*unsafe.Pointer)(unsafe.Pointer(&function))
+	if valuePointer == nil {
+		return nil
+	}
+	code := *(*uintptr)(valuePointer)
+	if _, exists := jitNativeCodes.Load(code); !exists {
+		return nil
+	}
+	return (*Proc)(valuePointer)
 }
 
 type jitHiddenArgKind uint8
@@ -299,6 +421,9 @@ type JITValueDesc struct {
 	// Parser carries compiler-only grammar shape. It is materialized only when
 	// no native parser consumer can fuse the grammar into its surrounding code.
 	Parser *JITParserTemplate
+	// StackFunc permits the outermost lambda produced for this exact result slot
+	// to use an invocation-local Go funcval. Nested expressions do not inherit it.
+	StackFunc bool
 }
 
 type JITLambdaTemplate struct {
@@ -376,6 +501,7 @@ const (
 	LocInputPair // Compiler-only reference to one Scmer in the native call's original variadic slice
 	LocLambdaTemplate
 	LocParserTemplate
+	LocClosurePair // One Scmer in the current Go funcval's typed closure environment
 )
 
 // JITFixup records a forward reference that must be patched after all
@@ -484,6 +610,17 @@ type JITContext struct {
 	// Optimized local frames may repurpose SliceBase, while hidden GC roots still
 	// live after the source-level arguments in the original Go-owned slice.
 	OriginalArgsOff int32
+	// ClosureFuncOff roots the incoming Go funcval in the native frame. Capture
+	// descriptors address inline Scmer values directly relative to this pointer.
+	ClosureFuncOff int32
+	// RuntimeEnvOff roots the invocation's lexical *Env loaded directly from the
+	// Proc funcval. Runtime symbol resolution therefore follows rebound closures
+	// without allocating or boxing an environment value.
+	RuntimeEnvOff  int32
+	UsesRuntimeEnv bool
+	// CurrentFuncOff roots the incoming Go funcval for recursive calls. Reusing
+	// the funcval, rather than a bare code pointer, preserves closure captures.
+	CurrentFuncOff int32
 	// SliceBaseTracksRSP indicates that SliceBase is a mirror of RSP and must be
 	// refreshed after helper calls (Go may grow/move the goroutine stack).
 	SliceBaseTracksRSP bool
@@ -494,10 +631,7 @@ type JITContext struct {
 	// LocalSlotCount is the number of 16-byte Scmer slots reserved in the
 	// invocation frame. Optimizer-internal !list values may borrow a bounded
 	// subrange while their NoEscape consumer is emitted inline.
-	LocalSlotCount int
-	// TransferInputArgs is set when emission proves that the native result is
-	// exactly the complete variadic input array re-tagged as an owned list.
-	TransferInputArgs     bool
+	LocalSlotCount        int
 	HiddenArgs            []JITHiddenArg
 	RuntimeEnv            Scmer
 	RecursiveLambdas      bool
@@ -541,6 +675,8 @@ type JITContext struct {
 	// referenced heap data while JIT code may still dereference it.
 	ConstRoots []unsafe.Pointer
 	rootSet    map[unsafe.Pointer]struct{}
+	EntryRoots []*JITEntryPoint
+	entrySet   map[*JITEntryPoint]struct{}
 	Arena      *jitArena // owning arena for source map entries
 }
 
@@ -563,11 +699,22 @@ type jitAllocStateSnapshot struct {
 	protectedRegs      uint64
 	protectedRegCounts [16]int
 	regOwnerIDs        [16]uint32
-	ownerValues        map[uint32]JITValueDesc
+	ownerValues        []jitOwnerSnapshot
+	firstNewDescID     uint32
 	spillOffset        int32
-	descSpills         map[uint32]descSpillMeta
-	stackRoots         map[jitStackRoot]struct{}
+	descSpills         []jitDescSpillSnapshot
+	stackRoots         []jitStackRoot
 	dynamicSP          int32
+}
+
+type jitOwnerSnapshot struct {
+	id    uint32
+	value JITValueDesc
+}
+
+type jitDescSpillSnapshot struct {
+	id    uint32
+	value descSpillMeta
 }
 
 func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
@@ -575,16 +722,17 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		freeRegs:           ctx.FreeRegs,
 		protectedRegs:      ctx.ProtectedRegs,
 		protectedRegCounts: ctx.ProtectedRegCounts,
+		firstNewDescID:     ctx.nextDescID + 1,
 		spillOffset:        ctx.SpillOffset,
 		dynamicSP:          ctx.DynamicSP,
 	}
 	if len(ctx.descOwners) != 0 {
-		s.ownerValues = make(map[uint32]JITValueDesc, len(ctx.descOwners))
 		for id, owner := range ctx.descOwners {
-			if owner == nil {
+			if owner == nil || owner.Loc == LocNone {
+				delete(ctx.descOwners, id)
 				continue
 			}
-			s.ownerValues[id] = *owner
+			s.ownerValues = append(s.ownerValues, jitOwnerSnapshot{id: id, value: *owner})
 		}
 	}
 	for r := Reg(0); r <= RegR15; r++ {
@@ -593,15 +741,13 @@ func (ctx *JITContext) SnapshotAllocState() jitAllocStateSnapshot {
 		}
 	}
 	if len(ctx.descSpills) != 0 {
-		s.descSpills = make(map[uint32]descSpillMeta, len(ctx.descSpills))
 		for k, v := range ctx.descSpills {
-			s.descSpills[k] = v
+			s.descSpills = append(s.descSpills, jitDescSpillSnapshot{id: k, value: v})
 		}
 	}
 	if len(ctx.StackRoots) != 0 {
-		s.stackRoots = make(map[jitStackRoot]struct{}, len(ctx.StackRoots))
 		for root := range ctx.StackRoots {
-			s.stackRoots[root] = struct{}{}
+			s.stackRoots = append(s.stackRoots, root)
 		}
 	}
 	return s
@@ -617,37 +763,43 @@ func (ctx *JITContext) RestoreAllocState(s jitAllocStateSnapshot) {
 	// spill metadata was already emitted on a sibling path.
 	ctx.DynamicSP = s.dynamicSP
 
-	if s.ownerValues == nil {
-		ctx.descOwners = nil
-	} else {
-		ctx.descOwners = make(map[uint32]*JITValueDesc, len(s.ownerValues))
-		for id, owner := range s.ownerValues {
-			copyOwner := owner
-			ctx.descOwners[id] = &copyOwner
+	for id := range ctx.descOwners {
+		if id >= s.firstNewDescID {
+			delete(ctx.descOwners, id)
 		}
+	}
+	for _, saved := range s.ownerValues {
+		owner := ctx.descOwners[saved.id]
+		if owner == nil {
+			owner = &JITValueDesc{}
+			ctx.descOwners[saved.id] = owner
+		}
+		*owner = saved.value
 	}
 	for r := Reg(0); r <= RegR15; r++ {
 		id := s.regOwnerIDs[r]
-		if id == 0 || ctx.descOwners == nil {
+		if id == 0 {
 			ctx.RegOwners[r] = nil
 			continue
 		}
 		ctx.RegOwners[r] = ctx.descOwners[id]
 	}
 
-	if s.descSpills == nil {
-		ctx.descSpills = nil
-	} else {
-		ctx.descSpills = make(map[uint32]descSpillMeta, len(s.descSpills))
-		for k, v := range s.descSpills {
-			ctx.descSpills[k] = v
+	clear(ctx.descSpills)
+	if len(s.descSpills) != 0 {
+		if ctx.descSpills == nil {
+			ctx.descSpills = make(map[uint32]descSpillMeta, len(s.descSpills))
+		}
+		for _, saved := range s.descSpills {
+			ctx.descSpills[saved.id] = saved.value
 		}
 	}
-	if s.stackRoots == nil {
-		ctx.StackRoots = nil
-	} else {
-		ctx.StackRoots = make(map[jitStackRoot]struct{}, len(s.stackRoots))
-		for root := range s.stackRoots {
+	clear(ctx.StackRoots)
+	if len(s.stackRoots) != 0 {
+		if ctx.StackRoots == nil {
+			ctx.StackRoots = make(map[jitStackRoot]struct{}, len(s.stackRoots))
+		}
+		for _, root := range s.stackRoots {
 			ctx.StackRoots[root] = struct{}{}
 		}
 	}
@@ -769,6 +921,22 @@ func (ctx *JITContext) TrackPointer(p unsafe.Pointer) {
 	}
 	ctx.rootSet[p] = struct{}{}
 	ctx.ConstRoots = append(ctx.ConstRoots, p)
+}
+
+// TrackEntry retains a JIT entry point whose native address is embedded into
+// this code. This typed edge is also the ownership edge for its arena cleanup.
+func (ctx *JITContext) TrackEntry(entry *JITEntryPoint) {
+	if ctx == nil || entry == nil {
+		return
+	}
+	if ctx.entrySet == nil {
+		ctx.entrySet = make(map[*JITEntryPoint]struct{}, 8)
+	}
+	if _, exists := ctx.entrySet[entry]; exists {
+		return
+	}
+	ctx.entrySet[entry] = struct{}{}
+	ctx.EntryRoots = append(ctx.EntryRoots, entry)
 }
 
 // ProtectReg marks a register as non-spillable by AllocReg.
@@ -1096,6 +1264,18 @@ func (ctx *JITContext) EnsureDesc(desc *JITValueDesc) {
 		desc.Reg2 = r2
 		ctx.BindReg(r1, desc)
 		ctx.BindReg(r2, desc)
+	case LocClosurePair:
+		r1 := ctx.AllocReg()
+		r2 := ctx.AllocRegExcept(r1)
+		ctx.EmitMovRegMem(ctx.ScratchReg, ctx.StackReg, ctx.ClosureFuncOff)
+		captureOffset := int32(unsafe.Offsetof(ProcJIT{}.Context)) + desc.StackOff*16
+		ctx.EmitMovRegMem(r1, ctx.ScratchReg, captureOffset)
+		ctx.EmitMovRegMem(r2, ctx.ScratchReg, captureOffset+8)
+		desc.Loc = LocRegPair
+		desc.Reg = r1
+		desc.Reg2 = r2
+		ctx.BindReg(r1, desc)
+		ctx.BindReg(r2, desc)
 	case LocStack:
 		ctx.EnsureReg(desc)
 	case LocStackPair:
@@ -1340,8 +1520,14 @@ func (ctx *JITContext) FreeDesc(desc *JITValueDesc) {
 	}
 	desc.Loc = LocNone
 	desc.MemPtr = 0
-	if desc.ID != 0 && ctx.descSpills != nil {
-		delete(ctx.descSpills, desc.ID)
+	if desc.ID != 0 {
+		if owner := ctx.descOwners[desc.ID]; owner != nil {
+			owner.Loc = LocNone
+			owner.MemPtr = 0
+		}
+		if ctx.descSpills != nil {
+			delete(ctx.descSpills, desc.ID)
+		}
 	}
 }
 
@@ -1374,6 +1560,60 @@ func jitAddLambdaBoundParams(params Scmer, bound map[Symbol]struct{}) {
 	}
 }
 
+func jitSyntaxKind(value Scmer) SyntaxKind {
+	declaration := DeclarationForValue(value)
+	if declaration == nil || !declaration.IsSpecialForm {
+		return SyntaxOrdinary
+	}
+	return declaration.SyntaxKind
+}
+
+func jitAddMatchPatternBoundSymbols(pattern Scmer, bound map[Symbol]struct{}) {
+	for pattern.IsSourceInfo() {
+		pattern = pattern.SourceInfo().value
+	}
+	if pattern.IsSymbol() {
+		symbol := pattern.Symbol()
+		switch symbol {
+		case "_", "nil", "true", "false":
+			return
+		}
+		bound[symbol] = struct{}{}
+		return
+	}
+	if !pattern.IsSlice() {
+		return
+	}
+	items := pattern.Slice()
+	if len(items) == 0 {
+		return
+	}
+	head, hasHead := scmerSymbol(items[0])
+	if !hasHead {
+		for _, item := range items {
+			jitAddMatchPatternBoundSymbols(item, bound)
+		}
+		return
+	}
+	switch head {
+	case "quote", "symbol", "eval", "ignorecase", "var":
+		return
+	case "regex":
+		for _, item := range items[2:] {
+			jitAddMatchPatternBoundSymbols(item, bound)
+		}
+		return
+	case "merge":
+		if len(items) > 2 {
+			jitAddMatchPatternBoundSymbols(items[2], bound)
+		}
+		return
+	}
+	for _, item := range items[1:] {
+		jitAddMatchPatternBoundSymbols(item, bound)
+	}
+}
+
 func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map[Symbol]struct{}, out *[]Symbol) {
 	if expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
@@ -1397,22 +1637,38 @@ func jitCollectLambdaFreeSymbols(expr Scmer, bound map[Symbol]struct{}, seen map
 		if len(list) == 0 {
 			return
 		}
-		if head, ok := scmerSymbol(list[0]); ok {
-			switch string(head) {
-			case "quote":
-				return
-			case "lambda":
-				if len(list) < 3 {
-					return
-				}
-				innerBound := make(map[Symbol]struct{}, len(bound)+4)
-				for k := range bound {
-					innerBound[k] = struct{}{}
-				}
-				jitAddLambdaBoundParams(list[1], innerBound)
-				jitCollectLambdaFreeSymbols(list[2], innerBound, seen, out)
+		switch jitSyntaxKind(list[0]) {
+		case SyntaxQuote:
+			return
+		case SyntaxLambda:
+			if len(list) < 3 {
 				return
 			}
+			innerBound := make(map[Symbol]struct{}, len(bound)+4)
+			for k := range bound {
+				innerBound[k] = struct{}{}
+			}
+			jitAddLambdaBoundParams(list[1], innerBound)
+			jitCollectLambdaFreeSymbols(list[2], innerBound, seen, out)
+			return
+		case SyntaxMatch:
+			if len(list) > 1 {
+				jitCollectLambdaFreeSymbols(list[1], bound, seen, out)
+			}
+			index := 2
+			for index+1 < len(list) {
+				branchBound := make(map[Symbol]struct{}, len(bound)+4)
+				for symbol := range bound {
+					branchBound[symbol] = struct{}{}
+				}
+				jitAddMatchPatternBoundSymbols(list[index], branchBound)
+				jitCollectLambdaFreeSymbols(list[index+1], branchBound, seen, out)
+				index += 2
+			}
+			if index < len(list) {
+				jitCollectLambdaFreeSymbols(list[index], bound, seen, out)
+			}
+			return
 		}
 		for _, item := range list {
 			jitCollectLambdaFreeSymbols(item, bound, seen, out)
@@ -1444,13 +1700,11 @@ func jitExpressionConsumesRuntimeEnv(expr Scmer) bool {
 	if len(items) == 0 {
 		return false
 	}
-	if head, ok := scmerSymbol(items[0]); ok {
-		switch string(head) {
-		case "quote":
-			return false
-		case "eval", "parser":
-			return true
-		}
+	switch jitSyntaxKind(items[0]) {
+	case SyntaxQuote:
+		return false
+	case SyntaxEval, SyntaxParser:
+		return true
 	}
 	for _, item := range items {
 		if jitExpressionConsumesRuntimeEnv(item) {
@@ -1465,7 +1719,15 @@ type jitLambdaOuterCapture struct {
 	index NthLocalVar
 }
 
-func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, seen map[jitLambdaOuterCapture]struct{}, out *[]jitLambdaOuterCapture) {
+type jitLambdaNamedOuterCapture struct {
+	depth  int
+	symbol Symbol
+}
+
+func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, countScopes bool,
+	seen map[jitLambdaOuterCapture]struct{}, out *[]jitLambdaOuterCapture,
+	namedSeen map[jitLambdaNamedOuterCapture]struct{}, namedOut *[]jitLambdaNamedOuterCapture,
+) {
 	if expr.IsSourceInfo() {
 		expr = expr.SourceInfo().value
 	}
@@ -1476,42 +1738,79 @@ func jitCollectLambdaOuterCaptures(expr Scmer, lambdaDepth int, seen map[jitLamb
 	if len(list) == 0 {
 		return
 	}
-	if head, ok := scmerSymbol(list[0]); ok {
-		switch string(head) {
-		case "quote":
-			return
-		case "lambda":
-			if len(list) >= 3 {
-				jitCollectLambdaOuterCaptures(list[2], lambdaDepth+1, seen, out)
+	switch jitSyntaxKind(list[0]) {
+	case SyntaxQuote:
+		return
+	case SyntaxLambda:
+		if len(list) >= 3 {
+			jitCollectLambdaOuterCaptures(list[2], lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
+		}
+		return
+	case SyntaxBegin:
+		if countScopes {
+			for _, item := range list[1:] {
+				jitCollectLambdaOuterCaptures(item, lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
 			}
 			return
-		case "outer":
-			if len(list) == 3 {
-				depth, validDepth := outerDepthLiteral(list[1])
-				arg := list[2]
-				if arg.IsSourceInfo() {
-					arg = arg.SourceInfo().value
-				}
-				if validDepth && int(depth) > lambdaDepth && arg.GetTag() == tagNthLocalVar {
-					capture := jitLambdaOuterCapture{depth: int(depth) - lambdaDepth - 1, index: arg.NthLocalVar()}
+		}
+	case SyntaxBeginMut:
+		if countScopes {
+			if len(list) > 1 {
+				jitCollectLambdaOuterCaptures(list[1], lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
+			}
+			for _, item := range list[2:] {
+				jitCollectLambdaOuterCaptures(item, lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
+			}
+			return
+		}
+	case SyntaxMatch:
+		if countScopes {
+			if len(list) > 1 {
+				jitCollectLambdaOuterCaptures(list[1], lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
+			}
+			for index := 3; index < len(list); index += 2 {
+				jitCollectLambdaOuterCaptures(list[index], lambdaDepth+1, countScopes, seen, out, namedSeen, namedOut)
+			}
+			return
+		}
+	case SyntaxOuter:
+		if len(list) == 3 {
+			depth, validDepth := outerDepthLiteral(list[1])
+			arg := list[2]
+			if arg.IsSourceInfo() {
+				arg = arg.SourceInfo().value
+			}
+			if validDepth && int(depth) > lambdaDepth {
+				captureDepth := int(depth) - lambdaDepth - 1
+				switch arg.GetTag() {
+				case tagNthLocalVar:
+					capture := jitLambdaOuterCapture{depth: captureDepth, index: arg.NthLocalVar()}
 					if _, ok := seen[capture]; !ok {
 						seen[capture] = struct{}{}
 						*out = append(*out, capture)
+					}
+				case tagSymbol:
+					capture := jitLambdaNamedOuterCapture{depth: captureDepth, symbol: arg.Symbol()}
+					if _, ok := namedSeen[capture]; !ok {
+						namedSeen[capture] = struct{}{}
+						*namedOut = append(*namedOut, capture)
 					}
 				}
 			}
 		}
 	}
 	for _, item := range list {
-		jitCollectLambdaOuterCaptures(item, lambdaDepth, seen, out)
+		jitCollectLambdaOuterCaptures(item, lambdaDepth, countScopes, seen, out, namedSeen, namedOut)
 	}
 }
 
-func jitLambdaOuterCaptures(body Scmer) []jitLambdaOuterCapture {
+func jitLambdaOuterCaptures(body Scmer, countScopes bool) ([]jitLambdaOuterCapture, []jitLambdaNamedOuterCapture) {
 	seen := make(map[jitLambdaOuterCapture]struct{}, 4)
 	out := make([]jitLambdaOuterCapture, 0, 4)
-	jitCollectLambdaOuterCaptures(body, 0, seen, &out)
-	return out
+	namedSeen := make(map[jitLambdaNamedOuterCapture]struct{}, 4)
+	namedOut := make([]jitLambdaNamedOuterCapture, 0, 4)
+	jitCollectLambdaOuterCaptures(body, 0, countScopes, seen, &out, namedSeen, &namedOut)
+	return out, namedOut
 }
 
 // jitBindLambdaCaptures turns lexical symbol and outer-slot reads into hidden
@@ -1526,8 +1825,16 @@ func jitLambdaCaptureReference(index NthLocalVar, depth int) Scmer {
 	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), local})
 }
 
-func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar) Scmer {
-	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, 0)
+func jitLambdaNamedCaptureReference(symbol Symbol, depth int) Scmer {
+	value := NewSymbol(string(symbol))
+	if depth == 0 {
+		return value
+	}
+	return NewSlice([]Scmer{NewSymbol("outer"), NewInt(int64(depth)), value})
+}
+
+func jitBindLambdaCaptures(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, namedOuterVars map[jitLambdaNamedOuterCapture]NthLocalVar) Scmer {
+	return jitBindLambdaCapturesAtDepth(expr, symbols, outerVars, namedOuterVars, 0)
 }
 
 // jitBindLambdaSelfValues routes a named recursive closure used as a value
@@ -1586,10 +1893,10 @@ func jitBindLambdaSelfValuesAtDepth(expr Scmer, self Symbol, param NthLocalVar, 
 	return NewSlice(bound)
 }
 
-func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, depth int) Scmer {
+func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, outerVars map[jitLambdaOuterCapture]NthLocalVar, namedOuterVars map[jitLambdaNamedOuterCapture]NthLocalVar, depth int) Scmer {
 	if expr.IsSourceInfo() {
 		source := *expr.SourceInfo()
-		source.value = jitBindLambdaCapturesAtDepth(source.value, symbols, outerVars, depth)
+		source.value = jitBindLambdaCapturesAtDepth(source.value, symbols, outerVars, namedOuterVars, depth)
 		return NewSourceInfo(source)
 	}
 	if expr.IsSymbol() {
@@ -1618,6 +1925,12 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 					return jitLambdaCaptureReference(param, depth)
 				}
 			}
+			if validDepth && int(outerDepth) > depth && key.IsSymbol() {
+				capture := jitLambdaNamedOuterCapture{depth: int(outerDepth) - depth - 1, symbol: key.Symbol()}
+				if param, exists := namedOuterVars[capture]; exists {
+					return jitLambdaCaptureReference(param, depth)
+				}
+			}
 		}
 		if string(head) == "lambda" && len(items) >= 3 {
 			bound := append([]Scmer(nil), items...)
@@ -1633,19 +1946,58 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 					delete(innerSymbols, symbol)
 				}
 			}
-			bound[2] = jitBindLambdaCapturesAtDepth(items[2], innerSymbols, outerVars, depth+1)
+			bound[2] = jitBindLambdaCapturesAtDepth(items[2], innerSymbols, outerVars, namedOuterVars, depth+1)
+			return NewSlice(bound)
+		}
+		if string(head) == "begin" {
+			bound := append([]Scmer(nil), items...)
+			for index := 1; index < len(items); index++ {
+				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, namedOuterVars, depth+1)
+			}
+			return NewSlice(bound)
+		}
+		if string(head) == "begin_mut" {
+			bound := append([]Scmer(nil), items...)
+			if len(items) > 1 {
+				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, namedOuterVars, depth)
+			}
+			for index := 2; index < len(items); index++ {
+				bound[index] = jitBindLambdaCapturesAtDepth(items[index], symbols, outerVars, namedOuterVars, depth+1)
+			}
+			return NewSlice(bound)
+		}
+		if string(head) == "match" || string(head) == "match_mut" {
+			bound := append([]Scmer(nil), items...)
+			if len(items) > 1 {
+				bound[1] = jitBindLambdaCapturesAtDepth(items[1], symbols, outerVars, namedOuterVars, depth)
+			}
+			for index := 3; index < len(items); index += 2 {
+				branchSymbols := symbols
+				if len(symbols) != 0 {
+					branchSymbols = make(map[Symbol]NthLocalVar, len(symbols))
+					for symbol, slot := range symbols {
+						branchSymbols[symbol] = slot
+					}
+					patternSymbols := make(map[Symbol]struct{})
+					jitAddMatchPatternBoundSymbols(items[index-1], patternSymbols)
+					for symbol := range patternSymbols {
+						delete(branchSymbols, symbol)
+					}
+				}
+				bound[index] = jitBindLambdaCapturesAtDepth(items[index], branchSymbols, outerVars, namedOuterVars, depth+1)
+			}
 			return NewSlice(bound)
 		}
 		if (string(head) == "define" || string(head) == "set" || string(head) == "setN") && len(items) == 3 {
 			bound := append([]Scmer(nil), items...)
-			bound[2] = jitBindLambdaCapturesAtDepth(items[2], symbols, outerVars, depth)
+			bound[2] = jitBindLambdaCapturesAtDepth(items[2], symbols, outerVars, namedOuterVars, depth)
 			return NewSlice(bound)
 		}
 	}
 	changed := false
 	bound := make([]Scmer, len(items))
 	for index, item := range items {
-		bound[index] = jitBindLambdaCapturesAtDepth(item, symbols, outerVars, depth)
+		bound[index] = jitBindLambdaCapturesAtDepth(item, symbols, outerVars, namedOuterVars, depth)
 		changed = changed || bound[index] != item
 	}
 	if !changed {
@@ -1654,60 +2006,138 @@ func jitBindLambdaCapturesAtDepth(expr Scmer, symbols map[Symbol]NthLocalVar, ou
 	return NewSlice(bound)
 }
 
-func jitBindCompiledLambdaEntry(template Scmer, closure Scmer, captureArgs []Scmer) Scmer {
-	if !template.IsProc() || template.Proc() == nil || template.Proc().Compiled == nil {
-		panic("jit: invalid compiled lambda template")
+func jitRebindProcCapture(proc *Proc, env *Env, key, previous Scmer, hasPrevious bool, value Scmer) *Proc {
+	if proc == nil || proc.Compiled == nil || proc.JITCode == 0 || len(proc.Compiled.CaptureKeys) != proc.Compiled.CaptureCount {
+		return nil
 	}
-	proc := closure.Proc()
-	if proc == nil {
-		panic("jit: invalid bound lambda closure")
-	}
-	bound := make([]Scmer, 0, len(captureArgs)/2)
-	for index := 0; index < len(captureArgs); index += 2 {
-		if index+1 >= len(captureArgs) {
-			panic("jit: invalid lambda capture")
-		}
-		bound = append(bound, captureArgs[index+1])
-	}
-	if template.Proc().Params.IsSlice() && proc.Params.IsSlice() {
-		padding := len(template.Proc().Params.Slice()) - len(proc.Params.Slice()) - len(bound)
-		if padding < 0 {
-			panic("jit: invalid compiled lambda capture count")
-		}
-		if padding != 0 {
-			padded := make([]Scmer, padding, padding+len(bound))
-			for index := range padded {
-				padded[index] = NewNil()
+	index := -1
+	if key.IsSymbol() {
+		for candidate, symbol := range proc.Compiled.CaptureSymbols {
+			if symbol == key.Symbol() {
+				index = candidate
+				break
 			}
-			bound = append(padded, bound...)
 		}
 	}
-	entry := *template.Proc().Compiled
-	entry.BoundArgs = bound
-	entry.Owner = template.Proc().Compiled
-	entry.Arena = nil
-	proc.Compiled = &entry
-	return closure
+	for candidate, captureKey := range proc.Compiled.CaptureKeys {
+		if index >= 0 {
+			break
+		}
+		if Equal(captureKey, key) {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 && hasPrevious {
+		for candidate, capture := range jitProcCaptures(proc) {
+			if Equal(capture, previous) {
+				index = candidate
+				break
+			}
+		}
+	}
+	sourceCaptures := jitProcCaptures(proc)
+	boundProc := jitAllocateProcContext(proc, len(sourceCaptures))
+	boundProc.En = env
+	boundCaptures := jitProcCaptures(boundProc)
+	copy(boundCaptures, sourceCaptures)
+	if index >= 0 {
+		boundCaptures[index] = value
+	}
+	return boundProc
 }
 
-func jitBuildBoundCompiledLambdaClosure(args ...Scmer) Scmer {
-	if len(args) < 4 {
-		panic("jit: bound lambda builder expects template and closure")
+func jitProcCaptures(proc *Proc) []Scmer {
+	if proc == nil || proc.Compiled == nil || proc.Compiled.CaptureCount == 0 {
+		return nil
 	}
-	return jitBindCompiledLambdaEntry(args[0], jitBuildLambdaClosure(args[1:]...), args[4:])
+	return unsafe.Slice((*Scmer)(unsafe.Add(unsafe.Pointer(proc), unsafe.Offsetof(ProcJIT{}.Context))), proc.Compiled.CaptureCount)
 }
 
-func jitBuildNamedBoundCompiledLambdaClosure(args ...Scmer) Scmer {
-	if len(args) < 5 {
-		panic("jit: named bound lambda builder expects template and closure")
+// JITCapturedLocals returns the numbered-local base and inline capture values
+// of this concrete procedure. The returned slice aliases the ProcJIT tail and
+// remains valid while proc is reachable. Analyzers use it to reconstruct the
+// call frame without separating executable callbacks from their source Proc.
+func (proc *Proc) JITCapturedLocals() (base int, captures []Scmer) {
+	if proc == nil || proc.Compiled == nil {
+		return 0, nil
 	}
-	closure := jitBuildNamedLambdaClosure(args[1:]...)
-	captures := args[5:]
-	if len(captures) >= 2 && captures[len(captures)-2].SymbolEquals("\x00jit-bound-self") {
-		captures = append([]Scmer(nil), captures...)
-		captures[len(captures)-1] = closure
+	return proc.Compiled.CaptureBase, jitProcCaptures(proc)
+}
+
+// closeJITProcedureCaptures replaces the hidden numbered parameters of a
+// ProcJIT tail with ordinary Scheme literals. Closed procedures are persisted
+// independently of executable mappings, so their serialized body must not
+// depend on the process-local capture tail.
+func closeJITProcedureCaptures(expr Scmer, captureBase int, captures []Scmer, depth int) Scmer {
+	if expr.IsSourceInfo() {
+		source := *expr.SourceInfo()
+		source.value = closeJITProcedureCaptures(source.value, captureBase, captures, depth)
+		return NewSourceInfo(source)
 	}
-	return jitBindCompiledLambdaEntry(args[0], closure, captures)
+	if depth == 0 && expr.IsNthLocalVar() {
+		index := int(expr.NthLocalVar()) - captureBase
+		if index >= 0 && index < len(captures) {
+			return captures[index]
+		}
+		return expr
+	}
+	if !expr.IsSlice() {
+		return expr
+	}
+	items := expr.Slice()
+	if len(items) == 0 {
+		return expr
+	}
+	head, hasHead := scmerSymbol(items[0])
+	if hasHead && head == Symbol("quote") {
+		return expr
+	}
+	if hasHead && head == Symbol("outer") && len(items) == 3 {
+		outerDepth, validDepth := outerDepthLiteral(items[1])
+		key := items[2].WithoutSourceInfo()
+		if validDepth && int(outerDepth) == depth && key.IsNthLocalVar() {
+			index := int(key.NthLocalVar()) - captureBase
+			if index >= 0 && index < len(captures) {
+				return captures[index]
+			}
+		}
+	}
+	bound := append([]Scmer(nil), items...)
+	if hasHead {
+		switch head {
+		case Symbol("lambda"):
+			if len(items) >= 3 {
+				bound[2] = closeJITProcedureCaptures(items[2], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		case Symbol("begin"):
+			for index := 1; index < len(items); index++ {
+				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		case Symbol("begin_mut"):
+			if len(items) > 1 {
+				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+			}
+			for index := 2; index < len(items); index++ {
+				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		case Symbol("match"), Symbol("match_mut"):
+			if len(items) > 1 {
+				bound[1] = closeJITProcedureCaptures(items[1], captureBase, captures, depth)
+			}
+			for index := 3; index < len(items); index += 2 {
+				bound[index] = closeJITProcedureCaptures(items[index], captureBase, captures, depth+1)
+			}
+			return NewSlice(bound)
+		}
+	}
+	for index, item := range items {
+		bound[index] = closeJITProcedureCaptures(item, captureBase, captures, depth)
+	}
+	return NewSlice(bound)
 }
 
 // jitBuildLambdaClosure constructs a closure Proc from a lambda form plus
@@ -1921,16 +2351,16 @@ func jitCallSpecialThunk(thunk Scmer) Scmer {
 	if thunk.GetTag() == tagAny {
 		if value, ok := thunk.Any().(*jitSpecialThunkValue); ok && value != nil {
 			if value.callable.GetTag() == tagProc {
-				if proc := value.callable.Proc(); proc != nil && proc.Compiled != nil {
-					return proc.Compiled.Call(value.args...)
+				if proc := value.callable.Proc(); proc != nil && proc.JITCode != 0 {
+					return proc.callJIT(value.args)
 				}
 			}
 			return Apply(value.callable, value.args...)
 		}
 	}
 	if thunk.GetTag() == tagProc {
-		if proc := thunk.Proc(); proc != nil && proc.Compiled != nil {
-			return proc.Compiled.Call()
+		if proc := thunk.Proc(); proc != nil && proc.JITCode != 0 {
+			return proc.callJIT(nil)
 		}
 	}
 	return Apply(thunk)
@@ -2436,6 +2866,9 @@ func (ctx *JITContext) flattenArgs(args []JITValueDesc, buf *[16]goCallArgWord) 
 	n := 0
 	for index := range args {
 		ctx.SyncDesc(&args[index])
+		if args[index].Loc == LocClosurePair {
+			ctx.EnsureDesc(&args[index])
+		}
 		a := args[index]
 		switch a.Loc {
 		case LocRegPair:
@@ -2857,9 +3290,11 @@ func unmapJITArena(a *jitArena) {
 type jitCodeLease struct {
 	pool  *jitPool
 	arena *jitArena
+	code  uintptr
 }
 
 func releaseJITEntryPoint(lease jitCodeLease) {
+	jitNativeCodes.Delete(lease.code)
 	lease.pool.Free(lease.arena)
 }
 
@@ -2968,500 +3403,19 @@ func init_jit() {
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["jit"].Fn, args, result)
-				}
-				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
-				for i := range args {
-					ctx.StabilizeDescForControlFlow(&args[i])
-				}
-				d0 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
-				d1 := d0
-				_ = d1
-				ctx.StabilizeDescForControlFlow(&d1)
-				bbpos_1_0 := int32(-1)
-				_ = bbpos_1_0
-				lbl0 := ctx.ReserveLabel()
-				_ = lbl0
-				bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl0)
-				ctx.ResolveFixups()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d1)
-				d2 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
-				d3 := JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(true)}
-				d4 := d1
-				_ = d4
-				ctx.StabilizeDescForControlFlow(&d4)
-				d5 := d2
-				_ = d5
-				ctx.StabilizeDescForControlFlow(&d5)
-				d6 := d3
-				_ = d6
-				ctx.StabilizeDescForControlFlow(&d6)
-				phiBase7 := ctx.AllocStack(int32(16))
-				d8 := JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				_ = d8
-				lbl1 := ctx.ReserveLabel()
-				bbpos_2_0 := int32(-1)
-				_ = bbpos_2_0
-				lbl2 := ctx.ReserveLabel()
-				_ = lbl2
-				bbpos_2_1 := int32(-1)
-				_ = bbpos_2_1
-				lbl3 := ctx.ReserveLabel()
-				_ = lbl3
-				bbpos_2_2 := int32(-1)
-				_ = bbpos_2_2
-				lbl4 := ctx.ReserveLabel()
-				_ = lbl4
-				bbpos_2_3 := int32(-1)
-				_ = bbpos_2_3
-				lbl5 := ctx.ReserveLabel()
-				_ = lbl5
-				bbpos_2_4 := int32(-1)
-				_ = bbpos_2_4
-				lbl6 := ctx.ReserveLabel()
-				_ = lbl6
-				bbpos_2_5 := int32(-1)
-				_ = bbpos_2_5
-				lbl7 := ctx.ReserveLabel()
-				_ = lbl7
-				bbpos_2_6 := int32(-1)
-				_ = bbpos_2_6
-				lbl8 := ctx.ReserveLabel()
-				_ = lbl8
-				bbpos_2_7 := int32(-1)
-				_ = bbpos_2_7
-				lbl9 := ctx.ReserveLabel()
-				_ = lbl9
-				bbpos_2_8 := int32(-1)
-				_ = bbpos_2_8
-				lbl10 := ctx.ReserveLabel()
-				_ = lbl10
-				bbpos_2_9 := int32(-1)
-				_ = bbpos_2_9
-				lbl11 := ctx.ReserveLabel()
-				_ = lbl11
-				bbpos_2_10 := int32(-1)
-				_ = bbpos_2_10
-				lbl12 := ctx.ReserveLabel()
-				_ = lbl12
-				bbpos_2_11 := int32(-1)
-				_ = bbpos_2_11
-				lbl13 := ctx.ReserveLabel()
-				_ = lbl13
-				bbpos_2_12 := int32(-1)
-				_ = bbpos_2_12
-				lbl14 := ctx.ReserveLabel()
-				_ = lbl14
-				bbpos_2_13 := int32(-1)
-				_ = bbpos_2_13
-				lbl15 := ctx.ReserveLabel()
-				_ = lbl15
-				bbpos_2_14 := int32(-1)
-				_ = bbpos_2_14
-				lbl16 := ctx.ReserveLabel()
-				_ = lbl16
-				bbpos_2_15 := int32(-1)
-				_ = bbpos_2_15
-				lbl17 := ctx.ReserveLabel()
-				_ = lbl17
-				bbpos_2_16 := int32(-1)
-				_ = bbpos_2_16
-				lbl18 := ctx.ReserveLabel()
-				_ = lbl18
-				bbpos_2_17 := int32(-1)
-				_ = bbpos_2_17
-				lbl19 := ctx.ReserveLabel()
-				_ = lbl19
-				bbpos_2_18 := int32(-1)
-				_ = bbpos_2_18
-				lbl20 := ctx.ReserveLabel()
-				_ = lbl20
-				bbpos_2_19 := int32(-1)
-				_ = bbpos_2_19
-				lbl21 := ctx.ReserveLabel()
-				_ = lbl21
-				bbpos_2_20 := int32(-1)
-				_ = bbpos_2_20
-				lbl22 := ctx.ReserveLabel()
-				_ = lbl22
-				bbpos_2_21 := int32(-1)
-				_ = bbpos_2_21
-				lbl23 := ctx.ReserveLabel()
-				_ = lbl23
-				bbpos_2_22 := int32(-1)
-				_ = bbpos_2_22
-				lbl24 := ctx.ReserveLabel()
-				_ = lbl24
-				bbpos_2_23 := int32(-1)
-				_ = bbpos_2_23
-				lbl25 := ctx.ReserveLabel()
-				_ = lbl25
-				bbpos_2_24 := int32(-1)
-				_ = bbpos_2_24
-				lbl26 := ctx.ReserveLabel()
-				_ = lbl26
-				bbpos_2_25 := int32(-1)
-				_ = bbpos_2_25
-				lbl27 := ctx.ReserveLabel()
-				_ = lbl27
-				bbpos_2_26 := int32(-1)
-				_ = bbpos_2_26
-				lbl28 := ctx.ReserveLabel()
-				_ = lbl28
-				bbpos_2_27 := int32(-1)
-				_ = bbpos_2_27
-				lbl29 := ctx.ReserveLabel()
-				_ = lbl29
-				bbpos_2_28 := int32(-1)
-				_ = bbpos_2_28
-				lbl30 := ctx.ReserveLabel()
-				_ = lbl30
-				bbpos_2_29 := int32(-1)
-				_ = bbpos_2_29
-				lbl31 := ctx.ReserveLabel()
-				_ = lbl31
-				bbpos_2_30 := int32(-1)
-				_ = bbpos_2_30
-				lbl32 := ctx.ReserveLabel()
-				_ = lbl32
-				bbpos_2_31 := int32(-1)
-				_ = bbpos_2_31
-				lbl33 := ctx.ReserveLabel()
-				_ = lbl33
-				bbpos_2_32 := int32(-1)
-				_ = bbpos_2_32
-				lbl34 := ctx.ReserveLabel()
-				_ = lbl34
-				bbpos_2_33 := int32(-1)
-				_ = bbpos_2_33
-				lbl35 := ctx.ReserveLabel()
-				_ = lbl35
-				bbpos_2_34 := int32(-1)
-				_ = bbpos_2_34
-				lbl36 := ctx.ReserveLabel()
-				_ = lbl36
-				bbpos_2_35 := int32(-1)
-				_ = bbpos_2_35
-				lbl37 := ctx.ReserveLabel()
-				_ = lbl37
-				bbpos_2_36 := int32(-1)
-				_ = bbpos_2_36
-				lbl38 := ctx.ReserveLabel()
-				_ = lbl38
-				bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl2)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				d9 := JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(int64(len(args)))}
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d9)
-				var d10 JITValueDesc
-				if d9.Loc == LocImm {
-					d10 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d9.Imm.Int() != 1)}
-				} else {
-					r0 := ctx.AllocReg()
-					ctx.EmitCmpRegImm32(d9.Reg, 1)
-					ctx.EmitSetcc(r0, CondNotEqual)
-					d10 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r0}
-					ctx.BindReg(r0, &d10)
-				}
-				ctx.FreeDesc(&d9)
-				ctx.ReclaimUntrackedRegs()
-				d11 := d10
-				ctx.EnsureDesc(&d11)
-				if d11.Loc != LocImm && d11.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
-				}
-				lbl39 := ctx.ReserveLabel()
-				lbl40 := ctx.ReserveLabel()
-				if d11.Loc == LocImm {
-					if d11.Imm.Bool() {
-						ctx.MarkLabel(lbl39)
-						ctx.EmitJmp(lbl3)
-					} else {
-						ctx.MarkLabel(lbl40)
-						ctx.EmitJmp(lbl4)
-					}
-				} else {
-					ctx.EmitCmpRegImm32(d11.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl39)
-					ctx.EmitJmp(lbl40)
-					ctx.MarkLabel(lbl39)
-					ctx.EmitJmp(lbl3)
-					ctx.MarkLabel(lbl40)
-					ctx.EmitJmp(lbl4)
-				}
-				ctx.FreeDesc(&d10)
-				bbpos_2_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl4)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				d12 := args[0]
-				d12.ID = 0
-				ctx.StabilizeDescForControlFlow(&d12)
-				ctx.ReclaimUntrackedRegs()
-				d13 := ctx.EmitGetTagDesc(&d12, JITValueDesc{Loc: LocAny})
-				ctx.StabilizeDescForControlFlow(&d13)
-				ctx.ReclaimUntrackedRegs()
-				bbpos_2_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl5)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d13)
-				var d14 JITValueDesc
-				if d13.Loc == LocImm {
-					d14 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d13.Imm.Int()) == uint64(0xb))}
-				} else {
-					r1 := ctx.AllocRegExcept(d13.Reg)
-					ctx.EmitCmpRegImm32(d13.Reg, 11)
-					ctx.EmitSetcc(r1, CondEqual)
-					d14 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
-					ctx.BindReg(r1, &d14)
-				}
-				ctx.ReclaimUntrackedRegs()
-				d15 := d14
-				ctx.EnsureDesc(&d15)
-				if d15.Loc != LocImm && d15.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
-				}
-				lbl41 := ctx.ReserveLabel()
-				lbl42 := ctx.ReserveLabel()
-				if d15.Loc == LocImm {
-					if d15.Imm.Bool() {
-						ctx.MarkLabel(lbl41)
-						ctx.EmitJmp(lbl7)
-					} else {
-						ctx.MarkLabel(lbl42)
-						ctx.EmitJmp(lbl8)
-					}
-				} else {
-					ctx.EmitCmpRegImm32(d15.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl41)
-					ctx.EmitJmp(lbl42)
-					ctx.MarkLabel(lbl41)
-					ctx.EmitJmp(lbl7)
-					ctx.MarkLabel(lbl42)
-					ctx.EmitJmp(lbl8)
-				}
-				ctx.FreeDesc(&d14)
-				bbpos_2_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl8)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d13)
-				var d16 JITValueDesc
-				if d13.Loc == LocImm {
-					d16 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d13.Imm.Int()) == uint64(0x8))}
-				} else {
-					r2 := ctx.AllocRegExcept(d13.Reg)
-					ctx.EmitCmpRegImm32(d13.Reg, 8)
-					ctx.EmitSetcc(r2, CondEqual)
-					d16 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r2}
-					ctx.BindReg(r2, &d16)
-				}
-				ctx.ReclaimUntrackedRegs()
-				d17 := d16
-				ctx.EnsureDesc(&d17)
-				if d17.Loc != LocImm && d17.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
-				}
-				lbl43 := ctx.ReserveLabel()
-				lbl44 := ctx.ReserveLabel()
-				if d17.Loc == LocImm {
-					if d17.Imm.Bool() {
-						ctx.MarkLabel(lbl43)
-						ctx.EmitJmp(lbl7)
-					} else {
-						ctx.MarkLabel(lbl44)
-						ctx.EmitJmp(lbl9)
-					}
-				} else {
-					ctx.EmitCmpRegImm32(d17.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl43)
-					ctx.EmitJmp(lbl44)
-					ctx.MarkLabel(lbl43)
-					ctx.EmitJmp(lbl7)
-					ctx.MarkLabel(lbl44)
-					ctx.EmitJmp(lbl9)
-				}
-				ctx.FreeDesc(&d16)
-				bbpos_2_7 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl9)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d13)
-				var d18 JITValueDesc
-				if d13.Loc == LocImm {
-					d18 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d13.Imm.Int()) == uint64(0x9))}
-				} else {
-					r3 := ctx.AllocRegExcept(d13.Reg)
-					ctx.EmitCmpRegImm32(d13.Reg, 9)
-					ctx.EmitSetcc(r3, CondEqual)
-					d18 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r3}
-					ctx.BindReg(r3, &d18)
-				}
-				ctx.ReclaimUntrackedRegs()
-				d19 := d18
-				ctx.EnsureDesc(&d19)
-				if d19.Loc != LocImm && d19.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
-				}
-				lbl45 := ctx.ReserveLabel()
-				lbl46 := ctx.ReserveLabel()
-				if d19.Loc == LocImm {
-					if d19.Imm.Bool() {
-						ctx.MarkLabel(lbl45)
-						ctx.EmitJmp(lbl7)
-					} else {
-						ctx.MarkLabel(lbl46)
-						ctx.EmitJmp(lbl10)
-					}
-				} else {
-					ctx.EmitCmpRegImm32(d19.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl45)
-					ctx.EmitJmp(lbl46)
-					ctx.MarkLabel(lbl45)
-					ctx.EmitJmp(lbl7)
-					ctx.MarkLabel(lbl46)
-					ctx.EmitJmp(lbl10)
-				}
-				ctx.FreeDesc(&d18)
-				bbpos_2_8 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl10)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d13)
-				var d20 JITValueDesc
-				if d13.Loc == LocImm {
-					d20 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d13.Imm.Int()) == uint64(0xa))}
-				} else {
-					r4 := ctx.AllocRegExcept(d13.Reg)
-					ctx.EmitCmpRegImm32(d13.Reg, 10)
-					ctx.EmitSetcc(r4, CondEqual)
-					d20 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r4}
-					ctx.BindReg(r4, &d20)
-				}
-				ctx.ReclaimUntrackedRegs()
-				d21 := d20
-				ctx.EnsureDesc(&d21)
-				if d21.Loc != LocImm && d21.Loc != LocReg {
-					panic("jit: If condition is neither LocImm nor LocReg")
-				}
-				lbl47 := ctx.ReserveLabel()
-				lbl48 := ctx.ReserveLabel()
-				if d21.Loc == LocImm {
-					if d21.Imm.Bool() {
-						ctx.MarkLabel(lbl47)
-						ctx.EmitJmp(lbl7)
-					} else {
-						ctx.MarkLabel(lbl48)
-						ctx.EmitJmp(lbl11)
-					}
-				} else {
-					ctx.EmitCmpRegImm32(d21.Reg, 0)
-					ctx.EmitJump(CondNotEqual, lbl47)
-					ctx.EmitJmp(lbl48)
-					ctx.MarkLabel(lbl47)
-					ctx.EmitJmp(lbl7)
-					ctx.MarkLabel(lbl48)
-					ctx.EmitJmp(lbl11)
-				}
-				ctx.FreeDesc(&d20)
-				bbpos_2_9 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl11)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
-				bbpos_2_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl3)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.EmitGoPanic("jit: invalid arguments for inlined Go helper")
-				bbpos_2_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-				ctx.MarkLabel(lbl7)
-				ctx.ResolveFixups()
-				d8 = JITValueDesc{Loc: LocStack, Type: tagInt, StackOff: int32(phiBase7) + int32(0)}
-				ctx.ReclaimUntrackedRegs()
-				ctx.ReclaimUntrackedRegs()
-				r5 := ctx.AllocReg()
-				r6 := ctx.AllocRegExcept(r5)
-				d22 := JITValueDesc{Loc: LocRegPair, Reg: r5, Reg2: r6}
-				ctx.BindReg(r5, &d22)
-				ctx.BindReg(r6, &d22)
-				ctx.EmitMovPairToResult(&d12, &d22)
-				ctx.EmitJmp(lbl1)
-				ctx.MarkLabel(lbl1)
-				d23 := JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: r5, Reg2: r6}
-				ctx.BindReg(r5, &d23)
-				ctx.BindReg(r6, &d23)
-				ctx.BindReg(r5, &d23)
-				ctx.BindReg(r6, &d23)
-				ctx.FreeDesc(&d1)
-				ctx.ReclaimUntrackedRegs()
-				ctx.EnsureDesc(&d23)
-				if d23.Loc == LocImm {
-					if result.Loc == LocAny {
-						return d23
-					}
-				}
-				if result.Loc == LocAny {
-					result = JITValueDesc{Loc: LocRegPair, Type: JITTypeUnknown, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-					ctx.BindReg(result.Reg, &result)
-					ctx.BindReg(result.Reg2, &result)
-				}
-				ctx.SyncDesc(&d23)
-				if d23.Loc == LocRegPair || d23.Loc == LocStackPair || d23.Loc == LocInputPair {
-					ctx.EmitMovPairToResult(&d23, &result)
-					result.Type = d23.Type
-				} else {
-					switch d23.Type {
-					case tagBool:
-						ctx.EmitMakeBool(result, d23)
-						result.Type = tagBool
-					case tagInt:
-						ctx.EmitMakeInt(result, d23)
-						result.Type = tagInt
-					case tagFloat:
-						ctx.EmitMakeFloat(result, d23)
-						result.Type = tagFloat
-					case tagNil:
-						ctx.EmitMakeNil(result)
-						result.Type = tagNil
-					default:
-						panic("jit: single-block scalar return with unknown type")
-					}
-				}
-				return result
-				return result
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["jit"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
-			JITInlineCost:  211,
+			JITInlineCost:  65535,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
 		Name: "jit?",
 
 		Fn: func(a ...Scmer) Scmer {
-			return NewBool(a[0].GetTag() == tagJIT || (a[0].GetTag() == tagProc && a[0].Proc() != nil && a[0].Proc().Compiled != nil))
+			return NewBool(a[0].GetTag() == tagJIT || (a[0].GetTag() == tagProc && a[0].Proc() != nil && a[0].Proc().JITCode != 0))
 		},
 		Type: &TypeDescriptor{Kind: "func", Description: "tells whether a value is a JIT-compiled function descriptor",
 			Params: []*TypeDescriptor{
@@ -3470,8 +3424,10 @@ func init_jit() {
 			Return: &TypeDescriptor{Kind: "bool"},
 			Const:  true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["jit?"].Fn, args, result)
+				declaration := declarations["jit?"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -4086,13 +4042,13 @@ func init_jit() {
 					var d51 JITValueDesc
 					ctx.EnsureDesc(&d50)
 					if d50.Loc == LocImm {
-						fieldAddr := uintptr(d50.Imm.Int()) + 56
+						fieldAddr := uintptr(d50.Imm.Int()) + 0
 						r2 := ctx.AllocReg()
 						ctx.EmitMovRegMem64(r2, fieldAddr)
 						d51 = JITValueDesc{Loc: LocReg, Reg: r2}
 						ctx.BindReg(r2, &d51)
 					} else {
-						off := int32(56)
+						off := int32(0)
 						baseReg := d50.Reg
 						r3 := ctx.AllocRegExcept(baseReg)
 						ctx.EmitMovRegMem(r3, baseReg, off)
@@ -4103,12 +4059,8 @@ func init_jit() {
 					ctx.EnsureDesc(&d51)
 					var d52 JITValueDesc
 					if d51.Loc == LocImm {
-						d52 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d51.Imm.IsNil() != true)}
+						d52 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d51.Imm.Int()) != uint64(0x0))}
 					} else {
-						ctx.EnsureDesc(&d51)
-						if d51.Loc != LocReg && d51.Loc != LocRegPair && d51.Loc != LocRegTriple {
-							panic("jit: nil comparison requires a register value")
-						}
 						r4 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d51.Reg, 0)
 						ctx.EmitSetcc(r4, CondNotEqual)
@@ -4662,7 +4614,7 @@ func init_jit() {
 
 		Fn: func(a ...Scmer) Scmer {
 			value := a[0]
-			compiled := value.GetTag() == tagJIT || (value.GetTag() == tagProc && value.Proc() != nil && value.Proc().Compiled != nil)
+			compiled := value.GetTag() == tagJIT || (value.GetTag() == tagProc && value.Proc() != nil && value.Proc().JITCode != 0)
 			if jitEnabled && !compiled {
 				label := SerializeToString(value, &Globalenv)
 				if len(a) > 1 {
@@ -4680,8 +4632,10 @@ func init_jit() {
 			Return:         &TypeDescriptor{Kind: "any"},
 			HasSideEffects: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["jit-warn-if-fallback"].Fn, args, result)
+				declaration := declarations["jit-warn-if-fallback"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d4 JITValueDesc
 				_ = d4
@@ -5372,13 +5326,13 @@ func init_jit() {
 					var d51 JITValueDesc
 					ctx.EnsureDesc(&d50)
 					if d50.Loc == LocImm {
-						fieldAddr := uintptr(d50.Imm.Int()) + 56
+						fieldAddr := uintptr(d50.Imm.Int()) + 0
 						r2 := ctx.AllocReg()
 						ctx.EmitMovRegMem64(r2, fieldAddr)
 						d51 = JITValueDesc{Loc: LocReg, Reg: r2}
 						ctx.BindReg(r2, &d51)
 					} else {
-						off := int32(56)
+						off := int32(0)
 						baseReg := d50.Reg
 						r3 := ctx.AllocRegExcept(baseReg)
 						ctx.EmitMovRegMem(r3, baseReg, off)
@@ -5389,12 +5343,8 @@ func init_jit() {
 					ctx.EnsureDesc(&d51)
 					var d52 JITValueDesc
 					if d51.Loc == LocImm {
-						d52 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d51.Imm.IsNil() != true)}
+						d52 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(uint64(d51.Imm.Int()) != uint64(0x0))}
 					} else {
-						ctx.EnsureDesc(&d51)
-						if d51.Loc != LocReg && d51.Loc != LocRegPair && d51.Loc != LocRegTriple {
-							panic("jit: nil comparison requires a register value")
-						}
 						r4 := ctx.AllocReg()
 						ctx.EmitCmpRegImm32(d51.Reg, 0)
 						ctx.EmitSetcc(r4, CondNotEqual)
@@ -7411,8 +7361,10 @@ func init_jit() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["jit-enabled?"].Fn, args, result)
+				declaration := declarations["jit-enabled?"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -7491,14 +7443,19 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 	case tagProc:
 		// Lambda/procedure — compile into a pool arena
 		proc := v.Proc()
-		if proc != nil && proc.Compiled != nil {
+		if proc != nil && proc.Compiled != nil && proc.Compiled.CodePtr != nil {
 			return v
 		}
+		if proc == nil || !atomic.CompareAndSwapUint32(&proc.jitCompiling, 0, 1) {
+			return v
+		}
+		defer atomic.StoreUint32(&proc.jitCompiling, 0)
+		plan := proc.Compiled
 		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024} {
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
-			codeLen, roots, overflow, transferInputArgs, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
+			codeLen, roots, dependencies, overflow, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
 			if waitForPublication {
 				arena.complete(reservation, buf.stackMaps)
 			} else {
@@ -7510,35 +7467,44 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 					fmt.Printf("%X\n", code)
 				}
 				maybeDumpJITCode(ptr, code)
-				fn2 := unsafe.Pointer(&struct{ *byte }{&code[0]})
-				nativeFn := *(*func(...Scmer) Scmer)(unsafe.Pointer(&fn2))
 				sourceProc := *proc
+				sourceProc.JITCode = 0
 				sourceProc.Compiled = nil
+				sourceProc.jitCompiling = 0
 				jep := &JITEntryPoint{
-					Native:            nativeFn,
-					StackFrameSize:    buf.stackFrameSize,
-					TransferInputArgs: transferInputArgs,
-					HiddenArgs:        hiddenArgs,
-					CodePtr:           ptr,
-					CodeLen:           codeLen,
-					Arena:             arena,
-					ConstRoots:        roots,
-					Proc:              sourceProc,
-					RecursiveLambdas:  recursiveLambdas,
-					NeedsStableArgs:   needsStableArgs,
-					Coverage:          coverage,
+					StackFrameSize:   buf.stackFrameSize,
+					HiddenArgs:       hiddenArgs,
+					CodePtr:          ptr,
+					CodeLen:          codeLen,
+					Arena:            arena,
+					ConstRoots:       roots,
+					Dependencies:     dependencies,
+					Proc:             sourceProc,
+					RecursiveLambdas: recursiveLambdas,
+					NeedsStableArgs:  needsStableArgs,
+					Coverage:         coverage,
+				}
+				if plan != nil {
+					jep.CaptureBase = plan.CaptureBase
+					jep.CaptureCount = plan.CaptureCount
+					jep.CaptureKeys = plan.CaptureKeys
+					jep.CaptureSymbols = plan.CaptureSymbols
 				}
 				runtime.AddCleanup(jep, releaseJITEntryPoint, jitCodeLease{
 					pool:  &globalJITPool,
 					arena: arena,
+					code:  uintptr(ptr),
 				})
-				if install {
-					proc.Compiled = jep
-					return v
+				targetProc := proc
+				if !install {
+					copy := sourceProc
+					targetProc = &copy
 				}
-				compiledProc := sourceProc
-				compiledProc.Compiled = jep
-				return NewProcStruct(compiledProc)
+				attachProcJIT(targetProc, jep)
+				if install {
+					return Scmer{ptr: (*byte)(unsafe.Pointer(targetProc)), aux: makeAux(tagProc, 0)}
+				}
+				return Scmer{ptr: (*byte)(unsafe.Pointer(targetProc)), aux: makeAux(tagProc, 0)}
 			}
 			globalJITPool.Free(arena)
 			if !overflow {
@@ -7599,7 +7565,7 @@ func maybeLogJITImportCandidate(name Symbol, entry *JITEntryPoint, selected bool
 		fmt.Printf("jitdump: import=%s compiled=false\n", name)
 		return
 	}
-	fmt.Printf("jitdump: import=%s selected=%t expressions=%d dynamic-calls=%d native-calls=%d inlined-calls=%d\n",
+	fmt.Printf("jitdump: import=%s selected=%t expressions=%d dynamic-calls=%d direct-procs=%d native-calls=%d inlined-calls=%d\n",
 		name, selected, entry.Coverage.Expressions, entry.Coverage.DynamicCalls,
-		entry.Coverage.NativeCalls, entry.Coverage.InlinedCalls)
+		entry.Coverage.DirectProcs, entry.Coverage.NativeCalls, entry.Coverage.InlinedCalls)
 }

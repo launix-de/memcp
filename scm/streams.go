@@ -39,8 +39,10 @@ func init_streams() {
 			Return: &TypeDescriptor{Kind: "stream"},
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["streamString"].Fn, args, result)
+				declaration := declarations["streamString"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -164,9 +166,11 @@ func init_streams() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: interface type assertion.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["gzip"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["gzip"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -198,9 +202,11 @@ func init_streams() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: interface type assertion.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["xz"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["xz"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -224,9 +230,11 @@ func init_streams() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: interface type assertion.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["zcat"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["zcat"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -250,9 +258,11 @@ func init_streams() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "stream", Label: "stream", Description: "input stream"}},
 			Return: &TypeDescriptor{Kind: "stream"},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: interface type assertion.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["xzcat"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["xzcat"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,

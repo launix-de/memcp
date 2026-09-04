@@ -104,6 +104,29 @@ func TestPrepareSerialProcUsesCompiledJITDirectly(t *testing.T) {
 	}
 }
 
+func TestPrepareSerialProcKeepsJITCapturesOutsideCallFrame(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	outer := compileJITExpressionTestProc(t,
+		`(lambda (captured) (lambda (acc value) (+ captured acc value)))`)
+	source := Apply(outer, NewInt(40))
+	prepared := PrepareSerialProc(source)
+	if prepared.Kind != SerialProcJIT {
+		t.Fatalf("bound procedure shape = %d, want direct JIT", prepared.Kind)
+	}
+	frame := prepared.PrepareCallFrame([]Scmer{NewInt(1), NewInt(1)})
+	if len(frame) != 2 {
+		t.Fatalf("prepared frame length = %d, want public arity 2", len(frame))
+	}
+	if got := prepared.Function(frame...); !Equal(got, NewInt(42)) {
+		t.Fatalf("bound direct JIT result = %s, want 42", String(got))
+	}
+	if got := prepared.CallPrepared(frame); !Equal(got, NewInt(42)) {
+		t.Fatalf("bound prepared JIT result = %s, want 42", String(got))
+	}
+}
+
 func BenchmarkSerialProcJITMapReducerDispatch(b *testing.B) {
 	if !jitEnabled {
 		b.Skip("requires GOEXPERIMENT=jit")

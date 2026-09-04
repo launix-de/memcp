@@ -49,13 +49,19 @@ func buildTestSSAFunction(t *testing.T, source, name string) *ssa.Function {
 	return fn
 }
 
-func TestFallbackClosureCallsDeclaredBuiltinDirectly(t *testing.T) {
+func TestFallbackClosureUsesGeneratedCallBoundary(t *testing.T) {
 	got := generateFallbackClosure("json_encode")
 	if _, err := parser.ParseExpr(got); err != nil {
 		t.Fatalf("fallback is not valid Go: %v\n%s", err, got)
 	}
-	if !strings.Contains(got, `jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode"].Fn, args, result)`) {
-		t.Fatalf("fallback does not call the declaration directly:\n%s", got)
+	if !strings.Contains(got, `jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)`) {
+		t.Fatalf("fallback does not materialize callbacks at the generated call boundary:\n%s", got)
+	}
+	if !strings.Contains(got, `declaration := declarations["json_encode"]`) {
+		t.Fatalf("fallback does not resolve the declaration once:\n%s", got)
+	}
+	if !strings.Contains(got, `ctx.Coverage.NativeCalls++`) {
+		t.Fatalf("fallback does not account for the native declaration call:\n%s", got)
 	}
 }
 
@@ -85,6 +91,8 @@ func add(a ...Scmer) Scmer { return NewInt(a[0].Int() + a[1].Int()) }
 		t.Fatal(errMsg)
 	}
 	for _, want := range []string{
+		`declaration := declarations["add"]`,
+		"jitGeneratedEmitterInline(ctx, declaration, args)",
 		"= result.Reg2",
 		"ctx.EmitAddInt64",
 		"ctx.EmitMakeInt(result",
@@ -145,6 +153,19 @@ func TestBoundedAppendStartsWithSpareCapacity(t *testing.T) {
 	unbounded := &ssa.Phi{Edges: []ssa.Value{&ssa.MakeSlice{Len: zero, Cap: zero}}}
 	if phiStartsWithBoundedEmptySlice(unbounded) {
 		t.Fatal("zero-capacity slice was accepted as non-growing append target")
+	}
+}
+
+func TestFunctionCallsMultipleResults(t *testing.T) {
+	fn := buildTestSSAFunction(t, `package sample
+func pair() (bool, bool) { return true, true }
+func caller() bool {
+	matched, handled := pair()
+	return matched && handled
+}
+`, "caller")
+	if !functionCallsMultipleResults(fn) {
+		t.Fatal("call returning a tuple was not detected")
 	}
 }
 

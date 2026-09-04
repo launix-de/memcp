@@ -47,8 +47,10 @@ func init_list_assoc_extra() {
 			Return: &TypeDescriptor{Kind: "assoc", Transfer: true, Length: UnknownLength},
 			Const:  true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc"].Fn, args, result)
+				declaration := declarations["group_assoc"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -1100,8 +1102,10 @@ func init_list_assoc_extra() {
 			Const:     true,
 			Forbidden: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_append"].Fn, args, result)
+				declaration := declarations["group_assoc_append"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -2207,8 +2211,10 @@ func init_list_assoc_extra() {
 			Const:     true,
 			Forbidden: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_append_reduce"].Fn, args, result)
+				declaration := declarations["group_assoc_append_reduce"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -3393,8 +3399,10 @@ func init_list_assoc_extra() {
 			Const:     true,
 			Forbidden: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_count"].Fn, args, result)
+				declaration := declarations["group_assoc_count"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -4364,8 +4372,10 @@ func init_list_assoc_extra() {
 			Const:     true,
 			Forbidden: true,
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["group_assoc_count_reduce"].Fn, args, result)
+				declaration := declarations["group_assoc_count_reduce"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -5352,9 +5362,11 @@ func init_list_assoc_extra() {
 			},
 			Return: FreshAlloc,
 			Const:  true,
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["mapkey_assoc"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["mapkey_assoc"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -5393,9 +5405,11 @@ func init_list_assoc_extra() {
 			Return:    FreshAlloc,
 			Const:     true,
 			Forbidden: true,
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["mapkey_assoc_mut"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["mapkey_assoc_mut"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,

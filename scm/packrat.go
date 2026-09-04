@@ -466,7 +466,8 @@ func NewParser(syntax, generator, whitespace Scmer, en *Env, ignoreResult bool) 
 func init_parser() {
 	DeclareTitle("Parsers")
 	DeclareSpecialForm(&Globalenv, &Declaration{
-		Name: "parser",
+		Name:       "parser",
+		SyntaxKind: SyntaxParser,
 
 		Fn: nil,
 		Type: &TypeDescriptor{Kind: "func", Description: `creates a parser

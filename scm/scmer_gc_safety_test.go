@@ -90,3 +90,14 @@ func TestScmerDoesNotCrashGCDuringStackGrowth(t *testing.T) {
 	})
 	stackGrow(2000, nested)
 }
+
+func TestApplyDoesNotExposeBorrowedArgumentBacking(t *testing.T) {
+	t.Run("retaining native", func(t *testing.T) {
+		args := []Scmer{NewInt(1), NewInt(2)}
+		result := ApplyEx(NewFunc(List), args, &Globalenv)
+		args[0] = NewInt(99)
+		if got := result.Slice()[0].Int(); got != 1 {
+			t.Fatalf("retaining native result aliases Apply arguments: got %d, want 1", got)
+		}
+	})
+}

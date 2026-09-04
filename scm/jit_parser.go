@@ -20,9 +20,19 @@ package scm
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sync"
 	"unicode"
 	"unicode/utf8"
+)
+
+const (
+	jitParserLargeInputBytes           = 64 << 10
+	jitParserMemoEntriesPerByteHint    = 20
+	jitParserMemoPreallocateLimit      = 4 << 20
+	jitParserMemoRuleSlotsPerByteHint  = 120
+	jitParserMemoRulePreallocateLimit  = 24 << 20
+	jitParserRetainedMemoEntryCapacity = 1 << 18
 )
 
 type jitParserNodeKind uint8
@@ -77,6 +87,8 @@ type jitParserRule struct {
 type jitParserProgram struct {
 	rules         []jitParserRule
 	parserRule    map[*ScmParser]int
+	memoRuleIndex []int32
+	memoRuleCount int
 	inlineActions bool
 	pool          sync.Pool
 }
@@ -140,6 +152,7 @@ func jitBuildParserPrograms(parsers []*ScmParser) *jitParserProgram {
 		}
 		builder.addScmParser(parser)
 	}
+	program.prepareMemoLayout()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program
 }
@@ -151,8 +164,22 @@ func jitBuildParserTemplateProgram(template *JITParserTemplate) (*jitParserProgr
 		active: make(map[*JITParserTemplate]int), inlineActions: true, compileEnv: template.Outer,
 	}
 	rule := builder.addTemplate(template, -1)
+	program.prepareMemoLayout()
 	program.pool.New = func() any { return new(jitParserState) }
 	return program, rule
+}
+
+func (program *jitParserProgram) prepareMemoLayout() {
+	program.memoRuleIndex = make([]int32, len(program.rules))
+	for index := range program.memoRuleIndex {
+		program.memoRuleIndex[index] = -1
+	}
+	for rule := range program.rules {
+		if program.rules[rule].lexicalParent < 0 {
+			program.memoRuleIndex[rule] = int32(program.memoRuleCount)
+			program.memoRuleCount++
+		}
+	}
 }
 
 func (builder *jitParserBuilder) addTemplate(template *JITParserTemplate, lexicalParent int) int {
@@ -627,7 +654,7 @@ type jitParserMemoKey struct {
 
 type jitParserMemoEntry struct {
 	value    Scmer
-	position int
+	position uint32
 	success  bool
 	active   bool
 	head     *jitParserLeftRecursionHead
@@ -682,10 +709,22 @@ type jitParserState struct {
 	checkpoints []jitParserCheckpoint
 	marks       []int
 	positions   []int
-	memo        map[jitParserMemoKey]jitParserMemoEntry
+	memoOffsets []uint32
+	memoRules   []uint32
+	memoEntries []jitParserMemoEntry
 	heads       []*jitParserLeftRecursionHead
 	farthest    int
 	expected    []string
+}
+
+func jitParserMemoEntryCapacity(inputLength int) int {
+	if inputLength <= jitParserLargeInputBytes {
+		return 0
+	}
+	if inputLength >= jitParserMemoPreallocateLimit/jitParserMemoEntriesPerByteHint {
+		return jitParserMemoPreallocateLimit
+	}
+	return inputLength * jitParserMemoEntriesPerByteHint
 }
 
 func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
@@ -698,6 +737,25 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 	state.checkpoints = state.checkpoints[:0]
 	state.marks = state.marks[:0]
 	state.positions = state.positions[:0]
+	memoCapacity := jitParserMemoEntryCapacity(inputLength)
+	if cap(state.memoEntries) < memoCapacity {
+		state.memoEntries = make([]jitParserMemoEntry, 0, memoCapacity)
+	} else {
+		state.memoEntries = state.memoEntries[:0]
+	}
+	memoRuleCapacity := 0
+	if inputLength > jitParserLargeInputBytes {
+		if inputLength >= jitParserMemoRulePreallocateLimit/jitParserMemoRuleSlotsPerByteHint {
+			memoRuleCapacity = jitParserMemoRulePreallocateLimit
+		} else {
+			memoRuleCapacity = inputLength * jitParserMemoRuleSlotsPerByteHint
+		}
+	}
+	if cap(state.memoRules) < memoRuleCapacity {
+		state.memoRules = make([]uint32, 0, memoRuleCapacity)
+	} else {
+		state.memoRules = state.memoRules[:0]
+	}
 	state.farthest = -1
 	state.expected = state.expected[:0]
 	if cap(state.heads) < inputLength+1 {
@@ -706,10 +764,11 @@ func (program *jitParserProgram) acquireState(inputLength int) *jitParserState {
 		state.heads = state.heads[:inputLength+1]
 		clear(state.heads)
 	}
-	if state.memo == nil {
-		state.memo = make(map[jitParserMemoKey]jitParserMemoEntry)
+	if cap(state.memoOffsets) < inputLength+1 {
+		state.memoOffsets = make([]uint32, inputLength+1)
 	} else {
-		clear(state.memo)
+		state.memoOffsets = state.memoOffsets[:inputLength+1]
+		clear(state.memoOffsets)
 	}
 	if cap(state.frames) < inputLength+8 {
 		state.frames = make([]jitParserCallFrame, 0, inputLength+8)
@@ -727,9 +786,64 @@ func (program *jitParserProgram) releaseState(state *jitParserState) {
 	for index := range state.mutations {
 		state.mutations[index].old = NewNil()
 	}
-	clear(state.memo)
+	if cap(state.memoEntries) > jitParserRetainedMemoEntryCapacity {
+		state.memoEntries = nil
+		state.memoOffsets = nil
+		state.memoRules = nil
+	} else {
+		clear(state.memoEntries)
+		state.memoEntries = state.memoEntries[:0]
+		clear(state.memoRules)
+		state.memoRules = state.memoRules[:0]
+		clear(state.memoOffsets)
+	}
 	state.program = nil
 	program.pool.Put(state)
+}
+
+func (state *jitParserState) memoGet(key jitParserMemoKey) (jitParserMemoEntry, bool) {
+	if key.position < 0 || key.position >= len(state.memoOffsets) || key.rule < 0 || key.rule >= len(state.program.rules) {
+		return jitParserMemoEntry{}, false
+	}
+	denseRule := int(state.program.memoRuleIndex[key.rule])
+	if denseRule < 0 {
+		return jitParserMemoEntry{}, false
+	}
+	offset := state.memoOffsets[key.position]
+	if offset == 0 {
+		return jitParserMemoEntry{}, false
+	}
+	entryIndex := state.memoRules[int(offset)-1+denseRule]
+	if entryIndex == 0 {
+		return jitParserMemoEntry{}, false
+	}
+	return state.memoEntries[entryIndex-1], true
+}
+
+func (state *jitParserState) memoSet(key jitParserMemoKey, entry jitParserMemoEntry) {
+	if key.position < 0 || key.position >= len(state.memoOffsets) || key.rule < 0 || key.rule >= len(state.program.rules) {
+		panic("jit: parser memo key outside program")
+	}
+	denseRule := int(state.program.memoRuleIndex[key.rule])
+	if denseRule < 0 {
+		panic("jit: lexical parser rule cannot be memoized")
+	}
+	offset := state.memoOffsets[key.position]
+	if offset == 0 {
+		base := len(state.memoRules)
+		state.memoRules = slices.Grow(state.memoRules, state.program.memoRuleCount)
+		state.memoRules = state.memoRules[:base+state.program.memoRuleCount]
+		clear(state.memoRules[base:])
+		offset = uint32(base + 1)
+		state.memoOffsets[key.position] = offset
+	}
+	index := int(offset) - 1 + denseRule
+	if entryIndex := state.memoRules[index]; entryIndex != 0 {
+		state.memoEntries[entryIndex-1] = entry
+		return
+	}
+	state.memoEntries = append(state.memoEntries, entry)
+	state.memoRules[index] = uint32(len(state.memoEntries))
 }
 
 func jitParserStateValue(value Scmer) *jitParserState {
@@ -806,7 +920,7 @@ func jitParserPushRuleFrame(state *jitParserState, ruleID, success, failure, pos
 }
 
 func jitParserSetupLeftRecursion(state *jitParserState, key jitParserMemoKey) jitParserMemoEntry {
-	memo := state.memo[key]
+	memo, _ := state.memoGet(key)
 	head := memo.head
 	if head == nil {
 		words := (len(state.program.rules) + 63) >> 6
@@ -815,7 +929,7 @@ func jitParserSetupLeftRecursion(state *jitParserState, key jitParserMemoKey) ji
 			involved: make([]uint64, words), evaluate: make([]uint64, words),
 		}
 		memo.head = head
-		state.memo[key] = memo
+		state.memoSet(key, memo)
 	}
 	for index := len(state.frames) - 1; index >= 0; index-- {
 		frame := state.frames[index]
@@ -823,17 +937,18 @@ func jitParserSetupLeftRecursion(state *jitParserState, key jitParserMemoKey) ji
 			continue
 		}
 		frameKey := jitParserMemoKey{rule: frame.rule, position: frame.position}
-		entry := state.memo[frameKey]
+		entry, _ := state.memoGet(frameKey)
 		if entry.head == head {
 			break
 		}
 		entry.head = head
-		state.memo[frameKey] = entry
+		state.memoSet(frameKey, entry)
 		if frameKey != key {
 			jitParserRuleSetAdd(head.involved, frame.rule)
 		}
 	}
-	return state.memo[key]
+	memo, _ = state.memoGet(key)
+	return memo
 }
 
 func jitParserResetRuleFrame(state *jitParserState, frame jitParserCallFrame, restoreMutations bool) {
@@ -881,21 +996,21 @@ func jitParserCompleteRule(state *jitParserState, position int, value Scmer, suc
 	}
 	if frame.transient {
 		key := jitParserMemoKey{rule: frame.rule, position: frame.position}
-		memo := state.memo[key]
-		memo.value, memo.position, memo.success = value, position, success
+		memo, _ := state.memoGet(key)
+		memo.value, memo.position, memo.success = value, uint32(position), success
 		memo.active = false
-		state.memo[key] = memo
+		state.memoSet(key, memo)
 		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
 	}
 	if !frame.memoize {
 		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
 	}
 	key := jitParserMemoKey{rule: frame.rule, position: frame.position}
-	memo := state.memo[key]
+	memo, _ := state.memoGet(key)
 	if frame.growing {
-		if success && position > memo.position {
-			memo.value, memo.position, memo.success = value, position, true
-			state.memo[key] = memo
+		if success && position > int(memo.position) {
+			memo.value, memo.position, memo.success = value, uint32(position), true
+			state.memoSet(key, memo)
 			jitParserResetRuleFrame(state, frame, true)
 			for range state.program.rules[frame.rule].bindings {
 				state.bindings = append(state.bindings, NewNil())
@@ -904,20 +1019,20 @@ func jitParserCompleteRule(state *jitParserState, position int, value Scmer, suc
 			return int64(frame.rule), int64(frame.position), true
 		}
 		state.heads[frame.position] = nil
-		return jitParserDeliverRuleResult(state, frame, memo.position, memo.value, memo.success, true)
+		return jitParserDeliverRuleResult(state, frame, int(memo.position), memo.value, memo.success, true)
 	}
-	memo.value, memo.position, memo.success = value, position, success
+	memo.value, memo.position, memo.success = value, uint32(position), success
 	if memo.head == nil {
 		memo.active = false
-		state.memo[key] = memo
+		state.memoSet(key, memo)
 		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
 	}
-	state.memo[key] = memo
+	state.memoSet(key, memo)
 	if memo.head.rule != frame.rule {
 		return jitParserDeliverRuleResult(state, frame, position, value, success, false)
 	}
 	memo.active = false
-	state.memo[key] = memo
+	state.memoSet(key, memo)
 	if !success {
 		return jitParserDeliverRuleResult(state, frame, position, value, false, true)
 	}
@@ -1148,15 +1263,14 @@ func jitParserPanic(stateValue, input Scmer) Scmer {
 // Native wrappers use scalar Go ABI words for parser indices and positions.
 // Scmer arguments remain pairs. Keeping this boundary explicit avoids boxing
 // control data merely to cross an emitted helper call.
-func jitParserEnterRuleNative(stateValue Scmer, ruleValue, success, failure, position int64) (int64, int64, bool) {
-	state := jitParserStateValue(stateValue)
+func jitParserEnterRuleNative(state *jitParserState, ruleValue, success, failure, position int64) (int64, int64, bool) {
 	rule := int(ruleValue)
 	if rule < 0 || rule >= len(state.program.rules) {
 		panic("jit: parser rule index out of range")
 	}
 	if state.program.rules[rule].lexicalParent < 0 {
 		key := jitParserMemoKey{rule: rule, position: int(position)}
-		memo, exists := state.memo[key]
+		memo, exists := state.memoGet(key)
 		var head *jitParserLeftRecursionHead
 		if int(position) >= 0 && int(position) < len(state.heads) {
 			head = state.heads[int(position)]
@@ -1181,7 +1295,10 @@ func jitParserEnterRuleNative(stateValue Scmer, ruleValue, success, failure, pos
 			}
 			return failure, int64(memo.position), true
 		}
-		state.memo[key] = jitParserMemoEntry{position: int(position), active: true}
+		if position > int64(^uint32(0)) {
+			panic("jit: parser input exceeds supported position range")
+		}
+		state.memoSet(key, jitParserMemoEntry{position: uint32(position), active: true})
 		jitParserPushRuleFrame(state, rule, int(success), int(failure), int(position), true, false)
 		return 0, position, false
 	}

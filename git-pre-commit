@@ -238,6 +238,7 @@ echo ""
 
 test_port=${MEMCP_TEST_PORT:-$(( (RANDOM % 10000) + 20000 ))}
 test_data_dir="${MEMCP_TEST_DATA_DIR:-/tmp/memcp-sql-tests-$test_port}"
+memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
 tmpdir=""
 supervisor_pid=""
 enable_mysql=0
@@ -288,7 +289,6 @@ run_memcp_forever() {
     echo "🚀 (re)Starting MemCP on port $test_port..."
     pkill -f "memcp.*--api-port=$test_port" || true
     sleep 1
-    memcp_log="${MEMCP_LOG:-/tmp/memcp-test.log}"
     mysql_args=()
     if [ "$enable_mysql" -ne 1 ]; then
       mysql_args+=(--disable-mysql)
@@ -315,6 +315,10 @@ start_supervisor() {
     return 0
   fi
   echo "❌ MemCP did not become SQL-ready"
+  if [ -f "$memcp_log" ]; then
+    echo "Last MemCP log lines:"
+    tail -n 200 "$memcp_log"
+  fi
   return 1
 }
 

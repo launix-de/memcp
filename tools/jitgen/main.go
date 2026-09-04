@@ -688,16 +688,29 @@ func nativeCallBoundaryReason(fn *ssa.Function) string {
 }
 
 func generateFallbackClosure(opName string) string {
-	return fmt.Sprintf(`func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-	return jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)
+	return fmt.Sprintf(`func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+	ctx.Coverage.NativeCalls++
+	declaration := declarations[%q]
+	return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 }`, opName)
 }
 
 func generateNativeCallClosure(opName, reason string) string {
-	return fmt.Sprintf(`func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+	return fmt.Sprintf(`func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 	// JITGen native call boundary: %s.
-	return jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)
+	ctx.Coverage.NativeCalls++
+	declaration := declarations[%q]
+	return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 }`, reason, opName)
+}
+
+func generateEmitterGuard(opName string) string {
+	return fmt.Sprintf(`	declaration := declarations[%[1]q]
+	if !jitGeneratedEmitterInline(ctx, declaration, args) {
+		ctx.Coverage.NativeCalls++
+		return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
+	}
+`, opName)
 }
 
 // --- AST operator collection (for patching byte offsets) ---
@@ -3687,6 +3700,21 @@ func functionWritesMemory(fn *ssa.Function) bool {
 	return false
 }
 
+func functionCallsMultipleResults(fn *ssa.Function) bool {
+	for _, block := range fn.Blocks {
+		for _, instruction := range block.Instrs {
+			call, ok := instruction.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			if tuple, ok := call.Type().Underlying().(*types.Tuple); ok && tuple.Len() > 1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func blockEndsInPanic(block *ssa.BasicBlock) bool {
 	return block != nil && len(block.Instrs) > 0 && func() bool {
 		_, ok := block.Instrs[len(block.Instrs)-1].(*ssa.Panic)
@@ -3724,6 +3752,13 @@ func (g *codeGen) tryInlineCall(callee *ssa.Function, callArgs []ssa.Value) (res
 		return genVal{}, false
 	}
 	if functionBuildsScmerStruct(callee) {
+		return genVal{}, false
+	}
+	// Keep tuple-producing calls inside their native helper until nested inline
+	// CFG returns have a stable, path-independent representation. Flattening
+	// such a helper into its caller can otherwise make a later return arm reuse
+	// an earlier arm's result register while the tuple call is being emitted.
+	if functionCallsMultipleResults(callee) {
 		return genVal{}, false
 	}
 	if cost := inlineInstructionCount(callee); cost > inlineInstructionBudget {
@@ -4057,7 +4092,7 @@ func generateClosureCost(opName string, fn *ssa.Function, rewrite ssaValueRewrit
 	// fallback or the (potentially very large) native emitter body completely.
 	// This prevents adding JIT coverage from perturbing non-JIT instruction
 	// layout and performance while retaining one generated source of truth.
-	guard := fmt.Sprintf("\tif !jitEnabled {\n\t\treturn jitEmitGoVariadicCallFromDescs(ctx, declarations[%q].Fn, args, result)\n\t}\n", opName)
+	guard := generateEmitterGuard(opName)
 	result := fmt.Sprintf("func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {\n%s%s%s\t\t}",
 		guard, g.wDecl.String(), injectBindRegCalls(g.w.String()))
 	cost := inlineInstructionCount(fn) + g.inlineInstructions

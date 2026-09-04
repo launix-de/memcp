@@ -384,8 +384,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["string?"].Fn, args, result)
+				declaration := declarations["string?"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -453,9 +455,11 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: interface type assertion.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["concat"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["concat"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -473,8 +477,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_concat"].Fn, args, result)
+				declaration := declarations["sql_concat"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -549,8 +555,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["substr"].Fn, args, result)
+				declaration := declarations["substr"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -1227,8 +1235,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_substr"].Fn, args, result)
+				declaration := declarations["sql_substr"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -5075,8 +5085,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["simplify"].Fn, args, result)
+				declaration := declarations["simplify"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -5184,8 +5196,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strlen"].Fn, args, result)
+				declaration := declarations["strlen"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -5271,8 +5285,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strlike"].Fn, args, result)
+				declaration := declarations["strlike"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -5332,50 +5348,6 @@ func init_strings() {
 				_ = d88
 				var d89 JITValueDesc
 				_ = d89
-				var d90 JITValueDesc
-				_ = d90
-				var d91 JITValueDesc
-				_ = d91
-				var d92 JITValueDesc
-				_ = d92
-				var d93 JITValueDesc
-				_ = d93
-				var d94 JITValueDesc
-				_ = d94
-				var d95 JITValueDesc
-				_ = d95
-				var d96 JITValueDesc
-				_ = d96
-				var d97 JITValueDesc
-				_ = d97
-				var d98 JITValueDesc
-				_ = d98
-				var d99 JITValueDesc
-				_ = d99
-				var d100 JITValueDesc
-				_ = d100
-				var d101 JITValueDesc
-				_ = d101
-				var d103 JITValueDesc
-				_ = d103
-				var d104 JITValueDesc
-				_ = d104
-				var d105 JITValueDesc
-				_ = d105
-				var d106 JITValueDesc
-				_ = d106
-				var d107 JITValueDesc
-				_ = d107
-				var d108 JITValueDesc
-				_ = d108
-				var d109 JITValueDesc
-				_ = d109
-				var d110 JITValueDesc
-				_ = d110
-				var d111 JITValueDesc
-				_ = d111
-				var d112 JITValueDesc
-				_ = d112
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				phiBase0 := ctx.AllocStack(int32(16))
 				d1 := JITValueDesc{Loc: LocStackPair, Type: tagString, StackOff: int32(phiBase0) + int32(0)}
@@ -6407,715 +6379,107 @@ func init_strings() {
 					}
 					ctx.ReclaimUntrackedRegs()
 					ctx.EnsureDesc(&d18)
+					ctx.EnsureDesc(&d18)
+					ctx.EnsureDesc(&d18)
+					if d18.Loc == LocImm {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d18.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+						ctx.TrackImm(d18.Imm)
+						ptrWord, _ := d18.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d18.Imm.String())))
+						d18 = tmpPair
+					} else if d18.Loc == LocReg {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d18.Type, Reg: ctx.AllocRegExcept(d18.Reg), Reg2: ctx.AllocRegExcept(d18.Reg)}
+						switch d18.Type {
+						case tagBool:
+							ctx.EmitMakeBool(tmpPair, d18)
+						case tagInt:
+							ctx.EmitMakeInt(tmpPair, d18)
+						case tagFloat:
+							ctx.EmitMakeFloat(tmpPair, d18)
+						default:
+							panic("jit: generic call arg scalar type unknown for 2-word value")
+						}
+						ctx.FreeDesc(&d18)
+						d18 = tmpPair
+					}
+					if d18.Loc != LocRegPair && d18.Loc != LocStackPair && d18.Loc != LocInputPair {
+						panic("jit: generic call arg expects 2-word value (StrLikeCollation arg0)")
+					}
 					ctx.EnsureDesc(&d21)
+					ctx.EnsureDesc(&d21)
+					ctx.EnsureDesc(&d21)
+					if d21.Loc == LocImm {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d21.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+						ctx.TrackImm(d21.Imm)
+						ptrWord, _ := d21.Imm.RawWords()
+						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
+						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d21.Imm.String())))
+						d21 = tmpPair
+					} else if d21.Loc == LocReg {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d21.Type, Reg: ctx.AllocRegExcept(d21.Reg), Reg2: ctx.AllocRegExcept(d21.Reg)}
+						switch d21.Type {
+						case tagBool:
+							ctx.EmitMakeBool(tmpPair, d21)
+						case tagInt:
+							ctx.EmitMakeInt(tmpPair, d21)
+						case tagFloat:
+							ctx.EmitMakeFloat(tmpPair, d21)
+						default:
+							panic("jit: generic call arg scalar type unknown for 2-word value")
+						}
+						ctx.FreeDesc(&d21)
+						d21 = tmpPair
+					}
+					if d21.Loc != LocRegPair && d21.Loc != LocStackPair && d21.Loc != LocInputPair {
+						panic("jit: generic call arg expects 2-word value (StrLikeCollation arg1)")
+					}
 					ctx.EnsureDesc(&d1)
-					d88 = d18
-					_ = d88
-					ctx.StabilizeDescForControlFlow(&d88)
-					d89 = d21
-					_ = d89
-					ctx.StabilizeDescForControlFlow(&d89)
-					d90 = d1
-					_ = d90
-					ctx.StabilizeDescForControlFlow(&d90)
-					lbl13 := ctx.ReserveLabel()
-					bbpos_1_0 := int32(-1)
-					_ = bbpos_1_0
-					lbl14 := ctx.ReserveLabel()
-					_ = lbl14
-					bbpos_1_1 := int32(-1)
-					_ = bbpos_1_1
-					lbl15 := ctx.ReserveLabel()
-					_ = lbl15
-					bbpos_1_2 := int32(-1)
-					_ = bbpos_1_2
-					lbl16 := ctx.ReserveLabel()
-					_ = lbl16
-					bbpos_1_3 := int32(-1)
-					_ = bbpos_1_3
-					lbl17 := ctx.ReserveLabel()
-					_ = lbl17
-					bbpos_1_4 := int32(-1)
-					_ = bbpos_1_4
-					lbl18 := ctx.ReserveLabel()
-					_ = lbl18
-					bbpos_1_5 := int32(-1)
-					_ = bbpos_1_5
-					lbl19 := ctx.ReserveLabel()
-					_ = lbl19
-					bbpos_1_6 := int32(-1)
-					_ = bbpos_1_6
-					lbl20 := ctx.ReserveLabel()
-					_ = lbl20
-					bbpos_1_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl14)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d90)
-					ctx.EnsureDesc(&d90)
-					ctx.EnsureDesc(&d90)
-					if d90.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d90.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d90.Imm)
-						ptrWord, _ := d90.Imm.RawWords()
+					ctx.EnsureDesc(&d1)
+					ctx.EnsureDesc(&d1)
+					if d1.Loc == LocImm {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
+						ctx.TrackImm(d1.Imm)
+						ptrWord, _ := d1.Imm.RawWords()
 						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d90.Imm.String())))
-						d90 = tmpPair
-					} else if d90.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d90.Type, Reg: ctx.AllocRegExcept(d90.Reg), Reg2: ctx.AllocRegExcept(d90.Reg)}
-						switch d90.Type {
+						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d1.Imm.String())))
+						d1 = tmpPair
+					} else if d1.Loc == LocReg {
+						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d1.Type, Reg: ctx.AllocRegExcept(d1.Reg), Reg2: ctx.AllocRegExcept(d1.Reg)}
+						switch d1.Type {
 						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d90)
+							ctx.EmitMakeBool(tmpPair, d1)
 						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d90)
+							ctx.EmitMakeInt(tmpPair, d1)
 						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d90)
+							ctx.EmitMakeFloat(tmpPair, d1)
 						default:
 							panic("jit: generic call arg scalar type unknown for 2-word value")
 						}
-						ctx.FreeDesc(&d90)
-						d90 = tmpPair
+						ctx.FreeDesc(&d1)
+						d1 = tmpPair
 					}
-					if d90.Loc != LocRegPair && d90.Loc != LocStackPair && d90.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
+					if d1.Loc != LocRegPair && d1.Loc != LocStackPair && d1.Loc != LocInputPair {
+						panic("jit: generic call arg expects 2-word value (StrLikeCollation arg2)")
 					}
-					ctx.SyncDesc(&d90)
-					d91 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d90}, 2)
-					d91.NoHeapPointer = false
-					ctx.BindReg(d91.Reg, &d91)
-					ctx.BindReg(d91.Reg2, &d91)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d91)
-					d92 = JITValueDesc{Loc: LocImm, Type: tagString, Imm: NewString("_ci")}
-					d93 = d91
-					_ = d93
-					ctx.StabilizeDescForControlFlow(&d93)
-					d94 = d92
-					_ = d94
-					ctx.StabilizeDescForControlFlow(&d94)
-					bbpos_2_0 := int32(-1)
-					_ = bbpos_2_0
-					lbl21 := ctx.ReserveLabel()
-					_ = lbl21
-					bbpos_2_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl21)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d93)
-					ctx.EnsureDesc(&d93)
-					ctx.EnsureDesc(&d93)
-					if d93.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d93.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d93.Imm)
-						ptrWord, _ := d93.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d93.Imm.String())))
-						d93 = tmpPair
-					} else if d93.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d93.Type, Reg: ctx.AllocRegExcept(d93.Reg), Reg2: ctx.AllocRegExcept(d93.Reg)}
-						switch d93.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d93)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d93)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d93)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d93)
-						d93 = tmpPair
-					}
-					if d93.Loc != LocRegPair && d93.Loc != LocStackPair && d93.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (strings.Index arg0)")
-					}
-					ctx.EnsureDesc(&d94)
-					ctx.EnsureDesc(&d94)
-					ctx.EnsureDesc(&d94)
-					if d94.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d94.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d94.Imm)
-						ptrWord, _ := d94.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d94.Imm.String())))
-						d94 = tmpPair
-					} else if d94.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d94.Type, Reg: ctx.AllocRegExcept(d94.Reg), Reg2: ctx.AllocRegExcept(d94.Reg)}
-						switch d94.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d94)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d94)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d94)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d94)
-						d94 = tmpPair
-					}
-					if d94.Loc != LocRegPair && d94.Loc != LocStackPair && d94.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (strings.Index arg1)")
-					}
-					ctx.SyncDesc(&d93)
-					ctx.SyncDesc(&d94)
-					d95 = ctx.EmitGoCallScalar(GoFuncAddr(strings.Index), []JITValueDesc{d93, d94}, 1)
-					d95.NoHeapPointer = true
-					ctx.BindReg(d95.Reg, &d95)
-					ctx.FreeDesc(&d94)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d95)
-					var d96 JITValueDesc
-					if d95.Loc == LocImm {
-						d96 = JITValueDesc{Loc: LocImm, Type: tagBool, Imm: NewBool(d95.Imm.Int() >= 0)}
-					} else {
-						r1 := ctx.AllocReg()
-						ctx.EmitCmpRegImm32(d95.Reg, 0)
-						ctx.EmitSetcc(r1, CondSignedGreaterOrEqual)
-						d96 = JITValueDesc{Loc: LocReg, Type: tagBool, Reg: r1}
-						ctx.BindReg(r1, &d96)
-					}
-					ctx.FreeDesc(&d95)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d96)
-					ctx.ReclaimUntrackedRegs()
-					d97 = d96
-					ctx.EnsureDesc(&d97)
-					if d97.Loc != LocImm && d97.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
-					}
-					lbl22 := ctx.ReserveLabel()
-					lbl23 := ctx.ReserveLabel()
-					if d97.Loc == LocImm {
-						if d97.Imm.Bool() {
-							ctx.MarkLabel(lbl22)
-							ctx.EmitJmp(lbl15)
-						} else {
-							ctx.MarkLabel(lbl23)
-							ctx.EmitJmp(lbl16)
-						}
-					} else {
-						ctx.EmitCmpRegImm32(d97.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl22)
-						ctx.EmitJmp(lbl23)
-						ctx.MarkLabel(lbl22)
-						ctx.EmitJmp(lbl15)
-						ctx.MarkLabel(lbl23)
-						ctx.EmitJmp(lbl16)
-					}
-					ctx.FreeDesc(&d96)
-					bbpos_1_2 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl16)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d88)
-					if d88.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d88.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d88.Imm)
-						ptrWord, _ := d88.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d88.Imm.String())))
-						d88 = tmpPair
-					} else if d88.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d88.Type, Reg: ctx.AllocRegExcept(d88.Reg), Reg2: ctx.AllocRegExcept(d88.Reg)}
-						switch d88.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d88)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d88)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d88)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d88)
-						d88 = tmpPair
-					}
-					if d88.Loc != LocRegPair && d88.Loc != LocStackPair && d88.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (StrLike arg0)")
-					}
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					if d89.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d89.Imm)
-						ptrWord, _ := d89.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d89.Imm.String())))
-						d89 = tmpPair
-					} else if d89.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocRegExcept(d89.Reg), Reg2: ctx.AllocRegExcept(d89.Reg)}
-						switch d89.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d89)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d89)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d89)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d89)
-						d89 = tmpPair
-					}
-					if d89.Loc != LocRegPair && d89.Loc != LocStackPair && d89.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (StrLike arg1)")
-					}
-					ctx.SyncDesc(&d88)
-					ctx.SyncDesc(&d89)
-					d98 = ctx.EmitGoCallScalar(GoFuncAddr(StrLike), []JITValueDesc{d88, d89}, 1)
-					d98.NoHeapPointer = true
-					ctx.EmitAndRegImm32(d98.Reg, 1)
-					d98.Type = tagBool
-					ctx.BindReg(d98.Reg, &d98)
-					ctx.ReclaimUntrackedRegs()
-					r2 := ctx.AllocReg()
-					ctx.EnsureDesc(&d98)
-					ctx.EnsureDesc(&d98)
-					if d98.Loc == LocRegPair {
-						panic("jit: scalar inline return has LocRegPair")
-					} else {
-						ctx.EmitMovToReg(r2, d98)
-					}
-					ctx.EmitJmp(lbl13)
-					bbpos_1_1 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl15)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					if d89.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d89.Imm)
-						ptrWord, _ := d89.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d89.Imm.String())))
-						d89 = tmpPair
-					} else if d89.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocRegExcept(d89.Reg), Reg2: ctx.AllocRegExcept(d89.Reg)}
-						switch d89.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d89)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d89)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d89)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d89)
-						d89 = tmpPair
-					}
-					if d89.Loc != LocRegPair && d89.Loc != LocStackPair && d89.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (likePatternNeedsCaseFold arg0)")
-					}
-					ctx.SyncDesc(&d89)
-					d99 = ctx.EmitGoCallScalar(GoFuncAddr(likePatternNeedsCaseFold), []JITValueDesc{d89}, 1)
-					d99.NoHeapPointer = true
-					ctx.EmitAndRegImm32(d99.Reg, 1)
-					d99.Type = tagBool
-					ctx.BindReg(d99.Reg, &d99)
-					ctx.ReclaimUntrackedRegs()
-					d100 = d99
-					ctx.EnsureDesc(&d100)
-					if d100.Loc != LocImm && d100.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
-					}
-					lbl24 := ctx.ReserveLabel()
-					lbl25 := ctx.ReserveLabel()
-					if d100.Loc == LocImm {
-						if d100.Imm.Bool() {
-							ctx.MarkLabel(lbl24)
-							ctx.EmitJmp(lbl18)
-						} else {
-							ctx.MarkLabel(lbl25)
-							ctx.EmitJmp(lbl17)
-						}
-					} else {
-						ctx.EmitCmpRegImm32(d100.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl24)
-						ctx.EmitJmp(lbl25)
-						ctx.MarkLabel(lbl24)
-						ctx.EmitJmp(lbl18)
-						ctx.MarkLabel(lbl25)
-						ctx.EmitJmp(lbl17)
-					}
-					ctx.FreeDesc(&d99)
-					bbpos_1_3 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl17)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d88)
-					if d88.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d88.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d88.Imm)
-						ptrWord, _ := d88.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d88.Imm.String())))
-						d88 = tmpPair
-					} else if d88.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d88.Type, Reg: ctx.AllocRegExcept(d88.Reg), Reg2: ctx.AllocRegExcept(d88.Reg)}
-						switch d88.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d88)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d88)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d88)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d88)
-						d88 = tmpPair
-					}
-					if d88.Loc != LocRegPair && d88.Loc != LocStackPair && d88.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (StrLike arg0)")
-					}
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					if d89.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d89.Imm)
-						ptrWord, _ := d89.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d89.Imm.String())))
-						d89 = tmpPair
-					} else if d89.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocRegExcept(d89.Reg), Reg2: ctx.AllocRegExcept(d89.Reg)}
-						switch d89.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d89)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d89)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d89)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d89)
-						d89 = tmpPair
-					}
-					if d89.Loc != LocRegPair && d89.Loc != LocStackPair && d89.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (StrLike arg1)")
-					}
-					ctx.SyncDesc(&d88)
-					ctx.SyncDesc(&d89)
-					d101 = ctx.EmitGoCallScalar(GoFuncAddr(StrLike), []JITValueDesc{d88, d89}, 1)
-					d101.NoHeapPointer = true
-					ctx.EmitAndRegImm32(d101.Reg, 1)
-					d101.Type = tagBool
-					ctx.BindReg(d101.Reg, &d101)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d101)
-					ctx.EnsureDesc(&d101)
-					if d101.Loc == LocRegPair {
-						panic("jit: scalar inline return has LocRegPair")
-					} else {
-						ctx.EmitMovToReg(r2, d101)
-					}
-					ctx.EmitJmp(lbl13)
-					bbpos_1_4 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl18)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d88)
-					if d88.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d88.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d88.Imm)
-						ptrWord, _ := d88.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d88.Imm.String())))
-						d88 = tmpPair
-					} else if d88.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d88.Type, Reg: ctx.AllocRegExcept(d88.Reg), Reg2: ctx.AllocRegExcept(d88.Reg)}
-						switch d88.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d88)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d88)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d88)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d88)
-						d88 = tmpPair
-					}
-					if d88.Loc != LocRegPair && d88.Loc != LocStackPair && d88.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (strLikeASCIIFold arg0)")
-					}
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					ctx.EnsureDesc(&d89)
-					if d89.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d89.Imm)
-						ptrWord, _ := d89.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d89.Imm.String())))
-						d89 = tmpPair
-					} else if d89.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d89.Type, Reg: ctx.AllocRegExcept(d89.Reg), Reg2: ctx.AllocRegExcept(d89.Reg)}
-						switch d89.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d89)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d89)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d89)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d89)
-						d89 = tmpPair
-					}
-					if d89.Loc != LocRegPair && d89.Loc != LocStackPair && d89.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (strLikeASCIIFold arg1)")
-					}
-					ctx.SyncDesc(&d88)
-					ctx.SyncDesc(&d89)
-					callResults102 := JITEmitGoCallResults(ctx, GoFuncAddr(strLikeASCIIFold), []JITValueDesc{d88, d89}, []uint8{1, 1}, []uint8{0, 0})
-					d103 = callResults102[0]
-					_ = d103
-					d104 = callResults102[1]
-					_ = d104
-					ctx.ReclaimUntrackedRegs()
-					ctx.StabilizeDescForControlFlow(&d103)
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					d105 = d104
-					ctx.EnsureDesc(&d105)
-					if d105.Loc != LocImm && d105.Loc != LocReg {
-						panic("jit: If condition is neither LocImm nor LocReg")
-					}
-					lbl26 := ctx.ReserveLabel()
-					lbl27 := ctx.ReserveLabel()
-					if d105.Loc == LocImm {
-						if d105.Imm.Bool() {
-							ctx.MarkLabel(lbl26)
-							ctx.EmitJmp(lbl19)
-						} else {
-							ctx.MarkLabel(lbl27)
-							ctx.EmitJmp(lbl20)
-						}
-					} else {
-						ctx.EmitCmpRegImm32(d105.Reg, 0)
-						ctx.EmitJump(CondNotEqual, lbl26)
-						ctx.EmitJmp(lbl27)
-						ctx.MarkLabel(lbl26)
-						ctx.EmitJmp(lbl19)
-						ctx.MarkLabel(lbl27)
-						ctx.EmitJmp(lbl20)
-					}
-					ctx.FreeDesc(&d104)
-					bbpos_1_6 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl20)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d88)
-					ctx.EnsureDesc(&d89)
-					d106 = d88
-					_ = d106
-					ctx.StabilizeDescForControlFlow(&d106)
-					d107 = d89
-					_ = d107
-					ctx.StabilizeDescForControlFlow(&d107)
-					ctx.StabilizeDescForControlFlow(&d88)
-					ctx.StabilizeDescForControlFlow(&d89)
-					bbpos_3_0 := int32(-1)
-					_ = bbpos_3_0
-					lbl28 := ctx.ReserveLabel()
-					_ = lbl28
-					bbpos_3_0 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl28)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d106)
-					ctx.EnsureDesc(&d106)
-					ctx.EnsureDesc(&d106)
-					if d106.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d106.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d106.Imm)
-						ptrWord, _ := d106.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d106.Imm.String())))
-						d106 = tmpPair
-					} else if d106.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d106.Type, Reg: ctx.AllocRegExcept(d106.Reg), Reg2: ctx.AllocRegExcept(d106.Reg)}
-						switch d106.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d106)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d106)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d106)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d106)
-						d106 = tmpPair
-					}
-					if d106.Loc != LocRegPair && d106.Loc != LocStackPair && d106.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
-					}
-					ctx.SyncDesc(&d106)
-					d108 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d106}, 2)
-					d108.NoHeapPointer = false
-					ctx.BindReg(d108.Reg, &d108)
-					ctx.BindReg(d108.Reg2, &d108)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d107)
-					ctx.EnsureDesc(&d107)
-					ctx.EnsureDesc(&d107)
-					if d107.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d107.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d107.Imm)
-						ptrWord, _ := d107.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d107.Imm.String())))
-						d107 = tmpPair
-					} else if d107.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d107.Type, Reg: ctx.AllocRegExcept(d107.Reg), Reg2: ctx.AllocRegExcept(d107.Reg)}
-						switch d107.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d107)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d107)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d107)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d107)
-						d107 = tmpPair
-					}
-					if d107.Loc != LocRegPair && d107.Loc != LocStackPair && d107.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (strings.ToLower arg0)")
-					}
-					ctx.SyncDesc(&d107)
-					d109 = ctx.EmitGoCallScalar(GoFuncAddr(strings.ToLower), []JITValueDesc{d107}, 2)
-					d109.NoHeapPointer = false
-					ctx.BindReg(d109.Reg, &d109)
-					ctx.BindReg(d109.Reg2, &d109)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d108)
-					ctx.EnsureDesc(&d108)
-					ctx.EnsureDesc(&d108)
-					if d108.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d108.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d108.Imm)
-						ptrWord, _ := d108.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d108.Imm.String())))
-						d108 = tmpPair
-					} else if d108.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d108.Type, Reg: ctx.AllocRegExcept(d108.Reg), Reg2: ctx.AllocRegExcept(d108.Reg)}
-						switch d108.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d108)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d108)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d108)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d108)
-						d108 = tmpPair
-					}
-					if d108.Loc != LocRegPair && d108.Loc != LocStackPair && d108.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (StrLike arg0)")
-					}
-					ctx.EnsureDesc(&d109)
-					ctx.EnsureDesc(&d109)
-					ctx.EnsureDesc(&d109)
-					if d109.Loc == LocImm {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d109.Type, Reg: ctx.AllocReg(), Reg2: ctx.AllocReg()}
-						ctx.TrackImm(d109.Imm)
-						ptrWord, _ := d109.Imm.RawWords()
-						ctx.EmitMovRegImm64(tmpPair.Reg, uint64(ptrWord))
-						ctx.EmitMovRegImm64(tmpPair.Reg2, uint64(len(d109.Imm.String())))
-						d109 = tmpPair
-					} else if d109.Loc == LocReg {
-						tmpPair := JITValueDesc{Loc: LocRegPair, Type: d109.Type, Reg: ctx.AllocRegExcept(d109.Reg), Reg2: ctx.AllocRegExcept(d109.Reg)}
-						switch d109.Type {
-						case tagBool:
-							ctx.EmitMakeBool(tmpPair, d109)
-						case tagInt:
-							ctx.EmitMakeInt(tmpPair, d109)
-						case tagFloat:
-							ctx.EmitMakeFloat(tmpPair, d109)
-						default:
-							panic("jit: generic call arg scalar type unknown for 2-word value")
-						}
-						ctx.FreeDesc(&d109)
-						d109 = tmpPair
-					}
-					if d109.Loc != LocRegPair && d109.Loc != LocStackPair && d109.Loc != LocInputPair {
-						panic("jit: generic call arg expects 2-word value (StrLike arg1)")
-					}
-					ctx.SyncDesc(&d108)
-					ctx.SyncDesc(&d109)
-					d110 = ctx.EmitGoCallScalar(GoFuncAddr(StrLike), []JITValueDesc{d108, d109}, 1)
-					d110.NoHeapPointer = true
-					ctx.EmitAndRegImm32(d110.Reg, 1)
-					d110.Type = tagBool
-					ctx.BindReg(d110.Reg, &d110)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d110)
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d110)
-					ctx.EnsureDesc(&d110)
-					if d110.Loc == LocRegPair {
-						panic("jit: scalar inline return has LocRegPair")
-					} else {
-						ctx.EmitMovToReg(r2, d110)
-					}
-					ctx.EmitJmp(lbl13)
-					bbpos_1_5 = int32(uintptr(ctx.Ptr) - uintptr(ctx.Start))
-					ctx.MarkLabel(lbl19)
-					ctx.ResolveFixups()
-					ctx.ReclaimUntrackedRegs()
-					ctx.ReclaimUntrackedRegs()
-					ctx.EnsureDesc(&d103)
-					ctx.EnsureDesc(&d103)
-					if d103.Loc == LocRegPair {
-						panic("jit: scalar inline return has LocRegPair")
-					} else {
-						ctx.EmitMovToReg(r2, d103)
-					}
-					ctx.EmitJmp(lbl13)
-					ctx.MarkLabel(lbl13)
-					d111 = JITValueDesc{Loc: LocReg, Reg: r2}
-					ctx.BindReg(r2, &d111)
-					ctx.BindReg(r2, &d111)
+					ctx.SyncDesc(&d18)
+					ctx.SyncDesc(&d21)
+					ctx.SyncDesc(&d1)
+					d88 = ctx.EmitGoCallScalar(GoFuncAddr(StrLikeCollation), []JITValueDesc{d18, d21, d1}, 1)
+					d88.NoHeapPointer = true
+					ctx.EmitAndRegImm32(d88.Reg, 1)
+					d88.Type = tagBool
+					ctx.BindReg(d88.Reg, &d88)
 					ctx.FreeDesc(&d1)
-					ctx.EnsureDesc(&d111)
-					if d111.Loc == LocImm {
-						ctx.EmitMakeBool(result, d111)
+					ctx.EnsureDesc(&d88)
+					if d88.Loc == LocImm {
+						ctx.EmitMakeBool(result, d88)
 					} else {
-						ctx.EmitMovToReg(result.Reg2, d111)
-						d112 := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: result.Reg2, ID: 0}
-						ctx.EmitMakeBool(result, d112)
-						if d111.Loc == LocReg && d111.Reg != result.Reg2 {
-							ctx.FreeReg(d111.Reg)
+						ctx.EmitMovToReg(result.Reg2, d88)
+						d89 := JITValueDesc{Loc: LocReg, Type: tagBool, Reg: result.Reg2, ID: 0}
+						ctx.EmitMakeBool(result, d89)
+						if d88.Loc == LocReg && d88.Reg != result.Reg2 {
+							ctx.FreeReg(d88.Reg)
 						}
 					}
 					result.Type = tagBool
@@ -7125,8 +6489,8 @@ func init_strings() {
 				for i := range args {
 					ctx.StabilizeDescForControlFlow(&args[i])
 				}
-				ps113 := PhiState{General: false}
-				_ = bbs[0].RenderPS(ps113)
+				ps90 := PhiState{General: false}
+				_ = bbs[0].RenderPS(ps90)
 				ctx.MarkLabel(lbl0)
 				ctx.ResolveFixups()
 				if resultRegsProtected {
@@ -7135,7 +6499,7 @@ func init_strings() {
 				}
 				return result
 			},
-			JITInlineCost: 51,
+			JITInlineCost: 28,
 		},
 	})
 	Declare(&Globalenv, &Declaration{
@@ -7153,8 +6517,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strlike_cs"].Fn, args, result)
+				declaration := declarations["strlike_cs"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -7770,8 +7136,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["toLower"].Fn, args, result)
+				declaration := declarations["toLower"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -7854,8 +7222,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["toUpper"].Fn, args, result)
+				declaration := declarations["toUpper"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -7938,8 +7308,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["replace"].Fn, args, result)
+				declaration := declarations["replace"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8147,8 +7519,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strtrim"].Fn, args, result)
+				declaration := declarations["strtrim"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8231,8 +7605,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strltrim"].Fn, args, result)
+				declaration := declarations["strltrim"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8344,8 +7720,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["strrtrim"].Fn, args, result)
+				declaration := declarations["strrtrim"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -8461,8 +7839,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_trim"].Fn, args, result)
+				declaration := declarations["sql_trim"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -8791,8 +8171,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_ltrim"].Fn, args, result)
+				declaration := declarations["sql_ltrim"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -9152,8 +8534,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_rtrim"].Fn, args, result)
+				declaration := declarations["sql_rtrim"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -9519,8 +8903,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["split"].Fn, args, result)
+				declaration := declarations["split"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d3 JITValueDesc
 				_ = d3
@@ -10843,8 +10229,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["string_repeat"].Fn, args, result)
+				declaration := declarations["string_repeat"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -11727,9 +11115,11 @@ func init_strings() {
 			},
 			Const: true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["collate"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["collate"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -11749,8 +11139,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["htmlentities"].Fn, args, result)
+				declaration := declarations["htmlentities"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -11833,8 +11225,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["urlencode"].Fn, args, result)
+				declaration := declarations["urlencode"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -11921,8 +11315,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["urldecode"].Fn, args, result)
+				declaration := declarations["urldecode"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -12271,8 +11667,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode"].Fn, args, result)
+				declaration := declarations["json_encode"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -12614,8 +12012,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_quote"].Fn, args, result)
+				declaration := declarations["json_quote"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -14287,9 +13687,11 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_encode_assoc"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["json_encode_assoc"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -14313,8 +13715,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_decode"].Fn, args, result)
+				declaration := declarations["json_decode"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -14783,8 +14187,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["json_decode_scmer"].Fn, args, result)
+				declaration := declarations["json_decode_scmer"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -15209,8 +14615,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["base64_encode"].Fn, args, result)
+				declaration := declarations["base64_encode"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -15362,8 +14770,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["base64_decode"].Fn, args, result)
+				declaration := declarations["base64_decode"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -15755,9 +15165,11 @@ func init_strings() {
 			Return: &TypeDescriptor{Kind: "string"},
 			Const:  true,
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: static Go callback value.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sql_unescape"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["sql_unescape"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -15782,8 +15194,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["bin2hex"].Fn, args, result)
+				declaration := declarations["bin2hex"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -16777,8 +16191,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["bin2hex"].Fn, args, result)
+				declaration := declarations["bin2hex"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d2 JITValueDesc
 				_ = d2
@@ -17769,8 +17185,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["hex2bin"].Fn, args, result)
+				declaration := declarations["hex2bin"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -18126,8 +17544,10 @@ func init_strings() {
 			Const:  false, /* NOT const — each call must return a unique value */
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["uuid"].Fn, args, result)
+				declaration := declarations["uuid"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d1 JITValueDesc
 				_ = d1
@@ -18437,8 +17857,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["randomBytes"].Fn, args, result)
+				declaration := declarations["randomBytes"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -19244,8 +18666,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_replace"].Fn, args, result)
+				declaration := declarations["regexp_replace"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -19964,8 +19388,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["fnv_hash"].Fn, args, result)
+				declaration := declarations["fnv_hash"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -20061,8 +19487,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["stable_structural_hash"].Fn, args, result)
+				declaration := declarations["stable_structural_hash"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -21244,8 +20672,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sha1"].Fn, args, result)
+				declaration := declarations["sha1"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -21419,8 +20849,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["sha256"].Fn, args, result)
+				declaration := declarations["sha256"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -21599,8 +21031,10 @@ func init_strings() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["regexp_test"].Fn, args, result)
+				declaration := declarations["regexp_test"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0

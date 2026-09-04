@@ -71,8 +71,18 @@ func jitMatchBranchEnv(outer *JITEnv) *JITEnv {
 }
 
 func jitMatchStableValue(ctx *JITContext, value JITValueDesc) JITValueDesc {
-	if value.Loc == LocImm || value.Loc == LocStackPair || value.Loc == LocInputPair || value.Loc == LocVirtualSlice {
+	if value.Loc == LocImm || value.Loc == LocInputPair || value.Loc == LocVirtualSlice {
 		return value
+	}
+	if value.Loc == LocStackPair {
+		off := ctx.AllocStack(16)
+		ctx.EmitStoreScmerToStack(value, off)
+		return JITValueDesc{
+			Loc: LocStackPair, Type: value.Type, StackOff: off,
+			KnownSliceLen: value.KnownSliceLen, KnownSliceCap: value.KnownSliceCap,
+			SliceSizeKnown: value.SliceSizeKnown, NoHeapPointer: value.NoHeapPointer,
+			Rooted: true,
+		}
 	}
 	src := value
 	ctx.EnsureDesc(&src)
@@ -109,6 +119,15 @@ func jitMatchBindValue(ctx *JITContext, env *JITEnv, pattern Scmer, value JITVal
 			copy(numbered, env.Numbered)
 			env.Numbered = numbered
 		}
+		target := env.Numbered[idx]
+		if target.Loc == LocStackPair {
+			ctx.EmitCopyScmerToDesc(&target, &bound)
+			target.Type = bound.Type
+			target.NoHeapPointer = bound.NoHeapPointer
+			target.Rooted = true
+			env.Numbered[idx] = target
+			return
+		}
 		env.Numbered[idx] = bound
 		return
 	}
@@ -118,7 +137,14 @@ func jitMatchBindValue(ctx *JITContext, env *JITEnv, pattern Scmer, value JITVal
 	if env.Vars == nil {
 		env.Vars = make(map[Symbol]JITValueDesc)
 	}
-	env.Vars[pattern.Symbol()] = bound
+	off := ctx.AllocStack(16)
+	ctx.EmitStoreScmerToStack(bound, off)
+	env.Vars[pattern.Symbol()] = JITValueDesc{
+		Loc: LocStackPair, Type: bound.Type, StackOff: off,
+		KnownSliceLen: bound.KnownSliceLen, KnownSliceCap: bound.KnownSliceCap,
+		SliceSizeKnown: bound.SliceSizeKnown, NoHeapPointer: bound.NoHeapPointer,
+		Rooted: true,
+	}
 }
 
 func jitMatchMaterializeImm(ctx *JITContext, value Scmer) JITValueDesc {
@@ -647,20 +673,7 @@ func jitCompileMatch(ctx *JITContext, list []Scmer, sliceBase Reg, result JITVal
 	for valueExpr.IsSourceInfo() {
 		valueExpr = valueExpr.SourceInfo().value
 	}
-	var value JITValueDesc
-	if items, ok := scmerAsSlice(valueExpr); ok && len(items) > 0 && items[0].SymbolEquals("list") {
-		values := make([]JITValueDesc, len(items)-1)
-		for i := 1; i < len(items); i++ {
-			item := jitCompileExpr(ctx, items[i], sliceBase, JITValueDesc{Loc: LocAny})
-			values[i-1] = jitMatchStableValue(ctx, item)
-		}
-		value = JITValueDesc{
-			Loc: LocVirtualSlice, Type: tagSlice, Virtual: values,
-			KnownSliceLen: int32(len(values)), KnownSliceCap: int32(len(values)), SliceSizeKnown: true,
-		}
-	} else {
-		value = jitCompileExpr(ctx, valueExpr, sliceBase, JITValueDesc{Loc: LocAny})
-	}
+	value := jitCompileExpr(ctx, valueExpr, sliceBase, JITValueDesc{Loc: LocAny})
 	value = jitMatchStableValue(ctx, value)
 	var target JITValueDesc
 	if result.Loc == LocStackPair {

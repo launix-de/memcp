@@ -243,6 +243,11 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}),
 		NewString("websocket"), NewFunc(func(a ...Scmer) Scmer {
 			// upgrade to a websocket, params: onMessage, onClose
+			onMessage := a[0]
+			onClose := NewNil()
+			if len(a) > 1 {
+				onClose = a[1]
+			}
 			var upgrader = websocket.Upgrader{
 				ReadBufferSize:  1024,
 				WriteBufferSize: 1024,
@@ -265,8 +270,8 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 					if err != nil {
 						if _, ok := err.(*websocket.CloseError); ok {
 							// closed connection
-							if len(a) > 1 {
-								Apply(a[1]) // close callback
+							if !onClose.IsNil() {
+								Apply(onClose) // close callback
 							}
 							return // exit endless loop
 						} else {
@@ -275,7 +280,7 @@ func (s *HttpServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 						}
 					}
 					if messageType == 1 {
-						Apply(a[0], NewString(string(msg)))
+						Apply(onMessage, NewString(string(msg)))
 					}
 				}
 			}()

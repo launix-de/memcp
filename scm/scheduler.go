@@ -255,9 +255,11 @@ func init_scheduler() {
 		Type: &TypeDescriptor{Kind: "func", Description: "Schedules a callback to run after the given delay in milliseconds (fractional values allowed for sub-millisecond precision).",
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "func", Label: "callback", Description: "function to execute once the timeout expires", Params: []*TypeDescriptor{{Kind: "any", Label: "args", Variadic: true}}, Return: &TypeDescriptor{Kind: "any"}}, &TypeDescriptor{Kind: "number", Label: "milliseconds", Description: "milliseconds until execution"}, &TypeDescriptor{Kind: "any", Label: "args...", Description: "optional arguments forwarded to the callback", Variadic: true}},
 			Return: &TypeDescriptor{Kind: "int"},
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["setTimeout"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["setTimeout"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -271,8 +273,10 @@ func init_scheduler() {
 			Params: []*TypeDescriptor{&TypeDescriptor{Kind: "number", Label: "id", Description: "identifier returned by setTimeout"}},
 			Return: &TypeDescriptor{Kind: "bool"},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["clearTimeout"].Fn, args, result)
+				declaration := declarations["clearTimeout"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0

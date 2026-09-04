@@ -1589,14 +1589,7 @@ func prepareReadMapReducerStorage(mr *ShardMapReducer, workspace *shardMapReduce
 }
 
 func prepareMapReducerCallFrame(mr *ShardMapReducer) {
-	required := mr.mapReduceProgram.CallFrameSize(len(mr.args))
-	if required <= cap(mr.args) {
-		mr.args = mr.args[:required]
-		return
-	}
-	args := make([]scm.Scmer, required)
-	copy(args, mr.args)
-	mr.args = args
+	mr.args = mr.mapReduceProgram.PrepareCallFrame(mr.args)
 }
 
 // initReadMapReducer initializes an ordinary read-only mapper without the
@@ -2093,7 +2086,7 @@ func (m *ShardMapReducer) Stream(acc scm.Scmer, recids []uint32, batchids []uint
 
 func (m *ShardMapReducer) callMapReduce(acc scm.Scmer) scm.Scmer {
 	m.args[0] = acc
-	return m.mapReduceProgram.Call(m.args)
+	return m.mapReduceProgram.CallPrepared(m.args)
 }
 
 // processMainBlock is a tight loop over main-storage records – no branching

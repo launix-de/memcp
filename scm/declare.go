@@ -26,6 +26,23 @@ import "strings"
 type JITEmitter func(ctx *JITContext, args []Scmer, descs []JITValueDesc, result JITValueDesc) JITValueDesc
 type JITCondEmitter func(ctx *JITContext, args []Scmer, trueLabel, falseLabel JITLabel)
 
+// SyntaxKind describes lexical behavior of unevaluated syntax. JIT tree
+// analyses consume this declaration metadata instead of recognizing builtins
+// by name, so aliases and optimizer-resolved special-form values behave alike.
+type SyntaxKind uint8
+
+const (
+	SyntaxOrdinary SyntaxKind = iota
+	SyntaxQuote
+	SyntaxEval
+	SyntaxParser
+	SyntaxLambda
+	SyntaxMatch
+	SyntaxBegin
+	SyntaxBeginMut
+	SyntaxOuter
+)
+
 // Declaration describes a built-in or Scheme-defined function.
 type Declaration struct {
 	Name            string
@@ -34,6 +51,8 @@ type Declaration struct {
 	IsSpecialForm   bool
 	Type            *TypeDescriptor
 	RetainsCallArgs bool // native result or state may retain the variadic argument array
+	SyntaxKind      SyntaxKind
+	evalDispatch    specialFormDispatch
 	// Optimize owns declaration-specific rewrites. When set, the optimizer calls
 	// it instead of the default argument optimization and post-processing path.
 	Optimize                 func(v []Scmer, oc *OptimizerContext, useResult bool) (Scmer, *TypeDescriptor)
@@ -72,6 +91,7 @@ func (d *Declaration) MaxParams() int {
 type TypeDescriptor struct {
 	Kind           string                     // "any"|"string"|"number"|"int"|"bool"|"nil"|"symbol"|"func"|"list"|"assoc"
 	NoEscape       bool                       // true = value will NOT outlive its scope (safe for stack alloc); default false = may escape (conservative)
+	SameGoroutine  bool                       // for NoEscape func parameters: callback runs synchronously on the caller goroutine
 	Transfer       bool                       // callee receives ownership, can mutate
 	CallsOnce      bool                       // for func params: callback is invoked at most once per call; default false = unknown or repeated
 	Const          bool                       // value is a compile-time constant; for func: safe to constant-fold

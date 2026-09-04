@@ -29,6 +29,15 @@ func jitRuntimeStackCheck() (guardOffset, stackSmall, moreStackPC uintptr) {
 	return config.StackGuardOffset, config.StackSmall, config.MoreStackPC
 }
 
+func jitPrepareProcContextType(captureCount int) unsafe.Pointer {
+	prepared := jit.TailTypeFor[ProcJIT](uintptr(captureCount))
+	return unsafe.Pointer(&prepared)
+}
+
+func jitRuntimeAllocTyped(preparedType unsafe.Pointer) unsafe.Pointer {
+	return (*jit.TailType)(preparedType).Alloc()
+}
+
 // registerJITArena registers a JIT arena with the Go runtime so the
 // unwinder, GC, and panic/recover can walk through JIT frames.
 // The Describe callback resolves PCs to Scheme source locations
@@ -83,7 +92,10 @@ func publishJITStackMaps(a *jitArena, maps []jitStackMap) {
 		}
 		if maps[i].entry {
 			runtimeMaps[i] = jit.StackMap{
-				PCOffset:       maps[i].pcOffset,
+				PCOffset: maps[i].pcOffset,
+				// The Go-compatible morestack path spills the incoming variadic
+				// slice at SP+8, SP+16 and SP+24. Its data word points into the
+				// caller's JIT frame and must be relocated when copystack moves it.
 				FrameWords:     4,
 				PointerMask:    []byte{0b00000010},
 				HasUnwind:      true,

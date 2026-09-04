@@ -387,24 +387,35 @@ func WithSession(session Scmer, fn Scmer) Scmer {
 	if !fn.IsProc() {
 		return Apply(fn)
 	}
-	proc := *fn.Proc()
-	outer := proc.En
+	original := fn.Proc()
+	proc := *original
+	outer := original.En
 	if outer == nil {
 		outer = &Globalenv
 	}
+	previousSession, hadPreviousSession := outer.Vars[Symbol("session")]
 	vars := make(Vars, len(outer.Vars)+1)
 	for name, value := range outer.Vars {
 		vars[name] = value
 	}
 	vars[Symbol("session")] = session
-	proc.En = &Env{
+	reboundEnv := &Env{
 		Vars:         vars,
 		VarsNumbered: outer.VarsNumbered,
 		Outer:        outer.Outer,
 		Nodefine:     outer.Nodefine,
 	}
+	if rebound := jitRebindProcCapture(original, reboundEnv, NewSymbol("session"), previousSession, hadPreviousSession, session); rebound != nil {
+		return Apply(Scmer{ptr: (*byte)(unsafe.Pointer(rebound)), aux: makeAux(tagProc, 0)})
+	}
+	proc.En = reboundEnv
+	proc.JITCode = 0
 	proc.Compiled = nil
-	return Apply(NewProcStruct(proc))
+	callable := NewProcStruct(proc)
+	if jitEnabled {
+		callable = jitCompileMode(true, callable)
+	}
+	return Apply(callable)
 }
 
 func init_sync() {
@@ -426,8 +437,10 @@ func init_sync() {
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "stored value, state flag, or operation result"},
 			},
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["newpromise"].Fn, args, result)
+				declaration := declarations["newpromise"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				var d0 JITValueDesc
 				_ = d0
@@ -1550,9 +1563,11 @@ func init_sync() {
 		Fn: NewSession,
 		Type: &TypeDescriptor{Kind: "func", Description: "Creates a thread-safe key-value session. Call it without arguments to list values, with a key to read, with a key and value to store, or with get_or_compute_scoped, a scope, a key, and a producer to share one concurrent computation.",
 			Return: sessionCallableType,
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["newsession"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["newsession"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -1572,8 +1587,10 @@ func init_sync() {
 			Return: &TypeDescriptor{Kind: "any"},
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["with_session"].Fn, args, result)
+				declaration := declarations["with_session"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -1644,8 +1661,10 @@ func init_sync() {
 				{Kind: "any", Label: "args...", Description: "depends on the usage", Variadic: true},
 			},
 			Return: &TypeDescriptor{Kind: "any"},
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["context"].Fn, args, result)
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["context"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -1677,9 +1696,11 @@ func init_sync() {
 			},
 			Return: &TypeDescriptor{Kind: "bool"},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: channel select.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["sleep"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["sleep"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs:     true,
 			JITInlineCallbacks: false,
@@ -1687,16 +1708,19 @@ func init_sync() {
 		},
 	})
 	Declare(&Globalenv, &Declaration{
-		Name:            "once",
-		RetainsCallArgs: true,
+		Name: "once",
 
 		Fn: func(a ...Scmer) Scmer {
+			callable := a[0]
 			var params []Scmer
+			var paramsOnce sync.Once
 			once := sync.OnceValue[Scmer](func() Scmer {
-				return Apply(a[0], params...)
+				return Apply(callable, params...)
 			})
 			return NewFunc(func(a ...Scmer) Scmer {
-				params = a
+				paramsOnce.Do(func() {
+					params = append([]Scmer(nil), a...)
+				})
 				return once()
 			})
 		},
@@ -1711,9 +1735,11 @@ func init_sync() {
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result cached from the first call"},
 			},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: escaping or recursive Go closure.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["once"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["once"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -1765,9 +1791,11 @@ func init_sync() {
 				Return: &TypeDescriptor{Kind: "any", Label: "result", Description: "result returned by the protected function"},
 			},
 
-			JITEmit: func(ctx *JITContext, _ []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
+			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
 				// JITGen native call boundary: channel construction.
-				return jitEmitGoVariadicCallFromDescs(ctx, declarations["mutex"].Fn, args, result)
+				ctx.Coverage.NativeCalls++
+				declaration := declarations["mutex"]
+				return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 			},
 			JITVirtualArgs: true,
 			JITInlineCost:  65535,
@@ -1784,8 +1812,10 @@ func init_sync() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["numcpu"].Fn, args, result)
+				declaration := declarations["numcpu"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {
@@ -1833,8 +1863,10 @@ func init_sync() {
 			Const:  true,
 
 			JITEmit: func(ctx *JITContext, sourceArgs []Scmer, args []JITValueDesc, result JITValueDesc) JITValueDesc {
-				if !jitEnabled {
-					return jitEmitGoVariadicCallFromDescs(ctx, declarations["memstats"].Fn, args, result)
+				declaration := declarations["memstats"]
+				if !jitGeneratedEmitterInline(ctx, declaration, args) {
+					ctx.Coverage.NativeCalls++
+					return jitEmitGeneratedCallBoundary(ctx, declaration, sourceArgs, args, result)
 				}
 				/* DO NEVER MANUALLY EDIT THIS SECTION. RUN make jitgen TO UPDATE */
 				for i := range args {

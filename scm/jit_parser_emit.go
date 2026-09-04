@@ -143,6 +143,20 @@ type jitParserEmitter struct {
 	skipperRule       int
 }
 
+func (emitter *jitParserEmitter) statePointer() JITValueDesc {
+	state := emitter.state
+	emitter.ctx.EnsureDesc(&state)
+	if state.Loc != LocRegPair {
+		panic("jit: parser state has no pointer representation")
+	}
+	stateReg := emitter.ctx.AllocRegExcept(state.Reg, state.Reg2)
+	emitter.ctx.EmitMovRegMem(stateReg, state.Reg, 8)
+	emitter.ctx.FreeDesc(&state)
+	result := JITValueDesc{Loc: LocReg, Type: JITTypeUnknown, Reg: stateReg, RelocatablePointer: true}
+	emitter.ctx.BindReg(result.Reg, &result)
+	return result
+}
+
 func jitParserScalar(value int64) JITValueDesc {
 	return JITValueDesc{Loc: LocImm, Type: tagInt, Imm: NewInt(value), NoHeapPointer: true}
 }
@@ -413,12 +427,14 @@ func (emitter *jitParserEmitter) continuation(label JITLabel) int64 {
 func (emitter *jitParserEmitter) emitRuleRef(node *jitParserNode, success, failure JITLabel) {
 	accepted, rejected := emitter.ctx.ReserveLabel(), emitter.ctx.ReserveLabel()
 	position := emitter.loadPosition()
-	enterArgs := []JITValueDesc{emitter.state, jitParserScalar(int64(node.rule)), jitParserScalar(emitter.continuation(accepted)),
+	statePointer := emitter.statePointer()
+	enterArgs := []JITValueDesc{statePointer, jitParserScalar(int64(node.rule)), jitParserScalar(emitter.continuation(accepted)),
 		jitParserScalar(emitter.continuation(rejected)), position}
 	var wordsBuf [16]goCallArgWord
 	words := emitter.ctx.flattenArgs(enterArgs, &wordsBuf)
 	var resultsBuf [16]Reg
 	results := emitter.ctx.EmitGoCall(GoFuncAddr(jitParserEnterRuleNative), words, 3, &resultsBuf, nil)
+	emitter.ctx.FreeDesc(&statePointer)
 	emitter.ctx.FreeDesc(&position)
 	emitter.ctx.EmitCmpRegImm32(results[2], 0)
 	for _, reg := range results {
@@ -625,11 +641,13 @@ func jitEmitParserProgramCore(ctx *JITContext, program *jitParserProgram, input,
 		panic("jit: parser entry has no integer representation")
 	}
 	position := emitter.loadPosition()
-	enterArgs := []JITValueDesc{emitter.state, entryScalar, jitParserScalar(finishedID), jitParserScalar(failedID), position}
+	statePointer := emitter.statePointer()
+	enterArgs := []JITValueDesc{statePointer, entryScalar, jitParserScalar(finishedID), jitParserScalar(failedID), position}
 	var wordsBuf [16]goCallArgWord
 	words := ctx.flattenArgs(enterArgs, &wordsBuf)
 	var resultsBuf [16]Reg
 	results := ctx.EmitGoCall(GoFuncAddr(jitParserEnterRuleNative), words, 3, &resultsBuf, nil)
+	ctx.FreeDesc(&statePointer)
 	ctx.FreeDesc(&position)
 	ctx.EmitCmpRegImm32(results[2], 0)
 	for _, reg := range results {

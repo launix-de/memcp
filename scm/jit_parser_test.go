@@ -17,7 +17,84 @@ Copyright (C) 2026  Carl-Philip Hänsch
 
 package scm
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
+
+func TestJITParserMemoEntryStaysCacheCompact(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) == 8 && unsafe.Sizeof(jitParserMemoEntry{}) != 32 {
+		t.Fatalf("parser memo entry grew to %d bytes, want 32", unsafe.Sizeof(jitParserMemoEntry{}))
+	}
+}
+
+func TestJITParserMemoSeparatesRulesAndPositions(t *testing.T) {
+	program := &jitParserProgram{rules: make([]jitParserRule, 10)}
+	for index := range program.rules {
+		program.rules[index].lexicalParent = -1
+	}
+	program.prepareMemoLayout()
+	state := &jitParserState{
+		program:     program,
+		memoOffsets: make([]uint32, 4),
+	}
+	first := jitParserMemoEntry{value: NewString("first"), position: 1, success: true}
+	second := jitParserMemoEntry{value: NewString("second"), position: 2, success: true}
+	otherPosition := jitParserMemoEntry{value: NewString("other"), position: 3, success: true}
+
+	state.memoSet(jitParserMemoKey{rule: 7, position: 1}, first)
+	state.memoSet(jitParserMemoKey{rule: 8, position: 1}, second)
+	state.memoSet(jitParserMemoKey{rule: 7, position: 2}, otherPosition)
+
+	for key, want := range map[jitParserMemoKey]jitParserMemoEntry{
+		{rule: 7, position: 1}: first,
+		{rule: 8, position: 1}: second,
+		{rule: 7, position: 2}: otherPosition,
+	} {
+		got, exists := state.memoGet(key)
+		if !exists || got.position != want.position || got.success != want.success || !Equal(got.value, want.value) {
+			t.Fatalf("memoGet(%+v) = %+v, %v; want %+v, true", key, got, exists, want)
+		}
+	}
+
+	updated := jitParserMemoEntry{value: NewString("updated"), position: 4}
+	state.memoSet(jitParserMemoKey{rule: 7, position: 1}, updated)
+	got, exists := state.memoGet(jitParserMemoKey{rule: 7, position: 1})
+	if !exists || len(state.memoEntries) != 3 || !Equal(got.value, updated.value) || got.position != updated.position {
+		t.Fatalf("memo update = %+v, %v with %d entries; want %+v, true with 3 entries", got, exists, len(state.memoEntries), updated)
+	}
+	if _, exists := state.memoGet(jitParserMemoKey{rule: 9, position: 1}); exists {
+		t.Fatal("missing memo rule unexpectedly exists")
+	}
+}
+
+func TestJITParserReleaseDropsOversizedMemoStorage(t *testing.T) {
+	program := &jitParserProgram{}
+	program.pool.New = func() any { return new(jitParserState) }
+	state := &jitParserState{
+		memoOffsets: []uint32{1},
+		memoRules:   []uint32{1},
+		memoEntries: make([]jitParserMemoEntry, 1, jitParserRetainedMemoEntryCapacity+1),
+	}
+	state.memoEntries[0].value = NewString("captured")
+
+	program.releaseState(state)
+	if state.memoOffsets != nil || state.memoRules != nil || state.memoEntries != nil {
+		t.Fatalf("oversized parser memo retained: offsets=%v rules=%v entry-capacity=%d", state.memoOffsets != nil, state.memoRules != nil, cap(state.memoEntries))
+	}
+}
+
+func TestJITParserMemoCapacityHintIsBounded(t *testing.T) {
+	if got := jitParserMemoEntryCapacity(jitParserLargeInputBytes); got != 0 {
+		t.Fatalf("small input capacity hint = %d, want 0", got)
+	}
+	if got := jitParserMemoEntryCapacity(jitParserLargeInputBytes + 1); got <= 0 || got > jitParserMemoPreallocateLimit {
+		t.Fatalf("large input capacity hint = %d, want 1..%d", got, jitParserMemoPreallocateLimit)
+	}
+	if got := jitParserMemoEntryCapacity(int(^uint(0) >> 1)); got != jitParserMemoPreallocateLimit {
+		t.Fatalf("maximum input capacity hint = %d, want %d", got, jitParserMemoPreallocateLimit)
+	}
+}
 
 func TestJITParserGrammarMatchesPackrat(t *testing.T) {
 	if !jitEnabled {
@@ -125,5 +202,31 @@ func TestJITParserGeneratorReadsAncestorAndOuterScopes(t *testing.T) {
 	want := NewSlice([]Scmer{NewString("scope"), NewString("alpha"), NewString("beta")})
 	if !Equal(got, want) {
 		t.Fatalf("nested generator returned %s, want %s", String(got), String(want))
+	}
+}
+
+func TestJITParserRecursiveRightBranchKeepsOptionalBindings(t *testing.T) {
+	compiled := compileJITExpressionTestProc(t, `(lambda (input) (begin
+		(define word (parser (regex "[A-Z]" false true)))
+		(define combine (lambda (left right) (list left right)))
+		(define core (parser '(
+			(define value word)
+			(? (atom "WHERE" true) (define condition word))
+			(? (atom "ORDER" true) (define order word))
+			(? (atom "LIMIT" true) (define limit word)))
+			(list value condition order limit)))
+		(define select (parser (or
+			(parser '((define left core) (atom "UNION" true) (define right select))
+				(combine left right))
+			core)))
+		((parser (define command select) command) input)))`)
+	requireNoDynamicJITCalls(t, compiled)
+	got := compiled.Proc().Compiled.Call(NewString("A UNION B WHERE C ORDER D LIMIT E"))
+	want := NewSlice([]Scmer{
+		NewSlice([]Scmer{NewString("A"), NewNil(), NewNil(), NewNil()}),
+		NewSlice([]Scmer{NewString("B"), NewString("C"), NewString("D"), NewString("E")}),
+	})
+	if !Equal(got, want) {
+		t.Fatalf("recursive parser returned %s, want %s", String(got), String(want))
 	}
 }
