@@ -968,8 +968,13 @@ Used for @@var resolution so per-session SET affects @@var reads. */
 				(lambda (tx) (begin
 					/* SQL syntax mode */
 					(define sql_parse_input (strtrim sql))
-					/* tolerate an optional trailing ';' - must be at end of string */
-					(set sql_parse_input (match sql_parse_input (regex "^((?s:.*));\\s*$" _ body) body sql_parse_input))
+					/* tolerate an optional trailing ';' - input is already trimmed, so a
+					single last-character check replaces a backtracking regex on the hot path */
+					(define sql_parse_input_len (strlen sql_parse_input))
+					(if (and (> sql_parse_input_len 0)
+							(equal? (substr sql_parse_input (- sql_parse_input_len 1) 1) ";"))
+						(set sql_parse_input (substr sql_parse_input 0 (- sql_parse_input_len 1)))
+						nil)
 					(define mysql_username (coalesce (session "username") "root"))
 					(define formula (if (equal? (session "syntax") "postgresql")
 						(cached_parse psql_queryplan_cache (list parse_psql) schema sql_parse_input
