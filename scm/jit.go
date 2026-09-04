@@ -3110,33 +3110,39 @@ type jitCodeReservation struct {
 	done      bool
 	published bool
 	maps      []jitStackMap
+	onPublish func()
 }
 
 // complete publishes arena metadata in allocation order. Compilation itself
 // may run concurrently, but an entry point does not become reachable before
 // every earlier reservation has either published its maps or reported failure.
 func (a *jitArena) complete(reservation *jitCodeReservation, maps []jitStackMap) {
-	a.completeMode(reservation, maps, true)
+	a.completeMode(reservation, maps, true, nil)
 }
 
 // completeDeferred records metadata for code which cannot become reachable
 // before its enclosing reservation is published. Nested special-form thunks
 // use this to avoid waiting on the outer compiler which is currently emitting
 // them; the outer completion publishes both reservations in allocation order.
-func (a *jitArena) completeDeferred(reservation *jitCodeReservation, maps []jitStackMap) {
-	a.completeMode(reservation, maps, false)
+func (a *jitArena) completeDeferred(reservation *jitCodeReservation, maps []jitStackMap, onPublish func()) {
+	a.completeMode(reservation, maps, false, onPublish)
 }
 
-func (a *jitArena) completeMode(reservation *jitCodeReservation, maps []jitStackMap, wait bool) {
+func (a *jitArena) completeMode(reservation *jitCodeReservation, maps []jitStackMap, wait bool, onPublish func()) {
 	if a == nil || reservation == nil {
 		return
 	}
 	a.metaMu.Lock()
 	reservation.maps = maps
+	reservation.onPublish = onPublish
 	reservation.done = true
 	for a.metaNext < len(a.reservations) && a.reservations[a.metaNext].done {
 		ready := a.reservations[a.metaNext]
 		publishJITStackMaps(a, ready.maps)
+		if ready.onPublish != nil {
+			ready.onPublish()
+			ready.onPublish = nil
+		}
 		ready.published = true
 		a.metaNext++
 	}
@@ -7476,18 +7482,18 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 		if proc == nil || !atomic.CompareAndSwapUint32(&proc.jitCompiling, 0, 1) {
 			return v
 		}
-		defer atomic.StoreUint32(&proc.jitCompiling, 0)
+		releaseCompiling := true
+		defer func() {
+			if releaseCompiling {
+				atomic.StoreUint32(&proc.jitCompiling, 0)
+			}
+		}()
 		plan := proc.Compiled
 		// Try increasing buffer sizes for overflow retry
 		for _, codeCap := range [...]int{16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024} {
 			ptr, arena, reservation := globalJITPool.Alloc(codeCap)
 			buf := &execBuf{ptr: ptr, n: codeCap, arena: arena, reservation: reservation}
 			codeLen, roots, dependencies, overflow, hiddenArgs, needsStableArgs, coverage := jitCompileProcToExec(proc, buf, recursiveLambdas)
-			if waitForPublication {
-				arena.complete(reservation, buf.stackMaps)
-			} else {
-				arena.completeDeferred(reservation, buf.stackMaps)
-			}
 			if codeLen > 0 {
 				code := (*[1 << 30]byte)(ptr)[:codeLen:codeLen]
 				if JITLog {
@@ -7522,16 +7528,38 @@ func jitCompileModePublish(recursiveLambdas bool, waitForPublication, install bo
 					arena: arena,
 					code:  uintptr(ptr),
 				})
-				targetProc := proc
-				if !install {
-					copy := sourceProc
-					targetProc = &copy
-				}
-				attachProcJIT(targetProc, jep)
-				if install {
+				if waitForPublication {
+					arena.complete(reservation, buf.stackMaps)
+					targetProc := proc
+					if !install {
+						copy := sourceProc
+						targetProc = &copy
+					}
+					attachProcJIT(targetProc, jep)
 					return Scmer{ptr: (*byte)(unsafe.Pointer(targetProc)), aux: makeAux(tagProc, 0)}
 				}
+
+				// The enclosing reservation is not published yet, so return a
+				// private Proc which only the enclosing compiler can reach. Install
+				// the shared Proc after AddStackMaps publishes this reservation.
+				copy := sourceProc
+				targetProc := &copy
+				attachProcJIT(targetProc, jep)
+				var onPublish func()
+				if install {
+					releaseCompiling = false
+					onPublish = func() {
+						attachProcJIT(proc, jep)
+						atomic.StoreUint32(&proc.jitCompiling, 0)
+					}
+				}
+				arena.completeDeferred(reservation, buf.stackMaps, onPublish)
 				return Scmer{ptr: (*byte)(unsafe.Pointer(targetProc)), aux: makeAux(tagProc, 0)}
+			}
+			if waitForPublication {
+				arena.complete(reservation, buf.stackMaps)
+			} else {
+				arena.completeDeferred(reservation, buf.stackMaps, nil)
 			}
 			globalJITPool.Free(arena)
 			if !overflow {

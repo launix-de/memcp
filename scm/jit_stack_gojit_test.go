@@ -22,6 +22,7 @@ package scm
 import (
 	"bytes"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -132,5 +133,41 @@ func TestJITEntryGrowsStackInPrologue(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("JIT stack growth did not resume the generated procedure")
+	}
+}
+
+func TestJITDeferredCompilationReturnsPrivateProc(t *testing.T) {
+	template := Eval(Read(t.Name(), `(lambda (value) value)`), &Globalenv)
+	if !template.IsProc() || template.Proc() == nil {
+		t.Fatal("lambda did not produce a Proc template")
+	}
+	compiled := jitCompileModeDeferred(true, template)
+	if !compiled.IsProc() || compiled.Proc() == nil {
+		t.Fatal("deferred compilation did not return a Proc")
+	}
+	if compiled.Proc() == template.Proc() {
+		t.Fatal("deferred compilation returned the shared Proc template")
+	}
+	if template.Proc().JITCode == 0 || template.Proc().Compiled == nil {
+		t.Fatal("shared Proc template was not installed after immediate stack-map publication")
+	}
+	if compiled.Proc().JITCode == 0 || compiled.Proc().Compiled == nil {
+		t.Fatal("deferred compilation did not return its private compiled Proc")
+	}
+}
+
+func TestJITArenaDefersCallbackUntilStackMapPublication(t *testing.T) {
+	first := &jitCodeReservation{}
+	second := &jitCodeReservation{}
+	arena := &jitArena{reservations: []*jitCodeReservation{first, second}}
+	arena.metaCond = sync.NewCond(&arena.metaMu)
+	published := false
+	arena.completeDeferred(second, nil, func() { published = true })
+	if published {
+		t.Fatal("deferred entry became visible before the preceding stack maps")
+	}
+	arena.complete(first, nil)
+	if !published || !second.published {
+		t.Fatal("deferred entry was not installed with its stack maps")
 	}
 }
