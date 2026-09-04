@@ -31,7 +31,8 @@ setup:
 
 test_cases:
   - name: "A false guard discards a wide schedule predicate before decorrelation"
-    max_time: 5.0
+    # Keep the compile budget in the runner so its machine calibration applies.
+    max_time: 1.2
     scm: |
       (begin
         (define branch (lambda (i)
@@ -50,13 +51,9 @@ test_cases:
         (define session (newsession))
         (session "username" "root")
         (session "schema" "memcp-tests")
-        (define started (nanotime))
         (cached_parse (newcachemap) (list parse_sql) "memcp-tests" query
           (lambda (_schema _table _write) true) "root" session false)
-        (define elapsed (- (nanotime) started))
-        (if (< elapsed 1200000000)
-          "ok"
-          (error (concat "constant-false wide predicate compiled in " elapsed "ns"))))
+        "ok")
     expect:
       data: ["ok"]
 
