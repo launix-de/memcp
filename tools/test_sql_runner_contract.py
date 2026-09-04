@@ -101,9 +101,15 @@ class PerformanceScaleContractTest(unittest.TestCase):
 
     def test_adaptive_measurement_requires_five_runs_and_time_budget(self) -> None:
         with mock.patch("run_sql_tests.PERF_MIN_MEASURE_MS", 250):
-            self.assertFalse(adaptive_measurement_complete(4, 1_000_000_000))
-            self.assertFalse(adaptive_measurement_complete(100, 249_999_999))
-            self.assertTrue(adaptive_measurement_complete(5, 250_000_000))
+            self.assertFalse(adaptive_measurement_complete([250_000_000] * 4))
+            self.assertFalse(adaptive_measurement_complete([2_499_999] * 100))
+            self.assertTrue(adaptive_measurement_complete([50_000_000] * 5))
+
+    def test_adaptive_measurement_ignores_outliers_when_selecting_duration(self) -> None:
+        with mock.patch("run_sql_tests.PERF_MIN_MEASURE_MS", 1000):
+            samples = [60_000_000] * 5 + [700_000_000]
+            self.assertFalse(adaptive_measurement_complete(samples))
+            self.assertTrue(adaptive_measurement_complete([60_000_000] * 17))
 
     def test_performance_sample_uses_median_to_ignore_one_scheduling_outlier(self) -> None:
         self.assertEqual(performance_sample_ns([78, 79, 80, 81, 200]), 80)
