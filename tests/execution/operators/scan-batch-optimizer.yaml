@@ -124,7 +124,17 @@ test_cases:
 
   # === EXPLAIN: verify scan_batch appears in plan ===
 
-  - name: "EXPLAIN result-producing correlated join stays row-at-a-time"
+  - name: "EXPLAIN correlated join uses scan_batch"
+    sql: |
+      EXPLAIN SELECT c.name, o.amount
+      FROM sb_customers c, sb_orders o
+      WHERE o.cid = c.cid
+    expect:
+      rows: 1
+      data_contains:
+        - code: "scan_batch"
+
+  - name: "EXPLAIN result-producing correlated join keeps compiled access"
     sql: |
       EXPLAIN SELECT c.name, o.amount
       FROM sb_customers c, sb_orders o
