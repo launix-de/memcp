@@ -304,6 +304,11 @@ run_memcp_forever() {
     rc=$?
     if [ $rc -ne 0 ]; then
       echo "⚠️  MemCP exited unexpectedly (code=$rc). Restarting..."
+      if [ -f "$memcp_log" ]; then
+        echo "--- MemCP log at unexpected exit (last 200 lines) ---"
+        tail -n 200 "$memcp_log"
+        echo "--- end MemCP log at unexpected exit ---"
+      fi
     fi
     sleep 0.5
   done
