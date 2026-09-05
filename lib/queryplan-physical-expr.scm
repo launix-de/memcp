@@ -5986,6 +5986,40 @@ join reducer aggregate shard-local states and merge them once at the root. */
 					nil))
 			grouped_scan))))
 
+/* All row-count aggregates over one global group share the same cardinality.
+Reduce the decorrelated input once and bind every COUNT-shaped output to that
+scalar state instead of allocating a one-entry group dictionary and one payload
+slot per syntactically repeated COUNT. */
+(define lower_direct_query_row_count_stage (lambda (stage fields offset_value limit_value)
+	(begin
+		(define input (gs_input stage))
+		(define alias (group_stage_input_alias stage))
+		(define keys '(1))
+		(define key_names (group_key_cols keys))
+		(define ags (gs_aggregates stage))
+		(define aggregate_state (quote __direct_row_count))
+		(define rowassoc_expr (runtime_cons_list_expr (merge (list
+			(list (car key_names) 1)
+			(merge (map ags (lambda (ag)
+				(list (aggregate_col_name ag) aggregate_state))))))))
+		(define emit_expr (list (quote resultrow)
+			(direct_group_result_assoc_expr alias keys key_names ags fields)))
+		(define offset_expr (coalesceNil offset_value 0))
+		(define limit_expr (coalesceNil limit_value -1))
+		(define count_plan (lower_query_block_as_dataset_reduce
+			input '() (list (quote lambda) '() 1) (quote +) 0 (quote +)))
+		(list
+			(list (quote lambda) (list aggregate_state)
+				(list (quote begin)
+					(list (quote define) (quote rowassoc) rowassoc_expr)
+					(list (quote if)
+						(list (quote and) (list (quote equal?) offset_expr 0)
+							(list (quote or) (list (quote equal?) limit_expr -1)
+								(list (quote >) limit_expr 0)))
+						(list (quote begin) emit_expr nil)
+						nil)))
+			count_plan))))
+
 (define aggregate_payload_merge_expr (lambda (ags idx)
 	(if (>= idx (count ags))
 		(quoted_runtime_list '())
