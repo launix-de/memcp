@@ -24,7 +24,25 @@ import (
 
 var benchmarkBoundaries boundaries
 
-func TestCompileScanAccessBindsRuntimeValuesWithoutAllocation(t *testing.T) {
+func testEqualScanAccess(column string, value scm.Scmer) (scm.Scmer, []scm.Scmer) {
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
+		scm.NewString("equal"), scm.NewString(column), scm.NewInt(0), scm.NewInt(0), scm.NewInt(3), scm.NewString(""),
+	}), []scm.Scmer{value}
+}
+
+func testUpperScanAccess(column string, value scm.Scmer, inclusive bool) (scm.Scmer, []scm.Scmer) {
+	flags := int64(0)
+	if inclusive {
+		flags = 2
+	}
+	return scm.NewSlice([]scm.Scmer{
+		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
+		scm.NewString("range"), scm.NewString(column), scm.NewInt(-1), scm.NewInt(0), scm.NewInt(flags), scm.NewString(""),
+	}), []scm.Scmer{value}
+}
+
+func TestCompileScanAccessReadsRuntimeValuesWithoutAllocation(t *testing.T) {
 	columns := scm.NewSlice([]scm.Scmer{
 		scm.NewSymbol("list"), scm.NewString("tenant"), scm.NewString("created_at"),
 	})
@@ -42,11 +60,11 @@ func TestCompileScanAccessBindsRuntimeValuesWithoutAllocation(t *testing.T) {
 		t.Fatalf("compileScanAccess returned ok=%v bindings=%d", ok, len(bindingExprs))
 	}
 	values := []scm.Scmer{scm.NewInt(7), scm.NewInt(100)}
-	var storage [scanAnalyzeScratchCapacity]columnboundaries
-	bound, valid := bindCompiledScanAccess(schema, values, storage[:0])
-	if !valid || len(bound) != 2 {
-		t.Fatalf("bindCompiledScanAccess returned valid=%v boundaries=%d", valid, len(bound))
+	access, valid := scanAccessFromScheme(schema, values, nil)
+	if !valid || access.len() != 2 {
+		t.Fatalf("scanAccessFromScheme returned valid=%v boundaries=%d", valid, access.len())
 	}
+	bound := materializeScanAccess(access)
 	if bound[0].col != "tenant" || bound[0].matcher != EqualMatcher || bound[0].lower.Int() != 7 {
 		t.Fatalf("unexpected compiled equality: %#v", bound[0])
 	}
@@ -54,9 +72,9 @@ func TestCompileScanAccessBindsRuntimeValuesWithoutAllocation(t *testing.T) {
 		t.Fatalf("unexpected compiled range: %#v", bound[1])
 	}
 	if allocs := testing.AllocsPerRun(1000, func() {
-		_, _ = bindCompiledScanAccess(schema, values, storage[:0])
+		_, _ = scanAccessFromScheme(schema, values, nil)
 	}); allocs != 0 {
-		t.Fatalf("compiled scan access binding allocated %.2f times per run, want 0", allocs)
+		t.Fatalf("compiled scan access view allocated %.2f times per run, want 0", allocs)
 	}
 }
 
@@ -89,10 +107,10 @@ func TestCompileScanAccessEncodesBatchSlots(t *testing.T) {
 	if !ok || len(bindings) != 0 {
 		t.Fatalf("batch access compilation returned ok=%v bindings=%d", ok, len(bindings))
 	}
-	var storage [scanAnalyzeScratchCapacity]columnboundaries
-	bound, valid := bindCompiledScanAccess(schema, nil, storage[:0])
-	if !valid || len(bound) != 1 || !bound[0].lowerBatch || !bound[0].upperBatch ||
-		bound[0].lowerBatchSubidx != 0 || bound[0].upperBatchSubidx != 0 {
+	access, valid := scanAccessFromScheme(schema, nil, nil)
+	bound := access.boundary(0)
+	if !valid || access.len() != 1 || !bound.lowerBatch || !bound.upperBatch ||
+		bound.lowerBatchSubidx != 0 || bound.upperBatchSubidx != 0 {
 		t.Fatalf("unexpected compiled batch boundary: valid=%v boundary=%#v", valid, bound)
 	}
 }
@@ -116,11 +134,11 @@ func TestCompileScanAccessKeepsCandidateHooksAfterSortedPrefix(t *testing.T) {
 		t.Fatalf("hook access compilation returned ok=%v bindings=%d", ok, len(bindings))
 	}
 	values := []scm.Scmer{scm.NewInt(7), scm.NewNil(), scm.NewString("prefix%")}
-	var storage [scanAnalyzeScratchCapacity]columnboundaries
-	bound, valid := bindCompiledScanAccess(schema, values, storage[:0])
-	if !valid || len(bound) != 3 {
-		t.Fatalf("compiled hooks returned valid=%v boundaries=%d", valid, len(bound))
+	access, valid := scanAccessFromScheme(schema, values, nil)
+	if !valid || access.len() != 3 {
+		t.Fatalf("compiled hooks returned valid=%v boundaries=%d", valid, access.len())
 	}
+	bound := materializeScanAccess(access)
 	if bound[0].matcher != EqualMatcher || bound[0].col != "tenant" {
 		t.Fatalf("equality is not the leading physical boundary: %#v", bound)
 	}
@@ -130,6 +148,78 @@ func TestCompileScanAccessKeepsCandidateHooksAfterSortedPrefix(t *testing.T) {
 	like := bound[2]
 	if like.matcher != LikeMatcher || like.collation != "utf8mb4_unicode_ci" || like.lower.String() != "prefix%" {
 		t.Fatalf("unexpected LIKE hook: %#v", like)
+	}
+}
+
+func TestPruneScanResidualDropsExactProbesAndKeepsLike(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"), scm.NewString("id"), scm.NewString("age"), scm.NewString("name"),
+	})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("id"), scm.NewSymbol("age"), scm.NewSymbol("name")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("and"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("equal??"), scm.NewSymbol("id"), scm.NewSymbol("wanted_id")}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol(">="), scm.NewSymbol("age"), scm.NewInt(18)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("strlike"), scm.NewSymbol("name"), scm.NewString("A%")}),
+		}),
+	})
+
+	residualColumns, residualFilter := pruneScanResidual(columns, filter, false)
+	columnItems, ok := scanStaticColumns(residualColumns)
+	if !ok || len(columnItems) != 1 || columnItems[0].String() != "name" {
+		t.Fatalf("residual columns = %s, want only name", scm.SerializeToString(residualColumns, &scm.Globalenv))
+	}
+	params, body, ok := scanLambdaParts(residualFilter)
+	if !ok || len(params) != 1 || !params[0].SymbolEquals("name") {
+		t.Fatalf("residual filter params = %s, want only name", scm.SerializeToString(residualFilter, &scm.Globalenv))
+	}
+	bodyItems, ok := scmerSlice(body)
+	if !ok || len(bodyItems) != 3 || !scanSymbolIs(bodyItems[0], "strlike") {
+		t.Fatalf("residual filter body = %s, want LIKE", scm.SerializeToString(body, &scm.Globalenv))
+	}
+}
+
+func TestPruneScanResidualKeepsSecondRangeColumn(t *testing.T) {
+	columns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"), scm.NewString("a"), scm.NewString("b"),
+	})
+	filter := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("lambda"),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("a"), scm.NewSymbol("b")}),
+		scm.NewSlice([]scm.Scmer{
+			scm.NewSymbol("and"),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("<="), scm.NewSymbol("a"), scm.NewInt(2)}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("<="), scm.NewSymbol("b"), scm.NewInt(1)}),
+		}),
+	})
+
+	residualColumns, residualFilter := pruneScanResidual(columns, filter, false)
+	columnItems, ok := scanStaticColumns(residualColumns)
+	if !ok || len(columnItems) != 1 || columnItems[0].String() != "b" {
+		t.Fatalf("residual columns = %s, want only b", scm.SerializeToString(residualColumns, &scm.Globalenv))
+	}
+	_, body, ok := scanLambdaParts(residualFilter)
+	bodyItems, sliced := scmerSlice(body)
+	if !ok || !sliced || len(bodyItems) != 3 || !scanSymbolIs(bodyItems[0], "<=") {
+		t.Fatalf("second range residual = %s, want b <= 1", scm.SerializeToString(residualFilter, &scm.Globalenv))
+	}
+}
+
+func TestScanAccessNullProbeIsImpossibleWithoutTreatingNilCheckAsImpossible(t *testing.T) {
+	exactSchema, _ := testEqualScanAccess("id", scm.NewNil())
+	exact, valid := scanAccessFromScheme(exactSchema, []scm.Scmer{scm.NewNil()}, nil)
+	if !valid || !exact.impossible() {
+		t.Fatal("runtime NULL equality probe must be impossible")
+	}
+	nilCheckSchema := scm.NewSlice([]scm.Scmer{
+		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
+		scm.NewString("equal"), scm.NewString("id"), scm.NewInt(-1), scm.NewInt(-1), scm.NewInt(3), scm.NewString(""),
+	})
+	nilCheck, valid := scanAccessFromScheme(nilCheckSchema, nil, nil)
+	if !valid || nilCheck.impossible() {
+		t.Fatal("IS NULL access must remain executable")
 	}
 }
 
@@ -553,18 +643,18 @@ func TestScanBufferSizeUsesSmallBufferOnlyForBoundUniqueKey(t *testing.T) {
 		}
 	}
 
-	if got := tbl.scanBufferSize(boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewInt(42))}); got != uniquePointScanBufferSize {
+	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewInt(42))}}); got != uniquePointScanBufferSize {
 		t.Fatalf("fully bound unique key buffer = %d, want %d", got, uniquePointScanBufferSize)
 	}
-	if got := tbl.scanBufferSize(boundaries{point("id", scm.NewInt(42))}); got != defaultScanBufferSize {
+	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("id", scm.NewInt(42))}}); got != defaultScanBufferSize {
 		t.Fatalf("partially bound unique key buffer = %d, want %d", got, defaultScanBufferSize)
 	}
-	if got := tbl.scanBufferSize(boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewNil())}); got != defaultScanBufferSize {
+	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("tenant_id", scm.NewInt(9)), point("id", scm.NewNil())}}); got != defaultScanBufferSize {
 		t.Fatalf("NULL unique key buffer = %d, want %d", got, defaultScanBufferSize)
 	}
 	rangeBoundary := point("id", scm.NewInt(42))
 	rangeBoundary.matcher = RangeMatcher
-	if got := tbl.scanBufferSize(boundaries{point("tenant_id", scm.NewInt(9)), rangeBoundary}); got != defaultScanBufferSize {
+	if got := tbl.scanBufferSize(scanAccess{suffix: boundaries{point("tenant_id", scm.NewInt(9)), rangeBoundary}}); got != defaultScanBufferSize {
 		t.Fatalf("range-bound unique key buffer = %d, want %d", got, defaultScanBufferSize)
 	}
 }
@@ -626,7 +716,7 @@ func TestEffectiveBoundaryInclusivenessUsesIndexedRange(t *testing.T) {
 		{col: "quantity", matcher: RangeMatcher, lowerInclusive: false, upperInclusive: false},
 	}
 	lower, _ := indexFromBoundaries(bounds)
-	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(bounds, lower)
+	lowerInclusive, upperInclusive := effectiveBoundaryInclusiveness(scanAccess{suffix: bounds}, lower)
 	if !lowerInclusive || !upperInclusive {
 		t.Fatalf("effective boundary inclusiveness = (%t, %t), want (true, true)", lowerInclusive, upperInclusive)
 	}
@@ -674,22 +764,20 @@ func TestBoundaryLikeNonPrefix(t *testing.T) {
 }
 
 func TestRecSetFilterBoundariesKeepLikeAndMembershipHooks(t *testing.T) {
-	body := scm.NewSlice([]scm.Scmer{
-		scm.NewSymbol("strlike"),
-		scm.NewSymbol("text"),
-		scm.NewString("%needle%"),
-	})
-	condition := buildProc([]string{"text"}, body)
 	owner := &recSet{}
-	bounds := recSetFilterBoundaries(owner, []string{"search"}, condition)
-	if len(bounds) != 2 {
-		t.Fatalf("combined RecSet/LIKE boundaries = %d, want 2", len(bounds))
+	schema := scm.NewSlice([]scm.Scmer{
+		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1),
+		scm.NewString("like"), scm.NewString("search"), scm.NewInt(0), scm.NewInt(0), scm.NewInt(3), scm.NewString(""),
+	})
+	access := recSetScanAccess(owner, schema, []scm.Scmer{scm.NewString("%needle%")})
+	if access.len() != 2 {
+		t.Fatalf("combined RecSet/LIKE boundaries = %d, want 2", access.len())
 	}
-	if bounds[0].matcher != LikeMatcher || bounds[1].matcher != RecSetMatcher {
+	if access.boundary(0).matcher != LikeMatcher || access.boundary(1).matcher != RecSetMatcher {
 		t.Fatalf("combined matcher order = (%s, %s), want (like, recset)",
-			bounds[0].matcher.Kind(), bounds[1].matcher.Kind())
+			access.boundary(0).matcher.Kind(), access.boundary(1).matcher.Kind())
 	}
-	if !bounds[1].lower.IsCustom(TagRecSet) || RecSetFromScmer(bounds[1].lower) != owner {
+	if !access.boundary(1).lower.IsCustom(TagRecSet) || RecSetFromScmer(access.boundary(1).lower) != owner {
 		t.Fatal("RecSet boundary did not retain the exact input membership")
 	}
 }
@@ -725,11 +813,11 @@ func TestRowWithinBoundsEqual(t *testing.T) {
 	idx := &StorageIndex{Cols: []string{"id"}, ColMatchers: []IndexAnalyzer{EqualMatcher}}
 	lower := []scm.Scmer{scm.NewInt(5)}
 
-	inRange, _ := idx.rowWithinBounds(boundaries{}, 1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(5) })
+	inRange, _ := idx.rowWithinBounds(scanAccess{}, 1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(5) })
 	if !inRange {
 		t.Error("expected match for equal value")
 	}
-	inRange, beyond := idx.rowWithinBounds(boundaries{}, 1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(10) })
+	inRange, beyond := idx.rowWithinBounds(scanAccess{}, 1, lower, scm.NewInt(5), true, func(i int) scm.Scmer { return scm.NewInt(10) })
 	if inRange {
 		t.Error("expected no match for different value")
 	}
@@ -744,7 +832,7 @@ func TestRowWithinBoundsLike(t *testing.T) {
 	lower := []scm.Scmer{scm.NewString("%Klaus%")}
 
 	// rowWithinBounds skips non-sorted columns entirely
-	inRange, _ := idx.rowWithinBounds(boundaries{}, 1, lower, scm.NewString("%Klaus%"), true, func(i int) scm.Scmer { return scm.NewString("anything") })
+	inRange, _ := idx.rowWithinBounds(scanAccess{}, 1, lower, scm.NewString("%Klaus%"), true, func(i int) scm.Scmer { return scm.NewString("anything") })
 	if !inRange {
 		t.Error("expected inRange=true (LIKE skipped in rowWithinBounds)")
 	}

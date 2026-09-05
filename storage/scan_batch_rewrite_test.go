@@ -124,7 +124,7 @@ func TestScanBatchOptimizerCompilesBatchAccess(t *testing.T) {
 	}
 	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
 	plan := scm.SerializeToString(optimized, &scm.Globalenv)
-	if !strings.Contains(plan, compiledScanAccessVersion) {
+	if !strings.Contains(plan, scanAccessSchemaName) {
 		t.Fatalf("scan_batch plan contains no compiled access: %s", plan)
 	}
 }

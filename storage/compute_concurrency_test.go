@@ -143,6 +143,13 @@ func BenchmarkComputedColumnRepair(b *testing.B) {
 }
 
 func countCollapsedComputor() scm.Scmer {
+	filterColumns := scm.NewSlice([]scm.Scmer{
+		scm.NewSymbol("list"),
+		scm.NewString("uid"),
+		scm.NewString("form"),
+		scm.NewString("subid"),
+		scm.NewString("k"),
+	})
 	filter := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("uid"),
@@ -160,6 +167,8 @@ func countCollapsedComputor() scm.Scmer {
 		En:      &scm.Globalenv,
 		NumVars: 4,
 	})
+	accessSchema, accessBindings, _ := compileScanAccess(filterColumns, filter)
+	accessValues := scm.NewSlice(append([]scm.Scmer{scm.NewSymbol("list")}, accessBindings...))
 	mapReduceFn := scm.NewProcStruct(scm.Proc{
 		Params: scm.NewSlice([]scm.Scmer{scm.NewSymbol("acc")}),
 		Body: scm.NewSlice([]scm.Scmer{
@@ -174,13 +183,9 @@ func countCollapsedComputor() scm.Scmer {
 			scm.NewSymbol("scan"),
 			scm.NewNil(),
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString("compconc"), scm.NewString("feature")}),
-			scm.NewSlice([]scm.Scmer{
-				scm.NewSymbol("list"),
-				scm.NewString("uid"),
-				scm.NewString("form"),
-				scm.NewString("subid"),
-				scm.NewString("k"),
-			}),
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), accessSchema}),
+			accessValues,
+			filterColumns,
 			filter,
 			scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}),
 			mapReduceFn,

@@ -23,14 +23,18 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* check admin credentials against system.user table */
 (define dashboard_check_admin (lambda (req) (begin
-	(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (acc password admin) (list password admin)) nil (lambda (a b) b)))
+	(set pw (scan_lookup nil (table "system" "user")
+		'("scan_access" 1 "map" 2 1 "equal" "username" 0 0 3 "" "password" "admin")
+		(list (req "username") (lambda (password admin) (list password admin)))))
 	(if (not (dashboard_auth_row_present? pw)) false
 		(and (equal? (car pw) (password (req "password"))) (car (cdr pw))))
 )))
 
 /* check any authenticated user (returns admin flag or false) */
 (define dashboard_check_user (lambda (req) (begin
-	(set pw (scan nil (table "system" "user") '("username") (lambda (username) (equal? username (req "username"))) '("password" "admin") (lambda (acc password admin) (list password admin)) nil (lambda (a b) b)))
+	(set pw (scan_lookup nil (table "system" "user")
+		'("scan_access" 1 "map" 2 1 "equal" "username" 0 0 3 "" "password" "admin")
+		(list (req "username") (lambda (password admin) (list password admin)))))
 	(if (not (dashboard_auth_row_present? pw)) nil
 		(if (equal? (car pw) (password (req "password"))) (equal? (car (cdr pw)) 1) nil))
 )))
@@ -49,7 +53,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 		(begin
 			/* build list of db names the user has access to; nil neutral avoids pre-call quirk */
 			(define allowed (scan nil (table "system" "access")
-				'("username" "database") (lambda (u db) (equal?? u username))
+				'("scan_access" 1 "scan" 0 -1 "equal" "username" 0 0 3 "") (list username)
+				'() (lambda () true)
 				'("database") (lambda (acc db) (if (nil? db) acc (cons db (if (nil? acc) (list) acc))))
 				nil (lambda (a b) (merge (list a b)))))
 			(filter (show) (lambda (db) (has? allowed db)))
@@ -96,7 +101,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 (define dashboard_has_db_access (lambda (username is_admin dbname)
 	(if is_admin true
 		(scan_lookup nil (table "system" "access")
-			'("scan_lookup_v1" 2 "username" "database" "exists" 0) (list username dbname))
+			'("scan_access" 2 "exists" 0 -1 "equal" "username" 0 0 3 "" "equal" "database" 1 1 3 "") (list username dbname))
 	)
 ))
 
@@ -130,10 +135,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 /* helper: build JSON for a single user entry (takes username string) */
 (define dashboard_build_user_json (lambda (uname) (begin
-	(set is_adm (scan_lookup nil (table "system" "user") '("scan_lookup_v1" 1 "username" "value" 1 "admin") (list uname)))
+	(set is_adm (scan_lookup nil (table "system" "user") '("scan_access" 1 "value" 1 -1 "equal" "username" 0 0 3 "" "admin") (list uname)))
 	/* get database access for non-admins */
 	(set dbs_csv (if is_adm ""
-		(scan nil (table "system" "access") '("username") (lambda (u) (equal?? u uname))
+		(scan nil (table "system" "access")
+			'("scan_access" 1 "scan" 0 -1 "equal" "username" 0 0 3 "") (list uname)
+			'() (lambda () true)
 			'("database") (lambda (acc db) (if (equal? acc "") (json_encode db) (concat acc "," (json_encode db))))
 			"" (lambda (a b) (if (equal? a "") b (if (equal? b "") a (concat a "," b)))))))
 	(concat "{\"username\":" (json_encode uname)
@@ -321,6 +328,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"/dashboard/api/logs" (begin
 				(if (dashboard_check_admin req) (begin
 					(define items (scan_order (session "__memcp_tx") (table "system_statistic" "logs")
+						'("scan_access" 0 "scan" 0 -1) '()
 						'() (lambda () true)
 						'("datetime") '(>) 0 0 100
 						'("datetime" "message")
@@ -335,6 +343,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 			"/dashboard/api/errors" (begin
 				(if (dashboard_check_admin req) (begin
 					(define items (scan (session "__memcp_tx") (table "system_statistic" "errors")
+						'("scan_access" 0 "scan" 0 -1) '()
 						'() (lambda () true)
 						'("datetime" "database" "user" "query" "error")
 						(lambda (acc dt db usr qry err) (begin
@@ -351,7 +360,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 					(dashboard_send_401 res)
 					(begin
 						(define default_pw (if is_admin
-							(equal? (scan_lookup nil (table "system" "user") '("scan_lookup_v1" 1 "username" "value" 1 "password") '("root"))
+							(equal? (scan_lookup nil (table "system" "user") '("scan_access" 1 "value" 1 -1 "equal" "username" 0 0 3 "" "password") '("root"))
 								(password "admin"))
 							false))
 						(dashboard_send_json res (concat
@@ -430,9 +439,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define max_print (settings "MaxPrintLog"))
 	(if (> max_print 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan nil (table "system_statistic" "logs") '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+			(define cnt (scan nil (table "system_statistic" "logs") '("scan_access" 0 "scan" 0 -1) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 			(if (> cnt max_print)
-				(scan_order nil (table "system_statistic" "logs") '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
+				(scan_order nil (table "system_statistic" "logs") '("scan_access" 0 "scan" 0 -1) '() '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_print) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
 			)
 		)) (lambda (e) true))
 	))
@@ -440,9 +449,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 	(define max_err (settings "MaxErrorQueryLog"))
 	(if (> max_err 0) (begin
 		(try (lambda () (begin
-			(define cnt (scan nil (table "system_statistic" "errors") '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
+			(define cnt (scan nil (table "system_statistic" "errors") '("scan_access" 0 "scan" 0 -1) '() '() (lambda () true) '() (lambda (acc) (+ acc 1)) 0 +))
 			(if (> cnt max_err)
-				(scan_order nil (table "system_statistic" "errors") '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
+				(scan_order nil (table "system_statistic" "errors") '("scan_access" 0 "scan" 0 -1) '() '() (lambda () true) '("datetime") '(<) 0 0 (- cnt max_err) '("$update") (lambda (acc $update) (begin ($update) acc)) nil)
 			)
 		)) (lambda (e) true))
 	))

@@ -35,6 +35,25 @@ func setupScanLookupTable(tb testing.TB, database string, rows [][]scm.Scmer) *t
 	return tbl
 }
 
+func testScanLookupSchema(consumer string, matchCols, mapCols []string) scm.Scmer {
+	mapperSlot := -1
+	if consumer == "map" {
+		mapperSlot = len(matchCols)
+	}
+	schema := []scm.Scmer{
+		scm.NewString(scanAccessSchemaName), scm.NewInt(int64(len(matchCols))), scm.NewString(consumer),
+		scm.NewInt(int64(len(mapCols))), scm.NewInt(int64(mapperSlot)),
+	}
+	for i, col := range matchCols {
+		schema = append(schema, scm.NewString("equal"), scm.NewString(col), scm.NewInt(int64(i)),
+			scm.NewInt(int64(i)), scm.NewInt(3), scm.NewString(""))
+	}
+	for _, col := range mapCols {
+		schema = append(schema, scm.NewString(col))
+	}
+	return scm.NewSlice(schema)
+}
+
 func TestScanLookupReturnsValueNullAndCardinalityError(t *testing.T) {
 	tbl := setupScanLookupTable(t, "test_scan_lookup", [][]scm.Scmer{
 		{scm.NewInt(1), scm.NewString("one")},
@@ -75,7 +94,7 @@ func TestScanLookupSchemeOperator(t *testing.T) {
 		scm.Globalenv.Vars[scm.Symbol("scan_lookup")],
 		scm.NewAny(NewTxContext(TxCursorStability)),
 		NewTableScmer(tbl),
-		scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("value"), scm.NewInt(1), scm.NewString("value")}),
+		testScanLookupSchema("value", []string{"key"}, []string{"value"}),
 		scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
 	)
 	if !scm.Equal(got, scm.NewString("seven")) {
@@ -85,7 +104,7 @@ func TestScanLookupSchemeOperator(t *testing.T) {
 		scm.Globalenv.Vars[scm.Symbol("scan_lookup")],
 		scm.NewAny(NewTxContext(TxCursorStability)),
 		NewTableScmer(tbl),
-		scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("exists"), scm.NewInt(0)}),
+		testScanLookupSchema("exists", []string{"key"}, nil),
 		scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
 	)
 	if !scm.ToBool(exists) {
@@ -94,11 +113,7 @@ func TestScanLookupSchemeOperator(t *testing.T) {
 }
 
 func TestScanLookupPlanBindingDoesNotAllocate(t *testing.T) {
-	schema := scm.NewSlice([]scm.Scmer{
-		scm.NewString("scan_lookup_v1"), scm.NewInt(2),
-		scm.NewString("tenant"), scm.NewString("key"),
-		scm.NewString("exists"), scm.NewInt(0),
-	})
+	schema := testScanLookupSchema("exists", []string{"tenant", "key"}, nil)
 	values := scm.NewSlice([]scm.Scmer{scm.NewInt(1), scm.NewInt(7)})
 	if allocs := testing.AllocsPerRun(1000, func() {
 		_ = parseScanLookupPlan(schema, values)
@@ -226,14 +241,14 @@ func TestCompiledScanLookupMapCanPerformNestedLookup(t *testing.T) {
 			scm.Globalenv.Vars[scm.Symbol("scan_lookup")],
 			txValue,
 			tableValue,
-			scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("value"), scm.NewInt(1), scm.NewString("value")}),
+			testScanLookupSchema("value", []string{"key"}, []string{"value"}),
 			scm.NewSlice([]scm.Scmer{scm.NewInt(7)}),
 		)
 	})
 	got := scm.Apply(operator,
 		txValue,
 		tableValue,
-		scm.NewSlice([]scm.Scmer{scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"), scm.NewString("map"), scm.NewInt(1), scm.NewString("value")}),
+		testScanLookupSchema("map", []string{"key"}, []string{"value"}),
 		scm.NewSlice([]scm.Scmer{scm.NewInt(7), mapper}),
 	)
 	if !scm.Equal(got, scm.NewString("seven")) {
@@ -268,10 +283,7 @@ func BenchmarkCompiledScanLookupWithTx(b *testing.B) {
 	}
 	tbl := setupScanLookupTable(b, "bench_compiled_scan_lookup", rows)
 	tx := NewTxContext(TxCursorStability)
-	schema := scm.NewSlice([]scm.Scmer{
-		scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"),
-		scm.NewString("value"), scm.NewInt(1), scm.NewString("value"),
-	})
+	schema := testScanLookupSchema("value", []string{"key"}, []string{"value"})
 	values := scm.NewSlice([]scm.Scmer{scm.NewInt(511)})
 	executeCompiledScanLookup(tbl, tx, schema, values)
 
@@ -374,10 +386,7 @@ func BenchmarkCompiledScanLookupMap(b *testing.B) {
 	mapper := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewInt(values[0].Int() + values[1].Int())
 	})
-	schema := scm.NewSlice([]scm.Scmer{
-		scm.NewString("scan_lookup_v1"), scm.NewInt(1), scm.NewString("key"),
-		scm.NewString("map"), scm.NewInt(2), scm.NewString("left_value"), scm.NewString("right_value"),
-	})
+	schema := testScanLookupSchema("map", []string{"key"}, []string{"left_value", "right_value"})
 	values := scm.NewSlice([]scm.Scmer{scm.NewInt(511), mapper})
 	executeCompiledScanLookup(tbl, tx, schema, values)
 

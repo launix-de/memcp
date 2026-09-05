@@ -35,6 +35,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 	sortDirs := []func(...scm.Scmer) scm.Scmer{scm.OptimizeProcToSerialFunction(scm.Globalenv.Vars[scm.Symbol("<")])}
 	orderedSpec := scanOrderTableSpec{
 		table:          tbl,
+		accessSchema:   newScanAccessSchema(scanAccessConsumerScan, nil, -1),
 		condition:      trueFn,
 		sortcols:       sortCols,
 		callbackCols:   []string{"id"},
@@ -45,7 +46,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 	recSetInputTable := benchScanTable(b, "family_recset_input")
 	recSetInputTable.Insert([]string{"id"}, [][]scm.Scmer{{scm.NewInt(1)}}, nil, scm.NewNil(), false, nil)
 	RebuildTable(recSetInputTable, true, false)
-	recSetInput := recSetInputTable.scanRecSet(nil, nil, trueFn, scm.NewNil(), nil)
+	recSetInput := recSetInputTable.scanRecSet(nil, nil, trueFn, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 	identityRecSet := scm.NewFunc(func(values ...scm.Scmer) scm.Scmer { return values[0] })
 
 	benchmarks := []struct {
@@ -55,13 +56,14 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 		{
 			name: "recset",
 			run: func() {
-				tbl.scanRecSet(nil, nil, trueFn, scm.NewNil(), nil)
+				tbl.scanRecSet(nil, nil, trueFn, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 			},
 		},
 		{
 			name: "recset_input",
 			run: func() {
-				recSetInput.filterToRecSet(nil, nil, trueFn)
+				recSetInput.filterToRecSet(nil, nil, trueFn,
+					newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 			},
 		},
 		{
@@ -82,7 +84,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 			run: func() {
 				tbl.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
 					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
-					scm.NewNil(), nil)
+					newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 			},
 		},
 		{
@@ -90,7 +92,7 @@ func BenchmarkScanFamilyFixedCosts(b *testing.B) {
 			run: func() {
 				recSetInput.scan_order(nil, nil, trueFn, sortCols, sortDirs, 0, 0, 72,
 					[]string{"id"}, mapReduceFn, nilValue, false, nilValue, nil, nilValue,
-					scm.NewNil(), nil)
+					newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 			},
 		},
 		{

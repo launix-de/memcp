@@ -483,7 +483,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 			col.OrcReduceInit,
 			nil,
 			scm.NewNil(),
-			scm.NewNil(),
+			newScanAccessSchema(scanAccessConsumerScan, nil, -1),
 			nil,
 		)
 		// Speculative callback-column prefetch may read rows rejected by the
@@ -555,7 +555,7 @@ func (t *table) incrementalRecomputeORC(name string, requestShard *storageShard,
 		col.OrcReduceInit,
 		nil,
 		scm.NewNil(),
-		scm.NewNil(),
+		newScanAccessSchema(scanAccessConsumerScan, nil, -1),
 		nil,
 	)
 }
@@ -685,7 +685,7 @@ func (t *table) invalidateORCFromSortKey(colName string, sortKeys []scm.Scmer) {
 			s.ensureMainCount(false)
 			var buf [1024]uint32
 			rowVals := make([]scm.Scmer, nCols)
-			s.iterateIndex(nil, bounds, lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+			s.iterateIndex(nil, scanAccess{suffix: bounds}, lower, upperLast, len(s.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 				for _, idx := range batch {
 					if s.deletions.Get(uint(idx)) {
 						continue
@@ -898,9 +898,9 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 			return extractScanJoinInfoBody(items[2], paramExpr.Slice())
 		}
 	}
-	if len(items) >= 5 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
+	if len(items) >= 7 && callHeadIs(items[0], "scan", "scan_order", "scalar_scan", "scalar_scan_order") {
 		tableIdx := 2
-		condColsIdx, filterIdx := 3, 4
+		condColsIdx, filterIdx := 5, 6
 		if len(items) <= filterIdx {
 			return nil
 		}
@@ -931,8 +931,8 @@ func extractScanJoinInfoBody(expr scm.Scmer, outerParams []scm.Scmer) []scanJoin
 		}
 		condCols := extractStringListFromAST(items[condColsIdx])
 		info.condCols = condCols
-		if len(items) > 5 {
-			info.mapCols = extractStringListFromAST(items[5])
+		if len(items) > 7 {
+			info.mapCols = extractStringListFromAST(items[7])
 		}
 		if len(condCols) > 0 {
 			info.srcCols, info.inputCols = extractEqualityJoins(items[filterIdx], condCols, outerParams)

@@ -2112,17 +2112,23 @@ would still have to project that value over the segment. */
 					(lower_column_expr_for_join sources default_alias key))))
 			nil))))
 
-/* Point probes use the same physical operator for EXISTS, direct projection,
-and computed projection. The quoted schema is persistent plan data; only the
-flat values expression is evaluated for each probe. */
+/* Point probes and ordinary scans share one access schema. Boundary metadata
+is cached with the plan; only the adjacent flat values list is evaluated for a
+probe. */
+(define compiled_scan_lookup_boundaries (lambda (lookup_cols slot)
+	(if (empty_list? lookup_cols)
+		'()
+		(merge (list "equal" (car lookup_cols) slot slot 3 "")
+			(compiled_scan_lookup_boundaries (cdr lookup_cols) (+ slot 1))))))
+
 (define compiled_scan_lookup_expr (lambda (tx table lookup_cols lookup_values consumer map_cols mapper)
 	(list (quote scan_lookup)
 		tx
 		table
 		(list (quote quote) (merge
-			(list "scan_lookup_v1" (count lookup_cols))
-			lookup_cols
-			(list consumer (count map_cols))
+			(list "scan_access" (count lookup_cols) consumer (count map_cols)
+				(if (equal? consumer "map") (count lookup_cols) -1))
+			(compiled_scan_lookup_boundaries lookup_cols 0)
 			map_cols))
 		(cons (quote list) (if (equal? consumer "map")
 			(merge lookup_values (list mapper))

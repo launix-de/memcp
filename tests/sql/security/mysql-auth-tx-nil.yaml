@@ -15,12 +15,12 @@ test_cases:
       (if
         (equal?
           (scan nil (table "system" "user")
-            '("username")
-            (lambda (username) (equal? username "auth_scan_nil_repro"))
-      '("password")
-      (lambda (acc password) password)
-      nil
-      (lambda (a b) b))
+            '("scan_access" 1 "scan" 0 -1 "equal" "username" 0 0 3 "") '("auth_scan_nil_repro")
+            '() (lambda () true)
+            '("password")
+            (lambda (acc password) password)
+            nil
+            (lambda (a b) b))
           (password "secret123"))
         "ok"
         (error "scan nil over system.user returned wrong password"))
@@ -37,7 +37,7 @@ test_cases:
       (if
         (equal?
           (scan_lookup nil (table "system" "user")
-            '("scan_lookup_v1" 1 "username" "value" 1 "password") '("auth_scan_nil_repro"))
+            '("scan_access" 1 "value" 1 -1 "equal" "username" 0 0 3 "" "password") '("auth_scan_nil_repro"))
           (password "secret123"))
         "ok"
         (error "scan_lookup nil over system.user returned wrong password"))

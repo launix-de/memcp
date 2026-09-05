@@ -98,7 +98,7 @@ func TestCollectRelevantShardsUsesPartitionBounds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := collectRelevantShards(schema, []columnboundaries{tt.boundary}, shards)
+			got := collectRelevantShards(schema, scanAccess{suffix: boundaries{tt.boundary}}, shards)
 			if len(got) != len(tt.wantShards) {
 				t.Fatalf("collectRelevantShards returned %d shards, want %d", len(got), len(tt.wantShards))
 			}
@@ -145,7 +145,7 @@ func TestIterateShardsParallelMarksFreeSingleShardSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	done := tbl.iterateShardsParallel(nil, nil, func(s *storageShard, solo bool) {
+	done := tbl.iterateShardsParallel(nil, scanAccess{}, func(s *storageShard, solo bool) {
 		calls++
 		sawSolo = solo
 	})
@@ -172,7 +172,7 @@ func TestIterateShardsParallelReleasesFreeShardRegistrationOnPanic(t *testing.T)
 				t.Fatal("iterateShardsParallel callback did not panic")
 			}
 		}()
-		tbl.iterateShardsParallel(nil, nil, func(*storageShard, bool) {
+		tbl.iterateShardsParallel(nil, scanAccess{}, func(*storageShard, bool) {
 			panic("forced scan failure")
 		})
 	}()
@@ -200,7 +200,7 @@ func TestRepartitionPublishesWhileOldGenerationReaderRuns(t *testing.T) {
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		tbl.iterateShardsParallel(nil, nil, func(*storageShard, bool) {
+		tbl.iterateShardsParallel(nil, scanAccess{}, func(*storageShard, bool) {
 			close(readerEntered)
 			<-releaseReader
 		})
@@ -353,14 +353,14 @@ func TestIterateShardsParallelMarksPartitionSingleShardSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	done := tbl.iterateShardsParallel(nil, []columnboundaries{{
+	done := tbl.iterateShardsParallel(nil, scanAccess{suffix: boundaries{{
 		col:            "id",
 		matcher:        EqualMatcher,
 		lower:          scm.NewInt(15),
 		lowerInclusive: true,
 		upper:          scm.NewInt(15),
 		upperInclusive: true,
-	}}, func(s *storageShard, solo bool) {
+	}}}, func(s *storageShard, solo bool) {
 		calls++
 		sawSolo = solo
 	})
@@ -389,7 +389,7 @@ func TestIterateShardsParallelMarksPartitionMultiShardNonSolo(t *testing.T) {
 
 	var calls atomic.Int32
 	var sawSolo atomic.Bool
-	done := tbl.iterateShardsParallel(nil, nil, func(s *storageShard, solo bool) {
+	done := tbl.iterateShardsParallel(nil, scanAccess{}, func(s *storageShard, solo bool) {
 		calls.Add(1)
 		if solo {
 			sawSolo.Store(true)
@@ -423,7 +423,7 @@ func TestIterateShardsParallelMarksSynchronousMultiShardNonSolo(t *testing.T) {
 
 	calls := 0
 	sawSolo := false
-	done := tbl.iterateShardsParallel(tx, nil, func(_ *storageShard, solo bool) {
+	done := tbl.iterateShardsParallel(tx, scanAccess{}, func(_ *storageShard, solo bool) {
 		calls++
 		sawSolo = sawSolo || solo
 	})
@@ -476,7 +476,7 @@ func TestIterateShardsParallelAutocommitUsesExplicitContext(t *testing.T) {
 	var missingSession atomic.Bool
 	var missingSessionState atomic.Bool
 	var missingQuerySeq atomic.Bool
-	done := tbl.iterateShardsParallel(tx, nil, func(s *storageShard, solo bool) {
+	done := tbl.iterateShardsParallel(tx, scanAccess{}, func(s *storageShard, solo bool) {
 		calls.Add(1)
 		if !scm.Apply(tx.Session, scm.NewString("worker-session-test")).Bool() {
 			missingSession.Store(true)

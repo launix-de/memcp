@@ -2174,7 +2174,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 				(cons src src_rest) (if (or (not (empty_list? src_rest)) (not (source_is_base_table? src)))
 					nil
 					(match stage
-						'(_ _id stage_src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
+						'(_ _id stage_src col sortcols sortdirs partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
 						(if (or (not (equal? (source_schema stage_src) (source_schema src)))
 							(not (equal? (source_relation stage_src) (source_relation src))))
 							nil
@@ -2217,7 +2217,7 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 													nil)))
 											(define map_params (map scan_mapcols (lambda (map_col) (symbol (concat (source_alias src) "." map_col)))))
 											(define mapped_expr (list (quote list)
-												(row_number_scan_partition_expr (source_alias src) mapcols)
+												(row_number_scan_partition_expr (source_alias src) partitioncount mapcols)
 												continuation_expr))
 											(define reduce_expr (list (quote lambda) (list (quote state) (quote mapped))
 												(list (quote begin)
@@ -4220,6 +4220,8 @@ RecSet; membership edges retain their own physical operators. */
 								(list (quote scan_order_batch_accept)
 									(physical_query_tx_symbol)
 									table_expr
+									(list (quote quote) (list "scan_access" 0 "scan" 0 -1))
+									(list (quote list))
 									batch_filter
 									(cons (quote list) batch_ordercols)
 									(cons (quote list) batch_orderdirs)
@@ -5329,7 +5331,9 @@ until the caller has selected this physical alternative. */
 			scalar_carrier))
 		(define scan_expr (if use_batch_accept
 			(list (quote scan_order_batch_accept)
-				(physical_query_tx_symbol) table_expr batch_filter
+				(physical_query_tx_symbol) table_expr
+				(list (quote quote) (list "scan_access" 0 "scan" 0 -1))
+				(list (quote list)) batch_filter
 				(cons (quote list) physical_ordercols)
 				(cons (quote list) physical_orderdirs)
 				0 offset limit
@@ -5601,12 +5605,14 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 (define without_col (lambda (cols col)
 	(filter (coalesceNil cols '()) (lambda (item) (not (equal? item col))))))
 
-(define row_number_scan_partition_expr (lambda (alias mapcols)
-	(if (empty_list? mapcols)
-		true
-		(if (single_source? mapcols)
-			(symbol (concat alias "." (car mapcols)))
-			(cons (quote list) (map mapcols (lambda (col) (symbol (concat alias "." col)))))))))
+(define row_number_scan_partition_expr (lambda (alias partitioncount mapcols)
+	(begin
+		(define partitioncols (slice mapcols 0 partitioncount))
+		(if (empty_list? partitioncols)
+			true
+			(if (single_source? partitioncols)
+				(symbol (concat alias "." (car partitioncols)))
+				(cons (quote list) (map partitioncols (lambda (col) (symbol (concat alias "." col))))))))))
 
 (define replace_lowered_row_number_symbol (lambda (alias col expr)
 	(if (equal? expr (symbol (concat alias "." col)))
@@ -5625,7 +5631,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 		(define limit (nth filter 1))
 		(define stripped_condition (nth filter 2))
 		(match stage
-			'(_ _id _stage_src col sortcols sortdirs _partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
+			'(_ _id _stage_src col sortcols sortdirs partitioncount mapcols _mapfn _reducefn _reduceinit _facts)
 			(begin
 				(define membership_filter_expr (if membership_filter
 					(recset_contains_call_expr membership_var)
@@ -5650,7 +5656,7 @@ ordered operator's Costgen-owned scan, map and expression coefficients. */
 				(define map_expr (list (quote lambda)
 					(map scan_mapcols (lambda (map_col) (symbol (concat alias "." map_col))))
 					(list (quote list)
-						(row_number_scan_partition_expr alias mapcols)
+						(row_number_scan_partition_expr alias partitioncount mapcols)
 						continuation_expr)))
 				(define row_number_reduce_expr (list (quote lambda) (list (quote state) (quote mapped))
 					(list (quote begin)
@@ -6529,8 +6535,8 @@ the costgen threshold. */
 		(if (nil? candidates)
 			0
 			(scan current_tx candidates
-				'("canonical_name")
-				(lambda (candidate_name) (equal? candidate_name canonical_name))
+				'("scan_access" 1 "scan" 0 -1 "equal" "canonical_name" 0 0 3 "") (list canonical_name)
+				'() (lambda () true)
 				'("$update")
 				(lambda (acc $update) (begin ($update) (+ acc 1)))
 				0 + false)))))
@@ -6995,7 +7001,9 @@ carrier remains on the measured direct path and is never built eagerly. */
 									(lambda (col) (not (contains? ordercols col)))))
 								(list (quote scan_order_batch_accept)
 									(physical_query_tx_symbol)
-									table_expr batch_filter
+									table_expr
+									(list (quote quote) (list "scan_access" 0 "scan" 0 -1))
+									(list (quote list)) batch_filter
 									(cons (quote list) (merge (list ordercols tiebreaker_cols)))
 									(cons (quote list) (merge (list
 										(order_relations_for_source src current_order_items)

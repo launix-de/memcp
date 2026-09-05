@@ -189,7 +189,7 @@ func BenchmarkScanUniquePointCompiledAccessWithTx(b *testing.B) {
 	condition := scanCondition("id", scm.NewInt(511))
 	mapReduceFn := scm.NewFunc(func(a ...scm.Scmer) scm.Scmer { return a[1] })
 	schema := scm.NewSlice([]scm.Scmer{
-		scm.NewString("scan_access_v1"), scm.NewInt(1), scm.NewString("equal"),
+		scm.NewString(scanAccessSchemaName), scm.NewInt(1), scm.NewString(scanAccessConsumerScan), scm.NewInt(0), scm.NewInt(-1), scm.NewString("equal"),
 		scm.NewString("id"), scm.NewInt(0), scm.NewInt(0), scm.NewInt(3), scm.NewString(""),
 	})
 	values := []scm.Scmer{scm.NewInt(511)}

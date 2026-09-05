@@ -161,7 +161,7 @@ test_cases:
     expect:
       rows: 1
       result_contains:
-        - "scan_access_v1"
+        - "scan_access"
         - "range"
 
   # ==============================================================

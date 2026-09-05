@@ -90,6 +90,8 @@ func nestedScanAst(schema, table, outerParam string) scm.Scmer {
 		scm.NewSymbol("scan"),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("session"), scm.NewString("__memcp_tx")}),
 		scm.NewSlice([]scm.Scmer{scm.NewSymbol("table"), scm.NewString(schema), scm.NewString(table)}),
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		listAst(scm.NewString("ref_id")),
 		lambdaAst([]string{"src.ref_id"}, scm.NewSlice([]scm.Scmer{
 			scm.NewSymbol("equal?"),
@@ -119,6 +121,8 @@ func TestExtractScanJoinInfoIncludesDynamicTablePlan(t *testing.T) {
 		scm.NewSymbol("scan"),
 		scm.NewNil(),
 		dynamicTable,
+		scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), newScanAccessSchema(scanAccessConsumerScan, nil, -1)}),
+		listAst(),
 		listAst(),
 		lambdaAst(nil, scm.NewBool(true)),
 		listAst(),
@@ -222,6 +226,7 @@ func TestLookupComputeTriggersInvalidateMatchingRows(t *testing.T) {
 
 	computorSource := `(lambda (ref_id)
 		(scan nil (table "tlookuptrigger" "src")
+			'("scan_access" 0 "scan" 0 -1) '()
 			'("ref_id") (lambda (source_ref_id) (equal? source_ref_id (outer 1 ref_id)))
 			'("val") (lambda (acc val) val)
 			0 (lambda (old value) value) false))`

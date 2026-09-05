@@ -2716,7 +2716,7 @@ func (t *storageShard) GetRecordidForUnique(columns []string, values []scm.Scmer
 	// Use iterateIndex for O(log n) lookup (builds index lazily if needed)
 	// Small buffer for existence check: stop early after first match
 	var buf [8]uint32
-	t.iterateIndex(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], 1, nil, func(batch []uint32) bool {
+	t.iterateIndex(currentTx, scanAccess{suffix: bounds}, lower, upperLast, len(t.inserts), buf[:], 1, nil, func(batch []uint32) bool {
 		for _, idx := range batch {
 			// Verify all columns match (iterateIndex may return superset for range boundaries)
 			matched := true
@@ -2773,22 +2773,21 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	if limit <= 0 {
 		limit = 1024
 	}
+	t.ensureLoaded()
 	t.ensureMainCount(false)
 	ccols := make([]ColumnStorage, len(conditionCols))
 	conditionGetters := make([]mapArgGetter, len(conditionCols))
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
-	var bounds boundaries
-	if accessSchema.IsNil() {
-		bounds = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
-	} else {
-		var compiled bool
-		bounds, compiled = bindCompiledScanAccess(accessSchema, accessValues, scratch.boundaries[:0])
-		if !compiled {
-			panic("scan_selectivity_estimate received an invalid compiled access schema")
-		}
+	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	if !compiled {
+		panic("scan_selectivity_estimate received an invalid compiled access schema")
 	}
-	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
+	if bounds.impossible() {
+		return filteredRowEstimate{population: "shard_rows", coverage: "exact"}
+	}
+	t.ensureScanAccessColumns(bounds, false, currentTx)
+	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 	recsetBoundaryCoversCondition := recSetHooksCoverCondition(bounds, lower, t.t, conditionCols, condition)
 	for i, col := range conditionCols {
 		if col == "$recset_contains" {
@@ -2822,10 +2821,14 @@ func (t *storageShard) EstimateFilteredRows(conditionCols []string, condition sc
 	cdataset := make([]scm.Scmer, len(conditionCols))
 
 	var buf [256]uint32
-	t.iterateIndexEstimate(currentTx, bounds, lower, upperLast, len(t.inserts), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
-		indexRestricted = active && len(lower) > 0
+	access := bounds
+	t.iterateIndexEstimate(currentTx, access, lower, upperLast, len(t.inserts), buf[:], &candidateSpan, func(index *StorageIndex, active bool) {
+		// Cold-index fallback now enforces the same exact sorted prefix before
+		// invoking the sampling callback, so its candidates have the same
+		// population semantics as an active index range.
+		indexRestricted = len(lower) > 0
 		if active {
-			if candidates, universe, ok := index.estimateHookCandidates(currentTx, bounds); ok {
+			if candidates, universe, ok := index.estimateHookCandidates(currentTx, access); ok {
 				hookCandidates = int64(candidates) + int64(len(t.inserts))
 				hookUniverse = int64(universe) + int64(len(t.inserts))
 			}

@@ -33,36 +33,37 @@ func optimizeScanOrderMulti(v []scm.Scmer, oc *scm.OptimizerContext, useResult b
 	// 9=partCols, 10=offset, 11=limit, 12=mapReduceCols,
 	// 13=mapReduceFns, 14=neutral, 15=isOuter, 16=notFoundValue
 	if len(v) >= 14 && len(v) <= 17 {
-		if schemas, bindings, ok := compileScanAccessList(v[3], v[4], false); ok {
-			for len(v) < 17 {
-				switch len(v) {
-				case 14:
-					v = append(v, scm.NewNil())
-				case 15:
-					v = append(v, scm.NewBool(false))
-				case 16:
-					v = append(v, v[14])
-				}
+		schemas, bindings, compiled, _ := compileScanAccessList(v[3], v[4], false)
+		v[3], v[4] = pruneScanResidualList(v[3], v[4], compiled, false)
+		for len(v) < 17 {
+			switch len(v) {
+			case 14:
+				v = append(v, scm.NewNil())
+			case 15:
+				v = append(v, scm.NewBool(false))
+			case 16:
+				v = append(v, v[14])
 			}
-			v = append(v,
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
-				oc.OptimizeNoEscapeList(bindings))
 		}
+		v = append(v[:3], append([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), scm.NewSlice(schemas)}),
+			oc.OptimizeNoEscapeList(bindings),
+		}, v[3:]...)...)
 	}
-	for i := 1; i <= 13 && i < len(v); i++ {
+	for i := 1; i <= 15 && i < len(v); i++ {
 		v[i], _ = oc.OptimizeSub(v[i], true)
 	}
 	neutralType := unknownScanType()
-	if len(v) > 14 {
-		v[14], neutralType = oc.OptimizeSub(v[14], true)
+	if len(v) > 16 {
+		v[16], neutralType = oc.OptimizeSub(v[16], true)
 		neutralType = normalizeScanType(neutralType)
 	}
 	oc.Ome.IncrLoopDepth()
-	if len(v) > 15 {
-		v[15], _ = oc.OptimizeSub(v[15], true)
+	if len(v) > 17 {
+		v[17], _ = oc.OptimizeSub(v[17], true)
 	}
-	if len(v) > 16 {
-		v[16], _ = oc.OptimizeSub(v[16], true)
+	if len(v) > 18 {
+		v[18], _ = oc.OptimizeSub(v[18], true)
 	}
 	oc.Ome.DecrLoopDepth()
 	return scm.NewSlice(v), nil
@@ -83,26 +84,29 @@ func optimizeScanOrder(v []scm.Scmer, oc *scm.OptimizerContext, useResult bool) 
 	// 	return oc.OptimizeSub(rewritten, useResult)
 	// }
 	if len(v) >= 14 && len(v) <= 17 {
-		if schema, bindings, ok := compileScanAccess(v[3], v[4]); ok {
-			if len(v) == 14 {
-				// notFoundValue defaults to the neutral accumulator.
-				v = append(v, scm.CloneOptimizerExpression(v[12]))
-			}
-			if len(v) == 15 {
-				v = append(v, scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}))
-			}
-			if len(v) == 16 {
-				v = append(v, scm.NewNil())
-			}
-			// Planner-generated neutral and not-found expressions can share
-			// mutable AST lists. They are optimized independently below.
-			v[14] = scm.CloneOptimizerExpression(v[14])
-			v = append(v,
-				scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
-				oc.OptimizeNoEscapeList(bindings))
+		schema, bindings, compiled := compileScanAccess(v[3], v[4])
+		if compiled {
+			v[3], v[4] = pruneScanResidual(v[3], v[4], false)
 		}
+		if len(v) == 14 {
+			// notFoundValue defaults to the neutral accumulator.
+			v = append(v, scm.CloneOptimizerExpression(v[12]))
+		}
+		if len(v) == 15 {
+			v = append(v, scm.NewSlice([]scm.Scmer{scm.NewSymbol("list")}))
+		}
+		if len(v) == 16 {
+			v = append(v, scm.NewNil())
+		}
+		// Planner-generated neutral and not-found expressions can share
+		// mutable AST lists. They are optimized independently below.
+		v[14] = scm.CloneOptimizerExpression(v[14])
+		v = append(v[:3], append([]scm.Scmer{
+			scm.NewSlice([]scm.Scmer{scm.NewSymbol("quote"), schema}),
+			oc.OptimizeNoEscapeList(bindings),
+		}, v[3:]...)...)
 	}
-	mapReduceIdx, neutralIdx, outerIdx, notFoundIdx, postOrderColsIdx, postOrderFilterIdx := 11, 12, 13, 14, 15, 16
+	mapReduceIdx, neutralIdx, outerIdx, notFoundIdx, postOrderColsIdx, postOrderFilterIdx := 13, 14, 15, 16, 17, 18
 	reuseNeutralForNotFound := len(v) > notFoundIdx && scm.Equal(v[neutralIdx], v[notFoundIdx])
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
@@ -204,7 +208,7 @@ type scanOrderResult struct {
 }
 
 type scanOrderStats struct {
-	boundaries     boundaries
+	access         scanAccess
 	inputCount     int64
 	candidateCount int64
 	outputCount    int64
@@ -500,12 +504,88 @@ func extendBoundariesWithSortCols(b boundaries, sortcols []scm.Scmer, sortdirs [
 	return b, len(sortcols) > 0
 }
 
-func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds boundaries, effectiveCols int) bool {
+// extendScanAccessWithSortCols adds only the runtime ORDER BY portion to the
+// immutable compiled access view. Unlike extendBoundariesWithSortCols it never
+// copies the planner-provided filter boundaries into a runtime array.
+func extendScanAccessWithSortCols(access scanAccess, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer) (scanAccess, bool) {
+	for i := 0; i < access.len(); i++ {
+		if !boundaryIsPoint(access.boundary(i)) {
+			return access, false
+		}
+	}
+	if len(sortcols) == 0 || len(sortdirs) < len(sortcols) {
+		return access, false
+	}
+	inserted := make(boundaries, 0, len(sortcols))
+	hasSorted := func(column string) bool {
+		for i := 0; i < access.len(); i++ {
+			boundary := access.boundary(i)
+			if boundary.col == column && boundary.matcher.IsSorted() {
+				return true
+			}
+		}
+		for _, boundary := range inserted {
+			if boundary.col == column && boundary.matcher.IsSorted() {
+				return true
+			}
+		}
+		return false
+	}
+	for i, sortcol := range sortcols {
+		if sortdirs[i] == nil {
+			return access, false
+		}
+		orderMeta := orderRelationMeta(sortdirs[i])
+		if sortcol.IsString() {
+			column := sortcol.String()
+			if !hasSorted(column) {
+				inserted = append(inserted, columnboundaries{col: column, matcher: RangeMatcher,
+					lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta})
+			}
+			continue
+		}
+		proc, ok := sortcol.Any().(scm.Proc)
+		if !ok && sortcol.IsProc() {
+			proc, ok = *sortcol.Proc(), true
+		}
+		if !ok || !proc.Params.IsSlice() || len(proc.Params.Slice()) == 0 {
+			return access, false
+		}
+		params := proc.Params.Slice()
+		conditionCols := make([]string, len(params))
+		for j, param := range params {
+			conditionCols[j] = scm.String(param)
+		}
+		if !isRawDataset(params, proc.Body) {
+			return access, false
+		}
+		canonical := canonicalColName(proc.Body, params, conditionCols)
+		mapCols, mapFn := buildComputedFn(proc.Body, proc.Params, proc.En, conditionCols)
+		if mapFn.IsNil() || mapCols == nil {
+			return access, false
+		}
+		if !hasSorted(canonical) {
+			inserted = append(inserted, columnboundaries{col: canonical, matcher: RangeMatcher,
+				lower: scm.NewNil(), upper: scm.NewNil(), order: sortdirs[i], orderMeta: orderMeta,
+				mapCols: mapCols, mapFn: mapFn})
+		}
+	}
+	compiledCount := 0
+	if len(access.schema) != 0 {
+		compiledCount = int(scm.ToInt(access.schema[1]))
+	}
+	access.insertAt = compiledCount
+	access.inserted = inserted
+	return access, true
+}
+
+func indexCoversBoundaryOrder(index *StorageIndex, active bool, bounds scanAccess, effectiveCols int) bool {
 	if !active || index == nil {
 		return false
 	}
 	orderCols := 0
-	for i, boundary := range bounds {
+	for i := 0; i < bounds.len(); i++ {
+		boundary := bounds.boundary(i)
 		if boundary.order == nil || boundaryIsPoint(boundary) {
 			continue
 		}
@@ -547,8 +627,9 @@ func orderedIndexUsageWeight(rows, kept int) float64 {
 // it must train the autoindex at the normal rate even when the result window is
 // tiny. Unbounded order boundaries only accelerate Top-k and retain the lower
 // build weight above.
-func orderedScanIndexUsageWeight(bounds boundaries, rows, kept int) float64 {
-	for _, bound := range bounds {
+func orderedScanIndexUsageWeight(bounds scanAccess, rows, kept int) float64 {
+	for i := 0; i < bounds.len(); i++ {
+		bound := bounds.boundary(i)
 		if !boundaryIsUnboundedOrder(bound) {
 			return 1
 		}
@@ -605,14 +686,14 @@ func recSetBoundaryCallCount(conditionCols []string, condition scm.Scmer) int {
 	return walk(p.Body)
 }
 
-func recSetHooksCoverCondition(bounds boundaries, lower []scm.Scmer, backingTable *table, conditionCols []string, condition scm.Scmer) bool {
+func recSetHooksCoverCondition(bounds scanAccess, lower []scm.Scmer, backingTable *table, conditionCols []string, condition scm.Scmer) bool {
 	want := recSetBoundaryCallCount(conditionCols, condition)
 	if want == 0 {
 		return false
 	}
 	covered := 0
-	for i := 0; i < len(lower) && i < len(bounds); i++ {
-		bound := bounds[i]
+	for i := 0; i < len(lower) && i < bounds.len(); i++ {
+		bound := bounds.boundary(i)
 		if !matcherKindEqual(bound.matcher, RecSetMatcher) {
 			continue
 		}
@@ -689,35 +770,34 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 		analyzeStart := time.Now()
 		scratch := acquireScanAnalyzeScratch()
 		defer releaseScanAnalyzeScratch(scratch)
-		var bounds boundaries
-		if spec.accessSchema.IsNil() {
-			bounds = extractBoundariesInto(scratch.boundaries[:0], spec.conditionCols, spec.condition)
-			reorderByFrequency(bounds, t)
-		} else {
-			var compiled bool
-			bounds, compiled = bindCompiledScanAccess(spec.accessSchema, spec.accessValues, scratch.boundaries[:0])
-			if !compiled {
-				panic("scan_order received an invalid compiled access schema")
-			}
+		bounds, compiled := scanAccessFromScheme(spec.accessSchema, spec.accessValues, nil)
+		if !compiled {
+			panic("scan_order received an invalid compiled access schema")
 		}
-		bounds, _ = extendBoundariesWithSortCols(bounds, spec.sortcols, sortdirs)
-		bounds = appendRecSetBoundary(bounds, spec.recset)
-		lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
+		if bounds.impossible() {
+			stats[ti].analyzeNs = time.Since(analyzeStart).Nanoseconds()
+			continue
+		}
+		bounds, _ = extendScanAccessWithSortCols(bounds, spec.sortcols, sortdirs)
+		bounds.suffix = appendRecSetBoundary(bounds.suffix, spec.recset)
+		lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 
 		if Settings.ScanDebugging {
 			dbg := fmt.Sprintf("[SCAN_ORDER_MULTI] %s.%s", t.schema.Name, t.Name)
-			for _, b := range bounds {
+			for i := 0; i < bounds.len(); i++ {
+				b := bounds.boundary(i)
 				dbg += fmt.Sprintf(" %s:[%v..%v]", b.col, b.lower, b.upper)
 			}
 			dbg += fmt.Sprintf(" lower=%v upper=%v", lower, upperLast)
 			fmt.Println(dbg)
 		}
 
-		for _, b := range bounds {
+		for i := 0; i < bounds.len(); i++ {
+			b := bounds.boundary(i)
 			t.AddPartitioningScore([]string{b.col})
 		}
 		analyzeNs := time.Since(analyzeStart).Nanoseconds()
-		stats[ti].boundaries = bounds
+		stats[ti].access = bounds
 		stats[ti].analyzeNs = analyzeNs
 
 		// Capture closure variables
@@ -1080,7 +1160,7 @@ func scanOrderMulti(currentTx *TxContext, tables []scanOrderTableSpec, sortdirs 
 			}
 		}
 		orderEnc := sb.String()
-		indexColsEnc := boundaryIndexCols(tableStats.boundaries)
+		indexColsEnc := scanAccessIndexCols(tableStats.access)
 		go safeLogScan(tbl.schema.Name, tbl.Name, true, filterEnc, orderEnc, indexColsEnc, tableStats.inputCount, tableStats.candidateCount, tableStats.outputCount, tableStats.analyzeNs, execNs)
 	}
 	return akkumulator
@@ -1118,18 +1198,14 @@ func (t *table) scanOrderFirst(currentTx *TxContext, conditionCols []string, con
 	querySeq := querySeqFromTx(currentTx)
 	scratch := acquireScanAnalyzeScratch()
 	defer releaseScanAnalyzeScratch(scratch)
-	var bounds boundaries
-	if accessSchema.IsNil() {
-		bounds = extractBoundariesInto(scratch.boundaries[:0], conditionCols, condition)
-		reorderByFrequency(bounds, t)
-	} else {
-		var compiled bool
-		bounds, compiled = bindCompiledScanAccess(accessSchema, accessValues, scratch.boundaries[:0])
-		if !compiled {
-			panic("scan_order received an invalid compiled access schema")
-		}
+	bounds, compiled := scanAccessFromScheme(accessSchema, accessValues, nil)
+	if !compiled {
+		panic("scan_order received an invalid compiled access schema")
 	}
-	lower, upperLast := indexFromBoundariesInto(scratch.lower[:0], bounds)
+	if bounds.impossible() {
+		return notFoundValue
+	}
+	lower, upperLast := indexFromScanAccessInto(scratch.lower[:0], bounds)
 
 	var mu sync.Mutex
 	var foundShard *storageShard
@@ -1224,9 +1300,12 @@ func streamOrBreak(mapper *ShardMapReducer, acc scm.Scmer, recids []uint32) (res
 	return
 }
 
-func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
+func (t *storageShard) scan_order(boundaries scanAccess, lower []scm.Scmer, upperLast scm.Scmer, conditionCols []string, condition scm.Scmer, acceptCols []string, accept scm.Scmer, sortcols []scm.Scmer, sortdirs []func(...scm.Scmer) scm.Scmer, limitPartitionCols int, offset int, limit int, callbackCols []string, currentTx *TxContext, ss *scm.SessionState) (result *shardqueue) {
 	result = new(shardqueue)
 	result.shard = t
+	t.ensureLoaded()
+	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
+	t.ensureScanAccessColumns(boundaries, skipShardReadLock, currentTx)
 	if ss == nil {
 		ss = SessionStateFromTx(currentTx)
 	}
@@ -1299,7 +1378,6 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 
 	adjustedSortdirs := sortdirs
 
-	skipShardReadLock := t.hasWriteOwnerForTx(currentTx)
 	if t.t.hasTableLock() {
 		t.t.waitTableLock(ss, querySeqFromTx(currentTx), false)
 	}
@@ -1395,11 +1473,11 @@ func (t *storageShard) scan_order(boundaries boundaries, lower []scm.Scmer, uppe
 		var survivedBuf, mainIdsBuf, acceptMainIdsBuf []uint32
 		colBufs := make([][]scm.Scmer, len(conditionCols))
 		acceptColBufs := make([][]scm.Scmer, len(acceptCols))
-		boundaryCoveredLimit := acceptProgram == nil &&
-			sortedBoundariesCoverCondition(conditionCols, condition, boundaries)
-		t.iterateIndexOrdered(currentTx, boundaries, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
+		boundaryCoveredLimit := acceptProgram == nil && (conditionAlwaysTrue || boundaries.filterCovered)
+		access := boundaries
+		t.iterateIndexOrdered(currentTx, access, lower, upperLast, maxInsertIndex, buf, usageWeight, limit, boundaryCoveredLimit, func(index *StorageIndex, active bool) {
 			if len(sortcols) > 0 {
-				resultAlreadySorted = indexCoversBoundaryOrder(index, active, boundaries, len(lower))
+				resultAlreadySorted = indexCoversBoundaryOrder(index, active, access, len(lower))
 			}
 		}, func(batch []uint32) bool {
 			result.candidateCount += int64(len(batch))

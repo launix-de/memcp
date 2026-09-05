@@ -44,7 +44,7 @@ func setupAdaptiveRecSetOrderTable(t *testing.T, database string, rows int) *tab
 func recSetForIDs(tbl *table, ids map[int64]bool) *recSet {
 	return tbl.scanRecSet(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(ids[values[0].Int()])
-	}), scm.NewNil(), nil)
+	}), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 }
 
 func scanOrderedRecSetIDs(tbl *table, source *recSet, limit int) []int64 {
@@ -67,7 +67,7 @@ func scanOrderedRecSetIDsWithCondition(tbl *table, source *recSet, limit int, or
 			result = append(result, values[1].Int())
 			return values[0]
 		}),
-		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), scm.NewNil(), nil)
+		scm.NewNil(), false, scm.NewNil(), nil, scm.NewNil(), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 	return result
 }
 
@@ -84,7 +84,7 @@ func buildRankOrderIndex(t *testing.T, tbl *table) func(...scm.Scmer) scm.Scmer 
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
 	var buf [8]uint32
-	shard.iterateIndexForce(nil, bounds, lower, upper, len(shard.inserts), buf[:], false,
+	shard.iterateIndexForce(nil, scanAccess{suffix: bounds}, lower, upper, len(shard.inserts), buf[:], false,
 		func([]uint32) bool { return false })
 	return order
 }
@@ -100,14 +100,14 @@ func TestRecSetScanSourceAddsExactBoundary(t *testing.T) {
 		scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 			got = append(got, values[1].Int())
 			return values[0]
-		}), scm.NewNil(), scm.NewNil(), false)
+		}), scm.NewNil(), scm.NewNil(), false, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 
 	if want := []int64{103, 150}; !equalInt64s(got, want) {
 		t.Fatalf("RecSet boundary scan rows = %v, want %v", got, want)
 	}
 	if !source.scanExists(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(values[0].Int() == 150)
-	}), scm.NewNil(), nil) {
+	}), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil) {
 		t.Fatal("scan_exists did not consume the RecSet boundary")
 	}
 }
@@ -125,7 +125,7 @@ func TestRepeatedUnorderedRecSetScanDoesNotBuildMembershipIndex(t *testing.T) {
 			scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 				got = append(got, values[1].Int())
 				return values[0]
-			}), scm.NewNil(), scm.NewNil(), false)
+			}), scm.NewNil(), scm.NewNil(), false, newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 		if want := []int64{103, 1_503}; !equalInt64s(got, want) {
 			t.Fatalf("repeated RecSet scan rows = %v, want %v", got, want)
 		}
@@ -209,7 +209,7 @@ func TestDenseOrderedRecSetKeepsIndexDrivenTraversal(t *testing.T) {
 	order := buildRankOrderIndex(t, tbl)
 	source := tbl.scanRecSet(nil, []string{"id"}, scm.NewFunc(func(values ...scm.Scmer) scm.Scmer {
 		return scm.NewBool(values[0].Int()%10 != 0)
-	}), scm.NewNil(), nil)
+	}), newScanAccessSchema(scanAccessConsumerScan, nil, -1), nil)
 
 	got := scanOrderedRecSetIDsWithOrder(tbl, source, 3, order)
 	if want := []int64{rows/2 + 1, rows/2 + 2, rows/2 + 3}; !equalInt64s(got, want) {

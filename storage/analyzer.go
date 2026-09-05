@@ -153,6 +153,183 @@ type columnboundaries struct {
 
 type boundaries []columnboundaries
 
+// scanAccess is the allocation-free runtime view of the physical access
+// contract. The common SQL path reads static boundary metadata directly from
+// the optimizer-produced Scheme schema and binds only values supplied in the
+// adjacent flat runtime array. suffix is reserved for physical constraints
+// introduced after local-filter compilation, such as a RecSet input or join
+// batch keys; it is never used to re-materialize the compiled schema.
+type scanAccess struct {
+	schema []scm.Scmer
+	values []scm.Scmer
+	// inserted contains runtime-only ordered boundaries. insertAt places them
+	// between the compiled sorted prefix and advisory matchers without copying
+	// either segment.
+	insertAt int
+	inserted boundaries
+	suffix   boundaries
+	// filterCovered is used only by internal callers which construct mandatory
+	// physical boundaries directly. Planner-produced scans establish the same
+	// proof by pruning the residual filter to constant true.
+	filterCovered bool
+}
+
+func (a scanAccess) len() int {
+	if len(a.schema) == 0 {
+		return len(a.inserted) + len(a.suffix)
+	}
+	return int(scm.ToInt(a.schema[1])) + len(a.inserted) + len(a.suffix)
+}
+
+func (a scanAccess) boundary(index int) columnboundaries {
+	compiled := 0
+	if len(a.schema) != 0 {
+		compiled = int(scm.ToInt(a.schema[1]))
+	}
+	insertAt := a.insertAt
+	if insertAt < 0 || insertAt > compiled {
+		insertAt = compiled
+	}
+	if index >= insertAt && index < insertAt+len(a.inserted) {
+		return a.inserted[index-insertAt]
+	}
+	if index >= insertAt+len(a.inserted) {
+		index -= len(a.inserted)
+	}
+	if index >= compiled {
+		return a.suffix[index-compiled]
+	}
+	offset := scanAccessSchemaHeaderSize + index*scanAccessBoundaryStride
+	lowerSlot := int(scm.ToInt(a.schema[offset+2]))
+	upperSlot := int(scm.ToInt(a.schema[offset+3]))
+	flags := scm.ToInt(a.schema[offset+4])
+	boundary := columnboundaries{
+		col:            a.schema[offset+1].String(),
+		lowerInclusive: flags&1 != 0,
+		upperInclusive: flags&2 != 0,
+		collation:      a.schema[offset+5].String(),
+	}
+	switch a.schema[offset].String() {
+	case "equal":
+		boundary.matcher = EqualMatcher
+	case "range":
+		boundary.matcher = RangeMatcher
+	case "like":
+		boundary.matcher = LikeMatcher
+	case "recset":
+		boundary.matcher = RecSetMatcher
+	default:
+		panic("scan access schema has an unknown matcher")
+	}
+	if lowerSlot >= 0 {
+		boundary.lower = a.values[lowerSlot]
+	} else if lowerSlot <= -2 {
+		boundary.lowerBatch = true
+		boundary.lowerBatchSubidx = -lowerSlot - 2
+	}
+	if upperSlot >= 0 {
+		boundary.upper = a.values[upperSlot]
+	} else if upperSlot <= -2 {
+		boundary.upperBatch = true
+		boundary.upperBatchSubidx = -upperSlot - 2
+	}
+	return boundary
+}
+
+// impossible reports SQL comparison probes whose runtime operand is NULL.
+// NULL is otherwise also the unbounded-range sentinel, so this check must use
+// the schema slot rather than the materialized boundary value.
+func (a scanAccess) impossible() bool {
+	compiled := 0
+	if len(a.schema) != 0 {
+		compiled = int(scm.ToInt(a.schema[1]))
+	}
+	for i := 0; i < compiled; i++ {
+		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
+		kind := a.schema[offset].String()
+		lowerSlot := int(scm.ToInt(a.schema[offset+2]))
+		upperSlot := int(scm.ToInt(a.schema[offset+3]))
+		if lowerSlot >= 0 && a.values[lowerSlot].IsNil() && (kind == "equal" || kind == "range") {
+			return true
+		}
+		if upperSlot >= 0 && a.values[upperSlot].IsNil() && kind == "range" {
+			return true
+		}
+	}
+	return false
+}
+
+func (a scanAccess) impossibleBatch(stride int, batchdata []scm.Scmer, batchid int) bool {
+	if a.impossible() {
+		return true
+	}
+	compiled := 0
+	if len(a.schema) != 0 {
+		compiled = int(scm.ToInt(a.schema[1]))
+	}
+	for i := 0; i < compiled; i++ {
+		offset := scanAccessSchemaHeaderSize + i*scanAccessBoundaryStride
+		kind := a.schema[offset].String()
+		for _, slotOffset := range []int{2, 3} {
+			slot := int(scm.ToInt(a.schema[offset+slotOffset]))
+			if slot <= -2 && (kind == "equal" || kind == "range") {
+				subindex := -slot - 2
+				position := batchid*stride + subindex
+				if position < 0 || position >= len(batchdata) || batchdata[position].IsNil() {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func materializeScanAccess(access scanAccess) boundaries {
+	result := make(boundaries, access.len())
+	for i := range result {
+		result[i] = access.boundary(i)
+	}
+	return result
+}
+
+func hasBatchScanAccess(access scanAccess) bool {
+	for i := 0; i < access.len(); i++ {
+		boundary := access.boundary(i)
+		if boundary.lowerBatch || boundary.upperBatch {
+			return true
+		}
+	}
+	return false
+}
+
+func materializeBatchScanAccess(access scanAccess, stride int, batchdata []scm.Scmer, batchid uint32) boundaries {
+	return materializeBatchBoundaries(materializeScanAccess(access), stride, batchdata, batchid)
+}
+
+func scanAccessFromScheme(schemaValue scm.Scmer, values []scm.Scmer, suffix boundaries) (scanAccess, bool) {
+	if !schemaValue.IsSlice() {
+		return scanAccess{}, false
+	}
+	schema := schemaValue.Slice()
+	if len(schema) < scanAccessSchemaHeaderSize || schema[0].String() != scanAccessSchemaName {
+		return scanAccess{}, false
+	}
+	count := int(scm.ToInt(schema[1]))
+	projectionCount := int(scm.ToInt(schema[3]))
+	if count < 0 || projectionCount < 0 || len(schema) != scanAccessSchemaHeaderSize+count*scanAccessBoundaryStride+projectionCount {
+		panic("scan access schema has an invalid boundary count")
+	}
+	for offset, remaining := scanAccessSchemaHeaderSize, count; remaining > 0; offset, remaining = offset+scanAccessBoundaryStride, remaining-1 {
+		for _, slotOffset := range []int{2, 3} {
+			slot := int(scm.ToInt(schema[offset+slotOffset]))
+			if slot >= len(values) {
+				panic("scan access value slot is out of bounds")
+			}
+		}
+	}
+	return scanAccess{schema: schema, values: values, suffix: suffix}, true
+}
+
 // IndexBoundary is the public boundary value returned by custom analyzers. Its
 // storage stays equal to the internal boundary representation.
 type IndexBoundary = columnboundaries
@@ -1410,4 +1587,44 @@ func indexFromBoundariesInto(storage []scm.Scmer, cols boundaries) (lower []scm.
 
 func indexFromBoundaries(cols boundaries) ([]scm.Scmer, scm.Scmer) {
 	return indexFromBoundariesInto(nil, cols)
+}
+
+func indexFromScanAccessInto(storage []scm.Scmer, access scanAccess) (lower []scm.Scmer, upperLast scm.Scmer) {
+	if access.len() == 0 {
+		return nil, scm.NewNil()
+	}
+	sortedEnd := 0
+	for sortedEnd < access.len() && access.boundary(sortedEnd).matcher.IsSorted() {
+		sortedEnd++
+	}
+	usableSorted := sortedEnd
+	for usableSorted >= 2 {
+		previous := access.boundary(usableSorted - 2)
+		last := access.boundary(usableSorted - 1)
+		if !boundaryIsPoint(previous) &&
+			!(boundaryIsUnboundedOrder(previous) && boundaryIsUnboundedOrder(last)) {
+			usableSorted--
+		} else {
+			break
+		}
+	}
+	effectiveLen := usableSorted
+	if usableSorted == sortedEnd {
+		effectiveLen = access.len()
+	}
+	if effectiveLen == 0 {
+		return nil, scm.NewNil()
+	}
+	if cap(storage) >= effectiveLen {
+		lower = storage[:effectiveLen]
+	} else {
+		lower = make([]scm.Scmer, effectiveLen)
+	}
+	for i := 0; i < effectiveLen; i++ {
+		lower[i] = access.boundary(i).lower
+	}
+	if usableSorted > 0 {
+		upperLast = access.boundary(usableSorted - 1).upper
+	}
+	return lower, upperLast
 }
