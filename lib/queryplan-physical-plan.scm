@@ -2299,6 +2299,12 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 				_ nil))
 		_ nil)))
 
+(define global_membership_row_count_block? (lambda (block)
+	(and (empty_list? (qb_group block))
+		(and (nil? (qb_having block))
+			(and (empty_list? (coalesceNil (qb_order block) '()))
+				(aggregate_pushdown_count_fields? (qb_fields block)))))))
+
 (define lower_grouped_query_block_with_stages (lambda (block)
 	(begin
 		(define fused_top_count (lower_row_number_top_count_block block))
@@ -2310,55 +2316,90 @@ logical window-stage remains unchanged and contains no createcolumn artifact. */
 				(define probe_rewritten (if (expr_contains_session_dependency? (qb_where rewritten))
 					(query_block_with_prepared_sources_using stage_lookup rewritten)
 					rewritten))
-				(define sources (qb_sources probe_rewritten))
-				(define stage_catalog (query_block_stage_catalog rewritten))
-				(define dependency_graph (stage_dependency_graph stage_lookup))
-				(define outer_prepare_stages (filter (qb_stages rewritten) (lambda (stage)
-					(not (group_stage? stage)))))
-				(define physical_sources (physicalize_stage_output_sources stage_lookup sources))
-				(define driver_src (car physical_sources))
-				(if (not (source_is_base_table? driver_src))
-					(neumann_fail "build_queryplan" "group-stage source did not lower to a physical driver")
-					true)
-				(define stage_sources (cdr physical_sources))
-				(define direct_probe_group (and
-					(empty_list? stage_sources)
-					(empty_list? (qb_stages probe_rewritten))
-					(source_is_base_table? driver_src)
-					/* Session-dependent memberships are query-local domains. A base-table
-					group cache uses persistent computed columns and cannot represent that
-					domain as an immutable column recipe; keep the general query-group
-					carrier, whose grouped insert is evaluated inside the query session. */
-					(empty_list? (query_expr_session_reads probe_rewritten))
-					(expr_contains_driver_membership? (qb_where probe_rewritten))))
-				(define final_stage_sources (physicalize_stage_output_sources stage_lookup
-					(filter (cdr sources) (lambda (src)
-						(source_needed_after_group? (source_alias driver_src) probe_rewritten src)))))
-				(define grouped_input_block (make_query_block
-					(qb_schema probe_rewritten)
-					(cons driver_src stage_sources)
-					(qb_fields probe_rewritten)
-					(qb_where probe_rewritten)
-					(qb_group probe_rewritten)
-					(qb_having probe_rewritten)
-					(qb_order probe_rewritten)
-					(qb_limit probe_rewritten)
-					(qb_offset probe_rewritten)
-					(qb_hidden probe_rewritten)
-					'()
-					(qb_facts probe_rewritten)))
-				(define main_stage (make_group_stage_for_query_block grouped_input_block))
-				(define main_stage_lookup (lowering_catalog_with_local_stages stage_lookup (list main_stage)))
-				(if direct_probe_group
-					(lower_query_block_core grouped_input_block)
-					(cons (quote !begin)
-						(merge (list
-							/* The main group prepare owns nested group stages used by its input.
-							Window and ORC stages still require their explicit materialization. */
-							(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup outer_prepare_stages)
-							(lower_stage_materialize_all outer_prepare_stages)
-							(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage true nil))
-							(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources))))))))))))
+				(define direct_prepared (if (global_membership_row_count_block? probe_rewritten)
+					(prepare_simple_query_block_physical_core probe_rewritten) nil))
+				(define direct_core (if (nil? direct_prepared) nil (nth direct_prepared 1)))
+				(define direct_stage (if (nil? direct_core) nil
+					(make_group_stage_for_query_block direct_core)))
+				/* Physical membership preparation is shared with ordinary SELECT
+				lowering. Once it exposes an exact driver carrier, a global row count
+				has no reusable grouping dimension: the fused join reducer dominates a
+				predicate-specific one-row group table. Selectivity-dependent choices
+				remain inside the ordinary membership and join cost models. */
+				(define direct_row_count (and (not (nil? direct_stage))
+					(expr_contains_driver_membership? (qb_where direct_core))))
+				(if direct_row_count
+					(begin
+						(define direct_prelude (nth direct_prepared 0))
+						(define direct_postlude (nth direct_prepared 2))
+						(planner_record_physical_decision
+							(list
+								(list "decision" "global_membership_row_count")
+								(list "chosen" "fused_reduce")
+								(list "selection" "dominance")
+								(list "reason" "exact_membership_already_owns_reusable_carriers")
+								(list "alternatives" (list
+									(list (list "plan" "fused_reduce") (list "status" "chosen"))
+									(list (list "plan" "query_group_cache") (list "status" "rejected")
+										(list "reason" "redundant_single_group_materialization")))))
+							(planner_context_session (qb_facts direct_core)))
+						(cons (quote !begin) (merge (list
+							direct_prelude
+							(list (lower_direct_query_row_count_stage direct_stage
+								(expand_query_block_fields (qb_sources direct_core) (qb_fields direct_core))
+								(qb_offset direct_core) (qb_limit direct_core)))
+							direct_postlude
+							(if (empty_list? direct_postlude) '() (list nil))))))
+					(begin
+						(define sources (qb_sources probe_rewritten))
+						(define stage_catalog (query_block_stage_catalog rewritten))
+						(define dependency_graph (stage_dependency_graph stage_lookup))
+						(define outer_prepare_stages (filter (qb_stages rewritten) (lambda (stage)
+							(not (group_stage? stage)))))
+						(define physical_sources (physicalize_stage_output_sources stage_lookup sources))
+						(define driver_src (car physical_sources))
+						(if (not (source_is_base_table? driver_src))
+							(neumann_fail "build_queryplan" "group-stage source did not lower to a physical driver")
+							true)
+						(define stage_sources (cdr physical_sources))
+						(define direct_probe_group (and
+							(empty_list? stage_sources)
+							(empty_list? (qb_stages probe_rewritten))
+							(source_is_base_table? driver_src)
+							/* Session-dependent memberships are query-local domains. A base-table
+							group cache uses persistent computed columns and cannot represent that
+							domain as an immutable column recipe; keep the general query-group
+							carrier, whose grouped insert is evaluated inside the query session. */
+							(empty_list? (query_expr_session_reads probe_rewritten))
+							(expr_contains_driver_membership? (qb_where probe_rewritten))))
+						(define final_stage_sources (physicalize_stage_output_sources stage_lookup
+							(filter (cdr sources) (lambda (src)
+								(source_needed_after_group? (source_alias driver_src) probe_rewritten src)))))
+						(define grouped_input_block (make_query_block
+							(qb_schema probe_rewritten)
+							(cons driver_src stage_sources)
+							(qb_fields probe_rewritten)
+							(qb_where probe_rewritten)
+							(qb_group probe_rewritten)
+							(qb_having probe_rewritten)
+							(qb_order probe_rewritten)
+							(qb_limit probe_rewritten)
+							(qb_offset probe_rewritten)
+							(qb_hidden probe_rewritten)
+							'()
+							(qb_facts probe_rewritten)))
+						(define main_stage (make_group_stage_for_query_block grouped_input_block))
+						(define main_stage_lookup (lowering_catalog_with_local_stages stage_lookup (list main_stage)))
+						(if direct_probe_group
+							(lower_query_block_core grouped_input_block)
+							(cons (quote !begin)
+								(merge (list
+									/* The main group prepare owns nested group stages used by its input.
+									Window and ORC stages still require their explicit materialization. */
+									(lower_unique_stage_prepares_with_graph dependency_graph stage_lookup outer_prepare_stages)
+									(lower_stage_materialize_all outer_prepare_stages)
+									(list (lower_group_stage_prepare_using (cons main_stage stage_catalog) main_stage_lookup main_stage true nil))
+									(list (lower_query_block_core (group_stage_final_block main_stage final_stage_sources))))))))))))))))
 
 (define query_block_without_stages (lambda (block)
 	(make_query_block

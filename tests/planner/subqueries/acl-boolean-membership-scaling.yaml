@@ -434,6 +434,10 @@ test_cases:
         - "recset_project_join"
         - "recset_project_join_access"
         - "runtime_cost_minimum"
+        - "global_membership_row_count"
+        - "fused_reduce"
+      result_not_contains:
+        - ".grp:query:"
 
   - name: "selective search evaluates compound ACL only on projected documents"
     max_time: 2
