@@ -372,11 +372,24 @@ func finalizeTriggerCompilation(trigger *TriggerDescription) {
 	if triggerScmerMissing(trigger.Func) {
 		return
 	}
+	// Vectorization inspects the retained Scheme body, so it must run before
+	// native compilation. Compile the outer trigger afterwards: nested physical
+	// callbacks retain their own scan specialization and compilation boundary.
+	// Apply then dispatches directly to the native trigger entry point, while
+	// unsupported bodies and non-JIT builds keep the interpreter fallback.
 	if (trigger.IsSystem || trigger.Hidden || trigger.Language == "") && trigger.VectorFunc.IsNil() {
 		if vf := VectorizeTrigger(trigger.Func); !vf.IsNil() {
 			trigger.VectorFunc = vf
 		}
 	}
+	trigger.Func = scm.CompileJIT(scm.CloseProcedure(trigger.Func), false)
+}
+
+func evaluateTriggerPlan(plan scm.Scmer) scm.Scmer {
+	// JIT consumes optimizer-normalized procedures. This is the same phase order
+	// used for cached SQL query plans and is required for numbered mutable locals
+	// in trigger sequences such as SET followed by a conditional SET.
+	return scm.Eval(scm.Optimize(plan, &scm.Globalenv, nil), &scm.Globalenv)
 }
 
 func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescription) {
@@ -385,14 +398,14 @@ func compileTriggerForUse(schemaName, tableName string, trigger *TriggerDescript
 		return
 	}
 	if !triggerScmerMissing(trigger.FuncPlan) {
-		trigger.Func = scm.Eval(trigger.FuncPlan, &scm.Globalenv)
+		trigger.Func = evaluateTriggerPlan(trigger.FuncPlan)
 		trigger.FuncPlan = scm.NewNil()
 		finalizeTriggerCompilation(trigger)
 		return
 	}
 	loadPersistedTriggerPlan(schemaName, tableName, trigger)
 	if !triggerScmerMissing(trigger.FuncPlan) {
-		trigger.Func = scm.Eval(trigger.FuncPlan, &scm.Globalenv)
+		trigger.Func = evaluateTriggerPlan(trigger.FuncPlan)
 		trigger.FuncPlan = scm.NewNil()
 	}
 	finalizeTriggerCompilation(trigger)

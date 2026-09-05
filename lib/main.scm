@@ -43,7 +43,8 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 available without loading an SQL module; other frontends can register their
 own compiler under any language name. */
 (registertriggerlanguage "scheme" (lambda (source context)
-	(eval (scheme source (concat "trigger:" (context "schema") "." (context "table") ":" (context "name"))))))
+	(list (quote deferred_trigger)
+		(scheme source (concat "trigger:" (context "schema") "." (context "table") ":" (context "name"))))))
 
 (import "sql.scm")
 (import "dashboard.scm")

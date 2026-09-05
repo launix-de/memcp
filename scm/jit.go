@@ -7448,6 +7448,14 @@ func jitCompile(a ...Scmer) Scmer {
 	return jitCompileMode(true, a...)
 }
 
+// CompileJIT compiles a procedure to native code when this build enables the
+// JIT. recursiveLambdas controls whether nested procedures are compiled with
+// their parent. Unsupported procedures and builds without JIT support retain
+// the original procedure as their interpreter fallback.
+func CompileJIT(procedure Scmer, recursiveLambdas bool) Scmer {
+	return jitCompileMode(recursiveLambdas, procedure)
+}
+
 func jitCompileMode(recursiveLambdas bool, a ...Scmer) Scmer {
 	return jitCompileModePublish(recursiveLambdas, true, true, a...)
 }
