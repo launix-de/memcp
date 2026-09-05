@@ -136,3 +136,16 @@ func TestScanBatchOptimizerPreservesCompiledBatchAccess(t *testing.T) {
 		t.Fatalf("scan_batch plan contains no compiled access: %s", plan)
 	}
 }
+
+func TestScanOptimizerKeepsDynamicAccessValuesOnTheFrame(t *testing.T) {
+	Init(scm.Globalenv)
+	expr := scm.Read("scan access noescape test", `(lambda (table_value wanted_id)
+		(scan nil table_value '() (list wanted_id)
+			'("id" "#0") (lambda (id probe) (equal?? id probe))
+			'("id") (lambda (acc id) (+ acc id)) 0 nil false))`)
+	optimized := scm.Optimize(expr, &scm.Globalenv, nil)
+	plan := scm.SerializeToString(optimized, &scm.Globalenv)
+	if !strings.Contains(plan, "(!list ") {
+		t.Fatalf("dynamic scan access values were heap allocated: %s", plan)
+	}
+}

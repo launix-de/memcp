@@ -2728,6 +2728,10 @@ func (oc *OptimizerContext) OptimizeNoEscapeList(elements []Scmer) Scmer {
 	for i := range elements {
 		optimized[i], _ = oc.OptimizeSub(elements[i], true)
 	}
+	return oc.lowerNoEscapeList(optimized)
+}
+
+func (oc *OptimizerContext) lowerNoEscapeList(optimized []Scmer) Scmer {
 	if len(optimized) == 0 {
 		return NewSlice([]Scmer{NewSymbol("list")})
 	}
@@ -2739,6 +2743,26 @@ func (oc *OptimizerContext) OptimizeNoEscapeList(elements []Scmer) Scmer {
 	result := make([]Scmer, 0, len(optimized)+3)
 	result = append(result, NewSymbol("!list"), NewNthLocalVar(NthLocalVar(start)), NewInt(int64(len(optimized))))
 	return NewSlice(append(result, optimized...))
+}
+
+// OptimizeNoEscapeArgument optimizes an argument consumed synchronously by a
+// native function and lowers a non-constant (list ...) constructor to !list.
+// Custom optimizer hooks use this to preserve the same stack-allocation rule
+// that applyDefaultOptimization derives from NoEscape parameter descriptors.
+func (oc *OptimizerContext) OptimizeNoEscapeArgument(value Scmer) (Scmer, *TypeDescriptor) {
+	optimized, td := oc.OptimizeSub(value, true)
+	if oc.Ome.nextSlot == nil {
+		return optimized, td
+	}
+	items, ok := scmerSlice(optimized)
+	if !ok || len(items) <= 1 {
+		return optimized, td
+	}
+	decl := DeclarationForValue(items[0])
+	if !scmerIsSymbol(items[0], "list") && (decl == nil || decl.Name != "list") {
+		return optimized, td
+	}
+	return oc.lowerNoEscapeList(items[1:]), td
 }
 
 // OptimizerRewriteContract declares the safety proof and maximum AST growth

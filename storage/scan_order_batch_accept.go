@@ -218,7 +218,7 @@ func optimizeScanOrderBatchAccept(v []scm.Scmer, oc *scm.OptimizerContext, useRe
 	rawMapReduce := v[mapReduceIdx]
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
 		if i != mapReduceIdx {
-			v[i], _ = oc.OptimizeSub(v[i], true)
+			optimizeScanArgument(v, i, oc)
 		}
 	}
 	neutralType := unknownScanType()

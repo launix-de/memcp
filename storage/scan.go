@@ -144,6 +144,15 @@ func buildOuterNullCallbackRow(callbackCols []string) []scm.Scmer {
 	return make([]scm.Scmer, len(callbackCols))
 }
 
+func optimizeScanArgument(v []scm.Scmer, index int, oc *scm.OptimizerContext) {
+	const accessSchemaExprIdx, accessValuesExprIdx = 3, 4
+	if index == accessSchemaExprIdx || index == accessValuesExprIdx {
+		v[index], _ = oc.OptimizeNoEscapeArgument(v[index])
+		return
+	}
+	v[index], _ = oc.OptimizeSub(v[index], true)
+}
+
 /* TODO: interface Scannable (scan + scan_order) and (table schema tbl) to get a scannable */
 
 // optimizeScanShared propagates the accumulator type through the combined
@@ -158,7 +167,7 @@ func optimizeScanShared(v []scm.Scmer, oc *scm.OptimizerContext, mapReduceIdx, n
 	// Optimize scalar/operator arguments independently of callback ownership.
 	for i := 1; i <= mapReduceIdx && i < len(v); i++ {
 		if i != mapReduceIdx {
-			v[i], _ = oc.OptimizeSub(v[i], true)
+			optimizeScanArgument(v, i, oc)
 		}
 	}
 	neutralType := unknownScanType()

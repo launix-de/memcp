@@ -9849,6 +9849,14 @@ protocol callback receives only the calibration row. */
 										(or (equal? head (quote scan_join_order))
 											(or (equal? head (quote scan_lookup))
 												(equal? head (quote scan_order_batch_accept)))))))))))))
+		(define scan_access_count (lambda (node)
+			(match node
+				(cons head tail) (+
+					(if (scan_access_head? head) 1 0)
+					(scan_access_count head)
+					(reduce tail (lambda (total item)
+						(+ total (scan_access_count item))) 0))
+				_ 0)))
 		(define static_scan_access_nodes (lambda (node)
 			(match node
 				(cons head tail) (+
@@ -9879,13 +9887,7 @@ protocol callback receives only the calibration row. */
 		plan operations. Discount their two mandatory leaf slots so plan_nodes
 		remains comparable to the pre-ABI execution-complexity budget. The raw
 		optimizer node counters and plan_bytes still include the complete data. */
-		(define raw_scan_access_slots (* 2 (+ raw_scans raw_ordered_scans raw_exists_scans
-			(plan_count plan (quote scan_batch))
-			(plan_count plan (quote scan_recset))
-			(plan_count plan (quote scan_selectivity_estimate))
-			(plan_count plan (quote scan_join_order))
-			(plan_count plan (quote scan_lookup))
-			(plan_count plan (quote scan_order_batch_accept)))))
+		(define raw_scan_access_slots (* 2 (scan_access_count plan)))
 		(define raw_plan_nodes (- (tree_count plan)
 			raw_scan_access_slots
 			(static_scan_access_nodes plan)))
