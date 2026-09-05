@@ -919,6 +919,20 @@ func jitParserPushRuleFrame(state *jitParserState, ruleID, success, failure, pos
 	}
 }
 
+// jitParserRecordFirstVisitNative is emitRuleRef's inline fast path's
+// call for a confirmed first visit: emitMemoCheckedRuleRef has already
+// established natively (no call) that state.heads[position] is nil and no
+// memoEntries slot exists yet for (ruleID, position), so this only needs to
+// mark the position active (for later left-recursion discovery) and push
+// the call frame - the checks jitParserEnterRuleNative repeats internally
+// are dead work here.
+func jitParserRecordFirstVisitNative(state *jitParserState, ruleValue, success, failure, position int64) {
+	rule := int(ruleValue)
+	key := jitParserMemoKey{rule: rule, position: int(position)}
+	state.memoSet(key, jitParserMemoEntry{position: uint32(position), active: true})
+	jitParserPushRuleFrame(state, rule, int(success), int(failure), int(position), true, false)
+}
+
 func jitParserSetupLeftRecursion(state *jitParserState, key jitParserMemoKey) jitParserMemoEntry {
 	memo, _ := state.memoGet(key)
 	head := memo.head
