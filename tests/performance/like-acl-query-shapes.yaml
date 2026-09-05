@@ -354,6 +354,50 @@ test_cases:
     expect:
       rows: 72
 
+  - name: "Perf: exact projected LIKE count with compound ACL"
+    setup: *like_acl_fixture
+    threshold_ms: 3000
+    timeout: 30
+    sql: |
+      SELECT COUNT(*) AS total
+      FROM (
+        SELECT d.id
+        FROM pla_document d
+        WHERE d.file_id IN (
+          SELECT filename_file.id
+          FROM pla_file filename_file
+          WHERE filename_file.filename LIKE '%common-document%'
+          UNION
+          SELECT search_file.id
+          FROM pla_file search_file
+          WHERE search_file.search_text LIKE '%common-document%'
+        )
+          AND COALESCE((
+            SELECT CASE WHEN site.direct_flag = 1 THEN TRUE ELSE (
+              EXISTS (
+                SELECT TRUE
+                FROM pla_assignment assignment
+                WHERE assignment.site_id = site.id
+                  AND assignment.actor_id = 7
+                  AND assignment.allowed = 1
+                LIMIT 1
+              ) OR COALESCE((
+                SELECT override.allowed
+                FROM pla_override override
+                WHERE override.site_id = site.id
+                  AND override.actor_id = 7
+                LIMIT 1
+              ), FALSE)
+            ) END
+            FROM pla_site site
+            WHERE site.id = d.site_id
+            LIMIT 1
+          ), FALSE)
+          AND TRUE
+      ) counted
+    expect:
+      rows: 1
+
   - name: "Perf: selective projected LIKE count with compound ACL"
     setup: *like_acl_fixture
     performance_rows: 40000
