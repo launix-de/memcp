@@ -40,12 +40,22 @@ func TestJITFusedListPipelinesInlineKnownCallbacks(t *testing.T) {
 		source string
 	}{
 		{"filter map", "filter_map", `(lambda (values) (filter (map values (lambda (value) (+ value 1))) (lambda (value) (> value 2))))`},
+		{"map filter not null", "map_filter_notnull", `(lambda (values) (filter (map values (lambda (value) (if (> value 1) (* value 10) nil))) (lambda (value) (not (nil? value)))))`},
 		{"map filter", "map_filter", `(lambda (values) (map (filter values (lambda (value) (> value 1))) (lambda (value) (+ value 1))))`},
 		{"map map", "map_map", `(lambda (values) (map (map values (lambda (value) (+ value 1))) (lambda (value) (* value 2))))`},
 		{"filter filter", "filter_filter", `(lambda (values) (filter (filter values (lambda (value) (> value 0))) (lambda (value) (< value 4))))`},
+		{"mapped sum", "sum_map", `(lambda (values) (reduce values (lambda (total value) (+ total (* value 2))) 0))`},
+		{"boolean any", "reduce_any", `(lambda (values) (reduce values (lambda (found value) (or found (> value 2))) false))`},
+		{"boolean all", "reduce_all", `(lambda (values) (reduce values (lambda (valid value) (and valid (> value 2))) true))`},
+		{"find mapped non-null", "find_map_notnull", `(lambda (values) (reduce values (lambda (found value) (if (not (nil? found)) found (if (> value 2) (* value 10) nil))) nil))`},
 		{"reduce map", "reduce_map", `(lambda (values) (reduce (map values (lambda (value) (+ value 1))) (lambda (acc value) (+ acc value))))`},
 		{"reduce filter", "reduce_filter", `(lambda (values) (reduce (filter values (lambda (value) (> value 1))) (lambda (acc value) (+ acc value))))`},
+		{"reduce map filter", "reduce_map_filter", `(lambda (values) (reduce (filter (map values (lambda (value) (* value 2))) (lambda (value) (> value 2))) (lambda (acc value) (+ acc value))))`},
 		{"reduce filter map", "reduce_filter_map", `(lambda (values) (reduce (map (filter values (lambda (value) (> value 1))) (lambda (value) (* value 2))) (lambda (acc value) (+ acc value))))`},
+		{"cons map", "cons_map", `(lambda (head values) (cons head (map values (lambda (value) (+ value 1)))))`},
+		{"flat map", "flat_map", `(lambda (values) (merge (map values (lambda (value) (list value (+ value 10))))))`},
+		{"group append", "group_assoc_append", `(lambda (pairs) (group_assoc pairs (lambda (pair) (car pair)) (lambda (values pair) (append values (cadr pair))) '()))`},
+		{"group count", "group_assoc_count", `(lambda (values) (group_assoc values (lambda (value) value) (lambda (count value) (+ count 1)) 0))`},
 		{"group append reduce", "group_assoc_append_reduce", `(lambda (pairs) (reduce pairs (lambda (dict pair) (set_assoc dict (car pair) (append (get_assoc dict (car pair) '()) (cadr pair)))) '()))`},
 		{"group count reduce", "group_assoc_count_reduce", `(lambda (values) (reduce values (lambda (dict value) (set_assoc dict value (+ (get_assoc dict value 0) 1))) '()))`},
 	}

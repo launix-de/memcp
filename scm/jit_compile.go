@@ -2014,6 +2014,11 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	callResult := JITValueDesc{Loc: LocStackPair, Type: JITTypeUnknown, StackOff: resultOff, Rooted: true}
 	ctx.EmitZeroDescWords(&callResult, 2)
 	ctx.setStackPointer(jitStackRootFrameBP, resultOff, true)
+	// Every dispatch arm must start from the same register state. In particular,
+	// generated higher-order builtins can enter here while most registers hold
+	// loop state. Keep the callable in a branch-stable home, then restore this
+	// snapshot before emitting each mutually exclusive arm.
+	ctx.StabilizeDescAcrossNestedCall(&callable)
 	fallbackLabel := ctx.ReserveLabel()
 	endLabel := ctx.ReserveLabel()
 
@@ -2030,6 +2035,11 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	ctx.EmitCmpRegImm8(tag, tagProc)
 	ctx.FreeReg(tag)
 	ctx.EmitJcc(CcNE, fallbackLabel)
+	ctx.FreeDesc(&callableValue)
+	dispatchState := ctx.SnapshotAllocState()
+
+	callableValue = callable
+	ctx.EnsureDesc(&callableValue)
 	// Scheme procedures need a direct, arity-compatible JIT entry. Their *Proc
 	// pointer is already the funcval context consumed by EmitProcCall.
 	metadata := ctx.AllocRegExcept(callableValue.Reg, callableValue.Reg2)
@@ -2068,6 +2078,7 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	ctx.Coverage.DirectProcs++
 	ctx.EmitJmp(endLabel)
 
+	ctx.RestoreAllocState(dispatchState)
 	ctx.MarkLabel(nativeFuncLabel)
 	nativeCallable := callable
 	ctx.EnsureDesc(&nativeCallable)
@@ -2098,6 +2109,7 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	ctx.Coverage.NativeCalls++
 	ctx.EmitJmp(endLabel)
 
+	ctx.RestoreAllocState(dispatchState)
 	ctx.MarkLabel(fallbackLabel)
 	args := make([]JITValueDesc, 0, len(operandValues)+2)
 	args = append(args, callable)
@@ -2139,6 +2151,7 @@ func jitEmitDynamicCallableAt(ctx *JITContext, callable JITValueDesc, operandVal
 	ctx.FreeDesc(&env)
 	ctx.EmitCopyScmerToDesc(&callResult, &fallbackResult)
 	ctx.FreeDesc(&fallbackResult)
+	ctx.RestoreAllocState(dispatchState)
 	ctx.MarkLabel(endLabel)
 	var out JITValueDesc
 	if result.Loc == LocStackPair {

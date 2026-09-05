@@ -99,6 +99,32 @@ func TestJITRuntimeReduceCallbacksUseDirectBoundary(t *testing.T) {
 	}
 }
 
+func TestJITRuntimeReduceCallbacksPreserveLiveValues(t *testing.T) {
+	if !jitEnabled {
+		t.Skip("requires GOEXPERIMENT=jit")
+	}
+	proc := Eval(Optimize(Read(t.Name(), `(lambda (callback values a b c d e f) (+ a b c d e f (reduce values callback 0)))`), &Globalenv, nil), &Globalenv)
+	compiled := jitCompile(proc)
+	if compiled.GetTag() != tagProc || compiled.Proc().Compiled == nil {
+		t.Fatal("runtime callback live-value test did not compile")
+	}
+	values := NewSlice([]Scmer{NewInt(1), NewInt(2), NewInt(3), NewInt(4)})
+	callbacks := []Scmer{
+		jitCompile(Eval(Read(t.Name(), `(lambda (acc value) (+ acc value))`), &Globalenv)),
+		NewFunc(func(args ...Scmer) Scmer {
+			runtime.GC()
+			_ = growJITCallbackStack(64)
+			return NewInt(args[0].Int() + args[1].Int())
+		}),
+	}
+	for _, callback := range callbacks {
+		got := Apply(compiled, callback, values, NewInt(10), NewInt(20), NewInt(30), NewInt(40), NewInt(50), NewInt(60))
+		if !Equal(got, NewInt(220)) {
+			t.Fatalf("runtime callback with live values returned %s, want 220", String(got))
+		}
+	}
+}
+
 func BenchmarkJITRuntimeReduceCallback(b *testing.B) {
 	compiled := compileJITRuntimeReduceBenchmark(b)
 	valuesSlice := make([]Scmer, 128)
